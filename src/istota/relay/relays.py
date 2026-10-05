@@ -624,11 +624,11 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
 
 def _reply_task(conn, config, *, actor_user_id: str, inbound_id: str, text: str,
                 relay, outcome: str, attachments=None, media=None):
-    from istota.transport.whatsapp.webhook import WhatsAppEventResult, media_stand_in
+    from istota.transport.whatsapp.webhook import WhatsAppEventResult, media_turn_text
 
     task_id = create_recipient_task(
         conn, config, relay, surface="whatsapp", actor_user_id=actor_user_id,
-        text=text if text else media_stand_in(media, attachments or []),
+        text=media_turn_text(text, media, attachments or []),
         outcome=outcome, attachments=attachments,
     )
     disposition = "relay_answer" if outcome == "accepted" else "relay_rejected"

@@ -154,6 +154,7 @@ const MEDIA_EXTENSIONS = {
   'audio/wav': 'wav',
   'audio/flac': 'flac',
   'audio/webm': 'webm',
+  'video/mp4': 'mp4',
 };
 const MEDIA_EXTENSION_FALLBACK = 'bin';
 
@@ -710,19 +711,25 @@ function hasReadableContent(message) {
 }
 
 // Message keys that carry media this surface fetches, in precedence order.
+// A third element is a test the node must pass: a `videoMessage` is fetched
+// only when it plays as a GIF (ISSUE-647), and a plain video stays
+// unsupported.
 const MEDIA_KINDS = [
   ['imageMessage', 'image'],
   ['audioMessage', 'audio'],
+  ['videoMessage', 'gif', (node) => node.gifPlayback === true],
 ];
 
 /*
  * The media this surface will fetch, as `{ kind, node }`, or null.
  *
- * **`imageMessage` and `audioMessage`, and nothing else.** The kind is the
- * frame's `message_type`, and the daemon sniffs the bytes against that kind
- * only. A voice note and a forwarded audio file are both `audioMessage` and
- * are treated alike, whatever `ptt` says. Video (round video notes included),
- * documents and stickers keep the unsupported reply, and a sticker is the
+ * **`imageMessage`, `audioMessage`, and a `videoMessage` that plays as a
+ * GIF, and nothing else.** The kind is the frame's `message_type`, and the
+ * daemon sniffs the bytes against that kind only. A voice note and a
+ * forwarded audio file are both `audioMessage` and are treated alike,
+ * whatever `ptt` says. A GIF is an MP4 with `gifPlayback`, which the daemon
+ * turns into one still of its frames (ISSUE-647). Other video (round video
+ * notes included), documents and stickers keep the unsupported reply, and a sticker is the
  * case that says why the gate is here rather than at the sniff: a sticker is
  * WebP, so it would pass a signature test cleanly. What excludes it is its
  * message type, which is a thing WhatsApp said rather than a thing the bytes
@@ -741,9 +748,11 @@ const MEDIA_KINDS = [
 function mediaPart(message) {
   const content = message && message.message;
   if (!content || typeof content !== 'object') return null;
-  for (const [key, kind] of MEDIA_KINDS) {
+  for (const [key, kind, admits] of MEDIA_KINDS) {
     const node = content[key];
-    if (node && typeof node === 'object') return { kind, node };
+    if (node && typeof node === 'object' && (!admits || admits(node))) {
+      return { kind, node };
+    }
   }
   return null;
 }
@@ -758,8 +767,10 @@ function mediaPart(message) {
  * twice.
  *
  * `videoMessage` and `documentMessage` carry captions too and are **not**
- * read: those types keep the unsupported reply, and a caption without the
- * bytes is a message the model answers about an image nobody can see.
+ * read here: those types keep the unsupported reply, and a caption read as
+ * text would be answered as if no file had come with it. `inboundContent`
+ * carries such a caption on the `unsupported` frame instead, where a group
+ * records it beside a stand-in naming the type.
  */
 function messageText(message) {
   const content = message && message.message;
@@ -768,12 +779,79 @@ function messageText(message) {
   if (content.extendedTextMessage && typeof content.extendedTextMessage.text === 'string') {
     return content.extendedTextMessage.text;
   }
-  // Audio carries no caption, so only an image's is read.
+  // Audio carries no caption, so only an image's or a GIF's is read.
   const media = mediaPart(message);
-  if (media && media.kind === 'image' && typeof media.node.caption === 'string') {
+  if (media && media.kind !== 'audio' && typeof media.node.caption === 'string') {
     return media.node.caption;
   }
   return null;
+}
+
+/*
+ * What a message this surface cannot open was, as the label the daemon names
+ * it by (`media.UNSUPPORTED_LABELS`), in precedence order. A video that plays
+ * as a GIF never reaches here: `mediaPart` fetches it (ISSUE-647).
+ */
+const UNSUPPORTED_KINDS = [
+  ['videoMessage', 'video'],
+  ['ptvMessage', 'video_note'],
+  ['stickerMessage', 'sticker'],
+  ['documentMessage', 'document'],
+  ['documentWithCaptionMessage', 'document'],
+  ['locationMessage', 'location'],
+  ['liveLocationMessage', 'location'],
+  ['contactMessage', 'contact'],
+  ['contactsArrayMessage', 'contact'],
+  ['pollCreationMessage', 'poll'],
+  ['pollCreationMessageV2', 'poll'],
+  ['pollCreationMessageV3', 'poll'],
+];
+
+// The unsupported types whose node can carry a caption a person typed.
+const CAPTIONED_UNSUPPORTED = new Set([
+  'videoMessage', 'documentMessage', 'documentWithCaptionMessage',
+]);
+
+/*
+ * What one inbound message becomes on the frame: its `message_type`, its
+ * words, the media part to fetch, and for an unsupported message what it was.
+ *
+ * **The same answer in a group and a direct chat** (ISSUE-646). A group
+ * branch here used to drop every group photo and its caption; the daemon now
+ * decides, because only it knows whether the sender is a member and whether
+ * the bot was asked. An unsupported message carries its caption: a group
+ * records it beside a stand-in naming the type, and a direct chat answers the
+ * type and reads no text, so a caption cannot be answered as if the file
+ * were not there.
+ */
+function inboundContent(message) {
+  const part = mediaPart(message);
+  if (part) {
+    return { messageType: part.kind, text: messageText(message), part, unsupportedKind: null };
+  }
+  const text = messageText(message);
+  if (text !== null) {
+    return { messageType: 'text', text, part: null, unsupportedKind: null };
+  }
+  const content = message && message.message;
+  let unsupportedKind = null;
+  let caption = null;
+  if (content && typeof content === 'object') {
+    for (const [key, kind] of UNSUPPORTED_KINDS) {
+      const node = content[key];
+      if (!node || typeof node !== 'object') continue;
+      unsupportedKind = typeof kind === 'function' ? kind(node) : kind;
+      // A `documentWithCaptionMessage` wraps its document one level down.
+      const captioned = key === 'documentWithCaptionMessage'
+        ? node.message && node.message.documentMessage
+        : node;
+      if (CAPTIONED_UNSUPPORTED.has(key) && captioned && typeof captioned.caption === 'string') {
+        caption = captioned.caption;
+      }
+      break;
+    }
+  }
+  return { messageType: 'unsupported', text: caption, part: null, unsupportedKind };
 }
 
 /*
@@ -974,6 +1052,52 @@ function rememberSent(id, content) {
 function recallSent(id) {
   if (typeof id !== 'string' || !id) return undefined;
   return sentMessages.get(id);
+}
+
+/*
+ * The last few inbound messages, so an answer can quote the one it answers
+ * (ISSUE-641).
+ *
+ * **A quoted reply needs the whole original `WAMessage`**, which only this
+ * process ever held: the daemon has the id and the text, not the message the
+ * library builds the quote from, and a synthetic `{key: {id}}` stub is a shape
+ * the library was not given and may refuse — spending `unknown` on a message
+ * that never left, for a cosmetic marker. So the quote is applied only when
+ * the original is here, and a miss sends unquoted, decided before the send.
+ *
+ * In memory only, for the reason `sentMessages` is: the value is somebody's
+ * message, and this program writes no content to disk. A restart empties it,
+ * and the answers after one go unquoted. Each entry keeps the chat it arrived
+ * in, so an id can only ever be quoted back into that chat.
+ */
+const INBOUND_CACHE_LIMIT = 256;
+
+const inboundMessages = new Map();
+
+function rememberInbound(chat, message) {
+  const id = message && message.key && message.key.id;
+  if (typeof id !== 'string' || !id || typeof chat !== 'string' || !chat) return;
+  inboundMessages.delete(id);
+  inboundMessages.set(id, { chat: bareJid(chat), message });
+  while (inboundMessages.size > INBOUND_CACHE_LIMIT) {
+    inboundMessages.delete(inboundMessages.keys().next().value);
+  }
+}
+
+function recallInbound(id, chat) {
+  if (typeof id !== 'string' || !id || typeof chat !== 'string') return undefined;
+  const entry = inboundMessages.get(id);
+  if (!entry || !entry.chat || entry.chat !== bareJid(chat)) return undefined;
+  const message = entry.message;
+  // A LID-addressed chat's message keeps its `@lid` key while the send goes to
+  // the phone JID, and the library marks a quote whose key names another chat
+  // as quoted from elsewhere. The copy names the chat the answer goes to.
+  if (message.key && message.key.remoteJid !== chat) {
+    return Object.assign({}, message, {
+      key: Object.assign({}, message.key, { remoteJid: chat }),
+    });
+  }
+  return message;
 }
 
 // How many consecutive failures to *construct* a session before calling the
@@ -2613,12 +2737,9 @@ class Session {
         continue;
       }
       const group = isGroupJid(jid);
-      // Group media stays refused (D6), image and audio alike, and an
-      // image's caption goes with it: the model would be answering about a
-      // picture nobody can see.
-      const part = group ? null : mediaPart(message);
-      const text = group && mediaPart(message) ? null : messageText(message);
-      if (!part && text === null) {
+      const content = inboundContent(message);
+      const { part, text } = content;
+      if (content.messageType === 'unsupported') {
         log('info', 'inbound has no text this side can read', {
           shape: messageShape(message),
         });
@@ -2644,7 +2765,7 @@ class Session {
         message_id: message.key.id,
         jid,
         username: message.pushName || null,
-        message_type: part ? part.kind : (text === null ? 'unsupported' : 'text'),
+        message_type: content.messageType,
         text,
         callback_data: null,
         reply_to_message_id: quotedId(message),
@@ -2660,7 +2781,9 @@ class Session {
         media_mime: media.media_mime,
         media_bytes: media.media_bytes,
         media_error: media.media_error,
+        unsupported_kind: content.unsupportedKind,
       });
+      if (delivered) rememberInbound(jid, message);
       if (!delivered) {
         // `Link.send` answers false for a destroyed socket and says nothing.
         // Before the chain existed the send happened inside the event
@@ -2829,13 +2952,10 @@ class Session {
       this.answer(requestId, { ok: false, reason: 'not_connected', definite: true });
       return;
     }
-    // **`reply_to_message_id` is carried on the wire and not applied here.**
-    // A quoted reply needs the whole original `WAMessage`, which this process
-    // does not keep, and the obvious synthetic stub — a bare `{key: {id}}` —
-    // is a shape the library was not given and may refuse. A refusal would
-    // land in the catch below as an *ambiguous* failure, spending `unknown`
-    // on a message that never left, for a cosmetic thread marker. Dropping
-    // it costs the quote and nothing else.
+    // `reply_to_message_id` quotes only an original this process still holds
+    // (`recallInbound`); a miss sends unquoted. Decided here, before the
+    // send, so a missing original can never become an ambiguous failure.
+    const quoted = recallInbound(payload.reply_to_message_id, payload.to);
     // A media part this side cannot read sends the text alone; a send that is
     // then empty was never anything, so it is refused before trying.
     const media = outboundMedia(payload.media);
@@ -2852,8 +2972,11 @@ class Session {
       // The last id is the one the ledger keeps: with a long reply split
       // after its image, that is the text a member quotes back.
       let id = '';
-      for (const content of contents) {
-        const sent = await this.sock.sendMessage(payload.to, content);
+      for (const [index, content] of contents.entries()) {
+        // Only the first message of a split send carries the quote.
+        const sent = index === 0 && quoted
+          ? await this.sock.sendMessage(payload.to, content, { quoted })
+          : await this.sock.sendMessage(payload.to, content);
         id = sent && sent.key && sent.key.id;
         // `sent.message` is the generated content, which is what
         // `relayMessage` re-encrypts on a retry — the content handed in is not.
@@ -3128,12 +3251,17 @@ module.exports = {
   mediaExtension,
   mediaPart,
   messageText,
+  inboundContent,
+  UNSUPPORTED_KINDS,
   newMediaCollector,
   stagedMediaName,
   writeStaged,
   rememberSent,
   recallSent,
   SENT_CACHE_LIMIT,
+  rememberInbound,
+  recallInbound,
+  INBOUND_CACHE_LIMIT,
   AUTH_TEMP_PREFIX,
   authFileName,
   writeFileAtomic,

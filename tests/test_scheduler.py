@@ -8113,6 +8113,11 @@ class TestCleanupOldClaudeLogs:
 # ---------------------------------------------------------------------------
 
 
+def _sends(fake_talk):
+    """The posts, without the read that decides whether the first one quotes."""
+    return [c for c in fake_talk.calls if c.method == "send_message"]
+
+
 class TestPostResultToTalk:
     """Tests for post_result_to_talk() — reply threading and @mentions in group chats.
 
@@ -8125,14 +8130,19 @@ class TestPostResultToTalk:
     refusal and a hardcoded number would let that read as a delivery.
     """
 
-    def _make_config(self):
-        return Config(
+    def _make_config(self, db_path=None):
+        # The quote check confirms through the room's binding that the answer
+        # goes to the conversation the question was asked in.
+        config = Config(
             nextcloud=NextcloudConfig(
                 url="https://nc.example.com",
                 username="istota",
                 app_password="secret",
             ),
         )
+        if db_path is not None:
+            config.db_path = db_path
+        return config
 
     def _make_task(self, token, *, is_group_chat=False, talk_message_id=None,
                    user_id="alice"):
@@ -8154,7 +8164,7 @@ class TestPostResultToTalk:
 
     @pytest.mark.asyncio
     async def test_dm_no_reply_to_no_mention(self, fake_talk, room):
-        """DM messages should not use reply_to or @mention."""
+        """A DM answer to the latest message neither quotes nor @mentions."""
         config = self._make_config()
         task = self._make_task(room.canonical, is_group_chat=False, talk_message_id=42)
 
@@ -8162,7 +8172,7 @@ class TestPostResultToTalk:
             config, task, "Hello there", use_reply_threading=True, target_token=room.talk_ref,
         )
 
-        assert [(c.method, c.token, c.args) for c in fake_talk.calls] == [
+        assert [(c.method, c.token, c.args) for c in _sends(fake_talk)] == [
             ("send_message", room.talk_ref, {
                 "message": "Hello there", "reply_to": None, "reference_id": None,
             }),
@@ -8170,18 +8180,20 @@ class TestPostResultToTalk:
         assert result == fake_talk.sent_ids[0]
 
     @pytest.mark.asyncio
-    async def test_group_chat_reply_to_and_mention(self, fake_talk, room):
-        """Group chat messages should reply to original and @mention the user."""
-        config = self._make_config()
+    async def test_group_chat_reply_to_and_mention(self, fake_talk, room, db_path):
+        """A group answer quotes the original once the room moved on past it
+        (ISSUE-641), and @mentions the user either way."""
+        config = self._make_config(db_path)
         task = self._make_task(
             room.canonical, is_group_chat=True, talk_message_id=42, user_id="bob",
         )
+        fake_talk.messages[room.talk_ref] = [{"id": 43, "message": "meanwhile"}]
 
         result = await post_result_to_talk(
             config, task, "Sure thing", use_reply_threading=True, target_token=room.talk_ref,
         )
 
-        assert [(c.method, c.token, c.args) for c in fake_talk.calls] == [
+        assert [(c.method, c.token, c.args) for c in _sends(fake_talk)] == [
             ("send_message", room.talk_ref, {
                 "message": "@bob Sure thing", "reply_to": 42, "reference_id": None,
             }),
@@ -8190,13 +8202,14 @@ class TestPostResultToTalk:
 
     @pytest.mark.asyncio
     async def test_group_chat_split_message_only_first_part_gets_reply(
-        self, fake_talk, room,
+        self, fake_talk, room, db_path,
     ):
         """When a message is split, only the first part should get reply_to and @mention."""
-        config = self._make_config()
+        config = self._make_config(db_path)
         task = self._make_task(
             room.canonical, is_group_chat=True, talk_message_id=42, user_id="carol",
         )
+        fake_talk.messages[room.talk_ref] = [{"id": 43, "message": "meanwhile"}]
 
         with patch(
             "istota.transport.talk.split_message",
@@ -8207,7 +8220,7 @@ class TestPostResultToTalk:
             )
 
         # Both parts land in the same room, in order; only the first threads.
-        assert [(c.token, c.args) for c in fake_talk.calls] == [
+        assert [(c.token, c.args) for c in _sends(fake_talk)] == [
             (room.talk_ref, {
                 "message": "@carol Part 1", "reply_to": 42, "reference_id": None,
             }),

@@ -559,6 +559,44 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  // ISSUE-641: the stored answer quotes its question once the room moved on.
+  // The answer on screen was built by the task stream, which never saw the
+  // citation, so it is taken from the stored row without a reload.
+  it('takes the quote from the stored row of an answer already on screen', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomMessages.mockResolvedValue({
+      ...emptyHistory,
+      messages: [
+        {
+          role: 'assistant',
+          text: 'noon',
+          task_id: 3,
+          status: 'completed',
+          created_at: '2026-07-26T09:00:00Z',
+        },
+      ],
+    });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    const reply_to = { msg_id: 8, role: 'user', excerpt: 'what time is it', deleted: false };
+    queueEvents(
+      [row(10, 't1', { text: 'noon', task_id: 3, status: 'completed', reply_to } as Partial<Row>)],
+      10,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    const msgs = get(s.messages);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].replyTo).toEqual({
+      msgId: 8,
+      role: 'user',
+      excerpt: 'what time is it',
+      deleted: false,
+    });
+    s.teardown();
+  });
+
   it('dedups the echo of a confirmation answered from the composer', async () => {
     // ISSUE-243's exchange is the one inline result that is also durable: the
     // server writes the answer and the ack into `messages`, so both come back

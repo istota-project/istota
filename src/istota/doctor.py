@@ -8449,6 +8449,51 @@ def check_whatsapp_media_staging(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_whatsapp_gif_decoder(config: "Config", probe: bool) -> CheckResult:
+    """Whether a GIF sent on Baileys can be shown to the model (ISSUE-647).
+
+    A GIF arrives as an MP4 and is decoded into one still by a child that
+    needs PyAV and Pillow. PyAV ships with the `whisper` extra rather than the
+    base install, so a deployment without it answers every GIF as an
+    unsupported message; this says so rather than leaving it to be found from
+    a user's complaint. Asked with `find_spec` and never an import, the vault
+    check's rule, so the daemon does not load the decoder. Cloud has no GIF
+    flag to admit one by, so it is skipped there. Spawns nothing.
+    """
+    name = "whatsapp.gif_decoder"
+    if not config.whatsapp.enabled:
+        return CheckResult(name, SKIP, "[whatsapp] enabled = false", scope=DEPLOYMENT)
+    if config.whatsapp.provider != "baileys":
+        return CheckResult(
+            name, SKIP,
+            f"[whatsapp] provider = \"{config.whatsapp.provider}\", which marks "
+            "no GIF, so a GIF there is an unsupported video",
+            scope=DEPLOYMENT,
+        )
+    missing = []
+    for module in ("av", "PIL"):
+        try:
+            if importlib.util.find_spec(module) is None:
+                missing.append(module)
+        except Exception:  # noqa: BLE001 - a check never raises
+            missing.append(module)
+    if not missing:
+        return CheckResult(
+            name, OK, "PyAV and Pillow are installed, so a GIF is shown as a "
+            "still of its frames", scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, WARN,
+        f"{' and '.join(missing)} not installed, so every GIF gets the "
+        "unsupported-message answer",
+        remedy=(
+            "Install the `whisper` extra (it brings PyAV), or accept that GIFs "
+            "are not shown."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def _baileys_precondition(name: str, config: "Config") -> "CheckResult | None":
     """The two skips both Baileys checks share, or ``None`` to carry on."""
     if not config.whatsapp.enabled:
@@ -9296,6 +9341,59 @@ def _baileys_live_session(name: str, path: Path) -> CheckResult:
 _DUPLICATE_ADDRESSES_SHOWN = 10
 
 
+def check_email_confirmation_answers(config: "Config", probe: bool) -> CheckResult:
+    """Whether a user whose alerts reach only email can answer a held task.
+
+    The email gate's request goes by the ``alert`` route, and an answer by mail
+    is accepted only with ``[email] authserv_id`` set (ISSUE-649). A user whose
+    alerts resolve to email alone, on a deployment without it, is asked a
+    question they can answer only from a surface the request does not reach,
+    and the held mail is cancelled at ``confirmation_timeout_minutes``. A count
+    rather than user ids, since the detail reaches the boot log and the admin
+    Health pane. Reads config only; spawns nothing.
+    """
+    from istota.notifications.delivery import resolve_destinations
+    from istota.transport.email.answers import email_answers_available
+
+    name = "email.confirmation_answers"
+    if not config.email.enabled:
+        return CheckResult(name, SKIP, "email is disabled", scope=DEPLOYMENT)
+    if email_answers_available(config):
+        return CheckResult(
+            name, OK, "held tasks can be answered by email (authserv_id is set)",
+            scope=DEPLOYMENT,
+        )
+    email_only = 0
+    for user_id in config.users:
+        try:
+            dests = resolve_destinations(config, user_id, "alert")
+        except Exception:  # noqa: BLE001 - a check never raises
+            continue
+        # ntfy carries no answer either, so email plus ntfy counts too.
+        surfaces = {d.surface for d in dests}
+        if "email" in surfaces and surfaces <= {"email", "ntfy"}:
+            email_only += 1
+    if not email_only:
+        return CheckResult(
+            name, OK,
+            "no user's alerts reach only email; answers by email are off "
+            "(authserv_id is not set)",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, WARN,
+        f"{email_only} user(s) receive confirmation requests only by email "
+        "(or email and ntfy) and cannot answer them there, because "
+        "email.authserv_id is not set",
+        remedy=(
+            "Set `[email] authserv_id` to your mail server's authserv-id so an "
+            "authenticated answer by email is accepted, or route those users' "
+            "alerts to a surface they can answer from as well (web or Talk)."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult:
     """Whether any email address is held by more than one user.
 
@@ -9572,6 +9670,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("whatsapp.common", check_whatsapp_common),
     ("whatsapp.billing", check_whatsapp_billing),
     ("whatsapp.media_staging", check_whatsapp_media_staging),
+    ("whatsapp.gif_decoder", check_whatsapp_gif_decoder),
     ("whatsapp.baileys_bridge", check_whatsapp_baileys_bridge),
     ("whatsapp.baileys_session", check_whatsapp_baileys_session),
     ("whatsapp.pairing_relay", check_whatsapp_pairing_relay),
@@ -9583,6 +9682,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("config.skill_overlays", check_skill_overlays),
     ("config.operator_persona", check_operator_persona),
     ("users.email_address_uniqueness", check_email_address_uniqueness),
+    ("email.confirmation_answers", check_email_confirmation_answers),
     ("sandbox.masks", check_sandbox_masks),
 )
 
@@ -9700,6 +9800,9 @@ CHECK_SCOPES: dict[str, str] = {
     # inbound photo into a directory derived from `db_path`, which a bare
     # `docker run` has neither of.
     "whatsapp.media_staging": DEPLOYMENT,
+    # Deployment: whether the GIF decoder is installed is a fact about the
+    # host's extras, and a bare image has no WhatsApp configured to need it.
+    "whatsapp.gif_decoder": DEPLOYMENT,
     # Deployment: one reads in-process counters that only the daemon has,
     # the other a paired credential on disk. A bare `docker run` has
     # neither.
@@ -9726,6 +9829,7 @@ CHECK_SCOPES: dict[str, str] = {
     "config.operator_persona": DEPLOYMENT,
     # Deployment: it reads the install's own user tables.
     "users.email_address_uniqueness": DEPLOYMENT,
+    "email.confirmation_answers": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
 

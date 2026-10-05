@@ -794,16 +794,20 @@ class TalkClient:
 
     async def fetch_messages_since(
         self, conversation_token: str, since_id: int, batch_size: int = 200,
+        *, timeout: float = 30, max_pages: int | None = None,
     ) -> list[dict]:
         """Fetch messages newer than since_id by paginating forward.
 
-        Returns messages in oldest-first order.
+        Returns messages in oldest-first order. ``max_pages`` and a short
+        ``timeout`` bound a caller that needs only the first few messages
+        (the answer-quote check, ISSUE-641).
         """
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
         all_messages: list[dict] = []
         current_id = since_id
 
         client = await self._ensure_open()
+        pages = 0
         while True:
             params = {
                 "lookIntoFuture": 1,
@@ -817,8 +821,9 @@ class TalkClient:
                 auth=self.auth,
                 headers=self._headers(),
                 params=params,
-                timeout=30,
+                timeout=timeout,
             )
+            pages += 1
             if response.status_code == 304:
                 break
             response.raise_for_status()
@@ -834,6 +839,8 @@ class TalkClient:
             current_id = messages[-1]["id"]
 
             if len(messages) < batch_size:
+                break
+            if max_pages is not None and pages >= max_pages:
                 break
 
         return all_messages

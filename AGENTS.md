@@ -173,6 +173,8 @@ src/istota/
 │   ├── rclone_client.py  # The rclone API `storage` and the files skill each had a copy of → leaf-modules.md
 │   ├── image_sniff.py    # Which bytes `/chat/files` will serve `inline` on the app's own origin → leaf-modules.md
 │   ├── audio_sniff.py    # Which bytes are audio the transcription pipeline decodes, and `AUDIO_EXTENSIONS` → leaf-modules.md
+│   ├── video_sniff.py    # Which bytes are an MP4 the GIF frame extractor opens → leaf-modules.md
+│   ├── gif_frames.py     # The child that tiles a GIF-as-MP4's frames into one JPEG; stdlib, PyAV and Pillow → leaf-modules.md
 │   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 │   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md

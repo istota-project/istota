@@ -49,6 +49,8 @@ In a shared room the bot does not answer every message. The **speech gate** deci
 
 The host can set a mode for one room that overrides the deployment's, in either direction: `!room speak classifier` tries the classifier in one group while the deployment stays on `mention`, and `!room speak default` puts the room back on the deployment's mode. `!room speak` on its own says which mode the room is on and whether it is the room's own or the deployment's. The same choice is the Replies field in the web room settings, shown to every member and editable by the host. An email thread room has no such setting.
 
+When the bot answers, it quotes the message it is answering if anything else was posted in the room after it, so it stays clear which message the answer belongs to. An answer to the latest message goes out unquoted. This holds on Talk, web and WhatsApp, in one-to-one rooms as well; a held guest reply is judged when the host releases it. Email threads by `In-Reply-To` instead.
+
 The unanswered turns still reach the bot as context, so when somebody does address it, it knows what was said. Every decision is logged in the `speech_gate_decisions` table for tuning; the log holds no message text. See [`[speech_gate]`](../configuration/reference.md#speech_gate).
 
 ## Hosts and guests

@@ -22,7 +22,7 @@ The bot's own @mention is stripped from the prompt in every conversation, a DM i
 
 A guest who mentions the bot is answered as the room's host, on the host's authority and with nothing private of the host's (see [hosts and guests](shared-rooms.md#hosts-and-guests)). Anyone in the room can switch the bot off with `!<name> off` ([switching the bot off](room-veto.md)).
 
-Final responses in group chats use `reply_to` on the original message, and prepend `@{user_id}` only when a member asked on Talk: an answer to a guest or to a web turn is threaded without a mention. Intermediate messages (ack, progress) are sent without reply threading to avoid noise; for a guest's message the ack carries no progress and is removed when the turn is held or cancelled.
+A final answer quotes the message it answers when anything else has been posted in the room since that message, and goes out unquoted while it is still the latest; this applies in DMs too. The bot's own acknowledgement and progress for the same turn do not count, another turn's answer does. In a group the answer starts with `@{user_id}` when a member asked on Talk, quoted or not: an answer to a guest or to a web turn has no mention. Intermediate messages (ack, progress) never quote; for a guest's message the ack carries no progress and is removed when the turn is held or cancelled.
 
 ## Progress updates
 
