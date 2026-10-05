@@ -883,10 +883,15 @@ async def cmd_confirm(ctx: CommandContext):
             ctx, f"Declined #{task.id} — {label}. Nothing was run.",
         )
 
-    trusted = confirmations.approve(
-        conn, task, trust_sender=(verb == "trust"), config=ctx.config,
-        by=ctx.surface,
-    )
+    try:
+        trusted = confirmations.approve(
+            conn, task, trust_sender=(verb == "trust"), config=ctx.config,
+            by=ctx.surface,
+        )
+    except confirmations.RoomSwitchedOff:
+        return _record_confirm_exchange(
+            ctx, f"Cancelled #{task.id} — {label}. {confirmations.SWITCHED_OFF_ACK}",
+        )
     if trusted:
         return _record_confirm_exchange(
             ctx,

@@ -11014,6 +11014,11 @@ def _chat_confirm_task(
         try:
             confirmations.approve(conn, task, config=_config, by="web",
                                   preview_digest=preview_digest)
+        except confirmations.RoomSwitchedOff:
+            # The cancel stands: it is committed with the response.
+            conn.commit()
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail=confirmations.SWITCHED_OFF_ACK)
         except RequestError:
             from fastapi import HTTPException
             logger.info("task %s: confirm refused, preview no longer current", task_id)
