@@ -32,6 +32,8 @@ the attempt that succeeds writes one row and pushes once.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from testbed.services import mail
@@ -146,7 +148,15 @@ def _assert_kept_private(stack, sent: flow.Sent, seen: flow.Outcome,
             carried = call.body.decode("utf-8", "replace") + " " + " ".join(
                 call.headers.values())
             assert remark not in carried, carried
-    if seen.reply is not None:
+    if seen.reply is None:
+        # `assert_outcome` reads "no reply" once; a mail still on its way
+        # through the server would be missed, so watch for it a while.
+        deadline = time.monotonic() + flow.NEGATIVE_SETTLE
+        while time.monotonic() < deadline:
+            assert flow.reply_to(stack, sent) is None
+            time.sleep(flow.POLL_INTERVAL)
+        assert flow.reply_to(stack, sent) is None
+    else:
         assert mailed is not None
         assert mailed in seen.reply.body_text, seen.reply.body_text
         if remark:
@@ -160,8 +170,9 @@ class TestTheHostWasNotOnTheMail:
         """The regression #636 started from. The model mails B with
         `email output` and ends with a report R to its user. The thread row is
         B (`composed_mail_body` reads the deferred file), the mail is B, and R
-        is the note's remark under `Replied.`; B is not repeated as the remark
-        (`email_note_remark` drops a remark equal to the mailed body)."""
+        is the note's remark under `Replied.`. A final text equal to B, which
+        `email_note_remark` drops, is not driven here; the default suite
+        covers it (`tests/test_email_thread_rooms.py`)."""
         nonce = flow.new_nonce()
         body = f"The invoice is paid in full {nonce}."
         remark = f"I told them it was paid; nothing for you to do {nonce}."
