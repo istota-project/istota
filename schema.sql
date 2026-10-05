@@ -1608,7 +1608,8 @@ CREATE TABLE IF NOT EXISTS room_policy (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     vetoed_at    TEXT,
     veto_on_by   TEXT,
-    announced_at TEXT
+    announced_at TEXT,
+    disposition  TEXT
 );
 
 -- Everyone who switched the bot off in a room (Stage 20, D12), one row per
@@ -1691,6 +1692,9 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     disposition TEXT,
     -- 'reply'|'ack' on a turn the bot answers, NULL otherwise
     kind       TEXT,
+    -- On an ack only: 1 answered with a reaction and no task, 0 the reaction
+    -- failed and the held task replied; NULL when no reaction was tried
+    reacted    INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_speech_gate_room ON speech_gate_decisions (room_token, id);

@@ -340,6 +340,86 @@ class TestThroughTheIngestPath:
         assert "reacts to what Istota just said" not in prompts[0]
 
 
+class TestTheRoomsOwnDisposition:
+    """ISSUE-654: a room's own setting outranks the deployment's."""
+
+    def test_a_friendly_room_on_a_reserved_deployment(self, config):
+        from istota.rooms import policy as room_policy
+
+        _seed(config)
+        with db.get_db(config.db_path) as conn:
+            room_policy.set_disposition(conn, "grp", "friendly")
+        task_id, row, prompts = _ask_and_ingest(
+            config, '{"speak": true, "kind": "ack", "reason": "thanks"}',
+        )
+        assert task_id is not None
+        assert row == {"spoke": 1, "disposition": "friendly", "kind": "ack"}
+        assert "reacts to what Istota just said" in prompts[0]
+
+    def test_a_reserved_room_on_a_friendly_deployment(self, config):
+        from istota.rooms import policy as room_policy
+
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        with db.get_db(config.db_path) as conn:
+            room_policy.set_disposition(conn, "grp", "reserved")
+        _task, row, prompts = _ask_and_ingest(config, '{"speak": false}')
+        assert row["disposition"] == "reserved"
+        assert "reacts to what Istota just said" not in prompts[0]
+
+    def test_a_reply_in_a_friendly_room_is_classified(self, config):
+        from istota.rooms import policy as room_policy
+
+        _seed(config)
+        with db.get_db(config.db_path) as conn:
+            room_policy.set_disposition(conn, "grp", "friendly")
+        classified, prompts = TestAReplyToTheBot()._classify_reply(config)
+        assert len(prompts) == 1 and classified.kind == KIND_ACK
+        assert classified.disposition == "friendly"
+
+    def test_a_reply_in_a_reserved_room_asks_nothing(self, config):
+        from istota.rooms import policy as room_policy
+
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        with db.get_db(config.db_path) as conn:
+            room_policy.set_disposition(conn, "grp", "reserved")
+        classified, prompts = TestAReplyToTheBot()._classify_reply(config)
+        assert (classified, prompts) == (None, [])
+
+    def test_the_row_records_the_disposition_the_model_was_asked_under(self, config):
+        """A host switching the room mid-call does not relabel the decision."""
+        from istota.rooms import policy as room_policy
+
+        _seed(config)
+        with db.get_db(config.db_path) as conn:
+            room_policy.set_disposition(conn, "grp", "friendly")
+
+        def completer(prompt):
+            with db.get_db(config.db_path) as conn:
+                room_policy.set_disposition(conn, "grp", "reserved")
+            return '{"speak": true, "kind": "ack"}'
+
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=completer):
+            classified = classify_ahead(
+                config, surface="talk", surface_ref="grp", user_id="alice",
+                text="Thanks!", is_group_chat=True, addressed_to_bot=False,
+            )
+        with db.get_db(config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            ingest_message(conn, config, IncomingMessage(
+                user_id="alice", text="Thanks!", source_type="talk", surface="talk",
+                channel_token="grp", is_group_chat=True, addressed_to_bot=False,
+                platform_message_id=603, classified=classified,
+            ))
+            row = conn.execute(
+                "SELECT disposition, kind FROM speech_gate_decisions "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert tuple(row) == ("friendly", "ack")
+
+
 class TestTheAckReachesTheTask:
     """A task the gate created as an `ack` is told to keep it to one line."""
 

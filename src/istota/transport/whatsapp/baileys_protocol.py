@@ -96,6 +96,11 @@ MSG_SEND = "send"
 MSG_SHUTDOWN = "shutdown"
 #: Leave a WhatsApp group: D14, the host left it.
 MSG_LEAVE_GROUP = "leave_group"
+#: React to an inbound message with one emoji (ISSUE-655). Answered with a
+#: `send_result` under the same request id. A sidecar that predates it logs
+#: the frame as unexpected and never answers, which the bridge reads as a
+#: failed reaction after its timeout, so the version does not move.
+MSG_REACT = "react"
 
 # The two group types are additive and the version does not move: a sidecar
 # that predates them sends a group message with no sender, which the daemon
@@ -108,7 +113,9 @@ UP_MESSAGES: frozenset[str] = frozenset({
 })
 
 #: Daemon to sidecar.
-DOWN_MESSAGES: frozenset[str] = frozenset({MSG_SEND, MSG_SHUTDOWN, MSG_LEAVE_GROUP})
+DOWN_MESSAGES: frozenset[str] = frozenset({
+    MSG_SEND, MSG_SHUTDOWN, MSG_LEAVE_GROUP, MSG_REACT,
+})
 
 #: One line's ceiling, enforced by `encode` and by `decode` both. A cap only on
 #: the reader lets a writer build a line it can never deliver; a cap only on the
@@ -750,6 +757,22 @@ def local_failure(reason: str, *, definite: bool) -> WhatsAppSendFailure:
     provably never entered the socket.
     """
     return WhatsAppSendFailure(definite=definite, error_code=None, safe_reason=reason)
+
+
+def react_payload(
+    request_id: str, *, to: str, message_id: str, reaction: str,
+) -> dict[str, Any]:
+    """A `react` frame: which chat, which inbound message, which emoji.
+
+    The sidecar reacts only to a message it still holds in its inbound cache
+    for that chat, since the reaction's key is the original message's.
+    """
+    return {
+        "request_id": request_id,
+        "to": to,
+        "message_id": message_id,
+        "reaction": reaction,
+    }
 
 
 def send_payload(request_id: str, request: WhatsAppSendRequest) -> dict[str, Any]:

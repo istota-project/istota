@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The bot reacts to thanks instead of replying, on Talk and in WhatsApp groups** (#655). In a friendly room, a message that only thanks the bot or acknowledges its answer gets a thumbs-up on that message rather than a reply, so a busy group sees less chatter and no model runs for it. If the reaction cannot be sent the bot answers in one short line, as before; web chat, SMS and email always get the short line. The emoji is the operator's `[speech_gate] ack_reaction`, and setting it empty turns reactions off.
+
+  **Upgrade note:** update the Baileys sidecar with the daemon for WhatsApp groups; an older sidecar ignores the reaction and the bot replies after a short wait. Adds a `reacted` column to `speech_gate_decisions` by migration.
+- **A shared room's host can set the speech gate's disposition for that room** (#654). `!room disposition reserved|friendly|default` and the Disposition field in the web room settings override `[speech_gate] disposition` for one room, so a busy group can stay reserved while a small working room is friendly. The setting matters only while the room is on the classifier, and both say so otherwise.
+
+  **Upgrade note:** adds a `disposition` column to `room_policy` by migration.
 - **The speech gate can be friendlier in shared rooms** (#653). With `[speech_gate] mode = "classifier"`, the new `disposition = "friendly"` also answers a turn that reacts to the bot's last answer, such as "thanks", and the bot then answers in one short line. The default, `"reserved"`, keeps today's rule. Separately, a reply to one of the bot's own messages on Talk or web now counts as addressing it in every mode, as a quote already did on WhatsApp; in a friendly room a reply that only thanks still gets the one-line answer. **Upgrade note:** `speech_gate_decisions` gains `disposition` and `kind` columns, added at startup.
 - **Photos and voice notes work in WhatsApp groups on Baileys** (#646). A member's photo or voice note reaches the bot when the message is addressed to it, and goes to that member's inbox as in a private chat. A guest's file, and a photo nobody addressed to the bot, are not downloaded into anyone's workspace. Every such message, and every message the bot cannot open (a video, a GIF, a sticker), is now recorded in the room with a line saying what was sent, where before it vanished without a trace.
 

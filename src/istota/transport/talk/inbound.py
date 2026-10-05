@@ -19,7 +19,7 @@ from ...async_runtime import get_talk_client
 from ...config import Config
 from istota.nextcloud.talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage, ParticipantRef
-from ..ingest import classifier_refs, classify_ahead, ingest_message
+from ..ingest import classifier_refs, classify_ahead, ingest
 from ..participants import classify as classify_participant
 from ..participants import guest_label
 from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
@@ -1715,6 +1715,9 @@ async def _process_poll_results(
     swallows fetch errors. A drain calling this owes the raise a ``finally``.
     """
     created: list[int] = []
+    # Acks whose task was created held, `(token, talk id, task id, message
+    # id)`; reacted to once the transaction below has committed (ISSUE-655).
+    held_acks: list[tuple[str, int, int, int | None]] = []
     # Before the transaction opens: a classifier call under it would hold the
     # WAL write lock for the whole model call.
     ahead = await _classify_batch_ahead(config, client, results, conv_types)
@@ -2037,7 +2040,7 @@ async def _process_poll_results(
                 # when the speech gate speaks, create its task) in the SAME
                 # transaction as the poll-state advance above — see the
                 # docstring's atomicity note.
-                task_id = ingest_message(conn, config, IncomingMessage(
+                result = ingest(conn, config, IncomingMessage(
                     user_id=actor_id if is_user else "",
                     author=None if is_user else author,
                     # A user's command was dispatched above; a guest's is
@@ -2058,11 +2061,73 @@ async def _process_poll_results(
                     model=model_override,
                     effort=effort_override,
                     model_prefix_used=prefix.matched,
+                    can_react=True,
                 ))
-                if task_id is not None:
-                    created.append(task_id)
+                if result.held_for_reaction and message_id:
+                    held_acks.append(
+                        (conversation_token, message_id, result.task_id,
+                         result.message_id),
+                    )
+                elif result.task_id is not None:
+                    created.append(result.task_id)
 
+    created.extend(await _react_to_held_acks(config, client, held_acks))
     return created
+
+
+#: One Talk reaction's bound, well inside `ack_reaction.HOLD_SECONDS`.
+REACT_DEADLINE_SECONDS = 20.0
+
+
+async def _react_to_held_acks(
+    config: Config, client: TalkClient,
+    held: list[tuple[str, int, int, int | None]],
+) -> list[int]:
+    """React to each held ack, after the batch committed; the task ids that
+    now run as a reply because their reaction could not be sent.
+
+    The reactions go out together, each bounded by `REACT_DEADLINE_SECONDS`
+    so a slow server cannot run a batch past the hold, then each ack is
+    settled in a short transaction of its own: the task is deleted when the
+    reaction landed, released otherwise. A failure of the settle write leaves
+    the hold to expire, which answers the turn with the reply. Never raises.
+    """
+    from istota.rooms import ack_reaction
+
+    released: list[int] = []
+    if not held:
+        return released
+    reaction = ack_reaction.reaction_for(config)
+
+    async def react(conversation_token: str, talk_id: int) -> bool:
+        if reaction is None:
+            return False
+        try:
+            await asyncio.wait_for(
+                client.add_reaction(conversation_token, talk_id, reaction),
+                timeout=REACT_DEADLINE_SECONDS,
+            )
+            return True
+        except Exception as e:  # noqa: BLE001 — a failed reaction is a reply
+            logger.warning(
+                "Could not react to message %s in %s, replying instead: %s",
+                talk_id, conversation_token, type(e).__name__,
+            )
+            return False
+
+    outcomes = await asyncio.gather(*(react(token, talk_id) for token, talk_id, _t, _m in held))
+    for (conversation_token, talk_id, task_id, message_id), reacted in zip(held, outcomes):
+        try:
+            async with talk_db(config.db_path) as conn:
+                removed = ack_reaction.settle(
+                    conn, task_id=task_id, message_id=message_id, reacted=reacted,
+                )
+        except Exception:  # noqa: BLE001 — the hold expiring is the fallback
+            logger.warning("Could not settle held ack task %s", task_id, exc_info=True)
+            continue
+        if not removed:
+            released.append(task_id)
+    return released
 
 
 async def handle_confirmation_reply(

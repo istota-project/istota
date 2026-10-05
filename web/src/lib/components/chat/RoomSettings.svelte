@@ -1,6 +1,13 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { ChatRoom, GuestReply, RoomPatch, SelectableBrain, SpeechMode } from '$lib/api';
+  import type {
+    ChatRoom,
+    GuestReply,
+    RoomPatch,
+    SelectableBrain,
+    SpeechDisposition,
+    SpeechMode,
+  } from '$lib/api';
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
   import RoomMembers from './RoomMembers.svelte';
   import RoomGroupLink from './RoomGroupLink.svelte';
@@ -79,6 +86,29 @@
   );
   const showSpeechMode = $derived(
     !!room.policy && !room.policy.email_thread && room.policy.speech_mode !== undefined,
+  );
+
+  // How wide "for the bot" is when the classifier decides (ISSUE-654). Read
+  // only on the classifier, so the field says so when Replies is anything else.
+  const DISPOSITION_LABELS: Record<string, string> = {
+    reserved: 'Reserved',
+    friendly: 'Friendly',
+  };
+  const dispositionOptions = $derived<SelectOption[]>([
+    {
+      value: '',
+      label: `Follow deployment (${DISPOSITION_LABELS[room.policy?.deployment_disposition ?? ''] ?? room.policy?.deployment_disposition ?? 'unknown'})`,
+    },
+    { value: 'reserved', label: DISPOSITION_LABELS.reserved },
+    { value: 'friendly', label: DISPOSITION_LABELS.friendly },
+  ]);
+  let dispositionValue = $state<string>(untrack(() => room.policy?.disposition ?? ''));
+  const dispositionChanged = $derived(
+    !!room.policy && dispositionValue !== (room.policy.disposition ?? ''),
+  );
+  const showDisposition = $derived(showSpeechMode && room.policy?.disposition !== undefined);
+  const classifierSelected = $derived(
+    (speechModeValue || room.policy?.deployment_speech_mode) === 'classifier',
   );
 
   // Model + effort defaults for this room (canonical values, shared Talk+web).
@@ -271,6 +301,7 @@
       brainValue = room.brain ?? '';
       guestReplyValue = room.policy?.guest_reply ?? 'direct';
       speechModeValue = room.policy?.speech_mode ?? '';
+      dispositionValue = room.policy?.disposition ?? '';
       showDeleteConfirm = false;
       copied = false;
       copyError = '';
@@ -299,6 +330,7 @@
         listedChanged ||
         guestReplyChanged ||
         speechModeChanged ||
+        dispositionChanged ||
         (!locked && (nameChanged || modelChanged || effortChanged || brainChanged))),
   );
 
@@ -332,6 +364,8 @@
     if (listedChanged) patch.listed = listedValue;
     if (guestReplyChanged) patch.guest_reply = guestReplyValue;
     if (speechModeChanged) patch.speech_mode = (speechModeValue || null) as SpeechMode | null;
+    if (dispositionChanged)
+      patch.disposition = (dispositionValue || null) as SpeechDisposition | null;
     onSave(patch);
   }
 
@@ -518,6 +552,34 @@
             .host}, sets this.
         {:else}
           This room has no host, so nobody can change this until a member claims it.
+        {/if}
+      </p>
+    </div>
+  {/if}
+
+  {#if room.policy && showDisposition}
+    <div class="field">
+      <span>Disposition</span>
+      <Select
+        value={dispositionValue}
+        options={dispositionOptions}
+        onValueChange={(v) => (dispositionValue = v)}
+        ariaLabel="How readily the bot replies when it decides from context"
+        disabled={!room.policy.is_host}
+        fullWidth
+      />
+      <p class="caption">
+        Friendly also answers thanks or a remark about what the bot just said; reserved answers only
+        a message addressed to it or asking it something.
+        {#if room.policy.is_host}
+          You set this as the room's host.
+        {:else if room.policy.host}
+          This room's host, {room.policy.host}, sets this.
+        {:else}
+          This room has no host, so nobody can change this until a member claims it.
+        {/if}
+        {#if !classifierSelected}
+          This applies only when Replies is set to decide from context.
         {/if}
       </p>
     </div>

@@ -1049,7 +1049,7 @@ class TestPollTalkConversations:
             with db.get_db(config.db_path) as conn:
                 db.set_talk_poll_state(conn, "room1", 50)
 
-            with patch("istota.transport.talk.inbound.ingest_message", side_effect=RuntimeError("db locked")):
+            with patch("istota.transport.talk.inbound.ingest", side_effect=RuntimeError("db locked")):
                 with pytest.raises(RuntimeError):
                     await poll_talk_conversations(config)
 
@@ -3092,3 +3092,101 @@ class TestTalkParticipants:
         with db.get_db(config.db_path) as conn:
             assert not db.is_room_dismissed(conn, "dm1", "alice")
         assert _user_rows(config, token="dm1") == []
+
+
+class TestAnAckIsAReaction:
+    """ISSUE-655: a friendly room's ack is a reaction on Talk, not a task."""
+
+    @staticmethod
+    async def _poll(config, messages, *, reaction=None, token="group1"):
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            client = MockClient.return_value
+            client.list_conversations = AsyncMock(return_value=[
+                {"token": token, "type": 2, "displayName": "Group"},
+            ])
+            client.poll_messages = AsyncMock(return_value=messages)
+            client.get_participants = AsyncMock(return_value=_GROUP_PARTICIPANTS)
+            client.send_message = AsyncMock(return_value={"id": 999})
+            client.fetch_chat_history = AsyncMock(return_value=[])
+            client.add_reaction = reaction or AsyncMock(return_value={})
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, token, 50)
+            created = await poll_talk_conversations(config)
+        return created, client.add_reaction
+
+    @staticmethod
+    def _friendly(make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.speech_gate.mode = "classifier"
+        config.speech_gate.disposition = "friendly"
+        return config
+
+    @staticmethod
+    def _tasks(config):
+        with db.get_db(config.db_path) as conn:
+            return [tuple(r) for r in conn.execute(
+                "SELECT id, scheduled_for FROM tasks WHERE source_type = 'talk'"
+            ).fetchall()]
+
+    @staticmethod
+    def _reacted(config):
+        with db.get_db(config.db_path) as conn:
+            return conn.execute(
+                "SELECT kind, reacted FROM speech_gate_decisions ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+    @pytest.mark.asyncio
+    async def test_an_ack_posts_one_reaction_and_leaves_no_task(self, make_config):
+        config = self._friendly(make_config)
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda _p: '{"speak": true, "kind": "ack"}'):
+            created, react = await self._poll(
+                config, [_msg(id=301, actor_id="alice", message="Thanks!")],
+            )
+
+        react.assert_awaited_once_with("group1", 301, "\N{THUMBS UP SIGN}")
+        assert created == []
+        assert self._tasks(config) == []
+        assert tuple(self._reacted(config)) == ("ack", 1)
+
+    @pytest.mark.asyncio
+    async def test_a_failing_reaction_creates_the_task(self, make_config):
+        config = self._friendly(make_config)
+        failing = AsyncMock(side_effect=RuntimeError("talk down"))
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda _p: '{"speak": true, "kind": "ack"}'):
+            created, _react = await self._poll(
+                config, [_msg(id=302, actor_id="alice", message="Thanks!")],
+                reaction=failing,
+            )
+
+        tasks = self._tasks(config)
+        assert len(tasks) == 1 and tasks[0][1] is None
+        assert created == [tasks[0][0]]
+        assert tuple(self._reacted(config)) == ("ack", 0)
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_room_never_reacts(self, make_config):
+        config = self._friendly(make_config)
+        config.speech_gate.disposition = "reserved"
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda _p: '{"speak": true, "kind": "ack"}'):
+            created, react = await self._poll(
+                config, [_msg(id=303, actor_id="alice", message="Thanks!")],
+            )
+
+        react.assert_not_awaited()
+        assert len(created) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_reply_kind_is_answered_as_before(self, make_config):
+        config = self._friendly(make_config)
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda _p: '{"speak": true, "kind": "reply"}'):
+            created, react = await self._poll(
+                config, [_msg(id=304, actor_id="alice", message="and on Sunday?")],
+            )
+
+        react.assert_not_awaited()
+        assert len(created) == 1

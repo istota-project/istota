@@ -396,6 +396,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "message_relays", {"return_claimed_at": "TEXT"})
     # No backfill: NULL is what a row from before the disposition existed is.
     _add_columns(conn, "speech_gate_decisions", {"disposition": "TEXT", "kind": "TEXT"})
+    # ISSUE-655: whether an ack was answered with a reaction. NULL on every
+    # older row, which is what "no reaction was tried" is.
+    _add_columns(conn, "speech_gate_decisions", {"reacted": "INTEGER"})
     # Tasks table migrations
     _add_columns(conn, "tasks", {
         "whatsapp_confirmation_request_id": "TEXT",
@@ -8456,7 +8459,8 @@ CREATE TABLE IF NOT EXISTS room_policy (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     vetoed_at    TEXT,
     veto_on_by   TEXT,
-    announced_at TEXT
+    announced_at TEXT,
+    disposition  TEXT
 )
 """
 
@@ -8515,6 +8519,9 @@ def _migrate_room_veto(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "room_policy", {
         "vetoed_at": "TEXT", "veto_on_by": "TEXT", "announced_at": "TEXT",
     })
+    # ISSUE-654: the room's own speech gate disposition. NULL follows
+    # `[speech_gate] disposition`, so nothing is backfilled.
+    _add_columns(conn, "room_policy", {"disposition": "TEXT"})
     conn.execute(_ROOM_VETOES_DDL)
     conn.execute(_ROOM_NOTICES_DDL)
     try:
