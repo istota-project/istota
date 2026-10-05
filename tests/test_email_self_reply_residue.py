@@ -201,8 +201,13 @@ class TestTheHistoryFallback:
         self._completed(config, db_path, task)
 
         with db.get_db(db_path) as conn:
-            # Still the fallback path — this room has no conversational task.
-            assert db._messages_caught_up(conn, ROOM) is False
+            # The fallback reader, asked directly: with no completed task on the
+            # room's token the store serves the room (ISSUE-645), and it never
+            # held this exchange either.
+            assert db._conversation_history_from_tasks(
+                conn, ROOM, None, 50,
+                ["scheduled", "briefing", "subtask", "heartbeat"],
+            ) == []
         assert self._history(db_path) == []
 
     def test_the_re_surfacing_reader_drops_it_too(self, db_path, config):

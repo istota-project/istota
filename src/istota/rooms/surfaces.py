@@ -40,8 +40,9 @@ implement.
 
 **Two questions that look like these and are not, so a converter does not
 reach for the wrong reader.** ``db._CONVERSATIONAL_SOURCE_TYPES`` is
-``("talk", "web")`` — the original members before phone rooms — and gates
-the caught-up dual-read. Its own comment says email is excluded *on purpose*
+``("talk", "web", "sms", "whatsapp")`` — the surfaces whose turns the store
+holds as user+assistant pairs from the room's start, phone rooms through their
+mint backfill (ISSUE-645) — and gates the caught-up dual-read. Its own comment says email is excluded *on purpose*
 and that "Mirroring is not the criterion; guaranteed completeness is": the
 store holds email turns only from ISSUE-136 forward, so counting them would pin
 a room to the legacy path forever. Collapsing it into a reader here would be
