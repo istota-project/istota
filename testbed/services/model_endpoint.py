@@ -2,7 +2,8 @@
 
 It speaks the OpenAI chat-completions format, which the native brain uses, and
 Anthropic's Messages format at `/v1/messages`, which the `claude` CLI uses.
-Both replay the same script, one turn per request, in call order.
+Both replay the same script: one turn per request in call order, or, for an
+item carrying `when`, the turn a route picks from the request itself.
 
 Why an HTTP server and not `llm/replay.py`'s `ReplayProvider`: the lean compose
 stack runs the daemon inside a container and the test on the host, so the
@@ -25,6 +26,7 @@ that failed for an unrelated-looking reason.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 
@@ -72,6 +74,21 @@ ENDPOINT_CREDENTIAL = "unused-by-the-scripted-endpoint"
 # that stops the barrier's own remedy from creating one.
 BARRIER_STATUS = 403
 
+#: What a request that matched no route is answered with, when the script has
+#: routes and no positional item is left. A daemon poller's task lands here, so
+#: it has to be an answer that does nothing and is not an error: a failed task
+#: is retried, and the retry row is what wedges the next reset's quiesce.
+UNSCRIPTED_TURN = {"text": "NO_ACTION: unscripted"}
+
+#: How a scenario marks the requests it is responsible for (`[e2e:<nonce>]`).
+#: `unmatched` records the markers each unmatched request carried, so a reader
+#: can tell a stray poller task (none) from a scenario's own task that found no
+#: route (one or more).
+MARKER_RE = re.compile(r"\[e2e:[^\]\s]+\]")
+
+#: How much of an unmatched request's first user message `unmatched` keeps.
+UNMATCHED_EXCERPT = 200
+
 
 class ScriptedEndpoint(HttpStub):
     """A running endpoint and the record of what it was asked.
@@ -96,6 +113,17 @@ class ScriptedEndpoint(HttpStub):
         #: `claude` CLI session-title requests, answered without a turn and
         #: not recorded in `requests` (see `_is_title_request`).
         self.titles_served: int = 0
+        #: Requests the script had no answer for, once it has routes: one that
+        #: matched no route with no positional item left, or one that matched a
+        #: route and ran past its turns. A dict each: `reason` (`no_route` or
+        #: `exhausted`), `when` (the matched route's marker, or None),
+        #: `markers` (every `[e2e:...]` in the request's first user message)
+        #: and `excerpt` (its first `UNMATCHED_EXCERPT` characters).
+        self.unmatched: list[dict] = []
+        #: The next positional item. Counted apart from `served` because a
+        #: routed request takes none; with no route in the script every request
+        #: is positional and the two are equal.
+        self.positional_served: int = 0
         self._barred: bool = False
 
     # -- the `Service` members --------------------------------------------
@@ -148,10 +176,11 @@ class ScriptedEndpoint(HttpStub):
         """
         with self._lock:
             served, scripted, seen = self.served, len(self.turns), len(self.requests)
-            refused = self.refused
+            refused, unmatched = self.refused, len(self.unmatched)
         return (
             f"  {served} turn(s) served of {scripted} scripted, "
-            f"{seen} request(s) recorded, {refused} refused at the barrier"
+            f"{seen} request(s) recorded, {refused} refused at the barrier, "
+            f"{unmatched} unmatched"
         )
 
     # -- addresses --------------------------------------------------------
@@ -196,7 +225,9 @@ class ScriptedEndpoint(HttpStub):
         with self._lock:
             self.turns = list(turns)
             self.served = 0
+            self.positional_served = 0
             self.requests.clear()
+            self.unmatched.clear()
 
     @contextmanager
     def barrier(self):
@@ -227,6 +258,16 @@ class ScriptedEndpoint(HttpStub):
         finally:
             with self._lock:
                 self._barred = False
+
+    def marked_unmatched(self) -> list[dict]:
+        """The `unmatched` entries a scenario is responsible for.
+
+        Those whose request carried an `[e2e:...]` marker. A request with none
+        is a daemon poller's own task, which a routed script answers with
+        `UNSCRIPTED_TURN` on purpose and which no scenario asked for.
+        """
+        with self._lock:
+            return [dict(entry) for entry in self.unmatched if entry["markers"]]
 
     def transcript(self) -> str:
         """Every message the endpoint was ever sent, as one string.
@@ -354,6 +395,63 @@ def _block_text(content: object) -> str:
             if isinstance(part, dict) and part.get("type") == "text"
         )
     return str(content)
+
+
+def first_user_text(body: dict) -> str:
+    """The request's first user message, as text, in either wire format.
+
+    OpenAI carries the system prompt as a `system`-role message ahead of it and
+    Anthropic as a top-level field, so the first `user`-role message is the
+    same thing in both: the user half of the task prompt (`prompts.md`), which
+    is where a scenario's marker travels. Never raises on a malformed body.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "user":
+            return _block_text(message.get("content"))
+    return ""
+
+
+def assistant_turns(body: dict) -> int:
+    """How many `assistant` messages the request already carries.
+
+    A task's position in its own conversation, read off the request alone: a
+    tool round trip adds one, so a task's second request takes its route's
+    second turn, and a retried attempt, which starts from a fresh message list,
+    takes the first again.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return 0
+    return sum(
+        1 for message in messages
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    )
+
+
+def choose_route(routes: list[dict], text: str) -> dict | None:
+    """The route whose `when` occurs furthest right in `text`, or None.
+
+    Furthest right because the user half puts conversation history before the
+    request: on a thread's second mail both markers are present and the current
+    one is the later. A tie (one `when` ending where another does) goes to the
+    longer `when`, the more specific match.
+    """
+    best: dict | None = None
+    best_key: tuple[int, int] | None = None
+    for route in routes:
+        when = str(route.get("when") or "")
+        if not when:
+            continue
+        start = text.rfind(when)
+        if start < 0:
+            continue
+        key = (start + len(when), len(when))
+        if best_key is None or key > best_key:
+            best, best_key = route, key
+    return best
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -561,6 +659,54 @@ def _anthropic_exhausted_body(served: int, scripted: int) -> bytes:
     }).encode()
 
 
+def _record_unmatched(
+    endpoint: ScriptedEndpoint, text: str, *, reason: str, when: str | None,
+) -> None:
+    endpoint.unmatched.append({
+        "reason": reason,
+        "when": when,
+        "markers": MARKER_RE.findall(text),
+        "excerpt": text[:UNMATCHED_EXCERPT],
+    })
+
+
+def _pick_turn(
+    endpoint: ScriptedEndpoint, body: dict,
+) -> tuple[dict | None, int, int]:
+    """`(turn, index, count)`: the turn to serve, or None for the exhausted
+    frame, plus the index and count that frame names.
+
+    Called under the endpoint's lock, after `served` is counted. With no route
+    in the script every request takes the positional branch, so
+    `positional_served` advances exactly as `served` used to and the frames are
+    the ones this endpoint has always sent.
+    """
+    routes = [item for item in endpoint.turns if "when" in item]
+    positional = [item for item in endpoint.turns if "when" not in item]
+    if not routes:
+        index = endpoint.positional_served
+        endpoint.positional_served += 1
+        turn = positional[index] if index < len(positional) else None
+        return turn, index, len(positional)
+
+    text = first_user_text(body)
+    route = choose_route(routes, text)
+    if route is not None:
+        route_turns = list(route.get("turns") or [])
+        index = assistant_turns(body)
+        if index < len(route_turns):
+            return route_turns[index], index, len(route_turns)
+        _record_unmatched(endpoint, text, reason="exhausted", when=route["when"])
+        return None, index, len(route_turns)
+
+    index = endpoint.positional_served
+    if index < len(positional):
+        endpoint.positional_served += 1
+        return positional[index], index, len(positional)
+    _record_unmatched(endpoint, text, reason="no_route", when=None)
+    return UNSCRIPTED_TURN, index, len(positional)
+
+
 def serve_script(
     turns: list[dict],
     *,
@@ -571,7 +717,18 @@ def serve_script(
     """Start an endpoint replaying `turns`, one per request, in order.
 
     A turn is ``{"text": str}`` or ``{"tool_calls": [{"id", "name",
-    "arguments"}]}``, optionally with ``finish_reason`` and ``usage``. Port 0
+    "arguments"}]}``, optionally with ``finish_reason`` and ``usage``.
+
+    An item with a ``when`` key is a **route** instead:
+    ``{"when": "<marker>", "turns": [turn, ...]}``. A request whose first user
+    message contains the marker is answered from that route, at the index the
+    assistant messages it already carries give (`choose_route`,
+    `assistant_turns`), so the answer depends on the request alone and a poller
+    task cannot take a scenario's turn. Items without ``when`` keep their
+    positional meaning, and a script with no route behaves as it always has.
+    With routes present, a request matching none takes the next positional
+    item, or `UNSCRIPTED_TURN` when none is left; that and a route run past its
+    end are recorded in `unmatched`. Port 0
     lets the OS choose, which is what keeps concurrent test sessions from
     colliding — the chosen port is on the returned object.
 
@@ -682,10 +839,9 @@ def serve_script(
                     barred = True
                 else:
                     barred = False
-                    index = endpoint.served
                     endpoint.served += 1
                     endpoint.requests.append(body)
-                    scripted = list(endpoint.turns)
+                    turn, index, scripted_count = _pick_turn(endpoint, body)
 
             if barred:
                 # Not recorded in `requests`: nothing was served, and a body in
@@ -703,8 +859,8 @@ def serve_script(
                 return
 
             model = body.get("model", "")
-            if anthropic and index >= len(scripted):
-                body_bytes = _anthropic_exhausted_body(index, len(scripted))
+            if anthropic and turn is None:
+                body_bytes = _anthropic_exhausted_body(index, scripted_count)
                 self.send_response(ANTHROPIC_EXHAUSTED_STATUS)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(body_bytes)))
@@ -712,11 +868,11 @@ def serve_script(
                 self.wfile.write(body_bytes)
                 return
             if anthropic:
-                frames = _anthropic_turn_frames(scripted[index], model)
-            elif index < len(scripted):
-                frames = _turn_frames(scripted[index], model)
+                frames = _anthropic_turn_frames(turn, model)
+            elif turn is not None:
+                frames = _turn_frames(turn, model)
             else:
-                frames = [_exhausted_frame(index, len(scripted))]
+                frames = [_exhausted_frame(index, scripted_count)]
 
             payload = b"".join(frames)
             self.send_response(200)
