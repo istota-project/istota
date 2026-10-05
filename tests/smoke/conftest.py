@@ -48,17 +48,15 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
-from dataclasses import dataclass
 
 import pytest
 
 from testbed import stack as stack_support
-from testbed.services import mail, ntfy
 
 from ..conftest import REPO, _require_no_xdist, require_docker, resolve_platform
 from ..image import conftest as image_support
 from ..support import email_flow
+from ..support import email_people as email_people_support
 
 NO_FORGE_DOCKERFILE = REPO / "docker" / "test" / "Dockerfile.no-forge"
 
@@ -120,115 +118,9 @@ def no_forge_image(pytestconfig) -> str:
 
 # -- the email suite ---------------------------------------------------------
 
-
-@dataclass(frozen=True)
-class EmailPeople:
-    """Who `email_people` seeded, by user id and address."""
-
-    host_id: str
-    host_address: str
-    alice_id: str
-    alice_address: str
-
-
-#: How long the readiness proof waits for the seeded profiles to reach the
-#: running daemon. They arrive through `config.refresh_user_profiles_if_changed`
-#: on a scheduler tick, and the mail poller runs every five seconds.
-READINESS_TIMEOUT = 60.0
-
-#: The alert route `email_people` gives testuser. `email` alone resolves to the
-#: email destination only (`notifications.delivery.resolve_destinations`); an
-#: ntfy secret adds no destination by itself, so the stub hears nothing unless
-#: the route names it. Both, so the suite can read a push on either surface.
-HOST_ALERT_ROUTE = "alert=email,ntfy"
-
-
-def _istota(stack, *argv: str) -> None:
-    result = stack.exec(
-        ["uv", "run", "istota", "-c", "/data/config/config.toml", *argv],
-        timeout=120,
-    )
-    if result.returncode != 0:
-        raise stack_support.StackError(
-            f"`istota {' '.join(argv)}` exited {result.returncode}\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
-        )
-
-
-def _seed_email_people(stack) -> EmailPeople:
-    """Seed the users and standings the email suite assumes, then prove the
-    running daemon routes by them.
-
-    Through the shipped CLI, as an operator would. Profile patterns rather than
-    the runtime trust table, because `Stack.reset_framework_state` clears only
-    the table, so a pattern survives every reset and the table stays what
-    `yes trust` writes.
-    """
-    _istota(stack, "user", "ensure", "--name", email_flow.ALICE_ID,
-            "--email", email_flow.ALICE_ADDRESS)
-    _istota(stack, "user", "ensure", "--name", email_flow.HOST_ID,
-            "--email", email_flow.HOST_ADDRESS,
-            "--trusted-sender", f"*@{email_flow.TRUSTED_DOMAIN}",
-            "--quiet-sender", f"*@{email_flow.QUIET_DOMAIN}",
-            "--route", HOST_ALERT_ROUTE)
-    ntfy_service = stack.service("ntfy")
-    for key, value in (
-        ("server_url", ntfy_service.container_url),
-        ("topic", ntfy_service.topic),
-        ("token", ntfy.NTFY_TOKEN),
-    ):
-        _istota(stack, "secret", "ensure", "-u", email_flow.HOST_ID,
-                "--service", "ntfy", "--key", key, "--value", value)
-
-    # The readiness proof: a mail only the seeded profile can route. alice
-    # exists nowhere but in the row just written, so `sender_match` naming her
-    # means the daemon's config has the overlay. Answered with a no-op through
-    # its own route, so it takes no turn of the test's script.
-    # A mail read before the overlay landed is routed some other way and is
-    # spent, so a wrong answer sends a fresh one rather than failing.
-    turns = list(stack.endpoint.turns)
-    markers: list[str] = []
-    deadline = time.monotonic() + READINESS_TIMEOUT
-    row = None
-    while time.monotonic() < deadline:
-        nonce = email_flow.new_nonce()
-        marker = f"ready-{nonce}"
-        markers.append(marker)
-        stack.script([email_flow.route(m, [{"text": "NO_ACTION: ready"}])
-                      for m in markers])
-        sent = email_flow.send(
-            stack, email_flow.person("alice", nonce), to=[mail.BOT_ADDRESS],
-            subject=f"readiness {nonce}", text="checking the seeded profiles",
-            marker=marker,
-        )
-        row = None
-        while time.monotonic() < deadline and row is None:
-            row = stack.probe.processed(sent.message_id)
-            if row is None:
-                time.sleep(2)
-        if (row is not None and row.get("routing_method") == "sender_match"
-                and row.get("user_id") == email_flow.ALICE_ID):
-            break
-    if (row is None or row.get("routing_method") != "sender_match"
-            or row.get("user_id") != email_flow.ALICE_ID):
-        raise stack_support.StackError(
-            f"the readiness mail was not routed to alice by sender within "
-            f"{READINESS_TIMEOUT}s (saw {row!r}). The seeded profiles have not "
-            "reached the running daemon; `refresh_user_profiles_if_changed` on "
-            "the scheduler tick is what carries them."
-        )
-    if row.get("task_id") is not None:
-        stack.probe.wait_for_task(status="completed", task_id=row["task_id"],
-                                  timeout=READINESS_TIMEOUT)
-    # The proof made rows and maybe mail; reset again so the test's watermark
-    # and mailboxes start after it, and put the test's own script back.
-    stack.mark = stack.reset(turns)
-    for marker in markers:
-        email_flow.sent_markers(stack).discard(email_flow.marker_text(marker))
-    return EmailPeople(
-        host_id=email_flow.HOST_ID, host_address=email_flow.HOST_ADDRESS,
-        alice_id=email_flow.ALICE_ID, alice_address=email_flow.ALICE_ADDRESS,
-    )
+#: The lean shape's seeding: no Talk, so the host's alerts go to email and ntfy.
+EmailPeople = email_people_support.EmailPeople
+HOST_ALERT_ROUTE = email_people_support.LEAN_ALERT_ROUTE
 
 
 @pytest.fixture
@@ -238,12 +130,15 @@ def email_people(stack) -> EmailPeople:
     Once per stack rather than per test, and kept on the stack object rather
     than in a session-scoped fixture, because `stack` is per test while the
     stack it hands out lives for the session. A fresh stack is a new object
-    and seeds again.
+    and seeds again. The seeding itself is `tests/support/email_people.py`,
+    shared with the full shape.
     """
     seeded = getattr(stack, "_email_people", None)
     if seeded is None:
         try:
-            seeded = _seed_email_people(stack)
+            seeded = email_people_support.seed_email_people(
+                stack, alert_route=HOST_ALERT_ROUTE,
+            )
         except (TimeoutError, stack_support.StackError) as exc:
             pytest.fail(str(exc), pytrace=False)
         stack._email_people = seeded
@@ -271,15 +166,5 @@ def _no_unmatched_marked_requests(request):
     ours = email_flow.sent_markers(stack)
     ours.clear()
     yield
-    unmatched = [
-        entry for entry in stack.endpoint.marked_unmatched()
-        if entry["markers"][-1] in ours
-    ]
-    assert not unmatched, (
-        "marked model requests found no scripted turn:\n"
-        + "\n".join(
-            f"  {entry['reason']} when={entry['when']!r} markers={entry['markers']} "
-            f"excerpt={entry['excerpt']!r}"
-            for entry in unmatched
-        )
-    )
+    unmatched = email_people_support.unmatched_marked_requests(stack, ours)
+    assert not unmatched, email_people_support.describe_unmatched(unmatched)
