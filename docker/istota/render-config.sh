@@ -649,6 +649,7 @@ talk_context_limit = ${ISTOTA_CONVERSATION_TALK_CONTEXT_LIMIT:-100}
 
 [speech_gate]
 mode = "${ISTOTA_SPEECH_GATE_MODE:-mention}"
+disposition = "${ISTOTA_SPEECH_GATE_DISPOSITION:-reserved}"
 model = "${ISTOTA_SPEECH_GATE_MODEL:-fast}"
 window_messages = ${ISTOTA_SPEECH_GATE_WINDOW_MESSAGES:-8}
 max_message_chars = ${ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS:-400}

@@ -326,9 +326,13 @@ class SpeechGateConfig:
     Read by ``speech_gate``. ``mode`` is ``"mention"`` (reply only when
     addressed, which is Talk's rule), ``"classifier"`` (a cheap model decides)
     or ``"off"`` (always reply). An unrecognised mode fails closed at the gate.
+    ``disposition`` widens the classifier's speak cases: ``"reserved"`` or
+    ``"friendly"`` (also answers thanks and reactions to the bot's last
+    answer, in one short line). An unrecognised value reads as ``reserved``.
     """
 
     mode: str = "mention"
+    disposition: str = "reserved"
     model: str = "fast"  # role alias, resolved per brain namespace; not a pin
     window_messages: int = 8  # transcript turns the classifier sees
     max_message_chars: int = 400  # per-turn cap inside the window

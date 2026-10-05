@@ -536,6 +536,7 @@ talk_context_limit = {{ istota_conversation_talk_context_limit }}
 
 [speech_gate]
 mode = "{{ istota_speech_gate_mode | istota_toml_escape }}"
+disposition = "{{ istota_speech_gate_disposition | istota_toml_escape }}"
 model = "{{ istota_speech_gate_model | istota_toml_escape }}"
 window_messages = {{ istota_speech_gate_window_messages }}
 max_message_chars = {{ istota_speech_gate_max_message_chars }}

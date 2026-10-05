@@ -8699,13 +8699,21 @@ def _chat_create_web_task(
     addressed = addressed_to_bot_in_text(
         text, (_config.bot_name, _config.talk.bot_username),
     )
+    replied_to_bot = False
+    if not addressed and reply_to_msg_id is not None:
+        # A reply to the bot's own answer addresses it, as a quote does on
+        # WhatsApp (ISSUE-653). The citation is validated again in the write
+        # transaction below; this read only decides the gate's rung.
+        with db.get_db(_config.db_path) as conn:
+            replied_to_bot = db.is_bot_message_in_room(conn, token, reply_to_msg_id)
     # Ahead of BEGIN IMMEDIATE, so a classifier call never holds the write
     # lock. None unless the gate could reach its classifier rung.
     classified = classify_ahead(
         _config, surface="web", surface_ref=token, user_id=username,
         text=text, is_group_chat=False, addressed_to_bot=addressed,
-        source_type="web",
+        source_type="web", replied_to_bot=replied_to_bot,
     )
+    addressed = addressed or replied_to_bot
     with db.get_db(_config.db_path) as conn:
         # Take the write lock up front so the count and the insert are one
         # critical section — a plain SELECT takes no lock under WAL, so two

@@ -1687,10 +1687,16 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     reason     TEXT,
     model      TEXT,
     latency_ms INTEGER,
+    -- 'reserved'|'friendly': `[speech_gate] disposition` when the row was written
+    disposition TEXT,
+    -- 'reply'|'ack' on a turn the bot answers, NULL otherwise
+    kind       TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_speech_gate_room ON speech_gate_decisions (room_token, id);
 CREATE INDEX IF NOT EXISTS idx_speech_gate_created ON speech_gate_decisions (created_at);
+-- The room card's reply-kind lookup goes from a task's message to its decision.
+CREATE INDEX IF NOT EXISTS idx_speech_gate_message ON speech_gate_decisions (message_id);
 
 -- One-time data-migration ledger (markered, so heavy backfills run once).
 CREATE TABLE IF NOT EXISTS _migration_state (

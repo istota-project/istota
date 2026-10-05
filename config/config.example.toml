@@ -936,6 +936,11 @@ talk_context_limit = 100
 # "classifier" lets a cheap model decide and does not reply if it fails;
 # "off" replies to every turn. Every turn is recorded whichever mode is set.
 mode = "mention"
+# How wide the classifier reads "for the bot". "reserved" answers a turn
+# addressed to it, asking it for something, or answering its question.
+# "friendly" also answers thanks and other reactions to its last answer, in
+# one short line. An unknown value is "reserved".
+disposition = "reserved"
 # Classifier model. A role alias ("fast"), resolved per brain namespace.
 model = "fast"
 # Transcript turns the classifier sees, and the per-turn character cap

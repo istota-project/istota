@@ -114,10 +114,7 @@ def addressed_to_bot(
     """Whether a group turn speaks to the bot (D5)."""
     if mentions_bot:
         return True
-    if reply_to_message_id and conn.execute(
-        "SELECT 1 FROM sent_whatsapp WHERE meta_message_id = ? LIMIT 1",
-        (reply_to_message_id,),
-    ).fetchone():
+    if quotes_bot(conn, reply_to_message_id):
         return True
     name = (getattr(config, "bot_name", "") or "").strip().casefold()
     if not name:
@@ -127,6 +124,14 @@ def addressed_to_bot(
         return False
     rest = spoken[len(name):]
     return not rest or not rest[0].isalnum()
+
+
+def quotes_bot(conn, reply_to_message_id: str | None) -> bool:
+    """Whether a group turn quotes one of the bot's own sends."""
+    return bool(reply_to_message_id) and conn.execute(
+        "SELECT 1 FROM sent_whatsapp WHERE meta_message_id = ? LIMIT 1",
+        (reply_to_message_id,),
+    ).fetchone() is not None
 
 
 def _mention_name(
@@ -441,10 +446,13 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
                 identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
             )
             text = render_mentions(conn, config, room.token, text, group.mentions)
+            # A quote is addressed but still classified, for its kind
+            # (ISSUE-653); a mention or the name first is not.
             addressed = addressed_to_bot(
                 conn, config, text, mentions_bot=group.mentions_bot,
-                reply_to_message_id=event.reply_to_message_id,
+                reply_to_message_id=None,
             )
+            quoted = not addressed and quotes_bot(conn, event.reply_to_message_id)
     except Exception as e:  # noqa: BLE001 — a failed lookup is a failed decision
         logger.warning("whatsapp.group.classify_failed: %s", type(e).__name__)
         return None
@@ -453,6 +461,7 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
         user_id=user_id or room.user_id, text=text, is_group_chat=False,
         addressed_to_bot=addressed, source_type="whatsapp", room_container=True,
         author_label=None if user_id else (event.from_user.username or None),
+        replied_to_bot=quoted,
     )
 
 

@@ -494,6 +494,7 @@ istota_conversation_talk_context_limit: 100  # max messages to fetch from Talk m
 # than one human. "mention" replies only when mentioned; "classifier" lets a
 # cheap model decide and stays silent if it fails; "off" replies to every turn.
 istota_speech_gate_mode: "mention"
+istota_speech_gate_disposition: "reserved"  # or "friendly"; read only by the classifier
 istota_speech_gate_model: "fast"  # role alias; override through istota_models_aliases
 istota_speech_gate_window_messages: 8  # transcript turns the classifier sees
 istota_speech_gate_max_message_chars: 400  # per-turn cap inside the window
