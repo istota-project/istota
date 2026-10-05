@@ -521,9 +521,10 @@ class TestTheResidueKeyedOnConversationToken:
     def test_and_the_tasks_fallback_reader_no_longer_sees_it_either(
         self, db_path, config,
     ):
-        """`get_conversation_history` falls back to `tasks WHERE
-        conversation_token = ?` for a room with no completed talk/web task, and
-        this task no longer carries the room's token."""
+        """The `tasks` reader is `SELECT … WHERE conversation_token = ?`, and
+        this task no longer carries the room's token. Asked directly, since a
+        room with no completed task on its token is now served from the store
+        (ISSUE-645), which holds nothing for it either."""
         with db.get_db(db_path) as conn:
             _origin_room(conn)
             _sent_from_the_room(conn, to_addr=USER_ADDR)
@@ -532,11 +533,12 @@ class TestTheResidueKeyedOnConversationToken:
             db.update_task_status(conn, task.id, "completed", result="42.")
 
         with db.get_db(db_path) as conn:
-            assert db._messages_caught_up(conn, ROOM) is False
+            excluded = ["scheduled", "briefing", "subtask", "heartbeat"]
+            fallback = db._conversation_history_from_tasks(conn, ROOM, None, 50, excluded)
             history = db.get_conversation_history(
-                conn, ROOM,
-                exclude_source_types=["scheduled", "briefing", "subtask", "heartbeat"],
+                conn, ROOM, exclude_source_types=excluded,
             )
+        assert fallback == []
         assert history == []
 
 

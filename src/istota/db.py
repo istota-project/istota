@@ -2665,7 +2665,12 @@ class TalkMessage:
 # `surfaces.is_room_member` here would give the same answer today and would be
 # the room-surface muddle committed one question further along: the day email's
 # backfill exists, this set widens and the room-role set does not.
-_CONVERSATIONAL_SOURCE_TYPES = ("talk", "web")
+#
+# SMS and WhatsApp joined with ISSUE-645: a phone room's answered turns are
+# written as user+assistant pairs from the mint, and its pre-mint turns are
+# folded in by `scheduler.backfill_phone_rooms`. A phone task whose answer never reached the
+# store keeps the room on the `tasks` path, which is what it read before.
+_CONVERSATIONAL_SOURCE_TYPES = ("talk", "web", "sms", "whatsapp")
 
 
 # Recovers the envelope sender of an email-sourced turn for the history readers
@@ -2920,7 +2925,7 @@ def get_conversation_history(
             by a reader that is not front stage (`!export`).
     """
     conversation_token = _canonical_room_token(conn, conversation_token, cross_surface=False)
-    if _messages_caught_up(conn, conversation_token):
+    if _messages_caught_up(conn, conversation_token, exclude_source_types):
         return _conversation_history_from_messages(
             conn, conversation_token, exclude_task_id, limit, exclude_source_types,
             user_email_addresses, after=after,
@@ -2949,8 +2954,9 @@ def _conversation_history_from_tasks(
     # never written there, which is the half ISSUE-254 already closed. This
     # fallback is where the quoted chain was still being charged to every later
     # task in the room, and it is not a rare path: it serves any room with no
-    # completed talk/web task left in `tasks`, i.e. a mail-only room, or one
-    # whose last chat turn aged past `task_retention_days`.
+    # completed conversational task left in `tasks` but some other completed
+    # task, i.e. a mail-only room, or one whose last chat turn aged past
+    # `task_retention_days`.
     refs = _room_ref_tokens(conn, conversation_token, include_surface_refs=False)
     ref_marks = ", ".join("?" for _ in refs)
     query = f"""
@@ -3027,7 +3033,10 @@ def _conversation_history_from_messages(
     WHERE clause, where it would turn the outer join back into an inner one and
     drop exactly those rows. A user row that *has* a task still needs a
     completed task and a paired assistant row, so an in-flight or failed turn is
-    excluded as before. The speaker is read off the message row first: an
+    excluded as before. An unanswered row starting with `!` is a command the
+    daemon dispatched (a phone room records one as a turn, and every room
+    records a typed `!confirm`), not conversation, so it is left out. The
+    speaker is read off the message row first: an
     unanswered row has no task to name one, and in a shared room the two differ.
     """
     query = f"""
@@ -3048,6 +3057,7 @@ def _conversation_history_from_messages(
              AND ma.role = 'assistant'
         WHERE mu.room_token = ? AND mu.role = 'user'
           AND (mu.task_id IS NULL OR (t.id IS NOT NULL AND ma.id IS NOT NULL))
+          AND (mu.task_id IS NOT NULL OR substr(mu.body, 1, 1) != '!')
     """
     params: list = [conversation_token]
 
@@ -3104,11 +3114,16 @@ def _third_party_label(row) -> str | None:
     return None
 
 
-def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bool:
+def _messages_caught_up(
+    conn: sqlite3.Connection, conversation_token: str,
+    exclude_source_types: list[str] | None = None,
+) -> bool:
     """True when the canonical `messages` store can authoritatively serve a
-    token's history: there is at least one completed turn and *every* completed
-    task (with a result) for the token has its assistant row present in
-    `messages`.
+    token's history: *every* completed conversational task (with a result) for
+    the token has its assistant row present in `messages`. With none, the store
+    serves only when the `tasks` path would return nothing either (no other
+    completed task outside ``exclude_source_types``), since a room's unanswered
+    turns are in the store and nowhere else.
 
     This is a completeness check, not a newest-only check. Keying solely on the
     single newest task (the original implementation) made the dual-read
@@ -3123,7 +3138,7 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
     writes land for every completed turn, this returns False and the caller
     falls back to `tasks` — no staleness during rollout.
 
-    Scoped to *conversational* source types (talk/web). The dual-read protects
+    Scoped to *conversational* source types (talk, web, sms, whatsapp). The dual-read protects
     conversational history from going stale; scheduled/cron and briefing posts
     aren't conversational turns, are never re-paired into history by
     `_conversation_history_from_messages` (they carry no user row), and a silent
@@ -3144,13 +3159,37 @@ def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bo
     ).fetchone()
     latest = row["mx"] if row else None
     if latest is None:
-        return False  # no completed conversational history -> tasks path returns []
+        # No answered conversational turn. The store still serves a room whose
+        # `tasks` path would return nothing at all, since its unanswered turns
+        # are there and nowhere else: the first addressed turn of a group
+        # follows the chatter it answers (ISSUE-645). Any other completed task
+        # (a mail-only room) keeps the room on `tasks`; one the caller excludes
+        # (a cron post) would not reach its history from there either.
+        excluded = list(exclude_source_types or [])
+        other_query = (
+            f"SELECT 1 FROM tasks WHERE conversation_token IN ({ref_marks}) "
+            f"AND status = 'completed' AND result IS NOT NULL "
+            f"AND COALESCE(withheld_from_room, 0) = 0"
+        )
+        if excluded:
+            other_query += f" AND source_type NOT IN ({', '.join('?' for _ in excluded)})"
+        other = conn.execute(other_query + " LIMIT 1", (*refs, *excluded)).fetchone()
+        return other is None
     # Any completed conversational turn missing its assistant row -> not caught
-    # up -> fall back.
+    # up -> fall back. A withheld turn is never written to the store and both
+    # readers leave it out, so it is no gap. Nor is an approved guest proposal:
+    # its row is written when the drain posts it, and a post that never lands
+    # (the room switched off or archived, the queue expired) never writes one,
+    # which would pin a room whose guests are held to `tasks` for good.
     gap = conn.execute(
         f"SELECT 1 FROM tasks t "
         f"WHERE t.conversation_token IN ({ref_marks}) AND t.status = 'completed' "
         f"  AND t.result IS NOT NULL AND t.source_type IN ({placeholders}) "
+        f"  AND COALESCE(t.withheld_from_room, 0) = 0 "
+        f"  AND NOT EXISTS ("
+        f"    SELECT 1 FROM whatsapp_skill_requests r "
+        f"    WHERE r.origin_task_id = t.id AND r.request_key = 'guest-reply-' || t.id"
+        f"  ) "
         f"  AND NOT EXISTS ("
         f"    SELECT 1 FROM messages m "
         f"    WHERE m.room_token = ? "
