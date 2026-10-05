@@ -101,7 +101,20 @@ def _trusted_thread(stack, email_people, nonce: str) -> tuple[flow.Sent, str]:
     assert flow.worker_done(stack, task["id"])
     room = stack.probe.email_room(sent.message_id)
     assert room is not None, f"the trusted mail minted no thread room: {sent.message_id}"
+    # The opener's note reaches the host by mail as well; wait for it, so it
+    # cannot land above a later step's outbox mark and be counted there.
+    deadline = time.monotonic() + flow.DEFAULT_TIMEOUT
+    while not any(
+        email_people.host_address in flow.recipients(m, "To")
+        for m in flow.bot_mail_since(stack, sent.outbox_uid)
+    ):
+        assert time.monotonic() < deadline, "the opener's note never reached the host"
+        time.sleep(flow.POLL_INTERVAL)
     return sent, room
+
+
+class Issue650(AssertionError):
+    """The behaviour #650 reports, raised only by the checks of it."""
 
 
 def _trusted_rows(stack, user_id: str, address: str) -> list[dict]:
@@ -374,10 +387,9 @@ class TestAThreadThatAlreadyExists:
         ), since=since)
         assert seen.room == room, (seen.room, room)
 
-    @pytest.mark.xfail(strict=True, reason="#650")
+    @pytest.mark.xfail(strict=True, raises=Issue650, reason="#650")
     def test_approving_on_a_vetoed_thread_records_nothing(self, stack, email_people):
-        """A held reply on a thread the host then switched off, approved by
-        mail.
+        """A held reply on a thread then switched off, approved by mail.
 
         Today `confirmations.approve` has no veto check: `_admit_approved_mail`
         adds the sender as a participant before `record_inbound` refuses the
@@ -385,6 +397,10 @@ class TestAThreadThatAlreadyExists:
         `task_room_vetoed` cannot stop it, and it ends `failed` on delivery.
         A vetoed room records no participant (multiplayer D12); #650 asks for a
         refusal or a dropped task with no model run.
+
+        The xfail covers only `Issue650`, raised by the two checks of that
+        behaviour. A setup step that fails is a plain failure, so the strict
+        xfail cannot pass for the wrong reason.
         """
         nonce = flow.new_nonce()
         stack.script([flow.route(f"t-{nonce}", [flow.email_answer(f"opened {nonce}")]),
@@ -394,25 +410,38 @@ class TestAThreadThatAlreadyExists:
         sent, task, request = _hold(stack, email_people, nonce, sender=stranger,
                                     parent=opener)
 
-        off = flow.send(
-            stack, flow.person("host", nonce), to=[mail.BOT_ADDRESS],
-            subject=f"Re: {opener.subject}", text="!istota off",
-            marker=f"off-{nonce}", reply_to_msg=opener,
+        # From the opener: an `off` is heard only from a present participant
+        # (`inbound.poll_emails`, the veto branch, `threads.is_present`), and
+        # the host is none, since the opener mailed the plus-address alone.
+        # The veto's ledger row carries no Message-ID or subject, so the room's
+        # policy is what is waited on.
+        flow.send(
+            stack, flow.Correspondent(opener.sender, None, flow.stamp(opener.sender)),
+            to=[mail.tagged(email_people.host_id)], subject=f"Re: {opener.subject}",
+            text="!istota off", marker=f"off-{nonce}", reply_to_msg=opener,
         )
-        assert flow.filed_row(stack, off)["routing_method"] == "room_veto"
-        vetoed = stack.probe.query(
-            "SELECT vetoed_at FROM room_policy WHERE room_token = ?", [room],
-        )
-        assert vetoed and vetoed[0]["vetoed_at"] is not None, vetoed
+        deadline = time.monotonic() + flow.DEFAULT_TIMEOUT
+        while not stack.probe.query(
+            "SELECT 1 FROM room_policy WHERE room_token = ? AND vetoed_at IS NOT NULL",
+            [room],
+        ):
+            assert time.monotonic() < deadline, f"room {room} was not switched off"
+            time.sleep(flow.POLL_INTERVAL)
 
         reply = flow.answer_by_mail(stack, request, "yes", nonce=nonce)
-        flow.filed_row(stack, reply)
-        flow.worker_done(stack, task["id"], timeout=60)
+        _answered(stack, reply, task)
+        # Settle whichever way #650 is fixed: a run ends in the worker's line,
+        # a refusal leaves the task parked or cancelled.
+        if not flow.worker_done(stack, task["id"], timeout=60):
+            [after] = stack.probe.tasks(task_id=task["id"])
+            assert after["status"] in ("pending_confirmation", "cancelled"), after
         [after] = stack.probe.tasks(task_id=task["id"])
         present = {p["surface_ref"] for p in stack.probe.participants(room)
                    if p.get("left_at") is None}
-        assert stranger.address not in present, present
-        assert after["status"] != "failed", after
+        if stranger.address in present:
+            raise Issue650(f"the vetoed room gained a participant: {present}")
+        if after["status"] == "failed":
+            raise Issue650(f"the approved task ran and failed: {after}")
 
 
 class TestAForgedAnswer:
@@ -437,6 +466,10 @@ class TestAForgedAnswer:
             time.sleep(flow.POLL_INTERVAL)
         time.sleep(flow.POST_COUNT_SETTLE)
         since = flow.checkpoint(stack)
+        # The canary's row is keyed per user and verdict, so on a session
+        # stack an earlier test may have left it open; a canary run would then
+        # bump it in place, below any watermark. Its counter is what moves.
+        canary_before = self._canary(stack, email_people)
 
         forged = flow.answer_by_mail(stack, request, "yes", nonce=nonce,
                                      sender=flow.person("spoofed_host", nonce))
@@ -445,26 +478,24 @@ class TestAForgedAnswer:
             "answer_refused:fail", None, email_people.host_id,
         ), row
 
+        deadline = time.monotonic() + flow.DEFAULT_TIMEOUT
+        while len(ntfy.pushes()) <= since.pushes and time.monotonic() < deadline:
+            time.sleep(flow.POLL_INTERVAL)
+        time.sleep(flow.NEGATIVE_SETTLE)
+
+        # The refusal row is keyed by reason alone, so this case can raise it
+        # once per session stack; a second run would bump it and push nothing.
         notices = stack.probe.notifications(
             email_people.host_id, id_above=since.mark.get("notifications"))
-        deadline = time.monotonic() + flow.DEFAULT_TIMEOUT
-        while not notices and time.monotonic() < deadline:
-            time.sleep(flow.POLL_INTERVAL)
-            notices = stack.probe.notifications(
-                email_people.host_id, id_above=since.mark.get("notifications"))
         assert [(n["source"], n["dedup_key"]) for n in notices] == [
             ("task_alert", "email-answer-refused:fail"),
         ], notices
         push = flatten_body(notices[0]["body"])
         for fragment in ("was not acted on", "result: fail", "Nothing was approved"):
             assert fragment in push, (fragment, push)
-
-        deadline = time.monotonic() + flow.DEFAULT_TIMEOUT
-        while len(ntfy.pushes()) <= since.pushes and time.monotonic() < deadline:
-            time.sleep(flow.POLL_INTERVAL)
-        time.sleep(flow.NEGATIVE_SETTLE)
         pushes = [c.body.decode("utf-8", "replace") for c in ntfy.pushes()[since.pushes:]]
         assert pushes == [push], pushes
+        assert self._canary(stack, email_people) == canary_before
 
         # Nothing else moved: the held task is still parked, no task was
         # created for the answer, and the bot mailed only the notice.
@@ -479,3 +510,11 @@ class TestAForgedAnswer:
         for message in mailed:
             assert forged.text not in message.body_text
         assert flow.reply_to(stack, sent) is None
+
+    @staticmethod
+    def _canary(stack, email_people) -> list[tuple]:
+        return [
+            (n["id"], n["occurrences"], n["updated_at"])
+            for n in stack.probe.notifications(email_people.host_id,
+                                               dedup_key="dmarc:fail")
+        ]

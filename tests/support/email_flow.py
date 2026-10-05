@@ -645,7 +645,9 @@ def assert_outcome(
     the one marker that follows the note step.
 
     Rows, transcript and pushes are read above the test's watermark, or above
-    `since` for a later step of a test that has already sent mail.
+    `since` for a later step of a test that has already sent mail. Alert mails
+    are always read above `sent.outbox_uid`, so a step must let an earlier
+    step's alert mail land before it sends.
     """
     probe = stack.probe
     mark = since.mark if since is not None else stack.mark
@@ -882,8 +884,9 @@ def ledger_only_row(stack, sent: Sent) -> dict | None:
     `confirm_answer` or `answer_refused:<reason>` row with the sender
     and subject and no `message_id` (the `mark_email_processed` calls on those
     branches of `inbound.poll_emails`), so `Probe.processed` cannot find one.
-    Every subject in the suite carries the test's nonce, which is what makes
-    sender plus subject this mail's.
+    Every subject in the suite carries the test's nonce or a session-unique
+    task id (a reply to a request is `Re: Confirm task #N`), which is what
+    makes sender plus subject this mail's.
     """
     rows = stack.probe.query(
         "SELECT * FROM processed_emails WHERE message_id IS NULL "
