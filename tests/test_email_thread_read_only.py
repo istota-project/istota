@@ -15,7 +15,7 @@ from istota import db
 from istota.config import Config, EmailConfig, SiteConfig, UserConfig, WebConfig
 from istota.mail import drafts as outbound_drafts
 from istota.transport.email.private_room import email_conversation_token
-from istota.transport.routing import email_thread_room
+from istota.rooms.scopes import is_email_thread_room
 
 try:
     import authlib  # noqa: F401
@@ -113,11 +113,11 @@ class TestThePredicate:
             thread = _thread_room(conn)
             private = _private_email_room(conn)
             web = db.create_web_chat_room(conn, "alice", "general").token
-            assert email_thread_room(conn, thread) is True
-            assert email_thread_room(conn, private) is False
-            assert email_thread_room(conn, web) is False
-            assert email_thread_room(conn, None) is False
-            assert email_thread_room(conn, "rm_nothing") is False
+            assert is_email_thread_room(conn, thread) is True
+            assert is_email_thread_room(conn, private) is False
+            assert is_email_thread_room(conn, web) is False
+            assert is_email_thread_room(conn, None) is False
+            assert is_email_thread_room(conn, "rm_nothing") is False
 
     def test_the_listing_batch_agrees(self, db_path):
         with db.get_db(db_path) as conn:

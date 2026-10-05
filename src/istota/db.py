@@ -5800,7 +5800,8 @@ def email_thread_tokens_for_member(
 
     The listing's batch form of `rooms.scopes.is_email_thread_room`, with the
     same rule: an email binding whose ref is not the room creator's private
-    email room. One query, for the reason `talk_refs_for_member` gives.
+    email room. One query, for the reason `talk_refs_for_member` gives;
+    `tests/test_email_thread_listed.py` holds the two forms equal.
     """
     from istota.transport.email.private_room import is_private_email_ref
 

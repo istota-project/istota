@@ -173,7 +173,7 @@ A **mail room** is any room with an `email` binding: an email thread room or the
 
 ### Read-only email thread rooms (hidden email threads stage 1)
 
-A thread room is the mail thread, so web never writes a turn into it. `POST /chat/rooms/{id}/messages` answers 409 `{error: EMAIL_THREAD_READ_ONLY, read_only: true}` when `routing.email_thread_room` names the room, for a send, a `!command` and a reply-to send alike; retrying a failed thread task, confirming a parked question and acting on a draft stay allowed, since none is a web turn. The listing, the room-stream snapshot and the PATCH response carry `email_thread` and `read_only: true`, and the composer dock shows the same sentence as the 409 (worded in `routes/chat/+page.svelte`). Room settings keep working.
+A thread room is the mail thread, so web never writes a turn into it. `POST /chat/rooms/{id}/messages` answers 409 `{error: EMAIL_THREAD_READ_ONLY, read_only: true}` when `rooms.scopes.is_email_thread_room` names the room, for a send, a `!command` and a reply-to send alike; retrying a failed thread task, confirming a parked question and acting on a draft stay allowed, since none is a web turn. The listing, the room-stream snapshot and the PATCH response carry `email_thread` and `read_only: true`, and the composer dock shows the same sentence as the 409 (worded in `routes/chat/+page.svelte`). Room settings keep working.
 
 ### Hidden email threads (hidden email threads stage 6)
 
