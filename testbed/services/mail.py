@@ -220,6 +220,7 @@ def send(
     subject: str,
     body: str,
     cc: list[str] | None = None,
+    bcc: list[str] | None = None,
     from_name: str | None = None,
     reply_to: str | None = None,
     in_reply_to: str | None = None,
@@ -254,7 +255,8 @@ def send(
     `to_addr` may be a list, and `cc` adds a `Cc:` header; every address in
     either is an envelope recipient, as a real client would send it, so a
     human's copy of a multi-party mail lands in the catch-all beside the bot's
-    replies. Readers there tell them apart by sender.
+    replies. Readers there tell them apart by sender. `bcc` adds envelope
+    recipients and no header, which is all a Bcc is on the wire.
 
     `attachments` is `(filename, content_type, payload)`. A `content_type` of
     `"application/octet-stream"` is the safe default; the string is split on `/`
@@ -321,7 +323,9 @@ def send(
         server.host, server.smtp_port, context=server.context(), timeout=NETWORK_TIMEOUT
     ) as client:
         client.login(*auth)
-        client.sendmail(from_addr, to_list + cc_list, raw, mail_options=options)
+        client.sendmail(
+            from_addr, to_list + cc_list + list(bcc or []), raw, mail_options=options,
+        )
     return message["Message-ID"]
 
 
