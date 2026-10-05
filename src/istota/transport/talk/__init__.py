@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,12 @@ if TYPE_CHECKING:
     from .._types import DeliveryOptions
 
 logger = logging.getLogger("istota.transport.talk")
+
+# The quote check (ISSUE-641) reads one page after the trigger, briefly: enough
+# to find the first post that is not this task's own, and never long enough to
+# hold the answer back.
+QUOTE_CHECK_LIMIT = 50
+QUOTE_CHECK_TIMEOUT_SECONDS = 5.0
 
 __all__ = ["TalkTransport", "poll_talk_conversations", "get_dm_token"]
 
@@ -312,18 +319,27 @@ class TalkTransport:
             # `reference_id`, so on a split message a match proves some part
             # landed and never that all of them did. See `_posted_message_id`.
             readback_allowed = len(parts) == 1
+            # A final result quotes the message that asked it once the room has
+            # moved on past that message (ISSUE-641), decided now rather than
+            # at task start. Progress updates never quote.
+            quote_id = (
+                await self._quote_target(client, token, task)
+                if threaded and task is not None else None
+            )
             for i, part in enumerate(parts):
-                # In group chats, reply to the original message and @mention the
-                # user for the first part only so they get a notification. Only
-                # applied for final results (threaded=True), not intermediate
-                # progress updates which would be too noisy.
                 part_reply_to = None
-                if threaded and i == 0 and task is not None and task.is_group_chat:
-                    part_reply_to = task.talk_message_id
-                    # Only the member who asked on Talk: a web question's answer
-                    # mirrored here would notify them on a surface they did not
-                    # use, and a guest's turn runs as the host, who did not ask.
-                    if task.source_type == "talk" and task.guest_participant_id is None:
+                if threaded and i == 0 and task is not None:
+                    part_reply_to = quote_id
+                    # The @mention notifies the asker in a group, quoted or
+                    # not. Only the member who asked on Talk: a web question's
+                    # answer mirrored here would notify them on a surface they
+                    # did not use, and a guest's turn runs as the host, who
+                    # did not ask.
+                    if (
+                        task.is_group_chat
+                        and task.source_type == "talk"
+                        and task.guest_participant_id is None
+                    ):
                         part = f"@{task.user_id} {part}"
                 elif reply_to is not None and i == 0:
                     part_reply_to = reply_to
@@ -340,6 +356,70 @@ class TalkTransport:
                 task_id, type(e).__name__, e,
             )
             return None
+
+    def _trigger_talk_id(self, token: str, task: "db.Task") -> int | None:
+        """This conversation's copy of the message that started ``task``.
+
+        A Talk turn carries its own id, and quotes it only into the
+        conversation it was asked in. A web turn reposted here (a promoted
+        room) has the repost's id on its canonical row. Nothing else has a copy
+        in Talk to quote. Synchronous: the caller runs it off the loop thread.
+        """
+        if task.source_type == "talk":
+            if not task.talk_message_id:
+                return None
+            if token in (task.conversation_token, task.talk_delivery_token):
+                return task.talk_message_id
+        elif task.source_type != "web":
+            return None
+        if not self._config.db_path or not os.path.exists(self._config.db_path):
+            return None
+        from ... import db
+        from ..reply_quote import trigger_turn
+        from ._db_lock import DB_BUSY_TIMEOUT_MS
+        try:
+            with db.get_db(self._config.db_path, busy_timeout_ms=DB_BUSY_TIMEOUT_MS) as conn:
+                room = db._canonical_room_token(conn, task.conversation_token or "")
+                binding = db.get_room_binding(conn, room, "talk")
+                if binding is None or binding.surface_ref != token:
+                    return None
+                if task.source_type == "talk":
+                    return task.talk_message_id
+                trigger = trigger_turn(conn, task.id)
+            talk_id = trigger.external_ids.get("talk") if trigger is not None else None
+            return int(talk_id) if talk_id and str(talk_id).isdigit() else None
+        except Exception as e:
+            logger.debug("Talk trigger lookup failed for task %s: %s", task.id, e)
+            return None
+
+    async def _quote_target(self, client, token: str, task: "db.Task") -> int | None:
+        """The Talk id to quote, or None to send unquoted.
+
+        One short, bounded read: a failed or slow read sends unquoted, since
+        the quote is a marker and the answer should not wait on it.
+        """
+        trigger_id = await asyncio.to_thread(self._trigger_talk_id, token, task)
+        if not trigger_id:
+            return None
+        from ..reply_quote import talk_room_moved_on
+        try:
+            later = await client.fetch_messages_since(
+                token, trigger_id, batch_size=QUOTE_CHECK_LIMIT,
+                timeout=QUOTE_CHECK_TIMEOUT_SECONDS, max_pages=1,
+            )
+        except Exception as e:
+            logger.debug(
+                "Talk quote check failed for task %s, sending unquoted: %s: %r",
+                task.id, type(e).__name__, e,
+            )
+            return None
+        if not isinstance(later, list):
+            return None
+        moved_on = talk_room_moved_on(
+            later, trigger_id=trigger_id, task_id=task.id,
+            bot_actor_ids=_bot_actor_ids(self._config),
+        )
+        return trigger_id if moved_on else None
 
     async def _post_part(
         self, client, token: str, part: str, *,

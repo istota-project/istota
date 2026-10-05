@@ -610,6 +610,7 @@ class FakeTalkClient:
 
     async def fetch_messages_since(
         self, conversation_token: str, since_id: int, batch_size: int = 200,
+        *, timeout: float = 30, max_pages: int | None = None,
     ) -> list[dict]:
         """The signaling catch-up, oldest-first and strictly newer than `since_id`.
 

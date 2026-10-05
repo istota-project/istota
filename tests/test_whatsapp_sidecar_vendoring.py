@@ -753,14 +753,12 @@ class TestTheSidecarsPayloadsAreReadable:
             key for key in emitted
             if f"payload.{key}" not in source and f"CONFIG['{key}']" not in source
         }
-        # Two are deliberately unread and both are recorded rather than
-        # filtered out of the emitter. `buttons`: this adapter has no
-        # interactive object, the caps say so, and the answer travels in the
-        # body. `reply_to_message_id`: a quoted reply needs the whole original
-        # message, which the sidecar does not keep, and the synthetic stub it
-        # used to pass could be refused — which would settle `unknown` on a
-        # message that never left, for a thread marker.
-        assert unread == {"buttons", "reply_to_message_id"}, unread
+        # One is deliberately unread and recorded rather than filtered out of
+        # the emitter. `buttons`: this adapter has no interactive object, the
+        # caps say so, and the answer travels in the body.
+        # `reply_to_message_id` is read since ISSUE-641, and quotes only an
+        # original the sidecar still holds.
+        assert unread == {"buttons"}, unread
 
     def test_a_qr_payload_carries_the_key_the_bridge_reads(self):
         assert _js_send_keys("MSG_QR") == {"qr"}

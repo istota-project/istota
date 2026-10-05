@@ -52,6 +52,7 @@ class TestDeliver:
         with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"id": 200})
+            inst.fetch_messages_since = AsyncMock(return_value=[{"id": 43, "message": "x"}])
             result = await t.deliver("room123", "Sure", task=task, threaded=True)
         assert result == 200
         inst.send_message.assert_called_once_with(
@@ -72,6 +73,7 @@ class TestDeliver:
         with patch("istota.transport.talk.get_talk_client") as MockClient:
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"id": 200})
+            inst.fetch_messages_since = AsyncMock(return_value=[{"id": 43, "message": "x"}])
             await t.deliver("room123", "Sure", task=task, threaded=True)
         inst.send_message.assert_called_once_with(
             "room123", "Sure", reply_to=task.talk_message_id, reference_id=None,
@@ -85,6 +87,7 @@ class TestDeliver:
                 patch("istota.transport.talk.split_message", return_value=["P1", "P2"]):
             inst = MockClient.return_value
             inst.send_message = AsyncMock(return_value={"id": 300})
+            inst.fetch_messages_since = AsyncMock(return_value=[{"id": 43, "message": "x"}])
             await t.deliver("room123", "long", task=task, threaded=True)
         calls = inst.send_message.call_args_list
         assert calls[0].args == ("room123", "@carol P1")

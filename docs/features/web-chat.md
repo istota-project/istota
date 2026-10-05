@@ -85,6 +85,7 @@ Deletion is not private to you: rooms are shared, so a message you delete is gon
 - **The rendered quote is a link back.** Clicking it jumps to the message being replied to, when that message is loaded in the current view.
 - **A deleted parent still reads as a reply** — the quote renders as "Original message deleted" rather than the turn silently becoming an ordinary message.
 - **Replying to a message that is already gone fails the send**, and your text and attachments go back into the composer with the dead citation dropped. This is the one failure that repopulates the box: retrying would only re-send the same missing parent, and a reply delivered without its referent is not the message you wrote.
+- **The bot quotes too.** An answer cites the message it answers when anything else was posted in the room after that message, your own follow-up included. An answer to the latest message cites nothing.
 - **Talk works both ways.** In a room bound to a Nextcloud Talk conversation, a web reply posts as a real Talk reply (falling back to a plain post if the parent never reached Talk), and a reply made in Talk shows up as a reply in web chat.
 
 ## Commands and model override

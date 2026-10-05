@@ -3933,12 +3933,16 @@ def process_one_task(
                     and db.get_room(conn, task.conversation_token) is not None
                 ):
                     # A linked turn's answer carries its link, as in
-                    # `_store_room_turn` (ISSUE-608).
+                    # `_store_room_turn` (ISSUE-608). It quotes the turn that
+                    # asked it once the room has moved on (ISSUE-641).
+                    from .transport.reply_quote import quoted_trigger
+                    _quoted = quoted_trigger(conn, task_id, task.conversation_token)
                     stored_assistant_msg_id = db.store_turn_message(
                         conn, task.conversation_token, role="assistant",
                         body=result, task_id=task_id,
                         origin_surface=task.source_type,
                         about_room_token=task.about_room_token or None,
+                        reply_to_message_id=_quoted.message_id if _quoted else None,
                     )
                     # A retry that re-completes the task finds the row already
                     # stored (store returns None) — recover its id so the star

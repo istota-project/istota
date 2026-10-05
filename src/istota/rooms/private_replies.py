@@ -82,6 +82,7 @@ from istota.relay.requests import (
     write_transaction,
 )
 from istota.rooms.scopes import canonical_token, is_current_member  # noqa: F401 — canonical_token re-exported; one copy
+from istota.transport.reply_quote import quoted_trigger
 
 logger = logging.getLogger(__name__)
 
@@ -1513,13 +1514,21 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 parent = current["room_token"]
                 whatsapp_group = bool(current.get("whatsapp_ref"))
                 reference = "room-post:" + request_id
+                answers = _post_answers_task(conn, row["origin_task_id"], parent)
+                # A released guest proposal quotes the guest's turn when the
+                # room moved on while it waited for approval (ISSUE-641),
+                # judged now rather than when it was proposed.
+                quoted = quoted_trigger(conn, answers, parent) if answers is not None else None
                 message_id = db.add_message(
                     conn, parent, role="assistant", body=body, origin_surface="web",
-                    delivery_reference=reference,
-                    task_id=_post_answers_task(conn, row["origin_task_id"], parent),
+                    delivery_reference=reference, task_id=answers,
+                    reply_to_message_id=quoted.message_id if quoted else None,
                 )
+                quoted_ids = quoted.external_ids if quoted else {}
                 claim.update(message_id=message_id, talk_ref=current["talk_ref"], parent=parent,
-                             reference=reference, whatsapp_group=whatsapp_group)
+                             reference=reference, whatsapp_group=whatsapp_group,
+                             talk_reply_to=quoted_ids.get("talk"),
+                             whatsapp_reply_to=quoted_ids.get("whatsapp"))
             else:
                 # A whisper (stored kind `side_whisper`): the principal's own
                 # private room, resolved now rather than at enqueue.
@@ -1537,6 +1546,13 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
             conn.execute("UPDATE whatsapp_skill_requests SET state='sending',updated_at=datetime('now') "
                          "WHERE id=?", (request_id,))
             return claim
+
+
+def _talk_id(value) -> int | None:
+    """A stored Talk id as the int Talk takes, or None: a bad one costs the
+    quote, never the post."""
+    text = str(value or "")
+    return int(text) if text.isdigit() else None
 
 
 def _post_answers_task(conn, task_id, parent: str) -> int | None:
@@ -1617,7 +1633,8 @@ async def deliver_request(config, row) -> None:
             from istota.transport.talk import TalkTransport
             try:
                 talk_id = await TalkTransport(config).deliver(
-                    claim["talk_ref"], claim["body"], reference_id=claim["reference"])
+                    claim["talk_ref"], claim["body"], reference_id=claim["reference"],
+                    reply_to=_talk_id(claim.get("talk_reply_to")))
             except Exception as exc:
                 logger.warning("room post %s: Talk post failed: %s", claim["request_id"], exc)
         if claim["whatsapp_group"]:
@@ -1628,7 +1645,8 @@ async def deliver_request(config, row) -> None:
             try:
                 await deliver_whatsapp(
                     config, logical_key=claim["reference"], user_id=claim["user_id"],
-                    text=claim["body"], group_room=claim["parent"])
+                    text=claim["body"], group_room=claim["parent"],
+                    reply_to_message_id=claim.get("whatsapp_reply_to"))
             except Exception as exc:
                 logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
     else:

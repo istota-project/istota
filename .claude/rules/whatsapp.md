@@ -106,6 +106,8 @@ Unsanctioned outside the Business API: ban risk, protocol breakage, unlink after
 
 `docker/whatsapp-baileys/`, its own image (too heavy to charge every deployment). **The daemon listens, the sidecar dials** (the daemon owns the socket's lifetime and mode). One JSON object per line over `AF_UNIX`, 256 KiB cap both ends, versioned `hello` refused on mismatch. **No HMAC**: the 0600 socket is the boundary. Pinned behaviourally in `tests/test_whatsapp_sidecar_vendoring.py`: entries classified, field names driven through daemon normalizers, pure functions **executed via `node`** (`loadBaileys` is lazy). No tier makes a real connection.
 
+**Quoted answers (ISSUE-641).** `reply_to_message_id` on `send` is applied only from `inboundMessages`, an in-memory cache of the last 256 forwarded inbound `WAMessage`s keyed by id with the chat they came from (`rememberInbound` / `recallInbound`, the `sentMessages` reasoning: no content on disk). A miss, or an original from another chat, sends unquoted, decided before the send, so a missing original never becomes `unknown`; a synthetic `{key: {id}}` stub is never built. Only the first message of a split send carries `{quoted}`. The daemon sets the id only for `task-result:<id>` and a released `room_post`, from the trigger row's `whatsapp` external id (`transport/reply_quote.py`). The Cloud adapter already sent `context.message_id` from the same field.
+
 ### The session directory is a full-account credential
 
 0700 asserted on an `O_NOFOLLOW` fd that also refuses a foreign uid. The sidecar sets `umask 0o077` on itself (systemd defaults 0022, compose cannot set one); the unit also has `UMask=0077`; `harden_session_files` narrows at bridge start. Sidecar stdio is discarded (Baileys logs JIDs and bodies); it writes `sidecar.log` in the directory with bounded labels. No contents or `qr` payload is ever logged. Its env is an **allowlist** (`PATH`, `HOME`, locale, `TZ`, `NODE_ENV`, socket, session dir). Bound into no sandbox.
@@ -202,6 +204,7 @@ Both update paths diff `docker/whatsapp-baileys/` and run `npm ci` (unit stopped
 - A hand-written unit moving the session dir without `ISTOTA_BAILEYS_MEDIA_DIR` stages where the daemon never reads.
 - A LID contact with no usable `senderPn` cannot use the surface (`@lid` refused).
 - Retries after a sidecar restart cannot be served: `getMessage` uses the last 256 bodies, in memory only.
+- An answer to a message older than the last 256 inbound, or sent after a sidecar restart, goes out unquoted.
 - `CIPHERTEXT` stubs are withheld (forwarding would claim the id); a never-redelivered message leaves only a log line.
 - The reply direction is tested by hand only.
 - The staging ceiling cannot be enforced on Baileys; bounded by per-file cap times queue depth.

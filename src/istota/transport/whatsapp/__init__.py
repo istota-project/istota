@@ -7,7 +7,9 @@ and only a group's own turns are answered into it.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import os
 import uuid
 from typing import TYPE_CHECKING
 
@@ -107,6 +109,29 @@ def _answers_own_turn(task, user_id: str, logical_key: str) -> bool:
     if getattr(task, "guest_participant_id", None) is not None:
         return False
     return logical_key == f"task-result:{task.id}"
+
+
+def _quoted_provider_id(config: "Config", task_id: int) -> str | None:
+    """The provider id of the message ``task_id`` answers, when the rule says
+    to quote it, else None. A failed read sends unquoted."""
+    import logging  # noqa: PLC0415
+
+    from ... import db  # noqa: PLC0415
+    from ..reply_quote import quoted_trigger  # noqa: PLC0415
+
+    if not config.db_path or not os.path.exists(config.db_path):
+        return None
+    try:
+        with db.get_db(config.db_path) as conn:
+            trigger = quoted_trigger(conn, task_id)
+    except Exception as e:
+        logging.getLogger(__name__).debug(
+            "whatsapp.outbound.quote_check_failed task=%s: %s", task_id, type(e).__name__,
+        )
+        return None
+    if trigger is None:
+        return None
+    return trigger.external_ids.get("whatsapp") or None
 
 
 class WhatsAppTransport:
@@ -227,12 +252,21 @@ class WhatsAppTransport:
                     "so this send deduplicates against nothing",
                     user_id,
                 )
+        # The answer to a task's own turn quotes it once the chat has moved
+        # on past it (ISSUE-641). Nothing else this surface sends answers a
+        # particular message.
+        reply_to_message_id = None
+        if task is not None and logical_key == f"task-result:{task.id}":
+            reply_to_message_id = await asyncio.to_thread(
+                _quoted_provider_id, self._config, task.id,
+            )
         return await deliver_whatsapp(
             self._config, logical_key=logical_key, user_id=user_id, text=text,
             task_id=task.id if task is not None else None,
             buttons=buttons, ignore_opt_out=ignore_opt_out,
             group_room=group_room,
             attach_media=_answers_own_turn(task, user_id, logical_key),
+            reply_to_message_id=reply_to_message_id,
         )
 
     async def edit(self, target: str, message_id: int, text: str) -> None:
