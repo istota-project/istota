@@ -178,6 +178,39 @@ def is_bot_mentioned(message: dict, bot_username: str) -> bool:
     return False
 
 
+def replies_to_bot(message: dict, bot_username: str) -> bool:
+    """Whether a Talk message is a reply to one of the bot's own posts.
+
+    The bot posts as the Nextcloud user ``bot_username``, so its own message
+    is a ``users`` actor with that id. A deleted parent no longer says whom it
+    was from, and counts as no reply. A post carrying somebody else's words
+    (the attributed repost of a web turn, an approved room post) is not the
+    bot's, by its ``referenceId``.
+    """
+    if not bot_username:
+        return False
+    parent = message.get("parent")
+    if not isinstance(parent, dict) or not parent.get("id") or parent.get("deleted"):
+        return False
+    return (
+        parent.get("actorType", "users") == "users"
+        and parent.get("actorId") == bot_username
+        and speech_gate.is_bots_own_words(parent.get("referenceId"))
+    )
+
+
+def is_addressed(message: dict, bot_username: str) -> bool:
+    """A structural address (speech gate rung 2): a mention, or a reply to the bot.
+
+    WhatsApp groups count a quote of the bot's message the same way; a reply
+    reacting to the bot's answer ("Thanks!") is aimed at it as plainly as a
+    mention is (ISSUE-653).
+    """
+    return is_bot_mentioned(message, bot_username) or replies_to_bot(
+        message, bot_username,
+    )
+
+
 async def _get_participants(
     client: TalkClient,
     conversation_token: str,
@@ -1627,6 +1660,7 @@ async def _classify_batch_ahead(
                     is_group_chat=_is_multi_user(participants),
                     addressed_to_bot=False, source_type="talk",
                     earlier=tuple(earlier),
+                    replied_to_bot=replies_to_bot(msg, config.talk.bot_username),
                 )))
             earlier.append((actor_id, text))
     if not jobs:
@@ -1779,7 +1813,7 @@ async def _process_poll_results(
                     synced_rosters.add(conversation_token)
                     _sync_talk_roster(conn, config, conversation_token, participants)
                 is_multi_user = _is_multi_user(participants)
-                addressed = is_bot_mentioned(msg, config.talk.bot_username)
+                addressed = is_addressed(msg, config.talk.bot_username)
                 # An unmentioned turn in a group room is recorded and nothing
                 # else: `record_inbound` stores it and the speech gate decides
                 # whether it gets a task. Everything between here and the ingest

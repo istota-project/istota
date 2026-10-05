@@ -27,6 +27,7 @@ from istota.mail import support as email_support
 from istota.credentials import vault as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env
+from istota.rooms import speech_gate
 from istota.rooms.scopes import CHANNEL_NOTES_LABEL as CHANNEL_MEMORY_LABEL
 from istota.sandbox.claude_runtime_env import (
     CLAUDE_RUNTIME_ENV_VARS,  # used by `_PROXY_LOOKUP_BLOCKED` below, and
@@ -6507,10 +6508,14 @@ def room_card(
 
         with db.get_db_if_present(config.db_path, conn) as c:
             read = _read(c) if c is not None else None
+            ack = (
+                read is not None and not guest_turn and task.id is not None
+                and speech_gate.reply_kind_for_task(c, task.id) == speech_gate.KIND_ACK
+            )
         readers, guest_reply = read if read is not None else (None, None)
     except Exception as exc:
         logger.warning("room card for task %s failed: %s", task.id, exc)
-        readers, guest_reply = None, None
+        readers, guest_reply, ack = None, None, False
     principal = _header_scalar(task.user_id)
     emissary = (
         "This turn was written by a guest, not by a member. You are acting "
@@ -6571,6 +6576,8 @@ def room_card(
             if readers.guests > 0 or task.audience == "mixed":
                 lines.append("A guest reads this room.")
 
+    if ack:
+        lines.append(speech_gate.ACK_TASK_LINE)
     if room_cli_available:
         if guest_turn:
             lines.append(

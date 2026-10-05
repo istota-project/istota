@@ -19,7 +19,9 @@ from istota.transport.talk.inbound import (
     extract_attachments,
     get_dm_token,
     handle_confirmation_reply,
+    is_addressed,
     is_bot_mentioned,
+    replies_to_bot,
     poll_talk_conversations,
 )
 
@@ -1396,6 +1398,61 @@ class TestIsBotMentioned:
         assert is_bot_mentioned(msg, "istota") is True
 
 
+class TestRepliesToBot:
+    """A reply to one of the bot's own messages addresses it (ISSUE-653)."""
+
+    def test_a_reply_to_the_bot(self):
+        msg = _msg(parent={"id": 7, "actorType": "users", "actorId": "istota",
+                           "message": "It closes at 6pm."})
+        assert replies_to_bot(msg, "istota") is True
+
+    def test_a_reply_to_someone_else(self):
+        msg = _msg(parent={"id": 7, "actorType": "users", "actorId": "bob",
+                           "message": "see you there"})
+        assert replies_to_bot(msg, "istota") is False
+
+    def test_a_deleted_parent(self):
+        msg = _msg(parent={"id": 7, "actorType": "users", "actorId": "istota",
+                           "deleted": True})
+        assert replies_to_bot(msg, "istota") is False
+
+    @pytest.mark.parametrize("reference", [
+        "istota:task:9:prompt", "room-post:abc",
+    ])
+    def test_a_bot_post_carrying_someone_elses_words(self, reference):
+        msg = _msg(parent={"id": 7, "actorType": "users", "actorId": "istota",
+                           "referenceId": reference, "message": "Bob (via web): hi"})
+        assert replies_to_bot(msg, "istota") is False
+
+    def test_the_bots_own_answer_by_reference(self):
+        msg = _msg(parent={"id": 7, "actorType": "users", "actorId": "istota",
+                           "referenceId": "istota:task:9:result"})
+        assert replies_to_bot(msg, "istota") is True
+
+    def test_a_bot_typed_actor_with_the_same_id(self):
+        msg = _msg(parent={"id": 7, "actorType": "bots", "actorId": "istota"})
+        assert replies_to_bot(msg, "istota") is False
+
+    @pytest.mark.parametrize("parent", [None, "7", {"actorId": "istota"}])
+    def test_no_usable_parent(self, parent):
+        msg = _msg()
+        if parent is not None:
+            msg["parent"] = parent
+        assert replies_to_bot(msg, "istota") is False
+
+    def test_an_empty_bot_username_matches_nothing(self):
+        msg = _msg(parent={"id": 7, "actorType": "users", "actorId": ""})
+        assert replies_to_bot(msg, "") is False
+
+    def test_is_addressed_covers_both(self):
+        assert is_addressed(_msg(message_params={
+            "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+        }), "istota")
+        assert is_addressed(_msg(parent={
+            "id": 7, "actorType": "users", "actorId": "istota"}), "istota")
+        assert not is_addressed(_msg(), "istota")
+
+
 # =============================================================================
 # TestCleanMessageContentMentions
 # =============================================================================
@@ -2767,6 +2824,42 @@ class TestTheClassifierRunsBeforeThePollTransaction:
 
         build.assert_not_called()
         assert len(created) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_reply_to_the_bot_is_answered_without_the_classifier(
+        self, make_config,
+    ):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.speech_gate.mode = "mention"
+
+        with patch("istota.executor.build_speech_gate_completer") as build:
+            created = await self._poll(config, [_msg(
+                id=205, actor_id="alice", message="Thanks!",
+                parent={"id": 150, "actorType": "users", "actorId": "istota",
+                        "message": "It closes at 6pm."},
+            )])
+
+        build.assert_not_called()
+        assert len(created) == 1
+        with db.get_db(config.db_path) as conn:
+            rung = conn.execute(
+                "SELECT rung FROM speech_gate_decisions ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        assert rung == "addressed"
+
+    @pytest.mark.asyncio
+    async def test_a_reply_to_a_person_is_still_gated(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        created = await self._poll(config, [_msg(
+            id=206, actor_id="alice", message="sounds good",
+            parent={"id": 151, "actorType": "users", "actorId": "bob",
+                    "message": "five then?"},
+        )])
+
+        assert created == []
 
     @pytest.mark.asyncio
     async def test_the_default_mode_asks_nothing(self, make_config):

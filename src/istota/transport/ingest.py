@@ -280,6 +280,7 @@ def _ask_gate(
     speech_gate.record_decision(
         conn, room_token=room_token, surface=surface, user_id=user_id,
         message_id=message_id, decision=decision,
+        disposition=config.speech_gate.disposition,
     )
     return decision
 
@@ -395,6 +396,7 @@ def classify_ahead(
     earlier: Sequence[tuple[str, str]] = (),
     room_container: bool = False,
     author_label: str | None = None,
+    replied_to_bot: bool = False,
 ) -> speech_gate.GateDecision | None:
     """Run the speech gate's classifier for a turn before it is recorded.
 
@@ -418,9 +420,18 @@ def classify_ahead(
     one in the same unrecorded batch, oldest first; they belong in the window
     and are not stored yet. Never raises: a failure is a failed decision, which
     the gate reads as "do not speak".
+
+    ``replied_to_bot`` is a reply to one of the bot's own messages: addressed,
+    so it speaks whatever the model says, but in a ``friendly`` room the model
+    is still asked whether it is only a reaction (ISSUE-653). Under
+    ``reserved`` nothing is asked, since the answer could change nothing.
     """
     gate = config.speech_gate
     if addressed_to_bot or not is_room_member_for(surface, room_container=room_container):
+        return None
+    if replied_to_bot and speech_gate.normalize_disposition(
+        gate.disposition, warn=False,
+    ) != speech_gate.FRIENDLY:
         return None
     source_type = source_type or surface
     try:
@@ -465,9 +476,12 @@ def classify_ahead(
             config, user_id=user_id, source_type=source_type,
             brain_kind=room.brain if room is not None else None,
         )
+        disposition = speech_gate.normalize_disposition(gate.disposition)
         return speech_gate.classify(
-            speech_gate.build_window(turns, bot_name=config.bot_name),
-            completer, gate.model,
+            speech_gate.build_window(
+                turns, bot_name=config.bot_name, disposition=disposition,
+            ),
+            completer, gate.model, disposition=disposition,
         )
     except Exception as e:  # noqa: BLE001 — a classifier failure never costs the turn
         logger.warning("speech gate: classifying ahead failed: %s", type(e).__name__)
