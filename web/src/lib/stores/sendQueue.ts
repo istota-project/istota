@@ -184,6 +184,8 @@ export interface StoredQueuedSend {
   pendingAttachments?: PendingAttachment[];
   replyTo?: MessageReply;
   replyToMsgId?: number;
+  /** The email thread the message is linked to (`SendOptions.aboutRoom`). */
+  aboutRoom?: string;
   idempotencyKey?: string;
   held: boolean;
   queuedAt: number;
@@ -340,6 +342,7 @@ function readEntry(value: unknown, now: number): StoredQueuedSend | null {
     ...(pendingAttachments.length ? { pendingAttachments } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(replyToMsgId ? { replyToMsgId } : {}),
+    ...(typeof e.aboutRoom === 'string' && e.aboutRoom ? { aboutRoom: e.aboutRoom } : {}),
     ...(typeof e.idempotencyKey === 'string' ? { idempotencyKey: e.idempotencyKey } : {}),
     held: e.held === true,
     // Anything that is not the word `offline` is a busy entry, which is what

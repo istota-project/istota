@@ -718,6 +718,63 @@ def _strip_action_prefix(result: str) -> tuple[bool, str]:
     return True, body
 
 
+def _thread_reply_outcome(conn, task, thread_token: str, *, delivery_failed: bool) -> str:
+    """What became of an email thread task's reply, from its row's card:
+    ``sent``, ``held``, ``failed`` or, with no card, ``none``."""
+    row = conn.execute(
+        "SELECT outgoing_mail FROM messages WHERE room_token = ? AND task_id = ? "
+        "AND role = 'assistant' ORDER BY id LIMIT 1",
+        (thread_token, task.id),
+    ).fetchone()
+    state = None
+    if row is not None and row["outgoing_mail"]:
+        try:
+            state = json.loads(row["outgoing_mail"]).get("state")
+        except (ValueError, AttributeError):
+            state = None
+    if state in ("sent", "held", "failed"):
+        return state
+    if delivery_failed:
+        return "failed"
+    if row is None:
+        logger.info("Task %d: no mail row in its thread room; note outcome is none", task.id)
+    return "none"
+
+
+def _write_email_note(config, task, *, thread_token: str, result: str,
+                      mailed: str | None, delivery_failed: bool) -> None:
+    """Write the host's private note for one mail on an email thread, after
+    delivery, when one is due (hidden email threads, section 2).
+
+    After delivery because whether the reply was held is decided there. Its
+    own transaction, then the push; a failure is logged and never fails the
+    task, since the mail has already gone and the thread row stands.
+    """
+    from istota.rooms import private_replies
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            outcome = _thread_reply_outcome(conn, task, thread_token,
+                                            delivery_failed=delivery_failed)
+            remark = private_replies.email_note_remark(result, mailed)
+            # `NO_ACTION:` says nothing needs the host; its reason is not an
+            # answer to them, so on a mail they were on it writes no note.
+            no_action = not _strip_action_prefix(result)[0]
+            due_remark = "" if no_action and not task.host_absent else remark
+            if not private_replies.email_note_due(host_absent=bool(task.host_absent),
+                                                  outcome=outcome, remark=due_remark):
+                return
+            note, body = private_replies.deliver_email_note(
+                conn, config, task, outcome=outcome, remark=remark,
+            )
+            db.log_task(conn, task.id, "info", f"Private note to the host: {outcome}")
+    except Exception as exc:
+        logger.warning("Task %d: could not write the private note (%s)",
+                       task.id, type(exc).__name__)
+        return
+    run_coro(private_replies.send_private(config, note, body=body))
+
+
 def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | None:
     """Store a task's delivered result as an assistant spine row in a room's
     canonical transcript — for ANY source type — when the room is web-visible.
@@ -3465,14 +3522,9 @@ def process_one_task(
         with db.get_db(config.db_path) as conn:
             _thread_token = thread_room_for_task(conn, task)
             _own_email_thread_room = _thread_token is not None
-    # A thread-room turn whose host was not on the message, with nothing to
-    # reply (email on rooms, section 2): `NO_ACTION:` passes the message on to
-    # the host privately and sends nothing. The note is built from the stored
-    # turn, never from the model's text.
-    _pass_on = bool(
-        success and task.host_absent and _thread_token
-        and task.guest_participant_id is None
-        and not _strip_action_prefix(result)[0]
+    # `NO_ACTION:` on a thread turn means no reply, never a question to park.
+    _thread_no_action = bool(
+        success and _thread_token and not _strip_action_prefix(result)[0]
     )
     _confirmable_surface = (
         (plan_talk and talk_token and not plan_ntfy)
@@ -3488,7 +3540,7 @@ def process_one_task(
     is_confirmation_request = bool(
         success
         and _confirmable_surface
-        and not _pass_on
+        and not _thread_no_action
         and not is_no_final_answer(result)
         and asks_for_confirmation(result)
     )
@@ -3566,10 +3618,11 @@ def process_one_task(
     from istota.rooms import private_replies
     from istota.relay.requests import text_hash
     private_park: "private_replies.PrivateDelivery | None" = None
-    # The pass-on note a host-absent thread turn wrote instead of a reply,
-    # pushed to the host's private room at the tail.
-    pass_on_note: "private_replies.PrivateDelivery | None" = None
-    pass_on_body = ""
+    # What that row says: the question, or on an email thread the note shape.
+    private_park_body = result
+    # The body an email thread task mailed, read before delivery consumes it,
+    # for the note written after delivery (hidden email threads, section 2).
+    thread_mailed_body: str | None = None
     # The shared room was told only that a private note went out, because its
     # principal has no private room: that post answers nothing.
     shared_room_notice = False
@@ -3652,11 +3705,17 @@ def process_one_task(
                     else private_replies.park_about(conn, task)
                 )
                 if _about is not None:
+                    if _thread_token is not None and guest_route is None:
+                        # An email thread's question is the note for its mail.
+                        private_park_body = private_replies.email_note_body(
+                            conn, task, outcome="parked",
+                            remark=private_replies.email_note_remark(result, None),
+                        )
                     private_park = private_replies.deliver_private(
                         conn, config, user_id=task.user_id, about_token=_about,
                         kind="proposal" if guest_route is not None else "confirmation",
                         reference=f"{task.id}:{text_hash(result)[:16]}",
-                        body=result, task_id=task_id,
+                        body=private_park_body, task_id=task_id,
                     )
                     # Room or bell alike: the shared room never saw the
                     # question, so the park must not hold it.
@@ -3883,14 +3942,7 @@ def process_one_task(
                     except Exception as e:
                         logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
 
-                if _pass_on:
-                    pass_on_note, pass_on_body = private_replies.deliver_pass_on(
-                        conn, config, task,
-                    )
-                    db.log_task(conn, task_id, "info",
-                                "Nothing to reply, and the host was not on the "
-                                "message: passed on to them privately")
-                elif task.heartbeat_silent:
+                if task.heartbeat_silent:
                     # Silent scheduled job — ACTION/NO_ACTION logic
                     should_post, result_to_post = _strip_action_prefix(result)
                     if should_post:
@@ -3925,6 +3977,17 @@ def process_one_task(
                         room_body = email_transcript_body(delivery_result)
                     else:
                         room_body = delivery_result
+                    # An email thread room records the mail, not the model's
+                    # report to its user: the row is the body that is mailed,
+                    # read the way delivery reads it, and with nothing composed
+                    # there is no row. A private email room keeps the answer.
+                    transcript_body = room_body
+                    if _thread_token is not None:
+                        from .transport.email.outbound import composed_mail_body
+                        transcript_body = composed_mail_body(
+                            config, task, delivery_result,
+                        )
+                        thread_mailed_body = transcript_body
                     # One decision, before any per-surface branch, replacing the
                     # three calls that each hung off one: the Talk plan, an
                     # own-room web push, and the email-only plan the first two
@@ -3961,13 +4024,13 @@ def process_one_task(
                             or transcript_token == task.conversation_token
                         )
                     )
-                    if _room_turn_belongs_here(
+                    if transcript_body is not None and _room_turn_belongs_here(
                         conn, task, task_id, transcript_token,
                         delivering_into_room=bool(
                             _talk_lands_here or own_room_canonical_dests
                         ),
                     ):
-                        _store_room_turn(conn, task, transcript_token, room_body)
+                        _store_room_turn(conn, task, transcript_token, transcript_body)
                     # A phone leg's own transcript row (room-surface-model §F):
                     # a minted SMS or WhatsApp room is the readable copy of what
                     # was texted. Written here, inside the transaction and ahead
@@ -4551,8 +4614,8 @@ def process_one_task(
         from istota.rooms.private_replies import whatsapp_confirmation_body
         _dest = private_park.dest
         _private_body = (
-            whatsapp_confirmation_body(result, task.id)
-            if _dest is not None and _dest.whatsapp else result
+            whatsapp_confirmation_body(private_park_body, task.id)
+            if _dest is not None and _dest.whatsapp else private_park_body
         )
         private_delivered = run_coro(private_replies.send_private(
             config, private_park, body=_private_body,
@@ -4568,11 +4631,6 @@ def process_one_task(
                         db.update_talk_response_id(conn, task_id, int(_private_talk_id))
             except Exception as e:
                 logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
-
-    if pass_on_note is not None:
-        run_coro(private_replies.send_private(
-            config, pass_on_note, body=pass_on_body,
-        ))
 
     # Store bot's response message ID for reply tracking. Not the shared-room
     # notice's: a reply to it in the room must not reach the question.
@@ -4679,6 +4737,13 @@ def process_one_task(
                 )
                 failure_alert_title = f"Could not send the email reply — task #{task.id}"
                 failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
+    if (success and _thread_token is not None and not is_confirmation_request
+            and task.guest_participant_id is None):
+        _write_email_note(
+            config, task, thread_token=_thread_token, result=result,
+            mailed=thread_mailed_body,
+            delivery_failed=post_email and not email_ok,
+        )
     sms_undelivered = False
     if post_sms_message:
         # `send_record` rather than `deliver`, because `Transport.deliver`

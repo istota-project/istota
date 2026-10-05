@@ -69,6 +69,8 @@
     sendSettled = { n: 0, key: null },
     replyTo = null,
     onReplyChange,
+    linkTarget = null,
+    onLinkClear,
     restoreSend = null,
     mentionCandidates = [],
   }: {
@@ -153,6 +155,14 @@
      * id) and a tapped Reply come back through the same path.
      */
     onReplyChange?: (msgId: number | null) => void;
+    /**
+     * The email thread the next send is about, with no row to reply to
+     * ("Discuss in private chat" with no note). Held by the caller, which
+     * sends it and clears it; shown here as a `re:` chip with a clear control.
+     * Never written to the draft store.
+     */
+    linkTarget?: { name: string } | null;
+    onLinkClear?: () => void;
     /**
      * A send handed back to be edited and re-sent, with a counter so the same
      * text can come back twice.
@@ -1161,6 +1171,14 @@
         onclick={() => onReplyChange?.(null)}
         title="Clear reply"
       >
+        <X size={13} />
+      </IconButton>
+    </div>
+  {/if}
+  {#if linkTarget && !replyTo}
+    <div class="reply-chip" data-testid="link-chip">
+      <span class="reply-chip-text">re: {linkTarget.name}</span>
+      <IconButton size="sm" label="Clear link" onclick={() => onLinkClear?.()} title="Clear link">
         <X size={13} />
       </IconButton>
     </div>

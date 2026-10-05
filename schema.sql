@@ -283,6 +283,9 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     recipients TEXT,  -- the message's To + Cc, JSON; an email thread room replies to the latest
     host_asked INTEGER NOT NULL DEFAULT 0,  -- the host's authenticated, addressed question on a thread room (ISSUE-607)
     in_reply_to TEXT,  -- RFC 5322 In-Reply-To, so approving a held reply finds its thread
+    -- The mail's card metadata, JSON (`inbound.received_mail_meta`), copied onto
+    -- the room row when a held mail is approved: `recipients` merges To and Cc.
+    mail_meta TEXT,
     UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 );
@@ -1267,6 +1270,10 @@ CREATE TABLE IF NOT EXISTS web_chat_rooms (
     -- user's choice on all of them. Nothing outside the web sidebar can render
     -- a colour at all (ISSUE-433).
     color       TEXT NOT NULL DEFAULT '',
+    -- 1 = show this room in the viewer's main room list although it would be
+    -- hidden. Only an email thread room reads it: those sit in a collapsed
+    -- "Email threads" group until listed. Per viewer, like `color`.
+    listed      INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (user_id, token)
@@ -1495,7 +1502,12 @@ CREATE TABLE IF NOT EXISTS messages (
     -- `to`, `cc`, `subject`, `state` (sent, held, failed, discarded),
     -- `draft_id` while it is or was a held draft, and `body` only where the
     -- mailed text differs from this row's. NULL on every other row.
-    outgoing_mail TEXT
+    outgoing_mail TEXT,
+    -- A mail that came into an email thread room or the private email room, as
+    -- JSON (`inbound.received_mail_meta`): from, to, cc, date, subject,
+    -- message_id, in_reply_to, attachments, sender_check, trusted. Written once
+    -- at intake; never Bcc. NULL on every other row.
+    received_mail TEXT
 );
 -- No index on either author column: they are projected, never filtered.
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);

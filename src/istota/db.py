@@ -525,6 +525,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # In-Reply-To, which `threads.admit_approved_mail` rebuilds the held mail
     # from: a reply naming its parent there alone otherwise finds no thread.
     _add_columns(conn, "processed_emails", {"in_reply_to": "TEXT"})
+    # The mail card's metadata (hidden email threads, stage 3), which approving
+    # a held mail copies onto its room row. Nothing to backfill.
+    _add_columns(conn, "processed_emails", {"mail_meta": "TEXT"})
 
     # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
     # `jid` is the Baileys-native identity and `provider` says which adapter
@@ -831,7 +834,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # keeps the column's contract identical on a fresh install and on a
         # migrated one.
         _add_columns(
-            conn, "web_chat_rooms", {"color": "TEXT NOT NULL DEFAULT ''"}
+            conn, "web_chat_rooms", {
+                "color": "TEXT NOT NULL DEFAULT ''",
+                # Show a hidden email thread room in the main list anyway
+                # (hidden email threads, stage 6). 0 on every existing handle,
+                # so threads move into the collapsed group on upgrade.
+                "listed": "INTEGER NOT NULL DEFAULT 0",
+            }
         )
         # Unsolicited (bot-delivered) messages posted into a web chat room —
         # alerts, the verbose execution log, and any notification routed to the
@@ -1183,6 +1192,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_group(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
+    # Hidden email threads, stage 3. A row from before it renders the card from
+    # the wrapper alone, so nothing is backfilled.
+    _add_columns(conn, "messages", {"received_mail": "TEXT"})
     # Email on rooms, stage 2. Nothing to backfill: no earlier task was asked
     # whether its host was on the message.
     _add_columns(conn, "tasks", {"host_absent": "INTEGER NOT NULL DEFAULT 0"})
@@ -3785,6 +3797,9 @@ class WebChatRoom:
     color: str | None
     created_at: str
     updated_at: str
+    #: Show this room in the viewer's main list although it would be hidden.
+    #: Only an email thread room reads it (`hidden_room_tokens_for_member`).
+    listed: bool = False
 
 
 def _row_to_web_chat_room(row: sqlite3.Row) -> WebChatRoom:
@@ -3805,6 +3820,8 @@ def _row_to_web_chat_room(row: sqlite3.Row) -> WebChatRoom:
         color=(row["color"] if "color" in row.keys() else "") or None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        # Tolerant for the same reason as `color`.
+        listed=bool(row["listed"]) if "listed" in row.keys() else False,
     )
 
 
@@ -3877,9 +3894,10 @@ def update_web_chat_room(
     name: str | None = None,
     archived: bool | None = None,
     color: str | None = None,
+    listed: bool | None = None,
 ) -> WebChatRoom | None:
-    """Rename, (un)archive and/or re-tint a room. Returns the updated row, or
-    None if the id is unknown.
+    """Rename, (un)archive, re-tint and/or (un)list a room. Returns the updated
+    row, or None if the id is unknown.
 
     `color` follows the same "None leaves it alone" contract as its neighbours,
     which leaves the **empty string** as the clear (ISSUE-433) — it is what the
@@ -3898,6 +3916,9 @@ def update_web_chat_room(
     if color is not None:
         sets.append("color = ?")
         params.append(color)
+    if listed is not None:
+        sets.append("listed = ?")
+        params.append(1 if listed else 0)
     if not sets:
         return get_web_chat_room(conn, room_id)
     sets.append("updated_at = datetime('now')")
@@ -5772,6 +5793,51 @@ def phone_bindings_for_member(
     return out
 
 
+def email_thread_tokens_for_member(
+    conn: sqlite3.Connection, user_id: str,
+) -> set[str]:
+    """Canonical tokens of the email thread rooms among one user's rooms.
+
+    The listing's batch form of `rooms.scopes.is_email_thread_room`, with the
+    same rule: an email binding whose ref is not the room creator's private
+    email room. One query, for the reason `talk_refs_for_member` gives.
+    """
+    from istota.transport.email.private_room import is_private_email_ref
+
+    rows = conn.execute(
+        "SELECT b.room_token, b.surface_ref, r.user_id AS owner FROM room_bindings b "
+        "JOIN room_members m ON m.room_token = b.room_token "
+        "JOIN rooms r ON r.token = b.room_token "
+        "WHERE b.surface = 'email' AND m.user_id = ?",
+        (user_id,),
+    ).fetchall()
+    return {
+        row["room_token"] for row in rows
+        if not is_private_email_ref(row["surface_ref"], row["owner"])
+    }
+
+
+def hidden_room_tokens_for_member(
+    conn: sqlite3.Connection, user_id: str,
+) -> set[str]:
+    """The email thread rooms one user keeps out of their main room list.
+
+    An email thread room is hidden unless the user's own handle says
+    `listed`. A room with no handle yet is hidden too, since a handle is only
+    minted by the listing and a fresh row reads `listed = 0` anyway. The web
+    client applies the same rule to the listing it is given; the aggregate
+    panes read this.
+    """
+    threads = email_thread_tokens_for_member(conn, user_id)
+    if not threads:
+        return set()
+    listed = {
+        h.token for h in list_web_chat_rooms(conn, user_id, include_archived=True)
+        if h.listed
+    }
+    return threads - listed
+
+
 def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
     """Whether the room is bound to SMS or WhatsApp at all, or is a user's
     private email room: each is a read-only transcript in web."""
@@ -6068,6 +6134,13 @@ def set_outgoing_mail(conn: sqlite3.Connection, message_id: int, mail: dict) -> 
     """
     conn.execute("UPDATE messages SET outgoing_mail = ? WHERE id = ?",
                  (json.dumps(mail), message_id))
+
+
+def set_received_mail(conn: sqlite3.Connection, message_id: int, meta: dict) -> None:
+    """Record the metadata of the mail a room row received (hidden email
+    threads, stage 3). Written once, at intake or at a held mail's approval."""
+    conn.execute("UPDATE messages SET received_mail = ? WHERE id = ?",
+                 (json.dumps(meta), message_id))
 
 
 def settle_draft_mail(
@@ -6843,6 +6916,9 @@ _CROSS_ROOM_COLUMNS = (
     # The mail an assistant row sent into an email thread room (ISSUE-612).
     # Selected in the per-room spine too, so both views show the same card.
     "  m.outgoing_mail AS outgoing_mail, "
+    # The mail a user row received in a mail room (hidden email threads,
+    # stage 3), for the incoming-mail card.
+    "  m.received_mail AS received_mail, "
     # A private park's question names its task here; the room stream marks
     # such a row as a confirmation while that task waits (#624).
     "  m.delivery_reference AS delivery_reference, "
@@ -6928,9 +7004,14 @@ def list_messages_across_rooms(
     limit: int = 50,
     before_ts: str | None = None,
     before_id: int | None = None,
+    exclude_tokens: set[str] | frozenset[str] = frozenset(),
 ) -> list[sqlite3.Row]:
     """One page of the cross-room message stream for the All / Unread / Starred
     web views, newest-first, keyset-paginated on ``(created_at, id)``.
+
+    ``exclude_tokens`` are rooms left out of all three views: the web passes
+    the hidden email thread rooms (`hidden_room_tokens_for_member`), since the
+    panes cover the main room list only.
 
     Reads the durable `messages` store only (no `tasks` gap-fill, no in-flight
     placeholders — a cross-room reading surface doesn't need the live-room aux
@@ -6964,6 +7045,8 @@ def list_messages_across_rooms(
         )
     elif view == "starred":
         sql += "AND s.message_id IS NOT NULL "
+    if exclude_tokens:
+        sql += "AND m.room_token NOT IN (SELECT value FROM json_each(:exclude)) "
     if before_ts is not None:
         sql += "AND (m.created_at, m.id) < (:before_ts, :before_id) "
     sql += "ORDER BY m.created_at DESC, m.id DESC LIMIT :limit"
@@ -6972,6 +7055,7 @@ def list_messages_across_rooms(
         "limit": limit,
         "before_ts": before_ts,
         "before_id": before_id,
+        "exclude": json.dumps(sorted(exclude_tokens)),
     }).fetchall()
 
 
@@ -7192,6 +7276,7 @@ def _migrate_processed_emails_uidvalidity(conn: sqlite3.Connection) -> None:
                 recipients TEXT,
                 host_asked INTEGER NOT NULL DEFAULT 0,
                 in_reply_to TEXT,
+                mail_meta TEXT,
                 UNIQUE (uidvalidity, email_id),
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )
@@ -7251,6 +7336,7 @@ def _migrate_web_chat_rooms_peruser(conn: sqlite3.Connection) -> None:
                 name        TEXT NOT NULL,
                 archived    INTEGER NOT NULL DEFAULT 0,
                 color       TEXT NOT NULL DEFAULT '',
+                listed      INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE (user_id, token)
@@ -7276,8 +7362,10 @@ def _migrate_web_chat_rooms_peruser(conn: sqlite3.Connection) -> None:
         }
         carried = ["id", "user_id", "token", "name", "archived",
                    "created_at", "updated_at"]
-        if "color" in old_cols:
-            carried.append("color")
+        # `listed` for the same reason, and on the same old-table test.
+        for optional in ("color", "listed"):
+            if optional in old_cols:
+                carried.append(optional)
         cols = ", ".join(carried)  # code-owned literals, never user input
         conn.execute(
             f"INSERT INTO web_chat_rooms ({cols}) "
@@ -9228,20 +9316,24 @@ def mark_email_processed(
     recipients: str | None = None,
     host_asked: bool = False,
     in_reply_to: str | None = None,
+    mail_meta: dict | None = None,
 ) -> int:
     """Record a processed email, keyed by (uidvalidity, email_id).
 
     ``recipients`` is the message's To and Cc as a JSON list; ``thread_id`` is
     the room token for a message on an email thread room. ``host_asked`` marks
     the host's own authenticated, addressed question there (ISSUE-607).
+    ``mail_meta`` is the card metadata a held mail's approval copies onto its
+    room row (`inbound.received_mail_meta`).
     """
     cursor = conn.execute(
         """
-        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked, in_reply_to)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO processed_emails (uidvalidity, email_id, sender_email, subject, thread_id, message_id, "references", user_id, task_id, routing_method, recipients, host_asked, in_reply_to, mail_meta)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
-        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked)), in_reply_to),
+        (uidvalidity, email_id, sender_email, subject, thread_id, message_id, references, user_id, task_id, routing_method, recipients, int(bool(host_asked)), in_reply_to,
+         json.dumps(mail_meta) if mail_meta is not None else None),
     )
     return cursor.fetchone()[0]
 

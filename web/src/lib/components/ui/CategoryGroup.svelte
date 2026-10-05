@@ -10,6 +10,10 @@
      *  collapses) and the header can render an active/selected state. */
     onSelect?: () => void;
     active?: boolean;
+    /** Bindable, for a caller that has to open the group itself (chat opens
+     *  "Email threads" when one of its rooms is on screen). Seeded from
+     *  `defaultOpen` when not bound. */
+    open?: boolean;
     children: Snippet;
   }
 
@@ -20,10 +24,9 @@
     defaultOpen = true,
     onSelect,
     active = false,
+    open = $bindable(untrack(() => defaultOpen)),
     children,
   }: Props = $props();
-
-  let open = $state(untrack(() => defaultOpen));
 
   function toggle(e: MouseEvent) {
     e.stopPropagation();

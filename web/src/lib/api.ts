@@ -2955,14 +2955,21 @@ export interface ChatRoom {
    * read. */
   phone_surface?: 'sms' | 'whatsapp' | 'email' | null;
   /** The room is bound to SMS or WhatsApp, a WhatsApp group included, or is
-   * the user's private email room: web reads it and the server refuses a send
-   * into it, so no composer. True for every member, since adding a reader does
+   * the user's private email room or an email thread: web reads it and the
+   * server refuses a send into it, so no composer. True for every member, since adding a reader does
    * not make the thread writable. */
   read_only?: boolean;
   /** The phone binding is a WhatsApp group, not the creator's private thread.
    * Its parked questions are answered from web and it takes members; only the
    * composer is gone (ISSUE-585). */
   phone_group?: boolean;
+  /** The room is an email thread: a view of the mail, read-only here with
+   * `read_only` set. The reply is drafted from the user's private chat. */
+  email_thread?: boolean;
+  /** The viewer chose to show this email thread in the main room list. An
+   * email thread without it sits in the collapsed "Email threads" group
+   * (`isHiddenRoom`). Per user, like `color`; false for every other room. */
+  listed?: boolean;
   /** More than one human reads this room, a Talk guest included. */
   shared?: boolean;
   /** The caller keeps private notes about this room ("My notes"). With
@@ -3128,10 +3135,14 @@ export interface ChatHistoryMessage {
   // private room. `name` is null when the viewer is no longer in that room,
   // and the chip then names nothing and opens nothing.
   about_room?: { token: string; name: string | null };
-  // Assistant rows only: the mail this answer sent into an email thread room
-  // (ISSUE-612). `body` is present only when the mailed text differs from
-  // `text`.
+  // On an assistant row, the mail this answer sent into an email thread room
+  // (ISSUE-612); `body` is present only when the mailed text differs from
+  // `text`. On an email note (a system row), the thread row's mail, read
+  // live, with `body` always present.
   mail?: OutgoingMail;
+  // User rows in a mail room (an email thread room or the private email
+  // room) only: the mail as the incoming-mail card renders it.
+  received_mail?: ReceivedMail;
 }
 
 export type OutgoingMailState = 'sent' | 'held' | 'failed' | 'discarded';
@@ -3142,6 +3153,58 @@ export interface OutgoingMail {
   subject?: string;
   state: OutgoingMailState;
   body?: string;
+  // In a mail room: how to name an address other than by itself ("you" for
+  // the viewer's own, the bot's name for the bot's), keyed lowercased.
+  labels?: Record<string, string>;
+  // In a mail room: the viewer's private room at this turn's task, where the
+  // mail is discussed. Stage 3 of hidden email threads links the room only; a
+  // held mail is approved from its notification until the note carries it.
+  note_path?: string;
+  // An email thread's card with no note: "Discuss in private chat" opens
+  // `room` with the composer linked to `about` (section 0c).
+  discuss?: MailDiscuss;
+}
+
+/** The private room to discuss a thread's mail in, and the thread itself. */
+export interface MailDiscuss {
+  room: string;
+  about: string;
+}
+
+export interface MailAddress {
+  name: string;
+  address: string;
+}
+
+export interface MailAttachment {
+  filename: string;
+  size?: number;
+  // A workspace path `chatFileUrl` serves, present only for a copy in the
+  // viewer's own workspace.
+  path?: string;
+}
+
+/** A mail that came into a mail room, from stored metadata only. */
+export interface ReceivedMail {
+  from: MailAddress;
+  to: MailAddress[];
+  cc: MailAddress[];
+  date: string;
+  subject: string;
+  attachments: MailAttachment[];
+  // The text the sender wrote now, and the rest (signature, quoted history).
+  new_text: string;
+  rest: string;
+  labels: Record<string, string>;
+  note_path?: string;
+  discuss?: MailDiscuss;
+  // A row from before the metadata was stored: From, Subject and Date from
+  // the prompt wrapper alone, and none of the fields below.
+  fallback?: boolean;
+  message_id?: string;
+  in_reply_to?: string;
+  sender_check?: 'verified' | 'failed' | 'none';
+  trusted?: boolean;
 }
 
 /** Cross-room aggregate views (sidebar All / Unread / Starred). */
@@ -3186,6 +3249,12 @@ export type SendFailure =
 export interface SendOptions {
   /** Canonical `messages.id` this message replies to. */
   replyToMsgId?: number;
+  /**
+   * An email thread room this message is about, with no row to reply to
+   * ("Discuss in private chat" with no note). The server checks it and
+   * refuses with 400; a `replyToMsgId` outranks it, so it is not sent beside one.
+   */
+  aboutRoom?: string;
 }
 
 export interface SendResult {
@@ -3379,6 +3448,9 @@ export interface RoomPatch {
   color?: string | null;
   /** Host only, like the other room-wide settings. */
   guest_reply?: GuestReply;
+  /** Show an email thread in the main room list. The server refuses it (400)
+   * on any other room. */
+  listed?: boolean;
   /** Host only. Null follows the deployment's mode again. */
   speech_mode?: SpeechMode | null;
 }
@@ -3768,6 +3840,7 @@ export async function sendChatMessage(
     // Only the id: the server reads the parent's text from the row it already
     // holds, so nothing here can dictate what the model is told it said.
     ...(options.replyToMsgId ? { reply_to_msg_id: options.replyToMsgId } : {}),
+    ...(options.aboutRoom && !options.replyToMsgId ? { about_room: options.aboutRoom } : {}),
   });
 
   try {

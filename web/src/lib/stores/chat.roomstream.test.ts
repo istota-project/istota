@@ -1047,6 +1047,77 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('a room list refresh carries a thread being listed, and hidden again', async () => {
+    const thread = { ...room(1), email_thread: true, read_only: true, listed: false };
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [thread] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    expect(get(s.rooms)[0].listed).toBe(false);
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [{ ...thread, listed: true }] });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].listed).toBe(true);
+    expect(get(s.rooms)[0].email_thread).toBe(true);
+    api.getChatRooms.mockResolvedValueOnce({ rooms: [thread] });
+    await s.refreshRooms();
+    expect(get(s.rooms)[0].listed).toBe(false);
+    s.teardown();
+  });
+
+  it('applies a listed frame, and hides the thread again', async () => {
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({
+      rooms: [{ ...room(1), email_thread: true, listed: false }],
+    });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    const frame = (listed: boolean) => ({
+      action: 'upsert',
+      room: { id: 1, token: 't1', name: 'Room 1', origin: 'email', email_thread: true, listed },
+    });
+    es.current!.emit('room', frame(true));
+    expect(get(s.rooms)[0].listed).toBe(true);
+    es.current!.emit('room', frame(false));
+    expect(get(s.rooms)[0].listed).toBe(false);
+    s.teardown();
+  });
+
+  it('keeps a hidden thread’s rows out of an open aggregate pane', async () => {
+    // The All pane covers the main room list, so a row streaming into a
+    // hidden thread is not appended to it.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({
+      rooms: [room(1), { ...room(2), email_thread: true, listed: false }],
+    });
+    api.getChatMessagesView.mockResolvedValue({ ...emptyHistory });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    await s.selectView('all');
+    queueEvents([row(5, 't2', { role: 'system' }), row(6, 't1', { role: 'system' })], 6);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(get(s.messages).map((m) => m.msgId)).toEqual([6]);
+    s.teardown();
+  });
+
+  it('keeps a row from a room not yet in the list out of an open aggregate pane', async () => {
+    // A new thread room's first mail streams before the listing has minted
+    // its handle, so its room is not in `$rooms` yet; the server's page hides
+    // a handle-less thread, and the pane must not show it either.
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getChatMessagesView.mockResolvedValue({ ...emptyHistory });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    await s.selectView('all');
+    queueEvents([row(5, 't-new', { role: 'system' }), row(6, 't1', { role: 'system' })], 6);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(get(s.messages).map((m) => m.msgId)).toEqual([6]);
+    s.teardown();
+  });
+
   it('does not lose the colour to an unrelated frame', async () => {
     // The failure the field-by-field merge actually produces: the colour is
     // set, then a rename frame arrives naming every field the snapshot sends.

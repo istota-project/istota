@@ -323,7 +323,10 @@ def _private_items(db_path):
 
 
 class TestTheOfficeRegression:
-    def test_the_answer_is_delivered_with_nothing_private(self, config, db_path):
+    def test_the_answer_is_delivered_and_the_host_gets_only_its_note(self, config, db_path):
+        """Nothing held, nothing parked: the one private item is the note for
+        a mail the host was not on (hidden email threads, stage 4), here a
+        bell row, since the host has no private room."""
         _office(config)
         (task_id,) = _poll(config, sender=STRANGER, to=(PLUS,),
                            message_id="<s1@elsewhere.example>", body="Are you open Sunday?")
@@ -333,8 +336,11 @@ class TestTheOfficeRegression:
         mail = _answer(config, _structured("Yes, from ten."))
         assert mail.called
         assert _task(db_path, task_id).status == "completed"
-        assert _private_items(db_path) == {
-            "private_rows": [], "requests": [], "drafts": [], "notifications": []}
+        items = _private_items(db_path)
+        assert {k: v for k, v in items.items() if k != "notifications"} == {
+            "private_rows": [], "requests": [], "drafts": []}
+        assert _rows(db_path, "SELECT source, dedup_key FROM notifications") == [
+            {"source": "task_alert", "dedup_key": f"private-note:{task_id}"}]
 
     @pytest.mark.asyncio
     async def test_the_reply_goes_out_with_no_draft(self, config, db_path):

@@ -12,6 +12,8 @@ Each room is a persistent conversation backed by its own per-surface channel tok
 - **Deep link** — `/chat?room=<token>` selects a room on load, silently falling back if the token is unknown or belongs to another user.
 - **SMS and WhatsApp rooms** — your [SMS](sms.md) conversation and your one-to-one [WhatsApp](whatsapp.md) chat each appear as a room, marked with a phone or chat-bubble icon. They are read-only here: you read the whole conversation, including your own texts marked "Sent by SMS" or "Sent on WhatsApp", and you answer by text. The server refuses a message, a confirmation or a decline sent to one from web chat. Settings show the connection and offer no way to unbind it. A WhatsApp group room has no composer either, since nothing sent from web chat reaches the group; you write in the group on WhatsApp. Unlike a one-to-one room, its waiting questions can still be confirmed or declined here, and it can take members.
 
+- **Email rooms** — an [email thread room](email.md#what-the-thread-room-shows) and your [private email room](email.md#your-private-email-room) show each message as a mail card, and neither has a composer: the server refuses a message, a `!command` or a reply sent into one. Ask about a thread from your private chat instead, where its notes arrive. Thread rooms are not in the main room list: they sit in a collapsed "Email threads" group below it, their unread messages are left out of the Unread total, and their messages stay out of the All, Unread and Starred views. "Show in room list", in a thread's settings or its menu, moves one thread into your main list, for you only.
+
 Deleting a room is a hard, token-scoped cascade across `task_events`, `tasks`, `web_chat_messages`, and `channel_sleep_cycle_state`, plus a best-effort removal of the `Channels/<token>/` workspace folder. (Channel `memory_chunks` are a documented residual.)
 
 ## Sharing a room
@@ -101,13 +103,13 @@ Size and type limits are the server's: the browser checks against the numbers th
 
 ## Held outbound mail
 
-Mail the [outbound approval gate](email.md#the-outbound-approval-gate) holds appears as a card under the assistant turn that composed it, showing the recipients, the subject, the whole drafted body verbatim, and anything else that task did — so declining does not quietly leave a calendar event behind. Send, edit the body, or discard from the card; recipients and threading are not editable. A draft whose task has no room of its own (a cron job mailing an external address), or whose turn has scrolled out of the loaded history, falls to a list above the transcript, so nothing is reachable only from a room you never open.
+Mail the [outbound approval gate](email.md#the-outbound-approval-gate) holds appears as a card under the assistant turn that composed it (for a reply on an email thread, under the thread's note in your private chat; the thread room itself shows only the held mail's card and a link to the note), showing the recipients, the subject, the whole drafted body verbatim, and anything else that task did — so declining does not quietly leave a calendar event behind. Send, edit the body, or discard from the card; recipients and threading are not editable. A draft whose task has no room of its own (a cron job mailing an external address), or whose turn has scrolled out of the loaded history, falls to a list above the transcript, so nothing is reachable only from a room you never open.
 
 A draft stuck in `sending` is shown with no action offered — nobody can tell from outside whether the message went out, and one of the actions would send it twice. Answering the same draft from Talk (`!drafts`) or another device removes the card here on the next stream frame.
 
 ## Turns from outside the room
 
-An email from an external contact that lands in a thread you started is mirrored into the room as a turn, marked with its origin and sender so a bot answer never appears without the question above it. How much of the body shows inline is a per-user setting, `external_turn_display`:
+A message from someone outside the room is shown as a turn, marked with its origin and sender so a bot answer never appears without the question above it. In an email room every message is a mail card instead (see above), and this setting does not apply there. Elsewhere, how much of the body shows inline is a per-user setting, `external_turn_display`:
 
 | Value | Inline body |
 |---|---|

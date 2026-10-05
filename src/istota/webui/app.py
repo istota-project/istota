@@ -29,7 +29,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace as _dc_replace
+from dataclasses import dataclass, field as _dc_field, replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
@@ -4279,11 +4279,23 @@ def _room_events_batch(
             conn, username,
             [(r["msg_id"], r["delivery_reference"]) for r in rows[:want] if r["role"] == "system"],
         ) if len(rows) <= want else {}
+        noted = _noted_rows(
+            conn, username,
+            [(r["msg_id"], r["delivery_reference"], r["about_room_token"])
+             for r in rows[:want] if r["role"] == "system"],
+        ) if len(rows) <= want else {}
+        mail_views = _mail_views(
+            conn, username, [r["room_token"] for r in rows[:want]],
+            [r["task_id"] for r in rows[:want]],
+        ) if len(rows) <= want else {}
     truncated = len(rows) > want
     events: list[dict] = []
     total = 0
     for r in rows[:want]:
-        d = _cross_room_message_dict(r, username, about_names=about_names, parked=parked)
+        d = _cross_room_message_dict(
+            r, username, about_names=about_names, parked=parked, mail_views=mail_views,
+            noted=noted,
+        )
         if r["msg_id"] in undeletable:
             d["deletable"] = False
         total += len(json.dumps(d))
@@ -4364,6 +4376,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
         # poll settles it (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
         phone_bindings = db.phone_bindings_for_member(conn, username)
+        email_threads = db.email_thread_tokens_for_member(conn, username)
         out: dict[str, dict] = {}
         for r in db.list_member_rooms(conn, username, include_archived=False):
             handle = handles.get(r.token)
@@ -4375,7 +4388,10 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
-                **_room_phone_fields(r, phone_bindings.get(r.token)),
+                **_room_phone_fields(
+                    r, phone_bindings.get(r.token),
+                    email_thread=r.token in email_threads,
+                ),
                 "model": r.model,
                 "effort": r.effort,
                 # The room's standing brain pin, beside the model and effort it
@@ -4391,6 +4407,9 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 # that never reaches the user's other tab, and the client
                 # merges field by field so it would also be erased there.
                 "color": handle.color,
+                # Per-user like `color`, and carried for the same reason: a
+                # thread listed or hidden in one tab has to reach the other.
+                "listed": handle.listed,
             }
     return out
 
@@ -5821,24 +5840,33 @@ def _render_pairing_qr() -> tuple[bytes, int] | None:
 # the task_events table the existing /chat/tasks/{id}/stream SSE endpoint tails.
 
 
-def _room_phone_fields(reg, binding) -> dict:
-    """``phone_surface``, ``read_only`` and ``phone_group`` for one listed room.
+def _room_phone_fields(reg, binding, *, email_thread: bool = False) -> dict:
+    """``phone_surface``, ``read_only``, ``phone_group`` and ``email_thread``
+    for one listed room.
 
     Any room bound to SMS or WhatsApp is read-only, a WhatsApp group included
     (ISSUE-585), the same test the send route refuses on (`routing.phone_room`),
     answered here from the binding already in hand rather than per room.
     ``phone_group`` tells the client which wording to use, and that a group's
-    parked questions and members are still managed from web.
+    parked questions and members are still managed from web. An email thread
+    room is read-only too (`routing.email_thread_room`); the caller answers
+    that from `db.email_thread_tokens_for_member`, since the phone binding
+    listing leaves thread bindings out.
     """
     from istota.transport.routing import private_phone_ref
 
+    if email_thread:
+        return {"phone_surface": None, "read_only": True, "phone_group": False,
+                "email_thread": True}
     if binding is None:
-        return {"phone_surface": None, "read_only": False, "phone_group": False}
+        return {"phone_surface": None, "read_only": False, "phone_group": False,
+                "email_thread": False}
     private = binding.surface_ref == private_phone_ref(binding.surface, reg.user_id)
     if binding.surface == "email" and not private:
-        # An email thread room, which the listing does not badge.
-        return {"phone_surface": None, "read_only": False, "phone_group": False}
-    return {"phone_surface": binding.surface, "read_only": True, "phone_group": not private}
+        return {"phone_surface": None, "read_only": True, "phone_group": False,
+                "email_thread": True}
+    return {"phone_surface": binding.surface, "read_only": True,
+            "phone_group": not private, "email_thread": False}
 
 
 def _room_to_dict(room) -> dict:
@@ -5851,6 +5879,9 @@ def _room_to_dict(room) -> dict:
         # a shared room has one registry row and one handle per member, and the
         # colour is the member's rather than the room's.
         "color": room.color,
+        # Per-user too: an email thread room the viewer chose to show in the
+        # main list. The client hides a thread with this false.
+        "listed": room.listed,
         "created_at": room.created_at,
         "updated_at": room.updated_at,
     }
@@ -5967,6 +5998,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
         # (ISSUE-342).
         talk_refs = db.talk_refs_for_member(conn, username)
         phone_bindings = db.phone_bindings_for_member(conn, username)
+        email_threads = db.email_thread_tokens_for_member(conn, username)
         noted = _noted_room_tokens(conn, username)
         out: list[dict] = []
         for r in registry:
@@ -5984,7 +6016,9 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
-            d.update(_room_phone_fields(r, phone_bindings.get(r.token)))
+            d.update(_room_phone_fields(
+                r, phone_bindings.get(r.token), email_thread=r.token in email_threads,
+            ))
             d.update(_room_sharing(conn, r, username))
             # The kebab offers "My notes" for a shared room and for any room
             # the user already has notes about (one they have since left alone).
@@ -6065,6 +6099,28 @@ def _phone_room(room_token: str):
 
     with db.get_db(_config.db_path) as conn:
         return phone_room(conn, room_token)
+
+
+#: The send route's refusal for an email thread room. The client's read-only
+#: notice in `routes/chat/+page.svelte` carries the same sentence.
+EMAIL_THREAD_READ_ONLY = (
+    "This is an email thread. Ask from your private chat and the bot will "
+    "draft the reply."
+)
+
+#: A send whose ``about_room`` fails any of its checks. One body for every
+#: cause, so the route says nothing about rooms the sender cannot link to.
+ABOUT_ROOM_REFUSED = "cannot link this message to that room"
+_MAX_ABOUT_ROOM_CHARS = 200
+
+
+def _email_thread_room(room_token: str) -> bool:
+    """`routing.email_thread_room` over its own connection."""
+    from istota import db
+    from istota.transport.routing import email_thread_room
+
+    with db.get_db(_config.db_path) as conn:
+        return email_thread_room(conn, room_token)
 
 
 def _task_phone_transcript_surface(task_id: int) -> str | None:
@@ -6246,9 +6302,18 @@ class _RoomSettingsRefused(Exception):
     """A shared room's setting changed by someone who is not its host (403)."""
 
 
+class _RoomNotListable(Exception):
+    """`listed` sent for a room that is not an email thread (400)."""
+
+
+#: The PATCH's refusal for `listed` on any room but an email thread.
+ROOM_NOT_LISTABLE = "only an email thread can be listed"
+
+
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
     model=_UNSET, effort=_UNSET, brain=_UNSET, color=_UNSET, guest_reply=_UNSET,
+    listed=_UNSET,
     speech_mode=_UNSET,
 ) -> dict | None:
     """Apply a room PATCH. `_UNSET` on a field means its key was absent.
@@ -6301,18 +6366,27 @@ def _chat_update_room(
             refusal = room_policy.guest_reply_refusal(conn, room.token, username)
             if refusal:
                 raise _RoomSettingsRefused(refusal)
+        # Only an email thread room is hidden, so only one can be listed.
+        # Per member, like colour, so no host check.
+        if listed is not _UNSET:
+            from istota.transport.routing import email_thread_room
+
+            if not email_thread_room(conn, room.token):
+                raise _RoomNotListable(ROOM_NOT_LISTABLE)
         if speech_mode is not _UNSET:
             refusal = room_policy.speech_mode_refusal(conn, room.token, username)
             if refusal:
                 raise _RoomSettingsRefused(refusal)
         # `_UNSET` → leave the column alone; `None` (an explicit null or "" in
         # the body) → clear it, which the store spells as the empty string.
-        # This is the one field written straight to the handle: `model`,
-        # `effort` and `brain` below all land on the canonical registry row
-        # instead, because they are room-global and this is not (ISSUE-433).
+        # Colour and `listed` are the fields written straight to the handle:
+        # `model`, `effort` and `brain` below all land on the canonical
+        # registry row instead, because they are room-global and these are
+        # not (ISSUE-433).
         updated = db.update_web_chat_room(
             conn, room_id, name=name, archived=archived,
             color=("" if color is None else color) if color is not _UNSET else None,
+            listed=listed if listed is not _UNSET else None,
         )
         cleared: list[str] = []
         # Keep the unified room registry in sync (the cross-surface room list /
@@ -6455,6 +6529,13 @@ def _chat_update_room(
             d["origin"] = reg.origin
         binding = db.get_room_binding(conn, updated.token, "talk")
         d["talk_token"] = binding.surface_ref if binding else None
+        if reg is not None:
+            from istota.transport.routing import email_thread_room
+
+            d.update(_room_phone_fields(
+                reg, db.phone_bindings_for_member(conn, username).get(reg.token),
+                email_thread=email_thread_room(conn, reg.token),
+            ))
         d.update(_room_sharing(conn, reg, username))
     return d
 
@@ -7543,6 +7624,238 @@ def _outgoing_mail_field(raw) -> dict | None:
     return out
 
 
+@dataclass(frozen=True)
+class _MailView:
+    """What the viewer's mail cards need from a mail room: an email thread
+    room or the private email room (hidden email threads, stage 3)."""
+
+    #: The viewer's own addresses, lowercased, which a card names "you".
+    own: frozenset
+    #: The viewer's private room, where "Discuss in private chat" goes.
+    private_room: str | None
+    #: ``{task_id: room}``: the room holding a turn's private note, which
+    #: outranks ``private_room`` for that turn's link.
+    note_rooms: dict = _dc_field(default_factory=dict)
+    #: The email thread room this view is of, when the viewer's private room
+    #: has a web composer to link it from, else None (the private email room,
+    #: a private WhatsApp room): only a thread is a send's ``about_room``.
+    thread: str | None = None
+
+
+def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
+    """``{room_token: _MailView}`` for the mail rooms among ``tokens``.
+
+    A mail room is one with an email binding. Its rows render as mail cards;
+    every other room's rows render as they did.
+    """
+    from istota.mail.support import own_addresses  # noqa: PLC0415
+    from istota.rooms.private_replies import private_room_for  # noqa: PLC0415
+    from istota.rooms.scopes import is_email_thread_room  # noqa: PLC0415
+
+    out: dict = {}
+    own = None
+    notes = None
+    for token in {t for t in tokens if t}:
+        if _db.get_room_binding(conn, token, "email") is None:
+            continue
+        if own is None:
+            own = frozenset(own_addresses(_config, username))
+            notes = _note_rooms(conn, username, task_ids)
+        try:
+            dest = private_room_for(conn, _config, username, token)
+        except Exception:  # noqa: BLE001 — a missing link is the safe answer
+            logger.warning("Could not resolve %s's private room for %s", username, token)
+            dest = None
+        private = dest.room_token if dest is not None and dest.room_token != token else None
+        # A private WhatsApp room is read-only in web, so it has no composer
+        # to link: the card keeps its plain link there.
+        thread = (token if dest is not None and dest.surface != "whatsapp"
+                  and is_email_thread_room(conn, token) else None)
+        out[token] = _MailView(own=own, private_room=private,
+                               note_rooms=notes, thread=thread)
+    return out
+
+
+def _note_rooms(conn, username: str, task_ids) -> dict:
+    """``{task_id: room}`` for the turns among ``task_ids`` with a private note."""
+    from istota.rooms.private_replies import note_room_for_task  # noqa: PLC0415
+
+    out: dict = {}
+    for task_id in {t for t in task_ids if isinstance(t, int)}:
+        try:
+            room = note_room_for_task(conn, task_id, username)
+        except Exception:  # noqa: BLE001 — a missing link is the safe answer
+            logger.warning("Could not find the private note for task %s", task_id)
+            room = None
+        if room is not None:
+            out[task_id] = room
+    return out
+
+
+def _mail_labels(view: _MailView, addresses) -> dict:
+    """``{address: label}`` for the addresses a card names other than by
+    their own text: the viewer's own as "you", the bot's by its name."""
+    from istota.mail.ownership import is_bot_address  # noqa: PLC0415
+
+    labels: dict = {}
+    for address in addresses:
+        if not isinstance(address, str) or not address:
+            continue
+        folded = address.strip().lower()
+        if folded in view.own:
+            labels[folded] = "you"
+        elif is_bot_address(_config, folded):
+            labels[folded] = _config.bot_name or "Istota"
+    return labels
+
+
+def _mail_note_path(view: _MailView, task_id) -> str | None:
+    """Where "Discuss in private chat" and a held card's link go: the room
+    holding the turn's private note, else the viewer's private room, at the
+    turn's task."""
+    from istota.notifications.sources import is_safe_path  # noqa: PLC0415
+
+    room = view.note_rooms.get(task_id) if isinstance(task_id, int) else None
+    room = room or view.private_room
+    if room is None:
+        return None
+    path = f"/chat/r/{room}"
+    if isinstance(task_id, int):
+        path += f"/t/{task_id}"
+    return path if is_safe_path(path) else None
+
+
+def _mail_discuss(view: _MailView, task_id) -> dict | None:
+    """``{room, about}`` for "Discuss in private chat" on a thread card with no
+    note (hidden email threads, section 0c): the viewer's private room, whose
+    composer is then linked to the thread, sent back as ``about_room``. The
+    send route checks the pair again; this only decides what the menu offers.
+    """
+    if view.thread is None or view.private_room is None:
+        return None
+    if isinstance(task_id, int) and task_id in view.note_rooms:
+        return None
+    return {"room": view.private_room, "about": view.thread}
+
+
+def _decorate_outgoing_mail(out: dict, view: "_MailView | None") -> None:
+    """Add the viewer's address labels and the note link to an assistant
+    dict's `mail` card, in a mail room."""
+    mail = out.get("mail")
+    if view is None or mail is None:
+        return
+    mail["labels"] = _mail_labels(view, mail["to"] + mail["cc"])
+    note = _mail_note_path(view, out.get("task_id"))
+    if note is not None:
+        mail["note_path"] = note
+    discuss = _mail_discuss(view, out.get("task_id"))
+    if discuss is not None:
+        mail["discuss"] = discuss
+
+
+_MAIL_CHECKS = frozenset({"verified", "failed", "none"})
+# A stored string's cap is `inbound.MAIL_META_STRING_CAP`; this re-asserts it
+# on read, since the column is JSON nothing else validates.
+_MAIL_FIELD_MAX_CHARS = 320
+_MAIL_LIST_MAX = 50
+
+
+def _mail_str(value) -> str:
+    return value[:_MAIL_FIELD_MAX_CHARS] if isinstance(value, str) else ""
+
+
+def _mail_person(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    address = _mail_str(value.get("address"))
+    if not address:
+        return None
+    return {"name": _mail_str(value.get("name")), "address": address}
+
+
+def _mail_people(values) -> list:
+    if not isinstance(values, list):
+        return []
+    people = [p for p in (_mail_person(v) for v in values[:_MAIL_LIST_MAX]) if p]
+    return people
+
+
+def _received_mail_field(
+    row, parsed, view: _MailView, username: str,
+) -> dict | None:
+    """A mail room's user row as the incoming-mail card renders it.
+
+    Built from the stored `received_mail` metadata, never from a raw header.
+    A row from before that column renders from the wrapper alone, marked
+    ``fallback``: From, Subject and Date, with no recipients, attachments or
+    sender check. None when the row is not a mail at all.
+    """
+    from email.utils import parseaddr  # noqa: PLC0415
+
+    from istota.transport.email.threads import split_new_text  # noqa: PLC0415
+
+    body = parsed[1] if parsed is not None else _row_get(row, "body") or ""
+    new_text, rest = split_new_text(body)
+    stored = None
+    raw = _row_get(row, "received_mail")
+    if raw:
+        try:
+            stored = json.loads(raw)
+        except (TypeError, ValueError):
+            stored = None
+    if not isinstance(stored, dict):
+        if parsed is None:
+            return None
+        headers = parsed[0]
+        name, address = parseaddr(headers.get("from") or "")
+        out = {
+            "fallback": True,
+            "from": {"name": _mail_str(name), "address": _mail_str(address)},
+            "to": [], "cc": [], "attachments": [],
+            "date": _mail_str(headers.get("date")),
+            "subject": _mail_str(headers.get("subject")),
+        }
+    else:
+        attachments = []
+        prefix = f"/Users/{username}/"
+        for item in (stored.get("attachments") or [])[:_MAIL_LIST_MAX]:
+            if not isinstance(item, dict) or not _mail_str(item.get("filename")):
+                continue
+            chip: dict = {"filename": _mail_str(item["filename"])}
+            if isinstance(item.get("size"), int):
+                chip["size"] = item["size"]
+            # Only a copy in the viewer's own workspace, which `/chat/files`
+            # serves under its own containment rules.
+            path = item.get("path")
+            if isinstance(path, str) and path.startswith(prefix) and ".." not in path:
+                chip["path"] = path
+            attachments.append(chip)
+        out = {
+            "from": _mail_person(stored.get("from")) or {"name": "", "address": ""},
+            "to": _mail_people(stored.get("to")),
+            "cc": _mail_people(stored.get("cc")),
+            "date": _mail_str(stored.get("date")),
+            "subject": _mail_str(stored.get("subject")),
+            "message_id": _mail_str(stored.get("message_id")),
+            "in_reply_to": _mail_str(stored.get("in_reply_to")),
+            "attachments": attachments,
+            "sender_check": (stored.get("sender_check")
+                             if stored.get("sender_check") in _MAIL_CHECKS else "none"),
+            "trusted": stored.get("trusted") is True,
+        }
+    out["new_text"] = new_text
+    out["rest"] = rest
+    addresses = [out["from"]["address"]] + [p["address"] for p in out["to"] + out["cc"]]
+    out["labels"] = _mail_labels(view, addresses)
+    note = _mail_note_path(view, _row_get(row, "task_id"))
+    if note is not None:
+        out["note_path"] = note
+    discuss = _mail_discuss(view, _row_get(row, "task_id"))
+    if discuss is not None:
+        out["discuss"] = discuss
+    return out
+
+
 def _row_get(row, key: str):
     """sqlite3.Row.get() equivalent — returns None for a column absent from the
     row's keys instead of raising (the two source queries differ in columns)."""
@@ -7598,6 +7911,7 @@ _SPINE_COLUMNS = (
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
     "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
+    "  m.received_mail AS received_mail, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
@@ -7822,7 +8136,9 @@ def _row_attachment_fields(row, username: str, *, message_column: bool = True) -
     return out
 
 
-def _user_row_display(row, viewer: str | None = None) -> dict:
+def _user_row_display(
+    row, viewer: str | None = None, *, mail: "_MailView | None" = None,
+) -> dict:
     """The `text` (and, when they apply, `author` / `origin` / `subject`) of a
     user row.
 
@@ -7887,6 +8203,10 @@ def _user_row_display(row, viewer: str | None = None) -> dict:
     out: dict = {"text": body}
 
     parsed = parse_email_prompt(body)
+    if mail is not None:
+        received = _received_mail_field(row, parsed, mail, viewer or "")
+        if received is not None:
+            out["received_mail"] = received
     if parsed is not None:
         out["text"] = parsed[1]
         # Capped for the same reason `_CROSS_ROOM_COLUMNS` truncates the reply
@@ -8134,6 +8454,12 @@ def _chat_room_messages(
         parked_notes = _parked_rows(
             conn, username, [(n.id, n.delivery_reference) for n in notes],
         )
+        noted_notes = _noted_rows(
+            conn, username, [(n.id, n.delivery_reference, n.about_room_token) for n in notes],
+        )
+        mail_view = _mail_views(
+            conn, username, [token], [_row_get(r, "task_id") for r in msg_rows],
+        ).get(token)
 
         # 4. Paging metadata: the page's oldest spine (or aux-only) row gives the
         #    next cursor; `has_more` ORs a spine probe with a band-eligible
@@ -8181,11 +8507,12 @@ def _chat_room_messages(
                 "role": "user", "task_id": tid,
                 "created_at": r["created_at"],
                 "msg_id": r["msg_id"], "starred": bool(r["starred"]),
-                **_user_row_display(r, username),
+                **_user_row_display(r, username, mail=mail_view),
             }
             d.update(_row_attachment_fields(r, username))
         else:  # assistant — a stored assistant row is by definition a completed turn
             d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+            _decorate_outgoing_mail(d, mail_view)
         cited = _row_reply_to(r)
         if cited is not None:
             d["reply_to"] = cited
@@ -8248,6 +8575,7 @@ def _chat_room_messages(
         if parked is not None:
             note["confirmation"] = True
             note["task_id"] = parked
+        _apply_noted(note, noted_notes.get(n.id))
         messages.append(note)
     # Normalize every turn's created_at to explicit ISO 8601 UTC. The stored
     # values are naive UTC (SQLite datetime('now') / strftime, and the Talk-cache
@@ -8383,11 +8711,16 @@ def _chat_create_web_task(
     client_msg_id: str | None = None,
     reply_to_msg_id: int | None = None,
     relay_answer: str | None = None,
+    about_room: str | None = None,
 ) -> tuple[str, int | None]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)``,
     ``("recorded", message_id)`` when the speech gate stored the turn without
-    answering it, ``("rate_limited", window_seconds)`` or
-    ``("reply_target_gone", 0)``.
+    answering it, ``("rate_limited", window_seconds)``,
+    ``("reply_target_gone", 0)`` or ``("about_room_refused", 0)``.
+
+    ``about_room`` links the turn to an email thread with no row to reply to
+    (`private_replies.about_room_link`), checked here so the check and the
+    write are one transaction. The caller drops it when a reply-to row is set.
 
     A cited parent is resolved here, inside the same transaction as the create:
     it must be a message in *this* room, and its body — never a client-supplied
@@ -8445,6 +8778,22 @@ def _chat_create_web_task(
             if target is None or target[0] != token:
                 return ("reply_target_gone", 0)
             reply_to_content = target[1][:_REPLY_SNAPSHOT_CHARS]
+        # Ahead of the cancel below, so a refused link changes nothing. A
+        # replay records nothing new, so it is not asked again.
+        about_room_token: str | None = None
+        if about_room is not None and not replaying:
+            from istota.rooms.private_replies import about_room_link
+
+            try:
+                about_room_token = about_room_link(
+                    conn, _config, user_id=username, room_token=token,
+                    about_token=about_room,
+                )
+            except sqlite3.Error:
+                logger.warning("Could not check the linked room for %s", username)
+                about_room_token = None
+            if about_room_token is None:
+                return ("about_room_refused", 0)
         relay = None
         if reply_to_msg_id is not None and not replaying:
             relay = message_relays.relay_for_room_reply(
@@ -8516,6 +8865,7 @@ def _chat_create_web_task(
             reply_to_content=reply_to_content,
             addressed_to_bot=addressed,
             classified=classified,
+            about_room_token=about_room_token,
         )
     if result.gate_reason == "vetoed":
         return ("room_off", 0)
@@ -9328,6 +9678,14 @@ async def chat_update_room(
         color = str(data["color"] or "").strip().lower() or None
         if color is not None and not is_room_color(color):
             return JSONResponse({"error": "unknown color"}, status_code=400)
+    # Show a hidden email thread room in the main list. Per user like `color`;
+    # `_chat_update_room` refuses it on a room that is not an email thread.
+    # A strict bool, since `bool("no")` is True.
+    listed = _UNSET
+    if "listed" in data:
+        if not isinstance(data["listed"], bool):
+            return JSONResponse({"error": "invalid listed"}, status_code=400)
+        listed = data["listed"]
     # How a guest's turn is answered (multiplayer D11). Host only, which
     # `_chat_update_room` checks with the rule `!room guests` uses.
     guest_reply = _UNSET
@@ -9415,10 +9773,12 @@ async def chat_update_room(
     try:
         updated = await asyncio.to_thread(
             _chat_update_room, user["username"], room_id, name, archived, model,
-            effort, brain, color, guest_reply, speech_mode,
+            effort, brain, color, guest_reply, listed, speech_mode,
         )
     except _RoomSettingsRefused as refused:
         return JSONResponse({"error": str(refused)}, status_code=403)
+    except _RoomNotListable as refused:
+        return JSONResponse({"error": str(refused)}, status_code=400)
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
     # Propagate a rename to the bound Talk conversation, if any (best-effort).
@@ -10064,8 +10424,60 @@ def _parked_rows(conn, username: str, rows) -> dict[int, int]:
     return out
 
 
+def _noted_rows(conn, username: str, rows) -> dict[int, tuple[int, dict | None]]:
+    """``{msg_id: (task_id, mail)}`` for the email notes among ``rows``, each
+    ``(msg_id, delivery_reference, about_room_token)``.
+
+    ``mail`` is the thread room's own row for that task, read live, so a held
+    draft released later shows `sent` under the note too; None when the turn
+    mailed nothing. Attached at read time rather than copied onto the note,
+    which would go stale (hidden email threads, section 5).
+    """
+    from istota.mail.support import own_addresses  # noqa: PLC0415
+    from istota.rooms.private_replies import noted_task_for_reference  # noqa: PLC0415
+
+    out: dict[int, tuple[int, dict | None]] = {}
+    view = None
+    for msg_id, reference, about in rows:
+        task_id = noted_task_for_reference(conn, reference, username)
+        if task_id is None:
+            continue
+        mail = None
+        row = conn.execute(
+            "SELECT body, outgoing_mail FROM messages WHERE task_id = ? "
+            "AND role = 'assistant' AND room_token = ? AND outgoing_mail IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, about),
+        ).fetchone() if about else None
+        if row is not None:
+            mail = _outgoing_mail_field(row["outgoing_mail"])
+        if mail is not None:
+            # The thread row's body is the mailed body; the record carries one
+            # only when the two differ.
+            if "body" not in mail and row["body"]:
+                body = row["body"]
+                mail["body"] = (body if len(body) <= _MAIL_BODY_MAX_CHARS
+                                else body[:_MAIL_BODY_MAX_CHARS].rstrip() + "…")
+            if view is None:
+                view = _MailView(own=frozenset(own_addresses(_config, username)),
+                                 private_room=None)
+            mail["labels"] = _mail_labels(view, mail["to"] + mail["cc"])
+        out[msg_id] = (task_id, mail)
+    return out
+
+
+def _apply_noted(d: dict, noted: tuple[int, dict | None] | None) -> None:
+    """Give an email note's payload its task id and live mail card."""
+    if noted is None:
+        return
+    d["task_id"] = noted[0]
+    if noted[1] is not None:
+        d["mail"] = noted[1]
+
+
 def _cross_room_message_dict(
     r, username: str, *, about_names: dict | None = None, parked: dict | None = None,
+    mail_views: dict | None = None, noted: dict | None = None,
 ) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
@@ -10085,11 +10497,14 @@ def _cross_room_message_dict(
         d = {
             "role": "user", "task_id": r["task_id"],
             "status": r["status"], "created_at": r["created_at"], **base,
-            **_user_row_display(r, username),
+            **_user_row_display(
+                r, username, mail=(mail_views or {}).get(r["room_token"]),
+            ),
         }
         d.update(_row_attachment_fields(r, username))
     elif r["role"] == "assistant":
         d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
+        _decorate_outgoing_mail(d, (mail_views or {}).get(r["room_token"]))
         d.update(base)
     else:  # system — same shape as the per-room notes merge
         text = f"**{r['title']}**\n\n{r['body']}" if r["title"] else r["body"]
@@ -10101,6 +10516,7 @@ def _cross_room_message_dict(
         if parked_task is not None:
             d["confirmation"] = True
             d["task_id"] = parked_task
+        _apply_noted(d, (noted or {}).get(r["msg_id"]))
     cited = _row_reply_to(r)
     if cited is not None:
         d["reply_to"] = cited
@@ -10126,10 +10542,12 @@ def _chat_aggregate_messages(
     from istota import db
     before_ts, before_id = before if before is not None else (None, None)
     with db.get_db(_config.db_path) as conn:
-        # limit+1 → the extra row is the has_more probe.
+        # limit+1 → the extra row is the has_more probe. The panes cover the
+        # main room list only, so a hidden email thread stays out of them.
         rows = db.list_messages_across_rooms(
             conn, username, view=view, limit=limit + 1,
             before_ts=before_ts, before_id=before_id,
+            exclude_tokens=db.hidden_room_tokens_for_member(conn, username),
         )
         undeletable = _undeletable_message_ids(
             conn, username, [(r["msg_id"], r["room_token"]) for r in rows[:limit]],
@@ -10137,6 +10555,8 @@ def _chat_aggregate_messages(
         about_names = _about_room_names(
             conn, username, [r["about_room_token"] for r in rows[:limit]],
         )
+        mail_views = _mail_views(conn, username, [r["room_token"] for r in rows[:limit]],
+                                 [r["task_id"] for r in rows[:limit]])
     has_more = len(rows) > limit
     rows = rows[:limit]
     # Rows arrive newest-first; the page's last row is its oldest → the cursor
@@ -10145,7 +10565,8 @@ def _chat_aggregate_messages(
     oldest_cursor = (
         {"ts": rows[-1]["created_at"], "id": rows[-1]["msg_id"]} if rows else None
     )
-    messages = [_cross_room_message_dict(r, username, about_names=about_names)
+    messages = [_cross_room_message_dict(r, username, about_names=about_names,
+                                         mail_views=mail_views)
                 for r in reversed(rows)]
     for m in messages:
         if m["msg_id"] in undeletable:
@@ -10288,6 +10709,13 @@ async def chat_send_message(
     phone = await asyncio.to_thread(_phone_room, room.token)
     if phone is not None:
         return _read_only_refusal(phone.surface, group=phone.group)
+    # An email thread room is the mail thread itself: a web turn there would be
+    # answered in web and mailed to nobody. Covers a `!command` and a reply-to
+    # send too, since both arrive here.
+    if await asyncio.to_thread(_email_thread_room, room.token):
+        return JSONResponse(
+            {"error": EMAIL_THREAD_READ_ONLY, "read_only": True}, status_code=409,
+        )
 
     data = await request.json()
     raw_text = data.get("text") if isinstance(data.get("text"), str) else ""
@@ -10335,6 +10763,16 @@ async def chat_send_message(
         and raw_reply_to > 0
         else None
     )
+    # An email thread this send is about, with no row to reply to ("Discuss in
+    # private chat" with no note). A reply-to row decides the link instead, so
+    # with one this is ignored. Its three checks run with the write below; a
+    # value that is not a token at all is refused here, with the same body.
+    about_room: str | None = None
+    raw_about = data.get("about_room")
+    if reply_to_msg_id is None and raw_about is not None and raw_about != "":
+        if not isinstance(raw_about, str) or len(raw_about) > _MAX_ABOUT_ROOM_CHARS:
+            return JSONResponse({"error": ABOUT_ROOM_REFUSED}, status_code=400)
+        about_room = raw_about
 
     # An attachment-only send is a real message — a voice memo recorded in the
     # composer is the whole message, with nothing typed alongside it. The
@@ -10461,7 +10899,10 @@ async def chat_send_message(
         # The exact answer, whitespace and all; a `!model` prefix already
         # changed the text, so only an unprefixed send keeps its raw form.
         text if model_prefix_used else raw_text,
+        about_room,
     )
+    if outcome == "about_room_refused":
+        return JSONResponse({"error": ABOUT_ROOM_REFUSED}, status_code=400)
     if outcome == "rate_limited":
         return JSONResponse(
             {"error": "rate limit exceeded"},

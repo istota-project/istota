@@ -81,7 +81,7 @@ import {
 } from '$lib/offline/db';
 import { rememberLastUserId, seedUserId } from '$lib/offline/lastUser';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
-import { sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
+import { isHiddenRoom, sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
 import { applyNotificationCounts } from '$lib/stores/notifications';
 import {
   isKnownCommand,
@@ -289,6 +289,8 @@ export interface SendReturn {
    */
   replyTo?: MessageReply;
   replyToMsgId?: number;
+  /** The email thread an edited queued message was linked to, if any. */
+  aboutRoom?: string;
 }
 
 export interface ChatSession {
@@ -369,7 +371,14 @@ export interface ChatSession {
   // go back to the composer, since Retry cannot resolve that failure. Same
   // counter-plus-room shape as `sendSettled`, and for the same reason.
   sendReturned: Writable<SendReturn>;
-  send: (text: string, attachments?: ChatAttachment[], replyTo?: MessageReply) => Promise<void>;
+  // `aboutRoom`: the email thread a message is linked to with no row to reply
+  // to (hidden email threads, section 0c); dropped when `replyTo` is set.
+  send: (
+    text: string,
+    attachments?: ChatAttachment[],
+    replyTo?: MessageReply,
+    aboutRoom?: string,
+  ) => Promise<void>;
   // Re-POST a failed send from its own row (ISSUE-200). Reuses the row rather
   // than appending a new one, so the canonical echo folds into it. No-op for a
   // row that didn't fail, or one whose failure a retry can't resolve.
@@ -738,6 +747,8 @@ function createSession(): ChatSession {
     replyTo?: MessageReply;
     // What the POST carries.
     replyToMsgId?: number;
+    // The email thread the message is linked to with no row to reply to.
+    aboutRoom?: string;
     // Minted at enqueue rather than at drain, so it is stable across a
     // persistence round trip: two drains of the same restored entry are then
     // answered with one task.
@@ -1651,6 +1662,10 @@ function createSession(): ChatSession {
           phone_surface: fresh.phone_surface ?? null,
           read_only: fresh.read_only ?? false,
           phone_group: fresh.phone_group ?? false,
+          email_thread: fresh.email_thread ?? false,
+          // Per user like the tint, and for the same reason: a thread listed
+          // or hidden on another device reaches this tab here.
+          listed: fresh.listed ?? false,
           shared: fresh.shared,
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
@@ -2046,6 +2061,12 @@ function createSession(): ChatSession {
     const v = get(view);
     if (v === 'room' || v === 'starred') return;
     if (v === 'unread' && row.role === 'user') return;
+    // The panes cover the main room list, as the server's page does. A room
+    // not in the list yet (a new thread's first mail streams before the
+    // listing mints its handle) is not in the main list either; the next
+    // page load brings the row back if it belongs.
+    const source = get(rooms).find((r) => r.token === row.room_token);
+    if (!source || isHiddenRoom(source)) return;
     if (typeof row.msg_id === 'number' && get(messages).some((m) => m.msgId === row.msg_id)) return;
     // The All view carries no queued rows (`carryClientOnlyRows` drops them in
     // the `token === null` branch) but it does carry stranded failed ones, and
@@ -2201,6 +2222,8 @@ function createSession(): ChatSession {
         phone_surface: fresh.phone_surface ?? null,
         read_only: fresh.read_only ?? false,
         phone_group: fresh.phone_group ?? false,
+        email_thread: fresh.email_thread ?? false,
+        listed: fresh.listed ?? false,
       };
       // Same invalidation the local save does, for a brain changed on another
       // surface: `!brain` on Talk, or this user's other device. The frame is
@@ -2713,16 +2736,22 @@ function createSession(): ChatSession {
       aboutRoom: m.about_room?.token
         ? { token: m.about_room.token, name: m.about_room.name ?? null }
         : undefined,
+      // An assistant row's own mail, or (on an email note) the thread row's,
+      // which the server attaches under the note.
       mail:
-        m.role === 'assistant' && m.mail
+        (m.role === 'assistant' || m.role === 'system') && m.mail
           ? {
               to: m.mail.to ?? [],
               cc: m.mail.cc ?? [],
               subject: m.mail.subject || undefined,
               state: m.mail.state,
               body: m.mail.body || undefined,
+              labels: m.mail.labels ?? undefined,
+              notePath: m.mail.note_path || undefined,
+              discuss: m.mail.discuss ?? undefined,
             }
           : undefined,
+      receivedMail: m.role === 'user' && m.received_mail ? m.received_mail : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,
@@ -3699,9 +3728,17 @@ function createSession(): ChatSession {
     return jumpToRow(roomToken, () => findCidByMsgId(msgId));
   }
 
-  async function send(text: string, attachments: ChatAttachment[] = [], replyTo?: MessageReply) {
+  async function send(
+    text: string,
+    attachments: ChatAttachment[] = [],
+    replyTo?: MessageReply,
+    aboutRoomToken?: string,
+  ) {
     const roomId = get(activeRoomId);
     const trimmed = text.trim();
+    // A cited row decides the link on the server, so the thread rides only
+    // a send that cites nothing (hidden email threads, section 0c).
+    const aboutRoom = replyTo ? undefined : aboutRoomToken || undefined;
     if (!roomId || (!trimmed && attachments.length === 0)) return;
     // Any `!word`, not only a catalogued one, and matching `sendTurn`'s own
     // test rather than `isKnownCommand`: what the two rules below turn on is
@@ -3729,7 +3766,14 @@ function createSession(): ChatSession {
       // restored one went out the turn it named would be long over. It still
       // goes on its own if the connection returns in this session, which is as
       // close to "now" as there is with nothing to send it to.
-      enqueueSend(roomId, trimmed, attachments, replyTo, isCommandBody ? 'busy' : 'offline');
+      enqueueSend(
+        roomId,
+        trimmed,
+        attachments,
+        replyTo,
+        isCommandBody ? 'busy' : 'offline',
+        aboutRoom,
+      );
       return;
     }
 
@@ -3745,7 +3789,7 @@ function createSession(): ChatSession {
       // should still go out by itself later. A busy room is the exception —
       // there the wait is the turn, which is what `busy` means.
       const idle = get(status) === 'idle';
-      enqueueSend(roomId, trimmed, attachments, replyTo, idle ? 'offline' : 'busy');
+      enqueueSend(roomId, trimmed, attachments, replyTo, idle ? 'offline' : 'busy', aboutRoom);
       // `canDrain` is the gate here as everywhere else, so a busy room queues
       // and waits for the running turn to settle.
       await drainSendQueue(roomId);
@@ -3775,7 +3819,7 @@ function createSession(): ChatSession {
         await sendInlineCommand(roomId, trimmed);
         return;
       }
-      enqueueSend(roomId, trimmed, attachments, replyTo);
+      enqueueSend(roomId, trimmed, attachments, replyTo, 'busy', aboutRoom);
       return;
     }
 
@@ -3814,10 +3858,11 @@ function createSession(): ChatSession {
           attachments,
           idempotencyKey,
           replyToMsgId: replyTo?.msgId,
+          ...(aboutRoom ? { aboutRoom } : {}),
         },
       }),
     );
-    await runTurn(roomId, userCid, trimmed, attachments, idempotencyKey, replyTo?.msgId);
+    await runTurn(roomId, userCid, trimmed, attachments, idempotencyKey, replyTo?.msgId, aboutRoom);
   }
 
   /**
@@ -3879,6 +3924,7 @@ function createSession(): ChatSession {
     attachments: ChatAttachment[],
     replyTo?: MessageReply,
     reason: QueueReason = 'busy',
+    aboutRoom?: string,
   ) {
     const roomToken = roomTokenOf(roomId);
     // The queue is keyed by token, so a room that has left `$rooms` (deleted
@@ -3928,6 +3974,7 @@ function createSession(): ChatSession {
       ...(pendingOf(attachments).length ? { pendingAttachments: pendingOf(attachments) } : {}),
       replyTo,
       replyToMsgId: replyTo?.msgId,
+      ...(aboutRoom ? { aboutRoom } : {}),
       idempotencyKey: newIdempotencyKey(),
       held: false,
       queuedAt: Date.now(),
@@ -4009,6 +4056,7 @@ function createSession(): ChatSession {
       resolved.attachments,
       resolved.idempotencyKey,
       resolved.replyToMsgId,
+      resolved.aboutRoom,
     );
   }
 
@@ -4299,6 +4347,7 @@ function createSession(): ChatSession {
       attachments: entry.attachments,
       idempotencyKey: entry.idempotencyKey,
       replyToMsgId: entry.replyToMsgId,
+      ...(entry.aboutRoom ? { aboutRoom: entry.aboutRoom } : {}),
     });
   }
 
@@ -4345,6 +4394,7 @@ function createSession(): ChatSession {
       // its whole reason for existing is that the cited parent is gone.
       replyTo: taken.entry.replyTo,
       replyToMsgId: taken.entry.replyToMsgId,
+      aboutRoom: taken.entry.aboutRoom,
     }));
   }
 
@@ -4389,6 +4439,7 @@ function createSession(): ChatSession {
     attachments: ChatAttachment[],
     idempotencyKey?: string,
     replyToMsgId?: number,
+    aboutRoom?: string,
   ) {
     const phCid = nextCid();
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -4442,7 +4493,16 @@ function createSession(): ChatSession {
         pendingSend = mine;
       }
 
-      await sendTurn(roomId, trimmed, attachments, userCid, phCid, idempotencyKey, replyToMsgId);
+      await sendTurn(
+        roomId,
+        trimmed,
+        attachments,
+        userCid,
+        phCid,
+        idempotencyKey,
+        replyToMsgId,
+        aboutRoom,
+      );
     } catch {
       // `sendChatMessage` classifies rather than throwing, so this is the
       // unforeseen case. It still must not escape: an un-reset 'sending' left
@@ -4549,6 +4609,7 @@ function createSession(): ChatSession {
         // bubble draws.
         replyTo: row?.replyTo,
         replyToMsgId: payload!.replyToMsgId,
+        ...(payload!.aboutRoom ? { aboutRoom: payload!.aboutRoom } : {}),
         idempotencyKey: payload!.idempotencyKey,
         held: false,
         queuedAt: Date.now(),
@@ -4771,6 +4832,7 @@ function createSession(): ChatSession {
     phCid: number,
     idempotencyKey?: string,
     replyToMsgId?: number,
+    aboutRoom?: string,
   ) {
     // Only the chips the server can resolve, and the two lists stay positional
     // against each other. A chip with no path is one whose bytes are still in
@@ -4786,6 +4848,7 @@ function createSession(): ChatSession {
     }
     const res = await sendChatMessage(roomId, trimmed, paths, names, undefined, idempotencyKey, {
       replyToMsgId,
+      ...(aboutRoom ? { aboutRoom } : {}),
     });
     if (!res.ok) {
       // The one failure whose recovery is not Retry: the server rejected the

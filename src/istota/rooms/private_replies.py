@@ -61,8 +61,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from istota import db
@@ -89,6 +90,9 @@ UNTRUSTED_LABEL = "PARENT ROOM TRANSCRIPT"
 PARENT_CONTEXT_MESSAGES = 40
 PARENT_CONTEXT_CHARS = 12000
 _LABEL_MAX = 80
+#: The `ACTION:` / `NO_ACTION:` markers `db.scheduled_assistant_body` reads,
+#: stripped wherever they start a line of a remark.
+_ACTION_MARKER_RE = re.compile(r"(?m)^[ \t]*(?:NO_)?ACTION:[ \t]*")
 
 
 def is_shared_room(conn, room_token: str, *, is_group_chat: bool = False) -> bool:
@@ -249,10 +253,12 @@ REPLY_SNAPSHOT_CHARS = 1000
 def linked_about(conn, parent_message_id: int | None, room_token: str | None) -> str | None:
     """The shared room a reply to ``parent_message_id`` is linked to, or None.
 
-    The one linking rule, applied by `transport.ingest.record_inbound` for
+    The first linking rule, applied by `transport.ingest.record_inbound` for
     every surface that supplies a parent: the parent row is in the same room
-    as the new turn and is tagged with ``about_room_token``. Nothing else
-    links a turn, and nothing carries a link forward to the next one.
+    as the new turn and is tagged with ``about_room_token``. The one other is
+    `about_room_link`, a web send naming an email thread room with no row to
+    reply to; the web route checks it and passes ``about_room_token`` in,
+    which skips this. Nothing carries a link forward to the next turn.
     """
     if parent_message_id is None or not room_token:
         return None
@@ -263,6 +269,40 @@ def linked_about(conn, parent_message_id: int | None, room_token: str | None) ->
     if row is None or row["room_token"] != room_token:
         return None
     return row["about_room_token"] or None
+
+
+def about_room_link(conn, config, *, user_id: str, room_token: str | None,
+                    about_token: str | None) -> str | None:
+    """The thread a web send naming ``about_token`` links to, or None to refuse.
+
+    The second linking rule ("Discuss in private chat" on a mail card with no
+    note, hidden email threads section 0c), and narrower than the first: the
+    token names an email thread room, ``user_id`` is a current member of it,
+    and ``room_token`` is that user's private room for it as
+    `private_room_for` resolves it. Returns the thread's canonical token.
+    Raises what the reads raise; the route refuses on that too.
+    """
+    from istota.rooms.scopes import is_email_thread_room
+
+    if not about_token or not room_token:
+        return None
+    thread = canonical_token(conn, about_token)
+    if thread is None or not is_email_thread_room(conn, thread):
+        return None
+    # `linked_room` drops an archived room at run time; refusing it here too
+    # keeps a link from being accepted that the run would then ignore.
+    room = db.get_room(conn, thread)
+    if room is None or room.archived:
+        return None
+    if not is_current_member(conn, thread, user_id):
+        return None
+    dest = private_room_for(conn, config, user_id, thread)
+    own = canonical_token(conn, room_token)
+    if dest is None or own is None or own == thread:
+        return None
+    if canonical_token(conn, dest.room_token) != own:
+        return None
+    return thread
 
 
 def quoted_private_reply(conn, *, user_id: str, quoted_id: str | None,
@@ -455,17 +495,50 @@ def parked_task_for_reference(conn, delivery_reference: str | None, user_id: str
     which is what makes the web card under the row disappear once the
     question is answered anywhere.
     """
-    ref = delivery_reference or ""
-    prefix = next((p for p in PARK_PREFIXES if ref.startswith(p)), None)
-    if prefix is None:
-        return None
-    head = ref[len(prefix):].split(":", 1)[0]
-    if not (head.isascii() and head.isdigit() and len(head) <= 18):
+    ident = _reference_task_id(delivery_reference, PARK_PREFIXES)
+    if ident is None:
         return None
     row = conn.execute(
         "SELECT id FROM tasks WHERE id = ? AND user_id = ? "
         "AND status = 'pending_confirmation'",
-        (int(head), user_id),
+        (ident, user_id),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+#: An email note's reference, ``private-pass_on:<task id>:pass-on``.
+NOTE_PREFIX = "private-pass_on:"
+_NOTE_SUFFIX = ":pass-on"
+
+
+def _reference_task_id(delivery_reference: str | None, prefixes, suffix: str | None = None):
+    """The task id a private row's ``<prefix><task id>:<tail>`` reference
+    names, or None for any other reference. With ``suffix``, the tail must be
+    exactly that."""
+    ref = delivery_reference or ""
+    prefix = next((p for p in prefixes if ref.startswith(p)), None)
+    if prefix is None:
+        return None
+    head, sep, tail = ref[len(prefix):].partition(":")
+    if suffix is not None and sep + tail != suffix:
+        return None
+    if not (head.isascii() and head.isdigit() and len(head) <= 18):
+        return None
+    return int(head)
+
+
+def noted_task_for_reference(conn, delivery_reference: str | None, user_id: str) -> int | None:
+    """The task an email note's row is about, when it is ``user_id``'s.
+
+    The sibling of `parked_task_for_reference` with no status filter: the note
+    stands after its task completes, and the web attaches that task's mail and
+    held draft under it. None for any other row or another user's task.
+    """
+    ident = _reference_task_id(delivery_reference, (NOTE_PREFIX,), _NOTE_SUFFIX)
+    if ident is None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE id = ? AND user_id = ?", (ident, user_id),
     ).fetchone()
     return row["id"] if row else None
 
@@ -540,6 +613,13 @@ def _existing(conn, delivery_reference: str, user_id: str) -> PrivateDestination
                               whatsapp=row["origin_surface"] == "whatsapp")
 
 
+def _bell_reference(kind: str, reference: str) -> str:
+    """The bell key's reference: an email note's is its task id, so every path
+    that announces one note (no private room, a push that reached nobody, a
+    web-only room) shares one `private-note:<task>` row."""
+    return reference.split(":", 1)[0] if kind == "pass_on" else reference
+
+
 def _bell_note(conn, *, user_id: str, about: str, reference: str, body: str, task_id):
     from istota.notifications.resolvers import _common, task_alert
 
@@ -581,7 +661,8 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
     if dest is None:
         notice = None
         if kind in _UNPARKED_KINDS:
-            notice = _bell_note(conn, user_id=user_id, about=about, reference=reference,
+            notice = _bell_note(conn, user_id=user_id, about=about,
+                                reference=_bell_reference(kind, reference),
                                 body=body, task_id=task_id)
         return PrivateDelivery(None, None, notice=notice, **common)
     message_id = db.add_message(
@@ -657,10 +738,10 @@ async def _send_whatsapp(config, delivery: PrivateDelivery, text: str) -> bool:
 
 
 def _late_bell_note(config, delivery: PrivateDelivery, body: str):
+    reference = _bell_reference(delivery.kind, delivery.delivery_reference.split(":", 1)[1])
     with db.get_db(config.db_path) as conn:
         return _bell_note(conn, user_id=delivery.user_id, about=delivery.about_token,
-                          reference=delivery.delivery_reference.split(":", 1)[1],
-                          body=body, task_id=None)
+                          reference=reference, body=body, task_id=None)
 
 
 async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: str) -> bool:
@@ -687,6 +768,13 @@ async def _send(config, delivery: PrivateDelivery, *, header_room_label, body: s
         # A whisper or a pass-on has no park bell behind it: one routed to a
         # surface that reached nobody there would sit unannounced in a transcript.
         notice = await asyncio.to_thread(_late_bell_note, config, delivery, body)
+        await asyncio.to_thread(deliver_pending, config, [notice])
+    elif delivery.kind == "pass_on" and dest is not None and not pushed:
+        # An email note in a web-only room: one bell push, room-free, since the
+        # note is already in a room and a second copy belongs in none.
+        notice = await asyncio.to_thread(_late_bell_note, config, delivery, body)
+        if notice is not None:
+            notice = replace(notice, room_free=True)
         await asyncio.to_thread(deliver_pending, config, [notice])
     return delivered
 
@@ -888,18 +976,60 @@ def _mail_new_text(body: str) -> str | None:
     return new_text(parsed[1]).strip() if parsed is not None else None
 
 
-def pass_on_body(conn, task) -> str:
-    """The pass-on note for a thread turn the host was not on, from the
-    stored turn: who wrote, on which room, and their new text quoted.
+#: What a note quotes of somebody's words, and what a guest proposal quotes.
+QUOTE_CHARS = 500
 
-    Built from the transcript row, never from the model's text, and through
-    the email wrapper's parser and `threads.new_text`, so neither the wrapper
-    nor the quoted history reaches the host.
+#: An email note's outcome line, by what became of the reply. Code-built: no
+#: model text reaches the first three parts of a note.
+NOTE_OUTCOMES = {
+    "sent": "Replied.",
+    "held": "Reply waiting for your approval.",
+    "parked": "Question for you.",
+    "failed": "The reply could not be sent.",
+    "none": "No reply sent.",
+}
+
+
+def email_note_due(*, host_absent: bool, outcome: str, remark: str) -> bool:
+    """Whether a turn on an email thread owes its host a private note (#636).
+
+    Always when the host was not on the mail. Otherwise only when something
+    needs them (a held reply, a question, a failed send) or the bot answered
+    them alone; a reply that went out unheld is already in their inbox.
     """
+    if outcome not in NOTE_OUTCOMES:
+        raise ValueError(f"unknown email note outcome: {outcome!r}")
+    if host_absent or outcome in ("held", "parked", "failed"):
+        return True
+    return outcome == "none" and bool(remark.strip())
+
+
+def email_note_remark(result: str, mailed: str | None) -> str:
+    """The bot's own words to its host about a mail: ``result`` without an
+    `ACTION:` / `NO_ACTION:` marker or the mail envelope, and nothing when it only
+    repeats the mailed body."""
+    from istota.transport.email.outbound import without_email_envelope
+
+    remark = _ACTION_MARKER_RE.sub("", without_email_envelope(result or "")).strip()
+    if remark and mailed is not None and not db.mailed_body_differs(remark, mailed):
+        return ""
+    return remark
+
+
+def email_note_body(conn, task, *, outcome: str, remark: str) -> str:
+    """The note for one mail on an email thread: who wrote on which room, their
+    new text quoted, what became of the reply, then the bot's remark.
+
+    The first three are built from the stored turn and never from the model's
+    text, through the email wrapper's parser and `threads.new_text`, so neither
+    the wrapper nor the quoted history reaches the host. The remark is the
+    model's, and reaches only the host.
+    """
+    from istota.confirmations import flatten
     from istota.transport.email.threads import new_text
 
     row = conn.execute(
-        "SELECT body, author_label FROM messages WHERE task_id = ? "
+        "SELECT body, author_label, author_user_id FROM messages WHERE task_id = ? "
         "AND role = 'user' ORDER BY id LIMIT 1",
         (task.id,),
     ).fetchone()
@@ -907,23 +1037,55 @@ def pass_on_body(conn, task) -> str:
     text = _mail_new_text(body)
     if text is None:
         text = new_text(body).strip()
-    label = (row["author_label"] if row else None) or "Someone"
+    if len(text) > QUOTE_CHARS:
+        text = text[:QUOTE_CHARS].rstrip() + "…"
+    label = flatten((row["author_label"] if row else None) or "")[:_LABEL_MAX]
+    if not label:
+        own = row is not None and row["author_user_id"] in (None, task.user_id)
+        label = "You" if own else "Someone"
     room = room_label(db.get_room(conn, canonical_token(conn, task.conversation_token) or ""))
+    header = f"{label} wrote on {room}"
+    if task.host_absent:
+        header += ", without you on the message"
     quoted = "\n".join(f"> {line}" if line else ">" for line in text.splitlines()) or ">"
-    return f"{label} wrote on {room}, without you on the message:\n\n{quoted}"
+    note = f"{header}:\n\n{quoted}\n\n{NOTE_OUTCOMES[outcome]}"
+    return f"{note}\n\n{remark}" if remark else note
 
 
-def deliver_pass_on(conn, config, task) -> tuple[PrivateDelivery, str]:
-    """Record the pass-on note for ``task`` in its host's private room, inside
-    the caller's transaction, and return it with its body for `send_private`.
-    With no private room it is a `private_note` bell row, as a whisper is.
+def deliver_email_note(conn, config, task, *, outcome: str,
+                       remark: str) -> tuple[PrivateDelivery, str]:
+    """Record ``task``'s note in its host's private room, inside the caller's
+    transaction, and return it with its body for `send_private`.
+
+    Kind `pass_on` under ``<task>:pass-on``, so a second delivery returns the
+    first row. With no private room it is a `private_note` bell row.
     """
-    body = pass_on_body(conn, task)
+    body = email_note_body(conn, task, outcome=outcome, remark=remark)
     delivery = deliver_private(
         conn, config, user_id=task.user_id, about_token=task.conversation_token,
         kind="pass_on", reference=f"{task.id}:pass-on", body=body, task_id=task.id,
     )
     return delivery, body
+
+
+def note_room_for_task(conn, task_id, user_id: str) -> str | None:
+    """The private room holding ``task_id``'s email note, else its private
+    question, or None. Re-checked as ``user_id``'s own private room."""
+    try:
+        ident = int(task_id)
+    except (TypeError, ValueError):
+        return None
+    rows = conn.execute(
+        "SELECT room_token FROM messages WHERE delivery_reference = ? "
+        "OR (delivery_reference >= ? AND delivery_reference < ?) "
+        "ORDER BY delivery_reference LIKE 'private-pass_on:%' DESC, id",
+        (f"private-pass_on:{ident}:pass-on",
+         f"private-confirmation:{ident}:", f"private-confirmation:{ident};"),
+    ).fetchall()
+    for row in rows:
+        if db.is_private_room_of(conn, row["room_token"], user_id, allow_phone=True):
+            return row["room_token"]
+    return None
 
 
 def _guest_words(conn, task) -> tuple[str, str]:
@@ -942,9 +1104,6 @@ def _guest_words(conn, task) -> tuple[str, str]:
     body = row["body"] or ""
     text = _mail_new_text(body)
     return row["author_label"] or "A guest", body if text is None else text
-
-
-_GUEST_QUOTE_CHARS = 500
 
 
 def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
@@ -971,8 +1130,8 @@ def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
             if len(reply) > TalkTransport.capabilities.max_message_length:
                 raise RequestError("invalid_rendering")
         label, words = _guest_words(conn, task)
-        if len(words) > _GUEST_QUOTE_CHARS:
-            words = words[:_GUEST_QUOTE_CHARS].rstrip() + "…"
+        if len(words) > QUOTE_CHARS:
+            words = words[:QUOTE_CHARS].rstrip() + "…"
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
         preview = (
             f"{label} asked in {destination['label']}:\n{words}\n\n"

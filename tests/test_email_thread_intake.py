@@ -188,38 +188,34 @@ def _run_scheduler(config, result):
 
 
 class TestThePassOnNote:
+    """The note itself is `test_email_notes.py`'s; these keep the shapes this
+    file has always driven through the scheduler with delivery mocked."""
+
     def test_no_action_passes_the_new_text_on_and_sends_nothing(self, config, db_path):
         task_id, private = _host_absent_turn(config, db_path)
-        mail = _run_scheduler(config, "NO_ACTION: Alice is only asking Carol.")
+        _run_scheduler(config, "NO_ACTION: Alice is only asking Carol.")
 
         assert _task(db_path, task_id).status == "completed"
-        mail.assert_not_called()
         (row,) = _rows(db_path, "SELECT role, body, about_room_token, delivery_reference "
                        "FROM messages WHERE room_token = ?", (private,))
         assert row["role"] == "system"
         assert row["about_room_token"] == _room_token(config)
         assert row["delivery_reference"] == f"private-pass_on:{task_id}:pass-on"
         # Built from the stored turn: the new text quoted, no wrapper, no
-        # quoted history, nothing of the model's answer.
+        # quoted history; then the outcome and the model's remark.
         assert row["body"] == (
             f"{ALICE} wrote on Dinner plans, without you on the message:\n\n"
-            "> Can we move dinner to Friday?"
+            "> Can we move dinner to Friday?\n\nNo reply sent.\n\n"
+            "Alice is only asking Carol."
         )
         assert _rows(db_path, "SELECT id FROM messages WHERE room_token = ? "
                      "AND role = 'assistant'", (_room_token(config),)) == []
 
-    def test_control_a_reply_is_sent_as_one(self, config, db_path):
-        task_id, private = _host_absent_turn(config, db_path)
-        mail = _run_scheduler(config, "Friday works too, I'll let Carol know.")
-
-        assert _task(db_path, task_id).status == "completed"
-        mail.assert_called_once()
-        assert _rows(db_path, "SELECT id FROM messages WHERE room_token = ?", (private,)) == []
-
-    def test_control_no_action_from_a_turn_the_host_is_on_is_no_pass_on(
+    def test_no_action_from_a_turn_the_host_is_on_writes_nothing(
         self, config, db_path,
     ):
-        """Only a host-absent turn passes on: the host already has this mail."""
+        """The host already has this mail, and a reason given with
+        `NO_ACTION:` is not an answer to them."""
         first = _start_thread(config)
         with db.get_db(db_path) as conn:
             private = db.create_web_chat_room(conn, HOST, "Mine").token
@@ -235,17 +231,18 @@ class TestThePassOnNote:
                            message_id="<a2@ext.example>", references=ROOT,
                            body="Can we move dinner to Friday?")
         with db.get_db(db_path) as conn:
-            delivery, body = private_replies.deliver_pass_on(
-                conn, config, db.get_task(conn, task_id),
+            delivery, body = private_replies.deliver_email_note(
+                conn, config, db.get_task(conn, task_id), outcome="none", remark="",
             )
             notes = conn.execute(
-                "SELECT body FROM notifications WHERE source = 'task_alert'",
+                "SELECT body, dedup_key FROM notifications WHERE source = 'task_alert'",
             ).fetchall()
         assert delivery.dest is None and delivery.notice is not None
-        assert body.endswith("> Can we move dinner to Friday?")
+        assert body.endswith("> Can we move dinner to Friday?\n\nNo reply sent.")
         # The bell stores its body flattened (`flatten_body`).
         (note,) = notes
-        assert note["body"].endswith("Can we move dinner to Friday?")
+        assert "Can we move dinner to Friday?" in note["body"]
+        assert note["dedup_key"] == f"private-note:{task_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -267,10 +264,12 @@ class TestNoGuestModeOnEmail:
             assert room_policy.ensure_policy(conn, _room_token(config)).guest_reply == "held"
             assert private_replies.guest_reply_mode(conn, db.get_task(conn, task_id)) == "direct"
 
-    def test_the_settings_payload_marks_an_email_room(self, config, db_path):
+    def test_the_settings_payload_marks_an_email_room(self, config, db_path, monkeypatch):
         pytest.importorskip("fastapi")
         from istota.webui import app as web_app
 
+        # The payload reads the deployment's speech mode off the app's config (#640).
+        monkeypatch.setattr(web_app, "_config", config)
         _start_thread(config)
         with db.get_db(db_path) as conn:
             view = web_app._room_sharing(
@@ -296,6 +295,11 @@ class TestTheEmailRoomCard:
         assert "reaches everyone on the thread: 'carol' and 2 other people" in card
         assert "untrusted input" in card
         assert "answer `NO_ACTION:`" in card
+        assert "passed on to them privately" not in card
+        # The thread records the mailed body; the answer text is the host's note.
+        assert "with `istota-skill email output`" in card
+        assert "Your answer text is shown only to 'carol'" in card
+        assert "Do not write a separate alert" in card
         # None of the shared-room card's rules apply on a thread.
         for absent in ("guest's turn", "Withheld", "room whisper", "answer-privately",
                        ALICE):

@@ -469,8 +469,8 @@ def _record_sent_email(
         logger.warning("Failed to record sent email for task %d: %s", task.id, e)
 
 
-def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
-    """The body of the mail an email task composed, or ``result`` with none.
+def composed_mail_body(config: "Config", task: db.Task, result: str) -> str | None:
+    """The body of the mail an email task composed, or None when it composed none.
 
     The deferred file first, then an envelope in the result, as
     `deliver_email_result` reads them; the file is peeked, never consumed.
@@ -481,7 +481,32 @@ def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
     )
     if parsed and parsed.get("body"):
         return parsed["body"]
-    return result
+    return None
+
+
+_FENCE_RE = re.compile(r"^```[^\n]*\n.*?^```[ \t]*$", re.S | re.M)
+
+
+def without_email_envelope(result: str) -> str:
+    """``result`` with the ``{"subject","body","format"}`` envelope cut out, so
+    what is left is the model's words beside the mail; unchanged when it
+    carries none, and empty when it is nothing but the envelope."""
+    if _parse_email_output(result) is None:
+        return result
+    text = result.strip()
+    for fence in _FENCE_RE.finditer(text):
+        if _parse_email_output(fence.group(0)) is not None:
+            return (text[:fence.start()] + text[fence.end():]).strip()
+    first, last = text.find("{"), text.rfind("}")
+    if first != -1 and last > first:
+        return (text[:first] + text[last + 1:]).strip()
+    return ""
+
+
+def composed_email_body(config: "Config", task: db.Task, result: str) -> str:
+    """The body of the mail an email task composed, or ``result`` with none."""
+    body = composed_mail_body(config, task, result)
+    return result if body is None else body
 
 
 #: Display cap on a recorded subject: it comes from an inbound header.

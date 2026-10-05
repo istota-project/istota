@@ -214,7 +214,7 @@ A **notification bell** sits in the app bar on every page, not only in the chat.
 
 ## Pages
 
-**Chat**: an always-on, full-page in-app chat console — the first nav tab, before Feeds. Discord/Slack-style rooms in a sidebar, live SSE streaming of tool use and intermediate text, `!commands` and the `!model` prefix, confirmation cards, attachments (drag, paste, the `+` button, or a voice message), clickable attachment chips, and per-message copy / star / delete. See [Web chat](web-chat.md) for the full surface.
+**Chat**: an always-on, full-page in-app chat console — the first nav tab, before Feeds. Discord/Slack-style rooms in a sidebar, live SSE streaming of tool use and intermediate text, `!commands` and the `!model` prefix, confirmation cards, attachments (drag, paste, the `+` button, or a voice message), clickable attachment chips, and per-message copy / star / delete. Email thread rooms render each message as a mail card, are read-only, and sit in a collapsed "Email threads" group under the room list. See [Web chat](web-chat.md) for the full surface.
 
 **Dashboard**: shows available features for the authenticated user. When [Google Workspace](google-workspace.md) is enabled, the dashboard also shows a connect/disconnect card for linking a Google account.
 
@@ -271,10 +271,10 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 | `/istota/api/chat/config` | Chat limits + streaming intervals |
 | `/istota/api/settings/*` | Per-user preferences, connected services, per-module settings |
 | `/istota/api/admin/*` | Admin dashboard aggregates (stats, logs, config view) — allowlist-gated |
-| `/istota/api/chat/rooms` | Room CRUD (list/create); `PATCH /chat/rooms/{id}` renames; `DELETE` hard-deletes |
+| `/istota/api/chat/rooms` | Room CRUD (list/create); `PATCH /chat/rooms/{id}` renames and changes per-user settings, `listed` among them (an email thread only; any other room is 400); `DELETE` hard-deletes |
 | `/istota/api/chat/rooms/{id}/promote` | Create a Talk conversation for a web-origin room and bind them, or replace a binding whose conversation was deleted |
 | `/istota/api/chat/rooms/{id}/read` · `/chat/rooms/read-all` | Mark read cursors |
-| `/istota/api/chat/rooms/{id}/messages` | Message history + send |
+| `/istota/api/chat/rooms/{id}/messages` | Message history + send. A send into an email room is 409 `read_only`. A send may carry `about_room: <token>` to link the turn to an email thread with no note to reply to; a link that fails its checks is 400 and creates no task |
 | `/istota/api/chat/messages` | Cross-room message query |
 | `/istota/api/chat/messages/{id}/star` · `DELETE /chat/messages/{id}` | Star / delete a message |
 | `/istota/api/chat/stream` · `/chat/events` | Room-level event stream and snapshot |

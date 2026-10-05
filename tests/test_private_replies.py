@@ -761,6 +761,51 @@ class TestSend:
         assert post.args["message"] == "re: Thread\n\nShall I?"
 
 
+class TestTheNotePush:
+    """An email note (kind `pass_on`) in a web-only room is announced by one
+    room-free bell row; a Talk-bound room gets the post and nothing more."""
+
+    def _note(self, config, parent):
+        return _deliver(config, parent, kind="pass_on", reference="7:pass-on",
+                        body="Ana wrote on Thread:\n\n> Saturday?\n\nReplied.")
+
+    def test_a_web_only_room_raises_one_room_free_bell_row(self, config, talk):
+        from istota.notifications.store import ROOM_FREE_SURFACES
+
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn, name="Thread")
+            _web_room(conn)
+        delivery = self._note(config, parent)
+        assert delivery.dest is not None and delivery.dest.talk_ref is None
+        with patch("istota.notifications.delivery.send_notification",
+                   return_value=True) as push:
+            for _ in range(2):
+                asyncio.run(private_replies.send_private(config, delivery, body="x"))
+        (row,) = _rows(config, "SELECT dedup_key, title FROM notifications "
+                               "WHERE source='task_alert'")
+        assert row == {"dedup_key": "private-note:7", "title": "Private note about Thread"}
+        (call,) = push.call_args_list
+        assert call.kwargs["only_surfaces"] == ROOM_FREE_SURFACES
+        assert talk["client"].calls == []
+
+    def test_a_talk_room_gets_the_post_and_no_bell_row(self, config, talk):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_talk(conn, name="Thread")
+            private = plain_talk_room(conn, "alice", name="talk")
+        delivery = self._note(config, parent)
+        assert asyncio.run(private_replies.send_private(config, delivery, body="x")) is True
+        assert len(talk["client"].calls_to(private.talk_ref, method="send_message")) == 1
+        assert _rows(config, "SELECT id FROM notifications WHERE source='task_alert'") == []
+
+    def test_a_whisper_in_a_web_only_room_raises_nothing(self, config, talk):
+        with db.get_db(config.db_path) as conn:
+            parent = _shared_web(conn)
+            _web_room(conn)
+        delivery = _deliver(config, parent, kind="whisper", reference="room-whisper:r1")
+        asyncio.run(private_replies.send_private(config, delivery, body="x"))
+        assert _rows(config, "SELECT id FROM notifications WHERE source='task_alert'") == []
+
+
 # ---------------------------------------------------------------------------
 # Linking
 # ---------------------------------------------------------------------------

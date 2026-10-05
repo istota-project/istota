@@ -77,3 +77,44 @@ describe('the card under a parked row', () => {
     expect(container.querySelector('.confirm-card')).toBeNull();
   });
 });
+
+describe('the mail card under an email note (hidden email threads, stage 5)', () => {
+  const note = () =>
+    privateRow({
+      text: 'Ana wrote on Book club:\n\n> Thursday?\n\nReplied.',
+      taskId: 9,
+      mail: {
+        to: ['ana@example.com'],
+        cc: [],
+        subject: 'Re: Book club',
+        state: 'sent',
+        body: 'Thursday works for us.',
+      },
+    });
+
+  it('renders collapsed to one line and expands to the card', async () => {
+    const { container, getByTestId } = render(Message, {
+      message: note(),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    const line = getByTestId('mail-collapsed');
+    expect(container.querySelector('.cmd-row .content [data-testid="mail-card"]')).not.toBeNull();
+    expect(line.textContent).toContain('Sent by email');
+    expect(line.textContent).toContain('To ana@example.com');
+    expect(line.textContent).toContain('Re: Book club');
+    expect(container.textContent).not.toContain('Thursday works for us.');
+    await fireEvent.click(line);
+    expect(container.querySelector('[data-testid="mail-collapsed"]')).toBeNull();
+    expect(container.textContent).toContain('Thursday works for us.');
+  });
+
+  it('is absent on a note whose turn mailed nothing', () => {
+    const { container } = render(Message, {
+      message: privateRow({ taskId: 9 }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('[data-testid="mail-card"]')).toBeNull();
+  });
+});

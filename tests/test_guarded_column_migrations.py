@@ -44,7 +44,7 @@ NEWEST_COLUMNS = [
     ("scheduled_jobs", "publish_shared_kv_trusted"),
     ("messages", "reply_to_message_id"),
     ("rooms", "model_namespace"),
-    ("web_chat_rooms", "color"),
+    ("web_chat_rooms", "listed"),
 ]
 
 

@@ -114,4 +114,36 @@ describe('chat store — a private park card', () => {
     expect(card(s)!.status).toBeUndefined();
     s.teardown();
   });
+
+  it('an email note with its task and mail leaves the queue alone (stage 5)', async () => {
+    api.getRoomMessages.mockResolvedValue({
+      messages: [
+        {
+          role: 'system',
+          text: 'Ana wrote on Book club:\n\nReply waiting for your approval.',
+          notif_id: 10,
+          msg_id: 10,
+          created_at: '2026-10-04T10:00:00Z',
+          about_room: { token: 'rm_thread', name: 'Book club' },
+          task_id: 41,
+          mail: { to: ['ana@example.com'], cc: [], state: 'held', body: 'Thursday.' },
+        },
+      ],
+      active_task: null,
+      active_tasks: [],
+    });
+    const s = await freshSession();
+    await s.init();
+    const noted = () => get(s.messages).find((m) => m.role === 'system' && m.taskId === 41);
+    await vi.waitFor(() => expect(noted()?.mail?.state).toBe('held'));
+    expect(noted()!.confirmation).toBe(false);
+    // No stream for the thread's task and no hold: the room sends at once.
+    expect(api.getTaskEvents).not.toHaveBeenCalled();
+    expect(get(s.status)).toBe('idle');
+    api.sendChatMessage.mockResolvedValue({ ok: true, task_id: 50 });
+    await s.send('tell them yes');
+    expect(api.sendChatMessage).toHaveBeenCalled();
+    expect(get(s.messages).some((m) => m.queueHeld)).toBe(false);
+    s.teardown();
+  });
 });

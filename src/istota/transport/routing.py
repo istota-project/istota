@@ -1015,6 +1015,21 @@ def phone_transcript_surface(conn, room_token) -> str | None:
     return found.surface
 
 
+def email_thread_room(conn, room_token) -> bool:
+    """Whether the room is an email thread, which web reads and may not write.
+
+    The thread room is a view of the mail thread: a web turn there would be
+    answered in web and mailed to nobody. Kept beside :func:`phone_room`
+    because the send route asks both, but answered by
+    `rooms.scopes.is_email_thread_room`, the one rule for a thread room.
+    """
+    from ..rooms.scopes import is_email_thread_room
+
+    if not room_token:
+        return False
+    return is_email_thread_room(conn, room_token)
+
+
 def transcript_room_for_task(conn, config: "Config", task: "db.Task") -> str | None:
     """The transcript room for a task that already exists.
 
