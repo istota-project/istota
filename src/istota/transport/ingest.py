@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Sequence
 
 from istota import db
+from istota.rooms import ack_reaction
 from istota.rooms import policy as room_policy
 from istota.rooms import veto as room_veto
 from istota.rooms import speech_gate
@@ -185,7 +186,10 @@ class InboundResult:
 
     ``message_id`` is the stored `role='user'` row, None when the surface keeps
     no transcript for this turn. ``gate_reason`` is the gate's rung when it
-    declined, for the caller's log only.
+    declined, for the caller's log only. ``held_for_reaction`` is a task
+    created held because the gate read the turn as an ack: the caller sends
+    `ack_reaction.reaction_for` after its commit, then `ack_reaction.settle`
+    (ISSUE-655).
     """
 
     room_token: str
@@ -193,6 +197,7 @@ class InboundResult:
     message_id: int | None
     outcome: Literal["created", "recorded", "dropped", "replayed"]
     gate_reason: str | None = None
+    held_for_reaction: bool = False
 
 
 def _prior_turn(
@@ -622,6 +627,9 @@ def record_inbound(
     host_absent: bool = False,
     # Email only: the mail card's metadata, written onto the stored user row.
     mail_meta: dict | None = None,
+    # The caller can answer an ack with a reaction after its commit (Talk, a
+    # WhatsApp group). An ack's task is then created held (ISSUE-655).
+    can_react: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -965,6 +973,7 @@ def record_inbound(
         audience = room_policy.audience_class(
             conn, transcript_token, is_group_chat=multi_human,
         )
+    decision = None
     if message_id is not None:
         decision = _ask_gate(
             conn, config, room_token=transcript_token, surface=surface,
@@ -993,7 +1002,9 @@ def record_inbound(
     if record_only:
         return InboundResult(room_token, None, message_id, "recorded")
 
-    # 5. Create the task and stamp the stored row with it.
+    # 5. Create the task and stamp the stored row with it. An ack the caller
+    #    can react to is held, not claimable, until the reaction is settled.
+    held = ack_reaction.should_hold(config, decision, can_react=can_react)
     task_id = db.create_task(
         conn,
         prompt=task_prompt,
@@ -1021,12 +1032,15 @@ def record_inbound(
         model_namespace=model_namespace,
         priority=priority,
         queue=queue,
+        scheduled_for=ack_reaction.hold_until() if held else None,
     )
     if message_id is not None:
         conn.execute(
             "UPDATE messages SET task_id = ? WHERE id = ?", (task_id, message_id),
         )
-    return InboundResult(room_token, task_id, message_id, "created")
+    return InboundResult(
+        room_token, task_id, message_id, "created", held_for_reaction=held,
+    )
 
 
 def record_phone_turn(
@@ -1080,7 +1094,13 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
     `platform_message_id` + `channel_token`) the existing task's id comes back
     rather than a second one.
     """
-    result = record_inbound(
+    return ingest(conn, config, msg).task_id
+
+
+def ingest(conn, config: "Config", msg: IncomingMessage) -> InboundResult:
+    """`ingest_message`, answering the whole `InboundResult`, for a caller that
+    needs ``held_for_reaction``."""
+    return record_inbound(
         conn,
         config,
         surface=msg.surface,
@@ -1113,5 +1133,5 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         room_container=msg.room_container,
         host_absent=msg.host_absent,
         mail_meta=msg.mail_meta,
+        can_react=msg.can_react,
     )
-    return result.task_id

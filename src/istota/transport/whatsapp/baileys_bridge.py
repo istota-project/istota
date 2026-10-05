@@ -83,6 +83,7 @@ from ._types import (
     WhatsAppInboundMedia,
     WhatsAppSendOutcome,
     WhatsAppSendRequest,
+    WhatsAppSendResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,11 @@ SEND_TIMEOUT_SECONDS = 45.0
 #: wedged sidecar can stall every other send, and it should be well under
 #: `SEND_TIMEOUT_SECONDS`.
 DRAIN_TIMEOUT = 10.0
+
+#: How long a reaction waits for its answer before the ack is replied to
+#: instead (ISSUE-655). Short, and well inside `ack_reaction.HOLD_SECONDS`:
+#: a sidecar that predates the frame never answers, and the reply waits on it.
+REACT_TIMEOUT_SECONDS = 15.0
 
 #: Pending inbound events. Deliberately large and deliberately *dropping* past
 #: it rather than blocking the reader: the worker's own work can include a
@@ -1637,6 +1643,8 @@ class BaileysBridge:
         self._server: asyncio.AbstractServer | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future] = {}
+        # Reactions in flight (ISSUE-655), held so the loop does not drop them.
+        self._react_tasks: set[asyncio.Task] = set()
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=INBOUND_QUEUE_MAX)
         self._worker: asyncio.Task | None = None
         self._supervisor: asyncio.Task | None = None
@@ -3997,6 +4005,12 @@ class BaileysBridge:
             for result in results:
                 if getattr(result, "leave_group_jid", None):
                     await self.leave_group(result.leave_group_jid)
+                if getattr(result, "react_message_id", None):
+                    # Off the serial worker: a sidecar that never answers would
+                    # otherwise stall every chat's inbound for the timeout.
+                    task = asyncio.ensure_future(self._react_to_held_ack(result))
+                    self._react_tasks.add(task)
+                    task.add_done_callback(self._react_tasks.discard)
             return
 
     def _apply_batch_to_db(self, event, classified=_ASK_CLASSIFIER):
@@ -4035,6 +4049,79 @@ class BaileysBridge:
             )
 
     # -- outbound -----------------------------------------------------------
+
+    async def _react_to_held_ack(self, result) -> None:
+        """React to a group ack whose task was created held, then settle it
+        (ISSUE-655): deleted when the reaction was sent, released otherwise.
+        Never raises; a settle that fails leaves the hold to expire, which
+        answers the turn with the short reply."""
+        from ... import db  # noqa: PLC0415
+        from istota.rooms import ack_reaction  # noqa: PLC0415
+
+        reaction = ack_reaction.reaction_for(self._config)
+        reacted = reaction is not None and await self.react(
+            result.react_jid, result.react_message_id, reaction,
+        )
+
+        def settle() -> None:
+            with db.get_db(self._config.db_path) as conn:
+                ack_reaction.settle(
+                    conn, task_id=result.task_id,
+                    message_id=result.react_turn_id, reacted=reacted,
+                )
+
+        try:
+            await asyncio.to_thread(settle)
+        except Exception:
+            logger.warning("whatsapp.baileys.ack_settle_failed", exc_info=True)
+
+    async def react(self, to: str, message_id: str, reaction: str) -> bool:
+        """Ask the sidecar to react to ``message_id`` in ``to``. Never raises.
+
+        True only on the sidecar's success answer. Anything else, including no
+        answer within `REACT_TIMEOUT_SECONDS` (a sidecar that predates the
+        frame ignores it), is False, and the caller replies instead. Unlike a
+        send there is no ledger: a reaction that went out unanswered costs a
+        thumbs-up beside the short reply, never a lost message.
+        """
+        if (
+            self._repairing or self._pairing_window is not None
+            or self._status.fatal_is_permanent or self._session_unpaired
+            or self._status.connection_replaced_latched
+        ):
+            return False
+        request_id = secrets.token_hex(8)
+        try:
+            line = proto.encode(proto.MSG_REACT, **proto.react_payload(
+                request_id, to=to, message_id=message_id, reaction=reaction,
+            ))
+        except proto.BaileysProtocolError:
+            logger.warning("whatsapp.baileys.react_unencodable")
+            return False
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        try:
+            await asyncio.wait_for(
+                self._write_lock.acquire(), timeout=REACT_TIMEOUT_SECONDS,
+            )
+            try:
+                writer = self._writer
+                if writer is None or writer.is_closing():
+                    return False
+                self._pending[request_id] = future
+                writer.write(line)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(writer.drain(), timeout=DRAIN_TIMEOUT)
+            finally:
+                self._write_lock.release()
+            outcome = await asyncio.wait_for(future, timeout=REACT_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("whatsapp.baileys.react_failed")
+            return False
+        finally:
+            self._pending.pop(request_id, None)
+        return isinstance(outcome, WhatsAppSendResult)
 
     async def leave_group(self, group_jid: str) -> bool:
         """Ask the sidecar to leave a WhatsApp group (D14). Never raises.

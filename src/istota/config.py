@@ -329,10 +329,13 @@ class SpeechGateConfig:
     ``disposition`` widens the classifier's speak cases: ``"reserved"`` or
     ``"friendly"`` (also answers thanks and reactions to the bot's last
     answer, in one short line). An unrecognised value reads as ``reserved``.
+    ``ack_reaction`` is the emoji a friendly room's ``ack`` is answered with
+    on Talk and in WhatsApp groups, instead of a reply; empty turns that off.
     """
 
     mode: str = "mention"
     disposition: str = "reserved"
+    ack_reaction: str = "\N{THUMBS UP SIGN}"
     model: str = "fast"  # role alias, resolved per brain namespace; not a pin
     window_messages: int = 8  # transcript turns the classifier sees
     max_message_chars: int = 400  # per-turn cap inside the window

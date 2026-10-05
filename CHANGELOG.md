@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The bot reacts to thanks instead of replying, on Talk and in WhatsApp groups** (#655). In a friendly room, a message that only thanks the bot or acknowledges its answer gets a thumbs-up on that message rather than a reply, so a busy group sees less chatter and no model runs for it. If the reaction cannot be sent the bot answers in one short line, as before; web chat, SMS and email always get the short line. The emoji is the operator's `[speech_gate] ack_reaction`, and setting it empty turns reactions off.
+
+  **Upgrade note:** update the Baileys sidecar with the daemon for WhatsApp groups; an older sidecar ignores the reaction and the bot replies after a short wait. Adds a `reacted` column to `speech_gate_decisions` by migration.
 - **A shared room's host can set the speech gate's disposition for that room** (#654). `!room disposition reserved|friendly|default` and the Disposition field in the web room settings override `[speech_gate] disposition` for one room, so a busy group can stay reserved while a small working room is friendly. The setting matters only while the room is on the classifier, and both say so otherwise.
 
   **Upgrade note:** adds a `disposition` column to `room_policy` by migration.

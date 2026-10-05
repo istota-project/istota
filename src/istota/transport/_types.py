@@ -106,6 +106,9 @@ class IncomingMessage:
     # Email only: the mail card's metadata (`mail_card.received_mail_meta`),
     # written onto the stored user row as `messages.received_mail`.
     mail_meta: "dict | None" = None
+    # The caller reacts to an ack after its commit (ISSUE-655); see
+    # `record_inbound`'s parameter of the same name.
+    can_react: bool = False
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None

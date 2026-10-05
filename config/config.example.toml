@@ -941,6 +941,11 @@ mode = "mention"
 # "friendly" also answers thanks and other reactions to its last answer, in
 # one short line. An unknown value is "reserved".
 disposition = "reserved"
+# Under "friendly", a turn the classifier reads as only thanks is answered on
+# Talk and in WhatsApp groups with this reaction instead of a message, and
+# falls back to the one short line if the reaction cannot be sent. Empty
+# turns reactions off. Web, SMS and email always get the short line.
+ack_reaction = "\U0001F44D"
 # Classifier model. A role alias ("fast"), resolved per brain namespace.
 model = "fast"
 # Transcript turns the classifier sees, and the per-turn character cap

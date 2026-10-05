@@ -59,7 +59,7 @@ The room model (defined in `schema.sql`) supersedes the de-facto tasks-as-histor
 | `room_vetoes` | One row per person who switched the bot off in a room, with `agreed_at` for their own `!<bot> on`. Emptied when the room comes back on |
 | `room_notices` | Veto replies owed to a Talk conversation or WhatsApp group by a process that cannot post there itself, posted at most once by the scheduler's `room-notices` gate (which also posts the one-time announcement, tracked on `room_policy.announced_at`) |
 | `room_epochs` | Audience boundaries: who joined and the highest `messages.id`, `tasks.id` and Talk message id at that moment. `epoch = 0` rows record a surface's first observed roster |
-| `speech_gate_decisions` | The speech gate's audit log: rung, whether it spoke, model, latency, the disposition in force, the reply kind (`reply` or `ack`) when it spoke, and a pointer to the message, never its text. Pruned after `[speech_gate] decision_retention_days` |
+| `speech_gate_decisions` | The speech gate's audit log: rung, whether it spoke, model, latency, the disposition in force, the reply kind (`reply` or `ack`) when it spoke, whether an ack was answered with a reaction (`reacted`), and a pointer to the message, never its text. Pruned after `[speech_gate] decision_retention_days` |
 | `room_dismissals` | Per-user "hide this room" tombstone, cleared by the user's own next inbound |
 | `room_read_state` | Per-surface, per-user read cursors driving unread badges |
 | `message_stars` | Per-user starred messages (Talk has no per-message star API, so this is web-only) |

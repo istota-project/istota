@@ -73,6 +73,8 @@ const MSG_GROUP_ROSTER = 'group_roster';
 const MSG_SEND = 'send';
 const MSG_SHUTDOWN = 'shutdown';
 const MSG_LEAVE_GROUP = 'leave_group';
+// React to an inbound message (ISSUE-655), answered with a `send_result`.
+const MSG_REACT = 'react';
 
 // Every `reason` the daemon's fixed table knows. Anything else there renders
 // as the generic sentence, which is a worse diagnostic rather than a leak —
@@ -1082,6 +1084,15 @@ function rememberInbound(chat, message) {
   while (inboundMessages.size > INBOUND_CACHE_LIMIT) {
     inboundMessages.delete(inboundMessages.keys().next().value);
   }
+}
+
+// The content of a reaction to `original`, a message `recallInbound` gave
+// back, or null when there is nothing to react to. The key is the original's
+// own, which is why only a cached message can be reacted to.
+function reactionContent(original, reaction) {
+  if (!original || !original.key || typeof original.key.id !== 'string') return null;
+  if (typeof reaction !== 'string' || !reaction) return null;
+  return { react: { text: reaction, key: original.key } };
 }
 
 function recallInbound(id, chat) {
@@ -2689,6 +2700,42 @@ class Session {
     });
   }
 
+  // ISSUE-655: react to an inbound message instead of replying. Only one this
+  // process still holds can be reacted to; a miss is a definite refusal, and
+  // the daemon then replies.
+  async react(payload) {
+    const requestId = payload && payload.request_id;
+    if (typeof requestId !== 'string' || !requestId) {
+      log('warn', 'a reaction arrived with no request id');
+      return;
+    }
+    if (!this.sock) {
+      this.answer(requestId, { ok: false, reason: 'not_connected', definite: true });
+      return;
+    }
+    const content = reactionContent(
+      recallInbound(payload.message_id, payload.to), payload.reaction,
+    );
+    if (!content) {
+      this.answer(requestId, { ok: false, reason: 'rejected', definite: true });
+      return;
+    }
+    try {
+      const sent = await this.sock.sendMessage(payload.to, content);
+      const id = sent && sent.key && sent.key.id;
+      if (typeof id !== 'string' || !id) {
+        // Possibly sent; the daemon replies as well, which costs a duplicate
+        // acknowledgement rather than a missed one.
+        this.answer(requestId, { ok: false, reason: 'internal', definite: false });
+        return;
+      }
+      this.answer(requestId, { ok: true, message_id: id });
+    } catch (err) {
+      log('warn', 'a reaction failed', { kind: err && err.name });
+      this.answer(requestId, { ok: false, reason: sendFailureReason(err), definite: false });
+    }
+  }
+
   // D14: the daemon asks the bot to leave a group whose host left it.
   async leaveGroup(jid) {
     if (!isGroupJid(jid) || !this.sock) return;
@@ -3165,6 +3212,12 @@ function main() {
       });
       return;
     }
+    if (type === MSG_REACT) {
+      session.react(payload).catch((err) => {
+        log('error', 'a reaction escaped', { kind: err && err.name });
+      });
+      return;
+    }
     if (type === MSG_LEAVE_GROUP) {
       session.leaveGroup(payload && payload.group_jid).catch((err) => {
         log('error', 'a group leave escaped', { kind: err && err.name });
@@ -3261,6 +3314,7 @@ module.exports = {
   SENT_CACHE_LIMIT,
   rememberInbound,
   recallInbound,
+  reactionContent,
   INBOUND_CACHE_LIMIT,
   AUTH_TEMP_PREFIX,
   authFileName,

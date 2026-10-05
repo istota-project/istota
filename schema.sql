@@ -1692,6 +1692,9 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     disposition TEXT,
     -- 'reply'|'ack' on a turn the bot answers, NULL otherwise
     kind       TEXT,
+    -- On an ack only: 1 answered with a reaction and no task, 0 the reaction
+    -- failed and the held task replied; NULL when no reaction was tried
+    reacted    INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_speech_gate_room ON speech_gate_decisions (room_token, id);

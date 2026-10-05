@@ -728,7 +728,14 @@ def handle_group_message(
         is_command=is_command,
         room_container=True,
         classified=classified,
+        can_react=True,
     )
+    if outcome.held_for_reaction:
+        return done(WhatsAppEventResult(
+            "group_ack", user_id=user_id, task_id=outcome.task_id,
+            react_jid=group_jid, react_message_id=event.message_id,
+            react_turn_id=outcome.message_id,
+        ))
     disposition = "task" if outcome.task_id is not None else f"group_{outcome.outcome}"
     return done(WhatsAppEventResult(
         disposition, user_id=user_id, task_id=outcome.task_id,

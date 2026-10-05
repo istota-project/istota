@@ -1913,3 +1913,113 @@ class TestGroupFrames:
 
         message = await sidecar.expect(proto.MSG_LEAVE_GROUP)
         assert message["group_jid"] == self.GROUP
+
+
+class TestTheReactFrame:
+    """ISSUE-655: a group ack answered with a reaction over the real socket."""
+
+    GROUP = "120363000000000001@g.us"
+
+    async def test_the_frame_names_the_inbound_message_and_the_answer_counts(
+        self, bridge, sidecar,
+    ):
+        task = asyncio.ensure_future(
+            bridge.react(self.GROUP, "BAE5THANKS", "\N{THUMBS UP SIGN}"),
+        )
+        request = await sidecar.expect(proto.MSG_REACT)
+        await sidecar.say(
+            proto.MSG_SEND_RESULT, request_id=request["request_id"], ok=True,
+            message_id="BAE5REACT",
+        )
+
+        assert await asyncio.wait_for(task, timeout=2.0) is True
+        assert (request["to"], request["message_id"], request["reaction"]) == (
+            self.GROUP, "BAE5THANKS", "\N{THUMBS UP SIGN}")
+
+    async def test_a_refusal_is_a_failed_reaction(self, bridge, sidecar):
+        task = asyncio.ensure_future(bridge.react(self.GROUP, "GONE", "x"))
+        request = await sidecar.expect(proto.MSG_REACT)
+        await sidecar.say(
+            proto.MSG_SEND_RESULT, request_id=request["request_id"], ok=False,
+            reason="rejected", definite=True,
+        )
+        assert await asyncio.wait_for(task, timeout=2.0) is False
+
+    async def test_a_sidecar_that_never_answers_is_a_failed_reaction(
+        self, bridge, sidecar, monkeypatch,
+    ):
+        """What a sidecar predating the frame does: log it and say nothing."""
+        monkeypatch.setattr(bridge_module, "REACT_TIMEOUT_SECONDS", 0.2)
+        task = asyncio.ensure_future(bridge.react(self.GROUP, "BAE5THANKS", "x"))
+        await sidecar.expect(proto.MSG_REACT)
+        assert await asyncio.wait_for(task, timeout=2.0) is False
+        assert not bridge._pending
+
+    def _held(self, config):
+        """A held ack task, its turn and its decision, as `record_inbound`
+        leaves them."""
+        from istota.rooms import ack_reaction
+
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "grp", USER, origin="whatsapp", name="Family")
+            message_id = db.add_message(
+                conn, "grp", role="user", body="Thanks!", origin_surface="whatsapp",
+                author_user_id=USER,
+            )
+            task_id = db.create_task(
+                conn, prompt="Thanks!", user_id=USER, source_type="whatsapp",
+                conversation_token="grp", scheduled_for=ack_reaction.hold_until(),
+            )
+            conn.execute(
+                "UPDATE messages SET task_id = ? WHERE id = ?", (task_id, message_id),
+            )
+            conn.execute(
+                "INSERT INTO speech_gate_decisions (room_token, surface, user_id, "
+                "message_id, spoke, rung, kind) VALUES ('grp', 'whatsapp', ?, ?, 1, "
+                "'classifier', 'ack')", (USER, message_id),
+            )
+        return task_id, message_id
+
+    def _state(self, config, task_id, message_id):
+        with db.get_db(config.db_path) as conn:
+            task = conn.execute(
+                "SELECT scheduled_for FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            reacted = conn.execute(
+                "SELECT reacted FROM speech_gate_decisions WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()[0]
+        return task, reacted
+
+    async def test_a_sent_reaction_removes_the_held_task(self, bridge, sidecar, config):
+        task_id, message_id = self._held(config)
+        result = webhook_module.WhatsAppEventResult(
+            "group_ack", user_id=USER, task_id=task_id, react_jid=self.GROUP,
+            react_message_id="BAE5THANKS", react_turn_id=message_id,
+        )
+        settle = asyncio.ensure_future(bridge._react_to_held_ack(result))
+        request = await sidecar.expect(proto.MSG_REACT)
+        await sidecar.say(
+            proto.MSG_SEND_RESULT, request_id=request["request_id"], ok=True,
+            message_id="BAE5REACT",
+        )
+        await asyncio.wait_for(settle, timeout=2.0)
+
+        assert self._state(config, task_id, message_id) == (None, 1)
+
+    async def test_no_answer_releases_the_held_task(
+        self, bridge, sidecar, config, monkeypatch,
+    ):
+        monkeypatch.setattr(bridge_module, "REACT_TIMEOUT_SECONDS", 0.2)
+        task_id, message_id = self._held(config)
+        result = webhook_module.WhatsAppEventResult(
+            "group_ack", user_id=USER, task_id=task_id, react_jid=self.GROUP,
+            react_message_id="BAE5THANKS", react_turn_id=message_id,
+        )
+        settle = asyncio.ensure_future(bridge._react_to_held_ack(result))
+        await sidecar.expect(proto.MSG_REACT)
+        await asyncio.wait_for(settle, timeout=2.0)
+
+        task, reacted = self._state(config, task_id, message_id)
+        assert task is not None and task["scheduled_for"] is None
+        assert reacted == 0

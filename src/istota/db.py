@@ -396,6 +396,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "message_relays", {"return_claimed_at": "TEXT"})
     # No backfill: NULL is what a row from before the disposition existed is.
     _add_columns(conn, "speech_gate_decisions", {"disposition": "TEXT", "kind": "TEXT"})
+    # ISSUE-655: whether an ack was answered with a reaction. NULL on every
+    # older row, which is what "no reaction was tried" is.
+    _add_columns(conn, "speech_gate_decisions", {"reacted": "INTEGER"})
     # Tasks table migrations
     _add_columns(conn, "tasks", {
         "whatsapp_confirmation_request_id": "TEXT",

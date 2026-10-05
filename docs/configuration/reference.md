@@ -196,6 +196,7 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 |---|---|---|
 | `mode` | `"mention"` | `"mention"` answers only when addressed; `"classifier"` lets a cheap model decide and stays quiet when it fails; `"off"` answers every turn. An unknown value stays quiet |
 | `disposition` | `"reserved"` | With the classifier: `"reserved"` answers a turn addressed to the bot, asking it for something or answering its question; `"friendly"` also answers thanks and other reactions to its last answer, in one short line. An unknown value is `"reserved"`. A room's host can override it for one room with `!room disposition` |
+| `ack_reaction` | `"\U0001F44D"` | Under `"friendly"`, the reaction a thanks-only turn gets on Talk and in WhatsApp groups instead of a reply. One emoji; empty, or anything that is not one emoji, replies with one short line instead |
 | `model` | `"fast"` | Role alias for the classifier, resolved per brain namespace |
 | `window_messages` | `8` | Transcript turns the classifier sees |
 | `max_message_chars` | `400` | Per-turn character cap inside the window |

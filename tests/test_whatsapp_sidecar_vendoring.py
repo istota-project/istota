@@ -40,6 +40,7 @@ in the module docstring of the program itself rather than left as an absence.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -178,6 +179,7 @@ class TestTheSidecarSpeaksTheSameProtocol:
             ("MSG_SHUTDOWN", "MSG_SHUTDOWN"),
             ("MSG_GROUP_ROSTER", "MSG_GROUP_ROSTER"),
             ("MSG_LEAVE_GROUP", "MSG_LEAVE_GROUP"),
+            ("MSG_REACT", "MSG_REACT"),
         ],
     )
     def test_each_message_type_is_spelled_the_same(self, js_name, py_name):
@@ -2679,6 +2681,7 @@ class TestALostCredentialIsAFatalOfItsOwn:
             conn, _ = server.accept()
             conn.settimeout(0.2)
             buffer = b""
+            eof = False
             deadline = time.monotonic() + listen_for
             while time.monotonic() < deadline:
                 try:
@@ -2688,6 +2691,7 @@ class TestALostCredentialIsAFatalOfItsOwn:
                 except socket.timeout:
                     continue
                 if not chunk:
+                    eof = True
                     break
                 buffer += chunk
                 if linger_after_fatal is not None and b'"fatal"' in buffer:
@@ -2698,6 +2702,10 @@ class TestALostCredentialIsAFatalOfItsOwn:
             assert not frames or frames[0]["type"] == "hello", frames
             conn.close()
             returncode = proc.poll()
+            if returncode is None and eof:
+                # The socket closes a moment before the exit status exists.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    returncode = proc.wait(timeout=5)
         finally:
             proc.kill()
             proc.communicate(timeout=15)
@@ -2740,7 +2748,9 @@ class TestALostCredentialIsAFatalOfItsOwn:
         whose alert tells an operator to archive a credential that works."""
         if (SIDECAR_DIR / "node_modules").exists():
             pytest.skip("the dependency tree is installed here")
-        frames, returncode = self._frames(tmp_path, None, listen_for=3.0)
+        # Generous: the read ends at the process's EOF, so only a loaded
+        # machine waits it out, and 3s went red under a parallel run.
+        frames, returncode = self._frames(tmp_path, None, listen_for=15.0)
 
         assert returncode == 3
         assert not [f for f in frames if f["type"] == "fatal"]
