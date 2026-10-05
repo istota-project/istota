@@ -542,7 +542,8 @@ def assert_outcome(
             misses.append(f"{dimension}: expected {want!r}, observed {got!r}")
 
     # 1. processed_emails
-    row = _wait(lambda: probe.processed(sent.message_id), timeout=timeout)
+    row = _wait(lambda: probe.processed(sent.message_id) or ledger_only_row(stack, sent),
+                timeout=timeout)
     seen.processed = row
     if row is None:
         raise AssertionError(
@@ -754,6 +755,28 @@ def assert_outcome(
             + (stack.diagnostics(task) if task else _mail(stack).describe())
         )
     return seen
+
+
+def ledger_only_row(stack, sent: Sent) -> dict | None:
+    """The ledger row of a mail filed without its Message-ID, or None.
+
+    The poller writes a `discarded`, `quiet` or `throttled` row with the sender
+    and subject and no `message_id` (the `mark_email_processed` calls on those
+    branches of `inbound.poll_emails`), so `Probe.processed` cannot find one.
+    Every subject in the suite carries the test's nonce, which is what makes
+    sender plus subject this mail's.
+    """
+    rows = stack.probe.query(
+        "SELECT * FROM processed_emails WHERE message_id IS NULL "
+        "AND lower(sender_email) = lower(?) AND subject = ? ORDER BY id DESC LIMIT 1",
+        [sent.sender, sent.subject],
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    meta = row.get("mail_meta")
+    row["mail_meta"] = json.loads(meta) if isinstance(meta, str) and meta else None
+    return row
 
 
 def user_id_address(user_id: str) -> str:
