@@ -85,6 +85,22 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
   { text: 'Star a message and it turns up in the Starred view, whichever room it was in.' },
   { text: 'Rooms hold separate conversations — each keeps its own memory.' },
   { text: "Add a line to TASKS.md in your workspace and I'll pick it up." },
+  { text: 'Add other people to a chat room to share it. I answer when someone talks to me.' },
+  { text: 'In a shared room, anyone can type !{cmd} off to quiet me, and !{cmd} on to wake me.' },
+  { text: 'In a shared room, reply to one of my messages and I know you are talking to me.' },
+  { text: 'In a shared room, ask me to answer privately and I reply in your own chat with me.' },
+  { text: 'A reply that failed has Retry and Continue: start over, or pick up where it stopped.' },
+  { text: 'If a scheduled job fails, the bell offers Run now instead of waiting for next time.' },
+  { text: 'When a room has moved on, I quote the message I am answering so you know which.' },
+  { text: 'Ask me to pin part of what I remember about you, and the nightly tidy-up keeps it.' },
+  {
+    text: 'Copy me on an email thread and start a line with {bot} when you want my answer.',
+    when: (c) => !!c.email,
+  },
+  {
+    text: 'Labs takes urine and stool results now, not only blood work. See the Health tab.',
+    when: (c) => !!c.features?.health,
+  },
   {
     text: 'Briefings arrive on whatever schedule you set — see the Briefings tab.',
     when: (c) => !!c.features?.briefings,
@@ -144,8 +160,14 @@ export const OCTOPUS_FACTS: string[] = [
 /** The tips that are true for this deployment, bot name substituted. */
 export function availableTips(ctx: TipContext, botName = ''): string[] {
   const name = botName.trim() || 'your assistant';
+  // `{cmd}` is the name as typed after `!`, lowercased with no spaces, which is
+  // `rooms.veto.command_word`'s spelling and its `bot` fallback.
+  const cmd = botName.replace(/\s+/g, '').toLowerCase() || 'bot';
   return TIPS.filter((tip) => !tip.when || tip.when(ctx)).map((tip) =>
-    tip.text.replace(/\{bot\}/g, name).replace(/\{email\}/g, ctx.email ?? ''),
+    tip.text
+      .replace(/\{bot\}/g, name)
+      .replace(/\{cmd\}/g, cmd)
+      .replace(/\{email\}/g, ctx.email ?? ''),
   );
 }
 
