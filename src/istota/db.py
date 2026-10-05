@@ -6137,10 +6137,14 @@ def store_turn_message(
     task_id: int,
     origin_surface: str,
     about_room_token: str | None = None,
+    reply_to_message_id: int | None = None,
 ) -> int | None:
     """Idempotently store a turn's user/assistant message. Returns the new id,
     or None if a row for (room_token, role, task_id) already exists — so a retry
-    that re-completes a task, or a duplicate inbound poll, won't duplicate it."""
+    that re-completes a task, or a duplicate inbound poll, won't duplicate it.
+
+    ``reply_to_message_id`` is the canonical row the message quotes (ISSUE-641
+    quotes an answer's trigger once the room has moved on)."""
     existing = conn.execute(
         "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
         "AND role = ? LIMIT 1",
@@ -6152,6 +6156,7 @@ def store_turn_message(
         conn, room_token, role=role, body=body,
         origin_surface=origin_surface, task_id=task_id,
         about_room_token=about_room_token,
+        reply_to_message_id=reply_to_message_id,
     )
 
 

@@ -976,6 +976,52 @@ function recallSent(id) {
   return sentMessages.get(id);
 }
 
+/*
+ * The last few inbound messages, so an answer can quote the one it answers
+ * (ISSUE-641).
+ *
+ * **A quoted reply needs the whole original `WAMessage`**, which only this
+ * process ever held: the daemon has the id and the text, not the message the
+ * library builds the quote from, and a synthetic `{key: {id}}` stub is a shape
+ * the library was not given and may refuse — spending `unknown` on a message
+ * that never left, for a cosmetic marker. So the quote is applied only when
+ * the original is here, and a miss sends unquoted, decided before the send.
+ *
+ * In memory only, for the reason `sentMessages` is: the value is somebody's
+ * message, and this program writes no content to disk. A restart empties it,
+ * and the answers after one go unquoted. Each entry keeps the chat it arrived
+ * in, so an id can only ever be quoted back into that chat.
+ */
+const INBOUND_CACHE_LIMIT = 256;
+
+const inboundMessages = new Map();
+
+function rememberInbound(chat, message) {
+  const id = message && message.key && message.key.id;
+  if (typeof id !== 'string' || !id || typeof chat !== 'string' || !chat) return;
+  inboundMessages.delete(id);
+  inboundMessages.set(id, { chat: bareJid(chat), message });
+  while (inboundMessages.size > INBOUND_CACHE_LIMIT) {
+    inboundMessages.delete(inboundMessages.keys().next().value);
+  }
+}
+
+function recallInbound(id, chat) {
+  if (typeof id !== 'string' || !id || typeof chat !== 'string') return undefined;
+  const entry = inboundMessages.get(id);
+  if (!entry || !entry.chat || entry.chat !== bareJid(chat)) return undefined;
+  const message = entry.message;
+  // A LID-addressed chat's message keeps its `@lid` key while the send goes to
+  // the phone JID, and the library marks a quote whose key names another chat
+  // as quoted from elsewhere. The copy names the chat the answer goes to.
+  if (message.key && message.key.remoteJid !== chat) {
+    return Object.assign({}, message, {
+      key: Object.assign({}, message.key, { remoteJid: chat }),
+    });
+  }
+  return message;
+}
+
 // How many consecutive failures to *construct* a session before calling the
 // credential unusable. One is a transient fault — a half-written auth file
 // mid-rotation, a DNS blip inside the library — and declaring that permanent
@@ -2661,6 +2707,7 @@ class Session {
         media_bytes: media.media_bytes,
         media_error: media.media_error,
       });
+      if (delivered) rememberInbound(jid, message);
       if (!delivered) {
         // `Link.send` answers false for a destroyed socket and says nothing.
         // Before the chain existed the send happened inside the event
@@ -2829,13 +2876,10 @@ class Session {
       this.answer(requestId, { ok: false, reason: 'not_connected', definite: true });
       return;
     }
-    // **`reply_to_message_id` is carried on the wire and not applied here.**
-    // A quoted reply needs the whole original `WAMessage`, which this process
-    // does not keep, and the obvious synthetic stub — a bare `{key: {id}}` —
-    // is a shape the library was not given and may refuse. A refusal would
-    // land in the catch below as an *ambiguous* failure, spending `unknown`
-    // on a message that never left, for a cosmetic thread marker. Dropping
-    // it costs the quote and nothing else.
+    // `reply_to_message_id` quotes only an original this process still holds
+    // (`recallInbound`); a miss sends unquoted. Decided here, before the
+    // send, so a missing original can never become an ambiguous failure.
+    const quoted = recallInbound(payload.reply_to_message_id, payload.to);
     // A media part this side cannot read sends the text alone; a send that is
     // then empty was never anything, so it is refused before trying.
     const media = outboundMedia(payload.media);
@@ -2852,8 +2896,11 @@ class Session {
       // The last id is the one the ledger keeps: with a long reply split
       // after its image, that is the text a member quotes back.
       let id = '';
-      for (const content of contents) {
-        const sent = await this.sock.sendMessage(payload.to, content);
+      for (const [index, content] of contents.entries()) {
+        // Only the first message of a split send carries the quote.
+        const sent = index === 0 && quoted
+          ? await this.sock.sendMessage(payload.to, content, { quoted })
+          : await this.sock.sendMessage(payload.to, content);
         id = sent && sent.key && sent.key.id;
         // `sent.message` is the generated content, which is what
         // `relayMessage` re-encrypts on a retry — the content handed in is not.
@@ -3134,6 +3181,9 @@ module.exports = {
   rememberSent,
   recallSent,
   SENT_CACHE_LIMIT,
+  rememberInbound,
+  recallInbound,
+  INBOUND_CACHE_LIMIT,
   AUTH_TEMP_PREFIX,
   authFileName,
   writeFileAtomic,

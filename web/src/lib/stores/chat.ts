@@ -29,6 +29,7 @@ import {
   getTaskEvents,
   chatRoomStreamUrl,
   type ChatRoomEvent,
+  type ReplyCitation,
   listOutboundDrafts,
   approveOutboundDraft,
   discardOutboundDraft,
@@ -215,6 +216,15 @@ const ACK_VERBS = [
   'Machinating…',
   'Gallivanting…',
 ];
+
+// The server's citation as a row field. The one place it is mapped, so the
+// history builder and the live-stream merge cannot disagree about it.
+function replyCitation(raw: ReplyCitation | undefined): MessageReply | undefined {
+  if (!raw) return undefined;
+  return raw.deleted
+    ? { msgId: raw.msg_id, deleted: true }
+    : { msgId: raw.msg_id, role: raw.role, excerpt: raw.excerpt, deleted: false };
+}
 
 function randomAckVerb(): string {
   return ACK_VERBS[Math.floor(Math.random() * ACK_VERBS.length)];
@@ -1958,11 +1968,19 @@ function createSession(): ChatSession {
         // and the LLM's own context all show the stored one. Never for an
         // assistant row: that text is the task stream's to build.
         const body = row.role === 'user' && typeof row.text === 'string' ? row.text : null;
-        if ((msgId != null && mine.msgId !== msgId) || (body != null && body !== mine.text)) {
+        // An answer that quotes its question (ISSUE-641) carries the citation
+        // only on its stored row, which the task stream never saw.
+        const cited = replyCitation(row.reply_to);
+        if (
+          (msgId != null && mine.msgId !== msgId) ||
+          (body != null && body !== mine.text) ||
+          (cited != null && mine.replyTo?.msgId !== cited.msgId)
+        ) {
           updateMsg(mine.cid, (m) => {
             if (msgId != null) m.msgId = msgId;
             m.starred = starred;
             if (body != null) m.text = body;
+            if (cited != null) m.replyTo = cited;
           });
         }
         return;
@@ -2767,19 +2785,10 @@ function createSession(): ChatSession {
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,
       attachmentPaths: m.attachment_paths?.length ? m.attachment_paths : undefined,
-      // The single place the server's citation becomes a row field, which is
-      // what makes history, the aggregate panes and the live stream agree —
-      // all three build their rows through here.
-      replyTo: m.reply_to
-        ? m.reply_to.deleted
-          ? { msgId: m.reply_to.msg_id, deleted: true }
-          : {
-              msgId: m.reply_to.msg_id,
-              role: m.reply_to.role,
-              excerpt: m.reply_to.excerpt,
-              deleted: false,
-            }
-        : undefined,
+      // History, the aggregate panes and the live stream all build their rows
+      // through here, and a streamed row merged into one already on screen
+      // takes the same `replyCitation`, so the four agree.
+      replyTo: replyCitation(m.reply_to),
     };
   }
 

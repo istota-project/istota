@@ -473,6 +473,38 @@ class TestGuestReplyThroughTheScheduler:
         # The bot's answer to the guest's turn (ISSUE-612), on the guest's task.
         assert posted == [(REPLY, ident)]
 
+    def test_a_proposal_released_after_the_room_moved_on_quotes_the_guest(
+        self, tmp_path, monkeypatch, fake_talk,
+    ):
+        """ISSUE-641: approval takes time, so the rule is judged at release.
+        The room moved on while the host decided, and the post quotes the
+        guest's turn, in the transcript and on Talk."""
+        config, ident, _ = _run_guest_task(tmp_path, monkeypatch, fake_talk, "held")
+        with db.get_db(config.db_path) as conn:
+            private = db.default_web_room(conn, "alice").token
+            confirmations.apply_answer(
+                conn, db.get_task(conn, ident),
+                confirmations.Answer(approve=True, trust_sender=False),
+                config, by="web", conversation_token=private,
+            )
+            (guest_row,) = conn.execute(
+                "SELECT id FROM messages WHERE task_id = ? AND role = 'user'", (ident,),
+            ).fetchall()
+            db.set_message_external_id(conn, guest_row["id"], "talk", "777")
+            _member_turn(conn, config, "bob", "meanwhile, dinner?", addressed=False)
+            row = conn.execute(
+                "SELECT * FROM whatsapp_skill_requests WHERE origin_task_id = ?", (ident,),
+            ).fetchone()
+        asyncio.run(private_replies.deliver_request(config, row))
+        with db.get_db(config.db_path) as conn:
+            (posted,) = conn.execute(
+                "SELECT reply_to_message_id FROM messages WHERE room_token = 'grp' "
+                "AND role = 'assistant'").fetchall()
+        assert posted["reply_to_message_id"] == guest_row["id"]
+        (talk_post,) = [c for c in fake_talk.calls_to("grp", method="send_message")
+                        if REPLY in c.args["message"]]
+        assert talk_post.args["reply_to"] == 777
+
     def test_the_room_keeps_no_ack_and_a_watching_client_still_finishes(
         self, tmp_path, monkeypatch, fake_talk,
     ):
