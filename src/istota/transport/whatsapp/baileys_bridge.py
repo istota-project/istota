@@ -1456,8 +1456,16 @@ def stage_inbound_media(
         if media_rules.sniff_staged(staged, kind) is None:
             media_rules.discard_staged(staged)
             return dataclasses.replace(event, media=None)
+        placed_as = kind
+        if kind == "gif":
+            # The MP4 becomes one still of its frames (ISSUE-647), placed as
+            # an image; a GIF that cannot be shown is unsupported, not failed.
+            staged = media_rules.gif_to_still(staged)
+            if staged is None:
+                return dataclasses.replace(event, media=None)
+            placed_as = "image"
         attachment = media_rules.stage_to_attachment(
-            config, user_id, staged, kind,
+            config, user_id, staged, placed_as,
         )
         if attachment is None:
             return dataclasses.replace(

@@ -108,6 +108,9 @@ MEDIA_FAILED_AUDIO_REPLY = (
 )
 """`MEDIA_FAILED_REPLY` for a voice note, on the same logical key."""
 
+MEDIA_FAILED_GIF_REPLY = "That GIF could not be fetched. Please send it again."
+"""`MEDIA_FAILED_REPLY` for a GIF, on the same logical key."""
+
 MEDIA_ONLY_PROMPT = "The user sent an image with no caption."
 """The prompt an uncaptioned image becomes.
 
@@ -133,6 +136,31 @@ def media_stand_in(
     if media is not None and media.kind == "audio" and attachments:
         return describe_attachment_only_message(attachments)
     return MEDIA_ONLY_PROMPT
+
+
+GIF_ONLY_PROMPT = "The user sent a GIF with no caption."
+"""`MEDIA_ONLY_PROMPT` for a GIF, which is attached as a still of its frames."""
+
+GIF_FRAMES_NOTE = (
+    "[A GIF: the attached image shows up to four of its frames in order, "
+    "left to right, then top to bottom.]"
+)
+"""What a GIF turn says about its one attached image (ISSUE-647), so the model
+does not read four frames as four pictures."""
+
+
+def media_turn_text(
+    text: str, media: WhatsAppInboundMedia | None, attachments: list[str],
+) -> str:
+    """The prompt a turn that carries an attached file becomes.
+
+    The words when there are any, else `media_stand_in`; a GIF adds
+    `GIF_FRAMES_NOTE` either way. One place for the direct chat, a group and
+    the relay reply path.
+    """
+    if media is not None and media.kind == "gif" and attachments:
+        return f"{text or GIF_ONLY_PROMPT}\n{GIF_FRAMES_NOTE}"
+    return text or media_stand_in(media, attachments)
 
 
 _TEXT_TYPES = frozenset({"text"})
@@ -1156,10 +1184,10 @@ def _dispatch_inbound(
         )
         return WhatsAppEventResult(
             "media_failed", user_id=user_id,
-            response_text=(
-                MEDIA_FAILED_AUDIO_REPLY if event.media.kind == "audio"
-                else MEDIA_FAILED_REPLY
-            ),
+            response_text={
+                "audio": MEDIA_FAILED_AUDIO_REPLY,
+                "gif": MEDIA_FAILED_GIF_REPLY,
+            }.get(event.media.kind, MEDIA_FAILED_REPLY),
             response_logical_key=f"media-failed:{event.message_id}",
         )
 
@@ -1167,7 +1195,7 @@ def _dispatch_inbound(
         [event.media.staged_path] if event.media is not None else []
     )
     turn = record_whatsapp_turn(
-        conn, config, user_id, text or media_stand_in(event.media, attachments),
+        conn, config, user_id, media_turn_text(text, event.media, attachments),
         external_id=event.message_id, attachments=attachments,
         quoted_message_id=event.reply_to_message_id,
     )

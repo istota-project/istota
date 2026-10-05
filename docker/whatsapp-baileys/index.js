@@ -154,6 +154,7 @@ const MEDIA_EXTENSIONS = {
   'audio/wav': 'wav',
   'audio/flac': 'flac',
   'audio/webm': 'webm',
+  'video/mp4': 'mp4',
 };
 const MEDIA_EXTENSION_FALLBACK = 'bin';
 
@@ -710,19 +711,25 @@ function hasReadableContent(message) {
 }
 
 // Message keys that carry media this surface fetches, in precedence order.
+// A third element is a test the node must pass: a `videoMessage` is fetched
+// only when it plays as a GIF (ISSUE-647), and a plain video stays
+// unsupported.
 const MEDIA_KINDS = [
   ['imageMessage', 'image'],
   ['audioMessage', 'audio'],
+  ['videoMessage', 'gif', (node) => node.gifPlayback === true],
 ];
 
 /*
  * The media this surface will fetch, as `{ kind, node }`, or null.
  *
- * **`imageMessage` and `audioMessage`, and nothing else.** The kind is the
- * frame's `message_type`, and the daemon sniffs the bytes against that kind
- * only. A voice note and a forwarded audio file are both `audioMessage` and
- * are treated alike, whatever `ptt` says. Video (round video notes included),
- * documents and stickers keep the unsupported reply, and a sticker is the
+ * **`imageMessage`, `audioMessage`, and a `videoMessage` that plays as a
+ * GIF, and nothing else.** The kind is the frame's `message_type`, and the
+ * daemon sniffs the bytes against that kind only. A voice note and a
+ * forwarded audio file are both `audioMessage` and are treated alike,
+ * whatever `ptt` says. A GIF is an MP4 with `gifPlayback`, which the daemon
+ * turns into one still of its frames (ISSUE-647). Other video (round video
+ * notes included), documents and stickers keep the unsupported reply, and a sticker is the
  * case that says why the gate is here rather than at the sniff: a sticker is
  * WebP, so it would pass a signature test cleanly. What excludes it is its
  * message type, which is a thing WhatsApp said rather than a thing the bytes
@@ -741,9 +748,11 @@ const MEDIA_KINDS = [
 function mediaPart(message) {
   const content = message && message.message;
   if (!content || typeof content !== 'object') return null;
-  for (const [key, kind] of MEDIA_KINDS) {
+  for (const [key, kind, admits] of MEDIA_KINDS) {
     const node = content[key];
-    if (node && typeof node === 'object') return { kind, node };
+    if (node && typeof node === 'object' && (!admits || admits(node))) {
+      return { kind, node };
+    }
   }
   return null;
 }
@@ -770,9 +779,9 @@ function messageText(message) {
   if (content.extendedTextMessage && typeof content.extendedTextMessage.text === 'string') {
     return content.extendedTextMessage.text;
   }
-  // Audio carries no caption, so only an image's is read.
+  // Audio carries no caption, so only an image's or a GIF's is read.
   const media = mediaPart(message);
-  if (media && media.kind === 'image' && typeof media.node.caption === 'string') {
+  if (media && media.kind !== 'audio' && typeof media.node.caption === 'string') {
     return media.node.caption;
   }
   return null;
@@ -780,12 +789,11 @@ function messageText(message) {
 
 /*
  * What a message this surface cannot open was, as the label the daemon names
- * it by (`media.UNSUPPORTED_LABELS`), in precedence order. A video is a GIF
- * when WhatsApp says it plays as one: every GIF, Giphy's included, arrives as
- * an MP4 `videoMessage` with `gifPlayback`.
+ * it by (`media.UNSUPPORTED_LABELS`), in precedence order. A video that plays
+ * as a GIF never reaches here: `mediaPart` fetches it (ISSUE-647).
  */
 const UNSUPPORTED_KINDS = [
-  ['videoMessage', (node) => (node.gifPlayback === true ? 'gif' : 'video')],
+  ['videoMessage', 'video'],
   ['ptvMessage', 'video_note'],
   ['stickerMessage', 'sticker'],
   ['documentMessage', 'document'],

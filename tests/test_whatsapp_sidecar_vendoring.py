@@ -51,7 +51,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota.lib import audio_sniff, image_sniff
+from istota.lib import audio_sniff, image_sniff, video_sniff
 from istota.transport.whatsapp import baileys_protocol as proto
 from istota.transport.whatsapp import identity, media
 
@@ -991,6 +991,10 @@ class TestTheSidecarsInboundMedia:
             # type up here rather than by the sniff down there. A round video
             # note is video, not audio.
             ({"videoMessage": {"mimetype": "video/mp4"}}, None),
+            # A GIF is an MP4 that plays as one (ISSUE-647); a plain video
+            # keeps the unsupported reply.
+            ({"videoMessage": {"mimetype": "video/mp4", "gifPlayback": True}}, "gif"),
+            ({"videoMessage": {"gifPlayback": "true"}}, None),
             ({"ptvMessage": {"mimetype": "video/mp4"}}, None),
             ({"documentMessage": {"mimetype": "audio/ogg"}}, None),
             ({"stickerMessage": {"mimetype": "image/webp"}}, None),
@@ -1039,6 +1043,7 @@ class TestTheSidecarsInboundMedia:
             # and a caption without the bytes is a message answered about an
             # image nobody can see.
             ({"videoMessage": {"caption": "clip"}}, None),
+            ({"videoMessage": {"caption": "lol", "gifPlayback": True}}, "lol"),
             ({"documentMessage": {"caption": "doc"}}, None),
         ],
     )
@@ -1059,8 +1064,8 @@ class TestTheSidecarsInboundMedia:
             ({"audioMessage": {"ptt": True}}, ["audio", None, "audio", None]),
             ({"videoMessage": {"caption": "clip"}},
              ["unsupported", "clip", None, "video"]),
-            ({"videoMessage": {"gifPlayback": True}},
-             ["unsupported", None, None, "gif"]),
+            ({"videoMessage": {"gifPlayback": True, "caption": "lol"}},
+             ["gif", "lol", "gif", None]),
             ({"ptvMessage": {}}, ["unsupported", None, None, "video_note"]),
             ({"stickerMessage": {}}, ["unsupported", None, None, "sticker"]),
             ({"documentMessage": {"caption": "doc"}},
@@ -1091,8 +1096,7 @@ class TestTheSidecarsInboundMedia:
 
     def test_every_unsupported_kind_is_one_the_daemon_can_name(self):
         kinds = self._call(
-            "[...new Set(m.UNSUPPORTED_KINDS.flatMap(([, k]) => "
-            "typeof k === 'string' ? [k] : ['video', 'gif']))]"
+            "[...new Set(m.UNSUPPORTED_KINDS.map(([, k]) => k))]"
         )
 
         assert set(kinds) <= set(media.UNSUPPORTED_LABELS)
@@ -1222,6 +1226,7 @@ class TestTheSidecarsInboundMedia:
         assert self._call("m.MEDIA_EXTENSIONS") == {
             **image_sniff.EXTENSION_BY_MEDIA_TYPE,
             **audio_sniff.EXTENSION_BY_MEDIA_TYPE,
+            **video_sniff.EXTENSION_BY_MEDIA_TYPE,
         }
 
     # --- the staged write --------------------------------------------------

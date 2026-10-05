@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Literal, TypeAlias
 
 WhatsAppMessageKind = Literal["service", "template"]
-MediaKind = Literal["image", "audio"]
+MediaKind = Literal["image", "audio", "gif"]
 """Which pipeline an inbound file may enter, decided by the declared message type."""
 WhatsAppDeliveryStatus = Literal[
     "accepted", "sent", "delivered", "read", "failed",

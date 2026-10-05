@@ -569,7 +569,7 @@ def handle_group_message(
         _media_for_user,
         _report_stranded_media,
         _set_disposition,
-        media_stand_in,
+        media_turn_text,
     )
 
     assert event.group is not None
@@ -650,7 +650,7 @@ def handle_group_message(
         ):
             attachments = [media.staged_path]
             attached = True
-            body = text or media_stand_in(media, attachments)
+            body = media_turn_text(text, media, attachments)
         else:
             stand_in = _stand_in(event, guest=not user_id)
             body = f"{text}\n{stand_in}" if text else stand_in
