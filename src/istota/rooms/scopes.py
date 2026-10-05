@@ -245,16 +245,12 @@ def is_email_thread_room(conn, token: str | None) -> bool:
 
     The user's private email room is bound to email too, under its creator's
     own token rather than a Message-ID, and is not a thread: its turns are the
-    user's own (`transport.email.private_room`).
+    user's own (`transport.email.private_room`). The rule itself is
+    `thread_binding`'s; this adds the canonicalisation.
     """
-    from istota.transport.email.private_room import is_private_email_ref
+    from istota.transport.email.threads import thread_binding
 
-    room = canonical_token(conn, token)
-    binding = db.get_room_binding(conn, room, "email") if room is not None else None
-    if binding is None:
-        return False
-    owner = db.get_room(conn, room)
-    return not is_private_email_ref(binding.surface_ref, owner.user_id if owner else None)
+    return thread_binding(conn, canonical_token(conn, token)) is not None
 
 
 def canonical_token(conn, token: str | None) -> str | None:
