@@ -1,7 +1,7 @@
 """Hidden email threads, stage 4: one private note per mail.
 
 When a note is due (`private_replies.email_note_due`), what it says
-(`email_note_body`), and that the scheduler writes it after delivery, once,
+(`email_note`), and that the scheduler writes it after delivery, once,
 in the host's private room. Driven through `poll_emails` and
 `process_one_task`, with delivery real up to the SMTP seam, as
 `test_email_thread_rooms.py` does.
@@ -249,6 +249,46 @@ class TestTheNote:
         assert len(_notes(db_path, private)) == 1
         assert len(_rows(db_path, "SELECT id FROM notifications WHERE source = 'task_alert' "
                          "AND dedup_key = ?", (f"private-note:{task_id}",))) == 1
+
+
+def _parts(db_path, private):
+    rows = _rows(db_path, "SELECT email_note FROM messages WHERE room_token = ? "
+                 "ORDER BY id", (private,))
+    return [json.loads(r["email_note"]) if r["email_note"] else None for r in rows]
+
+
+class TestTheNoteParts:
+    """ISSUE-644: the web renders a note from its parts, so the code-built
+    header and outcome are stored apart from the model's remark."""
+
+    def test_a_note_stores_its_parts_beside_the_body(self, config, db_path):
+        task_id, private = _absent_turn(config, db_path)
+        _complete(config, "They mean the weekend of your course.",
+                  task_id=task_id, deferred_body="Friday works.")
+        (parts,) = _parts(db_path, private)
+        assert parts == {
+            "header": HEADER_ABSENT[:-1],
+            "outcome": "Replied.",
+            "remark": "They mean the weekend of your course.",
+        }
+        # The body is unchanged: the push surfaces and the bell read it.
+        (note,) = _notes(db_path, private)
+        assert note["body"].startswith(HEADER_ABSENT)
+
+    def test_a_note_with_no_remark_stores_an_empty_one(self, config, db_path):
+        task_id, private = _absent_turn(config, db_path)
+        _complete(config, "NO_ACTION:", task_id=task_id)
+        (parts,) = _parts(db_path, private)
+        assert parts == {"header": HEADER_ABSENT[:-1], "outcome": "No reply sent.",
+                         "remark": ""}
+
+    def test_a_parked_question_stores_its_parts(self, config, db_path):
+        task_id, private = _absent_turn(config, db_path)
+        question = "Shall I tell Alice Friday works? Please confirm."
+        _complete(config, question, task_id=task_id)
+        (parts,) = _parts(db_path, private)
+        assert parts == {"header": HEADER_ABSENT[:-1], "outcome": "Question for you.",
+                         "remark": question}
 
 
 # ---------------------------------------------------------------------------

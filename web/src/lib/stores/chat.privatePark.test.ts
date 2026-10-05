@@ -146,4 +146,52 @@ describe('chat store — a private park card', () => {
     expect(get(s.messages).some((m) => m.queueHeld)).toBe(false);
     s.teardown();
   });
+
+  it("carries an email note's parts and its incoming mail (ISSUE-644)", async () => {
+    const receivedMail = {
+      from: { name: '', address: 'ana@example.com' },
+      to: [],
+      cc: [],
+      date: '',
+      subject: 'Dinner',
+      attachments: [],
+      new_text: 'Friday?',
+      rest: '',
+      labels: {},
+    };
+    api.getRoomMessages.mockResolvedValue({
+      messages: [
+        {
+          role: 'system',
+          text: 'note body',
+          notif_id: 11,
+          msg_id: 11,
+          created_at: '2026-10-04T10:00:00Z',
+          about_room: { token: 'rm_thread', name: 'Book club' },
+          task_id: 42,
+          email_note: { header: 'Ana wrote on Book club', outcome: 'Replied.', remark: 'Hi.' },
+          received_mail: receivedMail,
+        },
+        {
+          role: 'system',
+          text: 'an alert',
+          notif_id: 12,
+          msg_id: 12,
+          created_at: '2026-10-04T10:01:00Z',
+          received_mail: receivedMail,
+        },
+      ],
+      active_task: null,
+      active_tasks: [],
+    });
+    const s = await freshSession();
+    await s.init();
+    const row = (id: number) => get(s.messages).find((m) => m.msgId === id);
+    await vi.waitFor(() => expect(row(11)?.emailNote?.remark).toBe('Hi.'));
+    expect(row(11)!.receivedMail?.subject).toBe('Dinner');
+    // A system row that is not an email note takes no incoming card.
+    expect(row(12)!.emailNote).toBeUndefined();
+    expect(row(12)!.receivedMail).toBeUndefined();
+    s.teardown();
+  });
 });

@@ -3141,8 +3141,19 @@ export interface ChatHistoryMessage {
   // live, with `body` always present.
   mail?: OutgoingMail;
   // User rows in a mail room (an email thread room or the private email
-  // room) only: the mail as the incoming-mail card renders it.
+  // room): the mail as the incoming-mail card renders it. On an email note
+  // that stored its parts, the thread's incoming mail, for the same card.
   received_mail?: ReceivedMail;
+  // An email note's parts (ISSUE-644): the code-built header and outcome line
+  // and the bot's own remark. Absent on a note from before them, which then
+  // renders from `text`.
+  email_note?: EmailNoteParts;
+}
+
+export interface EmailNoteParts {
+  header: string;
+  outcome: string;
+  remark: string;
 }
 
 export type OutgoingMailState = 'sent' | 'held' | 'failed' | 'discarded';

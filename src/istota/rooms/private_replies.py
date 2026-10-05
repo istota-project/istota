@@ -543,6 +543,22 @@ def noted_task_for_reference(conn, delivery_reference: str | None, user_id: str)
     return row["id"] if row else None
 
 
+def email_note_task_for_reference(conn, delivery_reference: str | None,
+                                  user_id: str) -> int | None:
+    """The task an email note is about, when it is ``user_id``'s: the pass-on
+    note, or the private question a thread's parked task asked in its place.
+    The web reads the note's parts and the thread's incoming mail by it."""
+    ident = _reference_task_id(delivery_reference, (NOTE_PREFIX,), _NOTE_SUFFIX)
+    if ident is None:
+        ident = _reference_task_id(delivery_reference, ("private-confirmation:",))
+    if ident is None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE id = ? AND user_id = ?", (ident, user_id),
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def _park_refs_like() -> str:
     return " OR ".join("delivery_reference LIKE ?" for _ in PARK_PREFIXES)
 
@@ -633,8 +649,12 @@ def _bell_note(conn, *, user_id: str, about: str, reference: str, body: str, tas
 
 
 def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
-                    reference: str, body: str, task_id: int | None = None) -> PrivateDelivery:
+                    reference: str, body: str, task_id: int | None = None,
+                    email_note: dict | None = None) -> PrivateDelivery:
     """Record a note for ``user_id`` about ``about_token``, inside the caller's transaction.
+
+    ``email_note`` is an email note's parts (`email_note`), stored beside the
+    body on the room row; the bell row carries the body alone.
 
     ``reference`` is unique per note for the caller (it carries the task or
     request id). A resolver read error is logged and treated as "no private
@@ -669,6 +689,8 @@ def deliver_private(conn, config, *, user_id: str, about_token: str, kind: str,
         conn, dest.room_token, role="system", body=body, origin_surface=dest.surface,
         about_room_token=about, delivery_reference=delivery_reference,
     )
+    if email_note is not None:
+        db.set_email_note(conn, message_id, email_note)
     return PrivateDelivery(dest, message_id, **common)
 
 
@@ -1016,14 +1038,19 @@ def email_note_remark(result: str, mailed: str | None) -> str:
     return remark
 
 
-def email_note_body(conn, task, *, outcome: str, remark: str) -> str:
-    """The note for one mail on an email thread: who wrote on which room, their
-    new text quoted, what became of the reply, then the bot's remark.
+def email_note(conn, task, *, outcome: str, remark: str) -> tuple[str, dict]:
+    """The note for one mail on an email thread, as its body and its parts.
 
-    The first three are built from the stored turn and never from the model's
-    text, through the email wrapper's parser and `threads.new_text`, so neither
-    the wrapper nor the quoted history reaches the host. The remark is the
-    model's, and reaches only the host.
+    The body is who wrote on which room, their new text quoted, what became of
+    the reply, then the bot's remark: what a push surface and the bell show.
+    The parts are ``{header, outcome, remark}``, which the web renders as the
+    row's meta, cards and the bot's own words (ISSUE-644); the quote is left
+    out because the web shows the mail itself.
+
+    The header, quote and outcome are built from the stored turn and never from
+    the model's text, through the email wrapper's parser and
+    `threads.new_text`, so neither the wrapper nor the quoted history reaches
+    the host. The remark is the model's, and reaches only the host.
     """
     from istota.confirmations import flatten
     from istota.transport.email.threads import new_text
@@ -1049,7 +1076,8 @@ def email_note_body(conn, task, *, outcome: str, remark: str) -> str:
         header += ", without you on the message"
     quoted = "\n".join(f"> {line}" if line else ">" for line in text.splitlines()) or ">"
     note = f"{header}:\n\n{quoted}\n\n{NOTE_OUTCOMES[outcome]}"
-    return f"{note}\n\n{remark}" if remark else note
+    parts = {"header": header, "outcome": NOTE_OUTCOMES[outcome], "remark": remark}
+    return (f"{note}\n\n{remark}" if remark else note), parts
 
 
 def deliver_email_note(conn, config, task, *, outcome: str,
@@ -1060,10 +1088,11 @@ def deliver_email_note(conn, config, task, *, outcome: str,
     Kind `pass_on` under ``<task>:pass-on``, so a second delivery returns the
     first row. With no private room it is a `private_note` bell row.
     """
-    body = email_note_body(conn, task, outcome=outcome, remark=remark)
+    body, parts = email_note(conn, task, outcome=outcome, remark=remark)
     delivery = deliver_private(
         conn, config, user_id=task.user_id, about_token=task.conversation_token,
         kind="pass_on", reference=f"{task.id}:pass-on", body=body, task_id=task.id,
+        email_note=parts,
     )
     return delivery, body
 
