@@ -1789,6 +1789,12 @@
     max-width: var(--chat-body-max);
   }
 
+  /* A mail card under the bot's prose gets the same gap as a chip between
+     paragraphs; the card has no outer margin of its own. */
+  .content > .body + :global(.mail-card) {
+    margin-top: var(--space-3);
+  }
+
   .msg.error .body,
   .cmd-output.error {
     color: var(--status-danger-fg);
