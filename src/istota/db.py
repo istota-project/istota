@@ -9324,7 +9324,7 @@ def mark_email_processed(
     the room token for a message on an email thread room. ``host_asked`` marks
     the host's own authenticated, addressed question there (ISSUE-607).
     ``mail_meta`` is the card metadata a held mail's approval copies onto its
-    room row (`inbound.received_mail_meta`).
+    room row (`mail_card.received_mail_meta`).
     """
     cursor = conn.execute(
         """
