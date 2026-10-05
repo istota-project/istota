@@ -22,7 +22,6 @@ import time
 
 import pytest
 
-from istota.notifications.resolvers import outbound_draft
 from istota.notifications.resolvers.task_alert import flatten_body
 from testbed.services import mail
 
@@ -61,29 +60,6 @@ def _ack(stack, answer: flow.Sent, task: dict) -> mail.ReceivedMessage:
     return flow.wait_for_reply(
         stack, after_uid=answer.outbox_uid, subject=f"Answered: task #{task['id']}",
     )
-
-
-def _draft_push(stack, email_people, task_id: int, since: flow.Checkpoint):
-    """The draft a held reply made, and what its notice pushes: the stored
-    body as written, code spans included (`outbound_draft.delivery_body_for`),
-    unlike the gate prompt, whose push goes through `flatten_body`. Equal to
-    the row by construction, so the content is pinned by fragments the
-    producer composes and by `assert_outcome`'s check that the sender's words
-    are absent.
-    """
-    drafts = [
-        d for d in stack.probe.drafts(email_people.host_id,
-                                      id_above=since.mark.get("outbound_drafts"))
-        if d.get("task_id") == task_id
-    ]
-    assert len(drafts) == 1, drafts
-    key = outbound_draft.dedup_key(drafts[0]["id"])
-    rows = stack.probe.notifications(email_people.host_id, dedup_key=key)
-    assert len(rows) == 1, rows
-    push = rows[0]["body"]
-    for fragment in ("Nothing was sent.", f"`!drafts send {drafts[0]['id']}`"):
-        assert fragment in push, (fragment, push)
-    return key, push
 
 
 def _trusted_thread(stack, email_people, nonce: str) -> tuple[flow.Sent, str]:
@@ -154,8 +130,8 @@ class TestTheApproveLoop:
         stack.probe.wait_for_task(status="completed", task_id=task["id"],
                                   timeout=flow.DEFAULT_TIMEOUT)
         assert flow.worker_done(stack, task["id"])
-        draft_key, draft_push = _draft_push(
-            stack, email_people, task["id"], flow.Checkpoint(stack.mark, 0),
+        _, draft_key, draft_push = flow.held_draft(
+            stack, task["id"], flow.Checkpoint(stack.mark, 0),
         )
         seen = flow.assert_outcome(stack, sent, flow.Expected(
             processed=flow.Processed(
@@ -193,7 +169,7 @@ class TestTheApproveLoop:
         stack.probe.wait_for_task(status="completed", task_id=row["task_id"],
                                   timeout=flow.DEFAULT_TIMEOUT)
         assert flow.worker_done(stack, row["task_id"])
-        draft_key, draft_push = _draft_push(stack, email_people, row["task_id"], since)
+        _, draft_key, draft_push = flow.held_draft(stack, row["task_id"], since)
         seen = flow.assert_outcome(stack, again, flow.Expected(
             processed=flow.Processed(
                 routing_method="thread_room", user_id=email_people.host_id,
@@ -359,7 +335,7 @@ class TestAThreadThatAlreadyExists:
             ran["conversation_token"], room,
         )
         assert stack.probe.email_room(sent.message_id) == room
-        draft_key, draft_push = _draft_push(stack, email_people, task["id"], since)
+        _, draft_key, draft_push = flow.held_draft(stack, task["id"], since)
         plus = mail.tagged(email_people.host_id)
         seen = flow.assert_outcome(stack, sent, flow.Expected(
             processed=flow.Processed(

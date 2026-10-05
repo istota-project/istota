@@ -451,6 +451,33 @@ def filed_row(stack, sent: Sent, timeout: float = DEFAULT_TIMEOUT) -> dict:
     return row
 
 
+def held_draft(stack, task_id: int, since: Checkpoint,
+               user_id: str = HOST_ID) -> tuple[dict, str, str]:
+    """The one draft a held reply of `task_id` made, its notice's dedup key,
+    and what that notice pushes.
+
+    The push is the stored body as written, code spans included
+    (`outbound_draft.delivery_body_for`), unlike the gate prompt, whose push
+    goes through `flatten_body`. Equal to the row by construction, so the
+    content is pinned by fragments the producer composes and by
+    `assert_outcome`'s check that the sender's words are absent.
+    """
+    from istota.notifications.resolvers import outbound_draft
+
+    drafts = [
+        d for d in stack.probe.drafts(user_id, id_above=since.mark.get("outbound_drafts"))
+        if d.get("task_id") == task_id
+    ]
+    assert len(drafts) == 1, drafts
+    key = outbound_draft.dedup_key(drafts[0]["id"])
+    rows = stack.probe.notifications(user_id, dedup_key=key)
+    assert len(rows) == 1, rows
+    push = rows[0]["body"]
+    for fragment in ("Nothing was sent.", f"`!drafts send {drafts[0]['id']}`"):
+        assert fragment in push, (fragment, push)
+    return drafts[0], key, push
+
+
 # -- what every scenario asserts ------------------------------------------------
 
 
@@ -913,4 +940,5 @@ __all__ = [
     "confirm_command_from", "email_answer", "email_output_then", "person", "route",
     "send", "stamp", "wait_for_reply", "worker_done", "held_task", "prompt_push",
     "request_mail", "answer_by_mail", "filed_row", "assert_unknown_sender_prompt",
+    "held_draft",
 ]
