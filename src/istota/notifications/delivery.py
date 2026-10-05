@@ -291,6 +291,7 @@ def send_confirmation_prompt(
     message: str,
     *,
     conversation_token: str | None = None,
+    task_id: int | None = None,
 ) -> tuple[bool, int | None]:
     """Ask the user to approve a held task, on whatever surface they read.
 
@@ -310,17 +311,33 @@ def send_confirmation_prompt(
 
     ``conversation_token`` overrides the channel of a *bare* talk destination
     only (the caller's ``alerts_channel``), matching ``send_notification``.
+
+    ``task_id`` names the task in a mailed request's subject, which is how a
+    reply to it is read as an answer (ISSUE-649).
     """
+    from istota.confirmations import record_request_message_id, request_subject
+
     dests = resolve_destinations(config, user_id, "alert")
-    return _dispatch(config, user_id, message, dests,
-                     conversation_token=conversation_token,
-                     purpose="confirmation")
+    mailed: list[str] = []
+    result = _dispatch(config, user_id, message, dests,
+                       conversation_token=conversation_token,
+                       purpose="confirmation",
+                       email_subject=request_subject(task_id) if task_id else None,
+                       email_message_ids=mailed)
+    if task_id and mailed:
+        record_request_message_id(config, user_id, task_id, mailed[-1])
+    return result
 
 
 def _send_email(
     config: "Config", user_id: str, subject: str, body: str,
+    message_ids: list[str] | None = None,
 ) -> bool:
-    """Send a notification via email. Returns True on success."""
+    """Send a notification via email. Returns True on success.
+
+    ``message_ids`` collects the sent mail's Message-ID, for a caller that
+    has to recognise a reply to it (the confirmation request, ISSUE-649).
+    """
     user_config = config.users.get(user_id)
     if not user_config or not user_config.email_addresses:
         logger.warning("No email address for notification (user: %s)", user_id)
@@ -334,7 +351,7 @@ def _send_email(
         from istota.mail.support import get_email_config
         from istota.skills.email import send_email
         email_config = get_email_config(config)
-        send_email(
+        message_id = send_email(
             to=user_config.email_addresses[0],
             subject=subject,
             body=body,
@@ -342,6 +359,8 @@ def _send_email(
             from_addr=config.email.bot_email,
             content_type="plain",
         )
+        if message_ids is not None and isinstance(message_id, str) and message_id:
+            message_ids.append(message_id)
         return True
     except Exception as e:
         logger.error("Failed to send email notification (user: %s): %s", user_id, e)
@@ -752,6 +771,8 @@ def _dispatch(
     reference_id: str | None = None,
     purpose: str = "notification",
     task_room: str | None = None,
+    email_subject: str | None = None,
+    email_message_ids: list[str] | None = None,
 ) -> tuple[bool, int | None]:
     """Deliver ``message`` to every resolved destination.
 
@@ -827,7 +848,10 @@ def _dispatch(
                         title=title, talk_message_id=msg_id,
                     )
         elif dest.surface == "email":
-            if _send_email(config, user_id, title or "Notification", body):
+            if _send_email(
+                config, user_id, email_subject or title or "Notification", body,
+                message_ids=email_message_ids,
+            ):
                 sent = True
         elif dest.surface == "ntfy":
             if _send_ntfy(config, user_id, body, title=title, priority=priority, tags=tags):

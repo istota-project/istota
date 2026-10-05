@@ -144,7 +144,7 @@ def _run_poll(config, mailbox, download=None, notifications=None, upload=None):
     """
     sent = notifications if notifications is not None else []
 
-    def _fake_prompt(config, user_id, message, conversation_token=None):
+    def _fake_prompt(config, user_id, message, conversation_token=None, task_id=None):
         sent.append(("prompt", user_id, message))
         return True, 111
 
