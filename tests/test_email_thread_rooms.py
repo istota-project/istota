@@ -654,6 +654,78 @@ class TestAHeldMailStaysOutOfTheRoom:
         assert task.conversation_token == _room_token(config)
         assert len(_rows(db_path, "SELECT token FROM rooms WHERE origin='email'")) == 1
 
+    @staticmethod
+    def _held_on_a_vetoed_thread(config):
+        """A stranger's held reply on a thread the host then switched off."""
+        from istota.rooms import veto
+        from istota.transport._types import ParticipantRef
+
+        config.users[HOST].trusted_email_senders = []
+        _start_thread(config)
+        (held,) = _poll(config, sender="mallory@elsewhere.example", to=(BOT,),
+                        message_id="<m1@elsewhere.example>", references=ROOT)
+        token = _room_token(config)
+        with db.get_db(config.db_path) as conn:
+            host = ParticipantRef(surface="email", surface_ref=HOST_ADDR,
+                                  user_id=HOST, display_name=None)
+            assert veto.apply(conn, config, room_token=token, author=host,
+                              verb=veto.OFF) is not None
+            assert db.get_task(conn, held).status == "pending_confirmation"
+        return held, token
+
+    @staticmethod
+    def _nothing_admitted_and_nothing_runs(config, held, token):
+        outsider = "mallory@elsewhere.example"
+        with db.get_db(config.db_path) as conn:
+            assert not threads.is_present(conn, token, outsider)
+            assert db.get_task(conn, held).status == "cancelled"
+        assert _rows(config.db_path, "SELECT id FROM room_participants "
+                     "WHERE room_token=? AND surface_ref=?", (token, outsider)) == []
+        bell = _rows(config.db_path, "SELECT state FROM notifications WHERE "
+                     "source='confirmation' AND object_id=?", (str(held),))
+        assert bell and all(r["state"] == "resolved" for r in bell)
+
+    def test_approving_on_a_vetoed_thread_admits_nobody_and_runs_nothing(
+        self, config,
+    ):
+        """ISSUE-650: a held mail approved after the host switched the thread
+        off records no participant (D12) and settles the task cancelled, rather
+        than confirming it into a model run whose answer nothing can deliver."""
+        held, token = self._held_on_a_vetoed_thread(config)
+        with db.get_db(config.db_path) as conn:
+            ack = confirmations.apply_answer(
+                conn, db.get_task(conn, held),
+                confirmations.Answer(approve=True, trust_sender=False), config=config)
+        assert ack == confirmations.SWITCHED_OFF_ACK
+        self._nothing_admitted_and_nothing_runs(config, held, token)
+
+    def test_a_confirm_command_says_it_was_cancelled(self, config):
+        import asyncio
+
+        from istota.commands import CommandContext, cmd_confirm
+
+        held, token = self._held_on_a_vetoed_thread(config)
+        with db.get_db(config.db_path) as conn:
+            ctx = CommandContext(config, conn, HOST, None, str(held), surface="email")
+            reply = asyncio.run(cmd_confirm(ctx))
+        reply = getattr(reply, "text", reply)
+        assert reply.startswith(f"Cancelled #{held}")
+        assert confirmations.SWITCHED_OFF_ACK in reply
+        self._nothing_admitted_and_nothing_runs(config, held, token)
+
+    def test_the_web_confirm_refuses_and_keeps_the_cancel(self, config, monkeypatch):
+        from fastapi import HTTPException
+
+        from istota.webui import app as webapp
+
+        held, token = self._held_on_a_vetoed_thread(config)
+        monkeypatch.setattr(webapp, "_config", config)
+        with pytest.raises(HTTPException) as refused:
+            webapp._chat_confirm_task(held, HOST)
+        assert refused.value.status_code == 409
+        assert refused.value.detail == confirmations.SWITCHED_OFF_ACK
+        self._nothing_admitted_and_nothing_runs(config, held, token)
+
     def test_a_held_body_is_not_in_the_rooms_transcript(self, config, db_path):
         _start_thread(config)
         _poll(config, sender="mallory@elsewhere.example", to=(BOT,),

@@ -697,10 +697,9 @@ def admit_approved_mail(conn, config: "Config", task) -> str | None:
         return None
 
 
-def _admit_approved_mail(conn, config: "Config", task) -> str | None:
-    from ..ingest import record_inbound, record_phone_turn
-    from .private_room import email_conversation_token
-
+def _held_mail(conn, task):
+    """The held mail of ``task``, rebuilt from its `processed_emails` row, as
+    ``(row, email)``; None when it has none or came by a route not admitted."""
     row = conn.execute(
         'SELECT sender_email, recipients, message_id, "references", in_reply_to, '
         "subject, routing_method, mail_meta FROM processed_emails WHERE task_id = ? "
@@ -719,6 +718,40 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
         in_reply_to=row["in_reply_to"],
         subject=row["subject"], body="",
     )
+    return row, email
+
+
+def held_mail_room_vetoed(conn, config: "Config", task) -> bool:
+    """Whether approving ``task`` would admit its held mail to a thread room
+    that has been switched off (ISSUE-650).
+
+    A held task has no conversation token, so `veto.task_room_vetoed` cannot
+    see the room; the thread is found the way admission finds it. Wider than
+    admission on purpose: a thread hosted by someone else is not admitted, but
+    the task's answer would still be a reply-all into the switched-off thread.
+    Reads only.
+    """
+    from istota.rooms.veto import is_vetoed
+
+    if config is None or getattr(task, "source_type", None) != SURFACE:
+        return False
+    held = _held_mail(conn, task)
+    if held is None or is_private_mail(config, held[1], task.user_id):
+        return False
+    existing = find_thread_room(conn, config, held[1])
+    return existing is not None and is_vetoed(conn, existing.token)
+
+
+def _admit_approved_mail(conn, config: "Config", task) -> str | None:
+    from istota.rooms.veto import is_vetoed
+
+    from ..ingest import record_inbound, record_phone_turn
+    from .private_room import email_conversation_token
+
+    held = _held_mail(conn, task)
+    if held is None:
+        return None
+    row, email = held
     # The card metadata the poller stored at intake, so the approved mail's
     # row renders as it would have on receipt.
     mail_meta = stored_received_mail(row["mail_meta"])
@@ -735,7 +768,10 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
                        host_absent=False)
         return result.room_token
     existing = find_thread_room(conn, config, email)
-    if existing is not None and existing.host != user_id:
+    if existing is not None and (existing.host != user_id
+                                 or is_vetoed(conn, existing.token)):
+        # A vetoed room records no participant (D12), and `resolve_thread`
+        # writes the sender's row before `record_inbound` would refuse.
         return None
     sent = match_thread(conn, email) if existing is None else None
     if sent is not None and sent.user_id != user_id:
@@ -931,6 +967,7 @@ def reply_all(
 __all__ = [
     "IntakeFacts",
     "admit_approved_mail",
+    "held_mail_room_vetoed",
     "MIN_HUMANS",
     "ReplyAll",
     "SURFACE",
