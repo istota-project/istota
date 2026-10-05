@@ -47,6 +47,7 @@ from ...storage import ensure_user_directories_v2, upload_file_to_inbox_v2
 from .._types import IncomingMessage
 from ..ingest import classify_ahead, ingest_message, record_phone_turn
 from . import threads as email_threads
+from .mail_card import received_mail_meta
 from .private_room import email_conversation_token
 
 logger = logging.getLogger("istota.transport.email.inbound")
@@ -617,11 +618,6 @@ def _own_address_claim_counts(config: Config, result: "_AuthResult | None") -> b
 
 # --- The mail card's metadata (hidden email threads, stage 3) ---------------
 
-#: Addresses kept per list, and attachments per mail.
-MAIL_META_LIST_CAP = 50
-#: Characters kept per string: the RFC 5321 path limit.
-MAIL_META_STRING_CAP = 320
-
 #: `_AuthResult.verdict` values that mean no DMARC check was made.
 _UNCHECKED_VERDICTS = frozenset({"unevaluated", "unstamped", "none"})
 
@@ -639,77 +635,6 @@ def sender_check_for(config: Config, result: "_AuthResult | None") -> str:
     if result.verdict == "pass":
         return "verified" if config.email.authserv_id else "none"
     return "failed"
-
-
-def _meta_str(value: object) -> str:
-    return value[:MAIL_META_STRING_CAP] if isinstance(value, str) else ""
-
-
-def _meta_person(entry: object, names: dict) -> dict | None:
-    name, address = parseaddr(str(entry or ""))
-    address = address.strip()
-    if not address:
-        return None
-    if not name:
-        known = names.get(address.lower())
-        name = known if isinstance(known, str) else ""
-    return {"name": _meta_str(name), "address": _meta_str(address)}
-
-
-def _meta_people(entries: object, names: dict) -> list[dict]:
-    people: list[dict] = []
-    for entry in entries or ():
-        person = _meta_person(entry, names)
-        if person is not None:
-            people.append(person)
-        if len(people) == MAIL_META_LIST_CAP:
-            break
-    return people
-
-
-def received_mail_meta(
-    email, *, sender_check: str, trusted: bool,
-    stored_paths: "dict[str, str] | None" = None,
-) -> dict:
-    """The incoming-mail card's metadata, for `messages.received_mail` and
-    `processed_emails.mail_meta` alike.
-
-    Built from the parsed mail at intake, so the card never renders a raw
-    header at read time. Addresses are stored as written. The parsed mail
-    carries no Bcc, so none is stored. ``stored_paths`` maps an attachment's
-    leaf name to the inbox copy written for it.
-    """
-    names = getattr(email, "display_names", None) or {}
-    stored = stored_paths or {}
-    manifest = list(getattr(email, "attachment_manifest", None) or [])
-    if not manifest:
-        manifest = [{"filename": n} for n in getattr(email, "attachments", None) or []]
-    attachments: list[dict] = []
-    for item in manifest[:MAIL_META_LIST_CAP]:
-        if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
-            continue
-        entry: dict = {"filename": _meta_str(item["filename"])}
-        if isinstance(item.get("size"), int):
-            entry["size"] = item["size"]
-        if isinstance(item.get("content_type"), str):
-            entry["content_type"] = _meta_str(item["content_type"])
-        path = stored.get(attachment_leaf_name(item["filename"]))
-        if path:
-            entry["path"] = path
-        attachments.append(entry)
-    return {
-        "from": _meta_person(getattr(email, "sender", None), names)
-        or {"name": "", "address": ""},
-        "to": _meta_people(getattr(email, "to", None), names),
-        "cc": _meta_people(getattr(email, "cc", None), names),
-        "date": _meta_str(getattr(email, "date", None)),
-        "subject": _meta_str(getattr(email, "subject", None)),
-        "message_id": _meta_str(getattr(email, "message_id", None)),
-        "in_reply_to": _meta_str(getattr(email, "in_reply_to", None)),
-        "attachments": attachments,
-        "sender_check": sender_check,
-        "trusted": bool(trusted),
-    }
 
 
 # Generic advice appended to a canary alert while `authserv_id` is unset. It

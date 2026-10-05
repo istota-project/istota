@@ -71,6 +71,7 @@ from istota.mail.ownership import (
 )
 from .. import participants
 from .._types import ParticipantRef
+from .mail_card import stored_received_mail
 from .private_room import is_private_email_ref
 
 if TYPE_CHECKING:
@@ -720,12 +721,7 @@ def _admit_approved_mail(conn, config: "Config", task) -> str | None:
     )
     # The card metadata the poller stored at intake, so the approved mail's
     # row renders as it would have on receipt.
-    try:
-        mail_meta = json.loads(row["mail_meta"]) if row["mail_meta"] else None
-    except ValueError:
-        mail_meta = None
-    if not isinstance(mail_meta, dict):
-        mail_meta = None
+    mail_meta = stored_received_mail(row["mail_meta"])
     user_id = task.user_id
     if is_private_mail(config, email, user_id):
         result = record_phone_turn(

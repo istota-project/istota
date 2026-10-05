@@ -1,9 +1,10 @@
 """Hidden email threads, stage 3: the thread is a mail view.
 
 Incoming mail is stored with its metadata at intake (`messages.received_mail`,
-and `processed_emails.mail_meta` for the held path), built by one function,
-`inbound.received_mail_meta`. The web reads it back through
-`_user_row_display` as `received_mail`, the incoming-mail card's data.
+and `processed_emails.mail_meta` for the held path), built by
+`mail_card.received_mail_meta` and read back by `mail_card.stored_received_mail`.
+The web reads it through `_user_row_display` as `received_mail`, the
+incoming-mail card's data.
 
 Driven through `poll_emails` and the history endpoint, as
 `test_email_thread_rooms.py` does.
@@ -22,7 +23,11 @@ from istota import confirmations, db
 from istota.rooms import private_replies
 from istota.skills.email import Email, EmailEnvelope
 from istota.transport.email import email_conversation_token, threads
-from istota.transport.email.inbound import poll_emails, received_mail_meta
+from istota.transport.email.inbound import poll_emails
+from istota.transport.email.mail_card import (
+    MAIL_META_LIST_CAP, MAIL_META_STRING_CAP, SENDER_CHECKS, received_mail_meta,
+    stored_received_mail,
+)
 
 from . import test_email_thread_rooms as _base
 from .test_email_thread_rooms import ALICE, BOB, BOT, HOST, HOST_ADDR, ROOT, _rows
@@ -244,6 +249,63 @@ class TestTheCaps:
         assert len(meta["attachments"]) == 50
 
 
+class TestTheStoredSchema:
+    """One schema, both sides of the column (ISSUE-642)."""
+
+    def _meta(self):
+        email = Email(
+            id="1", subject="Dinner", sender="Alice Ash <alice@ext.example>",
+            date="Mon, 1 Sep 2026 10:00:00 +0000", body="", attachments=[],
+            message_id="<m@x>", in_reply_to="<r@x>", to=(BOT,), cc=(BOB,),
+            attachment_manifest=[{"filename": "a.pdf", "size": 3,
+                                  "content_type": "application/pdf"}],
+        )
+        return received_mail_meta(email, sender_check="verified", trusted=True,
+                                  stored_paths={"a.pdf": "/Users/host/inbox/a.pdf"})
+
+    def test_what_the_builder_writes_reads_back_unchanged(self):
+        meta = self._meta()
+        assert meta["attachments"][0]["content_type"] == "application/pdf"
+        assert stored_received_mail(json.dumps(meta)) == meta
+
+    def test_a_string_over_the_cap_is_cut_on_read(self):
+        meta = self._meta()
+        meta["subject"] = "s" * (MAIL_META_STRING_CAP + 10)
+        meta["from"]["address"] = "a" * (MAIL_META_STRING_CAP + 10)
+        stored = stored_received_mail(json.dumps(meta))
+        assert len(stored["subject"]) == MAIL_META_STRING_CAP
+        assert len(stored["from"]["address"]) == MAIL_META_STRING_CAP
+
+    def test_lists_over_the_cap_are_cut_on_read(self):
+        meta = self._meta()
+        meta["cc"] = [{"name": "", "address": f"p{i}@x"} for i in range(60)]
+        meta["attachments"] = [{"filename": f"f{i}"} for i in range(60)]
+        stored = stored_received_mail(json.dumps(meta))
+        assert len(stored["cc"]) == MAIL_META_LIST_CAP
+        assert len(stored["attachments"]) == MAIL_META_LIST_CAP
+
+    def test_an_unknown_sender_check_reads_as_none(self):
+        meta = self._meta()
+        meta["sender_check"] = "trust-me"
+        assert stored_received_mail(json.dumps(meta))["sender_check"] == "none"
+        assert set(SENDER_CHECKS) == {"verified", "failed", "none"}
+
+    def test_malformed_entries_are_dropped(self):
+        meta = self._meta()
+        meta["to"] = [{"name": "x"}, "bob@x", {"address": 5}, {"address": "c@x"}]
+        meta["attachments"] = [{"filename": ""}, {"size": 1}, {"filename": "ok",
+                               "size": "big", "path": 7}]
+        meta["trusted"] = "yes"
+        stored = stored_received_mail(json.dumps(meta))
+        assert stored["to"] == [{"name": "", "address": "c@x"}]
+        assert stored["attachments"] == [{"filename": "ok"}]
+        assert stored["trusted"] is False
+
+    @pytest.mark.parametrize("raw", [None, "", "not json", "[1]", "3", b"\xff"])
+    def test_anything_but_a_json_object_is_none(self, raw):
+        assert stored_received_mail(raw) is None
+
+
 class TestSplitNewText:
     def test_the_quoted_history_and_the_signature_are_the_rest(self):
         body = "Thursday works.\n-- \nAlice\n\nOn Mon, Carol wrote:\n> Dinner?"
@@ -340,6 +402,28 @@ class TestTheWebRead:
         # The viewer's own address and the bot's are named for the card.
         assert mail["labels"] == {HOST_ADDR: "you", BOT: "Zorg"}
         assert "fallback" not in mail
+
+    def test_an_attachment_chip_keeps_only_a_path_in_the_viewers_workspace(
+        self, config, db_path,
+    ):
+        _start(config)
+        token = _thread_token(config)
+        (stored,) = _received(db_path, token)
+        stored["attachments"] = [
+            {"filename": "a.pdf", "size": 3, "content_type": "application/pdf",
+             "path": f"/Users/{HOST}/inbox/a.pdf"},
+            {"filename": "b.pdf", "path": "/Users/someoneelse/inbox/b.pdf"},
+            {"filename": "c.pdf", "path": f"/Users/{HOST}/../x/c.pdf"},
+        ]
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE messages SET received_mail = ? WHERE room_token = ? "
+                         "AND role = 'user'", (json.dumps(stored), token))
+        (row,) = [m for m in _page(config, token)["messages"] if m["role"] == "user"]
+        assert row["received_mail"]["attachments"] == [
+            {"filename": "a.pdf", "size": 3, "path": f"/Users/{HOST}/inbox/a.pdf"},
+            {"filename": "b.pdf"},
+            {"filename": "c.pdf"},
+        ]
 
     def test_a_pre_change_row_gets_the_wrapper_only_fallback(self, config, db_path):
         _start(config)

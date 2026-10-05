@@ -7758,33 +7758,6 @@ def _decorate_outgoing_mail(out: dict, view: "_MailView | None") -> None:
         mail["discuss"] = discuss
 
 
-_MAIL_CHECKS = frozenset({"verified", "failed", "none"})
-# A stored string's cap is `inbound.MAIL_META_STRING_CAP`; this re-asserts it
-# on read, since the column is JSON nothing else validates.
-_MAIL_FIELD_MAX_CHARS = 320
-_MAIL_LIST_MAX = 50
-
-
-def _mail_str(value) -> str:
-    return value[:_MAIL_FIELD_MAX_CHARS] if isinstance(value, str) else ""
-
-
-def _mail_person(value) -> dict | None:
-    if not isinstance(value, dict):
-        return None
-    address = _mail_str(value.get("address"))
-    if not address:
-        return None
-    return {"name": _mail_str(value.get("name")), "address": address}
-
-
-def _mail_people(values) -> list:
-    if not isinstance(values, list):
-        return []
-    people = [p for p in (_mail_person(v) for v in values[:_MAIL_LIST_MAX]) if p]
-    return people
-
-
 def _received_mail_field(
     row, parsed, view: _MailView, username: str,
 ) -> dict | None:
@@ -7797,57 +7770,36 @@ def _received_mail_field(
     """
     from email.utils import parseaddr  # noqa: PLC0415
 
+    from istota.transport.email.mail_card import (  # noqa: PLC0415
+        meta_str, stored_received_mail,
+    )
     from istota.transport.email.threads import split_new_text  # noqa: PLC0415
 
     body = parsed[1] if parsed is not None else _row_get(row, "body") or ""
     new_text, rest = split_new_text(body)
-    stored = None
-    raw = _row_get(row, "received_mail")
-    if raw:
-        try:
-            stored = json.loads(raw)
-        except (TypeError, ValueError):
-            stored = None
-    if not isinstance(stored, dict):
+    stored = stored_received_mail(_row_get(row, "received_mail"))
+    if stored is None:
         if parsed is None:
             return None
         headers = parsed[0]
         name, address = parseaddr(headers.get("from") or "")
         out = {
             "fallback": True,
-            "from": {"name": _mail_str(name), "address": _mail_str(address)},
+            "from": {"name": meta_str(name), "address": meta_str(address)},
             "to": [], "cc": [], "attachments": [],
-            "date": _mail_str(headers.get("date")),
-            "subject": _mail_str(headers.get("subject")),
+            "date": meta_str(headers.get("date")),
+            "subject": meta_str(headers.get("subject")),
         }
     else:
-        attachments = []
+        out = stored
         prefix = f"/Users/{username}/"
-        for item in (stored.get("attachments") or [])[:_MAIL_LIST_MAX]:
-            if not isinstance(item, dict) or not _mail_str(item.get("filename")):
-                continue
-            chip: dict = {"filename": _mail_str(item["filename"])}
-            if isinstance(item.get("size"), int):
-                chip["size"] = item["size"]
+        for chip in out["attachments"]:
+            chip.pop("content_type", None)
             # Only a copy in the viewer's own workspace, which `/chat/files`
             # serves under its own containment rules.
-            path = item.get("path")
-            if isinstance(path, str) and path.startswith(prefix) and ".." not in path:
+            path = chip.pop("path", None)
+            if path is not None and path.startswith(prefix) and ".." not in path:
                 chip["path"] = path
-            attachments.append(chip)
-        out = {
-            "from": _mail_person(stored.get("from")) or {"name": "", "address": ""},
-            "to": _mail_people(stored.get("to")),
-            "cc": _mail_people(stored.get("cc")),
-            "date": _mail_str(stored.get("date")),
-            "subject": _mail_str(stored.get("subject")),
-            "message_id": _mail_str(stored.get("message_id")),
-            "in_reply_to": _mail_str(stored.get("in_reply_to")),
-            "attachments": attachments,
-            "sender_check": (stored.get("sender_check")
-                             if stored.get("sender_check") in _MAIL_CHECKS else "none"),
-            "trusted": stored.get("trusted") is True,
-        }
     out["new_text"] = new_text
     out["rest"] = rest
     addresses = [out["from"]["address"]] + [p["address"] for p in out["to"] + out["cc"]]
