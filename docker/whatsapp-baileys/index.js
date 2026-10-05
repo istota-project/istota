@@ -154,6 +154,7 @@ const MEDIA_EXTENSIONS = {
   'audio/wav': 'wav',
   'audio/flac': 'flac',
   'audio/webm': 'webm',
+  'video/mp4': 'mp4',
 };
 const MEDIA_EXTENSION_FALLBACK = 'bin';
 
@@ -710,19 +711,25 @@ function hasReadableContent(message) {
 }
 
 // Message keys that carry media this surface fetches, in precedence order.
+// A third element is a test the node must pass: a `videoMessage` is fetched
+// only when it plays as a GIF (ISSUE-647), and a plain video stays
+// unsupported.
 const MEDIA_KINDS = [
   ['imageMessage', 'image'],
   ['audioMessage', 'audio'],
+  ['videoMessage', 'gif', (node) => node.gifPlayback === true],
 ];
 
 /*
  * The media this surface will fetch, as `{ kind, node }`, or null.
  *
- * **`imageMessage` and `audioMessage`, and nothing else.** The kind is the
- * frame's `message_type`, and the daemon sniffs the bytes against that kind
- * only. A voice note and a forwarded audio file are both `audioMessage` and
- * are treated alike, whatever `ptt` says. Video (round video notes included),
- * documents and stickers keep the unsupported reply, and a sticker is the
+ * **`imageMessage`, `audioMessage`, and a `videoMessage` that plays as a
+ * GIF, and nothing else.** The kind is the frame's `message_type`, and the
+ * daemon sniffs the bytes against that kind only. A voice note and a
+ * forwarded audio file are both `audioMessage` and are treated alike,
+ * whatever `ptt` says. A GIF is an MP4 with `gifPlayback`, which the daemon
+ * turns into one still of its frames (ISSUE-647). Other video (round video
+ * notes included), documents and stickers keep the unsupported reply, and a sticker is the
  * case that says why the gate is here rather than at the sniff: a sticker is
  * WebP, so it would pass a signature test cleanly. What excludes it is its
  * message type, which is a thing WhatsApp said rather than a thing the bytes
@@ -741,9 +748,11 @@ const MEDIA_KINDS = [
 function mediaPart(message) {
   const content = message && message.message;
   if (!content || typeof content !== 'object') return null;
-  for (const [key, kind] of MEDIA_KINDS) {
+  for (const [key, kind, admits] of MEDIA_KINDS) {
     const node = content[key];
-    if (node && typeof node === 'object') return { kind, node };
+    if (node && typeof node === 'object' && (!admits || admits(node))) {
+      return { kind, node };
+    }
   }
   return null;
 }
@@ -758,8 +767,10 @@ function mediaPart(message) {
  * twice.
  *
  * `videoMessage` and `documentMessage` carry captions too and are **not**
- * read: those types keep the unsupported reply, and a caption without the
- * bytes is a message the model answers about an image nobody can see.
+ * read here: those types keep the unsupported reply, and a caption read as
+ * text would be answered as if no file had come with it. `inboundContent`
+ * carries such a caption on the `unsupported` frame instead, where a group
+ * records it beside a stand-in naming the type.
  */
 function messageText(message) {
   const content = message && message.message;
@@ -768,12 +779,79 @@ function messageText(message) {
   if (content.extendedTextMessage && typeof content.extendedTextMessage.text === 'string') {
     return content.extendedTextMessage.text;
   }
-  // Audio carries no caption, so only an image's is read.
+  // Audio carries no caption, so only an image's or a GIF's is read.
   const media = mediaPart(message);
-  if (media && media.kind === 'image' && typeof media.node.caption === 'string') {
+  if (media && media.kind !== 'audio' && typeof media.node.caption === 'string') {
     return media.node.caption;
   }
   return null;
+}
+
+/*
+ * What a message this surface cannot open was, as the label the daemon names
+ * it by (`media.UNSUPPORTED_LABELS`), in precedence order. A video that plays
+ * as a GIF never reaches here: `mediaPart` fetches it (ISSUE-647).
+ */
+const UNSUPPORTED_KINDS = [
+  ['videoMessage', 'video'],
+  ['ptvMessage', 'video_note'],
+  ['stickerMessage', 'sticker'],
+  ['documentMessage', 'document'],
+  ['documentWithCaptionMessage', 'document'],
+  ['locationMessage', 'location'],
+  ['liveLocationMessage', 'location'],
+  ['contactMessage', 'contact'],
+  ['contactsArrayMessage', 'contact'],
+  ['pollCreationMessage', 'poll'],
+  ['pollCreationMessageV2', 'poll'],
+  ['pollCreationMessageV3', 'poll'],
+];
+
+// The unsupported types whose node can carry a caption a person typed.
+const CAPTIONED_UNSUPPORTED = new Set([
+  'videoMessage', 'documentMessage', 'documentWithCaptionMessage',
+]);
+
+/*
+ * What one inbound message becomes on the frame: its `message_type`, its
+ * words, the media part to fetch, and for an unsupported message what it was.
+ *
+ * **The same answer in a group and a direct chat** (ISSUE-646). A group
+ * branch here used to drop every group photo and its caption; the daemon now
+ * decides, because only it knows whether the sender is a member and whether
+ * the bot was asked. An unsupported message carries its caption: a group
+ * records it beside a stand-in naming the type, and a direct chat answers the
+ * type and reads no text, so a caption cannot be answered as if the file
+ * were not there.
+ */
+function inboundContent(message) {
+  const part = mediaPart(message);
+  if (part) {
+    return { messageType: part.kind, text: messageText(message), part, unsupportedKind: null };
+  }
+  const text = messageText(message);
+  if (text !== null) {
+    return { messageType: 'text', text, part: null, unsupportedKind: null };
+  }
+  const content = message && message.message;
+  let unsupportedKind = null;
+  let caption = null;
+  if (content && typeof content === 'object') {
+    for (const [key, kind] of UNSUPPORTED_KINDS) {
+      const node = content[key];
+      if (!node || typeof node !== 'object') continue;
+      unsupportedKind = typeof kind === 'function' ? kind(node) : kind;
+      // A `documentWithCaptionMessage` wraps its document one level down.
+      const captioned = key === 'documentWithCaptionMessage'
+        ? node.message && node.message.documentMessage
+        : node;
+      if (CAPTIONED_UNSUPPORTED.has(key) && captioned && typeof captioned.caption === 'string') {
+        caption = captioned.caption;
+      }
+      break;
+    }
+  }
+  return { messageType: 'unsupported', text: caption, part: null, unsupportedKind };
 }
 
 /*
@@ -2659,12 +2737,9 @@ class Session {
         continue;
       }
       const group = isGroupJid(jid);
-      // Group media stays refused (D6), image and audio alike, and an
-      // image's caption goes with it: the model would be answering about a
-      // picture nobody can see.
-      const part = group ? null : mediaPart(message);
-      const text = group && mediaPart(message) ? null : messageText(message);
-      if (!part && text === null) {
+      const content = inboundContent(message);
+      const { part, text } = content;
+      if (content.messageType === 'unsupported') {
         log('info', 'inbound has no text this side can read', {
           shape: messageShape(message),
         });
@@ -2690,7 +2765,7 @@ class Session {
         message_id: message.key.id,
         jid,
         username: message.pushName || null,
-        message_type: part ? part.kind : (text === null ? 'unsupported' : 'text'),
+        message_type: content.messageType,
         text,
         callback_data: null,
         reply_to_message_id: quotedId(message),
@@ -2706,6 +2781,7 @@ class Session {
         media_mime: media.media_mime,
         media_bytes: media.media_bytes,
         media_error: media.media_error,
+        unsupported_kind: content.unsupportedKind,
       });
       if (delivered) rememberInbound(jid, message);
       if (!delivered) {
@@ -3175,6 +3251,8 @@ module.exports = {
   mediaExtension,
   mediaPart,
   messageText,
+  inboundContent,
+  UNSUPPORTED_KINDS,
   newMediaCollector,
   stagedMediaName,
   writeStaged,

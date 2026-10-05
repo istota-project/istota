@@ -712,12 +712,10 @@ class TestTheReasonTable:
         )
 
     def test_every_kind_has_every_key_and_the_audio_ones_say_so(self):
+        opening = {"image": "the image ", "audio": "the voice message ", "gif": "the GIF "}
         for kind in media.MEDIA_KINDS:
             for key in media.REASON_KEYS:
-                sentence = media.reason(kind, key)
-                assert sentence.startswith(
-                    "the voice message " if kind == "audio" else "the image "
-                )
+                assert media.reason(kind, key).startswith(opening[kind])
         assert media.reason("audio", "fetch_failed") == (
             "the voice message could not be downloaded from WhatsApp"
         )

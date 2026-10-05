@@ -94,6 +94,19 @@ Which bytes are audio the transcription pipeline decodes, asked of the bytes and
 
 No decode. stdlib-only leaf, imports nothing, never raises.
 
+## lib/video_sniff.py
+
+Which bytes are an MP4 video, for the WhatsApp GIF path (ISSUE-647): `sniff_video`, an ISO-BMFF `ftyp` box with a video major brand, and `EXTENSION_BY_MEDIA_TYPE`. **The sniff confirms, the message type chooses**, `audio_sniff`'s rule: `isom` is as much audio as video, so the declared type (a `videoMessage` with `gifPlayback`) decides which pipeline a file enters and this only says whether the bytes match. `media.sniff_staged` reads one head for all three sniffers. No decode. stdlib-only leaf, imports nothing, never raises.
+
+## lib/gif_frames.py
+
+The child that turns one GIF-as-MP4 into one JPEG of up to four frames, tiled in order (ISSUE-647), so a GIF turn carries exactly one image and the photo pipeline is unchanged. Spawned only by `transport/whatsapp/gif_frames.extract_frames` as `python -P -m istota.lib.gif_frames -- <src> <dest>`, with a 20-second deadline and its process group killed on timeout, on the inbound worker before any lock: it is a parser on a file a stranger chose, run where OCR and whisper run.
+
+- **Imports the standard library, PyAV and Pillow, and nothing from `istota`**, `ocr_leaf`'s rule: what a spawned child imports is paid per GIF. `tests/test_whatsapp_gif.py` spawns a subprocess and fails on any other `istota.*` module. PyAV comes with the `whisper` extra; without it the child answers `decoder_missing`, the GIF is unsupported, and `doctor.whatsapp.gif_decoder` WARNs.
+- **Bounded by its caps, not by the sender.** On Linux it sets `RLIMIT_AS` on itself before the decoder loads. It refuses a declared frame over `MAX_FRAME_PIXELS` (4K) before the clip is decoded, then every decoded frame against the same cap, since a frame's real size can differ from the declared one; opening the file can decode a few frames to probe the stream, and only the address-space cap bounds that. Over `MAX_PACKETS` packets or `MAX_SECONDS` declared is refused.
+- **Two passes, so memory holds four thumbnails.** The first demuxes and counts packets without decoding; the second decodes in order, keeps only `chosen_indexes`, shrinks each to `CELL_EDGE` at once, and stops after the last.
+- Writes its output `O_CREAT | O_EXCL | O_NOFOLLOW`, 0600, so an existing file is never overwritten; prints one JSON object (`status`, and `error` from a fixed set the runner checks); never raises past `main`.
+
 ## webui/map_basemap.py
 
 Where the map's background tiles come from, decided in one place (ISSUE-334). `LocationMap.svelte` hardcoded `basemaps.cartocdn.com`, which now watermarks unauthenticated tiles. A provider name plus a few `[web.map]` strings resolve to the concrete URLs the browser fetches; adding a provider is a row in `PROVIDERS`.

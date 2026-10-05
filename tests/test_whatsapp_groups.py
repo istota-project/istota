@@ -14,6 +14,7 @@ before merge.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -28,6 +29,7 @@ from istota.transport.registry import make_registry
 from istota.transport.routing import resolve_delivery_plan
 from istota.transport.whatsapp import WhatsAppTransport, outbound
 from istota.transport.whatsapp import baileys_protocol as proto
+from istota.transport.whatsapp import media as media_rules
 from istota.transport.whatsapp._types import WhatsAppSendResult
 from istota.transport.whatsapp.providers._types import (
     WhatsAppProviderAdapter,
@@ -118,6 +120,35 @@ def _message(text, *, sender=ALICE_JID, lid="", message_id="M1",
         "reply_to_message_id": reply_to,
         "timestamp": int(datetime.now(timezone.utc).timestamp()),
     })
+
+
+INBOX_COPY = "/Users/alice/inbox/whatsapp_0123456789abcdef.jpg"
+
+
+def _media_message(text=None, *, kind="image", sender=ALICE_JID, message_id="P1",
+                   mentions_bot=False, attached_for="", staged=INBOX_COPY,
+                   error=None):
+    """A group media frame as `stage_inbound_media` hands it on: attributed
+    to *attached_for* and naming its inbox copy, or carrying *error*."""
+    event = proto.inbound_event({
+        "message_id": message_id, "jid": GROUP, "group": True,
+        "sender_jid": sender, "sender_lid": "", "mentions_bot": mentions_bot,
+        "mentions": [], "message_type": kind, "text": text, "username": "Someone",
+        "reply_to_message_id": None,
+        "media_name": "0123456789abcdef0123456789abcdef.jpg",
+        "timestamp": int(datetime.now(timezone.utc).timestamp()),
+    })
+    if error is not None:
+        media = dataclasses.replace(
+            event.media, staged_path="", error=media_rules.reason(kind, error),
+        )
+    else:
+        media = dataclasses.replace(
+            event.media, staged_path=staged if attached_for else "",
+            attached_for_user=attached_for,
+            error=None if attached_for else media_rules.reason(kind, "unattributed"),
+        )
+    return dataclasses.replace(event, media=media)
 
 
 def _rows(config, sql, params=()):
@@ -498,18 +529,23 @@ class TestATurnInTheGroup:
         assert result.disposition == "group_unregistered"
         assert _rows(config, "SELECT * FROM messages") == []
 
-    def test_a_group_image_is_answered_by_nothing(self, group):
+    def test_an_unsupported_message_is_recorded_rather_than_dropped(self, group):
+        """ISSUE-646: a video somebody sent left no row, so the transcript and
+        the model both lost that anything was sent."""
         event = proto.inbound_event({
             "message_id": "M5", "jid": GROUP, "group": True,
             "sender_jid": ALICE_JID, "message_type": "unsupported", "text": None,
-            "media_name": "0123456789abcdef0123456789abcdef.jpg",
+            "unsupported_kind": "video",
             "timestamp": int(datetime.now(timezone.utc).timestamp()),
         })
         (result,) = _apply(group, event)
 
-        assert event.media is None
-        assert result.disposition == "group_unsupported"
         assert result.response_text is None
+        assert result.task_id is None
+        assert _rows(group, "SELECT body, author_user_id FROM messages "
+                     "WHERE room_token = ?", (_room(group),)) == [
+            {"body": "[Sent a video, which this bot cannot open.]",
+             "author_user_id": "alice"}]
 
 
 # ---------------------------------------------------------------------------
@@ -898,3 +934,217 @@ class TestAPrivateRoomBesideAGroup:
         assert _rows(
             group, "SELECT room_token, body FROM messages WHERE role = 'system'",
         ) == [{"room_token": private_room, "body": "Nothing is running."}]
+
+
+# ---------------------------------------------------------------------------
+# Media in a group (ISSUE-646)
+# ---------------------------------------------------------------------------
+
+
+def _user_rows(config):
+    return _rows(config, "SELECT body, attachments FROM messages "
+                 "WHERE room_token = ? AND role = 'user'", (_room(config),))
+
+
+class TestMediaInTheGroup:
+    """A member's photo or voice note reaches the task as a direct chat's
+    does; a guest's never reaches the host's inbox; nothing is dropped
+    silently."""
+
+    def test_a_members_addressed_image_reaches_the_task(self, group):
+        (result,) = _apply(group, _media_message(
+            "Istota what is this?", attached_for="alice",
+        ))
+
+        assert result.disposition == "task"
+        task = _task(group, result.task_id)
+        assert task.user_id == "alice"
+        assert task.attachments == [INBOX_COPY]
+        assert task.prompt == "Istota what is this?"
+        (row,) = _user_rows(group)
+        assert row["body"] == "Istota what is this?"
+        assert "whatsapp_0123456789abcdef.jpg" in row["attachments"]
+
+    def test_an_uncaptioned_voice_note_that_quotes_the_bot_reaches_the_task(
+        self, group,
+    ):
+        with db.get_db(group.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sent_whatsapp (logical_key, user_id, send_kind, "
+                "status, body_chars, body_sha256, meta_message_id, created_at, "
+                "updated_at) VALUES ('k', 'alice', 'service', 'accepted', 1, "
+                "'x', 'BOTMSG', '2026-01-01', '2026-01-01')"
+            )
+        voice = "/Users/alice/inbox/whatsapp_0123456789abcdef.ogg"
+        event = dataclasses.replace(
+            _media_message(kind="audio", attached_for="alice", staged=voice),
+            reply_to_message_id="BOTMSG",
+        )
+        (result,) = _apply(group, event)
+
+        task = _task(group, result.task_id)
+        assert task.attachments == [voice]
+        assert task.prompt == "Voice message (see attached audio)."
+
+    def test_a_guests_image_is_recorded_without_the_file(self, group):
+        (result,) = _apply(group, _media_message(
+            "Istota look at this", sender=GUEST_JID,
+        ))
+
+        assert _user_rows(group) == [{
+            "body": "Istota look at this\n[Sent an image. Files from guests "
+                    "are not opened.]",
+            "attachments": None,
+        }]
+        if result.task_id is not None:
+            task = _task(group, result.task_id)
+            assert task.user_id == "alice"
+            assert not task.attachments
+
+    def test_an_image_attributed_to_someone_else_is_not_attached(self, group):
+        """The pre-check is stale by design; the transaction's resolution wins."""
+        (result,) = _apply(group, _media_message(
+            "Istota what is this?", sender=BOB_JID, attached_for="alice",
+        ))
+
+        task = _task(group, result.task_id)
+        assert task.user_id == "bob"
+        assert not task.attachments
+        assert "[Sent an image, which was not opened.]" in task.prompt
+
+    def test_a_members_image_nobody_staged_is_recorded_with_a_stand_in(self, group):
+        (result,) = _apply(group, _media_message(message_id="P2"))
+
+        assert result.task_id is None
+        assert _user_rows(group) == [{
+            "body": "[Sent an image, which was not opened.]", "attachments": None,
+        }]
+
+    def test_a_failed_fetch_is_recorded_and_sends_no_direct_chat_reply(self, group):
+        (result,) = _apply(group, _media_message(
+            "Istota?", error="fetch_failed", message_id="P3",
+        ))
+
+        assert result.response_text is None
+        assert "[Sent an image, which was not opened.]" in _task(
+            group, result.task_id).prompt
+
+    @staticmethod
+    def _unsupported(text=None, kind="sticker", message_id="U1"):
+        return proto.inbound_event({
+            "message_id": message_id, "jid": GROUP, "group": True,
+            "sender_jid": ALICE_JID, "message_type": "unsupported", "text": text,
+            "unsupported_kind": kind,
+            "timestamp": int(datetime.now(timezone.utc).timestamp()),
+        })
+
+    def test_a_one_human_group_records_a_sticker_and_answers_nothing(self, config):
+        """The gate answers every turn in a group nobody else reads; a sticker
+        must not become a task saying the bot cannot open it."""
+        _apply(config, _roster([ALICE_JID], added_by=ALICE_JID))
+
+        (result,) = _apply(config, self._unsupported())
+
+        assert result.task_id is None
+        assert _user_rows(config) == [{
+            "body": "[Sent a sticker, which this bot cannot open.]",
+            "attachments": None,
+        }]
+
+    def test_a_frame_with_no_kind_and_no_words_leaves_no_row(self, config):
+        """A wrapper the sidecar could not read (disappearing messages) would
+        otherwise put a stand-in row under every message."""
+        _apply(config, _roster([ALICE_JID], added_by=ALICE_JID))
+
+        (result,) = _apply(config, self._unsupported(kind=None))
+
+        assert result.disposition == "group_unsupported"
+        assert _user_rows(config) == []
+
+    def test_a_videos_caption_is_recorded_and_never_acted_on(self, config):
+        """The direct chat reads no text on an unsupported message; nor does a
+        group, so a command under a video runs nothing."""
+        _apply(config, _roster([ALICE_JID], added_by=ALICE_JID))
+
+        (result,) = _apply(config, self._unsupported("!status", kind="video"))
+
+        assert result.disposition == "group_recorded"
+        assert result.command_text is None
+        assert _user_rows(config)[0]["body"] == (
+            "!status\n[Sent a video, which this bot cannot open.]"
+        )
+
+    def test_a_caption_command_is_still_a_command(self, group):
+        (result,) = _apply(group, _media_message(
+            "!status", attached_for="alice", message_id="P4",
+        ))
+
+        assert result.disposition == "command"
+        assert result.command_text == "!status"
+
+
+class TestWhoseInboxAGroupFileGoesTo:
+    """`groups.media_recipient`: the read-only answer `stage_inbound_media`
+    asks before it copies anything, so a file is placed only for a member's
+    turn the speech gate would answer."""
+
+    @staticmethod
+    def _ask(config, event, classified=None):
+        from istota.lib import sqlite_util
+        from istota.transport.whatsapp.groups import media_recipient
+
+        return media_recipient(
+            lambda: sqlite_util.connect_read_only(config.db_path), config, event,
+            classified=classified,
+        )
+
+    def test_a_member_addressing_the_bot_gets_the_file(self, group):
+        assert self._ask(group, _media_message("Istota what is this?")) == "alice"
+
+    def test_a_member_mentioning_the_bot_gets_the_file(self, group):
+        assert self._ask(group, _media_message(mentions_bot=True)) == "alice"
+
+    def test_an_unaddressed_image_in_a_shared_group_is_placed_nowhere(self, group):
+        assert self._ask(group, _media_message("look at the cat")) is None
+
+    def test_a_guest_never_gets_the_hosts_inbox(self, group):
+        assert self._ask(group, _media_message(
+            "Istota what is this?", sender=GUEST_JID,
+        )) is None
+
+    def test_a_group_with_one_human_answers_every_turn(self, config):
+        _apply(config, _roster([ALICE_JID], added_by=ALICE_JID))
+
+        assert self._ask(config, _media_message("look at the cat")) == "alice"
+
+    def test_a_classifier_answer_decides_an_unaddressed_turn(self, group):
+        from istota.rooms import speech_gate
+
+        group.speech_gate.mode = "classifier"
+        no = speech_gate.GateDecision(False, speech_gate.RUNG_CLASSIFIER)
+        yes = speech_gate.GateDecision(True, speech_gate.RUNG_CLASSIFIER)
+
+        assert self._ask(group, _media_message("the cat"), no) is None
+        assert self._ask(group, _media_message("the cat"), yes) == "alice"
+        assert self._ask(group, _media_message("the cat")) is None
+
+    def test_a_claimed_message_gets_no_second_copy(self, group):
+        _apply(group, _media_message("Istota what is this?", attached_for="alice"))
+
+        assert self._ask(group, _media_message("Istota what is this?")) is None
+
+    def test_an_unregistered_group_places_nothing(self, config):
+        assert self._ask(config, _media_message("Istota what is this?")) is None
+
+    def test_a_command_caption_places_nothing(self, group):
+        assert self._ask(group, _media_message("!status")) is None
+
+    def test_a_captioned_image_is_classified(self, group):
+        from istota.transport.whatsapp.groups import classify_group_event
+
+        group.speech_gate.mode = "classifier"
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda prompt: '{"speak": true, "reason": "asked"}'):
+            decision = classify_group_event(group, _media_message("the cat?"))
+
+        assert decision is not None and decision.speak

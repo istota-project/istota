@@ -8449,6 +8449,51 @@ def check_whatsapp_media_staging(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_whatsapp_gif_decoder(config: "Config", probe: bool) -> CheckResult:
+    """Whether a GIF sent on Baileys can be shown to the model (ISSUE-647).
+
+    A GIF arrives as an MP4 and is decoded into one still by a child that
+    needs PyAV and Pillow. PyAV ships with the `whisper` extra rather than the
+    base install, so a deployment without it answers every GIF as an
+    unsupported message; this says so rather than leaving it to be found from
+    a user's complaint. Asked with `find_spec` and never an import, the vault
+    check's rule, so the daemon does not load the decoder. Cloud has no GIF
+    flag to admit one by, so it is skipped there. Spawns nothing.
+    """
+    name = "whatsapp.gif_decoder"
+    if not config.whatsapp.enabled:
+        return CheckResult(name, SKIP, "[whatsapp] enabled = false", scope=DEPLOYMENT)
+    if config.whatsapp.provider != "baileys":
+        return CheckResult(
+            name, SKIP,
+            f"[whatsapp] provider = \"{config.whatsapp.provider}\", which marks "
+            "no GIF, so a GIF there is an unsupported video",
+            scope=DEPLOYMENT,
+        )
+    missing = []
+    for module in ("av", "PIL"):
+        try:
+            if importlib.util.find_spec(module) is None:
+                missing.append(module)
+        except Exception:  # noqa: BLE001 - a check never raises
+            missing.append(module)
+    if not missing:
+        return CheckResult(
+            name, OK, "PyAV and Pillow are installed, so a GIF is shown as a "
+            "still of its frames", scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, WARN,
+        f"{' and '.join(missing)} not installed, so every GIF gets the "
+        "unsupported-message answer",
+        remedy=(
+            "Install the `whisper` extra (it brings PyAV), or accept that GIFs "
+            "are not shown."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def _baileys_precondition(name: str, config: "Config") -> "CheckResult | None":
     """The two skips both Baileys checks share, or ``None`` to carry on."""
     if not config.whatsapp.enabled:
@@ -9572,6 +9617,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("whatsapp.common", check_whatsapp_common),
     ("whatsapp.billing", check_whatsapp_billing),
     ("whatsapp.media_staging", check_whatsapp_media_staging),
+    ("whatsapp.gif_decoder", check_whatsapp_gif_decoder),
     ("whatsapp.baileys_bridge", check_whatsapp_baileys_bridge),
     ("whatsapp.baileys_session", check_whatsapp_baileys_session),
     ("whatsapp.pairing_relay", check_whatsapp_pairing_relay),
@@ -9700,6 +9746,9 @@ CHECK_SCOPES: dict[str, str] = {
     # inbound photo into a directory derived from `db_path`, which a bare
     # `docker run` has neither of.
     "whatsapp.media_staging": DEPLOYMENT,
+    # Deployment: whether the GIF decoder is installed is a fact about the
+    # host's extras, and a bare image has no WhatsApp configured to need it.
+    "whatsapp.gif_decoder": DEPLOYMENT,
     # Deployment: one reads in-process counters that only the daemon has,
     # the other a paired credential on disk. A bare `docker run` has
     # neither.

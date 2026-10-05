@@ -51,7 +51,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from istota.lib import audio_sniff, image_sniff
+from istota.lib import audio_sniff, image_sniff, video_sniff
 from istota.transport.whatsapp import baileys_protocol as proto
 from istota.transport.whatsapp import identity, media
 
@@ -412,6 +412,7 @@ class TestTheSidecarsPayloadsAreReadable:
         "media_mime": None,
         "media_bytes": 0,
         "media_error": None,
+        "unsupported_kind": None,
     }
 
     def test_an_inbound_payload_normalizes(self):
@@ -603,18 +604,29 @@ class TestTheSidecarsPayloadsAreReadable:
 
         assert proto.inbound_event(payload).media is not None
 
-    def test_a_group_message_carrying_media_drops_it(self):
-        """A group message is refused before any identity lookup, so nothing
-        will ever consume the file; the sweep takes it."""
+    def test_a_group_message_carrying_media_keeps_it(self):
+        """ISSUE-646: a group file crosses, and the staging step decides whose
+        inbox it reaches."""
         keys = _js_send_keys("MSG_INBOUND")
         payload = self._filled(keys, dict(
             self._INBOUND_TEXT,
             group=True,
+            jid="120363000000000001@g.us",
+            sender_jid="15551234567@s.whatsapp.net",
             message_type="image",
             media_name="0123456789abcdef0123456789abcdef.jpg",
         ))
 
-        assert proto.inbound_event(payload).media is None
+        assert proto.inbound_event(payload).media is not None
+
+    def test_an_unsupported_kind_crosses(self):
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT, message_type="unsupported", text=None,
+            unsupported_kind="sticker",
+        ))
+
+        assert proto.inbound_event(payload).unsupported_kind == "sticker"
 
     @pytest.mark.parametrize(
         "field,value",
@@ -979,6 +991,10 @@ class TestTheSidecarsInboundMedia:
             # type up here rather than by the sniff down there. A round video
             # note is video, not audio.
             ({"videoMessage": {"mimetype": "video/mp4"}}, None),
+            # A GIF is an MP4 that plays as one (ISSUE-647); a plain video
+            # keeps the unsupported reply.
+            ({"videoMessage": {"mimetype": "video/mp4", "gifPlayback": True}}, "gif"),
+            ({"videoMessage": {"gifPlayback": "true"}}, None),
             ({"ptvMessage": {"mimetype": "video/mp4"}}, None),
             ({"documentMessage": {"mimetype": "audio/ogg"}}, None),
             ({"stickerMessage": {"mimetype": "image/webp"}}, None),
@@ -1027,6 +1043,7 @@ class TestTheSidecarsInboundMedia:
             # and a caption without the bytes is a message answered about an
             # image nobody can see.
             ({"videoMessage": {"caption": "clip"}}, None),
+            ({"videoMessage": {"caption": "lol", "gifPlayback": True}}, "lol"),
             ({"documentMessage": {"caption": "doc"}}, None),
         ],
     )
@@ -1036,6 +1053,62 @@ class TestTheSidecarsInboundMedia:
         assert self._call(
             f"m.messageText({{message: {json.dumps(content)}}})"
         ) == expected
+
+    # --- what one inbound message becomes (ISSUE-646) ----------------------
+
+    @pytest.mark.parametrize(
+        "content,expected",
+        [
+            ({"conversation": "hi"}, ["text", "hi", None, None]),
+            ({"imageMessage": {"caption": "cat?"}}, ["image", "cat?", "image", None]),
+            ({"audioMessage": {"ptt": True}}, ["audio", None, "audio", None]),
+            ({"videoMessage": {"caption": "clip"}},
+             ["unsupported", "clip", None, "video"]),
+            ({"videoMessage": {"gifPlayback": True, "caption": "lol"}},
+             ["gif", "lol", "gif", None]),
+            ({"ptvMessage": {}}, ["unsupported", None, None, "video_note"]),
+            ({"stickerMessage": {}}, ["unsupported", None, None, "sticker"]),
+            ({"documentMessage": {"caption": "doc"}},
+             ["unsupported", "doc", None, "document"]),
+            ({"documentWithCaptionMessage": {"message": {
+                "documentMessage": {"caption": "wrapped"}}}},
+             ["unsupported", "wrapped", None, "document"]),
+            ({"locationMessage": {}}, ["unsupported", None, None, "location"]),
+            ({"contactMessage": {}}, ["unsupported", None, None, "contact"]),
+            ({"pollCreationMessageV3": {}}, ["unsupported", None, None, "poll"]),
+            ({"somethingNewMessage": {}}, ["unsupported", None, None, None]),
+            ({"videoMessage": {"caption": 7}}, ["unsupported", None, None, "video"]),
+        ],
+    )
+    def test_one_message_becomes_one_frame_shape(self, content, expected):
+        """The same answer in a group and a direct chat: the group gate moved
+        to the daemon, which knows who sent it and whether the bot is asked.
+        An unsupported message carries its caption, which a group records
+        beside the stand-in; a direct chat answers the type and reads none."""
+        found = self._call(
+            "(() => { const c = m.inboundContent({message: "
+            f"{json.dumps(content)}}});"
+            " return [c.messageType, c.text, c.part ? c.part.kind : null,"
+            " c.unsupportedKind]; })()"
+        )
+
+        assert found == expected
+
+    def test_every_unsupported_kind_is_one_the_daemon_can_name(self):
+        kinds = self._call(
+            "[...new Set(m.UNSUPPORTED_KINDS.map(([, k]) => k))]"
+        )
+
+        assert set(kinds) <= set(media.UNSUPPORTED_LABELS)
+
+    def test_the_inbound_handler_reads_the_frame_from_inbound_content(self):
+        """A group branch in the handler is what dropped every group photo;
+        the handler must take its type, words and file from the one function
+        the cases above drive."""
+        source = PROGRAM.read_text()
+
+        assert "inboundContent(message)" in source
+        assert "group ? null : mediaPart" not in source
 
     # --- the per-file cap --------------------------------------------------
 
@@ -1153,6 +1226,7 @@ class TestTheSidecarsInboundMedia:
         assert self._call("m.MEDIA_EXTENSIONS") == {
             **image_sniff.EXTENSION_BY_MEDIA_TYPE,
             **audio_sniff.EXTENSION_BY_MEDIA_TYPE,
+            **video_sniff.EXTENSION_BY_MEDIA_TYPE,
         }
 
     # --- the staged write --------------------------------------------------

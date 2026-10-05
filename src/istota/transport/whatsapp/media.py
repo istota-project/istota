@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Callable, get_args
 from istota.lib import audio_sniff
 from istota.lib import du
 from istota.lib import image_sniff
+from istota.lib import video_sniff
 from . import message_fingerprint
 from ._types import MediaKind
 
@@ -146,6 +147,13 @@ _REASONS: dict[tuple[str, str], str] = {
     ("audio", "write_failed"): "the voice message could not be written to disk",
     ("audio", "no_id"): "the voice message named no media id",
     ("audio", "fetch_unknown"): "the voice message could not be fetched",
+    ("gif", "unattributed"): "the GIF was not attributed to a user",
+    ("gif", "not_placed"): "the GIF could not be placed in the user's workspace",
+    ("gif", "fetch_failed"): "the GIF could not be downloaded from WhatsApp",
+    ("gif", "over_cap"): "the GIF was larger than this surface accepts",
+    ("gif", "write_failed"): "the GIF could not be written to disk",
+    ("gif", "no_id"): "the GIF named no media id",
+    ("gif", "fetch_unknown"): "the GIF could not be fetched",
 }
 """Every reason a media record may carry, per kind: the only copy of the prose.
 
@@ -160,6 +168,25 @@ REASON_KEYS: tuple[str, ...] = (
     "unattributed", "not_placed", "fetch_failed", "over_cap", "write_failed",
     "no_id", "fetch_unknown",
 )
+
+#: What a message this surface cannot open was, by the sidecar's
+#: `unsupported_kind`, as the phrase a group's stand-in row names it by
+#: (ISSUE-646). A key off the wire outside this table reads as "a message".
+UNSUPPORTED_LABELS: dict[str, str] = {
+    "video": "a video",
+    "gif": "a GIF",
+    "video_note": "a video note",
+    "sticker": "a sticker",
+    "document": "a document",
+    "location": "a location",
+    "contact": "a contact card",
+    "poll": "a poll",
+}
+
+#: What a group's stand-in row calls a file of each kind.
+MEDIA_LABELS: dict[str, str] = {
+    "image": "an image", "audio": "a voice message", "gif": "a GIF",
+}
 
 
 def reason(kind: str, key: str) -> str:
@@ -413,11 +440,14 @@ def open_staged_write(media_dir: Path, name: str) -> int:
     )
 
 
-_SNIFF_READ_BYTES = max(image_sniff.SNIFF_BYTES, audio_sniff.SNIFF_BYTES)
+_SNIFF_READ_BYTES = max(
+    image_sniff.SNIFF_BYTES, audio_sniff.SNIFF_BYTES, video_sniff.SNIFF_BYTES,
+)
 
 _EXTENSION_BY_KIND: dict[str, dict[str, str]] = {
     "image": image_sniff.EXTENSION_BY_MEDIA_TYPE,
     "audio": audio_sniff.EXTENSION_BY_MEDIA_TYPE,
+    "gif": video_sniff.EXTENSION_BY_MEDIA_TYPE,
 }
 
 
@@ -452,7 +482,47 @@ def sniff_staged(path: Path, kind: str = "image") -> str | None:
         return image_sniff.sniff_decodable(head)
     if kind == "audio":
         return audio_sniff.sniff_audio(head)
+    if kind == "gif":
+        return video_sniff.sniff_video(head)
     return None
+
+
+def gif_to_still(staged: Path) -> Path | None:
+    """The staged GIF-as-MP4 as one staged JPEG of its frames, or None.
+
+    ISSUE-647. The MP4 is always unlinked: the inbox gets the still and never
+    the video, which is the smaller disk cost and the only form the image
+    pipeline reads. The decode runs in a child with a deadline
+    (`gif_frames.extract_frames`), on the inbound worker before any lock. The
+    still is a staged name beside the MP4, so the orphan sweep takes it if
+    nothing consumes it. None means a GIF that cannot be shown, which the
+    caller treats as an unsupported message rather than a failed fetch: a
+    missing decoder or a hostile file is not fixed by sending it again.
+    Never raises.
+    """
+    from . import gif_frames  # noqa: PLC0415
+
+    staged = Path(staged)
+    still = staged.with_name(f"{staged.stem}-frames.jpg")
+    try:
+        if not is_staged_name(staged.name) or not is_staged_name(still.name):
+            return None
+        if sniff_staged(staged, "gif") is None:
+            return None
+        code = gif_frames.extract_frames(str(staged), str(still))
+        if code is not None:
+            logger.info(
+                "whatsapp.media.gif_refused reason=%s file=%s", code, staged.stem,
+            )
+            discard_staged(still)
+            return None
+        return still
+    except Exception:  # noqa: BLE001 — a decode failure costs the GIF, never the message
+        logger.warning("whatsapp.media.gif_failed file=%s", staged.stem)
+        discard_staged(still)
+        return None
+    finally:
+        discard_staged(staged)
 
 
 def staging_bytes(media_dir: Path) -> int:
