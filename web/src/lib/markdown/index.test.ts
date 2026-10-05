@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 // `lib/offline/clear.test.ts`.
 vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
 
-import { renderMarkdown } from './index';
+import { renderMarkdown, renderUntrustedMarkdown } from './index';
 import { chatFileUrl } from '$lib/api';
 
 describe('renderMarkdown syntax highlighting', () => {
@@ -348,5 +348,38 @@ describe('an admitted image the model wrapped in a link', () => {
     const after = renderMarkdown(`[a](https://evil.example) ![radar](${png})`);
     expect(after).toContain('role="button"');
     expect(after).not.toContain('md-image-linked');
+  });
+});
+
+describe('untrusted text', () => {
+  it('names the host of a link whose text is not its target', () => {
+    const html = renderUntrustedMarkdown('[https://bank.example](https://evil.example/login)');
+    expect(html).toContain('href="https://evil.example/login"');
+    expect(html).toContain('<span class="md-link-dest">(evil.example)</span>');
+  });
+
+  it('adds nothing to a link that reads as where it goes', () => {
+    expect(renderUntrustedMarkdown('see https://example.com/x')).not.toContain('md-link-dest');
+    expect(renderUntrustedMarkdown('<https://example.com/x>')).not.toContain('md-link-dest');
+    expect(renderUntrustedMarkdown('[example.com](https://example.com/x)')).not.toContain(
+      'md-link-dest',
+    );
+  });
+
+  it('names the address of a labelled mailto', () => {
+    expect(renderUntrustedMarkdown('[write us](mailto:a@b.example)')).toContain('(a@b.example)');
+  });
+
+  it('turns a workspace image into a link', () => {
+    const html = renderUntrustedMarkdown(`![badge](${chatFileUrl('/Users/u/x.png')})`);
+    expect(html).not.toContain('<img');
+    expect(html).toContain('>badge</a>');
+  });
+
+  it('leaves trusted rendering alone', () => {
+    expect(renderMarkdown('[https://bank.example](https://evil.example)')).not.toContain(
+      'md-link-dest',
+    );
+    expect(renderMarkdown(`![badge](${chatFileUrl('/Users/u/x.png')})`)).toContain('<img');
   });
 });

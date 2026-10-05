@@ -77,6 +77,42 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return defaultLinkOpen(tokens, idx, options, env, self);
 };
 
+/** Where a link goes, as a reader checks it: the host of a web URL, the
+ *  address of a mailto, otherwise the href as written. */
+function linkDestination(href: string): string {
+  if (/^mailto:/i.test(href)) return href.slice('mailto:'.length);
+  if (/^https?:\/\//i.test(href)) {
+    try {
+      return new URL(href).host;
+    } catch {
+      return href;
+    }
+  }
+  return href;
+}
+
+// Untrusted text (`renderUntrustedMarkdown`): a link whose visible text is not
+// its own target says where it goes, so `[https://bank.example](https://evil.example)`
+// cannot pass for the bank. An autolink's text is its target and gets nothing.
+md.renderer.rules.link_close = (tokens, idx, options, env, self) => {
+  const close = self.renderToken(tokens, idx, options);
+  if (!env?.untrusted) return close;
+  let open = idx - 1;
+  while (open >= 0 && tokens[open].type !== 'link_open') open--;
+  if (open < 0) return close;
+  const opener = tokens[open];
+  if (opener.markup === 'linkify' || opener.markup === 'autolink') return close;
+  const href = opener.attrGet('href') ?? '';
+  const text = tokens
+    .slice(open + 1, idx)
+    .map((t) => t.content)
+    .join('')
+    .trim();
+  const destination = linkDestination(href);
+  if (!destination || text === href || text === destination) return close;
+  return `${close} <span class="md-link-dest">(${md.utils.escapeHtml(destination)})</span>`;
+};
+
 // The one `src` prefix an <img> may be drawn from: our own authenticated
 // chat-files endpoint. This restates the shape `chatFileUrl` builds (api.ts) and
 // shares only `base` with it, so the two *can* drift — and the drift is silent,
@@ -235,7 +271,9 @@ md.renderer.rules.image = (tokens, idx, options, env, self) => {
 
   if (!src) return md.utils.escapeHtml(alt);
 
-  if (!src.startsWith(CHAT_FILES_PREFIX)) {
+  // Untrusted text may point at any file in the reader's own workspace, so it
+  // never draws one inline; the image is a link like any foreign src.
+  if (!src.startsWith(CHAT_FILES_PREFIX) || env?.untrusted) {
     // The label falls back to the URL rather than to nothing: an empty alt would
     // render an anchor with no text, which is invisible and unreachable.
     const label = md.utils.escapeHtml(alt || src);
@@ -322,4 +360,11 @@ md.renderer.rules.mention = (tokens, idx) => {
 export function renderMarkdown(src: string, mentions?: readonly MentionTarget[]): string {
   if (!src) return '';
   return md.render(src, mentions && mentions.length > 0 ? { mentions } : {});
+}
+
+/** Render text somebody outside the room wrote, such as a mail body. No
+ *  mentions, no inline images, and every labelled link names its destination. */
+export function renderUntrustedMarkdown(src: string): string {
+  if (!src) return '';
+  return md.render(src, { untrusted: true });
 }

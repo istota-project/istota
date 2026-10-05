@@ -4,6 +4,7 @@
   import { chatFileUrl } from '$lib/api';
   import { copyText } from '$lib/clipboard';
   import { KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { renderUntrustedMarkdown } from '$lib/markdown';
   import {
     addressLabel,
     formatMailDate,
@@ -51,6 +52,10 @@
   const copyAddress = $derived(incoming ? card.from?.address : (card.to[0] ?? card.cc[0])?.address);
   // Headers are the stored metadata, so a card with none offers none.
   const hasHeaders = $derived(incoming && !card.fallback);
+  // A received body is read as markdown, so an HTML mail's converted links and
+  // quotes render. A sent one stays as typed: it was mailed as plain text.
+  const bodyHtml = $derived(incoming ? renderUntrustedMarkdown(card.body) : '');
+  const restHtml = $derived(incoming ? renderUntrustedMarkdown(card.rest) : '');
 
   const menu = $derived.by(() => {
     const items: KebabItem[] = [];
@@ -176,7 +181,11 @@
       </div>
     {/if}
     {#if card.body}
-      <div class="mail-body">{card.body}</div>
+      {#if incoming}
+        <div class="mail-body markdown">{@html bodyHtml}</div>
+      {:else}
+        <div class="mail-body mail-plain">{card.body}</div>
+      {/if}
     {/if}
     {#if card.rest}
       <button
@@ -187,7 +196,7 @@
         >{quotedShown ? 'Hide quoted text' : 'Show quoted text'}</button
       >
       {#if quotedShown}
-        <div class="mail-body mail-quoted">{card.rest}</div>
+        <div class="mail-body markdown mail-quoted">{@html restHtml}</div>
       {/if}
     {/if}
     {#if card.attachments.length}
@@ -319,10 +328,16 @@
     font-size: var(--text-sm);
     line-height: 1.5;
     color: var(--text-primary);
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  .mail-quoted {
+  .mail-plain {
+    white-space: pre-wrap;
+  }
+  .mail-quoted,
+  .mail-quoted :global(blockquote) {
+    color: var(--text-muted);
+  }
+  .mail-body :global(.md-link-dest) {
     color: var(--text-muted);
   }
   .mail-quoted-toggle {
