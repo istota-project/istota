@@ -231,10 +231,18 @@ FULL_CONFIG = {
 #: `participants/active` or Nextcloud's authorization, because all three need a
 #: real Talk behind them. A second full profile would be a second cold boot of
 #: the same six containers to run one chain.
+#:
+#: And ntfy, for `tests/full/test_email_rooms.py`: a push the product confines
+#: to ntfy and email (`notifications.store.ROOM_FREE_SURFACES`) can only be told
+#: apart from one on the whole alert route where that route also names a Talk
+#: room, which is the one thing the lean `email` profile has no way to offer.
+#: The stub runs in the pytest process and the daemon reaches it only through
+#: the per-user secret the email seeding writes. Until a test seeds it, nothing
+#: pushes there; after, testuser's alerts reach it for the rest of the session.
 FULL = Profile(
     "full",
     shape="full",
-    services=("model", "nextcloud", "mail", "signaling"),
+    services=("model", "nextcloud", "mail", "signaling", "ntfy"),
     config=FULL_CONFIG,
     compose_overlays=(MAIL_OVERLAY, MAIL_WEB_OVERLAY),
     compose_profiles=("signaling",),

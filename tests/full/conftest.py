@@ -31,8 +31,15 @@ flag file.
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
+
+from testbed import stack as stack_support
+from testbed.stack import CONTAINER_CONFIG
+
+from ..support import email_flow
+from ..support import email_people as email_people_support
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -59,3 +66,59 @@ def _refuse_keep_for_the_full_tier():
             "to run the full tier."
         )
     yield
+
+
+# -- the email suite ---------------------------------------------------------
+
+
+def alerts_token(stack) -> str:
+    """The host's Talk alerts room, as the container rendered it.
+
+    `entrypoint.sh` provisions `#alerts` and `render-config.sh` writes its token
+    as testuser's `alerts_channel`, which is the default route an `alert` push
+    takes on this shape.
+    """
+    rendered = stack.exec(["cat", CONTAINER_CONFIG])
+    found = re.search(r'^alerts_channel = "([^"]+)"', rendered.stdout, re.M)
+    if rendered.returncode != 0 or found is None:
+        raise stack_support.StackError(
+            f"no alerts_channel in the rendered config:\n{rendered.stdout}"
+        )
+    return found.group(1)
+
+
+@pytest.fixture
+def email_people(stack) -> email_people_support.EmailPeople:
+    """The email suite's users on the full shape, seeded once per stack.
+
+    As on lean (`tests/support/email_people.py`), with one difference: the
+    host's alert route keeps the Talk alerts room this shape provisions and
+    adds ntfy, rather than replacing Talk with email. A push confined to ntfy
+    and email is then visibly not a push on the whole route.
+    """
+    seeded = getattr(stack, "_email_people", None)
+    if seeded is None:
+        try:
+            seeded = email_people_support.seed_email_people(
+                stack, alert_route=f"alert=talk:{alerts_token(stack)},ntfy",
+            )
+        except (TimeoutError, stack_support.StackError) as exc:
+            pytest.fail(str(exc), pytrace=False)
+        stack._email_people = seeded
+    return seeded
+
+
+@pytest.fixture(autouse=True)
+def _no_unmatched_marked_requests(request):
+    """The lean conftest's check, for the email files on this shape: a marked
+    request this test sent that found no scripted turn fails the test."""
+    module = request.module.__name__.rsplit(".", 1)[-1]
+    if not module.startswith("test_email_") or "stack" not in request.fixturenames:
+        yield
+        return
+    stack = request.getfixturevalue("stack")
+    ours = email_flow.sent_markers(stack)
+    ours.clear()
+    yield
+    unmatched = email_people_support.unmatched_marked_requests(stack, ours)
+    assert not unmatched, email_people_support.describe_unmatched(unmatched)
