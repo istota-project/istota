@@ -36,34 +36,6 @@ _ALERT_DESTINATIONS = (
 )
 
 
-def held_task(stack, sent: flow.Sent, timeout: float = flow.DEFAULT_TIMEOUT) -> dict:
-    """The task the gate parked for `sent`, once it is parked."""
-    deadline = time.monotonic() + timeout
-    row = None
-    while row is None or row.get("task_id") is None:
-        row = stack.probe.processed(sent.message_id)
-        if row is not None and row.get("task_id") is not None:
-            break
-        if time.monotonic() >= deadline:
-            raise AssertionError(f"no held task for {sent.message_id}: {row!r}")
-        time.sleep(flow.POLL_INTERVAL)
-    task = stack.probe.wait_for_task(
-        status="pending_confirmation", task_id=row["task_id"], timeout=timeout,
-    )
-    # `wait_for_task` also returns on a terminal status.
-    assert task["status"] == "pending_confirmation", (
-        f"the gate did not hold {sent.message_id}: task {task['id']} is {task['status']}"
-    )
-    return task
-
-
-def prompt_push(task: dict) -> str:
-    """What the gate prompt's push carries: the composed prompt through
-    `flatten_body` (`inbound._deliver_confirmation_prompts`). It names the
-    sender, the subject and the task, never the mail's body."""
-    return flatten_body(task["confirmation_prompt"])
-
-
 def _dmarc_push(stack, task: dict, sent: flow.Sent, verdict: str) -> str:
     """The DMARC canary's push: its alert message through `flatten_body`
     (`inbound._deliver_dmarc_alerts`), read back off the `dmarc:<verdict>` row,
@@ -104,22 +76,14 @@ def _assert_self_claim_prompt(task: dict) -> None:
         flow.confirm_command_from(prompt, "yes trust")
 
 
-def assert_unknown_sender_prompt(task: dict, sender: str) -> None:
-    """Anyone not claiming to be the routed user is an `unknown sender`, and
-    is offered `yes trust` as well."""
-    prompt = task["confirmation_prompt"] or ""
-    assert prompt.startswith(f"Email from unknown sender {sender}\n"), prompt
-    assert flow.confirm_command_from(prompt, "yes trust") == f"!confirm {task['id']} trust"
-
-
 def _held_at_the_plus_address(stack, email_people, sent: flow.Sent) -> None:
     """A mail the gate held on the plus-address route from someone not
     claiming to be the host. The prompt is the one alert, on both surfaces of
     the alert route; the `confirmation` row is written and not pushed besides,
     because the prompt reached someone (`inbound._deliver_confirmation_prompts`
     delivers the row only where the prompt did not)."""
-    task = held_task(stack, sent)
-    assert_unknown_sender_prompt(task, sent.sender)
+    task = flow.held_task(stack, sent)
+    flow.assert_unknown_sender_prompt(task, sent.sender)
     flow.assert_outcome(stack, sent, flow.Expected(
         processed=flow.Processed(
             routing_method="plus_address", user_id=email_people.host_id,
@@ -131,7 +95,7 @@ def _held_at_the_plus_address(stack, email_people, sent: flow.Sent) -> None:
         reply=None, note=None,
         notices=flow.Notices(
             rows=frozenset({("confirmation", "task:{task}")}),
-            pushes=(prompt_push(task),),
+            pushes=(flow.prompt_push(task),),
             alert_mails=1,
         ),
     ))
@@ -220,7 +184,7 @@ class TestTheHostsOwnAddress:
             subject=f"spoofed {nonce}", text=f"a forged question {nonce}",
             marker=nonce,
         )
-        task = held_task(stack, sent)
+        task = flow.held_task(stack, sent)
         _assert_self_claim_prompt(task)
         flow.assert_outcome(stack, sent, flow.Expected(
             processed=flow.Processed(
@@ -234,7 +198,7 @@ class TestTheHostsOwnAddress:
             notices=flow.Notices(
                 rows=frozenset({("confirmation", "task:{task}"),
                                 ("task_alert", "dmarc:fail")}),
-                pushes=(prompt_push(task), _dmarc_push(stack, task, sent, "fail")),
+                pushes=(flow.prompt_push(task), _dmarc_push(stack, task, sent, "fail")),
                 alert_mails=2,
             ),
         ))
@@ -250,7 +214,7 @@ class TestTheHostsOwnAddress:
             subject=f"unstamped {nonce}", text=f"an unstamped question {nonce}",
             marker=nonce,
         )
-        task = held_task(stack, sent)
+        task = flow.held_task(stack, sent)
         _assert_self_claim_prompt(task)
         flow.assert_outcome(stack, sent, flow.Expected(
             processed=flow.Processed(
@@ -264,7 +228,7 @@ class TestTheHostsOwnAddress:
             notices=flow.Notices(
                 rows=frozenset({("confirmation", "task:{task}"),
                                 ("task_alert", "dmarc:unstamped")}),
-                pushes=(prompt_push(task), _dmarc_push(stack, task, sent, "unstamped")),
+                pushes=(flow.prompt_push(task), _dmarc_push(stack, task, sent, "unstamped")),
                 alert_mails=2,
             ),
         ))

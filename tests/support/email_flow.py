@@ -31,7 +31,8 @@ import uuid
 from dataclasses import dataclass, field
 from email.utils import getaddresses, parseaddr
 
-from istota.notifications.resolvers.task_alert import PRIVATE_NOTE_POINTER
+from istota.confirmations import request_subject
+from istota.notifications.resolvers.task_alert import PRIVATE_NOTE_POINTER, flatten_body
 from istota.rooms.private_replies import NOTE_OUTCOMES
 from testbed.services import mail
 
@@ -208,22 +209,26 @@ def send(
     cc: list[str] | tuple[str, ...] = (),
     subject: str,
     text: str,
-    reply_to_msg: Sent | None = None,
+    reply_to_msg: Sent | mail.ReceivedMessage | None = None,
+    with_references: bool = True,
     marker: str,
 ) -> Sent:
     """Send one mail through the stack's mail server, and say what was sent.
 
     The body is `text` followed by the marker on its own line. A reply carries
-    `In-Reply-To` naming `reply_to_msg` and `References` extending its chain.
-    The stamp, when the correspondent has one, goes on the wire verbatim.
+    `In-Reply-To` naming `reply_to_msg` (a mail this test sent, or one it read
+    back off the wire) and, unless `with_references` is False, `References`
+    extending its chain. The stamp, when the correspondent has one, goes on the
+    wire verbatim.
     """
     sent_markers(stack).add(marker_text(marker))
     references = None
     in_reply_to = None
     if reply_to_msg is not None:
         in_reply_to = reply_to_msg.message_id
-        chain = (reply_to_msg.references or "").split()
-        references = " ".join([*chain, reply_to_msg.message_id])
+        if with_references:
+            chain = (reply_to_msg.references or "").split()
+            references = " ".join([*chain, reply_to_msg.message_id])
     before = outbox_uid(stack)
     message_id = _mail(stack).send(
         from_addr=sender.address,
@@ -360,6 +365,92 @@ def confirm_command_from(prompt: mail.ReceivedMessage | str, answer: str = "yes"
     raise ValueError(f"unknown answer {answer!r}; expected yes, no or 'yes trust'")
 
 
+# -- the gate, and answering it by mail -----------------------------------------
+
+
+def held_task(stack, sent: Sent, timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """The task the gate parked for `sent`, once it is parked."""
+    deadline = time.monotonic() + timeout
+    row = None
+    while row is None or row.get("task_id") is None:
+        row = stack.probe.processed(sent.message_id)
+        if row is not None and row.get("task_id") is not None:
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"no held task for {sent.message_id}: {row!r}")
+        time.sleep(POLL_INTERVAL)
+    task = stack.probe.wait_for_task(
+        status="pending_confirmation", task_id=row["task_id"], timeout=timeout,
+    )
+    # `wait_for_task` also returns on a terminal status.
+    assert task["status"] == "pending_confirmation", (
+        f"the gate did not hold {sent.message_id}: task {task['id']} is {task['status']}"
+    )
+    return task
+
+
+def prompt_push(task: dict) -> str:
+    """What the gate prompt's push carries: the composed prompt through
+    `flatten_body` (`inbound._deliver_confirmation_prompts`). It names the
+    sender, the subject and the task, never the mail's body."""
+    return flatten_body(task["confirmation_prompt"])
+
+
+def assert_unknown_sender_prompt(task: dict, sender: str) -> None:
+    """Anyone not claiming to be the routed user is an `unknown sender`, and
+    is offered `yes trust` as well."""
+    prompt = task["confirmation_prompt"] or ""
+    assert prompt.startswith(f"Email from unknown sender {sender}\n"), prompt
+    assert confirm_command_from(prompt, "yes trust") == f"!confirm {task['id']} trust"
+
+
+def request_mail(stack, sent: Sent, task: dict,
+                 timeout: float = DEFAULT_TIMEOUT) -> mail.ReceivedMessage:
+    """The confirmation request the bot mailed the host for `task`.
+
+    Read out of the catch-all by the subject the request goes out under
+    (`confirmations.request_subject`, ISSUE-649) and checked to be addressed to
+    the task's user, since the alert route is what carries it.
+    """
+    message = wait_for_reply(stack, after_uid=sent.outbox_uid,
+                             subject=request_subject(task["id"]), timeout=timeout)
+    assert user_id_address(task["user_id"]) in recipients(message, "To"), message.headers
+    return message
+
+
+def answer_by_mail(stack, request: mail.ReceivedMessage, answer: str, *,
+                   sender: Correspondent | None = None, nonce: str) -> Sent:
+    """Answer a mailed request with the `!confirm` line it names.
+
+    From the host's own address with a passing stamp unless `sender` says
+    otherwise, to the bot's bare address, under a subject of its own: the line
+    is what makes it an answer (`transport/email/answers.read_answer`). The
+    answer runs no task, so its marker takes no scripted turn.
+    """
+    return send(
+        stack, sender or person("host", nonce), to=[mail.BOT_ADDRESS],
+        subject=f"answer {nonce}", text=confirm_command_from(request, answer),
+        marker=f"answer-{nonce}",
+    )
+
+
+def filed_row(stack, sent: Sent, timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """`sent`'s `processed_emails` row, once the poller has filed it.
+
+    An answer to a held task is filed without its Message-ID, like the other
+    ledger-only rows (`inbound.poll_emails`, the ISSUE-649 branch), so this
+    falls back to sender and subject as `assert_outcome` does.
+    """
+    row = _wait(lambda: stack.probe.processed(sent.message_id)
+                or ledger_only_row(stack, sent), timeout=timeout)
+    if row is None:
+        raise AssertionError(
+            f"{sent.message_id} was not filed within {timeout}s"
+            f"\n{_mail(stack).describe()}"
+        )
+    return row
+
+
 # -- what every scenario asserts ------------------------------------------------
 
 
@@ -455,6 +546,22 @@ class Expected:
     notices: Notices
 
 
+@dataclass(frozen=True)
+class Checkpoint:
+    """Where a later step of one test starts reading: the watermark and the
+    number of ntfy pushes already seen. `assert_outcome(..., since=)` reads
+    rows and pushes above it, so a test sending several mails can assert each
+    one's own."""
+    mark: dict
+    pushes: int
+
+
+def checkpoint(stack) -> Checkpoint:
+    ntfy = stack.service("ntfy") if "ntfy" in stack.services else None
+    return Checkpoint(mark=stack.probe.watermark(),
+                      pushes=len(ntfy.pushes()) if ntfy is not None else 0)
+
+
 @dataclass
 class Outcome:
     """What `assert_outcome` read, for a scenario that asserts further."""
@@ -527,7 +634,7 @@ def _people(entries) -> tuple[str, ...]:
 
 def assert_outcome(
     stack, sent: Sent, expected: Expected, *, user_id: str = HOST_ID,
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT, since: Checkpoint | None = None,
 ) -> Outcome:
     """Check every dimension of `expected` against what the stack did with `sent`.
 
@@ -536,8 +643,13 @@ def assert_outcome(
     bounded. A negative claim about something that happens after delivery (no
     reply, no note) is read after the worker's completion line for the task,
     the one marker that follows the note step.
+
+    Rows, transcript and pushes are read above the test's watermark, or above
+    `since` for a later step of a test that has already sent mail.
     """
     probe = stack.probe
+    mark = since.mark if since is not None else stack.mark
+    pushes_before = since.pushes if since is not None else 0
     misses: list[str] = []
     seen = Outcome()
 
@@ -613,7 +725,7 @@ def assert_outcome(
         check("participants", expected.participants, present)
 
     # 5. the transcript
-    rows = probe.room_messages(room, id_above=stack.mark.get("messages")) if room else []
+    rows = probe.room_messages(room, id_above=mark.get("messages")) if room else []
     seen.rows = rows
     incoming = next(
         (r for r in rows if r["role"] == "user" and isinstance(r.get("received_mail"), dict)
@@ -701,7 +813,7 @@ def assert_outcome(
 
     got_rows = frozenset(
         (n["source"], n["dedup_key"])
-        for n in probe.notifications(user_id, id_above=stack.mark.get("notifications"))
+        for n in probe.notifications(user_id, id_above=mark.get("notifications"))
     )
     check("notices.rows",
           frozenset((source, fill(key)) for source, key in expected.notices.rows),
@@ -709,7 +821,7 @@ def assert_outcome(
     ntfy = stack.service("ntfy") if "ntfy" in stack.services else None
 
     def read_pushes() -> list:
-        return ntfy.pushes() if ntfy is not None else []
+        return ntfy.pushes()[pushes_before:] if ntfy is not None else []
 
     def read_alerts() -> list:
         return [
@@ -766,7 +878,8 @@ def assert_outcome(
 def ledger_only_row(stack, sent: Sent) -> dict | None:
     """The ledger row of a mail filed without its Message-ID, or None.
 
-    The poller writes a `discarded`, `quiet`, `throttled` or `read_error` row with the sender
+    The poller writes a `discarded`, `quiet`, `throttled`, `read_error`,
+    `confirm_answer` or `answer_refused:<reason>` row with the sender
     and subject and no `message_id` (the `mark_email_processed` calls on those
     branches of `inbound.poll_emails`), so `Probe.processed` cannot find one.
     Every subject in the suite carries the test's nonce, which is what makes
@@ -793,7 +906,8 @@ def user_id_address(user_id: str) -> str:
 __all__ = [
     "PRIVATE_NOTE_POINTER", "NOTE_OUTCOMES", "Correspondent", "Sent", "Expected",
     "Processed", "TaskState", "Transcript", "Incoming", "BotRow", "Reply", "Note",
-    "Notices", "Outcome", "PASSING_STAMP", "FAILING_STAMP", "assert_outcome",
+    "Notices", "Outcome", "Checkpoint", "checkpoint", "PASSING_STAMP", "FAILING_STAMP", "assert_outcome",
     "confirm_command_from", "email_answer", "email_output_then", "person", "route",
-    "send", "stamp", "wait_for_reply", "worker_done",
+    "send", "stamp", "wait_for_reply", "worker_done", "held_task", "prompt_push",
+    "request_mail", "answer_by_mail", "filed_row", "assert_unknown_sender_prompt",
 ]
