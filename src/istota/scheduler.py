@@ -269,7 +269,7 @@ def request_shutdown() -> None:
     _shutdown_requested = True
 
 # Pattern to detect confirmation requests in Claude's output. Matched only
-# against the final paragraph, through `asks_for_confirmation`.
+# through `asks_for_confirmation`, never against the whole answer.
 CONFIRMATION_PATTERN = re.compile(
     r'(?:'
     r'I need your confirmation|'
@@ -287,12 +287,12 @@ _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _INLINE_CODE_RE = re.compile(r"(`+)[^`]*?\1")
 
 
-def final_paragraph(text: str) -> str:
-    """The last paragraph of ``text`` that is the model's own prose.
+def prose_paragraphs(text: str) -> list[str]:
+    """The paragraphs of ``text`` that are the model's own prose, in order.
 
     Fenced blocks and ``>`` quoted lines are dropped, each acting as a
-    paragraph break, so neither a quoted message nor a code sample can be the
-    final paragraph. An unclosed fence runs to the end.
+    paragraph break, so neither a quoted message nor a code sample is one of
+    them. An unclosed fence runs to the end.
     """
     kept: list[str] = []
     fence: str | None = None
@@ -313,20 +313,63 @@ def final_paragraph(text: str) -> str:
             kept.append("")
             continue
         kept.append(line)
-    paragraphs = [p for p in re.split(r"\n[ \t]*\n", "\n".join(kept)) if p.strip()]
-    return paragraphs[-1].strip() if paragraphs else ""
+    return [
+        p.strip() for p in re.split(r"\n[ \t]*\n", "\n".join(kept)) if p.strip()
+    ]
+
+
+def final_paragraph(text: str) -> str:
+    """The last of ``prose_paragraphs(text)``, or ``""``."""
+    paragraphs = prose_paragraphs(text)
+    return paragraphs[-1] if paragraphs else ""
+
+
+# A sentence ends at `.`, `!` or `?`, plus any closing quote or bracket.
+_SENTENCE_BREAK_RE = re.compile(r"[.!?][\"'\u201d\u2019)\]]*\s+")
+_TRAILING_CLOSERS = "*_\"'\u201d\u2019)] \t"
+_HEADING_RE = re.compile(r"^#{1,6}\s")
+_TRAILING_ASIDE_RE = re.compile(r"\s*\([^()]*\)$")
+
+
+def _introduces_what_follows(paragraph: str) -> bool:
+    """Whether ``paragraph`` ends on a request that the text after it serves.
+
+    The paragraph's last sentence has to end in ``?`` or ``:`` and open with
+    the request, or carry it straight after a comma, semicolon or dash ("Before
+    I send it, please confirm:"). A phrase in the middle of a sentence, quoted
+    or not, is the answer talking about confirmations, and so is a heading.
+    """
+    if _HEADING_RE.match(paragraph):
+        return False
+    text = _INLINE_CODE_RE.sub(" ", paragraph).strip()
+    text = _TRAILING_ASIDE_RE.sub("", text).rstrip(_TRAILING_CLOSERS)
+    if not text.endswith(("?", ":")):
+        return False
+    last_sentence = _SENTENCE_BREAK_RE.split(text)[-1].lstrip("*_ \t")
+    for match in CONFIRMATION_PATTERN.finditer(last_sentence):
+        before = last_sentence[:match.start()].rstrip()
+        if not before or before[-1] in ",;\u2013\u2014-":
+            return True
+    return False
 
 
 def asks_for_confirmation(result: str) -> bool:
-    """Whether an answer ends by asking the user to approve something.
+    """Whether an answer asks the user to approve something.
 
-    Only the final paragraph counts, with inline code removed: an answer that
-    explains the confirmation card, or quotes "Please confirm" from somewhere,
-    is not itself a question (#625, a web answer about confirmations that was
-    parked as one).
+    The final paragraph asks when it carries a request anywhere, with inline
+    code removed: an answer that explains the confirmation card, or quotes
+    "Please confirm" from somewhere, is not itself a question (#625, a web
+    answer about confirmations that was parked as one). An earlier paragraph
+    asks when it ends on the request and so introduces what follows, a draft
+    or a list put up for approval (#634). Every earlier paragraph is tried,
+    since the draft under a request can hold its own questions and headings.
     """
-    tail = _INLINE_CODE_RE.sub(" ", final_paragraph(result))
-    return CONFIRMATION_PATTERN.search(tail) is not None
+    paragraphs = prose_paragraphs(result)
+    if not paragraphs:
+        return False
+    if CONFIRMATION_PATTERN.search(_INLINE_CODE_RE.sub(" ", paragraphs[-1])):
+        return True
+    return any(_introduces_what_follows(p) for p in paragraphs[:-1])
 
 
 _POLICY_REFUSAL_KEYWORDS = ("safety", "policy", "content", "refused", "harm", "blocked")

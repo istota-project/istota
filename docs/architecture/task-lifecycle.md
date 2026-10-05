@@ -87,7 +87,7 @@ Back in the scheduler, `process_one_task()` handles the result inside a DB trans
 
 1. **API error guard**: detect API errors masquerading as success (exit 0 with error text)
 2. **Malformed output guard**: detect leaked tool-call XML — reclassify as failure
-3. **Confirmation check**: regex match for confirmation requests in the answer's final paragraph, skipping quoted, fenced and inline-code text (`scheduler.asks_for_confirmation`) → `pending_confirmation`
+3. **Confirmation check**: regex match for confirmation requests in the answer's final paragraph, or in the last paragraph ending in `?` or `:` when that paragraph ends on the request and introduces a draft or list below it, skipping quoted, fenced and inline-code text (`scheduler.asks_for_confirmation`) → `pending_confirmation`
 4. **Update to `completed`**: stores result, actions_taken, execution_trace
 5. **Memory search indexing**: index conversation under user and channel namespaces
 6. **Delivery routing**: `transport.routing.resolve_delivery_plan` turns `output_target` into an ordered, channel-resolved destination list (Talk, email, ntfy, TASKS.md write-back, or stream surfaces web/REPL). Stream destinations need no push — the `task_events` log is the delivery

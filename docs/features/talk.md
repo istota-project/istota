@@ -37,7 +37,7 @@ Per-user verbose logging of every tool action, with a `[task_id #channel]` prefi
 - Messages split at 4000 chars
 - File attachments downloaded to `/Users/{user_id}/inbox/`
 - Audio attachments pre-transcribed before skill selection (so the transcript is available to selection and the model)
-- Confirmation flow: a confirmation request in the answer's final paragraph prompts the user for a yes/no reply
+- Confirmation flow: a confirmation request in the answer's final paragraph, or ending the paragraph above a draft or list it introduces, prompts the user for a yes/no reply
 - Alerts channel (`alerts_channel` per-user config): dedicated Talk room for confirmations, email gate prompts, and security alerts. Falls back to briefing token, then auto-detected 1:1 DM with the bot
 - `!trust`/`!untrust` commands for runtime management of trusted email senders
 - Multi-line tool output is collapsed to the first line in progress updates
