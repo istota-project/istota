@@ -399,7 +399,7 @@ class TestTheBellItem:
         config = _config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
             task_id = _mint(conn, config, "sms", text="delete it").task_id
-            db.set_task_confirmation(conn, task_id, "Sure?")
+            db.set_task_confirmation(conn, task_id, "Delete the archive?")
             row = NotificationRow(
                 id=1, user_id="alice", source=confirmation.SOURCE,
                 dedup_key=confirmation.dedup_key(task_id), object_type="task",
@@ -410,6 +410,8 @@ class TestTheBellItem:
         assert view is not None
         assert view.actions == ()
         assert "Reply by SMS" in view.body
+        # Where the text did not arrive, the owed push sends the user here (#638).
+        assert "Delete the archive?" in view.body
 
 
 @web_only

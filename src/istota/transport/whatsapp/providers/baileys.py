@@ -55,6 +55,7 @@ BAILEYS_CAPS = WhatsAppProviderCaps(
     address_field="jid",
     service_body_limit=WHATSAPP_TEXT_LIMIT,
     interactive_body_limit=WHATSAPP_TEXT_LIMIT,
+    outbound_media=True,
 )
 """What a paired session is and is not, stated once.
 

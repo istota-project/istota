@@ -753,7 +753,7 @@ def send_payload(request_id: str, request: WhatsAppSendRequest) -> dict[str, Any
     template. The template name and language are deliberately *not* sent —
     they are Meta account state with no meaning here.
     """
-    return {
+    payload = {
         "request_id": request_id,
         "to": request.to,
         "text": request.text,
@@ -761,6 +761,18 @@ def send_payload(request_id: str, request: WhatsAppSendRequest) -> dict[str, Any
         "reply_to_message_id": request.reply_to_message_id,
         "buttons": [list(pair) for pair in request.buttons],
     }
+    # Optional, and absent on a text send, so the protocol version stays where
+    # it is (a bump refuses `hello` and takes the surface down on a deploy that
+    # ships one half first, the ISSUE-508 shape). A sidecar predating media
+    # ignores the field and sends `text`, the alt-text rendering.
+    if request.media is not None:
+        payload["media"] = {
+            "name": request.media.name,
+            "mimetype": request.media.mimetype,
+            "kind": request.media.kind,
+            "caption": request.media.caption,
+        }
+    return payload
 
 
 def hello_version(payload: dict[str, Any]) -> int:

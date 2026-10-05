@@ -47,8 +47,9 @@
   const renderable = $derived(
     (item.actions ?? []).filter(
       (a) =>
-        (a.method === 'POST' && isSafeActionPath(a.endpoint)) ||
-        (a.method === 'LINK' && isSafeActionPath(a.href)),
+        !a.detail_only &&
+        ((a.method === 'POST' && isSafeActionPath(a.endpoint)) ||
+          (a.method === 'LINK' && isSafeActionPath(a.href))),
     ),
   );
 

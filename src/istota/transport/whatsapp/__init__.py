@@ -93,6 +93,22 @@ def message_fingerprint(value: str | None) -> str:
     return short_fingerprint("istota-whatsapp-message-v1", value or "", length=12)
 
 
+def _answers_own_turn(task, user_id: str, logical_key: str) -> bool:
+    """Whether this send is a task's own answer to its owner's turn.
+
+    The one shape that may carry an image out of `user_id`'s workspace
+    (ISSUE-639). A confirmation prompt, an alert and a notification are keyed
+    otherwise and stay text. A guest's turn runs as the room's host with every
+    scope withheld, and the image would be read by the daemon, outside that
+    withholding, so it stays text too.
+    """
+    if task is None or task.user_id != user_id:
+        return False
+    if getattr(task, "guest_participant_id", None) is not None:
+        return False
+    return logical_key == f"task-result:{task.id}"
+
+
 class WhatsAppTransport:
     """The `whatsapp` surface: an interactive, user-routable push transport.
 
@@ -216,6 +232,7 @@ class WhatsAppTransport:
             task_id=task.id if task is not None else None,
             buttons=buttons, ignore_opt_out=ignore_opt_out,
             group_room=group_room,
+            attach_media=_answers_own_turn(task, user_id, logical_key),
         )
 
     async def edit(self, target: str, message_id: int, text: str) -> None:

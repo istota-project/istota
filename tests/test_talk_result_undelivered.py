@@ -48,6 +48,7 @@ from istota.config import (
     TalkConfig,
     UserConfig,
 )
+from istota.notifications.resolvers import confirmation as confirmation_source
 from istota.notifications.resolvers import task_alert
 from istota.scheduler import process_one_task
 
@@ -200,13 +201,14 @@ class TestATalkPostThatNeverLanded:
 
         assert "1,240 EUR" in _rows(config)[0]["body"]
 
-    def test_the_alert_send_carries_the_full_body(
+    def test_the_alert_send_carries_a_pointer_not_the_answer(
         self, mock_run, config, fake_talk, plain,
     ):
-        """Routed by `alert` purpose, like every other notice on this path, so
-        it reaches whichever surface the user actually reads."""
+        """Routed by `alert` purpose, so it reaches whichever surface the user
+        actually reads, and that is the alerts channel: a notice about the
+        answer, never the answer itself (#638). The row above keeps it."""
         _timeout(fake_talk, plain.talk_ref)
-        _queue(config, plain.canonical)
+        task_id = _queue(config, plain.canonical)
         with patch(
             "istota.scheduler.send_notification", return_value=True,
         ) as send:
@@ -214,7 +216,46 @@ class TestATalkPostThatNeverLanded:
 
         assert send.call_count == 1
         assert send.call_args.kwargs["purpose"] == "alert"
-        assert ANSWER in send.call_args.args[2]
+        pushed = send.call_args.args[2]
+        assert "1,240" not in pushed
+        assert f"#{task_id}" in pushed
+
+    def test_the_row_outlives_being_seen_and_the_alert_sweep(
+        self, mock_run, config, fake_talk, plain,
+    ):
+        """The push points at this row, so the row is the user's copy and stays
+        until they dismiss it (#638). An ordinary alert row in the same panel
+        open is the control: it still closes on being seen and on the clock."""
+        from istota.notifications import store
+
+        _timeout(fake_talk, plain.talk_ref)
+        _queue(config, plain.canonical)
+        with patch("istota.scheduler.send_notification", return_value=True):
+            _run(config)
+        with db.get_db(config.db_path) as conn:
+            other = task_alert.write(conn, USER, dedup_key="dmarc:fail", title="Notice")
+            items, _total = store.list_open(config, conn, USER)
+            store.mark_seen(conn, USER, [(i.id, i.updated_at) for i in items])
+            states = dict(conn.execute(
+                "SELECT dedup_key, state FROM notifications").fetchall())
+        assert states["dmarc:fail"] == "resolved"
+        (undelivered,) = [k for k in states if k.startswith("undelivered:")]
+        assert states[undelivered] == "open"
+
+        aged = db.iso_utc_days_ago(store.NOTIFICATION_ALERT_MAX_AGE_DAYS + 1)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE notifications SET state = 'open', updated_at = ?", (aged,))
+            store.sweep_expired_alerts(conn)
+            states = dict(conn.execute(
+                "SELECT dedup_key, state FROM notifications").fetchall())
+        assert states["dmarc:fail"] == "resolved"
+        assert states[undelivered] == "open"
+        assert other is not None
+
+        with db.get_db(config.db_path) as conn:
+            (item,), _total = store.list_open(config, conn, USER)
+        assert "1,240 EUR" in item.body
+        assert "dismiss" in (item.status_note or "")
 
     def test_a_landed_post_records_nothing(
         self, mock_run, config, fake_talk, plain,
@@ -414,7 +455,10 @@ class TestAConfirmationPromptThatNeverLanded:
             _run(config, result=self.QUESTION)
 
         assert send.call_count == 1
-        assert "delete the archive" in send.call_args.args[2]
+        # A notice about the question, never the question, and one that does
+        # not send the user back to where its delivery just failed (#638).
+        assert "delete the archive" not in send.call_args.args[2]
+        assert confirmation_source.PARK_UNDELIVERED_BODY in send.call_args.args[2]
 
     def test_and_raises_no_task_alert_beside_it(
         self, mock_run, config, fake_talk, plain,
@@ -454,7 +498,70 @@ class TestAConfirmationPromptThatNeverLanded:
             _run(config, result=self.QUESTION)
 
         assert send.call_count == 1
-        assert "delete the archive" in send.call_args.args[2]
+        # A notice about the question, never the question, and one that does
+        # not send the user back to where its delivery just failed (#638).
+        assert "delete the archive" not in send.call_args.args[2]
+        assert confirmation_source.PARK_UNDELIVERED_BODY in send.call_args.args[2]
+        # No user row stored in the room, so the web view does not show the
+        # question either: the push is not confined to ntfy and email (#635).
+        assert send.call_args.kwargs.get("only_surfaces") is None
+
+    def test_an_unregistered_talk_conversation_pushes_to_talk_alerts(
+        self, mock_run, config, fake_talk,
+    ):
+        """#635. A Talk conversation with no room behind it shows the question
+        nowhere once its post fails, so the owed push takes the user's whole
+        alert routing. Cut to ntfy and email it reached nobody here, since
+        this user routes alerts to Talk."""
+        fake_talk.known_channels.update({"rawconv", "alerts"})
+        _timeout(fake_talk, "rawconv")
+        _queue(config, "rawconv")
+        _run(config, result=self.QUESTION)
+
+        sent = [c for c in fake_talk.calls_to("alerts", method="send_message")
+                if c.sent_id is not None]
+        assert sent and "delete the archive" not in sent[-1].args["message"]
+        assert confirmation_source.PARK_UNDELIVERED_BODY in sent[-1].args["message"]
+
+    def test_a_registered_room_keeps_the_push_out_of_talk(
+        self, mock_run, config, fake_talk, plain,
+    ):
+        """The control: the web view renders a parked task in its registered
+        room, so the question is still in a room and the push stays room-free."""
+        fake_talk.known_channels.add("alerts")
+        _timeout(fake_talk, plain.talk_ref)
+        _queue(config, plain.canonical)
+        with patch(
+            "istota.notifications.delivery.send_notification", return_value=True,
+        ) as send:
+            _run(config, result=self.QUESTION)
+
+        assert send.call_count == 1
+        assert send.call_args.kwargs.get("only_surfaces") == ("ntfy", "email")
+
+    def test_an_email_mirror_with_its_turn_stored_stays_room_free(
+        self, mock_run, config, fake_talk, promoted,
+    ):
+        """The scope's email arm: with the user turn stored in the room, the web
+        view renders the parked task there, so the push stays room-free."""
+        _timeout(fake_talk, promoted.talk_ref)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="delete it?", user_id=USER, source_type="email",
+                conversation_token=promoted.canonical,
+                output_target=f"room:{promoted.canonical}",
+            )
+            db.store_turn_message(
+                conn, promoted.canonical, role="user", body="delete it?",
+                task_id=task_id, origin_surface="email",
+            )
+        with patch(
+            "istota.notifications.delivery.send_notification", return_value=True,
+        ) as send:
+            _run(config, result=self.QUESTION)
+
+        assert send.call_count == 1
+        assert send.call_args.kwargs.get("only_surfaces") == ("ntfy", "email")
 
     def test_a_landed_confirmation_post_delivers_nothing_extra(
         self, mock_run, config, fake_talk, plain,

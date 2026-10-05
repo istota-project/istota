@@ -269,3 +269,33 @@ def test_poll_batch_is_bounded(delivery):
     assert len(sent) == 2
     assert asyncio.run(requests.drain_requests(config, limit=2)) == 1
     assert len(sent) == 3
+
+
+def test_a_self_sent_image_goes_as_media_where_the_adapter_can(delivery, tmp_path, monkeypatch):
+    """ISSUE-639: the skill's `--file` becomes an embed in the stored text, and
+    the drain reads it back out of the admitted rendering. Cloud declares no
+    outbound media, so there the file goes as its name."""
+    from PIL import Image
+
+    from istota.skills import whatsapp as skill
+    from istota.transport.whatsapp import media as media_rules
+
+    config, ident, sent = delivery
+    home = tmp_path / 'workspace' / 'Users' / 'alice' / 'istota'
+    home.mkdir(parents=True)
+    Image.new('RGB', (8, 8)).save(home / 'chart.png')
+    config.workspace_path = tmp_path / 'workspace'
+    monkeypatch.setenv('ISTOTA_WORKSPACE_PATH', str(config.workspace_path))
+    monkeypatch.setenv('ISTOTA_USER_ID', 'alice')
+    text = skill.with_file('Your chart', str(home / 'chart.png'))
+
+    enqueue(config, ident, text=text)
+    asyncio.run(requests.drain_requests(config))
+
+    assert len(sent) == 1
+    if config.whatsapp.provider == 'baileys':
+        assert sent[0].media is not None and sent[0].media.caption == 'Your chart'
+        assert sent[0].text == 'Your chart\n\nchart.png'
+        assert not (media_rules.default_media_dir(config) / sent[0].media.name).exists()
+    else:
+        assert sent[0].media is None and sent[0].text == 'Your chart\n\nchart.png'

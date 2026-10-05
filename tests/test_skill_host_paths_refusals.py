@@ -301,6 +301,11 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.wordpress",
         patch=("istota.skills.wordpress.COMMANDS", "update"),
     ),
+    ("whatsapp", "send", "file"): Case(
+        argv=lambda p: ["send", "--request-key", "k1", "--file", p, "caption"],
+        main="istota.skills.whatsapp",
+        patch=("istota.skills.whatsapp", "_dispatch"),
+    ),
     ("wordpress", "media.upload", "file"): Case(
         argv=lambda p: ["media", "upload", "--file", p],
         main="istota.skills.wordpress",

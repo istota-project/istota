@@ -1603,6 +1603,9 @@ async def cmd_room(ctx: CommandContext):
     if sub == "guests":
         return _room_guests(conn, token, ctx.user_id, rest.lower())
 
+    if sub == "speak":
+        return _room_speak(conn, config, token, ctx.user_id, rest.lower())
+
     if sub == "group":
         return _room_group(conn, room, ctx.user_id, rest)
 
@@ -1616,6 +1619,7 @@ async def cmd_room(ctx: CommandContext):
     return (
         "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
         "`!room host`, `!room guests <off|held|direct>`, "
+        "`!room speak [mention|classifier|off|default]`, "
         "`!room group [<id>|none]`, `!room notes [<room>]`. "
         "Use `default` to clear."
     )
@@ -1729,6 +1733,45 @@ def _room_guests(conn, token: str, user_id: str, value: str) -> str:
         return "Usage: `!room guests <off|held|direct>`."
     room_policy.set_guest_reply(conn, token, value)
     return f"Guest replies here are now `{value}`."
+
+
+#: What each speech mode means, for `!room speak`'s replies.
+_SPEECH_MODE_WORDS = {
+    "mention": "only when addressed",
+    "classifier": "when the conversation calls for it",
+    "off": "on every turn",
+}
+
+
+def _room_speak(conn, config, token: str, user_id: str, value: str) -> str:
+    """`!room speak [mention|classifier|off|default]`: when I answer an
+    unaddressed turn here (ISSUE-640). Any member may read it; setting it is
+    the host's, and an email thread room has no such setting."""
+    from istota.rooms import policy as room_policy
+    from istota.rooms import veto as room_veto
+
+    if not value:
+        mode, own = room_policy.speech_mode_source(
+            conn, token, config.speech_gate.mode,
+        )
+        source = "this room" if own else "deployment default"
+        return f"I speak here {_SPEECH_MODE_WORDS.get(mode, mode)}: `{mode}` ({source})."
+    if value not in room_policy.SPEECH_MODE_VALUES:
+        return "Usage: `!room speak [mention|classifier|off|default]`."
+    refusal = room_policy.speech_mode_refusal(conn, token, user_id)
+    if refusal:
+        return refusal
+    room_policy.set_speech_mode(conn, token, value)
+    if value == room_policy.DEFAULT_SPEECH_MODE:
+        mode = room_policy.effective_speech_mode(conn, token, config.speech_gate.mode)
+        return f"This room now follows the deployment: `{mode}`."
+    reply = f"I now speak here {_SPEECH_MODE_WORDS[value]} (`{value}`)."
+    if value == "off":
+        reply += (
+            " That means I answer every message anyone sends in this room. To stop me "
+            f"speaking here instead, use `!{room_veto.command_word(config)} off`."
+        )
+    return reply
 
 
 @command("status", "Show your running/pending tasks and system status")

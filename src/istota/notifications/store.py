@@ -100,6 +100,11 @@ class RaiseResult:
     `room_free` marks a push that must not land in any room: the question is
     already in one, and a second copy in the alerts room is the duplicate
     #625 recorded. Set by the confirmation source; in memory only.
+
+    `skip_surfaces` drops surfaces from the push whatever the routing says. The
+    scheduler sets it when an owed confirmation's SMS or WhatsApp send failed
+    or came back unknown, since a ledger never resends an ambiguous send and a
+    push on that surface would be one under a new key (#635).
     """
 
     notification_id: int
@@ -109,6 +114,7 @@ class RaiseResult:
     title: str
     purpose: str
     room_free: bool = False
+    skip_surfaces: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -440,6 +446,7 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
                         title=result.title,
                         reference_id=f"notification:{result.notification_id}",
                         only_surfaces=ROOM_FREE_SURFACES if result.room_free else None,
+                        skip_surfaces=result.skip_surfaces,
                     )
                 except Exception:
                     logger.warning(
@@ -700,13 +707,14 @@ def mark_seen(
             return None
 
         auto_sources = sources.auto_resolve_sources()
+        kept = sources.kept_until_dismissed()
         now = db.iso_utc_now()
 
         for chunk in _chunks(list(wanted)):
             placeholders = ",".join("?" for _ in chunk)
             rows = _read(
                 conn,
-                "SELECT id, source, state, updated_at FROM notifications "
+                "SELECT id, source, dedup_key, state, updated_at FROM notifications "
                 f"WHERE user_id = ? AND id IN ({placeholders})",
                 [user_id, *chunk],
             ).fetchall()
@@ -724,6 +732,7 @@ def mark_seen(
                 r["id"]
                 for r in rows
                 if r["source"] in auto_sources
+                and not sources.is_kept_until_dismissed(r["source"], r["dedup_key"], kept)
                 and r["state"] == STATE_OPEN
                 and r["updated_at"] == wanted.get(r["id"])
             ]
@@ -771,17 +780,23 @@ def sweep_expired_alerts(conn: sqlite3.Connection) -> int:
         auto_sources = sorted(sources.auto_resolve_sources())
         if not auto_sources:
             return 0
+        kept = sources.kept_until_dismissed()
         cutoff = db.iso_utc_days_ago(NOTIFICATION_ALERT_MAX_AGE_DAYS)
         now = db.iso_utc_now()
         closed = 0
-        for chunk in _chunks(auto_sources):
-            placeholders = ",".join("?" for _ in chunk)
+        for source in auto_sources:
+            # `substr` rather than LIKE: a prefix carrying `_` or `%` would match
+            # more than it names.
+            prefixes = kept.get(source, ())
+            exempt = "".join(
+                " AND substr(dedup_key, 1, ?) != ?" for _ in prefixes
+            )
+            exempt_args = [v for p in prefixes for v in (len(p), p)]
             cursor = conn.execute(
                 "UPDATE notifications SET state = 'resolved', resolved_at = ?, "
                 "resolved_by = 'system', updated_at = ? "
-                f"WHERE state = 'open' AND source IN ({placeholders}) "
-                "  AND updated_at < ?",
-                [now, now, *chunk, cutoff],
+                "WHERE state = 'open' AND source = ? AND updated_at < ?" + exempt,
+                [now, now, source, cutoff, *exempt_args],
             )
             closed += cursor.rowcount or 0
         if closed:

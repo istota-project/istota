@@ -259,6 +259,7 @@ class TestTheWorkStillLands:
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk", name="old")
             db.add_room_binding(conn, "room1", "talk", "room1")
+            db.record_external_room_name(conn, "room1", "talk", "old")
             db.set_talk_poll_state(conn, "room1", 50)
             db.upsert_talk_messages(conn, "room1", [_msg(msg_id=1)])
 

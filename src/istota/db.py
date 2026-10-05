@@ -928,6 +928,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 surface      TEXT NOT NULL,
                 surface_ref  TEXT NOT NULL,
                 created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                external_name TEXT,
                 PRIMARY KEY (room_token, surface)
             )
         """)
@@ -935,6 +936,16 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_room_bindings_ref "
             "ON room_bindings (surface, surface_ref)"
         )
+        if _add_columns(conn, "room_bindings", {"external_name": "TEXT"}):
+            # A Talk binding's last-seen name starts as the room's own: the old
+            # writers renamed from Talk within one poll, so the two agree. A
+            # WhatsApp group's subject was taken only on a roster frame, so a
+            # web rename can be standing there, and NULL reads as unknown.
+            conn.execute(
+                "UPDATE room_bindings SET external_name = "
+                "(SELECT name FROM rooms WHERE rooms.token = room_bindings.room_token) "
+                "WHERE surface = 'talk'"
+            )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id            INTEGER PRIMARY KEY,
@@ -5446,13 +5457,73 @@ def rename_room(conn: sqlite3.Connection, token: str, name: str) -> None:
     conn.execute("UPDATE rooms SET name = ? WHERE token = ?", (name, token))
 
 
+def observe_external_room_name(
+    conn: sqlite3.Connection, token: str, surface: str, name: str | None,
+) -> bool:
+    """Take a surface's name for a room into `rooms.name`, only when it moved there.
+
+    The Talk ingest, the Talk poller's title backfill and the WhatsApp roster
+    each see the room's name on its own surface, and each used to rename
+    whenever that name differed from `rooms.name`. So a web rename lasted until
+    the next frame carrying the unchanged external name (ISSUE-637). The
+    comparison is against the name last seen on that surface instead, kept on
+    the binding, so a rename on either side stands until the other side
+    renames again. Returns whether `rooms.name` was written.
+
+    With no last-seen name there is nothing to say whether the external name
+    moved, so it is recorded and taken only by a room with no name of its own.
+    That is a WhatsApp binding from before the column (the migration seeds Talk
+    ones), and a room with no binding on the surface, which has nowhere to keep
+    the name at all.
+    """
+    if not name:
+        return False
+    room = conn.execute("SELECT name FROM rooms WHERE token = ?", (token,)).fetchone()
+    if room is None:
+        return False
+    binding = conn.execute(
+        "SELECT external_name FROM room_bindings WHERE room_token = ? AND surface = ?",
+        (token, surface),
+    ).fetchone()
+    if binding is None:
+        if room["name"]:
+            return False
+        rename_room(conn, token, name)
+        return True
+    last_seen = binding["external_name"]
+    if last_seen != name:
+        record_external_room_name(conn, token, surface, name)
+    if last_seen is None and room["name"]:
+        return False
+    if name == last_seen or name == room["name"]:
+        return False
+    rename_room(conn, token, name)
+    return True
+
+
+def record_external_room_name(
+    conn: sqlite3.Connection, token: str, surface: str, name: str,
+) -> None:
+    """Note a room's name on one surface as seen, without renaming the room.
+
+    For a name we put there ourselves: the web rename's push to Talk, which
+    the next poll would otherwise read as a rename made in Talk.
+    """
+    conn.execute(
+        "UPDATE room_bindings SET external_name = ? "
+        "WHERE room_token = ? AND surface = ?",
+        (name, token, surface),
+    )
+
+
 def room_display_name(room: Room | None, handle: WebChatRoom | None) -> str:
     """The name to show for a room: the registry's, falling back to the handle's.
 
     A room carries two names and only one of them is kept current. `rooms.name`
-    is canonical — the room PATCH, the Talk poller's title backfill and
-    `transport.ingest` (whenever Talk reports a different channel name) all write
-    it through `rename_room`. `web_chat_rooms.name` is a mint-time snapshot:
+    is canonical — the room PATCH writes it through `rename_room`, and the Talk
+    poller's title backfill, `transport.ingest` and the WhatsApp roster write it
+    through `observe_external_room_name` when their surface renames the room.
+    `web_chat_rooms.name` is a mint-time snapshot:
     `ensure_web_chat_handle` is INSERT OR IGNORE, so a handle minted before its
     room's name was known keeps the `"Talk room"` placeholder its caller passed,
     for good. Every reader must therefore prefer the registry.
@@ -6156,6 +6227,37 @@ def room_for_task_turn(
         (task_id, role),
     ).fetchone()
     return row["room_token"] if row else None
+
+
+# Which tasks a room's web transcript renders from the task row rather than
+# from the spine: a web or Talk task conversing in the room, or an email task
+# whose user turn the room stored. `webui.app._AUX_ROOM_SCOPE` reads it (its
+# comment says why it stays a literal), and so does `task_shown_in_room`. Both
+# `?` bind the room token.
+TASK_ROOM_SCOPE_SQL = (
+    "((source_type IN ('web', 'talk') AND conversation_token = ?) "
+    "OR (source_type = 'email' AND EXISTS ("
+    "SELECT 1 FROM messages m2 WHERE m2.room_token = ? "
+    "AND m2.task_id = tasks.id AND m2.role = 'user')))"
+)
+
+
+def task_shown_in_room(
+    conn: sqlite3.Connection, task_id: int, user_id: str, room_token: str | None,
+) -> bool:
+    """Whether the web view of `room_token` renders this task from its row.
+
+    A parked task's question has no transcript row of its own; the web view
+    renders it from `tasks.confirmation_prompt`, and only for a task inside
+    `TASK_ROOM_SCOPE_SQL`. So this is the answer to "is the question on screen
+    anywhere" once its push has failed (#635). False for no room."""
+    if not room_token or get_room(conn, room_token) is None:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE id = ? AND user_id = ? AND " + TASK_ROOM_SCOPE_SQL,
+        (task_id, user_id, room_token, room_token),
+    ).fetchone()
+    return row is not None
 
 
 def list_system_messages(

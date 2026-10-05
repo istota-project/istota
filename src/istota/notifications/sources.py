@@ -102,6 +102,9 @@ class NotificationAction:
     method: str                 # one of ACTION_METHODS
     endpoint: str | None = None  # method == 'POST'
     href: str | None = None      # method == 'LINK'
+    # Offered only in the detail view, where the full body is shown: an action
+    # that approves what the body says must not be one click from the list.
+    detail_only: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +114,7 @@ class NotificationAction:
             "method": self.method,
             "endpoint": self.endpoint,
             "href": self.href,
+            "detail_only": self.detail_only,
         }
 
 
@@ -226,6 +230,23 @@ def auto_resolve_sources() -> set[str]:
         for source, resolver in all_resolvers().items()
         if getattr(resolver, "auto_resolve_on_seen", False)
     }
+
+
+def kept_until_dismissed() -> dict[str, tuple[str, ...]]:
+    """Per auto-resolve source, the `dedup_key` prefixes whose rows stay open
+    until dismissed: rows that are the user's only copy of something (#638)."""
+    kept: dict[str, tuple[str, ...]] = {}
+    for source, resolver in all_resolvers().items():
+        prefixes = tuple(getattr(resolver, "kept_until_dismissed", ()) or ())
+        if prefixes:
+            kept[source] = prefixes
+    return kept
+
+
+def is_kept_until_dismissed(source: str, dedup_key: str | None,
+                            kept: dict[str, tuple[str, ...]]) -> bool:
+    prefixes = kept.get(source)
+    return bool(prefixes) and (dedup_key or "").startswith(prefixes)
 
 
 def _register_all() -> None:

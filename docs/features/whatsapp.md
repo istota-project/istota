@@ -248,7 +248,7 @@ Use a bare `whatsapp` destination. `whatsapp:+15551234567` is refused, so routin
 
 You can ask Istota in a web or Talk conversation to send a separate message to your own WhatsApp. The task's final answer stays in its original conversation. Once the message is queued, a later task failure does not retract it. Queued means waiting for an attempt, not delivered; a timeout may leave its status uncertain, and Istota will not automatically send it again.
 
-The task skill exposes `whatsapp send --request-key KEY "text"` and `whatsapp status REQUEST_ID` through `istota-skill`. There is no recipient argument: the message goes to your own binding. Request keys are scoped to the user and task: retrying identical content returns the original request, while changed content needs a new key. Text is limited to 2,000 characters. Opt-out, Cloud windows and budgets apply, and a changed binding blocks a queued message.
+The task skill exposes `whatsapp send --request-key KEY "text"` and `whatsapp status REQUEST_ID` through `istota-skill`. There is no recipient argument: the message goes to your own binding. Request keys are scoped to the user and task: retrying identical content returns the original request, while changed content needs a new key. Text is limited to 2,000 characters. `--file PATH` adds a picture from your own workspace, sent as described in [Receiving a picture](#receiving-a-picture). Opt-out, Cloud windows and budgets apply, and a changed binding blocks a queued message.
 
 Questions to another user of the installation, which can travel over WhatsApp among other routes, are [relay questions](relay.md). A WhatsApp question is answered by quoting it or with `!relay reply RELAY_ID text`, and STOP still blocks all WhatsApp delivery, relay questions included.
 
@@ -291,6 +291,14 @@ Record a voice note, or forward an audio file, and Istota answers what was said.
 The spoken words are never read as a keyword, a command or a confirmation answer. Saying "stop" does not opt you out and saying "yes" does not approve a waiting question; type those. A voice note does count as a new message, so it cancels a question that was waiting on you, as any other message would.
 
 Ogg (what WhatsApp records), MP3, AAC, M4A, WAV, FLAC and WebM are read, again by the file's own bytes. AMR, which some older phones send for forwarded clips, is not, and gets the unsupported reply. The 16 MB limit is the same as for images, which is over an hour of WhatsApp speech. A download that fails gets "That voice message could not be fetched. Please send it again." If transcription fails, the model still gets the request and the file and can transcribe it itself. Voice notes in a group are refused, as group photographs are. Replies stay text.
+
+## Receiving a picture
+
+Ask for a chart, a screenshot or a meme, and on Baileys the picture arrives as a WhatsApp photo with the rest of the reply as its caption. The model saves the image in your workspace and embeds it in its reply the way it does in web chat, so the same answer shows the picture in the WhatsApp room in web chat too. A reply longer than WhatsApp's 1,024-character caption limit arrives as the photo followed by the text. It is still one logical send: one ledger row, one attempt, never retried.
+
+What leaves is a copy. Istota reads the file from your own workspace only, re-encodes it without its metadata, so a photograph's location and camera details stay behind, and scales it down to 2,048 pixels on its long edge. PNG, JPEG, GIF and WebP are sent, one picture per reply, up to 16 MB before re-encoding. Any other picture in the reply, and one that cannot be read or sent, arrives as its alt text.
+
+Pictures go only with a task's own answer to you, or to a group in answer to a member's message, and with a self-send's `--file` (below). A confirmation question, an alert, and a reply to a guest in a group stay text. The Cloud adapter does not send pictures yet: there, the picture arrives as its alt text.
 
 ## Groups
 

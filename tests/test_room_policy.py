@@ -511,11 +511,24 @@ class TestGuestReplyThroughTheScheduler:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, ident)
             bell = conn.execute(
-                "SELECT state, last_delivered_at FROM notifications "
+                "SELECT state, last_delivered_at, body FROM notifications "
                 "WHERE source = 'confirmation' AND object_id = ?", (str(ident),)).fetchone()
             rooms = conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0]
+            from istota.notifications import sources, store
+            from istota.notifications.resolvers import confirmation as confirmation_source
+            sources.reset_registry()
+            try:
+                (item,), _total = store.list_open(config, conn, "alice")
+            finally:
+                sources.reset_registry()
         assert task.status == "pending_confirmation"
         assert bell is not None and bell["state"] == "open"
+        # The push points at the bell, the one place the host can approve it,
+        # and the bell shows the proposal with a Confirm (#633).
+        assert bell["body"] == confirmation_source.ROOM_POST_BELL_BODY
+        assert REPLY not in bell["body"]
+        assert REPLY in item.body
+        assert {a.id for a in item.actions} == {"confirm", "discard"}
         assert rooms == 1
         sends = [c.args["message"] for c in fake_talk.calls_to("grp", method="send_message")]
         assert SHARED_ROOM_NOTICE in sends
@@ -661,3 +674,129 @@ class TestReviewFixes:
         assert task_temp_dir(config, own) == base
         assert task_temp_dir(config, guest).parent == base
         assert task_temp_dir(config, guest) != base
+
+
+# ---------------------------------------------------------------------------
+# The room's own speech mode (ISSUE-640)
+# ---------------------------------------------------------------------------
+
+
+def _speak(config, conn, args, user_id="alice", token="grp"):
+    ctx = commands.CommandContext(
+        config=config, conn=conn, user_id=user_id,
+        conversation_token=token, args=f"speak {args}".strip(), surface="talk",
+    )
+    return asyncio.run(commands.cmd_room(ctx))
+
+
+def _email_thread_room(conn, token="thr"):
+    db.register_room(conn, token, "alice", origin="email", name="Thread")
+    db.add_room_member(conn, token, "bob")
+    db.add_room_binding(conn, token, "email", "<root@ext.example>")
+
+
+class TestSpeechMode:
+    @pytest.mark.parametrize("value,stored", [
+        ("mention", "mention"), ("classifier", "classifier"), ("off", "off"),
+        ("default", None),
+    ])
+    def test_each_value_is_stored(self, config, value, stored):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            room_policy.set_speech_mode(conn, "grp", "classifier")
+            room_policy.set_speech_mode(conn, "grp", value)
+            assert room_policy.get_policy(conn, "grp").speech_mode == stored
+
+    def test_an_unknown_value_raises(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            with pytest.raises(ValueError):
+                room_policy.set_speech_mode(conn, "grp", "sometimes")
+
+    def test_only_the_host_may_change_it(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            assert room_policy.speech_mode_refusal(conn, "grp", "alice") is None
+            assert "host" in room_policy.speech_mode_refusal(conn, "grp", "bob")
+
+    def test_an_email_thread_room_has_no_setting(self, config):
+        with db.get_db(config.db_path) as conn:
+            _email_thread_room(conn)
+            assert "email thread" in room_policy.speech_mode_refusal(conn, "thr", "alice")
+
+    def test_a_room_on_default_follows_the_deployment(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            room_policy.set_speech_mode(conn, "grp", "default")
+            for mode in ("mention", "classifier", "off"):
+                assert room_policy.speech_mode_source(conn, "grp", mode) == (mode, False)
+            room_policy.set_speech_mode(conn, "grp", "off")
+            assert room_policy.speech_mode_source(conn, "grp", "mention") == ("off", True)
+
+    def test_classifier_in_use(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            assert room_policy.classifier_in_use(conn, "classifier")
+            assert not room_policy.classifier_in_use(conn, "mention")
+            room_policy.set_speech_mode(conn, "grp", "classifier")
+            assert room_policy.classifier_in_use(conn, "mention")
+
+    def test_the_decision_uses_the_rooms_own_mode(self, config):
+        """A room set to `off` answers an unaddressed turn on a mention deployment."""
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            room_policy.set_speech_mode(conn, "grp", "off")
+            result = _member_turn(conn, config, "alice", "anyone?", addressed=False)
+            assert result.outcome == "created"
+            assert _rung(conn, result.message_id) == "mode_off"
+
+
+class TestRoomSpeakCommand:
+    def test_no_argument_reports_the_deployment_default(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            out = _speak(config, conn, "")
+        assert "`mention` (deployment default)" in out
+
+    def test_a_value_sets_it_and_reading_reports_the_room(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            out = _speak(config, conn, "classifier")
+            assert "classifier" in out
+            assert room_policy.get_policy(conn, "grp").speech_mode == "classifier"
+            assert "`classifier` (this room)" in _speak(config, conn, "", user_id="bob")
+
+    def test_off_warns_that_every_turn_is_answered(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            out = _speak(config, conn, "off")
+        assert "every message" in out
+        assert "off`" in out and "!" in out  # names the veto, the opposite command
+
+    def test_default_clears_it(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            _speak(config, conn, "off")
+            out = _speak(config, conn, "default")
+            assert "follows the deployment" in out
+            assert room_policy.get_policy(conn, "grp").speech_mode is None
+
+    def test_a_non_host_is_refused(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            out = _speak(config, conn, "off", user_id="bob")
+            assert "host" in out
+            assert room_policy.get_policy(conn, "grp").speech_mode is None
+
+    def test_an_unknown_value_shows_the_usage(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            assert "Usage" in _speak(config, conn, "loud")
+
+    def test_refused_in_an_email_thread_room(self, config):
+        with db.get_db(config.db_path) as conn:
+            _email_thread_room(conn)
+            out = _speak(config, conn, "classifier", token="thr")
+            assert "email thread" in out
+            policy = room_policy.get_policy(conn, "thr")
+            assert policy is None or policy.speech_mode is None

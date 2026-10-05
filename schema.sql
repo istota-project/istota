@@ -1416,6 +1416,7 @@ CREATE TABLE IF NOT EXISTS room_bindings (
     surface      TEXT NOT NULL,             -- 'talk' | 'web'
     surface_ref  TEXT NOT NULL,             -- Talk: Nextcloud room token; web: room_token
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    external_name TEXT,                     -- the surface's own name for the room, as last seen (ISSUE-637)
     PRIMARY KEY (room_token, surface)
 );
 CREATE INDEX IF NOT EXISTS idx_room_bindings_ref ON room_bindings (surface, surface_ref);

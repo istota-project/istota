@@ -13,6 +13,9 @@ rule below is a no-op for it.
 - **`guest_reply`** decides what a guest-triggered answer does (D11): `off`
   records the turn and answers nothing, `held` proposes the answer to the
   host privately, `direct` posts it in the room at room-safe reach.
+- **`speech_mode`** overrides ``[speech_gate] mode`` for this room's
+  unaddressed turns, in either direction; NULL follows the deployment
+  (ISSUE-640). Host only, and never set on an email thread room.
 - **The loop cap** (D9): at most `max_bot_turns_without_human` bot turns since
   a principal last spoke, after which a guest's turn is recorded only.
 - **The audience class** (D3): `private` for one human, `principals` when
@@ -29,10 +32,16 @@ import sqlite3
 from dataclasses import dataclass
 
 from istota import db
+from .speech_gate import MODES as _SPEECH_MODES
 from .speech_gate import normalize_mode
 
 GUEST_REPLY_VALUES = ("off", "held", "direct")
 OFF, HELD, DIRECT = GUEST_REPLY_VALUES
+
+#: What `set_speech_mode` takes: a gate mode, or ``default`` to follow the
+#: deployment's ``[speech_gate] mode`` again.
+DEFAULT_SPEECH_MODE = "default"
+SPEECH_MODE_VALUES = (*_SPEECH_MODES, DEFAULT_SPEECH_MODE)
 
 PRIVATE = "private"
 PRINCIPALS = "principals"
@@ -68,7 +77,8 @@ def effective_speech_mode(
     The room's own ``speech_mode`` when it names a mode; otherwise the
     deployment's, except that an email thread room never defaults to the
     classifier: speaking there is a reply-all to everyone on the thread, so
-    only the bot in To makes it speak until the host chooses otherwise.
+    only the bot in To makes it speak. `speech_mode_refusal` keeps a host from
+    setting one there, so only a row written before ISSUE-640 can hold one.
     """
     if not room_token:
         return deployment_mode
@@ -81,6 +91,33 @@ def effective_speech_mode(
         if room is not None and room.origin == "email":
             return "mention"
     return deployment_mode
+
+
+def speech_mode_source(
+    conn: sqlite3.Connection, room_token: str | None, deployment_mode: str,
+) -> tuple[str, bool]:
+    """``effective_speech_mode`` plus whether the room's own value chose it."""
+    policy = get_policy(conn, room_token) if room_token else None
+    own = normalize_mode(policy.speech_mode) if policy is not None else None
+    return effective_speech_mode(conn, room_token, deployment_mode), own is not None
+
+
+def classifier_in_use(conn: sqlite3.Connection, deployment_mode: str) -> bool:
+    """Whether any room could be on the classifier: the deployment is, or a
+    room opted in on its own (ISSUE-640).
+
+    The classifier pre-passes ask this before anything per room, so a
+    `mention` deployment with no opted-in room still costs no model call and
+    no roster fetch, and one that has an opted-in room reaches the per-room
+    check rather than returning before it.
+    """
+    if normalize_mode(deployment_mode) == "classifier":
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM room_policy "
+        "WHERE LOWER(TRIM(speech_mode)) = 'classifier' LIMIT 1"
+    ).fetchone()
+    return row is not None
 
 
 def _row_to_policy(row) -> RoomPolicy:
@@ -282,6 +319,45 @@ def set_guest_reply(conn: sqlite3.Connection, room_token: str, value: str) -> Ro
         raise ValueError("no such room")
     conn.execute(
         "UPDATE room_policy SET guest_reply = ? WHERE room_token = ?", (value, room_token),
+    )
+    return get_policy(conn, room_token)
+
+
+def speech_mode_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) -> str | None:
+    """Why ``user_id`` may not change when the bot speaks here, or None.
+
+    Host only, like `guest_reply_refusal`. Refused outright in an email thread
+    room, where speaking is a reply-all to everyone on the thread, so only the
+    bot in To makes it speak. `!room speak` and the web PATCH both ask this.
+    """
+    from .scopes import is_email_thread_room
+
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
+    if is_email_thread_room(conn, room_token):
+        return (
+            "This room is an email thread: I reply only when the mail is "
+            "addressed to me, and that is not a setting."
+        )
+    policy = ensure_policy(conn, room_token)
+    if policy is None:
+        return "This room has no speech setting."
+    if current_host(conn, policy) != user_id:
+        return "Only this room's host can change when I speak here."
+    return None
+
+
+def set_speech_mode(conn: sqlite3.Connection, room_token: str, value: str) -> RoomPolicy:
+    """Set the room's own speech mode; ``default`` clears it (NULL), so the
+    room follows ``[speech_gate] mode`` again."""
+    room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
+    if value not in SPEECH_MODE_VALUES:
+        raise ValueError(f"speech_mode must be one of {SPEECH_MODE_VALUES}")
+    policy = ensure_policy(conn, room_token)
+    if policy is None:
+        raise ValueError("no such room")
+    conn.execute(
+        "UPDATE room_policy SET speech_mode = ? WHERE room_token = ?",
+        (None if value == DEFAULT_SPEECH_MODE else value, room_token),
     )
     return get_policy(conn, room_token)
 

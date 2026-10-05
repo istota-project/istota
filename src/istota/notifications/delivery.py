@@ -891,6 +891,7 @@ def send_notification(
     reference_id: str | None = None,
     task_room: str | None = None,
     only_surfaces: tuple[str, ...] | None = None,
+    skip_surfaces: tuple[str, ...] = (),
 ) -> bool:
     """Send a notification via an explicit surface or the user's routing table.
 
@@ -912,6 +913,8 @@ def send_notification(
             this one (`routing.refuse_shared_rooms`).
         only_surfaces: when given, the resolved destinations are cut to these
             surfaces. A list that empties sends nothing and returns False.
+        skip_surfaces: surfaces dropped from the resolved destinations, applied
+            after ``only_surfaces``; an empty result sends nothing either.
     """
     from istota.transport import parse_output_target
 
@@ -926,6 +929,12 @@ def send_notification(
         if not dests:
             logger.info("Notification for %s has no room-free destination; not pushed",
                         user_id)
+            return False
+    if skip_surfaces:
+        dests = [d for d in dests if d.surface not in skip_surfaces]
+        if not dests:
+            logger.info("Notification for %s has no destination left after "
+                        "skipping %s; not pushed", user_id, ", ".join(skip_surfaces))
             return False
 
     sent, _talk_msg_id = _dispatch(

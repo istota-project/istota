@@ -3729,3 +3729,127 @@ class TestTheGroupFunctions:
         assert "sock.ev.on('group-participants.update'" in source
         assert "this.sock.groupLeave(jid)" in source
         assert "if (type === MSG_LEAVE_GROUP)" in source
+
+
+class TestTheSidecarsOutboundMedia:
+    """The image half of a send (ISSUE-639), executed.
+
+    The daemon names a staged file and the sidecar reads it; what is driven
+    here is every check between the name on the wire and the bytes handed to
+    Baileys, and `Session.send` against a recording socket, so the one-send
+    shape (one `send_result` per request, the last id kept) is asserted on
+    what the program does rather than what its source says.
+    """
+
+    _call = TestTheSidecarsInboundMedia._call
+    _run = TestTheSidecarsInboundMedia._run
+
+    def test_the_name_rule_is_the_daemons(self):
+        source = PROGRAM.read_text()
+        match = re.search(r"const STAGED_NAME_RE = /\^(.*)\$/;", source)
+        assert match is not None
+        assert match.group(1) == media.STAGED_NAME_RE.pattern
+
+    def test_the_types_are_what_the_daemon_stages(self):
+        assert sorted(self._call("[...m.OUTBOUND_MEDIA_TYPES]")) == [
+            "image/jpeg", "image/png",
+        ]
+
+    @pytest.mark.parametrize(
+        "part,ok",
+        [
+            ({"name": "out-0123abcd.png", "mimetype": "image/png", "kind": "image"}, True),
+            ({"name": "../x.png", "mimetype": "image/png", "kind": "image"}, False),
+            ({"name": "a/b.png", "mimetype": "image/png", "kind": "image"}, False),
+            ({"name": ".hidden", "mimetype": "image/png", "kind": "image"}, False),
+            ({"name": "out.svg", "mimetype": "image/svg+xml", "kind": "image"}, False),
+            ({"name": "out.ogg", "mimetype": "audio/ogg", "kind": "audio"}, False),
+            ("out.png", False),
+        ],
+    )
+    def test_only_a_plain_staged_image_is_read(self, part, ok):
+        assert (self._call(f"m.outboundMedia({json.dumps(part)})") is not None) is ok
+
+    def test_a_link_and_an_oversized_file_are_not_read(self, tmp_path):
+        (tmp_path / "out-a.png").write_bytes(b"PNG data")
+        (tmp_path / "secret").write_bytes(b"secret")
+        os.symlink(tmp_path / "secret", tmp_path / "out-link.png")
+        with open(tmp_path / "out-big.png", "wb") as handle:
+            handle.truncate(media.MAX_MEDIA_BYTES + 1)
+        found = self._call(
+            "['out-a.png', 'out-link.png', 'out-big.png', 'missing.png']"
+            ".map((n) => { const b = m.readOutboundMedia("
+            f"{json.dumps(str(tmp_path))}, n); return b ? b.toString() : null; }})",
+        )
+
+        assert found == ["PNG data", None, None, None]
+
+    def test_a_short_reply_is_the_caption_and_a_long_one_follows(self):
+        short, long_, alone = self._call(
+            "[m.outboundContents('hi cat', {mimetype: 'image/png', caption: 'hi'},"
+            "   Buffer.from('x')),"
+            " m.outboundContents('alt', {mimetype: 'image/png',"
+            "   caption: 'y'.repeat(m.CAPTION_LIMIT + 1)}, Buffer.from('x')),"
+            " m.outboundContents('hi cat', {mimetype: 'image/png', caption: 'hi'}, null)]"
+            ".map((list) => list.map((c) => [Object.keys(c).sort(),"
+            "  (c.caption || c.text || '').length]))"
+        )
+
+        assert short == [[["caption", "image", "mimetype"], 2]]
+        assert long_ == [[["image", "mimetype"], 0], [["text"], 1025]]
+        # Unread: the alt-text rendering goes, not the bare caption.
+        assert alone == [[["text"], 6]]
+
+    def _send(self, tmp_path, payload):
+        script = (
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "const answers = []; const contents = [];"
+            "const link = {greeted: true, send: (t, f) => {"
+            " answers.push(Object.assign({type: t}, f)); return true; }};"
+            "const s = new m.Session(link);"
+            "s.sock = {sendMessage: async (to, c) => {"
+            " contents.push(Object.keys(c).sort());"
+            " return {key: {id: 'id' + contents.length}, message: {}}; }};"
+            f"s.send({json.dumps(payload)}).then(() =>"
+            " process.stdout.write(JSON.stringify({answers, contents})));"
+        )
+        return self._run(script, media_dir=tmp_path)
+
+    def test_a_send_with_its_image_is_one_answer(self, tmp_path):
+        (tmp_path / "out-a.png").write_bytes(b"PNG data")
+
+        out = self._send(tmp_path, {
+            "request_id": "r1", "to": "1@s.whatsapp.net", "text": "x" * 1100 + " cat",
+            "kind": "service",
+            "media": {"name": "out-a.png", "mimetype": "image/png", "kind": "image",
+                      "caption": "x" * 1100},
+        })
+
+        assert out["contents"] == [["image", "mimetype"], ["text"]]
+        assert out["answers"] == [{
+            "type": "send_result", "request_id": "r1", "ok": True,
+            "message_id": "id2",
+        }]
+
+    def test_an_unreadable_image_sends_the_text_alone(self, tmp_path):
+        out = self._send(tmp_path, {
+            "request_id": "r1", "to": "1@s.whatsapp.net", "text": "hello",
+            "kind": "service",
+            "media": {"name": "out-gone.png", "mimetype": "image/png", "kind": "image"},
+        })
+
+        assert out["contents"] == [["text"]]
+        assert out["answers"][0]["ok"] is True
+
+    def test_nothing_to_send_is_refused_before_trying(self, tmp_path):
+        out = self._send(tmp_path, {
+            "request_id": "r1", "to": "1@s.whatsapp.net", "text": "",
+            "kind": "service",
+            "media": {"name": "out-gone.png", "mimetype": "image/png", "kind": "image"},
+        })
+
+        assert out["contents"] == []
+        assert out["answers"] == [{
+            "type": "send_result", "request_id": "r1", "ok": False,
+            "reason": "rejected", "definite": True,
+        }]

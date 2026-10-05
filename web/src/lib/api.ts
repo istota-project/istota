@@ -2995,11 +2995,20 @@ export interface RoomOffView {
 /** How guests' turns are answered (multiplayer D11). */
 export type GuestReply = 'off' | 'held' | 'direct';
 
+/** When the bot answers an unaddressed turn in a shared room (ISSUE-640). */
+export type SpeechMode = 'mention' | 'classifier' | 'off';
+
 export interface RoomPolicyView {
   /** The host's user id, or null once the room has lost its host. */
   host: string | null;
   is_host: boolean;
   guest_reply: GuestReply;
+  /** The room's own speech mode, or null when it follows the deployment. */
+  speech_mode?: SpeechMode | null;
+  /** What the room is on now, by its own mode or the deployment's. */
+  effective_speech_mode?: string;
+  /** The deployment's `[speech_gate] mode`, which "Follow deployment" means. */
+  deployment_speech_mode?: string;
   /** An email thread room: no guest mode, so the guest reply setting is
    * not shown. */
   email_thread?: boolean;
@@ -3442,6 +3451,8 @@ export interface RoomPatch {
   /** Show an email thread in the main room list. The server refuses it (400)
    * on any other room. */
   listed?: boolean;
+  /** Host only. Null follows the deployment's mode again. */
+  speech_mode?: SpeechMode | null;
 }
 
 /** The PATCH response is the room, plus one field that is not room state:
@@ -4620,6 +4631,8 @@ export interface NotificationAction {
   method: 'POST' | 'LINK';
   endpoint: string | null;
   href: string | null;
+  /** Offered only in the detail modal, beside the full body it acts on. */
+  detail_only?: boolean;
 }
 
 /** A stored notification as the panel renders it.
