@@ -14,9 +14,10 @@ chain or the email answer envelope by hand:
 - `Expected` names a value for each of the eight dimensions, with no defaults,
   and `assert_outcome` checks all of them and reports every mismatch.
 
-The outcome strings, the note pointer and the private-ref digest are imported
-from the product rather than restated, so an expectation cannot drift from the
-code it describes. Plain functions and dataclasses; no pytest import, so a
+The note's outcome lines and its push pointer are imported from the product
+rather than restated, so an expectation cannot drift from the code it
+describes; the probe's restated strings are held equal by
+`tests/test_testbed_probe_email.py`. Plain functions and dataclasses; no pytest import, so a
 failure is an `AssertionError` or a `TimeoutError` naming what it last saw.
 """
 
@@ -67,6 +68,12 @@ WORKER_DONE_RE = r"Worker [^/\s]+/[a-z]+: task {task_id} (completed|failed)\b"
 
 DEFAULT_TIMEOUT = 90.0
 POLL_INTERVAL = 2.0
+
+#: How long a "nothing was pushed" claim waits on a mail no worker ran (held at
+#: the gate): two of the lean profiles' five-second mail polls. A bounded
+#: settle, not an event, because nothing the probe can read follows the gate's
+#: prompt delivery.
+NEGATIVE_SETTLE = 10.0
 
 
 def stamp(address: str, verdict: str = "pass") -> str:
@@ -467,16 +474,19 @@ def _wait(read, *, timeout: float):
         time.sleep(POLL_INTERVAL)
 
 
-def worker_done(stack, task_id: int, *, timeout: float = DEFAULT_TIMEOUT) -> bool:
+def worker_done(stack, task_id: int, *, attempts: int = 1,
+                timeout: float = DEFAULT_TIMEOUT) -> bool:
     """Wait for the worker's line for this task, which follows the note step.
 
-    True once seen. The line is in the daemon's log, which has no watermark;
-    the task id is what makes the match this test's.
+    True once `attempts` lines are seen: the scheduler logs one per attempt,
+    so a retried task's first `failed` line must not stand for its last
+    attempt. The line is in the daemon's log, which has no watermark; the task
+    id is what makes the match this test's.
     """
     pattern = re.compile(WORKER_DONE_RE.format(task_id=task_id))
     deadline = time.monotonic() + timeout
     while True:
-        if pattern.search(stack.logs(2000)):
+        if len(pattern.findall(stack.logs(2000))) >= attempts:
             return True
         if time.monotonic() >= deadline:
             return False
@@ -568,7 +578,9 @@ def assert_outcome(
                   bool(task.get("host_absent")))
     seen.task = task
     ran = task is not None and bool(task.get("started_at"))
-    settled = worker_done(stack, task_id, timeout=timeout) if ran else True
+    attempts = int(task.get("attempt_count") or 0) + 1 if task else 1
+    settled = (worker_done(stack, task_id, attempts=attempts, timeout=timeout)
+               if ran else True)
     if ran and not settled:
         misses.append(f"worker: no completion line for task {task_id} in the log")
 
@@ -690,15 +702,33 @@ def assert_outcome(
           frozenset((source, fill(key)) for source, key in expected.notices.rows),
           got_rows)
     ntfy = stack.service("ntfy") if "ntfy" in stack.services else None
-    pushes = ntfy.pushes() if ntfy is not None else []
+
+    def read_pushes() -> list:
+        return ntfy.pushes() if ntfy is not None else []
+
+    def read_alerts() -> list:
+        return [
+            m for m in bot_mail_since(stack, sent.outbox_uid)
+            if (m.in_reply_to or "").strip() != sent.message_id
+            and user_id_address(user_id) in recipients(m, "To")
+        ]
+
+    # A gate prompt is sent after the poll's transaction commits, and an alert
+    # mail passes through the mail server before IMAP shows it, so neither is
+    # read once. A positive count is waited for; a zero on a task no worker
+    # ran has nothing later to wait behind, so it gets a bounded settle.
+    want_pushes = len(expected.notices.pushes)
+    want_alerts = expected.notices.alert_mails
+    if want_pushes or want_alerts:
+        _wait(lambda: len(read_pushes()) >= want_pushes
+              and len(read_alerts()) >= want_alerts, timeout=timeout)
+    elif not ran:
+        time.sleep(NEGATIVE_SETTLE)
+    pushes = read_pushes()
     seen.pushes = pushes
     check("notices.pushes", tuple(fill(text) for text in expected.notices.pushes),
           tuple(call.body.decode("utf-8", "replace") for call in pushes))
-    alerts = [
-        m for m in bot_mail_since(stack, sent.outbox_uid)
-        if (m.in_reply_to or "").strip() != sent.message_id
-        and user_id_address(user_id) in recipients(m, "To")
-    ]
+    alerts = read_alerts()
     check("notices.alert_mails", expected.notices.alert_mails, len(alerts))
 
     # Whatever went out on the alert route is a title and fixed text (#638):

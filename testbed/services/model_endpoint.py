@@ -177,6 +177,16 @@ class ScriptedEndpoint(HttpStub):
         with self._lock:
             served, scripted, seen = self.served, len(self.turns), len(self.requests)
             refused, unmatched = self.refused, len(self.unmatched)
+            routes = sum(1 for item in self.turns if "when" in item)
+            positional = self.positional_served
+        if routes:
+            return (
+                f"  {served} request(s) answered: {routes} route(s) and "
+                f"{scripted - routes} positional item(s) scripted, "
+                f"{positional} positional served, "
+                f"{seen} request(s) recorded, {refused} refused at the barrier, "
+                f"{unmatched} unmatched"
+            )
         return (
             f"  {served} turn(s) served of {scripted} scripted, "
             f"{seen} request(s) recorded, {refused} refused at the barrier, "

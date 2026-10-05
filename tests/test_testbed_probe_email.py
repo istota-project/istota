@@ -55,6 +55,27 @@ class TestThePrivateRefIsTheProducts:
         assert probe_support.private_email_ref(user_id) == email_conversation_token(user_id)
 
 
+class TestTheNoteStringsAreTheProducts:
+    """A "no note" claim reads these two strings and finds nothing either way,
+    so a rename in the product would leave it passing without testing
+    anything. Held equal here instead."""
+
+    def test_the_note_reference_is_the_one_deliver_email_note_writes(self):
+        from istota.rooms import private_replies
+
+        assert probe_support.email_note_reference(42) == (
+            f"{private_replies.NOTE_PREFIX}42{private_replies._NOTE_SUFFIX}"
+        )
+
+    def test_the_note_log_line_is_the_one_the_scheduler_writes(self):
+        from istota import scheduler
+
+        from .support.drift import source_of
+        from .support.email_flow import NOTE_LOG_LINE
+
+        assert f'"{NOTE_LOG_LINE}{{outcome}}"' in source_of(scheduler._write_email_note)
+
+
 class TestEmailRoomAgreesWithFindThreadRoom:
     """Three shapes, each asked of both: the probe answers what the product does."""
 

@@ -184,22 +184,31 @@ def _seed_email_people(stack) -> EmailPeople:
     # exists nowhere but in the row just written, so `sender_match` naming her
     # means the daemon's config has the overlay. Answered with a no-op through
     # its own route, so it takes no turn of the test's script.
-    nonce = email_flow.new_nonce()
-    marker = f"ready-{nonce}"
+    # A mail read before the overlay landed is routed some other way and is
+    # spent, so a wrong answer sends a fresh one rather than failing.
     turns = list(stack.endpoint.turns)
-    stack.script([email_flow.route(marker, [{"text": "NO_ACTION: ready"}])])
-    sent = email_flow.send(
-        stack, email_flow.person("alice", nonce), to=[mail.BOT_ADDRESS],
-        subject=f"readiness {nonce}", text="checking the seeded profiles",
-        marker=marker,
-    )
+    markers: list[str] = []
     deadline = time.monotonic() + READINESS_TIMEOUT
     row = None
     while time.monotonic() < deadline:
-        row = stack.probe.processed(sent.message_id)
-        if row is not None:
+        nonce = email_flow.new_nonce()
+        marker = f"ready-{nonce}"
+        markers.append(marker)
+        stack.script([email_flow.route(m, [{"text": "NO_ACTION: ready"}])
+                      for m in markers])
+        sent = email_flow.send(
+            stack, email_flow.person("alice", nonce), to=[mail.BOT_ADDRESS],
+            subject=f"readiness {nonce}", text="checking the seeded profiles",
+            marker=marker,
+        )
+        row = None
+        while time.monotonic() < deadline and row is None:
+            row = stack.probe.processed(sent.message_id)
+            if row is None:
+                time.sleep(2)
+        if (row is not None and row.get("routing_method") == "sender_match"
+                and row.get("user_id") == email_flow.ALICE_ID):
             break
-        time.sleep(2)
     if (row is None or row.get("routing_method") != "sender_match"
             or row.get("user_id") != email_flow.ALICE_ID):
         raise stack_support.StackError(
@@ -214,7 +223,8 @@ def _seed_email_people(stack) -> EmailPeople:
     # The proof made rows and maybe mail; reset again so the test's watermark
     # and mailboxes start after it, and put the test's own script back.
     stack.mark = stack.reset(turns)
-    email_flow.sent_markers(stack).discard(email_flow.marker_text(marker))
+    for marker in markers:
+        email_flow.sent_markers(stack).discard(email_flow.marker_text(marker))
     return EmailPeople(
         host_id=email_flow.HOST_ID, host_address=email_flow.HOST_ADDRESS,
         alice_id=email_flow.ALICE_ID, alice_address=email_flow.ALICE_ADDRESS,
