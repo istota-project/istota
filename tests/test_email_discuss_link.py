@@ -113,6 +113,16 @@ class TestTheRule:
                 conn, config, user_id="alice", room_token=other, about_token=thread,
             ) is None
 
+    def test_an_archived_thread_does_not(self, config):
+        """`linked_room` would drop it at run time, so it is not accepted here."""
+        with db.get_db(config.db_path) as conn:
+            general = db.create_web_chat_room(conn, "alice", "general").token
+            thread = _thread_room(conn)
+            db.set_room_archived(conn, thread, True)
+            assert private_replies.about_room_link(
+                conn, config, user_id="alice", room_token=general, about_token=thread,
+            ) is None
+
     def test_the_thread_itself_and_nonsense_do_not(self, config):
         with db.get_db(config.db_path) as conn:
             db.create_web_chat_room(conn, "alice", "general")
@@ -201,6 +211,24 @@ class TestTheSend:
                 "SELECT COUNT(*) FROM messages WHERE room_token = ? AND role = 'user'",
                 (room.token,),
             ).fetchone()[0] == 0
+
+    async def test_a_refused_link_leaves_a_parked_question_standing(self, client, config):
+        with db.get_db(config.db_path) as conn:
+            general = db.create_web_chat_room(conn, "alice", "general")
+            shared = db.create_web_chat_room(conn, "alice", "Family").token
+            db.add_web_room_member(conn, shared, "bob")
+            parked = db.create_task(conn, user_id="alice", source_type="web",
+                                    prompt="book it", conversation_token=general.token)
+            db.set_task_confirmation(conn, parked, "Book the table?")
+            before = _task_count(conn)
+        cookies = await _login(client)
+        resp = await _send(client, cookies, general.id,
+                           {"text": "something else", "about_room": shared})
+        assert resp.status_code == 400
+        assert resp.json() == REFUSAL
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, parked).status == "pending_confirmation"
+            assert _task_count(conn) == before
 
     @pytest.mark.parametrize("value", [7, ["x"], {"token": "x"}, "x" * 300])
     async def test_a_malformed_about_room_is_refused(self, client, config, value):

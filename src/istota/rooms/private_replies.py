@@ -289,6 +289,11 @@ def about_room_link(conn, config, *, user_id: str, room_token: str | None,
     thread = canonical_token(conn, about_token)
     if thread is None or not is_email_thread_room(conn, thread):
         return None
+    # `linked_room` drops an archived room at run time; refusing it here too
+    # keeps a link from being accepted that the run would then ignore.
+    room = db.get_room(conn, thread)
+    if room is None or room.archived:
+        return None
     if not is_current_member(conn, thread, user_id):
         return None
     dest = private_room_for(conn, config, user_id, thread)

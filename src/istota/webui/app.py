@@ -7609,8 +7609,9 @@ class _MailView:
     #: ``{task_id: room}``: the room holding a turn's private note, which
     #: outranks ``private_room`` for that turn's link.
     note_rooms: dict = _dc_field(default_factory=dict)
-    #: The email thread room this view is of, or None for the private email
-    #: room: only a thread can be named as a send's ``about_room``.
+    #: The email thread room this view is of, when the viewer's private room
+    #: has a web composer to link it from, else None (the private email room,
+    #: a private WhatsApp room): only a thread is a send's ``about_room``.
     thread: str | None = None
 
 
@@ -7639,9 +7640,12 @@ def _mail_views(conn, username: str, tokens, task_ids=()) -> dict:
             logger.warning("Could not resolve %s's private room for %s", username, token)
             dest = None
         private = dest.room_token if dest is not None and dest.room_token != token else None
+        # A private WhatsApp room is read-only in web, so it has no composer
+        # to link: the card keeps its plain link there.
+        thread = (token if dest is not None and dest.surface != "whatsapp"
+                  and is_email_thread_room(conn, token) else None)
         out[token] = _MailView(own=own, private_room=private,
-                               note_rooms=notes,
-                               thread=token if is_email_thread_room(conn, token) else None)
+                               note_rooms=notes, thread=thread)
     return out
 
 
