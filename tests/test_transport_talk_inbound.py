@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from istota import db
 from istota.brain.claude_code import OPUS
 from istota.config import Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig
+from istota.rooms import ack_reaction
 from istota.transport.talk import inbound as _talk_poller_mod
 from istota.transport.talk.inbound import (
     _get_participants,
@@ -3149,6 +3150,30 @@ class TestAnAckIsAReaction:
         assert created == []
         assert self._tasks(config) == []
         assert tuple(self._reacted(config)) == ("ack", 1)
+
+    @pytest.mark.asyncio
+    async def test_a_funny_ack_posts_an_emoji_from_the_funny_list(self, make_config):
+        """ISSUE-657: the classifier's type picks the list, the id picks the emoji."""
+        config = self._friendly(make_config)
+        funny = ["\N{FACE WITH TEARS OF JOY}", "\N{OCTOPUS}"]
+        config.speech_gate.ack_reactions = {"default": ["\N{PARTY POPPER}"], "funny": funny}
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=lambda _p: '{"speak": true, "kind": "ack", "ack_type": "funny"}'):
+            created, react = await self._poll(
+                config, [_msg(id=305, actor_id="alice", message="ha, nice one")],
+            )
+
+        react.assert_awaited_once()
+        token, talk_id, emoji = react.await_args.args
+        assert (token, talk_id) == ("group1", 305)
+        assert emoji == ack_reaction.pick(config, "funny", 305) and emoji in funny
+        assert created == []
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT ack_type, reacted, reaction FROM speech_gate_decisions "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert tuple(row) == ("funny", 1, emoji)
 
     @pytest.mark.asyncio
     async def test_a_failing_reaction_creates_the_task(self, make_config):

@@ -226,6 +226,8 @@ class WhatsAppEventResult:
     react_jid: str | None = None
     react_message_id: str | None = None
     react_turn_id: int | None = None
+    # The ack's type, which picks its reaction list (ISSUE-657).
+    react_ack_type: str | None = None
 
 
 # ---------------------------------------------------------------------------

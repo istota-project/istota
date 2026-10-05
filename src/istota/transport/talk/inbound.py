@@ -1716,8 +1716,9 @@ async def _process_poll_results(
     """
     created: list[int] = []
     # Acks whose task was created held, `(token, talk id, task id, message
-    # id)`; reacted to once the transaction below has committed (ISSUE-655).
-    held_acks: list[tuple[str, int, int, int | None]] = []
+    # id, ack type)`; reacted to once the transaction below has committed
+    # (ISSUE-655).
+    held_acks: list[tuple[str, int, int, int | None, str | None]] = []
     # Before the transaction opens: a classifier call under it would hold the
     # WAL write lock for the whole model call.
     ahead = await _classify_batch_ahead(config, client, results, conv_types)
@@ -2066,7 +2067,7 @@ async def _process_poll_results(
                 if result.held_for_reaction and message_id:
                     held_acks.append(
                         (conversation_token, message_id, result.task_id,
-                         result.message_id),
+                         result.message_id, result.ack_type),
                     )
                 elif result.task_id is not None:
                     created.append(result.task_id)
@@ -2081,7 +2082,7 @@ REACT_DEADLINE_SECONDS = 20.0
 
 async def _react_to_held_acks(
     config: Config, client: TalkClient,
-    held: list[tuple[str, int, int, int | None]],
+    held: list[tuple[str, int, int, int | None, str | None]],
 ) -> list[int]:
     """React to each held ack, after the batch committed; the task ids that
     now run as a reply because their reaction could not be sent.
@@ -2097,9 +2098,12 @@ async def _react_to_held_acks(
     released: list[int] = []
     if not held:
         return released
-    reaction = ack_reaction.reaction_for(config)
+    reactions = [
+        ack_reaction.pick(config, ack_type, talk_id)
+        for _t, talk_id, _task, _m, ack_type in held
+    ]
 
-    async def react(conversation_token: str, talk_id: int) -> bool:
+    async def react(conversation_token: str, talk_id: int, reaction: str | None) -> bool:
         if reaction is None:
             return False
         try:
@@ -2115,12 +2119,18 @@ async def _react_to_held_acks(
             )
             return False
 
-    outcomes = await asyncio.gather(*(react(token, talk_id) for token, talk_id, _t, _m in held))
-    for (conversation_token, talk_id, task_id, message_id), reacted in zip(held, outcomes):
+    outcomes = await asyncio.gather(*(
+        react(token, talk_id, reaction)
+        for (token, talk_id, _t, _m, _a), reaction in zip(held, reactions)
+    ))
+    for (_token, _talk_id, task_id, message_id, _a), reaction, reacted in zip(
+        held, reactions, outcomes,
+    ):
         try:
             async with talk_db(config.db_path) as conn:
                 removed = ack_reaction.settle(
                     conn, task_id=task_id, message_id=message_id, reacted=reacted,
+                    reaction=reaction,
                 )
         except Exception:  # noqa: BLE001 — the hold expiring is the fallback
             logger.warning("Could not settle held ack task %s", task_id, exc_info=True)

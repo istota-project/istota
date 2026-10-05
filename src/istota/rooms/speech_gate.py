@@ -71,6 +71,13 @@ DISPOSITIONS: tuple[str, ...] = (RESERVED, FRIENDLY)
 KIND_REPLY = "reply"
 KIND_ACK = "ack"
 
+#: What an ``ack`` is, as the classifier names it (ISSUE-657). It picks the
+#: reaction list, never the emoji. Anything else, or nothing, is
+#: ``DEFAULT_ACK_TYPE``. Kept short on purpose: every type is a distinction the
+#: classifier has to get right beside the question that matters, speak or not.
+ACK_TYPES: tuple[str, ...] = ("thanks", "agreement", "funny", "celebration")
+DEFAULT_ACK_TYPE = "default"
+
 #: The room-card line an ``ack`` task gets. Self-contained: it names no
 #: earlier message, so it points at nothing in the user half.
 ACK_TASK_LINE = "Answer this turn in one short line."
@@ -129,6 +136,8 @@ class GateDecision:
     #: `ingest.classify_ahead` so the audit row records that one and not a
     #: value re-read after a host changed it mid-call (ISSUE-654).
     disposition: str | None = None
+    #: One of ``ACK_TYPES`` or ``DEFAULT_ACK_TYPE`` on an ``ack``, else None.
+    ack_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -323,8 +332,12 @@ def build_window(
         )
         answer = (
             'Answer with JSON only: {"speak": true or false, "kind": "reply" or '
-            '"ack", "reason": "at most 120 characters"}. Use "ack" when the '
-            'newest message only thanks or acknowledges, and "reply" otherwise.'
+            '"ack", "ack_type": "thanks", "agreement", "funny" or '
+            '"celebration", "reason": "at most 120 characters"}. Use "ack" when '
+            'the newest message only thanks or acknowledges, and "reply" '
+            'otherwise. With "ack", "ack_type" says which: "thanks", '
+            '"agreement" (agrees or confirms), "funny" (a joke or laughter) or '
+            '"celebration" (good news). Leave it out with "reply".'
         )
     else:
         cases = (
@@ -358,6 +371,16 @@ class ClassifierVerdict:
     speak: bool
     reason: str | None
     kind: str = KIND_REPLY
+    ack_type: str | None = None
+
+
+def normalize_ack_type(value: object) -> str:
+    """An ``ack_type`` as one of ``ACK_TYPES``, else ``DEFAULT_ACK_TYPE``."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ACK_TYPES:
+            return normalized
+    return DEFAULT_ACK_TYPE
 
 
 #: How many ``{`` positions the fallback scan will try to decode from. Bounds
@@ -374,7 +397,10 @@ def _verdict_from(data: object) -> ClassifierVerdict | None:
     reason = data.get("reason")
     reason_text = _flatten(reason, MAX_REASON_CHARS) if isinstance(reason, str) else ""
     kind = KIND_ACK if data.get("kind") == KIND_ACK else KIND_REPLY
-    return ClassifierVerdict(speak=speak, reason=reason_text or None, kind=kind)
+    ack_type = normalize_ack_type(data.get("ack_type")) if kind == KIND_ACK else None
+    return ClassifierVerdict(
+        speak=speak, reason=reason_text or None, kind=kind, ack_type=ack_type,
+    )
 
 
 def parse_decision(raw: str | None) -> ClassifierVerdict | None:
@@ -478,6 +504,7 @@ def should_speak(
                     True, RUNG_ADDRESSED, reason=classified.reason,
                     model=classified.model, latency_ms=classified.latency_ms,
                     kind=KIND_ACK,
+                    ack_type=classified.ack_type or DEFAULT_ACK_TYPE,
                 )
             return GateDecision(True, RUNG_ADDRESSED)
         normalized = normalize_mode(mode)
@@ -536,6 +563,7 @@ def classify(
     return GateDecision(
         verdict.speak, RUNG_CLASSIFIER, reason=verdict.reason,
         model=model, latency_ms=latency, kind=KIND_ACK if ack else KIND_REPLY,
+        ack_type=(verdict.ack_type or DEFAULT_ACK_TYPE) if ack else None,
     )
 
 
@@ -555,14 +583,15 @@ def record_decision(
     swallowed. The row carries a message id rather than the body, so the table
     holds no text a participant wrote. ``disposition`` is the setting in force,
     recorded on every row so the two can be compared; ``kind`` is written only
-    for a turn the bot answers.
+    for a turn the bot answers, and ``ack_type`` only for an ``ack``.
     """
+    ack = decision.speak and decision.kind == KIND_ACK
     try:
         cur = conn.execute(
             "INSERT INTO speech_gate_decisions "
             "(room_token, surface, user_id, message_id, spoke, rung, reason, "
-            "model, latency_ms, disposition, kind) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "model, latency_ms, disposition, kind, ack_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 room_token, surface, user_id, message_id,
                 1 if decision.speak else 0, decision.rung,
@@ -571,6 +600,7 @@ def record_decision(
                 None if disposition is None
                 else normalize_disposition(disposition, warn=False),
                 decision.kind if decision.speak else None,
+                (decision.ack_type or DEFAULT_ACK_TYPE) if ack else None,
             ),
         )
         return cur.lastrowid

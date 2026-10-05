@@ -783,6 +783,7 @@ class TestTheClassifierReachesTheGroup:
         group.speech_gate.mode = "classifier"
         decision = speech_gate.GateDecision(
             True, speech_gate.RUNG_CLASSIFIER, kind=speech_gate.KIND_ACK,
+            ack_type="celebration",
         )
         with db.get_db(group.db_path) as conn:
             (result,) = handle_whatsapp_batch(
@@ -792,6 +793,7 @@ class TestTheClassifierReachesTheGroup:
 
         assert (result.disposition, result.react_jid, result.react_message_id) == (
             "group_ack", GROUP, "C4")
+        assert result.react_ack_type == "celebration"
         assert _rows(group, "SELECT scheduled_for IS NOT NULL AS held FROM tasks "
                      "WHERE id = ?", (result.task_id,)) == [{"held": 1}]
 

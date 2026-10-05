@@ -188,8 +188,8 @@ class InboundResult:
     no transcript for this turn. ``gate_reason`` is the gate's rung when it
     declined, for the caller's log only. ``held_for_reaction`` is a task
     created held because the gate read the turn as an ack: the caller sends
-    `ack_reaction.reaction_for` after its commit, then `ack_reaction.settle`
-    (ISSUE-655).
+    `ack_reaction.pick` for ``ack_type`` after its commit, then
+    `ack_reaction.settle` (ISSUE-655, ISSUE-657).
     """
 
     room_token: str
@@ -198,6 +198,7 @@ class InboundResult:
     outcome: Literal["created", "recorded", "dropped", "replayed"]
     gate_reason: str | None = None
     held_for_reaction: bool = False
+    ack_type: str | None = None
 
 
 def _prior_turn(
@@ -1040,6 +1041,7 @@ def record_inbound(
         )
     return InboundResult(
         room_token, task_id, message_id, "created", held_for_reaction=held,
+        ack_type=decision.ack_type if held else None,
     )
 
 

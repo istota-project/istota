@@ -977,6 +977,36 @@ PY
         fi
     fi
 
+
+    # Per-kind ack reactions (ISSUE-657), each a comma-separated list. Last,
+    # because a sub-table header closes whatever section is open, and several
+    # sections above are finished by conditional blocks after their header.
+    # Only when one is set: an absent table is what lets
+    # ISTOTA_SPEECH_GATE_ACK_REACTION stand for `default` on its own.
+    _ack_reactions=""
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_DEFAULT:-}")"
+    [ -z "$_list" ] || _ack_reactions="${_ack_reactions}default = ${_list}
+"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_THANKS:-}")"
+    [ -z "$_list" ] || _ack_reactions="${_ack_reactions}thanks = ${_list}
+"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_AGREEMENT:-}")"
+    [ -z "$_list" ] || _ack_reactions="${_ack_reactions}agreement = ${_list}
+"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_FUNNY:-}")"
+    [ -z "$_list" ] || _ack_reactions="${_ack_reactions}funny = ${_list}
+"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_CELEBRATION:-}")"
+    [ -z "$_list" ] || _ack_reactions="${_ack_reactions}celebration = ${_list}
+"
+    if [ -n "$_ack_reactions" ]; then
+        cat >> "$CONFIG_FILE" <<TOML
+
+[speech_gate.ack_reactions]
+${_ack_reactions}
+TOML
+    fi
+
 }
 
 # Render to a sibling and move it into place, so a partial file can never be

@@ -2007,6 +2007,37 @@ class TestTheReactFrame:
 
         assert self._state(config, task_id, message_id) == (None, 1)
 
+    async def test_the_ack_type_picks_the_emoji_in_the_react_frame(
+        self, bridge, sidecar, config,
+    ):
+        """ISSUE-657: a `funny` ack sends an emoji from the `funny` list."""
+        from istota.rooms import ack_reaction
+
+        funny = ["\N{FACE WITH TEARS OF JOY}", "\N{OCTOPUS}"]
+        config.speech_gate.ack_reactions = {"default": ["\N{PARTY POPPER}"], "funny": funny}
+        task_id, message_id = self._held(config)
+        result = webhook_module.WhatsAppEventResult(
+            "group_ack", user_id=USER, task_id=task_id, react_jid=self.GROUP,
+            react_message_id="BAE5HAHA", react_turn_id=message_id,
+            react_ack_type="funny",
+        )
+        settle = asyncio.ensure_future(bridge._react_to_held_ack(result))
+        request = await sidecar.expect(proto.MSG_REACT)
+        await sidecar.say(
+            proto.MSG_SEND_RESULT, request_id=request["request_id"], ok=True,
+            message_id="BAE5REACT",
+        )
+        await asyncio.wait_for(settle, timeout=2.0)
+
+        assert request["reaction"] in funny
+        assert request["reaction"] == ack_reaction.pick(config, "funny", "BAE5HAHA")
+        with db.get_db(config.db_path) as conn:
+            recorded = conn.execute(
+                "SELECT reaction FROM speech_gate_decisions WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()[0]
+        assert recorded == request["reaction"]
+
     async def test_no_answer_releases_the_held_task(
         self, bridge, sidecar, config, monkeypatch,
     ):
