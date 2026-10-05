@@ -18,6 +18,9 @@ client factory by the `fake_talk` fixture, whose `send_failures` list fails the
 prompt's post and lets the next one through. The prompt's failure is a 403,
 which `TalkTransport._post_part` neither retries nor reads back, so it is one
 call. Everything else is real: the mail server, `poll_emails`, the database.
+The default suite drives the same fallback with `send_confirmation_prompt`
+patched to fail (`tests/test_private_channel_push.py::TestTheEmailGateFallback`);
+this case adds a prompt that really failed in `TalkTransport` and a real mail.
 
 The other half, the prompt that did arrive and the row that is therefore not
 pushed, is on the lean stack
