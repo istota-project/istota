@@ -5854,7 +5854,7 @@ def _room_phone_fields(reg, binding, *, email_thread: bool = False) -> dict:
     answered here from the binding already in hand rather than per room.
     ``phone_group`` tells the client which wording to use, and that a group's
     parked questions and members are still managed from web. An email thread
-    room is read-only too (`routing.email_thread_room`); the caller answers
+    room is read-only too (`rooms.scopes.is_email_thread_room`); the caller answers
     that from `db.email_thread_tokens_for_member`, since the phone binding
     listing leaves thread bindings out.
     """
@@ -6120,12 +6120,12 @@ _MAX_ABOUT_ROOM_CHARS = 200
 
 
 def _email_thread_room(room_token: str) -> bool:
-    """`routing.email_thread_room` over its own connection."""
+    """`rooms.scopes.is_email_thread_room` over its own connection."""
     from istota import db
-    from istota.transport.routing import email_thread_room
+    from istota.rooms.scopes import is_email_thread_room
 
     with db.get_db(_config.db_path) as conn:
-        return email_thread_room(conn, room_token)
+        return is_email_thread_room(conn, room_token)
 
 
 def _task_phone_transcript_surface(task_id: int) -> str | None:
@@ -6374,9 +6374,9 @@ def _chat_update_room(
         # Only an email thread room is hidden, so only one can be listed.
         # Per member, like colour, so no host check.
         if listed is not _UNSET:
-            from istota.transport.routing import email_thread_room
+            from istota.rooms.scopes import is_email_thread_room
 
-            if not email_thread_room(conn, room.token):
+            if not is_email_thread_room(conn, room.token):
                 raise _RoomNotListable(ROOM_NOT_LISTABLE)
         if speech_mode is not _UNSET:
             refusal = room_policy.speech_mode_refusal(conn, room.token, username)
@@ -6535,11 +6535,11 @@ def _chat_update_room(
         binding = db.get_room_binding(conn, updated.token, "talk")
         d["talk_token"] = binding.surface_ref if binding else None
         if reg is not None:
-            from istota.transport.routing import email_thread_room
+            from istota.rooms.scopes import is_email_thread_room
 
             d.update(_room_phone_fields(
                 reg, db.phone_bindings_for_member(conn, username).get(reg.token),
-                email_thread=email_thread_room(conn, reg.token),
+                email_thread=is_email_thread_room(conn, reg.token),
             ))
         d.update(_room_sharing(conn, reg, username))
     return d

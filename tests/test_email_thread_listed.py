@@ -208,6 +208,28 @@ class TestTheColumn:
             db.update_web_chat_room(conn, handle.id, listed=True)
             assert db.hidden_room_tokens_for_member(conn, "alice") == {hidden}
 
+    def test_the_batch_form_agrees_with_the_per_token_rule(self, db_path):
+        """The listing's one-query form and `is_email_thread_room` are two
+        bodies of one rule, so a room one hides the other must refuse."""
+        from istota.rooms.scopes import is_email_thread_room
+
+        with db.get_db(db_path) as conn:
+            thread = _thread_room(conn)
+            theirs = _thread_room(conn, user="bob", name="Theirs",
+                                  ref="<bob@example.com>")
+            db.add_room_member(conn, theirs, "alice")
+            _private_email_room(conn)
+            bobs_private = _private_email_room(conn, user="bob")
+            db.add_room_member(conn, bobs_private, "alice")
+            db.register_bound_room(conn, "alice", origin="talk", name="Talk",
+                                   surface="talk", surface_ref="talktok1")
+            db.create_web_chat_room(conn, "alice", "general")
+            mine = {r[0] for r in conn.execute(
+                "SELECT room_token FROM room_members WHERE user_id = 'alice'")}
+            per_token = {t for t in mine if is_email_thread_room(conn, t)}
+            assert per_token == {thread, theirs}
+            assert db.email_thread_tokens_for_member(conn, "alice") == per_token
+
 
 # ---------------------------------------------------------------------------
 # The listing and the PATCH
