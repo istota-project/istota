@@ -71,6 +71,48 @@ describe('an incoming card', () => {
     expect(text()).toContain('On Mon, Carol wrote:');
   });
 
+  it('renders the body and the quoted text as markdown', async () => {
+    render(MailCard, {
+      card: receivedCard(
+        received({
+          new_text: 'Sent from [Proton Mail](https://proton.me/mail/home) for iOS.',
+          rest: 'On Mon, Carol wrote:\n> Dinner?',
+        }),
+      ),
+    });
+    const link = screen.getByRole('link', { name: 'Proton Mail' });
+    expect(link.getAttribute('href')).toBe('https://proton.me/mail/home');
+    expect(text()).toContain('Sent from Proton Mail (proton.me) for iOS.');
+    expect(text()).not.toContain('](');
+    await fireEvent.click(screen.getByRole('button', { name: 'Show quoted text' }));
+    const quote = card().querySelector('.mail-quoted blockquote');
+    expect(quote?.textContent?.trim()).toBe('Dinner?');
+  });
+
+  it('names where a relabelled link in a received body goes', () => {
+    render(MailCard, {
+      card: receivedCard(
+        received({ new_text: 'Log in at [https://bank.example](https://evil.example/x)' }),
+      ),
+    });
+    expect(text()).toContain('https://bank.example (evil.example)');
+  });
+
+  it('does not draw a workspace image from a received body', () => {
+    render(MailCard, {
+      card: receivedCard(received({ new_text: '![badge](/api/chat/files?path=/Users/u/x.png)' })),
+    });
+    expect(card().querySelector('img')).toBeNull();
+  });
+
+  it('does not emit raw HTML from a mail body', () => {
+    render(MailCard, {
+      card: receivedCard(received({ new_text: '<img src=x onerror="alert(1)"> hi' })),
+    });
+    expect(card().querySelector('img')).toBeNull();
+    expect(text()).toContain('<img src=x');
+  });
+
   it.each([
     [{ trusted: true, sender_check: 'failed' as const }, 'Trusted sender'],
     [{ sender_check: 'verified' as const }, 'Verified sender'],
@@ -205,8 +247,16 @@ describe('an outgoing card', () => {
     expect(text()).toContain('Sent by email');
     expect(text()).toContain('Thursday after 7 works');
     expect(text()).toContain('Cc: you');
+    // Mailed as plain text, so it reads as typed rather than rendered.
+    expect(card().querySelector('.mail-body.markdown')).toBeNull();
     expect(card().querySelector('[data-testid="mail-state"]')?.textContent?.trim()).toBe('Sent');
     expect(card().querySelector('[data-testid="sender-badge"]')).toBeNull();
+  });
+
+  it('shows the sent body as typed', () => {
+    render(MailCard, { card: sentCard(sent, 'See [the menu](https://example.com/menu)') });
+    expect(text()).toContain('See [the menu](https://example.com/menu)');
+    expect(card().querySelector('a[href="https://example.com/menu"]')).toBeNull();
   });
 
   it('copies the first recipient', async () => {
