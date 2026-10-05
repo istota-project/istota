@@ -322,6 +322,82 @@ class TestAsksForConfirmation:
         assert asks_for_confirmation(
             "I will run this. Should I proceed?\n\n```\nrm old.log\n```")
 
+    def test_a_request_introducing_a_draft_parks(self):
+        """#634: unfenced content after the request used to hide it."""
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "I drafted the reply below. Please confirm before I send it:\n\n"
+            "Hi Bob,\n\nThursday at 3 works.\n\nBest, Alice"
+        )
+
+    def test_a_request_followed_by_a_list_parks(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "Should I proceed with deleting these 40 files?\n\n- a.txt\n- b.txt")
+
+    def test_an_earlier_request_must_end_its_paragraph(self):
+        """A request that is not the paragraph's last sentence, or that is
+        quoted, is still only discussion when prose follows it."""
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation(
+            "Should I proceed? is what the bot asks before a send.\n\n"
+            "Click Confirm to run it.")
+        assert not asks_for_confirmation(
+            "The card shows the bot asking \"Should I proceed?\"\n\n"
+            "Click Confirm to run it.")
+        assert not asks_for_confirmation(
+            "When it needs approval the bot writes 'Please confirm':\n\n"
+            "- Confirm runs it\n- Discard drops it")
+        assert not asks_for_confirmation(
+            "The prompt is `Should I proceed?`\n\nIt is set in the config.")
+
+    def test_a_draft_holding_its_own_question_or_heading_still_parks(self):
+        """The request is not the last paragraph ending in ? or : once the
+        draft under it asks something or carries a label."""
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "Please confirm before I send it:\n\nHi Bob,\n\n"
+            "Does Thursday at 3 work for you?\n\nBest, Alice")
+        assert asks_for_confirmation(
+            "Please confirm before I send it:\n\nHi team,\n\n"
+            "Agenda for Thursday:\n\n- budget\n- hiring\n\nThanks, Alice")
+
+    def test_the_request_may_be_bold_follow_a_clause_or_carry_an_aside(self):
+        from istota.scheduler import asks_for_confirmation
+
+        assert asks_for_confirmation(
+            "**Please confirm before I send it:**\n\nHi Bob,\n\nThursday works.")
+        assert asks_for_confirmation(
+            "*Should I proceed with deleting these?*\n\n- a.txt\n- b.txt")
+        assert asks_for_confirmation(
+            "Should I proceed? (yes/no)\n\n- a.txt\n- b.txt")
+        assert asks_for_confirmation(
+            "I will remove 40 files. Before I do, please confirm:\n\n- a.txt")
+        assert asks_for_confirmation(
+            'Bob wrote "Can we do Thursday?" Please confirm before I send '
+            "this reply:\n\nHi Bob,\n\nThursday works.")
+
+    def test_an_unquoted_mention_or_a_heading_does_not_park(self):
+        """#625's shape without its quote marks: the phrase sits mid-sentence."""
+        from istota.scheduler import asks_for_confirmation
+
+        assert not asks_for_confirmation(
+            "That card is a confirmation. When it needs approval the bot asks "
+            "Should I proceed?\n\nClick Confirm to run it, or Discard to drop it.")
+        assert not asks_for_confirmation(
+            "When it needs approval the bot writes Please confirm and then the "
+            "details:\n\n- Recipient\n- Subject\n\nYou answer yes or no.")
+        assert not asks_for_confirmation(
+            "### Can you confirm from the bell?\n\n"
+            "Yes, the bell shows a Confirm button for held tasks.")
+        assert not asks_for_confirmation(
+            "Should I proceed is the bot's phrase. Is that clear?\n\n"
+            "Click Confirm.")
+
     def test_final_paragraph_drops_quotes_and_fences(self):
         from istota.scheduler import final_paragraph
 
@@ -3414,6 +3490,35 @@ class TestProcessOneTask:
             )
 
         process_one_task(config)
+        mock_drain.assert_not_called()
+
+    @patch("istota.scheduler._drain_deferred_ops")
+    @patch("istota.scheduler.execute_task")
+    @patch("istota.scheduler.run_coro", return_value=None)
+    def test_a_request_above_its_draft_parks_and_holds_the_ops(
+        self, mock_runcoro, mock_exec, mock_drain, db_path, tmp_path,
+    ):
+        """#634: the draft under the request used to be the final paragraph,
+        so the task completed and its deferred ops ran unapproved."""
+        mock_exec.return_value = (
+            True,
+            "I drafted the reply below. Please confirm before I send it:\n\n"
+            "Hi Bob,\n\nThursday at 3 works.\n\nBest, Alice",
+            None, None,
+        )
+        config = self._make_config(db_path, tmp_path)
+        with db.get_db(db_path) as conn:
+            db.create_task(
+                conn, prompt="Answer Bob", user_id="testuser",
+                source_type="web", conversation_token="web-testuser-abc",
+                output_target="web",
+            )
+
+        task_id, _ = process_one_task(config)
+
+        with db.get_db(db_path) as conn:
+            task = db.get_task(conn, task_id)
+        assert task.status == "pending_confirmation"
         mock_drain.assert_not_called()
 
     @patch("istota.scheduler.execute_task")

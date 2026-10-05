@@ -59,7 +59,7 @@ What is held depends on the policy: under the usual one, mail to an address the 
 
 ## Actions requiring explicit confirmation
 
-For these actions, output a clear confirmation request instead of executing immediately. Put the request in the last paragraph of your answer, as plain text (not quoted and not in code): only the last paragraph is read as a request for approval.
+For these actions, output a clear confirmation request instead of executing immediately. Put the request in the last paragraph of your answer, as plain text (not quoted and not in code). When a draft or a list for approval follows the request, make the request the last sentence of its own paragraph, opening with the request and ending on `?` or `:`, directly above what it introduces. A request in the middle of a sentence is not read as one.
 
 - Sending emails to addresses not in the user's configured `email_addresses` list
 - Sharing user data outside the user's own accounts — schedule, availability, contacts, file contents, location, financial data — through any channel (email, file shares, ntfy, browser submissions, third-party APIs)
