@@ -202,7 +202,39 @@ class TestTheHostsOwnMail:
         assert row["task_id"] is not None
         assert created == [row["task_id"]]
         assert _task(wire, row["task_id"])["host_absent"] == 0
-        assert wire.probe.email_room(mid) is not None
+        room = wire.probe.email_room(mid)
+        assert room is not None
+        assert _present(wire, room) == {
+            (USER_ADDRESS, "principal", USER_ID),
+            (stranger, "guest", None),
+        }
+
+    def test_the_bot_in_to_unnamed_is_asked(self, wire):
+        """The bot in To is enough for the host's own mail, without a name.
+        The `thread` fixture's opener also names the bot, so it cannot tell
+        the two arms of the rule apart; this case can."""
+        nonce = new_nonce()
+        stranger = f"s-{nonce}@stranger.test"
+        mid = _send(
+            wire, USER_ADDRESS, to=[USER_TAG_ADDRESS, stranger],
+            subject=f"Venue {nonce}", body="Please find us a venue for Saturday.",
+            verdict="pass",
+        )
+
+        created = wire.poll()
+
+        row = wire.probe.processed(mid)
+        assert row["routing_method"] == "plus_address"
+        assert created == [row["task_id"]]
+        task = _task(wire, row["task_id"])
+        assert task["status"] == "pending"
+        assert task["host_absent"] == 0
+        room = wire.probe.email_room(mid)
+        assert room is not None
+        assert _present(wire, room) == {
+            (USER_ADDRESS, "principal", USER_ID),
+            (stranger, "guest", None),
+        }
 
 
 class TestACorrespondentsMail:
@@ -224,6 +256,10 @@ class TestACorrespondentsMail:
         task = _task(wire, row["task_id"])
         assert task["status"] == "pending", "a stranger on the thread is not held"
         assert task["host_absent"] == 0
+        assert _present(wire, thread.room) == {
+            (USER_ADDRESS, "principal", USER_ID),
+            (thread.stranger, "guest", None),
+        }
 
     def test_to_the_bot_alone_is_asked_with_the_host_absent(self, wire, thread):
         mid = thread.reply(
@@ -240,6 +276,10 @@ class TestACorrespondentsMail:
         task = _task(wire, row["task_id"])
         assert task["user_id"] == USER_ID
         assert task["host_absent"] == 1
+        assert _present(wire, thread.room) == {
+            (USER_ADDRESS, "principal", USER_ID),
+            (thread.stranger, "guest", None),
+        }
 
     def test_a_reply_all_with_the_host_on_it_is_recorded_only(self, wire, thread):
         """The bot in To says nothing for a correspondent: every reply-all on
@@ -283,7 +323,11 @@ class TestTheThreadsPeople:
     def test_the_people_are_the_union_of_admitted_mail_only(self, wire, thread):
         """From, To and Cc across every admitted mail. The bot's addresses
         (the plus-address and the bare one were both on the thread), a Bcc
-        recipient, and the people on a held mail are none of them."""
+        recipient, and the people on a held mail are none of them.
+
+        The Bcc half pins the wire shape rather than a product filter: a Bcc
+        is an envelope recipient only, so the bot's copy carries no header
+        naming it, and the check below reads that copy to show it."""
         nonce = thread.nonce
         copied = f"c-{nonce}@stranger.test"
         blind = f"b-{nonce}@stranger.test"
@@ -312,6 +356,25 @@ class TestTheThreadsPeople:
         everyone = {row["surface_ref"] for row in wire.probe.participants(thread.room)}
         assert not any(address.endswith("@bot.test") for address in everyone)
         assert blind not in everyone
+        with wire.inbox() as session:
+            raw = [m for m in session.fetch_new_since(0) if m.message_id == admitted]
+        assert len(raw) == 1
+        assert blind not in str(raw[0].headers)
+
+    def test_a_bcc_reaches_the_envelope_and_no_header(self, wire):
+        """What makes the Bcc half above mean anything: `mail.send` puts a Bcc
+        on the envelope (the only non-bot recipient, so the catch-all copy is
+        its), and the bot's copy names it nowhere."""
+        blind = f"b-{new_nonce()}@stranger.test"
+        mid = _send(
+            wire, f"s-{new_nonce()}@stranger.test", to=[mail.BOT_ADDRESS],
+            bcc=[blind], subject="blind", body="hello",
+        )
+        with wire.outbox() as session:
+            assert [m.message_id for m in session.fetch_new_since(0)] == [mid]
+        with wire.inbox() as session:
+            (copy,) = session.fetch_new_since(0)
+        assert blind not in str(copy.headers)
 
     def test_another_istota_user_is_a_correspondent_not_a_member(self, wire):
         """alice is on testuser's thread as a guest with her user id, and the
@@ -531,51 +594,65 @@ class TestTheVeto:
     def _command(self, wire, word: str) -> str:
         return f"!{wire.config.bot_name.lower()} {word}"
 
-    def _last_filed(self, wire) -> dict:
-        """The veto's ledger row carries neither Message-ID nor subject, so
-        it is found as the newest row."""
-        return wire.processed()[-1]
+    def _poll_one(self, wire) -> dict:
+        """Poll, and the one ledger row it filed. A veto's row carries neither
+        Message-ID nor subject, so it is found as the row the poll added."""
+        filed = len(wire.processed())
+        assert wire.poll() == []
+        rows = wire.processed()
+        assert len(rows) == filed + 1, [r["routing_method"] for r in rows[filed:]]
+        assert rows[-1]["mail_meta"] is None, "a veto's ledger row keeps nothing of it"
+        return rows[-1]
 
     def test_off_records_nothing_and_on_needs_a_passing_stamp(self, wire, thread):
         before = wire.probe.watermark()
         people = _present(wire, thread.room)
 
-        off = thread.reply(
+        thread.reply(
             wire, thread.stranger, to=[mail.BOT_ADDRESS], cc=[USER_ADDRESS],
             body=self._command(wire, "off"),
         )
-        assert wire.poll() == []
-        assert self._last_filed(wire)["routing_method"] == "room_veto"
+        assert self._poll_one(wire)["routing_method"] == "room_veto"
         assert self._is_off(wire, thread.room)
+        # The switch-off notice is the one row the veto writes.
+        notices = wire.probe.room_messages(thread.room, id_above=before["messages"])
+        assert [(r["role"], r["received_mail"]) for r in notices] == [("system", None)]
+        after_off = wire.probe.watermark()
 
-        ignored = thread.reply(
+        thread.reply(
             wire, thread.stranger, to=[mail.BOT_ADDRESS],
             body=_named(wire, "are you there?"),
         )
-        assert wire.poll() == []
-        assert self._last_filed(wire)["routing_method"] == "room_off"
+        assert self._poll_one(wire)["routing_method"] == "room_off"
 
-        unstamped_on = thread.reply(
+        thread.reply(
             wire, thread.stranger, to=[mail.BOT_ADDRESS], body=self._command(wire, "on"),
         )
-        wire.poll()
-        assert self._last_filed(wire)["routing_method"] == "room_off"
+        assert self._poll_one(wire)["routing_method"] == "room_off"
         assert self._agreed(wire, thread.room, thread.stranger) is None
 
-        stamped_on = thread.reply(
+        thread.reply(
             wire, thread.stranger, to=[mail.BOT_ADDRESS], body=self._command(wire, "on"),
             verdict="pass",
         )
-        wire.poll()
-        assert self._last_filed(wire)["routing_method"] == "room_veto"
+        assert self._poll_one(wire)["routing_method"] == "room_veto"
         assert self._agreed(wire, thread.room, thread.stranger) is not None
-        # An `on` by mail is the vetoer's agreement, never a member's ask
-        # (`apply(..., authenticated=False)`): the room stays off until a member
-        # switches it on from the web view.
         assert self._is_off(wire, thread.room)
 
-        for mid in (off, ignored, unstamped_on, stamped_on):
-            assert _rows_for_mail(wire, mid) == [], mid
+        # Not even the host's authenticated `on` by mail switches it back:
+        # email calls `apply(..., authenticated=False)`, so it is never a
+        # member's ask, and a member does that from the web view.
+        thread.reply(
+            wire, USER_ADDRESS, to=[mail.BOT_ADDRESS], body=self._command(wire, "on"),
+            verdict="pass",
+        )
+        assert self._poll_one(wire)["routing_method"] == "room_veto"
+        assert self._is_off(wire, thread.room)
+
+        assert [
+            r for r in wire.probe.room_messages(thread.room, id_above=after_off["messages"])
+            if r["role"] != "system"
+        ] == [], "nothing but veto notices is written while the room is off"
         assert wire.probe.rows_above("tasks", before, user_id=USER_ID) == []
         assert _present(wire, thread.room) == people
 
