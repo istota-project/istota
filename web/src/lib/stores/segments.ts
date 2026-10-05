@@ -13,7 +13,7 @@
  * types and calls `applyEvent` inside its `updateMsg` mutation.
  */
 
-import type { MailDiscuss, ReceivedMail } from '../api';
+import type { EmailNoteParts, MailDiscuss, ReceivedMail } from '../api';
 
 export interface ToolEntry {
   id: string; // tool_call_id (or synthesized t<n> / h<n>)
@@ -285,8 +285,11 @@ export interface ChatMessage {
     discuss?: MailDiscuss;
   };
   // User rows in a mail room: the incoming mail, rendered as a mail card.
-  // The server's `received_mail`, as sent.
+  // The server's `received_mail`, as sent. Also on an email note with parts,
+  // where it is the mail the note is about.
   receivedMail?: ReceivedMail;
+  // An email note's parts (ISSUE-644), as sent.
+  emailNote?: EmailNoteParts;
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every

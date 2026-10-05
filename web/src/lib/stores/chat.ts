@@ -2751,7 +2751,18 @@ function createSession(): ChatSession {
               discuss: m.mail.discuss ?? undefined,
             }
           : undefined,
-      receivedMail: m.role === 'user' && m.received_mail ? m.received_mail : undefined,
+      receivedMail:
+        (m.role === 'user' || (m.role === 'system' && m.email_note)) && m.received_mail
+          ? m.received_mail
+          : undefined,
+      emailNote:
+        m.role === 'system' && m.email_note
+          ? {
+              header: m.email_note.header ?? '',
+              outcome: m.email_note.outcome ?? '',
+              remark: m.email_note.remark ?? '',
+            }
+          : undefined,
       // Persisted server-side, so the chip survives leaving the room and
       // coming back (the composer's names are long gone by then).
       attachments: m.attachments?.length ? m.attachments : undefined,

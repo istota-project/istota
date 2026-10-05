@@ -354,9 +354,22 @@
   );
   // A mail that came into a mail room renders as the incoming card, in place
   // of both the bubble and the external treatment.
+  // An email note with its parts (ISSUE-644) shows the mail it is about the
+  // same way, collapsed under the note's header line.
+  // Without the mail the parts would drop the body's quote, so both or neither.
+  const emailNote = $derived(isSystem && message.receivedMail ? message.emailNote : undefined);
   const incomingCard = $derived(
-    isUser && message.receivedMail ? receivedCard(message.receivedMail) : null,
+    (isUser || emailNote) && message.receivedMail ? receivedCard(message.receivedMail) : null,
   );
+  // The note's outcome line says what a card under it would say, so it shows
+  // only where no card does.
+  const noteOutcomeShown = $derived(
+    !!emailNote?.outcome &&
+      !outgoingCard &&
+      !(draftActions && drafts.length) &&
+      !(message.confirmation && message.taskId),
+  );
+  const remarkHtml = $derived(emailNote?.remark ? renderMarkdown(emailNote.remark, mentions) : '');
 
   // The turn's body is an ordered list of render groups (substantial prose +
   // activity chips), interleaved in the model's true block order. A substantial
@@ -832,8 +845,22 @@
         </button>
       {/if}
       {@render aboutChip()}
+      <!-- Only a notice gets the panel. A bot-voice row (a private reply, a
+           private question, an email note) is the bot talking to its user, so
+           its words read as an answer does; cards stay cards (ISSUE-644). An
+           email note with its parts shows a header line and the mail it is
+           about here, and the bot's remark under the cards. -->
       {#if message.searchResults}
         <SearchResults data={message.searchResults} {onJump} />
+      {:else if emailNote}
+        <div class="note-header caption">{emailNote.header}</div>
+        {#if incomingCard}
+          <MailCard card={incomingCard} collapsed {onDiscuss} />
+        {/if}
+      {:else if botVoice}
+        <div class="body markdown">
+          {@html bodyHtml}
+        </div>
       {:else}
         <div class="cmd-output markdown" class:error={message.error}>
           {@html bodyHtml}
@@ -855,6 +882,14 @@
             onNeedsFullRow={draftActions.refresh}
           />
         {/each}
+      {/if}
+      {#if noteOutcomeShown}
+        <div class="note-outcome caption">{emailNote?.outcome}</div>
+      {/if}
+      {#if remarkHtml}
+        <div class="body markdown note-remark">
+          {@html remarkHtml}
+        </div>
       {/if}
 
       <!-- A question parked privately about another room (#624): the card sits
@@ -2001,6 +2036,13 @@
     position: absolute;
     right: var(--chat-row-inline);
     top: 0.3rem;
+  }
+  .note-header {
+    margin-bottom: var(--space-1);
+  }
+  .note-outcome,
+  .note-remark {
+    margin-top: var(--space-1);
   }
   .cmd-output {
     max-width: var(--chat-body-max);

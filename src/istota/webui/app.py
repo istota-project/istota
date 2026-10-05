@@ -4284,6 +4284,11 @@ def _room_events_batch(
             [(r["msg_id"], r["delivery_reference"], r["about_room_token"])
              for r in rows[:want] if r["role"] == "system"],
         ) if len(rows) <= want else {}
+        note_parts = _note_parts_rows(
+            conn, username,
+            [(r["msg_id"], r["delivery_reference"], r["about_room_token"])
+             for r in rows[:want] if r["role"] == "system"],
+        ) if len(rows) <= want else {}
         mail_views = _mail_views(
             conn, username, [r["room_token"] for r in rows[:want]],
             [r["task_id"] for r in rows[:want]],
@@ -4294,7 +4299,7 @@ def _room_events_batch(
     for r in rows[:want]:
         d = _cross_room_message_dict(
             r, username, about_names=about_names, parked=parked, mail_views=mail_views,
-            noted=noted,
+            noted=noted, note_parts=note_parts,
         )
         if r["msg_id"] in undeletable:
             d["deletable"] = False
@@ -8457,6 +8462,9 @@ def _chat_room_messages(
         noted_notes = _noted_rows(
             conn, username, [(n.id, n.delivery_reference, n.about_room_token) for n in notes],
         )
+        note_parts = _note_parts_rows(
+            conn, username, [(n.id, n.delivery_reference, n.about_room_token) for n in notes],
+        )
         mail_view = _mail_views(
             conn, username, [token], [_row_get(r, "task_id") for r in msg_rows],
         ).get(token)
@@ -8576,6 +8584,7 @@ def _chat_room_messages(
             note["confirmation"] = True
             note["task_id"] = parked
         _apply_noted(note, noted_notes.get(n.id))
+        note.update(note_parts.get(n.id, {}))
         messages.append(note)
     # Normalize every turn's created_at to explicit ISO 8601 UTC. The stored
     # values are naive UTC (SQLite datetime('now') / strftime, and the Talk-cache
@@ -10466,6 +10475,59 @@ def _noted_rows(conn, username: str, rows) -> dict[int, tuple[int, dict | None]]
     return out
 
 
+_NOTE_PART_KEYS = ("header", "outcome", "remark")
+
+
+def _note_parts_rows(conn, username: str, rows) -> dict[int, dict]:
+    """``{msg_id: fields}`` for the email notes among ``rows`` that stored
+    their parts (ISSUE-644), each ``(msg_id, delivery_reference,
+    about_room_token)``.
+
+    ``fields`` is ``email_note`` (the parts) and ``received_mail``: the
+    incoming mail as the thread's card renders it, with no note link, since
+    the reader is already in the note's room. Both or neither: the parts leave
+    out the quote, so a note whose mail the thread no longer holds, like a note
+    from before the parts, has no entry and renders from its body.
+    """
+    from istota.mail.support import own_addresses, parse_email_prompt  # noqa: PLC0415
+    from istota.rooms.private_replies import email_note_task_for_reference  # noqa: PLC0415
+
+    out: dict[int, dict] = {}
+    view = None
+    for msg_id, reference, about in rows:
+        task_id = email_note_task_for_reference(conn, reference, username)
+        if task_id is None:
+            continue
+        stored = conn.execute("SELECT email_note FROM messages WHERE id = ?",
+                              (msg_id,)).fetchone()
+        try:
+            parts = json.loads(stored["email_note"]) if stored and stored["email_note"] else None
+        except (TypeError, ValueError):
+            parts = None
+        if not isinstance(parts, dict):
+            continue
+        row = conn.execute(
+            "SELECT body, received_mail, task_id FROM messages WHERE task_id = ? "
+            "AND role = 'user' AND room_token = ? ORDER BY id LIMIT 1",
+            (task_id, about),
+        ).fetchone() if about else None
+        if row is not None:
+            if view is None:
+                view = _MailView(own=frozenset(own_addresses(_config, username)),
+                                 private_room=None)
+            received = _received_mail_field(
+                row, parse_email_prompt(row["body"] or ""), view, username)
+            if received is not None:
+                out[msg_id] = {
+                    "email_note": {
+                        key: parts[key] if isinstance(parts.get(key), str) else ""
+                        for key in _NOTE_PART_KEYS
+                    },
+                    "received_mail": received,
+                }
+    return out
+
+
 def _apply_noted(d: dict, noted: tuple[int, dict | None] | None) -> None:
     """Give an email note's payload its task id and live mail card."""
     if noted is None:
@@ -10478,6 +10540,7 @@ def _apply_noted(d: dict, noted: tuple[int, dict | None] | None) -> None:
 def _cross_room_message_dict(
     r, username: str, *, about_names: dict | None = None, parked: dict | None = None,
     mail_views: dict | None = None, noted: dict | None = None,
+    note_parts: dict | None = None,
 ) -> dict:
     """One `db._CROSS_ROOM_COLUMNS` row → the history payload shape.
 
@@ -10517,6 +10580,7 @@ def _cross_room_message_dict(
             d["confirmation"] = True
             d["task_id"] = parked_task
         _apply_noted(d, (noted or {}).get(r["msg_id"]))
+        d.update((note_parts or {}).get(r["msg_id"], {}))
     cited = _row_reply_to(r)
     if cited is not None:
         d["reply_to"] = cited

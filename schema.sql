@@ -1507,7 +1507,10 @@ CREATE TABLE IF NOT EXISTS messages (
     -- JSON (`inbound.received_mail_meta`): from, to, cc, date, subject,
     -- message_id, in_reply_to, attachments, sender_check, trusted. Written once
     -- at intake; never Bcc. NULL on every other row.
-    received_mail TEXT
+    received_mail TEXT,
+    -- An email note's parts, JSON: header, outcome, remark (ISSUE-644). The
+    -- body stays the whole note for the push surfaces. NULL on every other row.
+    email_note TEXT
 );
 -- No index on either author column: they are projected, never filtered.
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);

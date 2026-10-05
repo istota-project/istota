@@ -118,3 +118,126 @@ describe('the mail card under an email note (hidden email threads, stage 5)', ()
     expect(container.querySelector('[data-testid="mail-card"]')).toBeNull();
   });
 });
+
+describe('a bot-voice row reads as the bot talking (ISSUE-644)', () => {
+  it('renders a private reply as bot text, with no notice panel', () => {
+    const { container } = render(Message, {
+      message: privateRow(),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.cmd-output')).toBeNull();
+    expect(container.querySelector('.cmd-row .content .body.markdown')?.textContent).toContain(
+      'Post this in Family as Istota?',
+    );
+  });
+
+  it('keeps the panel on an ordinary notice', () => {
+    const { container } = render(Message, {
+      message: privateRow({ aboutRoom: undefined }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.cmd-output')).not.toBeNull();
+    expect(container.querySelector('.cmd-row .body')).toBeNull();
+  });
+});
+
+describe('an email note with its parts (ISSUE-644)', () => {
+  const received = {
+    from: { name: '', address: 'ana@example.com' },
+    to: [{ name: '', address: 'bot@example.com' }],
+    cc: [],
+    date: 'Sun, 04 Oct 2026 10:00:00 +0000',
+    subject: 'Dinner',
+    attachments: [],
+    new_text: 'Friday?',
+    rest: 'Sent from my phone',
+    labels: {},
+  };
+  const parts = {
+    header: 'ana@example.com wrote on Book club, without you on the message',
+    outcome: 'Replied.',
+    remark: 'Your calendar is free on **Friday**.',
+  };
+  const noteRow = (over: Partial<ChatMessage> = {}) =>
+    privateRow({
+      text: 'ana@example.com wrote on Book club:\n\n> Friday?\n\nReplied.\n\nYour calendar…',
+      taskId: 9,
+      emailNote: parts,
+      receivedMail: received,
+      ...over,
+    });
+  const sent = {
+    to: ['ana@example.com'],
+    cc: [],
+    subject: 'Re: Dinner',
+    state: 'sent' as const,
+    body: 'Friday works.',
+  };
+
+  it('shows the header, the incoming mail as a card and the remark as bot text', () => {
+    const { container } = render(Message, {
+      message: noteRow({ mail: sent }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.cmd-output')).toBeNull();
+    expect(container.querySelector('.note-header')?.textContent).toBe(parts.header);
+    const cards = container.querySelectorAll('[data-testid="mail-card"]');
+    expect(cards.length).toBe(2);
+    // The quote is not rendered; the mail card carries the mail.
+    expect(container.textContent).not.toContain('> Friday?');
+    const remark = container.querySelector('.note-remark');
+    expect(remark?.querySelector('strong')?.textContent).toBe('Friday');
+    // The sent card already says the outcome.
+    expect(container.querySelector('.note-outcome')).toBeNull();
+  });
+
+  it('says the outcome where no card does', () => {
+    const { container } = render(Message, {
+      message: noteRow({ emailNote: { ...parts, outcome: 'No reply sent.', remark: '' } }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.note-outcome')?.textContent).toBe('No reply sent.');
+    expect(container.querySelector('.note-remark')).toBeNull();
+  });
+
+  it('puts a parked question above its card and drops the outcome line', () => {
+    const { container } = render(Message, {
+      message: noteRow({
+        emailNote: { ...parts, outcome: 'Question for you.', remark: 'Shall I say Friday?' },
+        confirmation: true,
+      }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.note-outcome')).toBeNull();
+    const remark = container.querySelector('.note-remark');
+    const card = container.querySelector('.confirm-card');
+    expect(remark && card).toBeTruthy();
+    expect(remark!.compareDocumentPosition(card!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('renders the body when the parts arrive without their mail', () => {
+    const { container } = render(Message, {
+      message: noteRow({ receivedMail: undefined }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.note-header')).toBeNull();
+    expect(container.textContent).toContain('Friday?');
+  });
+
+  it('renders a note from before the parts from its body, as bot text', () => {
+    const { container } = render(Message, {
+      message: noteRow({ emailNote: undefined, receivedMail: undefined }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    expect(container.querySelector('.note-header')).toBeNull();
+    expect(container.querySelector('.cmd-output')).toBeNull();
+    expect(container.querySelector('.body.markdown blockquote')?.textContent).toContain('Friday?');
+  });
+});
