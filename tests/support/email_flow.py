@@ -75,6 +75,10 @@ POLL_INTERVAL = 2.0
 #: prompt delivery.
 NEGATIVE_SETTLE = 10.0
 
+#: How long the exact push and alert-mail sets are watched past the expected
+#: count, so one extra push sent right behind them is still counted.
+POST_COUNT_SETTLE = 3.0
+
 
 def stamp(address: str, verdict: str = "pass") -> str:
     """An `Authentication-Results` value for `address`'s domain.
@@ -723,6 +727,8 @@ def assert_outcome(
     if want_pushes or want_alerts:
         _wait(lambda: len(read_pushes()) >= want_pushes
               and len(read_alerts()) >= want_alerts, timeout=timeout)
+        # The count is a floor: a push past it would otherwise go unseen.
+        time.sleep(POST_COUNT_SETTLE)
     elif not ran:
         time.sleep(NEGATIVE_SETTLE)
     pushes = read_pushes()
@@ -760,7 +766,7 @@ def assert_outcome(
 def ledger_only_row(stack, sent: Sent) -> dict | None:
     """The ledger row of a mail filed without its Message-ID, or None.
 
-    The poller writes a `discarded`, `quiet` or `throttled` row with the sender
+    The poller writes a `discarded`, `quiet`, `throttled` or `read_error` row with the sender
     and subject and no `message_id` (the `mark_email_processed` calls on those
     branches of `inbound.poll_emails`), so `Probe.processed` cannot find one.
     Every subject in the suite carries the test's nonce, which is what makes

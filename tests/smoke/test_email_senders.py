@@ -64,17 +64,32 @@ def prompt_push(task: dict) -> str:
     return flatten_body(task["confirmation_prompt"])
 
 
-def _dmarc_push(stack, task: dict, verdict: str) -> str:
+def _dmarc_push(stack, task: dict, sent: flow.Sent, verdict: str) -> str:
     """The DMARC canary's push: its alert message through `flatten_body`
     (`inbound._deliver_dmarc_alerts`), read back off the `dmarc:<verdict>` row,
     which stores the same message (`inbound._write_dmarc_rows`).
 
-    The row is keyed per user and verdict, and the in-process alert dedup per
-    sender and verdict, so each verdict is exercised once per session stack.
+    The row is written after the prompt has been delivered, in the same
+    `finally`, so it is waited for. It is keyed per user and verdict, and the
+    in-process alert dedup per user, sender and verdict, so each verdict is
+    exercised once per session stack. Equal to the push by construction, so
+    the content is pinned by fragments the product composes independently.
     """
-    rows = stack.probe.notifications(task["user_id"], dedup_key=f"dmarc:{verdict}")
+    def read():
+        return stack.probe.notifications(task["user_id"], dedup_key=f"dmarc:{verdict}")
+
+    deadline = time.monotonic() + flow.DEFAULT_TIMEOUT
+    rows = read()
+    while not rows and time.monotonic() < deadline:
+        time.sleep(flow.POLL_INTERVAL)
+        rows = read()
     assert len(rows) == 1, rows
-    return flatten_body(rows[0]["body"])
+    push = flatten_body(rows[0]["body"])
+    for fragment in ("routed as sender_match",
+                     'confirm_sender_match = "verify"',
+                     f"Subject: {sent.subject}"):
+        assert fragment in push, (fragment, push)
+    return push
 
 
 def _assert_self_claim_prompt(task: dict) -> None:
@@ -219,7 +234,7 @@ class TestTheHostsOwnAddress:
             notices=flow.Notices(
                 rows=frozenset({("confirmation", "task:{task}"),
                                 ("task_alert", "dmarc:fail")}),
-                pushes=(prompt_push(task), _dmarc_push(stack, task, "fail")),
+                pushes=(prompt_push(task), _dmarc_push(stack, task, sent, "fail")),
                 alert_mails=2,
             ),
         ))
@@ -249,7 +264,7 @@ class TestTheHostsOwnAddress:
             notices=flow.Notices(
                 rows=frozenset({("confirmation", "task:{task}"),
                                 ("task_alert", "dmarc:unstamped")}),
-                pushes=(prompt_push(task), _dmarc_push(stack, task, "unstamped")),
+                pushes=(prompt_push(task), _dmarc_push(stack, task, sent, "unstamped")),
                 alert_mails=2,
             ),
         ))
