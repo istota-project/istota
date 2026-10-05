@@ -4058,7 +4058,10 @@ class BaileysBridge:
         from ... import db  # noqa: PLC0415
         from istota.rooms import ack_reaction  # noqa: PLC0415
 
-        reaction = ack_reaction.reaction_for(self._config)
+        reaction = ack_reaction.pick(
+            self._config, getattr(result, "react_ack_type", None),
+            result.react_message_id,
+        )
         reacted = reaction is not None and await self.react(
             result.react_jid, result.react_message_id, reaction,
         )
@@ -4068,6 +4071,7 @@ class BaileysBridge:
                 ack_reaction.settle(
                     conn, task_id=result.task_id,
                     message_id=result.react_turn_id, reacted=reacted,
+                    reaction=reaction,
                 )
 
         try:

@@ -399,6 +399,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # ISSUE-655: whether an ack was answered with a reaction. NULL on every
     # older row, which is what "no reaction was tried" is.
     _add_columns(conn, "speech_gate_decisions", {"reacted": "INTEGER"})
+    # ISSUE-657: what kind of ack the classifier read, and the emoji sent.
+    _add_columns(conn, "speech_gate_decisions", {"ack_type": "TEXT", "reaction": "TEXT"})
     # Tasks table migrations
     _add_columns(conn, "tasks", {
         "whatsapp_confirmation_request_id": "TEXT",

@@ -956,6 +956,7 @@ class TestTheSeamControl:
 # or `get_talk_client(cfg).mark_conversation_read(...)` would be invisible and
 # leave a non-empty `called` behind.
 SEAM_METHODS = {
+    "add_reaction",
     "delete_message",
     "download_attachment",
     "edit_message",

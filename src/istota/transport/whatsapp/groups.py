@@ -734,7 +734,7 @@ def handle_group_message(
         return done(WhatsAppEventResult(
             "group_ack", user_id=user_id, task_id=outcome.task_id,
             react_jid=group_jid, react_message_id=event.message_id,
-            react_turn_id=outcome.message_id,
+            react_turn_id=outcome.message_id, react_ack_type=outcome.ack_type,
         ))
     disposition = "task" if outcome.task_id is not None else f"group_{outcome.outcome}"
     return done(WhatsAppEventResult(

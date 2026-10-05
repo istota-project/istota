@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ack reactions can vary by kind** (#657). `[speech_gate.ack_reactions]` holds a list of emoji for each kind of ack the classifier names (thanks, agreement, funny, celebration) plus `default`, so a joke can get a laugh and good news a party popper. The bot picks from the list by message id, so the same message always gets the same emoji; `ack_reaction` alone works as before, and `ack_reaction = ""` still turns reactions off. Docker takes `ISTOTA_SPEECH_GATE_ACK_REACTIONS_<KIND>` and Ansible `istota_speech_gate_ack_reactions`.
+
+  **Upgrade note:** adds `ack_type` and `reaction` columns to `speech_gate_decisions` by migration.
 - **The bot reacts to thanks instead of replying, on Talk and in WhatsApp groups** (#655). In a friendly room, a message that only thanks the bot or acknowledges its answer gets a thumbs-up on that message rather than a reply, so a busy group sees less chatter and no model runs for it. If the reaction cannot be sent the bot answers in one short line, as before; web chat, SMS and email always get the short line. The emoji is the operator's `[speech_gate] ack_reaction`, and setting it empty turns reactions off.
 
   **Upgrade note:** update the Baileys sidecar with the daemon for WhatsApp groups; an older sidecar ignores the reaction and the bot replies after a short wait. Adds a `reacted` column to `speech_gate_decisions` by migration.

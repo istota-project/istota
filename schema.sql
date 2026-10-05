@@ -1695,6 +1695,11 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     -- On an ack only: 1 answered with a reaction and no task, 0 the reaction
     -- failed and the held task replied; NULL when no reaction was tried
     reacted    INTEGER,
+    -- On an ack only: 'thanks'|'agreement'|'funny'|'celebration'|'default',
+    -- the classifier's reading, which picks the reaction list
+    ack_type   TEXT,
+    -- The emoji sent, when `reacted` is 1; NULL otherwise
+    reaction   TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_speech_gate_room ON speech_gate_decisions (room_token, id);

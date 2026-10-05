@@ -20,30 +20,160 @@ def _fresh_warning_latch():
     ack_reaction._warned.clear()
 
 
-def _cfg(value):
-    return SimpleNamespace(speech_gate=SimpleNamespace(ack_reaction=value))
+THUMB = "\N{THUMBS UP SIGN}"
+OCTOPUS = "\N{OCTOPUS}"
+LAUGH = "\N{SMILING FACE WITH OPEN MOUTH AND SMILING EYES}"
+PARTY = "\N{PARTY POPPER}"
+OK_HAND = "\N{OK HAND SIGN}"
+
+
+def _cfg(value, table=None):
+    return SimpleNamespace(speech_gate=SimpleNamespace(
+        ack_reaction=value, ack_reactions=table if table is not None else {},
+    ))
 
 
 class TestTheConfiguredReaction:
+    """`ack_reaction` alone behaves exactly as in ISSUE-655."""
+
     def test_the_default_is_a_thumbs_up(self):
-        assert ack_reaction.reaction_for(Config()) == "\N{THUMBS UP SIGN}"
+        assert ack_reaction.reactions_for(Config()) == [THUMB]
+        assert ack_reaction.pick(Config(), "funny", 301) == THUMB
 
     def test_a_skin_tone_sequence_is_one_reaction(self):
         value = "\N{THUMBS UP SIGN}\N{EMOJI MODIFIER FITZPATRICK TYPE-4}"
-        assert ack_reaction.reaction_for(_cfg(value)) == value
+        assert ack_reaction.reactions_for(_cfg(value)) == [value]
 
     @pytest.mark.parametrize("value", ["", "   ", None, 7])
     def test_empty_or_absent_is_off(self, value):
-        assert ack_reaction.reaction_for(_cfg(value)) is None
+        assert ack_reaction.reactions_for(_cfg(value)) == []
+        assert ack_reaction.pick(_cfg(value), None, 1) is None
 
     @pytest.mark.parametrize("value", [
         "ok", "+1", "\N{THUMBS UP SIGN} \N{THUMBS UP SIGN}",
         "\N{THUMBS UP SIGN}" * 17, "\N{THUMBS UP SIGN}\x07",
     ])
     def test_anything_that_is_not_one_emoji_is_refused(self, value, caplog):
-        assert ack_reaction.reaction_for(_cfg(value)) is None
-        assert ack_reaction.reaction_for(_cfg(value)) is None
+        assert ack_reaction.reactions_for(_cfg(value)) == []
+        assert ack_reaction.reactions_for(_cfg(value)) == []
         assert len([r for r in caplog.records if "ack_reaction" in r.message]) == 1
+
+
+class TestThePerTypeTable:
+    """ISSUE-657: `[speech_gate.ack_reactions]`, a list of emoji per type."""
+
+    TABLE = {
+        "default": [THUMB], "thanks": [THUMB, OCTOPUS], "agreement": [OK_HAND],
+        "funny": [LAUGH, OCTOPUS], "celebration": [PARTY],
+    }
+
+    def test_a_type_uses_its_own_list(self):
+        cfg = _cfg(THUMB, self.TABLE)
+        assert ack_reaction.reactions_for(cfg, "funny") == [LAUGH, OCTOPUS]
+        assert ack_reaction.pick(cfg, "celebration", 9) == PARTY
+        assert ack_reaction.pick(cfg, "funny", 9) in (LAUGH, OCTOPUS)
+
+    @pytest.mark.parametrize("table", [
+        {"default": [PARTY]}, {"default": [PARTY], "funny": []},
+        {"default": [PARTY], "funny": ["ok", " "]},
+    ])
+    def test_an_absent_empty_or_all_invalid_type_falls_back_to_default(self, table):
+        assert ack_reaction.reactions_for(_cfg(THUMB, table), "funny") == [PARTY]
+
+    def test_an_unknown_type_reads_as_default(self, caplog):
+        cfg = _cfg(THUMB, {"default": [PARTY], "sarcasm": [LAUGH]})
+        assert ack_reaction.reactions_for(cfg, "sarcasm") == [PARTY]
+        assert ack_reaction.reactions_for(cfg, None) == [PARTY]
+        # A table key that is no kind is a typo nothing reads; said once.
+        assert len([r for r in caplog.records if "sarcasm" in r.getMessage()]) == 1
+
+    def test_the_table_wins_over_ack_reaction(self):
+        assert ack_reaction.reactions_for(_cfg(THUMB, {"default": [PARTY]})) == [PARTY]
+
+    def test_ack_reaction_fills_default_when_the_table_has_none(self):
+        cfg = _cfg(OCTOPUS, {"funny": [LAUGH]})
+        assert ack_reaction.reactions_for(cfg, "thanks") == [OCTOPUS]
+        assert ack_reaction.reactions_for(cfg, "funny") == [LAUGH]
+
+    def test_an_invalid_entry_is_dropped_and_the_rest_survive(self, caplog):
+        cfg = _cfg(THUMB, {"funny": ["lol", LAUGH, "\N{OCTOPUS} x", OCTOPUS]})
+        assert ack_reaction.reactions_for(cfg, "funny") == [LAUGH, OCTOPUS]
+        assert ack_reaction.reactions_for(cfg, "funny") == [LAUGH, OCTOPUS]
+        warnings = [r for r in caplog.records if "ack_reaction" in r.message]
+        assert len(warnings) == 2
+
+    def test_nothing_valid_left_is_off(self):
+        cfg = _cfg("nope", {"default": ["ok"], "funny": ["lol"]})
+        assert ack_reaction.pick(cfg, "funny", 1) is None
+        decision = GateDecision(
+            True, speech_gate.RUNG_CLASSIFIER, kind=KIND_ACK, ack_type="funny",
+        )
+        assert not ack_reaction.should_hold(cfg, decision, can_react=True)
+
+    def test_an_empty_ack_reaction_turns_off_a_table_too(self):
+        cfg = _cfg("", self.TABLE)
+        assert ack_reaction.reactions_for(cfg, "funny") == []
+        decision = GateDecision(
+            True, speech_gate.RUNG_CLASSIFIER, kind=KIND_ACK, ack_type="funny",
+        )
+        assert not ack_reaction.should_hold(cfg, decision, can_react=True)
+
+    def test_the_same_message_always_picks_the_same_emoji(self):
+        cfg = _cfg(THUMB, {"default": [THUMB, OCTOPUS, LAUGH, PARTY, OK_HAND]})
+        for key in (301, "BAE5THANKS", None):
+            first = ack_reaction.pick(cfg, None, key)
+            assert all(ack_reaction.pick(cfg, None, key) == first for _ in range(5))
+        picks = {ack_reaction.pick(cfg, None, i) for i in range(200)}
+        assert len(picks) > 1
+
+
+class TestTheClassifierNamesAType:
+    """ISSUE-657: `ack_type` on an ack under friendly, and nowhere else."""
+
+    @staticmethod
+    def _classify(raw, disposition="friendly"):
+        return speech_gate.classify(
+            "window", lambda _p: raw, "fast", disposition=disposition,
+        )
+
+    @pytest.mark.parametrize("ack_type", speech_gate.ACK_TYPES)
+    def test_each_known_type(self, ack_type):
+        decision = self._classify(
+            json.dumps({"speak": True, "kind": "ack", "ack_type": ack_type}),
+        )
+        assert (decision.kind, decision.ack_type) == (KIND_ACK, ack_type)
+
+    @pytest.mark.parametrize("raw", [
+        '{"speak": true, "kind": "ack", "ack_type": "sarcasm"}',
+        '{"speak": true, "kind": "ack", "ack_type": 3}',
+        '{"speak": true, "kind": "ack"}',
+    ])
+    def test_an_unknown_or_missing_type_is_default(self, raw):
+        assert self._classify(raw).ack_type == speech_gate.DEFAULT_ACK_TYPE
+
+    def test_a_reply_carries_no_type(self):
+        decision = self._classify('{"speak": true, "kind": "reply", "ack_type": "funny"}')
+        assert (decision.kind, decision.ack_type) == (KIND_REPLY, None)
+
+    def test_reserved_carries_no_type(self):
+        decision = self._classify(
+            '{"speak": true, "kind": "ack", "ack_type": "funny"}', "reserved",
+        )
+        assert (decision.kind, decision.ack_type) == (KIND_REPLY, None)
+
+    def test_an_addressed_ack_keeps_its_type(self):
+        classified = self._classify('{"speak": true, "kind": "ack", "ack_type": "funny"}')
+        decision = speech_gate.should_speak(
+            is_multi_human=True, addressed_to_bot=True, mode="classifier",
+            classified=classified,
+        )
+        assert (decision.rung, decision.ack_type) == (speech_gate.RUNG_ADDRESSED, "funny")
+
+    def test_the_friendly_prompt_asks_for_the_type_and_reserved_does_not(self):
+        friendly = speech_gate.build_window([], bot_name="Istota", disposition="friendly")
+        reserved = speech_gate.build_window([], bot_name="Istota", disposition="reserved")
+        assert all(t in friendly for t in speech_gate.ACK_TYPES)
+        assert "ack_type" in friendly and "ack_type" not in reserved
 
 
 class TestShouldHold:
@@ -82,13 +212,15 @@ def config(tmp_path):
     return cfg
 
 
-def _ack_turn(conn, config, *, can_react=True, message_id=701):
+def _ack_turn(conn, config, *, can_react=True, message_id=701, ack_type=None):
     db.register_room(conn, "grp", "alice", origin="talk", name="Family")
     return record_inbound(
         conn, config, surface="talk", surface_ref="grp", user_id="alice",
         text="Thanks!", source_type="talk", is_group_chat=True,
         addressed_to_bot=False, platform_message_id=message_id,
-        classified=GateDecision(True, speech_gate.RUNG_CLASSIFIER, kind=KIND_ACK),
+        classified=GateDecision(
+            True, speech_gate.RUNG_CLASSIFIER, kind=KIND_ACK, ack_type=ack_type,
+        ),
         can_react=can_react,
     )
 
@@ -103,6 +235,65 @@ def _reacted(conn, message_id):
     return conn.execute(
         "SELECT reacted FROM speech_gate_decisions WHERE message_id = ?", (message_id,),
     ).fetchone()[0]
+
+
+class TestTheDecisionRow:
+    """ISSUE-657: `ack_type` and `reaction` beside `kind` and `reacted`."""
+
+    @staticmethod
+    def _row(conn, message_id):
+        return tuple(conn.execute(
+            "SELECT kind, ack_type, reacted, reaction FROM speech_gate_decisions "
+            "WHERE message_id = ?", (message_id,),
+        ).fetchone())
+
+    def test_a_reacted_ack_records_its_type_and_emoji(self, config):
+        with db.get_db(config.db_path) as conn:
+            result = _ack_turn(conn, config, ack_type="funny")
+            assert result.ack_type == "funny"
+            ack_reaction.settle(
+                conn, task_id=result.task_id, message_id=result.message_id,
+                reacted=True, reaction=OCTOPUS,
+            )
+            assert self._row(conn, result.message_id) == ("ack", "funny", 1, OCTOPUS)
+
+    def test_a_failed_reaction_records_no_emoji(self, config):
+        with db.get_db(config.db_path) as conn:
+            result = _ack_turn(conn, config, ack_type="thanks")
+            ack_reaction.settle(
+                conn, task_id=result.task_id, message_id=result.message_id,
+                reacted=False, reaction=OCTOPUS,
+            )
+            assert self._row(conn, result.message_id) == ("ack", "thanks", 0, None)
+
+    def test_a_reply_records_neither(self, config):
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "grp", "alice", origin="talk", name="Family")
+            result = record_inbound(
+                conn, config, surface="talk", surface_ref="grp", user_id="alice",
+                text="and Sunday?", source_type="talk", is_group_chat=True,
+                addressed_to_bot=False, platform_message_id=703,
+                classified=GateDecision(True, speech_gate.RUNG_CLASSIFIER),
+                can_react=True,
+            )
+            assert self._row(conn, result.message_id) == ("reply", None, None, None)
+
+    def test_an_upgraded_database_gains_both_columns(self, tmp_path):
+        import sqlite3
+
+        path = tmp_path / "old.db"
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "CREATE TABLE speech_gate_decisions (id INTEGER PRIMARY KEY, "
+                "room_token TEXT NOT NULL, surface TEXT NOT NULL, user_id TEXT NOT NULL, "
+                "message_id INTEGER, spoke INTEGER NOT NULL, rung TEXT NOT NULL, "
+                "reason TEXT, model TEXT, latency_ms INTEGER, "
+                "created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            )
+        db.init_db(path)
+        with sqlite3.connect(path) as conn:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(speech_gate_decisions)")}
+        assert {"ack_type", "reaction", "reacted", "kind"} <= columns
 
 
 class TestTheHeldTask:
