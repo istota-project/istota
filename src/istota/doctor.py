@@ -9341,6 +9341,59 @@ def _baileys_live_session(name: str, path: Path) -> CheckResult:
 _DUPLICATE_ADDRESSES_SHOWN = 10
 
 
+def check_email_confirmation_answers(config: "Config", probe: bool) -> CheckResult:
+    """Whether a user whose alerts reach only email can answer a held task.
+
+    The email gate's request goes by the ``alert`` route, and an answer by mail
+    is accepted only with ``[email] authserv_id`` set (ISSUE-649). A user whose
+    alerts resolve to email alone, on a deployment without it, is asked a
+    question they can answer only from a surface the request does not reach,
+    and the held mail is cancelled at ``confirmation_timeout_minutes``. A count
+    rather than user ids, since the detail reaches the boot log and the admin
+    Health pane. Reads config only; spawns nothing.
+    """
+    from istota.notifications.delivery import resolve_destinations
+    from istota.transport.email.answers import email_answers_available
+
+    name = "email.confirmation_answers"
+    if not config.email.enabled:
+        return CheckResult(name, SKIP, "email is disabled", scope=DEPLOYMENT)
+    if email_answers_available(config):
+        return CheckResult(
+            name, OK, "held tasks can be answered by email (authserv_id is set)",
+            scope=DEPLOYMENT,
+        )
+    email_only = 0
+    for user_id in config.users:
+        try:
+            dests = resolve_destinations(config, user_id, "alert")
+        except Exception:  # noqa: BLE001 - a check never raises
+            continue
+        # ntfy carries no answer either, so email plus ntfy counts too.
+        surfaces = {d.surface for d in dests}
+        if "email" in surfaces and surfaces <= {"email", "ntfy"}:
+            email_only += 1
+    if not email_only:
+        return CheckResult(
+            name, OK,
+            "no user's alerts reach only email; answers by email are off "
+            "(authserv_id is not set)",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, WARN,
+        f"{email_only} user(s) receive confirmation requests only by email "
+        "(or email and ntfy) and cannot answer them there, because "
+        "email.authserv_id is not set",
+        remedy=(
+            "Set `[email] authserv_id` to your mail server's authserv-id so an "
+            "authenticated answer by email is accepted, or route those users' "
+            "alerts to a surface they can answer from as well (web or Talk)."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult:
     """Whether any email address is held by more than one user.
 
@@ -9629,6 +9682,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("config.skill_overlays", check_skill_overlays),
     ("config.operator_persona", check_operator_persona),
     ("users.email_address_uniqueness", check_email_address_uniqueness),
+    ("email.confirmation_answers", check_email_confirmation_answers),
     ("sandbox.masks", check_sandbox_masks),
 )
 
@@ -9775,6 +9829,7 @@ CHECK_SCOPES: dict[str, str] = {
     "config.operator_persona": DEPLOYMENT,
     # Deployment: it reads the install's own user tables.
     "users.email_address_uniqueness": DEPLOYMENT,
+    "email.confirmation_answers": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
 

@@ -765,6 +765,48 @@ _VERB_WORDS = {
 }
 
 
+
+def parse_confirm_words(invoked_as: str, args: str) -> tuple[int | None, str] | str:
+    """Read `!confirm`'s arguments as ``(task id or None, verb)``, or a refusal.
+
+    The verb is ``approve``, ``decline`` or ``trust``. Shared by `cmd_confirm`
+    and the emailed answer (ISSUE-649), so the two cannot read one line
+    differently. ``trust`` after ``yes`` is one answer, the "yes trust" the
+    request offers; any other pair of different verbs is refused, never
+    resolved: last-word-wins made `!no 41 trust` approve *and* trust, resolving
+    an ambiguous input towards approval on a gate that holds untrusted mail.
+    """
+    words = args.split()
+    target_id: int | None = None
+    if words:
+        # A leading word that parses as an id is the target; anything else is a
+        # verb and falls through to `_VERB_WORDS` below.
+        parsed = parse_task_id(words[0])
+        if parsed is not None:
+            target_id = parsed
+            words.pop(0)
+
+    spoken = "decline" if invoked_as in _DECLINE_ALIASES else None
+    for word in words:
+        mapped = _VERB_WORDS.get(word.lower())
+        if mapped is None:
+            return (
+                f"Don't know what `{word}` means here. Try `!confirm <task-id>`, "
+                "`!confirm <task-id> no`, or `!confirm <task-id> trust`."
+            )
+        if {spoken, mapped} == {"approve", "trust"}:
+            spoken = "trust"
+            continue
+        if spoken is not None and mapped != spoken:
+            return (
+                f"`!{invoked_as} … {word}` says two different things. "
+                "Use `!confirm <task-id>` to approve, `!confirm <task-id> no` to "
+                "discard, or `!confirm <task-id> trust` to approve and trust the "
+                "sender."
+            )
+        spoken = mapped
+    return target_id, spoken or "approve"
+
 @command(
     "confirm",
     "Answer a held task: `!confirm`, `!confirm <task-id>`, `!confirm <id> no`, "
@@ -793,37 +835,10 @@ async def cmd_confirm(ctx: CommandContext):
         return refusal
 
     conn, user_id = ctx.conn, ctx.user_id
-    words = ctx.args.split()
-
-    target_id: int | None = None
-    if words:
-        # A leading word that parses as an id is the target; anything else is a
-        # verb and falls through to `_VERB_WORDS` below.
-        parsed = parse_task_id(words[0])
-        if parsed is not None:
-            target_id = parsed
-            words.pop(0)
-
-    # Contradictions are refused, not resolved. `verb = mapped` last-word-wins
-    # made `!no 41 trust` approve *and* trust — resolving an ambiguous input
-    # towards approval, on a gate whose whole job is holding untrusted mail.
-    spoken = "decline" if ctx.invoked_as in _DECLINE_ALIASES else None
-    for word in words:
-        mapped = _VERB_WORDS.get(word.lower())
-        if mapped is None:
-            return (
-                f"Don't know what `{word}` means here. Try `!confirm <task-id>`, "
-                "`!confirm <task-id> no`, or `!confirm <task-id> trust`."
-            )
-        if spoken is not None and mapped != spoken:
-            return (
-                f"`!{ctx.invoked_as} … {word}` says two different things. "
-                "Use `!confirm <task-id>` to approve, `!confirm <task-id> no` to "
-                "discard, or `!confirm <task-id> trust` to approve and trust the "
-                "sender."
-            )
-        spoken = mapped
-    verb = spoken or "approve"
+    parsed_words = parse_confirm_words(ctx.invoked_as, ctx.args)
+    if isinstance(parsed_words, str):
+        return parsed_words
+    target_id, verb = parsed_words
 
     pending = confirmations.pending_for_user(conn, user_id)
     if not pending:

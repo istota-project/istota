@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from . import db
@@ -453,6 +454,60 @@ def parse_answer(text: str) -> Answer | None:
     if t in _NO:
         return Answer(approve=False, trust_sender=False)
     return None
+
+
+def request_subject(task_id: int) -> str:
+    """The subject a mailed confirmation request goes out under (ISSUE-649).
+
+    It names the task, so a reply to the request is an answer to that task:
+    :func:`task_id_from_reply_subject` reads it back.
+    """
+    return f"Confirm task #{task_id}"
+
+
+# The reserved KV namespace holding each mailed request's Message-ID, keyed by
+# task id. Reserved (`_`), so no task can plant one to make a phishing reply
+# count as an answer.
+REQUEST_MESSAGE_IDS_NAMESPACE = "_confirmation_requests"
+
+
+def record_request_message_id(config, user_id: str, task_id: int, message_id: str) -> None:
+    """Remember the Message-ID a request was mailed under. Never raises."""
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.kv_set(conn, user_id, REQUEST_MESSAGE_IDS_NAMESPACE, str(task_id),
+                      message_id.strip())
+    except Exception:
+        logger.warning("Could not record the request mail for task %d", task_id,
+                       exc_info=True)
+
+
+def replies_to_request(conn, user_id: str, task_id: int, email) -> bool:
+    """Whether ``email`` is a reply to the request mailed for ``task_id``.
+
+    A subject anyone can write, so it is only a hint: a phishing mail titled
+    like the request, answered by the user, would otherwise approve the task.
+    The reply has to name the Message-ID the request actually went out under.
+    """
+    row = db.kv_get(conn, user_id, REQUEST_MESSAGE_IDS_NAMESPACE, str(task_id))
+    if not row or not row.get("value"):
+        return False
+    wanted = str(row["value"]).strip()
+    named = f"{email.in_reply_to or ''} {email.references or ''}".split()
+    return wanted in named
+
+
+# `Re:` and its common translations, stacked any number of times by clients.
+_REPLY_SUBJECT = re.compile(
+    r"^\s*(?:(?:re|aw|sv|antw|ref)\s*(?:\[\d+\])?\s*:\s*)+confirm task #(\d+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def task_id_from_reply_subject(subject: str | None) -> int | None:
+    """The task a reply to a mailed request answers, or None if it is not one."""
+    match = _REPLY_SUBJECT.match(subject or "")
+    return int(match.group(1)) if match else None
 
 
 @dataclass(frozen=True)
