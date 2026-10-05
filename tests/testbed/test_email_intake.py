@@ -237,6 +237,30 @@ class TestTheHostsOwnMail:
         }
 
 
+    @pytest.mark.parametrize(("authserv_id", "asked"), [("mail", 1), ("", 0)])
+    def test_host_asked_needs_our_own_authserv_id(self, wire, authserv_id, asked):
+        """The host's addressed, passing mail is `host_asked`, the one release
+        from the outbound hold, only with `authserv_id` set: without it the
+        verdict is read off the topmost header, which the sender writes
+        (`inbound.poll_emails`, ISSUE-607). The lean stack always sets the id,
+        so this is the one place the condition can be seen to matter; under
+        the wire's `confirm_sender_match = off` the unscoped pass still runs
+        the task."""
+        wire.config.email.authserv_id = authserv_id
+        nonce = new_nonce()
+        mid = _send(
+            wire, USER_ADDRESS, to=[USER_TAG_ADDRESS, f"s-{nonce}@stranger.test"],
+            subject=f"Quote {nonce}", body="Please send the quote.", verdict="pass",
+        )
+
+        created = wire.poll()
+
+        row = wire.probe.processed(mid)
+        assert created == [row["task_id"]]
+        assert wire.probe.email_room(mid) is not None
+        assert row["host_asked"] == asked
+
+
 class TestACorrespondentsMail:
     """`thread_addressed` for anyone else: named, or the host not on it."""
 
