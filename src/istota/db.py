@@ -1195,6 +1195,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Hidden email threads, stage 3. A row from before it renders the card from
     # the wrapper alone, so nothing is backfilled.
     _add_columns(conn, "messages", {"received_mail": "TEXT"})
+    # ISSUE-644. An earlier note keeps rendering from its body alone.
+    _add_columns(conn, "messages", {"email_note": "TEXT"})
     # Email on rooms, stage 2. Nothing to backfill: no earlier task was asked
     # whether its host was on the message.
     _add_columns(conn, "tasks", {"host_absent": "INTEGER NOT NULL DEFAULT 0"})
@@ -5800,7 +5802,8 @@ def email_thread_tokens_for_member(
 
     The listing's batch form of `rooms.scopes.is_email_thread_room`, with the
     same rule: an email binding whose ref is not the room creator's private
-    email room. One query, for the reason `talk_refs_for_member` gives.
+    email room. One query, for the reason `talk_refs_for_member` gives;
+    `tests/test_email_thread_listed.py` holds the two forms equal.
     """
     from istota.transport.email.private_room import is_private_email_ref
 
@@ -6141,6 +6144,17 @@ def set_received_mail(conn: sqlite3.Connection, message_id: int, meta: dict) -> 
     threads, stage 3). Written once, at intake or at a held mail's approval."""
     conn.execute("UPDATE messages SET received_mail = ? WHERE id = ?",
                  (json.dumps(meta), message_id))
+
+
+def set_email_note(conn: sqlite3.Connection, message_id: int, parts: dict) -> None:
+    """Record an email note's parts beside its body (ISSUE-644): the
+    code-built ``header`` and ``outcome`` and the model's ``remark``, so the
+    web can render the remark as the bot's words and the rest as cards.
+
+    Written once: a repeated delivery returns the existing row with its first
+    body, so the parts stay the first delivery's too."""
+    conn.execute("UPDATE messages SET email_note = ? WHERE id = ? AND email_note IS NULL",
+                 (json.dumps(parts), message_id))
 
 
 def settle_draft_mail(

@@ -3620,6 +3620,7 @@ def process_one_task(
     private_park: "private_replies.PrivateDelivery | None" = None
     # What that row says: the question, or on an email thread the note shape.
     private_park_body = result
+    _note_parts = None
     # The body an email thread task mailed, read before delivery consumes it,
     # for the note written after delivery (hidden email threads, section 2).
     thread_mailed_body: str | None = None
@@ -3707,7 +3708,7 @@ def process_one_task(
                 if _about is not None:
                     if _thread_token is not None and guest_route is None:
                         # An email thread's question is the note for its mail.
-                        private_park_body = private_replies.email_note_body(
+                        private_park_body, _note_parts = private_replies.email_note(
                             conn, task, outcome="parked",
                             remark=private_replies.email_note_remark(result, None),
                         )
@@ -3715,7 +3716,7 @@ def process_one_task(
                         conn, config, user_id=task.user_id, about_token=_about,
                         kind="proposal" if guest_route is not None else "confirmation",
                         reference=f"{task.id}:{text_hash(result)[:16]}",
-                        body=private_park_body, task_id=task_id,
+                        body=private_park_body, task_id=task_id, email_note=_note_parts,
                     )
                     # Room or bell alike: the shared room never saw the
                     # question, so the park must not hold it.
