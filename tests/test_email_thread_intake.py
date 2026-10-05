@@ -264,10 +264,12 @@ class TestNoGuestModeOnEmail:
             assert room_policy.ensure_policy(conn, _room_token(config)).guest_reply == "held"
             assert private_replies.guest_reply_mode(conn, db.get_task(conn, task_id)) == "direct"
 
-    def test_the_settings_payload_marks_an_email_room(self, config, db_path):
+    def test_the_settings_payload_marks_an_email_room(self, config, db_path, monkeypatch):
         pytest.importorskip("fastapi")
         from istota.webui import app as web_app
 
+        # The payload reads the deployment's speech mode off the app's config (#640).
+        monkeypatch.setattr(web_app, "_config", config)
         _start_thread(config)
         with db.get_db(db_path) as conn:
             view = web_app._room_sharing(
