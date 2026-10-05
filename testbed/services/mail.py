@@ -216,9 +216,10 @@ def send(
     server: MailServer,
     *,
     from_addr: str,
-    to_addr: str,
+    to_addr: str | list[str],
     subject: str,
     body: str,
+    cc: list[str] | None = None,
     from_name: str | None = None,
     reply_to: str | None = None,
     in_reply_to: str | None = None,
@@ -250,6 +251,11 @@ def send(
     `Authentication-Results` headers is a case and their order is what the
     canary reads.
 
+    `to_addr` may be a list, and `cc` adds a `Cc:` header; every address in
+    either is an envelope recipient, as a real client would send it, so a
+    human's copy of a multi-party mail lands in the catch-all beside the bot's
+    replies. Readers there tell them apart by sender.
+
     `attachments` is `(filename, content_type, payload)`. A `content_type` of
     `"application/octet-stream"` is the safe default; the string is split on `/`
     and handed to `add_attachment`.
@@ -261,7 +267,11 @@ def send(
     """
     message = EmailMessage(policy=email.policy.SMTP)
     message["From"] = email.utils.formataddr((from_name or "", from_addr))
-    message["To"] = to_addr
+    to_list = [to_addr] if isinstance(to_addr, str) else list(to_addr)
+    cc_list = list(cc or [])
+    message["To"] = ", ".join(to_list)
+    if cc_list:
+        message["Cc"] = ", ".join(cc_list)
     message["Subject"] = subject
     message["Date"] = email.utils.formatdate(localtime=True)
     message["Message-ID"] = message_id or email.utils.make_msgid(
@@ -311,7 +321,7 @@ def send(
         server.host, server.smtp_port, context=server.context(), timeout=NETWORK_TIMEOUT
     ) as client:
         client.login(*auth)
-        client.sendmail(from_addr, [to_addr], raw, mail_options=options)
+        client.sendmail(from_addr, to_list + cc_list, raw, mail_options=options)
     return message["Message-ID"]
 
 

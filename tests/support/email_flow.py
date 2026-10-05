@@ -1,0 +1,740 @@
+"""Correspondents, mail on the wire, and the eight things every email scenario asserts.
+
+The email suite on the lean stack (`tests/smoke/test_email_*.py`) drives the
+deployed daemon with real mail and a scripted model, and reads the outcome back
+out of the database, the catch-all mailbox and the ntfy stub. This module is
+the vocabulary those files share, so no scenario spells a stamp, a Message-ID
+chain or the email answer envelope by hand:
+
+- `person` names a correspondent by kind, with an address carrying the test's
+  nonce, so no sender is already on a thread, under a prompt cap, or trusted
+  because of an earlier test on the same session stack.
+- `send` puts one mail on the wire with an `[e2e:<marker>]` in its body, which
+  is what a routed script turn (`route`) keys on.
+- `Expected` names a value for each of the eight dimensions, with no defaults,
+  and `assert_outcome` checks all of them and reports every mismatch.
+
+The outcome strings, the note pointer and the private-ref digest are imported
+from the product rather than restated, so an expectation cannot drift from the
+code it describes. Plain functions and dataclasses; no pytest import, so a
+failure is an `AssertionError` or a `TimeoutError` naming what it last saw.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shlex
+import time
+import uuid
+from dataclasses import dataclass, field
+from email.utils import getaddresses, parseaddr
+
+from istota.notifications.resolvers.task_alert import PRIVATE_NOTE_POINTER
+from istota.rooms.private_replies import NOTE_OUTCOMES
+from testbed.services import mail
+
+#: The stack's own user and the second istota user `email_people` seeds.
+HOST_ID = "testuser"
+HOST_ADDRESS = "testuser@ext.test"
+ALICE_ID = "alice"
+ALICE_ADDRESS = "alice@ext.test"
+
+#: The domains `email_people` gives a standing to, through testuser's profile
+#: patterns (`--trusted-sender`, `--quiet-sender`). A stranger's domain is on
+#: no list.
+TRUSTED_DOMAIN = "trusted.test"
+QUIET_DOMAIN = "quiet.test"
+STRANGER_DOMAIN = "stranger.test"
+
+#: The bot's own mail domain. Everything sent there lands in the bot mailbox;
+#: the bot's mail to anyone else lands in the catch-all, from this domain.
+BOT_DOMAIN = mail.BOT_ADDRESS.rsplit("@", 1)[1]
+
+#: The `authserv_id` `MailService.config_env` gives the daemon. A stamp naming
+#: any other server is ignored under `verify`, which is the point of setting it.
+AUTHSERV_ID = mail.SERVICE_NAME
+
+#: What the scheduler logs when it writes an email note
+#: (`scheduler._write_email_note`).
+NOTE_LOG_LINE = "Private note to the host: "
+
+#: What `UserWorker.run` logs once `process_one_task` has returned, which is
+#: after the reply, the note and the note's push. The one marker a test can
+#: read that comes after the note step: nothing in the database does. It is in
+#: the daemon's log, not a table, so `worker_done` reads `Stack.logs`.
+WORKER_DONE_RE = r"Worker [^/\s]+/[a-z]+: task {task_id} (completed|failed)\b"
+
+DEFAULT_TIMEOUT = 90.0
+POLL_INTERVAL = 2.0
+
+
+def stamp(address: str, verdict: str = "pass") -> str:
+    """An `Authentication-Results` value for `address`'s domain.
+
+    `pass` is the full SPF, DKIM and DMARC pass a receiving MTA would write;
+    `fail` is a DMARC fail. Built per address, because `header.from` has to
+    name the domain the `From:` claims.
+    """
+    domain = address.rsplit("@", 1)[-1]
+    if verdict == "pass":
+        return (
+            f"{AUTHSERV_ID}; spf=pass smtp.mailfrom={domain}; dkim=pass; "
+            f"dmarc=pass header.from={domain}"
+        )
+    if verdict == "fail":
+        return f"{AUTHSERV_ID}; dmarc=fail header.from={domain}"
+    raise ValueError(f"unknown verdict {verdict!r}; expected 'pass' or 'fail'")
+
+
+#: A clean and a failing verdict for the stack user's own domain, as header
+#: dicts for `MailService.send(headers=...)`. Moved here from
+#: `tests/full/test_email_attachments.py`, which imports them.
+PASSING_STAMP = {"Authentication-Results": stamp(HOST_ADDRESS, "pass")}
+FAILING_STAMP = {"Authentication-Results": stamp(HOST_ADDRESS, "fail")}
+
+
+def new_nonce() -> str:
+    """A short per-test token for addresses, subjects and markers."""
+    return uuid.uuid4().hex[:10]
+
+
+def marker_text(marker: str) -> str:
+    """The marker as it appears in a mail body, and what a route keys on."""
+    return f"[e2e:{marker}]"
+
+
+def route(marker: str, turns: list[dict]) -> dict:
+    """A routed script item: the request carrying `marker` gets `turns`."""
+    return {"when": marker_text(marker), "turns": list(turns)}
+
+
+# -- correspondents -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Correspondent:
+    address: str
+    name: str | None = None
+    #: An `Authentication-Results` value, or None to send no such header.
+    stamp: str | None = None
+
+
+PERSON_KINDS = ("host", "alice", "trusted", "quiet", "stranger", "spoofed_host")
+
+
+def person(kind: str, nonce: str) -> Correspondent:
+    """A correspondent of one standing, unique to `nonce` where it can be.
+
+    `host` and `alice` are fixed addresses, since they are configured users;
+    `spoofed_host` is the host's address with a failing stamp, which is what a
+    forged self-claim looks like under `verify`. Everyone else's local part is
+    the nonce, at a domain whose standing `email_people` set up.
+    """
+    if kind == "host":
+        return Correspondent(HOST_ADDRESS, "Test User", stamp(HOST_ADDRESS))
+    if kind == "alice":
+        return Correspondent(ALICE_ADDRESS, "Alice", stamp(ALICE_ADDRESS))
+    if kind == "spoofed_host":
+        return Correspondent(HOST_ADDRESS, "Test User", stamp(HOST_ADDRESS, "fail"))
+    domains = {"trusted": TRUSTED_DOMAIN, "quiet": QUIET_DOMAIN,
+               "stranger": STRANGER_DOMAIN}
+    if kind not in domains:
+        raise ValueError(f"unknown kind {kind!r}; expected one of {PERSON_KINDS}")
+    address = f"{kind}-{nonce}@{domains[kind]}"
+    return Correspondent(address, None, stamp(address))
+
+
+# -- the wire -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Sent:
+    message_id: str
+    marker: str
+    subject: str
+    sender: str
+    #: The text the sender wrote, without the marker: what must never reach a
+    #: push or a room it was not addressed to.
+    text: str
+    to: tuple[str, ...]
+    cc: tuple[str, ...]
+    #: The `References` this mail carried, so a reply to it can extend the chain.
+    references: str | None
+    #: The catch-all's highest UID just before this mail went out. Everything
+    #: the bot sent because of it is above this.
+    outbox_uid: int
+
+
+def _mail(stack) -> mail.MailService:
+    return stack.service("mail")
+
+
+def outbox_uid(stack) -> int:
+    with _mail(stack).session(mail.EXTERNAL_ADDRESS) as outbox:
+        return outbox.latest_uid()
+
+
+def sent_markers(stack) -> set[str]:
+    """The markers `send` put on the wire since the set was last cleared.
+
+    Kept on the stack so the unmatched-request check can tell this test's own
+    requests from a daemon job that quotes an earlier test's mail: the nightly
+    memory extraction reads a day of conversation, markers included.
+    """
+    markers = getattr(stack, "_e2e_sent_markers", None)
+    if markers is None:
+        markers = set()
+        stack._e2e_sent_markers = markers
+    return markers
+
+
+def send(
+    stack,
+    sender: Correspondent,
+    *,
+    to: list[str],
+    cc: list[str] | tuple[str, ...] = (),
+    subject: str,
+    text: str,
+    reply_to_msg: Sent | None = None,
+    marker: str,
+) -> Sent:
+    """Send one mail through the stack's mail server, and say what was sent.
+
+    The body is `text` followed by the marker on its own line. A reply carries
+    `In-Reply-To` naming `reply_to_msg` and `References` extending its chain.
+    The stamp, when the correspondent has one, goes on the wire verbatim.
+    """
+    sent_markers(stack).add(marker_text(marker))
+    references = None
+    in_reply_to = None
+    if reply_to_msg is not None:
+        in_reply_to = reply_to_msg.message_id
+        chain = (reply_to_msg.references or "").split()
+        references = " ".join([*chain, reply_to_msg.message_id])
+    before = outbox_uid(stack)
+    message_id = _mail(stack).send(
+        from_addr=sender.address,
+        from_name=sender.name,
+        to_addr=list(to),
+        cc=list(cc),
+        subject=subject,
+        body=f"{text}\n\n{marker_text(marker)}\n",
+        in_reply_to=in_reply_to,
+        references=references,
+        headers=(
+            {"Authentication-Results": sender.stamp} if sender.stamp else None
+        ),
+    )
+    return Sent(
+        message_id=message_id, marker=marker, subject=subject,
+        sender=sender.address, text=text, to=tuple(to), cc=tuple(cc),
+        references=references, outbox_uid=before,
+    )
+
+
+def bot_mail_since(stack, after_uid: int) -> list[mail.ReceivedMessage]:
+    """Every message in the catch-all above `after_uid` that the bot sent.
+
+    By the `From:` domain, because a multi-party mail's human copies land in
+    the catch-all too (`mail.send` delivers to every recipient).
+    """
+    with _mail(stack).session(mail.EXTERNAL_ADDRESS) as outbox:
+        found = outbox.fetch_new_since(after_uid)
+    return [
+        message for message in found
+        if parseaddr(message.sender)[1].lower().endswith("@" + BOT_DOMAIN)
+    ]
+
+
+def wait_for_reply(
+    stack, *, after_uid: int, subject: str, timeout: float = DEFAULT_TIMEOUT,
+) -> mail.ReceivedMessage:
+    """The first mail from the bot above `after_uid` with this subject.
+
+    Raises `TimeoutError` with both mailboxes and the endpoint's counts.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        for message in bot_mail_since(stack, after_uid):
+            if message.subject == subject:
+                return message
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"no mail from the bot with subject {subject!r} within "
+                f"{timeout}s\n{_mail(stack).describe()}\n"
+                f"model:{stack.endpoint.describe()}"
+            )
+        time.sleep(POLL_INTERVAL)
+
+
+def reply_to(stack, sent: Sent) -> mail.ReceivedMessage | None:
+    """The bot's mail threaded on `sent`, read once, or None."""
+    for message in bot_mail_since(stack, sent.outbox_uid):
+        if (message.in_reply_to or "").strip() == sent.message_id:
+            return message
+    return None
+
+
+def recipients(message: mail.ReceivedMessage, header: str) -> tuple[str, ...]:
+    """The addresses in one of a received message's address headers, folded."""
+    value = message.headers.get(header, "")
+    return tuple(
+        address.strip().lower()
+        for _, address in getaddresses([value]) if address.strip()
+    )
+
+
+# -- the model's turns ----------------------------------------------------------
+
+
+def email_answer(text: str) -> dict:
+    """The structured answer the email surface parses and mails.
+
+    No `subject`, so the reply keeps the inbound subject with `Re:` in front.
+    See `tests/smoke/test_email_e2e.py` for what a prose turn does instead.
+    """
+    return {"text": json.dumps({"body": text, "format": "plain"})}
+
+
+def email_output_then(body: str, remark: str, *, subject: str | None = None) -> list[dict]:
+    """The two turns the production model uses to mail `body` and tell the
+    host `remark`: `istota-skill email output`, then a final text turn.
+
+    Since #636 the envelope alone cannot carry a remark
+    (`private_replies.email_note_remark` strips it), and this is the route that
+    lets a scenario tell the mailed body from the report.
+    """
+    command = f"istota-skill email output --body {shlex.quote(body)}"
+    if subject is not None:
+        command += f" --subject {shlex.quote(subject)}"
+    return [
+        {"tool_calls": [{
+            "id": "call-email-output", "name": "Bash",
+            "arguments": {"command": command},
+        }]},
+        {"text": remark},
+    ]
+
+
+_CONFIRM_RE = re.compile(r"!confirm (\d+) to process")
+
+
+def confirm_command_from(prompt: mail.ReceivedMessage | str, answer: str = "yes") -> str:
+    """The `!confirm` line the gate prompt tells its user to send.
+
+    Read off the prompt rather than spelled from a task id, so a prompt that
+    stops saying how to answer fails here. `answer` is `yes`, `no` or
+    `yes trust`; the last only where the prompt offers it (a self-claim is
+    offered a plain yes or no, `inbound.py`).
+    """
+    body = prompt if isinstance(prompt, str) else prompt.body_text
+    found = _CONFIRM_RE.search(body)
+    if found is None:
+        raise AssertionError(
+            f"the gate prompt names no `!confirm N` command:\n{body}"
+        )
+    task_id = found.group(1)
+    if answer == "yes":
+        return f"!confirm {task_id}"
+    if answer == "no":
+        if f"!confirm {task_id} no" not in body:
+            raise AssertionError(f"the gate prompt offers no `no` answer:\n{body}")
+        return f"!confirm {task_id} no"
+    if answer == "yes trust":
+        if "'yes trust'" not in body:
+            raise AssertionError(f"the gate prompt offers no `yes trust`:\n{body}")
+        return f"!confirm {task_id} trust"
+    raise ValueError(f"unknown answer {answer!r}; expected yes, no or 'yes trust'")
+
+
+# -- what every scenario asserts ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Processed:
+    """Dimension 1: the mail's `processed_emails` row."""
+    routing_method: str
+    user_id: str | None
+    host_asked: bool
+    #: `mail_meta.sender_check`, or None for a row with no `mail_meta`.
+    sender_check: str | None
+
+
+@dataclass(frozen=True)
+class TaskState:
+    """Dimension 2: the task the mail made, when it made one."""
+    status: str
+    host_absent: bool
+
+
+@dataclass(frozen=True)
+class Incoming:
+    """The incoming row's `received_mail`. Bcc is never stored."""
+    to: tuple[str, ...]
+    cc: tuple[str, ...]
+    sender_check: str
+    trusted: bool
+
+
+@dataclass(frozen=True)
+class BotRow:
+    """The bot's row in the room: its body, and its outgoing card's state
+    (None for a row with no card)."""
+    body: str
+    mail_state: str | None
+
+
+@dataclass(frozen=True)
+class Transcript:
+    """Dimension 5: the rows this mail added to its room."""
+    incoming: Incoming | None
+    bot: BotRow | None
+
+
+@dataclass(frozen=True)
+class Reply:
+    """Dimension 6: the reply on the wire. Its `In-Reply-To` is always checked
+    against the mail that was sent."""
+    to: tuple[str, ...]
+    cc: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Note:
+    """Dimension 7: the host's email note.
+
+    `outcome` is a key of `private_replies.NOTE_OUTCOMES`; `remark` is the
+    bot's words after the outcome line, or None for none.
+    """
+    outcome: str
+    without_you: bool
+    remark: str | None
+
+
+@dataclass(frozen=True)
+class Notices:
+    """Dimension 8: notifications and pushes.
+
+    `rows` is the exact set of `(source, dedup_key)` the user gained above the
+    watermark; `{task}` in a key is the mail's task id. `pushes` is the exact
+    sequence of ntfy push bodies this test caused, with the same placeholder.
+    `alert_mails` is how many mails the bot sent the host on the alert route
+    because of this mail, the reply excluded.
+    """
+    rows: frozenset[tuple[str, str]]
+    pushes: tuple[str, ...]
+    alert_mails: int
+
+
+@dataclass(frozen=True)
+class Expected:
+    """One mail's outcome on every dimension. No field has a default."""
+    processed: Processed
+    task: TaskState | None
+    #: `private` (the user's private email room), `thread`, or `none`.
+    room: str
+    #: Present participants as `(surface_ref, kind, user_id)`; None when
+    #: `room` is `none`.
+    participants: frozenset[tuple[str, str, str | None]] | None
+    transcript: Transcript
+    reply: Reply | None
+    note: Note | None
+    notices: Notices
+
+
+@dataclass
+class Outcome:
+    """What `assert_outcome` read, for a scenario that asserts further."""
+    processed: dict | None = None
+    task: dict | None = None
+    room: str | None = None
+    rows: list[dict] = field(default_factory=list)
+    reply: mail.ReceivedMessage | None = None
+    note_body: str | None = None
+    pushes: list = field(default_factory=list)
+
+
+def _wait(read, *, timeout: float):
+    deadline = time.monotonic() + timeout
+    while True:
+        found = read()
+        if found:
+            return found
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(POLL_INTERVAL)
+
+
+def worker_done(stack, task_id: int, *, timeout: float = DEFAULT_TIMEOUT) -> bool:
+    """Wait for the worker's line for this task, which follows the note step.
+
+    True once seen. The line is in the daemon's log, which has no watermark;
+    the task id is what makes the match this test's.
+    """
+    pattern = re.compile(WORKER_DONE_RE.format(task_id=task_id))
+    deadline = time.monotonic() + timeout
+    while True:
+        if pattern.search(stack.logs(2000)):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_INTERVAL)
+
+
+def parse_note(body: str) -> tuple[str | None, bool, str | None]:
+    """`(outcome key, without_you, remark)` read off a note's text body.
+
+    The body is `email_note`'s: a header line, the quote, the outcome line,
+    then the remark. The outcome is the last line that is exactly one of
+    `NOTE_OUTCOMES`; everything after it is the remark.
+    """
+    lines = body.splitlines()
+    header = lines[0] if lines else ""
+    by_text = {text: key for key, text in NOTE_OUTCOMES.items()}
+    found = None
+    for index, line in enumerate(lines):
+        if line.strip() in by_text:
+            found = index
+    if found is None:
+        return None, "without you on the message" in header, None
+    remark = "\n".join(lines[found + 1:]).strip() or None
+    return (by_text[lines[found].strip()],
+            "without you on the message" in header, remark)
+
+
+def _people(entries) -> tuple[str, ...]:
+    return tuple(
+        str(entry.get("address", "")).lower()
+        for entry in entries or () if isinstance(entry, dict)
+    )
+
+
+def assert_outcome(
+    stack, sent: Sent, expected: Expected, *, user_id: str = HOST_ID,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Outcome:
+    """Check every dimension of `expected` against what the stack did with `sent`.
+
+    In the order the dimensions are listed, collecting every mismatch before
+    failing, so a broken run says everything that is wrong with it. Waits are
+    bounded. A negative claim about something that happens after delivery (no
+    reply, no note) is read after the worker's completion line for the task,
+    the one marker that follows the note step.
+    """
+    probe = stack.probe
+    misses: list[str] = []
+    seen = Outcome()
+
+    def check(dimension: str, want, got) -> None:
+        if want != got:
+            misses.append(f"{dimension}: expected {want!r}, observed {got!r}")
+
+    # 1. processed_emails
+    row = _wait(lambda: probe.processed(sent.message_id), timeout=timeout)
+    seen.processed = row
+    if row is None:
+        raise AssertionError(
+            f"no processed_emails row for {sent.message_id} within {timeout}s"
+            f"\n{_mail(stack).describe()}\nmodel:{stack.endpoint.describe()}"
+        )
+    meta = row.get("mail_meta") if isinstance(row.get("mail_meta"), dict) else None
+    check("processed.routing_method", expected.processed.routing_method,
+          row.get("routing_method"))
+    check("processed.user_id", expected.processed.user_id, row.get("user_id"))
+    check("processed.host_asked", expected.processed.host_asked,
+          bool(row.get("host_asked")))
+    check("processed.mail_meta.sender_check", expected.processed.sender_check,
+          meta.get("sender_check") if meta else None)
+
+    # 2. the task
+    task = None
+    task_id = row.get("task_id")
+    if expected.task is None:
+        check("task", None, task_id)
+    elif task_id is None:
+        misses.append(f"task: expected {expected.task!r}, observed no task")
+    else:
+        try:
+            task = probe.wait_for_task(status=expected.task.status,
+                                       task_id=task_id, timeout=timeout)
+        except TimeoutError as exc:
+            misses.append(f"task: {exc}")
+            task = (probe.tasks(task_id=task_id) or [None])[0]
+        if task is not None:
+            check("task.status", expected.task.status, task.get("status"))
+            check("task.host_absent", expected.task.host_absent,
+                  bool(task.get("host_absent")))
+    seen.task = task
+    ran = task is not None and bool(task.get("started_at"))
+    settled = worker_done(stack, task_id, timeout=timeout) if ran else True
+    if ran and not settled:
+        misses.append(f"worker: no completion line for task {task_id} in the log")
+
+    # 3. the room
+    thread = probe.email_room(sent.message_id)
+    private = probe.private_email_room(user_id)
+    stored = row.get("thread_id")
+    if thread is not None:
+        room, kind = thread, "thread"
+    elif private is not None and stored and probe._canonical_room(stored) == private:
+        room, kind = private, "private"
+    else:
+        room, kind = None, "none"
+    seen.room = room
+    check("room", expected.room, kind)
+
+    # 4. participants
+    if room is None:
+        check("participants", expected.participants, None)
+    else:
+        present = frozenset(
+            (p["surface_ref"], p["kind"], p["user_id"])
+            for p in probe.participants(room) if p.get("left_at") is None
+        )
+        check("participants", expected.participants, present)
+
+    # 5. the transcript
+    rows = probe.room_messages(room, id_above=stack.mark.get("messages")) if room else []
+    seen.rows = rows
+    incoming = next(
+        (r for r in rows if r["role"] == "user" and isinstance(r.get("received_mail"), dict)
+         and r["received_mail"].get("message_id") == sent.message_id),
+        None,
+    ) or next(
+        (r for r in rows if r["role"] == "user" and task_id is not None
+         and r.get("task_id") == task_id),
+        None,
+    )
+    if expected.transcript.incoming is None:
+        check("transcript.incoming", None, incoming and incoming.get("id"))
+    elif incoming is None:
+        misses.append("transcript.incoming: expected a row, observed none")
+    else:
+        received = incoming.get("received_mail") or {}
+        got = Incoming(
+            to=_people(received.get("to")), cc=_people(received.get("cc")),
+            sender_check=received.get("sender_check"),
+            trusted=received.get("trusted"),
+        )
+        check("transcript.incoming.received_mail", expected.transcript.incoming, got)
+    bot = next(
+        (r for r in rows if r["role"] == "assistant" and task_id is not None
+         and r.get("task_id") == task_id),
+        None,
+    )
+    if expected.transcript.bot is None:
+        check("transcript.bot", None, bot and bot.get("body"))
+    elif bot is None:
+        misses.append("transcript.bot: expected a row, observed none")
+    else:
+        card = bot.get("outgoing_mail") if isinstance(bot.get("outgoing_mail"), dict) else None
+        check("transcript.bot", expected.transcript.bot,
+              BotRow(body=(bot.get("body") or "").strip(),
+                     mail_state=card.get("state") if card else None))
+
+    # 6. the wire
+    if expected.reply is None:
+        reply = reply_to(stack, sent)
+        check("reply", None, reply and reply.subject)
+    else:
+        reply = _wait(lambda: reply_to(stack, sent), timeout=timeout)
+        if reply is None:
+            misses.append(f"reply: expected {expected.reply!r}, observed none")
+        else:
+            check("reply.to", expected.reply.to, recipients(reply, "To"))
+            check("reply.cc", expected.reply.cc, recipients(reply, "Cc"))
+    seen.reply = reply
+
+    # 7. the note
+    note_key = f"private-note:{task_id}"
+
+    def read_note() -> str | None:
+        if task_id is None:
+            return None
+        room_row = probe.email_note(task_id)
+        if room_row is not None:
+            return room_row.get("body")
+        bell = probe.notifications(user_id, dedup_key=note_key)
+        return bell[0]["body"] if bell else None
+
+    if expected.note is None:
+        body = read_note()
+        check("note", None, body)
+        if task_id is not None:
+            check("note.task_log", [], [
+                r["message"] for r in probe.task_log(task_id, contains=NOTE_LOG_LINE)
+            ])
+    else:
+        body = _wait(read_note, timeout=timeout)
+        if body is None:
+            misses.append(f"note: expected {expected.note!r}, observed none")
+        else:
+            outcome, without_you, remark = parse_note(body)
+            check("note", expected.note, Note(outcome, without_you, remark))
+            check("note.task_log", [NOTE_LOG_LINE + str(expected.note.outcome)], [
+                r["message"] for r in probe.task_log(task_id, contains=NOTE_LOG_LINE)
+            ])
+    seen.note_body = body
+
+    # 8. notifications and pushes
+    def fill(text: str) -> str:
+        return text.replace("{task}", str(task_id))
+
+    got_rows = frozenset(
+        (n["source"], n["dedup_key"])
+        for n in probe.notifications(user_id, id_above=stack.mark.get("notifications"))
+    )
+    check("notices.rows",
+          frozenset((source, fill(key)) for source, key in expected.notices.rows),
+          got_rows)
+    ntfy = stack.service("ntfy") if "ntfy" in stack.services else None
+    pushes = ntfy.pushes() if ntfy is not None else []
+    seen.pushes = pushes
+    check("notices.pushes", tuple(fill(text) for text in expected.notices.pushes),
+          tuple(call.body.decode("utf-8", "replace") for call in pushes))
+    alerts = [
+        m for m in bot_mail_since(stack, sent.outbox_uid)
+        if (m.in_reply_to or "").strip() != sent.message_id
+        and user_id_address(user_id) in recipients(m, "To")
+    ]
+    check("notices.alert_mails", expected.notices.alert_mails, len(alerts))
+
+    # Whatever went out on the alert route is a title and fixed text (#638):
+    # never the sender's words, never the bot's remark.
+    forbidden = [sent.text]
+    if expected.note is not None and expected.note.remark:
+        forbidden.append(expected.note.remark)
+    for call in pushes:
+        carried = call.body.decode("utf-8", "replace") + " " + " ".join(call.headers.values())
+        for text in forbidden:
+            if text and text in carried:
+                misses.append(f"notices: a push carried {text!r}")
+    for message in alerts:
+        for text in forbidden:
+            if text and text in message.body_text:
+                misses.append(f"notices: an alert mail carried {text!r}")
+
+    if misses:
+        raise AssertionError(
+            f"{len(misses)} dimension(s) differ for {sent.message_id}:\n  "
+            + "\n  ".join(misses)
+            + f"\n\nmodel:{stack.endpoint.describe()}\n"
+            + (stack.diagnostics(task) if task else _mail(stack).describe())
+        )
+    return seen
+
+
+def user_id_address(user_id: str) -> str:
+    """The address the alert route mails, for the two seeded users."""
+    return {HOST_ID: HOST_ADDRESS, ALICE_ID: ALICE_ADDRESS}.get(user_id, "")
+
+
+__all__ = [
+    "PRIVATE_NOTE_POINTER", "NOTE_OUTCOMES", "Correspondent", "Sent", "Expected",
+    "Processed", "TaskState", "Transcript", "Incoming", "BotRow", "Reply", "Note",
+    "Notices", "Outcome", "PASSING_STAMP", "FAILING_STAMP", "assert_outcome",
+    "confirm_command_from", "email_answer", "email_output_then", "person", "route",
+    "send", "stamp", "wait_for_reply", "worker_done",
+]
