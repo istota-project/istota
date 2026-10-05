@@ -26,18 +26,23 @@ from ..support import email_flow as flow
 pytestmark = [pytest.mark.smoke, pytest.mark.profile("email")]
 
 
-#: Prints where a draft's Open action goes: the resolver's own
-#: `_open_href`, read inside the container through the daemon's config.
+#: Prints where the draft notice's Open action goes: the stored row rendered by
+#: the source's own resolver, inside the container through the daemon's
+#: config, so a resolver that stopped offering Open prints `None`.
 _OPEN_HREF = (
     "import sys\n"
     "from pathlib import Path\n"
     "from istota import db\n"
     "from istota.config import load_config\n"
-    "from istota.mail import drafts\n"
-    "from istota.notifications.resolvers.outbound_draft import _open_href\n"
+    "from istota.notifications import store\n"
+    "from istota.notifications.resolvers.outbound_draft import RESOLVER, dedup_key\n"
     "config = load_config(Path('/data/config/config.toml'))\n"
     "with db.get_db(config.db_path) as conn:\n"
-    "    print(_open_href(conn, drafts.get(conn, int(sys.argv[1])), sys.argv[2]))\n"
+    "    raw = conn.execute('SELECT * FROM notifications WHERE user_id = ? "
+    "AND dedup_key = ?', (sys.argv[2], dedup_key(int(sys.argv[1])))).fetchone()\n"
+    "    view = RESOLVER.resolve(config, conn, store._row_to_notification(raw))\n"
+    "    print(next((a.href for a in view.actions if a.id == 'open'), None)"
+    " if view else None)\n"
 )
 
 
@@ -195,10 +200,12 @@ class TestMinting:
         assert seen.room == room
 
     def test_the_hosts_mail_to_a_correspondent_mints_on_receipt(self, stack, email_people):
-        """The host writes to a trusted correspondent with the bot in To.
+        """The host writes to a trusted correspondent with the bot's bare
+        address in To.
 
-        The host's own address on the mail is the evidence that mints it
-        (`threads.resolve_thread`); the host is its principal and the
+        Routed `sender_match`, not by plus-address, so the host's own address
+        on the mail is the evidence that mints it (`threads.resolve_thread`,
+        the owned-address arm); the host is its principal and the
         correspondent a guest. Asked, with the bot in To (`thread_addressed`),
         and `host_asked`, since the mail authenticated (`inbound.poll_emails`).
         Reply-all to the latest mail: the host in To, the correspondent in Cc.
@@ -209,16 +216,15 @@ class TestMinting:
         answer = f"booked for two {nonce}"
         stack.script([flow.route(nonce, [flow.email_answer(answer)])])
         friend = flow.person("trusted", nonce)
-        plus = mail.tagged(email_people.host_id)
         host = email_people.host_address
         sent = flow.send(
-            stack, flow.person("host", nonce), to=[plus, friend.address],
+            stack, flow.person("host", nonce), to=[mail.BOT_ADDRESS, friend.address],
             subject=f"Dinner {nonce}", text=f"please book us a table {nonce}",
             marker=nonce,
         )
         flow.assert_outcome(stack, sent, flow.Expected(
             processed=flow.Processed(
-                routing_method="plus_address", user_id=email_people.host_id,
+                routing_method="sender_match", user_id=email_people.host_id,
                 host_asked=True, sender_check="verified",
             ),
             task=flow.TaskState(status="completed", host_absent=False),
@@ -226,7 +232,7 @@ class TestMinting:
             participants=frozenset({(host, "principal", email_people.host_id),
                                     (friend.address, "guest", None)}),
             transcript=flow.Transcript(
-                incoming=flow.Incoming(to=(plus, friend.address), cc=(),
+                incoming=flow.Incoming(to=(mail.BOT_ADDRESS, friend.address), cc=(),
                                        sender_check="verified", trusted=False),
                 bot=flow.BotRow(body=answer, mail_state="sent"),
             ),
@@ -456,10 +462,11 @@ class TestAMixedThread:
         # Quoted from the stored turn, not from the model's text.
         assert five.text in seen.note_body
         assert seen.room == room
-        # Nothing the bot said reached the thread after the first reply.
+        # Nothing the bot mailed after the first reply reached anyone on the
+        # thread but the host, whose mail is the alert route.
+        others = {alice.address, trusted.address, stranger.address, newcomer.address}
         assert [m.subject for m in flow.bot_mail_since(stack, two.outbox_uid)
-                if newcomer.address in flow.recipients(m, "To")
-                or stranger.address in flow.recipients(m, "To")] == []
+                if others & set(flow.recipients(m, "To") + flow.recipients(m, "Cc"))] == []
 
 
 class TestTheHostsOwnAsk:
@@ -541,7 +548,7 @@ class TestTheHostsOwnAsk:
 
 
 class TestRoomPost:
-    def test_room_post_cannot_reach_a_thread_from_the_private_email_room(
+    def test_room_post_from_the_private_email_room_is_refused_as_an_origin(
         self, stack, email_people,
     ):
         """`room post` from the host's private email turn, aimed at a thread
@@ -553,7 +560,8 @@ class TestRoomPost:
         through `relay.relays.private_origin`), which takes web, Talk, SMS and
         WhatsApp only, so the refusal here is `unsupported_origin`, ahead of
         the `email_thread` refusal `_post_destination` makes for a web or Talk
-        private room. That one needs a web room and is the full file's.
+        private room. That one needs a web private room; no stack case covers it
+        yet (the full file's list has none), only the default suite.
         """
         nonce = flow.new_nonce()
         opened = flow.route(f"t-{nonce}", [flow.email_answer(f"opened {nonce}")])
