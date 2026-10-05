@@ -777,6 +777,85 @@ def _audio_event(name, *, message_id="BAE5F00D"):
     )
 
 
+GROUP_JID = "120363000000000001@g.us"
+
+
+class TestTheBaileysStagingStepInAGroup:
+    """ISSUE-646, through the real staging step: a group file reaches an inbox
+    only for a member's turn the gate would answer, and never the host's for a
+    guest's."""
+
+    @staticmethod
+    def _group(config):
+        from istota.transport.whatsapp import baileys_protocol as proto
+        from istota.transport.whatsapp.webhook import handle_whatsapp_batch
+
+        _bind_identity(config.db_path, jid=USER_JID)
+        roster = proto.group_roster({
+            "group_jid": GROUP_JID, "subject": "Family", "added_by": USER_JID,
+            "bot_present": True,
+            "participants": [{"jid": USER_JID, "lid": ""},
+                             {"jid": OTHER_JID, "lid": ""}],
+        })
+        with db.get_db(config.db_path) as conn:
+            handle_whatsapp_batch(
+                conn, config, [roster], provider=db.WHATSAPP_BAILEYS_PROVIDER,
+            )
+
+    @staticmethod
+    def _in_group(event, *, sender=USER_JID):
+        from istota.transport.whatsapp._types import WhatsAppGroupContext
+
+        return dataclasses.replace(
+            event,
+            from_user=dataclasses.replace(event.from_user, jid=sender),
+            group=WhatsAppGroupContext(
+                group_jid=GROUP_JID, sender_lid="", mentions_bot=False,
+                mentions=(),
+            ),
+        )
+
+    def test_a_members_addressed_image_is_placed_in_their_inbox(self, tmp_path):
+        config = _config(tmp_path)
+        self._group(config)
+        name = _stage_a_file(config)
+
+        staged = stage_inbound_media(config, _media_dir(config), self._in_group(
+            _image_event(name, caption="Istota what is this?"),
+        ))
+
+        assert staged.media.attached_for_user == "alice"
+        assert staged.media.staged_path.startswith("/Users/alice/inbox/")
+        assert not (_media_dir(config) / name).exists()
+
+    def test_a_guests_image_is_placed_nowhere(self, tmp_path):
+        config = _config(tmp_path)
+        self._group(config)
+        name = _stage_a_file(config)
+
+        staged = stage_inbound_media(config, _media_dir(config), self._in_group(
+            _image_event(name, caption="Istota what is this?"), sender=OTHER_JID,
+        ))
+
+        assert staged.media.error == media.MEDIA_UNATTRIBUTED
+        assert staged.media.staged_path == ""
+        assert not (_media_dir(config) / name).exists()
+        assert not (config.workspace_path / "Users").exists()
+
+    def test_an_unaddressed_image_is_placed_nowhere(self, tmp_path):
+        config = _config(tmp_path)
+        self._group(config)
+        name = _stage_a_file(config)
+
+        staged = stage_inbound_media(config, _media_dir(config), self._in_group(
+            _image_event(name, caption="look at the cat"),
+        ))
+
+        assert staged.media.error == media.MEDIA_UNATTRIBUTED
+        assert not (_media_dir(config) / name).exists()
+        assert not (config.workspace_path / "Users").exists()
+
+
 class TestTheBaileysStagingStepForAudio:
     """The same three calls for a voice note, with the kind carried through."""
 

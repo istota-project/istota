@@ -574,7 +574,7 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
     rather than off the JID's domain: the sidecar knows which chat a message
     arrived in. One with no sender — an older sidecar — is typed `group` and
     refused before any identity lookup, as every group message used to be.
-    Group media is not carried on either branch.
+    Group media is carried on the first branch only (ISSUE-646).
 
     An image's caption rides `text` rather than a field of its own, so that
     every gate in `_dispatch_inbound` can apply to it with no new code —
@@ -598,16 +598,23 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         # sidecar: text on a voice note would reach STOP, the confirmation
         # parse and `!` dispatch, and spoken words never drive those gates.
         text = None
+    unsupported_kind = None
+    if message_type == "unsupported":
+        # An allowlisted label and nothing else: the value is only ever
+        # rendered, and an unknown one reads as "a message".
+        declared_kind = payload.get("unsupported_kind")
+        if isinstance(declared_kind, str) and declared_kind in media_rules.UNSUPPORTED_LABELS:
+            unsupported_kind = declared_kind
     sender = _text(payload, "jid")
     group = None
     if payload.get("group") is True:
         # A group message names its sender beside the chat (multiplayer D6).
         # One that names none came from a sidecar that predates groups, and
         # no principal can be resolved for it, so it keeps the old refusal.
-        # Media and callbacks are dropped either way: group media stays
-        # refused, and a button belongs to a direct chat.
+        # A button belongs to a direct chat. Media is carried (ISSUE-646):
+        # `stage_inbound_media` asks `groups.media_recipient` whose inbox, if
+        # anyone's, the file goes to.
         callback_data = None
-        inbound_media = None
         sender_jid = _bounded_text(
             payload.get("sender_jid"), "sender_jid", MAX_JID_CHARS,
         ) or ""
@@ -617,6 +624,7 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         if len(sender) > MAX_JID_CHARS or not (sender_jid or sender_lid):
             message_type = "group"
             text = None
+            inbound_media = None
         else:
             group = WhatsAppGroupContext(
                 group_jid=sender, sender_lid=sender_lid,
@@ -643,6 +651,7 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         sent_at=_event_time(payload),
         media=inbound_media,
         group=group,
+        unsupported_kind=unsupported_kind,
     )
 
 

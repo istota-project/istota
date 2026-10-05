@@ -431,8 +431,9 @@ def _inbound_event(
     # in `_dispatch_inbound` runs inside the transaction, while the fetch this
     # record authorizes happens before it — so a group image must carry no
     # record at all, which the reset above arranges by taking `image` off the
-    # type. Baileys refuses a group message in the sidecar, before anything is
-    # downloaded; this is the same refusal one module over.
+    # type. Cloud groups stay refused (D6). A Baileys group's file does cross,
+    # and `stage_inbound_media` asks `groups.media_recipient` whose inbox, if
+    # anyone's, it reaches (ISSUE-646).
     media = (
         _pending_media(message, message_type)
         if message_type in media_rules.MEDIA_KINDS else None

@@ -23,10 +23,17 @@ and the room is registered here, never by `record_inbound`.
 - **Addressing** (D5): the bot's JID in `mentionedJid` (the sidecar's
   answer), a quoted reply to a message the bot sent, or the bot's name as the
   first word.
+- **Media** (ISSUE-646): an image or voice note reaches the task only on a
+  member's turn the speech gate would answer. `media_recipient` asks that
+  read-only before `stage_inbound_media` copies anything, so an unaddressed
+  photo, or any file a guest sends, is never placed in an inbox (a guest's
+  turn runs as the host, and the copy would land in the host's). Every turn
+  with a file it did not open, and every unsupported message, is still
+  recorded under a stand-in naming what was sent.
 
-Group media stays refused, and a group never sends the fixed direct-chat
-replies (`HELP`, `STOP`, the unsupported-type notice): those answer one
-person, and everyone in the group would read them.
+A group never sends the fixed direct-chat replies (`HELP`, `STOP`, the
+unsupported-type and media-failed notices): those answer one person, and
+everyone in the group would read them.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from .._types import ParticipantRef
 from ..ingest import record_inbound
 from . import identity as identity_rules
 from . import jid_fingerprint, message_fingerprint
+from . import media as media_rules
 from ._types import (
     InboundWhatsAppEvent,
     WhatsAppGroupMember,
@@ -61,6 +69,10 @@ logger = logging.getLogger(__name__)
 SURFACE = "whatsapp"
 
 _TEXT_TYPES = frozenset({"text"})
+#: The types whose words the speech gate reads: a caption is a message.
+_WORDED_TYPES = _TEXT_TYPES | frozenset(media_rules.MEDIA_KINDS)
+#: Every type a group records as a turn; anything else is claimed and dropped.
+_TURN_TYPES = _WORDED_TYPES | frozenset({"unsupported"})
 
 #: What a mention of somebody the room cannot name becomes: neither a number
 #: nor a LID.
@@ -398,11 +410,12 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
 
     Call before `handle_whatsapp_batch` opens `BEGIN IMMEDIATE`, for the reason
     `ingest.classify_ahead` gives: the model call must not hold the write lock.
-    None for anything that is not a text turn in a registered group, and for
-    a group whose effective mode is not the classifier. Never raises.
+    None for anything that is not a worded turn (text, or a caption) in a
+    registered group, and for a group whose effective mode is not the
+    classifier. Never raises.
     """
     group = getattr(event, "group", None)
-    if group is None or getattr(event, "message_type", None) not in _TEXT_TYPES:
+    if group is None or getattr(event, "message_type", None) not in _WORDED_TYPES:
         return None
     text = (getattr(event, "text", None) or "").strip()
     if not text or text.startswith("!"):
@@ -443,6 +456,104 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
     )
 
 
+def media_recipient(
+    conn_factory, config: "Config", event, *,
+    classified: "GateDecision | None" = None,
+) -> str | None:
+    """Whose inbox a group turn's file goes to, or None for nobody's.
+
+    Asked by `stage_inbound_media` before anything is copied (ISSUE-646), on
+    the connection ``conn_factory`` returns, which this owns and closes on
+    every path, as `media.precheck` does with its own. A user id only for a member's turn the speech gate
+    would answer, read with `speech_gate.should_speak` itself so the two
+    cannot disagree about a rung: a guest's file would otherwise land in the
+    host's inbox, and an unaddressed photo in a shared group in the sender's
+    for a turn that never runs. ``classified`` is the classifier's answer,
+    asked ahead as the transaction's own gate is.
+
+    **A pre-filter, not the gate.** Host loss is not read (its policy row is
+    written on first read, and this connection writes nothing), and the
+    answer can be stale; the transaction decides. What that costs is a
+    member's own file in their own inbox for a turn that was then recorded
+    only. Never raises.
+    """
+    import sqlite3
+
+    from istota.rooms import speech_gate
+
+    group = getattr(event, "group", None)
+    if group is None:
+        return None
+    try:
+        conn = conn_factory()
+    except Exception:  # noqa: BLE001 — no read connection places nothing
+        logger.warning("whatsapp.group.media_recipient_unavailable")
+        return None
+    try:
+        # The binding and room lookups index rows by column name.
+        conn.row_factory = sqlite3.Row
+        group_jid = identity_rules.normalize_group_jid(group.group_jid)
+        token = db.resolve_room_token(conn, SURFACE, group_jid) if group_jid else None
+        room = db.get_room(conn, token) if token else None
+        if room is None or room.archived or room_veto.is_vetoed(conn, room.token):
+            return None
+        sender_jid = identity_rules.normalize_jid(event.from_user.jid)
+        user_id = (
+            identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
+        )
+        if not user_id:
+            return None
+        if conn.execute(
+            "SELECT 1 FROM processed_whatsapp WHERE message_id = ?",
+            (event.message_id,),
+        ).fetchone() is not None:
+            return None
+        text = render_mentions(
+            conn, config, room.token, (event.text or "").strip(), group.mentions,
+        )
+        if text.startswith("!"):
+            # A command acts on the room; the file goes nowhere.
+            return None
+        decision = speech_gate.should_speak(
+            is_multi_human=participants.is_multi_human(
+                conn, surface=SURFACE, room_token=room.token,
+                is_group_chat=False, room_container=True,
+            ),
+            addressed_to_bot=addressed_to_bot(
+                conn, config, text, mentions_bot=group.mentions_bot,
+                reply_to_message_id=event.reply_to_message_id,
+            ),
+            mode=room_policy.effective_speech_mode(
+                conn, room.token, config.speech_gate.mode,
+            ),
+            classified=classified,
+        )
+        return user_id if decision.speak else None
+    except Exception as e:  # noqa: BLE001 — a failed read places nothing
+        logger.warning("whatsapp.group.media_recipient_failed: %s", type(e).__name__)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — nothing useful to do with it
+            pass
+
+
+def _stand_in(event: InboundWhatsAppEvent, *, guest: bool) -> str:
+    """The fixed line a turn's unopened file or unsupported message records.
+
+    Fixed English and nothing off the wire: the label comes from
+    `media.MEDIA_LABELS` or `media.UNSUPPORTED_LABELS` by an allowlisted key.
+    """
+    if event.message_type == "unsupported":
+        label = media_rules.UNSUPPORTED_LABELS.get(event.unsupported_kind or "", "a message")
+        return f"[Sent {label}, which this bot cannot open.]"
+    label = media_rules.MEDIA_LABELS.get(event.message_type, "a file")
+    if guest:
+        return f"[Sent {label}. Files from guests are not opened.]"
+    return f"[Sent {label}, which was not opened.]"
+
+
 def handle_group_message(
     conn, config: "Config", event: InboundWhatsAppEvent,
     *, classified: "GateDecision | None" = None,
@@ -452,7 +563,14 @@ def handle_group_message(
     ``classified`` is `classify_group_event`'s answer for this event, asked
     before the transaction opened; without it the classifier rung fails closed.
     """
-    from .webhook import WhatsAppEventResult, _claim, _set_disposition
+    from .webhook import (
+        WhatsAppEventResult,
+        _claim,
+        _media_for_user,
+        _report_stranded_media,
+        _set_disposition,
+        media_stand_in,
+    )
 
     assert event.group is not None
     group_jid = identity_rules.normalize_group_jid(event.group.group_jid)
@@ -463,16 +581,24 @@ def handle_group_message(
             "whatsapp.group.unregistered message=%s",
             message_fingerprint(event.message_id),
         )
+        _report_stranded_media(event, "group_unregistered")
         return WhatsAppEventResult("group_unregistered")
     sender_jid = identity_rules.normalize_jid(event.from_user.jid)
     ref = sender_jid or identity_rules.normalize_lid(event.group.sender_lid)
     if not ref:
+        _report_stranded_media(event, "unknown_sender")
         return WhatsAppEventResult("unknown_sender")
     user_id = identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
     if not _claim(conn, event, user_id or "", f"group:{event.message_type}"):
+        _report_stranded_media(event, "duplicate")
         return WhatsAppEventResult("duplicate", user_id=user_id)
+    attached = False
 
     def done(result: "WhatsAppEventResult") -> "WhatsAppEventResult":
+        # A file the staging step placed and this turn did not attach is a
+        # stray copy in the member's inbox, logged as the direct chat does.
+        if not attached:
+            _report_stranded_media(event, result.disposition)
         _set_disposition(conn, event, result.disposition, result.task_id)
         return result
 
@@ -503,10 +629,53 @@ def handle_group_message(
             ))
     if room_veto.is_vetoed(conn, room.token):
         return done(WhatsAppEventResult("group_vetoed", user_id=user_id))
-    if event.message_type not in _TEXT_TYPES or not text:
-        # Recorded as seen and answered by nothing: the direct-chat notice
-        # would be read by the whole group.
+
+    # The words decide addressing, commands and answers; the body is what the
+    # room records and the task reads. They differ only for a file: an opened
+    # one is attached, and anything not opened leaves a stand-in, so neither
+    # the transcript nor the model loses that something was sent (ISSUE-646).
+    body = text if event.message_type in _TURN_TYPES else ""
+    attachments: list[str] = []
+    unsupported = event.message_type == "unsupported"
+    if unsupported and not text and event.unsupported_kind is None:
+        # A frame with no kind and no words is whatever the sidecar could not
+        # read at all (a wrapper, a reaction); a row for each would fill the
+        # transcript with noise.
+        body = ""
+    elif unsupported or event.message_type in media_rules.MEDIA_KINDS:
+        media = _media_for_user(event, user_id or "").media
+        if (
+            user_id and not unsupported
+            and media is not None and media.error is None and media.staged_path
+        ):
+            attachments = [media.staged_path]
+            attached = True
+            body = text or media_stand_in(media, attachments)
+        else:
+            stand_in = _stand_in(event, guest=not user_id)
+            body = f"{text}\n{stand_in}" if text else stand_in
+    if not body:
+        # Claimed and answered by nothing: the direct-chat notice would be
+        # read by the whole group.
         return done(WhatsAppEventResult("group_unsupported", user_id=user_id))
+    if unsupported:
+        # Recorded only, caption included, as the direct chat answers the type
+        # and reads no text: never a task, a command or a confirmation answer,
+        # so a one-human group does not answer every sticker.
+        outcome = record_inbound(
+            conn, config,
+            surface=SURFACE, surface_ref=group_jid, user_id=user_id or "",
+            text=body, source_type="whatsapp", channel_name=None,
+            external_id=event.message_id, addressed_to_bot=False,
+            author=ParticipantRef(
+                surface=SURFACE, surface_ref=ref, user_id=user_id,
+                display_name=event.from_user.username,
+            ),
+            room_container=True, record_only=True,
+        )
+        return done(WhatsAppEventResult(
+            f"group_{outcome.outcome}", user_id=user_id,
+        ))
 
     is_command = text.startswith("!")
     if user_id and is_command:
@@ -536,7 +705,8 @@ def handle_group_message(
     outcome = record_inbound(
         conn, config,
         surface=SURFACE, surface_ref=group_jid, user_id=user_id or "",
-        text=text, source_type="whatsapp", channel_name=None,
+        text=body, source_type="whatsapp", channel_name=None,
+        attachments=attachments or None,
         external_id=event.message_id,
         addressed_to_bot=addressed_to_bot(
             conn, config, text, mentions_bot=event.group.mentions_bot,

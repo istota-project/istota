@@ -190,6 +190,10 @@ class InboundWhatsAppEvent:
     #: The group this message was posted in, or `None` for a direct chat.
     #: When set, `from_user` is the *sender* inside the group, not the chat.
     group: "WhatsAppGroupContext | None" = None
+    #: What an `unsupported` message was, from `media.UNSUPPORTED_LABELS`'
+    #: keys (`video`, `sticker`, …), or `None` when the adapter did not say.
+    #: A group records the turn under a stand-in naming it (ISSUE-646).
+    unsupported_kind: str | None = None
 
 
 @dataclass(frozen=True)

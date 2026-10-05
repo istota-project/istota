@@ -1325,8 +1325,14 @@ def _staged_file_is_readable(staged: Path) -> bool:
     return True
 
 
+#: `_handle_event`'s "the classifier was not asked ahead" marker, kept apart
+#: from `None`, which is an asked-ahead answer of "no classifier decision".
+_ASK_CLASSIFIER = object()
+
+
 def stage_inbound_media(
-    config: Config, media_dir: Path, event: InboundWhatsAppEvent
+    config: Config, media_dir: Path, event: InboundWhatsAppEvent,
+    classified=None,
 ) -> InboundWhatsAppEvent:
     """Put this message's file in its user's inbox, before any lock is taken.
 
@@ -1349,7 +1355,10 @@ def stage_inbound_media(
     1. **Pre-check.** Unlocked, read-only, and allowed to be stale. `None`
        means the file goes no further: an unknown sender, a message id already
        claimed (which is what closes the redelivery re-copy), a sender who has
-       opted out, or a read that could not be answered.
+       opted out, or a read that could not be answered. A group's file asks
+       `groups.media_recipient` instead (ISSUE-646), which also says None for
+       a guest and for a turn the speech gate would not answer; *classified*
+       is the classifier's answer for that turn, asked ahead.
     2. **Sniff, then consume.** The sniff is asked here rather than left to
        `stage_to_attachment` because that function answers `None` for two
        situations the surface owes different replies for: a file that does not
@@ -1403,12 +1412,20 @@ def stage_inbound_media(
                 event, media=_media_failed(kind, "unattributed"),
             )
         staged = Path(media_dir) / incoming.staged_path
-        user_id = media_rules.precheck(
-            lambda: sqlite_util.connect_read_only(config.db_path),
-            identity=event.from_user,
-            message_id=event.message_id,
-            provider=db.WHATSAPP_BAILEYS_PROVIDER,
-        )
+        if event.group is not None:
+            from .groups import media_recipient  # noqa: PLC0415
+
+            user_id = media_recipient(
+                lambda: sqlite_util.connect_read_only(config.db_path),
+                config, event, classified=classified,
+            )
+        else:
+            user_id = media_rules.precheck(
+                lambda: sqlite_util.connect_read_only(config.db_path),
+                identity=event.from_user,
+                message_id=event.message_id,
+                provider=db.WHATSAPP_BAILEYS_PROVIDER,
+            )
         if user_id is None:
             logger.info(
                 "whatsapp.baileys.media_unattributed message=%s: the "
@@ -3902,7 +3919,17 @@ class BaileysBridge:
             # A receipt status this surface does not model.
             logger.debug("whatsapp.baileys.receipt_ignored")
             return
+        classified = _ASK_CLASSIFIER
         if isinstance(event, InboundWhatsAppEvent) and event.media is not None:
+            if event.group is not None:
+                # Asked ahead of the staging for a group's file, which is
+                # placed only for a turn the gate would answer (ISSUE-646),
+                # and handed on so the transaction reads the same answer.
+                from .groups import classify_group_event  # noqa: PLC0415
+
+                classified = await asyncio.to_thread(
+                    classify_group_event, self._config, event,
+                )
             # **Here rather than inside `_apply_batch_to_db`**, on both of the
             # axes that matter: off the event loop, because the copy is a
             # Nextcloud round trip and a SQLite read; and above the retry
@@ -3910,10 +3937,11 @@ class BaileysBridge:
             # file the first attempt already consumed.
             event = await asyncio.to_thread(
                 stage_inbound_media, self._config, self._media_dir, event,
+                None if classified is _ASK_CLASSIFIER else classified,
             )
-        await self._apply_with_retry(event)
+        await self._apply_with_retry(event, classified)
 
-    async def _apply_with_retry(self, event) -> None:
+    async def _apply_with_retry(self, event, classified=_ASK_CLASSIFIER) -> None:
         """Apply one event, retrying a database failure in place.
 
         The webhook answers a failed transaction with 503 and Meta redelivers;
@@ -3928,7 +3956,9 @@ class BaileysBridge:
         delay = INBOUND_RETRY_BASE_SECONDS
         for attempt in range(1, INBOUND_ATTEMPTS + 1):
             try:
-                results = await asyncio.to_thread(self._apply_batch_to_db, event)
+                results = await asyncio.to_thread(
+                    self._apply_batch_to_db, event, classified,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -3961,7 +3991,7 @@ class BaileysBridge:
                     await self.leave_group(result.leave_group_jid)
             return
 
-    def _apply_batch_to_db(self, event):
+    def _apply_batch_to_db(self, event, classified=_ASK_CLASSIFIER):
         """One event, one transaction, one thread.
 
         The whole `with db.get_db(...)` block is inside a single
@@ -3981,8 +4011,12 @@ class BaileysBridge:
         from .webhook import handle_whatsapp_batch  # noqa: PLC0415
 
         # Asked before the transaction opens: a model call must not hold the
-        # write lock `handle_whatsapp_batch` takes.
-        decision = classify_group_event(self._config, event)
+        # write lock `handle_whatsapp_batch` takes. A group file's turn was
+        # asked already, before its staging, and is not asked twice.
+        decision = (
+            classify_group_event(self._config, event)
+            if classified is _ASK_CLASSIFIER else classified
+        )
         classified = (
             {event.message_id: decision} if decision is not None else None
         )

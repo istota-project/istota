@@ -161,6 +161,23 @@ REASON_KEYS: tuple[str, ...] = (
     "no_id", "fetch_unknown",
 )
 
+#: What a message this surface cannot open was, by the sidecar's
+#: `unsupported_kind`, as the phrase a group's stand-in row names it by
+#: (ISSUE-646). A key off the wire outside this table reads as "a message".
+UNSUPPORTED_LABELS: dict[str, str] = {
+    "video": "a video",
+    "gif": "a GIF",
+    "video_note": "a video note",
+    "sticker": "a sticker",
+    "document": "a document",
+    "location": "a location",
+    "contact": "a contact card",
+    "poll": "a poll",
+}
+
+#: What a group's stand-in row calls a file of each kind.
+MEDIA_LABELS: dict[str, str] = {"image": "an image", "audio": "a voice message"}
+
 
 def reason(kind: str, key: str) -> str:
     """The fixed sentence for *key* about a file of *kind*.

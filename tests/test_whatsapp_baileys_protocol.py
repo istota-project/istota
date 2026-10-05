@@ -282,14 +282,48 @@ class TestTheMediaKind:
         assert event.media.staged_path == ""
         assert event.text == "check the backup"
 
-    def test_a_group_audio_frame_carries_no_record(self):
+    def test_a_group_audio_frame_carries_its_record(self):
+        """ISSUE-646: group media crosses; `stage_inbound_media` decides whose
+        inbox, if anyone's, it reaches."""
         event = proto.inbound_event(_inbound(
             group=True, jid="120363000000000001@g.us", sender_jid=JID,
             message_type="audio", text=None, media_name=_STAGED,
         ))
 
         assert event.group is not None
+        assert event.media is not None
+        assert event.media.kind == "audio"
+        assert event.media.staged_path == _STAGED
+
+    def test_a_group_frame_naming_no_sender_still_carries_nothing(self):
+        """An older sidecar's group frame is refused before identity, so a file
+        on it could reach nobody."""
+        event = proto.inbound_event(_inbound(
+            group=True, jid="120363000000000001@g.us",
+            message_type="image", text=None, media_name=_STAGED,
+        ))
+
+        assert event.message_type == "group"
         assert event.media is None
+
+    @pytest.mark.parametrize(
+        ("declared", "kept"),
+        [("video", "video"), ("sticker", "sticker"), ("rocket", None),
+         (7, None), (None, None), (["video"], None), ({"k": 1}, None)],
+    )
+    def test_an_unsupported_kind_is_kept_only_from_the_allowlist(
+        self, declared, kept,
+    ):
+        event = proto.inbound_event(_inbound(
+            message_type="unsupported", text=None, unsupported_kind=declared,
+        ))
+
+        assert event.unsupported_kind == kept
+
+    def test_an_unsupported_kind_on_another_type_is_ignored(self):
+        event = proto.inbound_event(_inbound(unsupported_kind="video"))
+
+        assert event.unsupported_kind is None
 
 
 class TestTheReceipt:
