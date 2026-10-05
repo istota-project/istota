@@ -800,7 +800,7 @@ def assert_outcome(
         # A reply still passing through the mail server is not in IMAP yet,
         # so one read would miss it: watch for a bounded settle instead.
         reply = _wait(lambda: reply_to(stack, sent), timeout=NEGATIVE_SETTLE)
-        absence_watched = True
+        absence_watched = reply is None
         check("reply", None, reply and reply.subject)
     else:
         reply = _wait(lambda: reply_to(stack, sent), timeout=timeout)

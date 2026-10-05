@@ -18,7 +18,9 @@ command or a reply to a mailed request (`transport.email.answers.read_answer`),
 so a mailed `!drafts send <id>` is ordinary mail, and the `!drafts` command and
 the `/chat/drafts/{id}` routes need Talk or the web app. Release and discard,
 with the thread row's state following the draft (`db.settle_draft_mail`), are
-the full file's (`tests/full/test_email_rooms.py`).
+owed to the full-shape stage of this suite; until it lands they are covered in
+the default suite only (`tests/test_outbound_drafts_api.py`,
+`tests/test_email_note_cards.py`).
 """
 
 from __future__ import annotations
@@ -79,16 +81,22 @@ def _expected(email_people, sender, other, plus, *, answer: str, held: bool,
 def _assert_sent_unheld(stack, email_people, nonce: str, cc_kind: str) -> None:
     answer = f"Delivery is on Tuesday {nonce}."
     sent, sender, other, plus = _thread_with(stack, email_people, nonce, answer, cc_kind)
-    flow.assert_outcome(stack, sent, _expected(
+    seen = flow.assert_outcome(stack, sent, _expected(
         email_people, sender, other, plus, answer=answer, held=False,
         notices=flow.Notices(
             rows=frozenset({("task_alert", "private-note:{task}")}),
             pushes=(flow.PRIVATE_NOTE_POINTER,), alert_mails=1,
         ),
     ))
-    assert stack.probe.drafts(
+    _assert_no_draft(stack, email_people, seen)
+
+
+def _assert_no_draft(stack, email_people, seen: flow.Outcome) -> None:
+    """No draft for this mail's task above the test's watermark."""
+    assert seen.task is not None
+    assert [d for d in stack.probe.drafts(
         email_people.host_id, id_above=stack.mark.get("outbound_drafts"),
-    ) == []
+    ) if d.get("task_id") == seen.task["id"]] == []
 
 
 def _assert_held(stack, email_people, nonce: str, cc_kind: str, reason: str) -> None:
@@ -102,6 +110,9 @@ def _assert_held(stack, email_people, nonce: str, cc_kind: str, reason: str) -> 
     task = stack.probe.wait_for_task(status="completed", task_id=row["task_id"],
                                      timeout=flow.DEFAULT_TIMEOUT)
     assert task["status"] == "completed", task
+    # `completed` commits before delivery holds the draft; the worker's line
+    # comes after delivery and the note.
+    assert flow.worker_done(stack, task["id"]), f"task {task['id']} never finished"
     since = flow.Checkpoint(mark=stack.mark, pushes=0)
     draft, draft_key, draft_push = flow.held_draft(stack, task["id"], since)
     assert (draft["status"], draft["hold_reason"]) == ("pending", reason), draft
@@ -165,7 +176,7 @@ class TestTheAllFloor:
             marker=nonce,
         )
         host = email_people.host_address
-        flow.assert_outcome(stack, sent, flow.Expected(
+        seen = flow.assert_outcome(stack, sent, flow.Expected(
             processed=flow.Processed(
                 routing_method="sender_match", user_id=email_people.host_id,
                 host_asked=False, sender_check="verified",
@@ -184,9 +195,7 @@ class TestTheAllFloor:
             note=None,
             notices=flow.Notices(rows=frozenset(), pushes=(), alert_mails=0),
         ))
-        assert stack.probe.drafts(
-            email_people.host_id, id_above=stack.mark.get("outbound_drafts"),
-        ) == []
+        _assert_no_draft(stack, email_people, seen)
 
     def test_the_hosts_own_ask_on_a_thread_goes_out(self, stack, email_people):
         """The host asks on a thread with a trusted correspondent, stamped,
@@ -204,7 +213,7 @@ class TestTheAllFloor:
             subject=f"ask {nonce}", text=f"please send my friend the plan {nonce}",
             marker=nonce,
         )
-        flow.assert_outcome(stack, sent, flow.Expected(
+        seen = flow.assert_outcome(stack, sent, flow.Expected(
             processed=flow.Processed(
                 routing_method="plus_address", user_id=email_people.host_id,
                 host_asked=True, sender_check="verified",
@@ -222,6 +231,4 @@ class TestTheAllFloor:
             note=None,
             notices=flow.Notices(rows=frozenset(), pushes=(), alert_mails=0),
         ))
-        assert stack.probe.drafts(
-            email_people.host_id, id_above=stack.mark.get("outbound_drafts"),
-        ) == []
+        _assert_no_draft(stack, email_people, seen)
