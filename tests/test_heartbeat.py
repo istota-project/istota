@@ -1756,3 +1756,88 @@ class TestTheStandingFailureGate:
 
         assert result.healthy is True
         assert result.alert_signature is None
+
+
+# ---------------------------------------------------------------------------
+# TestCheckCalendarConflicts (ISSUE-673)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCalendarConflicts:
+    ALICE = "https://cloud.example.com/remote.php/dav/calendars/istota/a/"
+    BOB = "https://cloud.example.com/remote.php/dav/calendars/istota/b/"
+
+    def _calendar(self, name, url, owner):
+        cal = MagicMock()
+        cal.name = name
+        cal.url = url
+        cal.get_properties.return_value = {
+            "{DAV:}owner": f"/remote.php/dav/principals/users/{owner}/",
+        }
+        return cal
+
+    def _run(self, events_by_url, *, make_events=None):
+        from istota.heartbeat import _check_calendar_conflicts
+        from istota.skills.calendar import CalendarEvent
+
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.__exit__.return_value = False
+        client.principal.return_value.calendars.return_value = [
+            self._calendar("Alice", self.ALICE, "alice"),
+            self._calendar("Bob", self.BOB, "bob"),
+        ]
+        soon = datetime.now() + timedelta(hours=1)
+
+        def events(_client, url, _start, _end):
+            if make_events is not None:
+                return make_events(url)
+            return [
+                CalendarEvent(uid=s, summary=s, start=soon, end=soon + timedelta(hours=1))
+                for s in events_by_url.get(url, [])
+            ]
+
+        config = Config(nextcloud=NextcloudConfig(
+            url="https://cloud.example.com", username="istota", app_password="pw",
+        ))
+        check = HeartbeatCheck(name="cal", type="calendar-conflicts", config={})
+        with patch("istota.skills.calendar.get_caldav_client", return_value=client), \
+                patch("istota.skills.calendar.get_events", side_effect=events) as get_events_:
+            result = _check_calendar_conflicts(check, config, "alice")
+        return result, [c.args[1] for c in get_events_.call_args_list]
+
+    def test_reads_only_the_users_own_calendars(self):
+        result, read = self._run({self.ALICE: ["Standup"], self.BOB: ["Dentist"]})
+        assert read == [self.ALICE]
+        assert result.healthy is True
+        assert result.message == "No calendar conflicts"
+
+    def test_finds_an_overlap_in_the_users_calendars(self):
+        result, _ = self._run({self.ALICE: ["Standup", "Review"]})
+        assert result.healthy is False
+        assert "'Standup' and 'Review'" in result.message
+
+    def _two_events(self, tz_a, tz_b):
+        from istota.skills.calendar import CalendarEvent
+
+        # get_events hands back wall-clock times with the zone stripped.
+        wall = (datetime.now() + timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+
+        def make(url):
+            if url != self.ALICE:
+                return []
+            return [
+                CalendarEvent(uid="a", summary="A", start=wall,
+                              end=wall + timedelta(hours=1), timezone=tz_a),
+                CalendarEvent(uid="b", summary="B", start=wall,
+                              end=wall + timedelta(hours=1), timezone=tz_b),
+            ]
+        return make
+
+    def test_same_wall_clock_in_different_zones_is_not_a_conflict(self):
+        result, _ = self._run({}, make_events=self._two_events("UTC", "Asia/Tokyo"))
+        assert result.healthy is True, result.message
+
+    def test_same_zone_same_wall_clock_is_a_conflict(self):
+        result, _ = self._run({}, make_events=self._two_events("Asia/Tokyo", "Asia/Tokyo"))
+        assert result.healthy is False

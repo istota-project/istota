@@ -13,6 +13,7 @@ import argparse
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from istota.skills._cli import parse_and_resolve, run_skill_cli
@@ -97,6 +98,39 @@ def get_calendars_for_user(
             result.append((cal.name, str(cal.url), writable))
 
     return result
+
+
+class CalendarNotFound(LookupError):
+    """A calendar URL that is not one of the task user's own calendars."""
+
+
+def owned_calendars(client: caldav.DAVClient, user_id: str) -> list[tuple[str, str]]:
+    """The ``(name, url)`` pairs of the calendars ``user_id`` owns.
+
+    The bot's account sees every calendar any user shared with it, so a skill
+    CLI reads only this set (ISSUE-673). Same owner rule as prompt discovery.
+    """
+    return [(name, url) for name, url, _ in get_calendars_for_user(client, user_id)]
+
+
+def _calendar_key(url: str) -> tuple[str, str]:
+    parts = urlsplit(url.strip())
+    return (parts.netloc.lower(), unquote(parts.path).rstrip("/"))
+
+
+def resolve_owned_calendar(client: caldav.DAVClient, user_id: str, url: str) -> str:
+    """Return the discovered URL of ``url`` if ``user_id`` owns it.
+
+    Anything else, a calendar that does not exist included, is one refusal, so
+    the answer does not say whether another user's calendar is there.
+    """
+    wanted_host, wanted_path = _calendar_key(url)
+    for _, owned_url in owned_calendars(client, user_id):
+        owned_host, owned_path = _calendar_key(owned_url)
+        # A bare path names a calendar on the account's own server.
+        if owned_path == wanted_path and wanted_host in ("", owned_host):
+            return owned_url
+    raise CalendarNotFound(f"Calendar not found: {url}")
 
 
 def get_events(
@@ -427,6 +461,18 @@ def _get_client_from_env() -> caldav.DAVClient:
     return get_caldav_client(url, username, password)
 
 
+def task_user_id() -> str:
+    """The task's user, from the proxy's env; refuses rather than widening.
+
+    The CalDAV credential is the bot's, so without a user every calendar
+    shared with the bot would be in reach.
+    """
+    user_id = os.environ.get("ISTOTA_USER_ID", "").strip()
+    if not user_id:
+        raise ValueError("ISTOTA_USER_ID is not set; refusing to read calendars without a user")
+    return user_id
+
+
 def _event_to_dict(event: CalendarEvent) -> dict:
     """Convert CalendarEvent to JSON-serializable dict."""
     d = {
@@ -513,15 +559,14 @@ def _get_date_range(args) -> tuple[datetime, datetime, str]:
 def cmd_list(args) -> dict:
     """List calendar events."""
     start, end, label = _get_date_range(args)
+    user_id = task_user_id()
 
     # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
     # leak unless close() is called.
     with _get_client_from_env() as client:
-        # If no calendar specified, list from all user calendars
         if not args.calendar:
             all_events = []
-            calendars = list_calendars(client)
-            for name, url in calendars:
+            for name, url in owned_calendars(client, user_id):
                 try:
                     events = get_events(client, url, start, end)
                     for e in events:
@@ -540,8 +585,8 @@ def cmd_list(args) -> dict:
                 "events": all_events,
             }
 
-        # Single calendar specified
-        events = get_events(client, args.calendar, start, end)
+        calendar_url = resolve_owned_calendar(client, user_id, args.calendar)
+        events = get_events(client, calendar_url, start, end)
 
         return {
             "status": "ok",
@@ -571,11 +616,12 @@ def cmd_create(args) -> dict:
         start = start.replace(tzinfo=tz)
         end = end.replace(tzinfo=tz)
 
+    user_id = task_user_id()
     # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
     with _get_client_from_env() as client:
         uid = create_event(
             client,
-            args.calendar,
+            resolve_owned_calendar(client, user_id, args.calendar),
             summary=args.summary,
             start=start,
             end=end,
@@ -595,9 +641,11 @@ def cmd_create(args) -> dict:
 
 def cmd_delete(args) -> dict:
     """Delete a calendar event."""
+    user_id = task_user_id()
     # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
     with _get_client_from_env() as client:
-        deleted = delete_event(client, args.calendar, args.uid)
+        calendar_url = resolve_owned_calendar(client, user_id, args.calendar)
+        deleted = delete_event(client, calendar_url, args.uid)
 
     if deleted:
         return {"status": "ok", "uid": args.uid, "deleted": True}
@@ -645,9 +693,11 @@ def cmd_update(args) -> dict:
     if not kwargs:
         return {"status": "error", "error": "No fields to update. Provide at least one of --summary, --start, --end, --location, --description, --clear-location, --clear-description."}
 
+    user_id = task_user_id()
     # ISSUE-101: close DAVClient to drop the urllib3 watchdog thread.
     with _get_client_from_env() as client:
-        updated = update_event(client, args.calendar, args.uid, **kwargs)
+        calendar_url = resolve_owned_calendar(client, user_id, args.calendar)
+        updated = update_event(client, calendar_url, args.uid, **kwargs)
 
     if updated:
         return {"status": "ok", "uid": args.uid, "updated_fields": list(kwargs.keys())}

@@ -8,7 +8,8 @@ import pytest
 
 from istota.skills.calendar import (
     Calendar,
-    get_events, create_event, update_event, cmd_create, cmd_update, cmd_list, build_parser, main,
+    get_events, create_event, update_event, cmd_create, cmd_update, cmd_delete, cmd_list,
+    build_parser, main,
     _parse_datetime, _get_date_range,
 )
 
@@ -282,6 +283,16 @@ class TestBuildParserUpdateSubcommand:
         assert m.called
 
 
+@pytest.fixture
+def owner_scope_passthrough(monkeypatch):
+    """For tests about argument handling: the task user owns whatever is named."""
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    with patch("istota.skills.calendar.resolve_owned_calendar",
+               side_effect=lambda client, user_id, url: url):
+        yield
+
+
+@pytest.mark.usefixtures("owner_scope_passthrough")
 class TestCmdUpdate:
     @patch("istota.skills.calendar.update_event")
     @patch("istota.skills.calendar._get_client_from_env")
@@ -388,6 +399,7 @@ class TestCmdUpdate:
             cmd_update(args)
 
 
+@pytest.mark.usefixtures("owner_scope_passthrough")
 class TestCmdCreate:
     @patch("istota.skills.calendar.create_event")
     @patch("istota.skills.calendar._get_client_from_env")
@@ -457,8 +469,9 @@ class TestAllDayEventWrites:
         assert component["dtend"].dt == date(2026, 8, 31)
 
 
+@pytest.mark.usefixtures("owner_scope_passthrough")
 class TestCmdListWeek:
-    @patch("istota.skills.calendar.list_calendars")
+    @patch("istota.skills.calendar.owned_calendars")
     @patch("istota.skills.calendar._get_client_from_env")
     def test_list_week_returns_7_day_label(self, mock_client_fn, mock_list_cals):
         mock_list_cals.return_value = []
@@ -467,3 +480,105 @@ class TestCmdListWeek:
         result = cmd_list(args)
         assert result["date"] == "week"
         assert result["status"] == "ok"
+
+
+# --- ISSUE-673: the CLI scopes calendars to the task's user -----------------
+
+ALICE_URL = "https://cloud.example.com/remote.php/dav/calendars/istota/personal_shared_by_alice/"
+BOB_URL = "https://cloud.example.com/remote.php/dav/calendars/istota/personal_shared_by_bob/"
+
+
+def _fake_calendar(name: str, url: str, owner: str):
+    cal = MagicMock()
+    cal.name = name
+    cal.url = url
+    cal.get_properties.return_value = {
+        "{DAV:}owner": f"/remote.php/dav/principals/users/{owner}/",
+    }
+    return cal
+
+
+def _fake_client():
+    """A bot account that sees one calendar shared by alice and one by bob."""
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.__exit__.return_value = False
+    client.principal.return_value.calendars.return_value = [
+        _fake_calendar("Alice", ALICE_URL, "alice"),
+        _fake_calendar("Bob", BOB_URL, "bob"),
+    ]
+    return client
+
+
+@pytest.fixture
+def as_alice(monkeypatch):
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    client = _fake_client()
+    with patch("istota.skills.calendar._get_client_from_env", return_value=client):
+        yield client
+
+
+_COMMANDS = {"list": cmd_list, "create": cmd_create, "update": cmd_update, "delete": cmd_delete}
+
+
+class TestTheCliScopesCalendarsToTheTaskUser:
+    def test_list_without_a_calendar_reads_only_the_users_own(self, as_alice):
+        with patch("istota.skills.calendar.get_events", return_value=[]) as get_events_:
+            result = cmd_list(build_parser().parse_args(["list", "--week"]))
+        assert result["status"] == "ok"
+        read = [c.args[1] for c in get_events_.call_args_list]
+        assert read == [ALICE_URL]
+
+    @pytest.mark.parametrize("argv", [
+        ["list", "--calendar", BOB_URL],
+        ["create", "--calendar", BOB_URL, "--summary", "x",
+         "--start", "2026-10-06 10:00", "--end", "2026-10-06 11:00"],
+        ["update", "--calendar", BOB_URL, "--uid", "u1", "--summary", "x"],
+        ["delete", "--calendar", BOB_URL, "--uid", "u1"],
+    ], ids=["list", "create", "update", "delete"])
+    def test_another_users_calendar_is_refused_like_a_missing_one(self, as_alice, argv):
+        missing = BOB_URL.replace("bob", "nobody")
+        answers = []
+        for url in (BOB_URL, missing):
+            args = build_parser().parse_args([url if a == BOB_URL else a for a in argv])
+            with patch("istota.skills.calendar.get_events") as get_events_, \
+                    patch("istota.skills.calendar.create_event") as create_, \
+                    patch("istota.skills.calendar.update_event") as update_, \
+                    patch("istota.skills.calendar.delete_event") as delete_:
+                with pytest.raises(LookupError) as exc:
+                    _COMMANDS[argv[0]](args)
+            for called in (get_events_, create_, update_, delete_):
+                called.assert_not_called()
+            answers.append(str(exc.value).replace(url, "<url>"))
+        assert answers[0] == answers[1]
+
+    @pytest.mark.parametrize("given", [
+        ALICE_URL.rstrip("/"),
+        "/remote.php/dav/calendars/istota/personal_shared_by_alice/",
+    ], ids=["no-trailing-slash", "path-only"])
+    def test_an_owned_calendar_is_used_by_its_discovered_url(self, as_alice, given):
+        args = build_parser().parse_args(
+            ["delete", "--calendar", given, "--uid", "u1"])
+        with patch("istota.skills.calendar.delete_event", return_value=True) as delete_:
+            result = cmd_delete(args)
+        assert result["status"] == "ok"
+        assert delete_.call_args.args[1] == ALICE_URL
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_no_user_id_refuses_rather_than_reading_everything(self, monkeypatch, value):
+        if value is None:
+            monkeypatch.delenv("ISTOTA_USER_ID", raising=False)
+        else:
+            monkeypatch.setenv("ISTOTA_USER_ID", value)
+        client = _fake_client()
+        with patch("istota.skills.calendar._get_client_from_env", return_value=client), \
+                patch("istota.skills.calendar.get_events") as get_events_:
+            with pytest.raises(ValueError, match="ISTOTA_USER_ID"):
+                cmd_list(build_parser().parse_args(["list"]))
+        get_events_.assert_not_called()
+
+    def test_the_cli_refusal_is_an_error_envelope(self, as_alice, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["list", "--calendar", BOB_URL])
+        assert exc.value.code == 1
+        assert '"status": "error"' in capsys.readouterr().out

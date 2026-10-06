@@ -20,7 +20,7 @@ Calendar operations use CalDAV. Credentials are available via environment variab
 The simplest way to interact with calendars is via the CLI:
 
 ```bash
-# List today's events from all calendars (`agenda` is an alias for `list`)
+# List today's events from all of your calendars (`agenda` is an alias for `list`)
 istota-skill calendar list --tz "America/Los_Angeles"
 
 # List tomorrow's events
@@ -85,6 +85,8 @@ istota-skill calendar update \
 istota-skill calendar delete --calendar "https://..." --uid "event-uid-here"
 ```
 
+**`--calendar` takes one of the user's own calendars**, as listed in the prompt. A calendar another user shared with the bot is refused as `Calendar not found`, the same answer as one that does not exist.
+
 **Always pass `--tz` with the user's timezone** (from prompt metadata) to ensure correct date boundaries.
 
 **Always pass `--tz` when creating timed events with specific timezone semantics** (flights, meetings across timezones). Omit `--tz` for local timed events where the wall-clock time is what matters. All-day events are DATE values and never carry a timezone. Their end date is inclusive; create may omit it for a one-day event, while update requires both dates to keep the event boundaries the same type.
@@ -120,8 +122,9 @@ The `istota.skills.calendar` module also provides functions for programmatic acc
 | Function | Description | Returns |
 |----------|-------------|---------|
 | `get_caldav_client(url, username, password)` | Create CalDAV client | `caldav.DAVClient` |
-| `list_calendars(client)` | List all accessible calendars | `list[(name, url)]` |
+| `list_calendars(client)` | List every calendar the account can see, other users' shared ones included | `list[(name, url)]` |
 | `get_calendars_for_user(client, username)` | Get calendars owned by a user | `list[(name, url, writable)]` |
+| `owned_calendars(client, username)` | The same, as `(name, url)` | `list[(name, url)]` |
 | `get_events(client, calendar_url, start, end)` | Get events in date range | `list[CalendarEvent]` |
 | `get_today_events(client, calendar_url, tz)` | Get today's events | `list[CalendarEvent]` |
 | `get_tomorrow_events(client, calendar_url, tz)` | Get tomorrow's events | `list[CalendarEvent]` |
