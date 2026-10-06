@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import os
 import shutil
 import sqlite3
@@ -1913,6 +1914,166 @@ class TestGroupFrames:
 
         message = await sidecar.expect(proto.MSG_LEAVE_GROUP)
         assert message["group_jid"] == self.GROUP
+
+
+class TestClaimingEarlierGroupMedia:
+    """ISSUE-658 over the real socket: an addressed turn that quotes an
+    unopened photo asks the sidecar for it, and the task gets the file."""
+
+    GROUP = "120363000000000001@g.us"
+    BOB = "15557654321@s.whatsapp.net"
+    INBOX = "/Users/alice/inbox/whatsapp_0123456789abcdef.jpg"
+
+    def _group(self, config):
+        bind_user(config)
+        config.users["bob"] = UserConfig()
+        with db.get_db(config.db_path) as conn:
+            db.set_whatsapp_binding(conn, "bob", bootstrap_phone_number="+15557654321")
+            db.latch_whatsapp_jid(conn, "bob", jid=self.BOB)
+        with db.get_db(config.db_path) as conn:
+            webhook_module.handle_whatsapp_batch(conn, config, [proto.group_roster({
+                "group_jid": self.GROUP, "subject": "Family", "added_by": USER_JID,
+                "bot_present": True,
+                "participants": [{"jid": USER_JID, "lid": ""}, {"jid": self.BOB, "lid": ""}],
+            })], provider=BAILEYS)
+
+    def _frame(self, message_id, message_type, text, **extra):
+        return dict(
+            message_id=message_id, jid=self.GROUP, group=True, sender_jid=USER_JID,
+            sender_lid="", mentions_bot=False, mentions=[], username="Alice",
+            message_type=message_type, text=text,
+            timestamp=int(datetime.now(timezone.utc).timestamp()), **extra,
+        )
+
+    @staticmethod
+    def _fake_staging(monkeypatch, staged):
+        def stage(config, media_dir, event, classified=None):
+            if event.media.error is not None:
+                return event
+            staged.append(event.media.staged_path)
+            return dataclasses.replace(event, media=dataclasses.replace(
+                event.media, staged_path=TestClaimingEarlierGroupMedia.INBOX,
+                attached_for_user="alice",
+            ))
+
+        monkeypatch.setattr(bridge_module, "stage_inbound_media", stage)
+
+    def _tasks(self, config):
+        with db.get_db(config.db_path) as conn:
+            return [db.get_task(conn, row[0]) for row in conn.execute(
+                "SELECT id FROM tasks WHERE source_type = 'whatsapp' ORDER BY id",
+            ).fetchall()]
+
+    async def test_a_quoted_photo_is_fetched_and_attached(
+        self, bridge, sidecar, config, monkeypatch,
+    ):
+        self._group(config)
+        staged = []
+        self._fake_staging(monkeypatch, staged)
+        await sidecar.say(proto.MSG_INBOUND, **self._frame(
+            "P1", "image", None, media_error="download_failed",
+        ))
+        await sidecar.say(proto.MSG_INBOUND, **self._frame(
+            "T1", "text", "Istota what is this?", reply_to_message_id="P1",
+        ))
+
+        request = await sidecar.expect(proto.MSG_FETCH_MEDIA)
+        assert (request["chat"], request["message_id"]) == (self.GROUP, "P1")
+        await sidecar.say(
+            proto.MSG_MEDIA_RESULT, request_id=request["request_id"], ok=True,
+            message_type="image", media_name="0123456789abcdef0123456789abcdef.jpg",
+            media_mime="image/jpeg", media_bytes=10, media_error=None,
+        )
+
+        tasks = await wait_for(lambda: self._tasks(config))
+        assert tasks[0].attachments == [self.INBOX]
+        assert staged == ["0123456789abcdef0123456789abcdef.jpg"]
+
+    async def test_an_unaddressed_follow_up_asks_for_nothing(
+        self, bridge, sidecar, config, monkeypatch,
+    ):
+        self._group(config)
+        self._fake_staging(monkeypatch, [])
+        await sidecar.say(proto.MSG_INBOUND, **self._frame(
+            "P1", "image", None, media_error="download_failed",
+        ))
+        await sidecar.say(proto.MSG_INBOUND, **self._frame("T1", "text", "what is this?"))
+
+        def recorded():
+            with db.get_db(config.db_path) as conn:
+                return conn.execute(
+                    "SELECT 1 FROM processed_whatsapp WHERE message_id = 'T1'",
+                ).fetchone()
+
+        assert await wait_for(recorded)
+        with pytest.raises(asyncio.TimeoutError):
+            await sidecar.next_message(timeout=0.3)
+
+    async def test_a_sidecar_with_nothing_held_leaves_the_turn_as_it_came(
+        self, bridge, sidecar, config, monkeypatch,
+    ):
+        self._group(config)
+        self._fake_staging(monkeypatch, [])
+        await sidecar.say(proto.MSG_INBOUND, **self._frame(
+            "P1", "image", None, media_error="download_failed",
+        ))
+        await sidecar.say(proto.MSG_INBOUND, **self._frame(
+            "T1", "text", "Istota what is this?", reply_to_message_id="P1",
+        ))
+        request = await sidecar.expect(proto.MSG_FETCH_MEDIA)
+        await sidecar.say(
+            proto.MSG_MEDIA_RESULT, request_id=request["request_id"], ok=False,
+        )
+
+        tasks = await wait_for(lambda: self._tasks(config))
+        assert not tasks[0].attachments
+
+    async def test_a_sidecar_that_never_answers_is_nothing_to_claim(
+        self, bridge, sidecar, monkeypatch,
+    ):
+        monkeypatch.setattr(bridge_module, "FETCH_MEDIA_TIMEOUT_SECONDS", 0.2)
+        task = asyncio.ensure_future(bridge.fetch_media(self.GROUP, "P1"))
+        await sidecar.expect(proto.MSG_FETCH_MEDIA)
+
+        assert await asyncio.wait_for(task, timeout=2.0) is None
+        assert not bridge._pending
+
+    async def test_after_one_unanswered_fetch_the_link_asks_no_more(
+        self, bridge, sidecar, sockets, monkeypatch,
+    ):
+        """A sidecar predating the frame costs one timeout per link, not one
+        per claiming turn, and a fresh `hello` asks again."""
+        monkeypatch.setattr(bridge_module, "FETCH_MEDIA_TIMEOUT_SECONDS", 0.2)
+        first = asyncio.ensure_future(bridge.fetch_media(self.GROUP, "P1"))
+        await sidecar.expect(proto.MSG_FETCH_MEDIA)
+        assert await asyncio.wait_for(first, timeout=2.0) is None
+
+        assert await asyncio.wait_for(
+            bridge.fetch_media(self.GROUP, "P2"), timeout=0.1,
+        ) is None
+        with pytest.raises(asyncio.TimeoutError):
+            await sidecar.next_message(timeout=0.2)
+
+        await sidecar.close()
+        async with connected(bridge, sockets) as again:
+            task = asyncio.ensure_future(bridge.fetch_media(self.GROUP, "P3"))
+            request = await again.expect(proto.MSG_FETCH_MEDIA)
+            assert request["message_id"] == "P3"
+            task.cancel()
+
+    async def test_a_send_result_cannot_answer_a_fetch(
+        self, bridge, sidecar, monkeypatch,
+    ):
+        monkeypatch.setattr(bridge_module, "FETCH_MEDIA_TIMEOUT_SECONDS", 0.3)
+        task = asyncio.ensure_future(bridge.fetch_media(self.GROUP, "P1"))
+        request = await sidecar.expect(proto.MSG_FETCH_MEDIA)
+        await sidecar.say(
+            proto.MSG_SEND_RESULT, request_id=request["request_id"], ok=True,
+            message_id="X",
+        )
+
+        assert await asyncio.wait_for(task, timeout=2.0) is None
+        assert bridge.status.malformed_lines >= 1
 
 
 class TestTheReactFrame:

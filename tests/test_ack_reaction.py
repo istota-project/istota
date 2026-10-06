@@ -1,12 +1,14 @@
 """ISSUE-655: an ack answered with a reaction, the held task, and settling it."""
 
 import json
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from istota import db
-from istota.config import Config
+from istota.config import DEFAULT_ACK_REACTIONS, Config
 from istota.rooms import ack_reaction
 from istota.rooms import speech_gate
 from istota.rooms.speech_gate import KIND_ACK, KIND_REPLY, GateDecision
@@ -33,12 +35,43 @@ def _cfg(value, table=None):
     ))
 
 
+class TestTheShippedLists:
+    """The loader's defaults: a list per named kind, `ack_reaction` for the rest."""
+
+    def test_each_kind_takes_its_shipped_list(self):
+        assert ack_reaction.reactions_for(Config(), "thanks") == [THUMB, OCTOPUS]
+        assert ack_reaction.reactions_for(Config(), "agreement") == [OK_HAND]
+        assert ack_reaction.reactions_for(Config(), "funny") == [LAUGH, OCTOPUS]
+        assert ack_reaction.reactions_for(Config(), "celebration") == [PARTY]
+
+    def test_an_unnamed_kind_takes_ack_reaction(self):
+        assert ack_reaction.reactions_for(Config()) == [THUMB]
+        config = Config()
+        config.speech_gate.ack_reaction = PARTY
+        assert ack_reaction.reactions_for(config, None) == [PARTY]
+
+    def test_an_empty_ack_reaction_still_turns_the_lists_off(self):
+        config = Config()
+        config.speech_gate.ack_reaction = ""
+        assert ack_reaction.reactions_for(config, "funny") == []
+
+    def test_the_example_config_shows_the_shipped_lists(self):
+        example = Path(__file__).parent.parent / "config" / "config.example.toml"
+        table = tomllib.loads(example.read_text())["speech_gate"]["ack_reactions"]
+        assert table == {k: list(v) for k, v in DEFAULT_ACK_REACTIONS.items()}
+
+    def test_instances_do_not_share_the_lists(self):
+        first = Config()
+        first.speech_gate.ack_reactions["funny"].append(PARTY)
+        assert Config().speech_gate.ack_reactions["funny"] == [LAUGH, OCTOPUS]
+
+
 class TestTheConfiguredReaction:
     """`ack_reaction` alone behaves exactly as in ISSUE-655."""
 
-    def test_the_default_is_a_thumbs_up(self):
-        assert ack_reaction.reactions_for(Config()) == [THUMB]
-        assert ack_reaction.pick(Config(), "funny", 301) == THUMB
+    def test_an_empty_table_leaves_ack_reaction(self):
+        assert ack_reaction.reactions_for(_cfg(THUMB)) == [THUMB]
+        assert ack_reaction.pick(_cfg(THUMB), "funny", 301) == THUMB
 
     def test_a_skin_tone_sequence_is_one_reaction(self):
         value = "\N{THUMBS UP SIGN}\N{EMOJI MODIFIER FITZPATRICK TYPE-4}"

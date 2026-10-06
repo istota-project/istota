@@ -344,7 +344,7 @@ class TestRetention:
 class TestConfig:
     def test_defaults(self):
         cfg = SpeechGateConfig()
-        assert cfg.mode == "mention"
+        assert (cfg.mode, cfg.disposition) == ("classifier", "friendly")
         assert cfg.model == "fast"
         assert (cfg.window_messages, cfg.max_message_chars) == (8, 400)
         assert cfg.decision_retention_days == 30

@@ -1746,8 +1746,8 @@ def _user_rows(config, token="group1"):
 class TestUnmentionedGroupTurnsAreRecorded:
     """SG 5: Talk no longer drops an unmentioned group turn before ingest.
 
-    The turn is stored in the room with no task, and the speech gate (at the
-    default ``mode = "mention"``) declines it. Nothing else a Talk message can
+    The turn is stored in the room with no task, and the speech gate (under
+    ``mode = "mention"``) declines it. Nothing else a Talk message can
     cause happens for it: no command, no confirmation answer, no cancel of a
     parked confirmation, no channel-gate notice. The recorded row is the only
     visible change.
@@ -1757,6 +1757,7 @@ class TestUnmentionedGroupTurnsAreRecorded:
     async def test_the_turn_is_stored_with_no_task(self, make_config):
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.speech_gate.mode = "mention"
 
         created, client = await _poll_group(
             config, _msg(id=101, actor_id="alice", message="Just chatting"),
@@ -2863,9 +2864,10 @@ class TestTheClassifierRunsBeforeThePollTransaction:
         assert created == []
 
     @pytest.mark.asyncio
-    async def test_the_default_mode_asks_nothing(self, make_config):
+    async def test_mention_mode_asks_nothing(self, make_config):
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.speech_gate.mode = "mention"
 
         with patch("istota.executor.build_speech_gate_completer") as build:
             created = await self._poll(

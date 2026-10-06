@@ -648,8 +648,8 @@ previous_tasks_count = ${ISTOTA_CONVERSATION_PREVIOUS_TASKS_COUNT:-3}
 talk_context_limit = ${ISTOTA_CONVERSATION_TALK_CONTEXT_LIMIT:-100}
 
 [speech_gate]
-mode = "${ISTOTA_SPEECH_GATE_MODE:-mention}"
-disposition = "${ISTOTA_SPEECH_GATE_DISPOSITION:-reserved}"
+mode = "${ISTOTA_SPEECH_GATE_MODE:-classifier}"
+disposition = "${ISTOTA_SPEECH_GATE_DISPOSITION:-friendly}"
 ack_reaction = "${ISTOTA_SPEECH_GATE_ACK_REACTION-👍}"
 model = "${ISTOTA_SPEECH_GATE_MODEL:-fast}"
 window_messages = ${ISTOTA_SPEECH_GATE_WINDOW_MESSAGES:-8}
@@ -981,31 +981,30 @@ PY
     # Per-kind ack reactions (ISSUE-657), each a comma-separated list. Last,
     # because a sub-table header closes whatever section is open, and several
     # sections above are finished by conditional blocks after their header.
-    # Only when one is set: an absent table is what lets
-    # ISTOTA_SPEECH_GATE_ACK_REACTION stand for `default` on its own.
+    # Unset takes the shipped list; set empty drops that kind, so it falls to
+    # DEFAULT and then ISTOTA_SPEECH_GATE_ACK_REACTION. The header is written
+    # even when every kind is empty, since no table means the shipped lists.
     _ack_reactions=""
-    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_DEFAULT:-}")"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_DEFAULT-}")"
     [ -z "$_list" ] || _ack_reactions="${_ack_reactions}default = ${_list}
 "
-    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_THANKS:-}")"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_THANKS-👍,🐙}")"
     [ -z "$_list" ] || _ack_reactions="${_ack_reactions}thanks = ${_list}
 "
-    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_AGREEMENT:-}")"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_AGREEMENT-👌}")"
     [ -z "$_list" ] || _ack_reactions="${_ack_reactions}agreement = ${_list}
 "
-    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_FUNNY:-}")"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_FUNNY-😄,🐙}")"
     [ -z "$_list" ] || _ack_reactions="${_ack_reactions}funny = ${_list}
 "
-    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_CELEBRATION:-}")"
+    _list="$(toml_string_list "${ISTOTA_SPEECH_GATE_ACK_REACTIONS_CELEBRATION-🎉}")"
     [ -z "$_list" ] || _ack_reactions="${_ack_reactions}celebration = ${_list}
 "
-    if [ -n "$_ack_reactions" ]; then
-        cat >> "$CONFIG_FILE" <<TOML
+    cat >> "$CONFIG_FILE" <<TOML
 
 [speech_gate.ack_reactions]
 ${_ack_reactions}
 TOML
-    fi
 
 }
 

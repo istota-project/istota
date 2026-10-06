@@ -935,18 +935,18 @@ talk_context_limit = 100
 # always gets a reply. "mention" replies only when mentioned (Talk's rule);
 # "classifier" lets a cheap model decide and does not reply if it fails;
 # "off" replies to every turn. Every turn is recorded whichever mode is set.
-mode = "mention"
+mode = "classifier"
 # How wide the classifier reads "for the bot". "reserved" answers a turn
 # addressed to it, asking it for something, or answering its question.
 # "friendly" also answers thanks and other reactions to its last answer, in
 # one short line. An unknown value is "reserved".
-disposition = "reserved"
+disposition = "friendly"
 # Under "friendly", a turn the classifier reads as only thanks is answered on
 # Talk and in WhatsApp groups with this reaction instead of a message, and
 # falls back to the one short line if the reaction cannot be sent. Empty
 # turns reactions off everywhere, the table below included. Web, SMS and
 # email always get the short line.
-ack_reaction = "\U0001F44D"
+ack_reaction = "👍"
 # Classifier model. A role alias ("fast"), resolved per brain namespace.
 model = "fast"
 # Transcript turns the classifier sees, and the per-turn character cap
@@ -956,17 +956,17 @@ timeout_seconds = 8.0
 # Days to keep the speech_gate_decisions audit rows (0 keeps them forever)
 decision_retention_days = 30
 
-# Optional: a list of reactions per kind of ack. The classifier names the kind
+# A list of reactions per kind of ack. The classifier names the kind
 # (thanks, agreement, funny, celebration, else default), never the emoji; one
 # is picked from the list by the message id, so a message always gets the same
-# one. A kind that is missing or empty uses default. The table wins over
-# ack_reaction, which fills default when the table has none.
-# [speech_gate.ack_reactions]
-# default = ["\U0001F44D"]
-# thanks = ["\U0001F44D", "\U0001F419"]
-# agreement = ["\U0001F44C"]
-# funny = ["\U0001F604", "\U0001F419"]
-# celebration = ["\U0001F389"]
+# one. A kind that is missing or empty uses default, and with no default,
+# ack_reaction. These are the shipped lists: a table here replaces them whole,
+# and an empty table leaves only ack_reaction.
+[speech_gate.ack_reactions]
+thanks = ["👍", "🐙"]
+agreement = ["👌"]
+funny = ["😄", "🐙"]
+celebration = ["🎉"]
 
 [money]
 # Whether the portfolio module may look up ticker metadata from a third-party

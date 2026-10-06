@@ -20,7 +20,7 @@ from istota import commands, confirmations, db
 from istota.rooms import policy as room_policy
 from istota.rooms import private_replies
 from istota.rooms import speech_gate
-from istota.config import Config, NextcloudConfig, TalkConfig, UserConfig
+from istota.config import Config, NextcloudConfig, SpeechGateConfig, TalkConfig, UserConfig
 from istota.transport._types import ParticipantRef
 from istota.transport.ingest import record_inbound
 
@@ -44,6 +44,8 @@ def _config(tmp_path):
         talk=TalkConfig(enabled=True, bot_username="bot"),
         users={"alice": UserConfig(display_name="Alice"),
                "bob": UserConfig(display_name="Bob")},
+        # The room's own settings are measured against these deployment values.
+        speech_gate=SpeechGateConfig(mode="mention", disposition="reserved"),
     )
 
 

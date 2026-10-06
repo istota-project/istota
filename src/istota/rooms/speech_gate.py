@@ -30,7 +30,7 @@ name. ``context._triage_older_messages`` fails *open*, because there dropping
 context is the harm. Two triage sites with opposite defaults, on purpose.
 
 **The disposition decides how wide "for the bot" is** (ISSUE-653).
-``reserved``, the default, answers a turn addressed to the bot, asking it for
+``reserved`` answers a turn addressed to the bot, asking it for
 something, or answering its question. ``friendly`` adds a turn that reacts to
 what the bot just said (thanks, an acknowledgement, a remark on its answer),
 and lets the verdict carry ``kind: "ack"``, which the task reads as "one short

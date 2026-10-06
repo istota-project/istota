@@ -43,7 +43,7 @@ from jinja2 import Environment, StrictUndefined
 
 from istota import config as config_module
 from istota.brain.claude_code import HAIKU, OPUS, SONNET
-from istota.config import Config, devbox_container_backend, load_config
+from istota.config import DEFAULT_ACK_REACTIONS, Config, devbox_container_backend, load_config
 
 
 @functools.cache
@@ -2424,9 +2424,15 @@ class TestTheAckReactionsTable:
     ``[speech_gate.ack_reactions]``, and ``istota_speech_gate_ack_reaction``
     keeps feeding ``default`` when the dict is empty."""
 
-    def test_the_default_render_emits_no_table(self, parsed):
-        assert "ack_reactions" not in parsed["speech_gate"]
+    def test_the_default_render_writes_the_shipped_lists(self, parsed):
+        shipped = {k: list(v) for k, v in DEFAULT_ACK_REACTIONS.items()}
+        assert parsed["speech_gate"]["ack_reactions"] == shipped
         assert parsed["speech_gate"]["ack_reaction"] == "\N{THUMBS UP SIGN}"
+
+    def test_an_empty_dict_leaves_only_ack_reaction(self):
+        config = load_config_from(render(istota_speech_gate_ack_reactions={}))
+        assert config.speech_gate.ack_reactions == {}
+        assert config.speech_gate.ack_reaction == "\N{THUMBS UP SIGN}"
 
     def test_the_dict_reaches_the_loader(self):
         laugh = "\N{SMILING FACE WITH OPEN MOUTH AND SMILING EYES}"
