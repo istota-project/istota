@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An email task records that its private-note step ran** (#651). Every email task that finishes its run without parking on a question now ends its task log with an `Email note step:` line saying what the step decided, such as a note written, no note due, or not an email thread. A task whose reply could not be sent still gets the line. Before, nothing in the database said the step had finished, so "no note" and "not yet" looked the same from outside.
 - **Ack reactions can vary by kind** (#657). `[speech_gate.ack_reactions]` holds a list of emoji for each kind of ack the classifier names (thanks, agreement, funny, celebration) plus `default`, so a joke can get a laugh and good news a party popper. The bot picks from the list by message id, so the same message always gets the same emoji; `ack_reaction` alone works as before, and `ack_reaction = ""` still turns reactions off. Docker takes `ISTOTA_SPEECH_GATE_ACK_REACTIONS_<KIND>` and Ansible `istota_speech_gate_ack_reactions`.
 
   **Upgrade note:** adds `ack_type` and `reaction` columns to `speech_gate_decisions` by migration.
