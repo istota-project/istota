@@ -1039,6 +1039,20 @@ describe('Composer drafts', () => {
     expect(readDraft('room:9')).toBe('B own draft');
   });
 
+  it('removes the selected attachment through its touch target', async () => {
+    upload.mockResolvedValue({ path: 'inbox/example.txt', name: 'example.txt', size: 4 });
+    const { container } = mount({ draftKey: 'room:3' });
+    const input = picker(container, 'file');
+    Object.defineProperty(input, 'files', { value: [new File(['test'], 'example.txt')] });
+    await fireEvent.change(input);
+    await tick();
+
+    const remove = container.querySelector('.attach-x')!;
+    expect(remove.classList.contains('touch-target')).toBe(true);
+    await fireEvent.click(remove);
+    expect(container.querySelector('.attach-chip')).toBeNull();
+  });
+
   it('does not carry attachments into the next room', async () => {
     // Not drafted, but they must not ride along either: re-picking a file
     // costs a tap, posting one to the wrong room does not undo.

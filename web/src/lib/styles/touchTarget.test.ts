@@ -183,3 +183,25 @@ describe('reported touch controls', () => {
     expect(blockAfter(coarse, selector)).toContain(declaration);
   });
 });
+
+describe('compact control touch targets', () => {
+  it.each([
+    ['lib/components/ui/CategoryGroup.svelte', 'caret-btn'],
+    ['lib/components/ui/HintPopover.svelte', 'ui-hint-trigger'],
+    ['lib/components/chat/Composer.svelte', 'attach-x'],
+    ['lib/components/chat/Message.svelte', 'star-btn'],
+    ['routes/health/documents/+page.svelte', 'detach'],
+    ['routes/health/labs/panel/+page.svelte', 'del'],
+  ])('uses the shared target for %s %s', (file, control) => {
+    const source = readFileSync(resolve(SRC, file), 'utf8');
+    expect(source).toContain(`class="${control} touch-target"`);
+  });
+
+  it('keeps the category caret within its own column on touch', () => {
+    const source = readFileSync(resolve(SRC, 'lib/components/ui/CategoryGroup.svelte'), 'utf8');
+    const coarse = blockAfter(source, '@media (pointer: coarse)') ?? '';
+    expect(blockAfter(coarse, '.caret-btn')).toContain('min-width: var(--touch-min)');
+    expect(blockAfter(coarse, '.caret-btn')).toContain('--touch-target-w: 100%');
+    expect(blockAfter(coarse, '.cat-header')).toContain('gap: var(--space-1)');
+  });
+});

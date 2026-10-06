@@ -1193,7 +1193,7 @@
           {isAudio(att.name) ? '🎤' : '📎'}
           <span class="attach-name">{att.name}</span>
           <button
-            class="attach-x"
+            class="attach-x touch-target"
             onclick={() => removeAttachment(attachKey(att))}
             type="button"
             aria-label="Remove {att.name}"

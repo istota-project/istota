@@ -107,6 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Small location, chat, health and help controls are easier to tap on phones. Category collapse buttons have enough room beside their labels to avoid selecting the category by mistake.
+
 - Feed stars and section dropdowns are easier to tap on phones and tablets. Dropdown choices have taller touch rows, and room action menus have more space beside the room name.
 
 - **Cards in the web chat transcript use a card fill** (#671). A received mail, a message from outside the room and the activity chip were filled with the badge colour, a mid grey on the light theme's white transcript, and a quoted reply had no visible card at all in the dark theme. All four now share one fill, a step off the transcript background in each theme.

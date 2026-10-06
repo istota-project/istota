@@ -728,7 +728,7 @@
 
 {#snippet starButton()}
   <button
-    class="star-btn"
+    class="star-btn touch-target"
     class:starred={message.starred}
     onclick={(e) => {
       onToggleStar?.(message.cid);
