@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onMount, untrack } from 'svelte';
+  import { page } from '$app/state';
+  import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
   import { getAccounts, type AccountRow } from '$lib/money/api';
   import { selectedAccount, selectedYear, filterText } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
@@ -12,6 +15,54 @@
 
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 11 }, (_, i) => currentYear - i);
+
+  type TransactionSelection = { account: string; year: number };
+  let selectionReady = $state(false);
+
+  function applySelection(selection: TransactionSelection) {
+    selectedAccount.set(selection.account);
+    selectedYear.set(selection.year);
+  }
+
+  const transactionSel = createUrlSelection<TransactionSelection>({
+    key: 'transactions',
+    params: ['account', 'year'],
+    encode(selection) {
+      const params: Params = {};
+      if (selection.account) params.account = selection.account;
+      params.year = selection.year ? String(selection.year) : 'all';
+      return params;
+    },
+    decode(params) {
+      const year = Number(params.year);
+      const validYear = /^\d{4}$/.test(params.year ?? '') && year >= 1900 && year <= 2100;
+      return {
+        account: params.account ?? '',
+        year: params.year === 'all' ? 0 : validYear ? year : currentYear,
+      };
+    },
+    read: () => (selectionReady ? { account: $selectedAccount, year: $selectedYear } : null),
+    apply: applySelection,
+  });
+
+  // A query-only navigation can reuse this layout, including Back after reload.
+  let lastUrl = page.url;
+  $effect(() => {
+    const url = page.url;
+    if (url === lastUrl) return;
+    lastUrl = url;
+    untrack(() => {
+      if (!selectionReady) return;
+      const selection = transactionSel.current();
+      if (selection) applySelection(selection);
+    });
+  });
+  transactionSel.start();
+  onMount(() => {
+    const selection = transactionSel.current();
+    if (selection) applySelection(selection);
+    selectionReady = true;
+  });
 
   interface AccountNode {
     name: string;
@@ -62,7 +113,10 @@
   }
 
   function selectAccount(fullName: string) {
-    selectedAccount.update((current) => (current === fullName ? '' : fullName));
+    transactionSel.push({
+      account: $selectedAccount === fullName ? '' : fullName,
+      year: $selectedYear,
+    });
     sidebarOpen = false;
   }
 
@@ -98,7 +152,9 @@
 
   const yearOptions = $derived([
     { value: '', label: 'All' },
-    ...years.map((y) => ({ value: String(y), label: String(y) })),
+    ...($selectedYear && !years.includes($selectedYear) ? [$selectedYear, ...years] : years).map(
+      (y) => ({ value: String(y), label: String(y) }),
+    ),
   ]);
 
   const selectedYearValue = $derived($selectedYear ? String($selectedYear) : '');
@@ -106,7 +162,7 @@
 
 <div class="money-section-header">
   {#if $selectedAccount}
-    <button class="active-filter" onclick={() => selectedAccount.set('')} type="button">
+    <button class="active-filter" onclick={() => selectAccount($selectedAccount)} type="button">
       {$selectedAccount} <span class="clear">&times;</span>
     </button>
   {/if}
