@@ -78,7 +78,7 @@
 		   keep this margin 0 so a tool-first chip sits flush under the meta. */
     margin: 0;
     border-radius: var(--radius-sm);
-    background: var(--surface-badge);
+    background: var(--surface-reading-card);
     max-width: 100%;
     width: fit-content;
     min-width: 0;
@@ -94,9 +94,9 @@
   .activity.active {
     background: linear-gradient(
       100deg,
-      var(--surface-badge) 20%,
+      var(--surface-reading-card) 20%,
       var(--shimmer-tint) 50%,
-      var(--surface-badge) 80%
+      var(--surface-reading-card) 80%
     );
     background-size: 200% 100%;
     animation: activity-pulse 1.5s ease-in-out infinite;
@@ -112,7 +112,7 @@
   @media (prefers-reduced-motion: reduce) {
     .activity.active {
       animation: none;
-      background: var(--surface-badge);
+      background: var(--surface-reading-card);
     }
   }
 
