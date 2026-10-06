@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import type { HealthDocument } from '$lib/api';
 import { viewer } from '$lib/fileViewer/store.svelte';
 import FileViewerHost from '$lib/fileViewer/FileViewerHost.svelte';
@@ -76,10 +76,15 @@ describe('Health document image links', () => {
     await fireEvent.click(link, { ctrlKey: true });
     expect(viewer.state.mode).toBe('closed');
     await fireEvent.keyDown(screen.getByLabelText('Document actions'), { key: 'Enter' });
-    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Open' }));
+    const open = await screen.findByRole('menuitem', { name: 'Open' });
+    open.focus();
+    await fireEvent.click(open);
     expect(viewer.state).toEqual({ mode: 'images', images: [doc.url], index: 0 });
     expect(screen.queryByRole('menu')).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Close image' }));
     expect(document.querySelector('.lightbox img')).toBeNull();
+    await waitFor(() =>
+      expect(document.activeElement === screen.getByLabelText('Document actions')).toBe(true),
+    );
   });
 });

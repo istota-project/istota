@@ -25,10 +25,12 @@
   }
 
   let { items, ariaLabel = 'Actions' }: Props = $props();
+  let trigger: HTMLButtonElement | null = $state(null);
 </script>
 
 <DropdownMenu.Root>
   <DropdownMenu.Trigger
+    bind:ref={trigger}
     class="ui-kebab-trigger"
     aria-label={ariaLabel}
     onclick={(e) => e.stopPropagation()}
@@ -48,7 +50,11 @@
                 data-sveltekit-reload={item.reload ? '' : undefined}
                 onclick={(event) => {
                   props.onclick?.(event);
-                  if (!item.disabled) item.onClick?.(event);
+                  if (!item.disabled && item.onClick) {
+                    // A viewer opened here must return to the surviving trigger.
+                    trigger?.focus();
+                    item.onClick(event);
+                  }
                 }}>{item.label}</a
               >
             {/snippet}
