@@ -118,6 +118,12 @@ DRAIN_TIMEOUT = 10.0
 #: a sidecar that predates the frame never answers, and the reply waits on it.
 REACT_TIMEOUT_SECONDS = 15.0
 
+#: How long a claimed file's fetch waits (ISSUE-658). Above the sidecar's own
+#: 60-second download deadline, so its answer, success or failure, arrives
+#: first; the inbound worker is held for this long at most, as it would be for
+#: a file downloaded with its own message.
+FETCH_MEDIA_TIMEOUT_SECONDS = 75.0
+
 #: Pending inbound events. Deliberately large and deliberately *dropping* past
 #: it rather than blocking the reader: the worker's own work can include a
 #: reply, which awaits a `send_result` only the reader can deliver, so a reader
@@ -1335,6 +1341,9 @@ def _staged_file_is_readable(staged: Path) -> bool:
 #: from `None`, which is an asked-ahead answer of "no classifier decision".
 _ASK_CLASSIFIER = object()
 
+#: `_round_trip`'s answer for a line that was written and never answered.
+_NO_ANSWER = object()
+
 
 def stage_inbound_media(
     config: Config, media_dir: Path, event: InboundWhatsAppEvent,
@@ -1643,6 +1652,13 @@ class BaileysBridge:
         self._server: asyncio.AbstractServer | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future] = {}
+        # Which pending ids are claimed-file fetches (ISSUE-658), so a
+        # `media_result` and a `send_result` can only resolve their own kind.
+        self._fetch_requests: set[str] = set()
+        # Set when a sidecar on this link left a fetch unanswered, which is
+        # what one predating the frame does; cleared by the next `hello`, so
+        # an old sidecar costs the inbound worker one timeout, not one a turn.
+        self._fetch_unanswered = False
         # Reactions in flight (ISSUE-655), held so the loop does not drop them.
         self._react_tasks: set[asyncio.Task] = set()
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=INBOUND_QUEUE_MAX)
@@ -3576,11 +3592,14 @@ class BaileysBridge:
             )
             return False
         self._status.protocol_version = version
+        self._fetch_unanswered = False
         return True
 
     def _dispatch(self, message_type: str, payload: dict) -> None:
         if message_type == proto.MSG_SEND_RESULT:
             self._resolve_send(payload)
+        elif message_type == proto.MSG_MEDIA_RESULT:
+            self._resolve_fetch(payload)
         elif message_type in (
             proto.MSG_INBOUND, proto.MSG_RECEIPT, proto.MSG_GROUP_ROSTER,
         ):
@@ -3862,6 +3881,10 @@ class BaileysBridge:
             self._status.malformed_lines += 1
             logger.warning("whatsapp.baileys.send_result_unkeyed reason=%s", exc)
             return
+        if request_id in self._fetch_requests:
+            self._status.malformed_lines += 1
+            logger.warning("whatsapp.baileys.send_result_for_a_fetch")
+            return
         future = self._pending.pop(request_id, None)
         if future is None:
             # The send already timed out or the link dropped under it, and its
@@ -3880,6 +3903,26 @@ class BaileysBridge:
             outcome = proto.local_failure(proto.REASON_LINK_LOST, definite=False)
         if not future.done():
             future.set_result(outcome)
+
+    def _resolve_fetch(self, payload: dict) -> None:
+        """Hand a `media_result` to the fetch waiting on it, as raw fields."""
+        try:
+            request_id = proto.result_request_id(payload)
+        except proto.BaileysProtocolError as exc:
+            self._status.malformed_lines += 1
+            logger.warning("whatsapp.baileys.media_result_unkeyed reason=%s", exc)
+            return
+        if request_id not in self._fetch_requests:
+            self._status.malformed_lines += 1
+            logger.warning("whatsapp.baileys.media_result_unrequested")
+            return
+        future = self._pending.pop(request_id, None)
+        if future is None:
+            # The fetch timed out; a file it staged is the orphan sweep's.
+            logger.info("whatsapp.baileys.media_result_late request=%s", request_id)
+            return
+        if not future.done():
+            future.set_result(payload)
 
     def _enqueue(self, message_type: str, payload: dict) -> None:
         try:
@@ -3936,8 +3979,13 @@ class BaileysBridge:
             logger.debug("whatsapp.baileys.receipt_ignored")
             return
         classified = _ASK_CLASSIFIER
+        if (
+            isinstance(event, InboundWhatsAppEvent) and event.group is not None
+            and event.media is None
+        ):
+            event, classified = await self._claim_earlier_media(event)
         if isinstance(event, InboundWhatsAppEvent) and event.media is not None:
-            if event.group is not None:
+            if event.group is not None and classified is _ASK_CLASSIFIER:
                 # Asked ahead of the staging for a group's file, which is
                 # placed only for a turn the gate would answer (ISSUE-646),
                 # and handed on so the transaction reads the same answer.
@@ -3956,6 +4004,49 @@ class BaileysBridge:
                 None if classified is _ASK_CLASSIFIER else classified,
             )
         await self._apply_with_retry(event, classified)
+
+    async def _claim_earlier_media(self, event: InboundWhatsAppEvent):
+        """A group turn with the earlier file it claims (ISSUE-658), and the
+        classifier's answer if one was asked.
+
+        Fetched only when `groups.claim_candidate` names a file and
+        `media_recipient` says the turn would be answered, so an unaddressed
+        turn stages nothing. A fetch that brings back nothing, a failure or a
+        different kind of file leaves the turn as it came.
+        """
+        from istota.lib import sqlite_util  # noqa: PLC0415
+        from .groups import (  # noqa: PLC0415
+            claim_candidate,
+            classify_group_event,
+            media_recipient,
+        )
+
+        def factory():
+            return sqlite_util.connect_read_only(self._config.db_path)
+
+        claim = await asyncio.to_thread(claim_candidate, factory, self._config, event)
+        if claim is None:
+            return event, _ASK_CLASSIFIER
+        classified = await asyncio.to_thread(
+            classify_group_event, self._config, event,
+        )
+        recipient = await asyncio.to_thread(
+            media_recipient, factory, self._config, event, classified=classified,
+        )
+        if recipient is None:
+            return event, classified
+        media = await self.fetch_media(event.group.group_jid, claim.message_id)
+        if media is None or media.error is not None or media.kind != claim.kind:
+            if media is not None and media.staged_path:
+                media_rules.discard_staged(Path(self._media_dir) / media.staged_path)
+            logger.info(
+                "whatsapp.baileys.claim_not_fetched message=%s",
+                message_fingerprint(event.message_id),
+            )
+            return event, classified
+        return dataclasses.replace(
+            event, media=media, claimed_from=claim.message_id,
+        ), classified
 
     async def _apply_with_retry(self, event, classified=_ASK_CLASSIFIER) -> None:
         """Apply one event, retrying a database failure in place.
@@ -4088,12 +4179,6 @@ class BaileysBridge:
         send there is no ledger: a reaction that went out unanswered costs a
         thumbs-up beside the short reply, never a lost message.
         """
-        if (
-            self._repairing or self._pairing_window is not None
-            or self._status.fatal_is_permanent or self._session_unpaired
-            or self._status.connection_replaced_latched
-        ):
-            return False
         request_id = secrets.token_hex(8)
         try:
             line = proto.encode(proto.MSG_REACT, **proto.react_payload(
@@ -4102,30 +4187,89 @@ class BaileysBridge:
         except proto.BaileysProtocolError:
             logger.warning("whatsapp.baileys.react_unencodable")
             return False
+        outcome = await self._round_trip(
+            request_id, line, REACT_TIMEOUT_SECONDS, "react",
+        )
+        return isinstance(outcome, WhatsAppSendResult)
+
+    async def fetch_media(
+        self, chat: str, message_id: str,
+    ) -> WhatsAppInboundMedia | None:
+        """Ask the sidecar to fetch an earlier inbound message's file
+        (ISSUE-658). Never raises.
+
+        The sidecar holds the message only in its in-memory inbound cache, so
+        a miss, a sidecar that predates the frame, and no answer within
+        `FETCH_MEDIA_TIMEOUT_SECONDS` are all None: nothing to claim. After
+        one unanswered fetch the link asks no more until the next `hello`.
+        A fetch that failed is a record with an `error`.
+        """
+        if self._fetch_unanswered:
+            return None
+        request_id = secrets.token_hex(8)
+        try:
+            line = proto.encode(proto.MSG_FETCH_MEDIA, **proto.fetch_media_payload(
+                request_id, chat=chat, message_id=message_id,
+            ))
+        except proto.BaileysProtocolError:
+            logger.warning("whatsapp.baileys.fetch_media_unencodable")
+            return None
+        self._fetch_requests.add(request_id)
+        try:
+            payload = await self._round_trip(
+                request_id, line, FETCH_MEDIA_TIMEOUT_SECONDS, "fetch_media",
+            )
+        finally:
+            self._fetch_requests.discard(request_id)
+        if payload is _NO_ANSWER:
+            self._fetch_unanswered = True
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return proto.fetched_media(payload)
+
+    async def _round_trip(self, request_id: str, line: bytes, timeout: float, what: str):
+        """Write one request line and wait for whatever answers its id.
+
+        For the frames with no ledger behind them (a reaction, a claimed
+        file's fetch), where a lost answer costs nothing but itself. None when
+        the line was not written or failed, `_NO_ANSWER` when it was written
+        and nothing answered within *timeout*. The write lock is waited on for
+        `DRAIN_TIMEOUT` at most, so a busy send path cannot double the wait.
+        """
+        if (
+            self._repairing or self._pairing_window is not None
+            or self._status.fatal_is_permanent or self._session_unpaired
+            or self._status.connection_replaced_latched
+        ):
+            return None
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         try:
             await asyncio.wait_for(
-                self._write_lock.acquire(), timeout=REACT_TIMEOUT_SECONDS,
+                self._write_lock.acquire(), timeout=min(timeout, DRAIN_TIMEOUT),
             )
             try:
                 writer = self._writer
                 if writer is None or writer.is_closing():
-                    return False
+                    return None
                 self._pending[request_id] = future
                 writer.write(line)
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(writer.drain(), timeout=DRAIN_TIMEOUT)
             finally:
                 self._write_lock.release()
-            outcome = await asyncio.wait_for(future, timeout=REACT_TIMEOUT_SECONDS)
+            try:
+                return await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("whatsapp.baileys.%s_unanswered", what)
+                return _NO_ANSWER
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.warning("whatsapp.baileys.react_failed")
-            return False
+            logger.warning("whatsapp.baileys.%s_failed", what)
+            return None
         finally:
             self._pending.pop(request_id, None)
-        return isinstance(outcome, WhatsAppSendResult)
 
     async def leave_group(self, group_jid: str) -> bool:
         """Ask the sidecar to leave a WhatsApp group (D14). Never raises.

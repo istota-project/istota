@@ -30,6 +30,11 @@ and the room is registered here, never by `record_inbound`.
   turn runs as the host, and the copy would land in the host's). Every turn
   with a file it did not open, and every unsupported message, is still
   recorded under a stand-in naming what was sent.
+- **Claiming** (ISSUE-658): an addressed member's turn may pull in a file
+  left unopened earlier, by quoting it or by following up on their own file
+  within `FOLLOW_UP_WINDOW_SECONDS`. `claim_candidate` names it before the
+  bridge asks the sidecar to fetch it, and `_claimable` is the one rule both
+  that and the transaction read. A guest's file is never claimable.
 
 A group never sends the fixed direct-chat replies (`HELP`, `STOP`, the
 unsupported-type and media-failed notices): those answer one person, and
@@ -39,9 +44,10 @@ everyone in the group would read them.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from istota import confirmations, db
 from istota.rooms import policy as room_policy
@@ -77,6 +83,23 @@ _TURN_TYPES = _WORDED_TYPES | frozenset({"unsupported"})
 #: What a mention of somebody the room cannot name becomes: neither a number
 #: nor a LID.
 UNNAMED_MENTION = "@member"
+
+#: How soon after a member's unopened file their addressed follow-up may claim
+#: it, and how old a quoted file may be (ISSUE-658). The sidecar's inbound
+#: cache (256 messages, memory only) bounds both again from its side.
+FOLLOW_UP_WINDOW_SECONDS = 120
+QUOTE_WINDOW_SECONDS = 24 * 3600
+#: What the transaction's re-check adds to either window: the time the fetch
+#: may have taken since the pre-check passed (the bridge's 75-second answer
+#: wait plus its 10-second lock wait, rounded up), so a claim that was in its
+#: window when asked is not refused for the fetch's own duration.
+CLAIM_SLACK_SECONDS = 120
+
+
+class MediaClaim(NamedTuple):
+    """An earlier group message whose unopened file a turn may claim."""
+    message_id: str
+    kind: str
 
 
 def group_room_token(group_jid: str) -> str:
@@ -557,10 +580,175 @@ def _stand_in(event: InboundWhatsAppEvent, *, guest: bool) -> str:
     if event.message_type == "unsupported":
         label = media_rules.UNSUPPORTED_LABELS.get(event.unsupported_kind or "", "a message")
         return f"[Sent {label}, which this bot cannot open.]"
-    label = media_rules.MEDIA_LABELS.get(event.message_type, "a file")
     if guest:
+        label = media_rules.MEDIA_LABELS.get(event.message_type, "a file")
         return f"[Sent {label}. Files from guests are not opened.]"
+    return _unopened_stand_in(event.message_type)
+
+
+def _unopened_stand_in(kind: str) -> str:
+    label = media_rules.MEDIA_LABELS.get(kind, "a file")
     return f"[Sent {label}, which was not opened.]"
+
+
+def _claimed_stand_in(kind: str) -> str:
+    label = media_rules.MEDIA_LABELS.get(kind, "a file")
+    return f"[Sent {label}, opened for a later message.]"
+
+
+def _unopened_kind(body: str) -> str | None:
+    """The kind of a member's unopened file a stored row's last line names.
+
+    The line is ours (`_unopened_stand_in`), so an exact match is enough: a
+    member who types it as text names a message that holds no file, and the
+    sidecar answers that with nothing to fetch.
+    """
+    last = (body or "").rsplit("\n", 1)[-1]
+    for kind in media_rules.MEDIA_KINDS:
+        if last == _unopened_stand_in(kind):
+            return kind
+    return None
+
+
+def _whatsapp_id(external_ids: str | None) -> str | None:
+    try:
+        ids = json.loads(external_ids or "")
+    except (TypeError, ValueError):
+        return None
+    value = ids.get(SURFACE) if isinstance(ids, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+_CLAIM_COLUMNS = (
+    "id, role, body, task_id, author_user_id, author_label, "
+    "author_participant_id, external_ids"
+)
+
+
+def _claimable(
+    conn, room_token: str, user_id: str, event: InboundWhatsAppEvent,
+    *, slack_seconds: int = 0,
+) -> tuple[int, MediaClaim] | None:
+    """The stored row whose file this member's turn may claim, and what to
+    fetch for it (ISSUE-658), or None.
+
+    One rule for the unlocked pre-check and the transaction. The row must be
+    a member's unopened file, never a guest's: the guest stand-in is another
+    line, and the author must be a principal participant. A quote names the
+    row and may be another member's (decided: everyone in the group already
+    saw it). A follow-up claims the sender's own latest unopened, unanswered
+    file within `FOLLOW_UP_WINDOW_SECONDS`, and only while nothing in the room
+    was answered after it. *slack_seconds* widens both windows for the
+    transaction's re-check (`CLAIM_SLACK_SECONDS`).
+    """
+    if event.reply_to_message_id:
+        row_id = db.find_message_by_external_id(
+            conn, room_token, SURFACE, event.reply_to_message_id,
+        )
+        if row_id is None:
+            return None
+        row = conn.execute(
+            f"SELECT {_CLAIM_COLUMNS} FROM messages WHERE id = ? "
+            "AND created_at >= datetime('now', ?)",
+            (row_id, f"-{QUOTE_WINDOW_SECONDS + slack_seconds} seconds"),
+        ).fetchone()
+    else:
+        row = None
+        for candidate in conn.execute(
+            f"SELECT {_CLAIM_COLUMNS} FROM messages WHERE room_token = ? "
+            "AND role = 'user' AND author_user_id = ? AND task_id IS NULL "
+            "AND created_at >= datetime('now', ?) ORDER BY id DESC LIMIT 20",
+            (room_token, user_id,
+             f"-{FOLLOW_UP_WINDOW_SECONDS + slack_seconds} seconds"),
+        ):
+            if _unopened_kind(candidate["body"]) is not None:
+                row = candidate
+                break
+        if row is not None and conn.execute(
+            "SELECT 1 FROM messages WHERE room_token = ? AND id > ? "
+            "AND (role = 'assistant' OR task_id IS NOT NULL) LIMIT 1",
+            (room_token, row["id"]),
+        ).fetchone() is not None:
+            return None
+    if row is None or row["role"] != "user" or not row["author_user_id"]:
+        return None
+    if row["author_label"]:
+        return None
+    if row["author_participant_id"] is not None:
+        author = conn.execute(
+            "SELECT kind FROM room_participants WHERE id = ?",
+            (row["author_participant_id"],),
+        ).fetchone()
+        if author is None or author["kind"] != participants.PRINCIPAL:
+            return None
+    kind = _unopened_kind(row["body"])
+    message_id = _whatsapp_id(row["external_ids"])
+    if kind is None or message_id is None:
+        return None
+    return int(row["id"]), MediaClaim(message_id, kind)
+
+
+def claim_candidate(conn_factory, config: "Config", event) -> MediaClaim | None:
+    """The earlier file a group turn would claim, before anything is fetched.
+
+    The pre-check half of ISSUE-658, read-only on the connection
+    ``conn_factory`` returns, which this owns and closes. Only a member's text
+    turn with no file of its own and no command. Whether the turn would be
+    answered is `media_recipient`'s question, which the caller asks before
+    the fetch. Never raises.
+    """
+    import sqlite3
+
+    group = getattr(event, "group", None)
+    if (
+        group is None or getattr(event, "media", None) is not None
+        or getattr(event, "message_type", None) not in _TEXT_TYPES
+        or (event.text or "").strip().startswith("!")
+    ):
+        return None
+    try:
+        conn = conn_factory()
+    except Exception:  # noqa: BLE001 — no read connection claims nothing
+        logger.warning("whatsapp.group.claim_unavailable")
+        return None
+    try:
+        conn.row_factory = sqlite3.Row
+        group_jid = identity_rules.normalize_group_jid(group.group_jid)
+        token = db.resolve_room_token(conn, SURFACE, group_jid) if group_jid else None
+        room = db.get_room(conn, token) if token else None
+        if room is None or room.archived or room_veto.is_vetoed(conn, room.token):
+            return None
+        sender_jid = identity_rules.normalize_jid(event.from_user.jid)
+        user_id = (
+            identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
+        )
+        if not user_id:
+            return None
+        found = _claimable(conn, room.token, user_id, event)
+        return found[1] if found is not None else None
+    except Exception as e:  # noqa: BLE001 — a failed read claims nothing
+        logger.warning("whatsapp.group.claim_failed: %s", type(e).__name__)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 — nothing useful to do with it
+            pass
+
+
+def _settle_claim(conn, row_id: int, kind: str) -> None:
+    """The claimed row stops saying its file was not opened."""
+    row = conn.execute("SELECT body FROM messages WHERE id = ?", (row_id,)).fetchone()
+    if row is None:
+        return
+    head, _, last = row["body"].rpartition("\n")
+    if last != _unopened_stand_in(kind):
+        return
+    claimed = _claimed_stand_in(kind)
+    conn.execute(
+        "UPDATE messages SET body = ? WHERE id = ?",
+        (f"{head}\n{claimed}" if head else claimed, row_id),
+    )
 
 
 def handle_group_message(
@@ -646,6 +834,29 @@ def handle_group_message(
     body = text if event.message_type in _TURN_TYPES else ""
     attachments: list[str] = []
     unsupported = event.message_type == "unsupported"
+    claimed: tuple[int, MediaClaim] | None = None
+    if event.claimed_from is not None and event.message_type in _TEXT_TYPES:
+        # A file the bridge fetched for an earlier message (ISSUE-658),
+        # attached only when the rule still holds under the lock and the copy
+        # is this sender's. `attached` waits for a task to hold it, so a turn
+        # that ends any other way reports the copy as stranded.
+        media = _media_for_user(event, user_id or "").media
+        confirmed = _claimable(
+            conn, room.token, user_id, event, slack_seconds=CLAIM_SLACK_SECONDS,
+        ) if user_id else None
+        if (
+            confirmed is not None and confirmed[1].message_id == event.claimed_from
+            and media is not None and media.error is None and media.staged_path
+            and media.kind == confirmed[1].kind
+        ):
+            claimed = confirmed
+            attachments = [media.staged_path]
+            body = media_turn_text(text, media, attachments)
+        else:
+            logger.info(
+                "whatsapp.group.claim_refused message=%s",
+                message_fingerprint(event.message_id),
+            )
     if unsupported and not text and event.unsupported_kind is None:
         # A frame with no kind and no words is whatever the sidecar could not
         # read at all (a wrapper, a reaction); a row for each would fill the
@@ -730,6 +941,12 @@ def handle_group_message(
         classified=classified,
         can_react=True,
     )
+    if claimed is not None and outcome.task_id is not None:
+        attached = True
+        if not outcome.held_for_reaction:
+            # A held ack's task is deleted once the reaction lands, so the
+            # file would be marked opened with nothing having read it.
+            _settle_claim(conn, claimed[0], claimed[1].kind)
     if outcome.held_for_reaction:
         return done(WhatsAppEventResult(
             "group_ack", user_id=user_id, task_id=outcome.task_id,
@@ -743,8 +960,10 @@ def handle_group_message(
 
 
 __all__ = [
+    "MediaClaim",
     "addressed_to_bot",
     "apply_roster",
+    "claim_candidate",
     "classify_group_event",
     "group_destination",
     "group_room_token",
