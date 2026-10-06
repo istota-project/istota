@@ -95,7 +95,7 @@ describe('workspace file viewer through the host', () => {
     expect(await screen.findByText("Couldn't load a preview.")).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Download' })).toBeTruthy();
   });
-  it('hands images to Lightbox with no remaining dialog and closes/reopens', async () => {
+  it('hands images to Lightbox with no remaining file dialog and closes/reopens', async () => {
     preview.mockResolvedValue({ ...text('image.png'), kind: 'image', text: undefined });
     open('/image.png');
     await waitFor(() =>
@@ -103,7 +103,8 @@ describe('workspace file viewer through the host', () => {
         chatFileUrl('/image.png'),
       ),
     );
-    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Image viewer' })).not.toBeNull();
+    expect(document.querySelector('.ui-modal-content')).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Close image' }));
     expect(document.querySelector('.lightbox')).toBeNull();
     preview.mockResolvedValue(text());

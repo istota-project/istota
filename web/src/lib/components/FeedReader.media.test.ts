@@ -10,10 +10,11 @@
  * attachment's hero is a real link to the file, and neither reaches the
  * lightbox. An ordinary image post is untouched.
  */
-import { describe, it, expect, afterEach } from 'vitest';
-import { render, cleanup, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import type { FeedEntry } from '$lib/api';
 import FeedReader from './FeedReader.svelte';
+import Lightbox from './Lightbox.svelte';
 
 afterEach(cleanup);
 
@@ -236,4 +237,22 @@ describe('the reader on an ordinary image post', () => {
     await fireEvent.click(container.querySelector('.hero-img') as HTMLElement);
     expect(opened).toBe(true);
   });
+});
+
+it('Escape in an image viewer keeps the feed reader open underneath', async () => {
+  const closeReader = vi.fn();
+  const closeImage = vi.fn();
+  const images = ['https://example.com/image.png'];
+  render(FeedReader, {
+    entries: [entry({ images })],
+    index: 0,
+    onClose: closeReader,
+    onImageClick: () => {},
+  });
+  render(Lightbox, { images, index: 0, onClose: closeImage });
+  const close = screen.getByRole('button', { name: 'Close image' });
+  close.focus();
+  await fireEvent.keyDown(close, { key: 'Escape' });
+  expect(closeImage).toHaveBeenCalledTimes(1);
+  expect(closeReader).not.toHaveBeenCalled();
 });

@@ -523,3 +523,23 @@ describe('visible viewer controls', () => {
     expect(screen.queryByRole('link', { name: 'Download' })).toBeNull();
   });
 });
+
+it('shows a download fallback after an image decode failure, then resets on reopen', async () => {
+  const { container, rerender } = render(Lightbox, {
+    images: ['/istota/api/health/documents/1/file'],
+    index: 0,
+    onClose: vi.fn(),
+    download: true,
+  });
+  await fireEvent.error(container.querySelector('img')!);
+  expect(
+    screen.getByText('This image could not be displayed. Download it to open it in another app.'),
+  ).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Download' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Close image' })).toBeTruthy();
+  await rerender({ index: null });
+  await rerender({ index: 0 });
+  expect(
+    screen.queryByText('This image could not be displayed. Download it to open it in another app.'),
+  ).toBeNull();
+});

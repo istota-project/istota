@@ -4,6 +4,7 @@ import type { HealthDocument } from '$lib/api';
 import { viewer } from '$lib/fileViewer/store.svelte';
 import FileViewerHost from '$lib/fileViewer/FileViewerHost.svelte';
 import DocumentCard from './DocumentCard.svelte';
+import DocumentCardModal from './DocumentCardModal.fixture.svelte';
 
 const doc: HealthDocument = {
   id: 1,
@@ -87,4 +88,20 @@ describe('Health document image links', () => {
       expect(document.activeElement === screen.getByLabelText('Document actions')).toBe(true),
     );
   });
+});
+
+it('keeps a containing documents modal usable after image dismissal', async () => {
+  render(DocumentCardModal, { doc });
+  const link = await screen.findByRole('link', { name: 'scan.png' });
+  link.focus();
+  await fireEvent.click(link);
+  const close = screen.getByRole('button', { name: 'Close image' });
+  close.focus();
+  expect(document.activeElement === close).toBe(true);
+  await fireEvent.keyDown(close, { key: 'Escape' });
+  await waitFor(() => expect(document.querySelector('.lightbox')).toBeNull());
+  expect(screen.getByRole('dialog', { name: 'Documents' })).toBeTruthy();
+  await waitFor(() => expect(document.activeElement === link).toBe(true));
+  await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
