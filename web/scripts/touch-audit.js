@@ -118,6 +118,18 @@
       inlineLink(element)
     )
       continue;
+    // Opacity alone does not disable taps. Pointer-inert action bars do,
+    // unless a child or pseudo-element explicitly restores pointer events.
+    if (style.pointerEvents === 'none') {
+      const before = getComputedStyle(element, '::before');
+      const activeBefore =
+        !['none', 'normal', ''].includes(before.content) && before.pointerEvents !== 'none';
+      const activeChild = [...element.querySelectorAll('*')].some(
+        (child) =>
+          getComputedStyle(child).pointerEvents !== 'none' && child.getClientRects().length,
+      );
+      if (!activeBefore && !activeChild) continue;
+    }
     const box = element.getBoundingClientRect();
     if (!box.width || !box.height) continue;
     const hit = hitRect(element);
