@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { page } from '$app/state';
+  import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import {
     adminLogStreamUrl,
     getAdminLogPage,
@@ -25,6 +27,30 @@
 
   let sources = $state<AdminLogSource[]>([]);
   let sourceId = $state('app');
+  let sourcesReady = $state(false);
+  const sourceSel = createUrlSelection<{ source: string }>({
+    key: 'adminLogs',
+    params: ['source'],
+    encode: (selection) => ({ source: selection.source }),
+    decode(params) {
+      if (!sourcesReady) return null;
+      const source = params.source || 'app';
+      return sources.some((item) => item.id === source) ? { source } : null;
+    },
+    read: () => (sourcesReady ? { source: sourceId } : null),
+    apply: (selection) => applySource(selection.source),
+  });
+  let lastUrl = page.url;
+  $effect(() => {
+    const url = page.url;
+    if (url === lastUrl) return;
+    lastUrl = url;
+    untrack(() => {
+      if (sourcesReady) applySource(sourceSel.current()?.source ?? 'app');
+    });
+  });
+  sourceSel.start();
+
   let records = $state<AdminLogRecord[]>([]);
   let loading = $state(true);
   let loadingOlder = $state(false);
@@ -100,7 +126,8 @@
     try {
       const resp = await getAdminLogSources();
       sources = resp.sources;
-      if (!sources.some((s) => s.id === sourceId)) sourceId = sources[0]?.id ?? 'app';
+      sourcesReady = true;
+      sourceId = sourceSel.current()?.source ?? 'app';
     } catch (e) {
       error = describeError(e);
     }
@@ -273,6 +300,10 @@
   }
 
   function pickSource(id: string) {
+    sourceSel.push({ source: id });
+  }
+
+  function applySource(id: string) {
     if (id === sourceId) return;
     sourceId = id;
     records = [];

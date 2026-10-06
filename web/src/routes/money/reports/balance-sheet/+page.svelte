@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { Collapsible } from 'bits-ui';
   import { getReport, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { selectedAccount } from '$lib/money/stores/transactions';
+  import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
   import {
     buildTree,
     displayBalance,
@@ -14,8 +13,7 @@
   } from '$lib/money/utils/accounts';
 
   function navigateToAccount(fullName: string) {
-    selectedAccount.set(fullName);
-    goto(`${base}/money/transactions`);
+    goto(transactionsUrl(fullName, $selectedYear));
   }
 
   let loading = $state(true);

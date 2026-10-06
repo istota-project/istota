@@ -1,9 +1,10 @@
 /** Stub for SvelteKit's `$app/state` under vitest. */
-export const page = {
+export const page = $state({
   url: new URL('http://localhost/'),
   params: {} as Record<string, string>,
   route: { id: null as string | null },
-};
+  state: {} as Record<string, unknown>,
+});
 
 /**
  * Kit's stale-build signal, which the root layout reads to show its reload

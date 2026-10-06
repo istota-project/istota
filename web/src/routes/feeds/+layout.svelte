@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -29,6 +29,7 @@
   import { HeaderSave } from '$lib/components/settings';
   import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from '@lucide/svelte';
   import { notifyError } from '$lib/stores/notices';
+  import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();
 
@@ -37,14 +38,104 @@
     { value: 'added', label: 'Added' },
   ];
 
-  let feeds: Feed[] = $state([]);
+  let feeds: Feed[] = $derived($feedsList);
   let sidebarOpen = $state(false);
 
   let onSettings = $derived(page.url.pathname.startsWith(`${base}/feeds/settings`));
 
+  type FeedSelection = { feed: number; category: number; view: '' | 'starred' | 'unread' };
+  const all: FeedSelection = { feed: 0, category: 0, view: '' };
+  let feedsReady = $state(false);
+  let selectionReady = $state(false);
+  let mounted = false;
+  let loadGeneration = 0;
+
+  function encodeSelection(selection: FeedSelection): Params {
+    if (selection.feed) return { feed: String(selection.feed) };
+    if (selection.category) return { category: String(selection.category) };
+    if (selection.view) return { view: selection.view };
+    return {};
+  }
+
+  function readSelection(): FeedSelection {
+    return {
+      feed: $selectedFeedId,
+      category: $selectedCategoryId,
+      view: $showStarred ? 'starred' : $showUnseen ? 'unread' : '',
+    };
+  }
+
+  function applySelection(selection: FeedSelection) {
+    selectedFeedId.set(selection.feed);
+    selectedCategoryId.set(selection.category);
+    showStarred.set(selection.view === 'starred');
+    showUnseen.set(selection.view === 'unread');
+  }
+
+  const feedSel = createUrlSelection<FeedSelection>({
+    key: 'feeds',
+    params: ['feed', 'category', 'view'],
+    encode: encodeSelection,
+    decode(params) {
+      if (onSettings) return null;
+      if (params.feed) {
+        if (!feedsReady) return null;
+        const id = Number(params.feed);
+        return Number.isSafeInteger(id) && id > 0 && feeds.some((feed) => feed.id === id)
+          ? { ...all, feed: id }
+          : null;
+      }
+      if (params.category) {
+        if (!feedsReady) return null;
+        const id = Number(params.category);
+        return Number.isSafeInteger(id) && id > 0 && feeds.some((feed) => feed.category.id === id)
+          ? { ...all, category: id }
+          : null;
+      }
+      if (params.view === 'starred' || params.view === 'unread') {
+        return { ...all, view: params.view };
+      }
+      return params.view ? null : all;
+    },
+    read: () => (selectionReady && !onSettings ? readSelection() : null),
+    apply: applySelection,
+  });
+
+  // Settings shares this layout. Real navigations need fresh subscriptions
+  // before validating the query; shallow Back/Forward uses the helper instead.
+  let lastUrl = page.url;
+  $effect(() => {
+    const url = page.url;
+    if (url === lastUrl) return;
+    lastUrl = url;
+    untrack(() => {
+      if (!mounted) return;
+      if (onSettings) {
+        loadGeneration++;
+        return;
+      }
+      void loadFeeds();
+    });
+  });
+  feedSel.start();
+
+  function readerUrl(selection: FeedSelection): string {
+    const query = new URLSearchParams(encodeSelection(selection)).toString();
+    return `${base}/feeds/${query ? `?${query}` : ''}`;
+  }
+
   function toggleSettings() {
-    if (onSettings) goto(`${base}/feeds`);
+    if (onSettings) goto(readerUrl(readSelection()));
     else goto(`${base}/feeds/settings`);
+  }
+
+  function pickSelection(selection: FeedSelection) {
+    sidebarOpen = false;
+    if (onSettings) goto(readerUrl(selection));
+    else {
+      selectionReady = true;
+      feedSel.push(selection);
+    }
   }
 
   let groupedFeeds = $derived.by(() => {
@@ -61,49 +152,23 @@
   });
 
   function handleFeedClick(feedId: number) {
-    selectedFeedId.set($selectedFeedId === feedId ? 0 : feedId);
-    selectedCategoryId.set(0);
-    showStarred.set(false);
-    showUnseen.set(false);
-    sidebarOpen = false;
-    if (onSettings) goto(`${base}/feeds`);
+    pickSelection({ ...all, feed: $selectedFeedId === feedId ? 0 : feedId });
   }
 
   function handleCategoryClick(categoryId: number) {
-    // Toggle: clicking the active category again returns to All.
-    selectedCategoryId.set($selectedCategoryId === categoryId ? 0 : categoryId);
-    selectedFeedId.set(0);
-    showStarred.set(false);
-    showUnseen.set(false);
-    sidebarOpen = false;
-    if (onSettings) goto(`${base}/feeds`);
+    pickSelection({ ...all, category: $selectedCategoryId === categoryId ? 0 : categoryId });
   }
 
   function handleAllClick() {
-    selectedFeedId.set(0);
-    selectedCategoryId.set(0);
-    showStarred.set(false);
-    showUnseen.set(false);
-    sidebarOpen = false;
-    if (onSettings) goto(`${base}/feeds`);
+    pickSelection(all);
   }
 
   function handleUnreadClick() {
-    showUnseen.set(true);
-    showStarred.set(false);
-    selectedFeedId.set(0);
-    selectedCategoryId.set(0);
-    sidebarOpen = false;
-    if (onSettings) goto(`${base}/feeds`);
+    pickSelection({ ...all, view: 'unread' });
   }
 
   function handleStarredClick() {
-    showStarred.set(true);
-    showUnseen.set(false);
-    selectedFeedId.set(0);
-    selectedCategoryId.set(0);
-    sidebarOpen = false;
-    if (onSettings) goto(`${base}/feeds`);
+    pickSelection({ ...all, view: 'starred' });
   }
 
   let markAllTargetTitle = $state<string | null>(null);
@@ -130,14 +195,35 @@
     }
   }
 
-  onMount(async () => {
+  async function loadFeeds() {
+    const generation = ++loadGeneration;
+    feedsReady = false;
+    selectionReady = false;
     try {
       const data = await getFeeds({ limit: '1', offset: '0' });
-      feeds = data.feeds;
+      if (generation !== loadGeneration) return;
       feedsList.set(data.feeds);
+      feedsReady = true;
+      if (!onSettings) applySelection(feedSel.current() ?? all);
+      selectionReady = true;
     } catch {
-      // page handles its own errors
+      if (generation !== loadGeneration) return;
+      // Views do not need subscriptions. Keep unresolved ids in the URL.
+      const selection = feedSel.current();
+      if (selection) {
+        applySelection(selection);
+        selectionReady = true;
+      }
     }
+  }
+
+  onMount(() => {
+    mounted = true;
+    void loadFeeds();
+    return () => {
+      mounted = false;
+      loadGeneration++;
+    };
   });
 </script>
 

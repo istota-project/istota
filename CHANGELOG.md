@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Browser Back and Forward now follow selections within chat, briefings, feeds, transactions and admin logs, including returning from a chat search result to the previous room. Links and reloads restore the selection; transaction years and health date ranges update the current history entry. The iOS app's Back gesture uses the same history.
+
 - Health image documents now open in the zoom viewer from their name or Open menu. Download still saves the original file, and PDFs keep downloading as before.
 
 - Workspace links and upload chips in chat, briefings and viewed Markdown now open an in-app preview. Modified clicks keep their usual browser behavior, and Download saves the original file.

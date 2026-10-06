@@ -13,7 +13,6 @@
   let current = $state<BriefingArchiveItem | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
-  let loadedId = $state<number | null>(null);
 
   const fmtDate = (iso: string) => formatDateTime(iso, { dateStyle: 'medium', timeStyle: 'short' });
 
@@ -22,24 +21,28 @@
     const id = $selectedBriefingId;
     if (id == null) {
       current = null;
-      loadedId = null;
+      loading = false;
+      error = null;
       return;
     }
-    if (id === loadedId) return;
-    loadedId = id;
     loading = true;
     error = null;
+    let active = true;
     getBriefingArchiveItem(id)
       .then((item) => {
         // Guard against an out-of-order response after a fast re-select.
-        if ($selectedBriefingId === id) current = item;
+        if (active && $selectedBriefingId === id) current = item;
       })
       .catch((e) => {
+        if (!active || $selectedBriefingId !== id) return;
         error = e instanceof Error ? e.message : 'Failed to load briefing';
       })
       .finally(() => {
-        loading = false;
+        if (active && $selectedBriefingId === id) loading = false;
       });
+    return () => {
+      active = false;
+    };
   });
 </script>
 

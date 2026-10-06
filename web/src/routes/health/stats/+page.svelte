@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { page } from '$app/state';
+  import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { theme } from '$lib/stores/theme';
   import { chartChrome } from '$lib/chartTheme';
   import {
@@ -48,6 +50,38 @@
   type Range = '30d' | '90d' | '1y' | 'all';
 
   let range = $state<Range>('90d');
+  let selectionReady = $state(false);
+  const rangeSel = createUrlSelection<{ range: Range }>({
+    key: 'healthStats',
+    params: ['range'],
+    encode: (selection) => ({ range: selection.range }),
+    decode(params) {
+      if (
+        params.range === '30d' ||
+        params.range === '90d' ||
+        params.range === '1y' ||
+        params.range === 'all'
+      ) {
+        return { range: params.range };
+      }
+      return null;
+    },
+    read: () => (selectionReady ? { range } : null),
+    apply: (selection) => {
+      range = selection.range;
+    },
+  });
+  let lastUrl = page.url;
+  $effect(() => {
+    const url = page.url;
+    if (url === lastUrl) return;
+    lastUrl = url;
+    untrack(() => {
+      if (selectionReady) range = rangeSel.current()?.range ?? '90d';
+    });
+  });
+  rangeSel.start();
+
   let loading = $state(true);
   let error = $state('');
   let settings: HealthSettings | null = $state(null);
@@ -259,7 +293,7 @@
 
   $effect(() => {
     range;
-    untrack(load);
+    if (selectionReady) untrack(load);
   });
 
   $effect(() => {
@@ -366,7 +400,10 @@
     return Math.round((w.value / (h * h)) * 10) / 10;
   }
 
-  onMount(load);
+  onMount(() => {
+    range = rangeSel.current()?.range ?? '90d';
+    selectionReady = true;
+  });
 </script>
 
 {#if !loading && !error}

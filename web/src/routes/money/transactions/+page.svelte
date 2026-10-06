@@ -7,12 +7,19 @@
     type TransactionRow,
     type PostingRow,
   } from '$lib/money/api';
-  import { selectedAccount, selectedYear, filterText } from '$lib/money/stores/transactions';
+  import {
+    selectedAccount,
+    selectedYear,
+    filterText,
+    getTransactionNavigation,
+  } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
   import { KebabMenu } from '$lib/components/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
+
+  const navigateToAccount = getTransactionNavigation();
 
   let transactions: TransactionRow[] = $state([]);
   let loading = $state(true);
@@ -269,7 +276,7 @@
               class="txn-account"
               onclick={(e) => {
                 e.stopPropagation();
-                selectedAccount.set(txn.account);
+                navigateToAccount(txn.account);
               }}
               type="button">{shortAccount(txn.account)}</button
             >
@@ -290,7 +297,7 @@
                   <div class="posting-row">
                     <button
                       class="posting-account"
-                      onclick={() => selectedAccount.set(posting.account)}
+                      onclick={() => navigateToAccount(posting.account)}
                       type="button">{posting.account}</button
                     >
                     <span class="posting-amount">{posting.position}</span>

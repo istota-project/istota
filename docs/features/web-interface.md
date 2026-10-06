@@ -4,6 +4,24 @@ SvelteKit frontend with FastAPI backend. Sign in with Nextcloud, an email addres
 
 The web UI is per-user: each authenticated user sees only the features they have configured (feeds, money, location, etc.). Nextcloud login requires a configured user. Email login requires a live user profile and an enabled email identity, read from the database on each login.
 
+## Browser history
+
+Selections within a page appear in its URL and survive a reload or a shared link. Back and Forward restore the previous selection. Moving to another place adds a history entry; changing the year or date range replaces the current entry. Defaults and fallbacks also replace the current entry, so loading a list does not add a Back step. Free-text searches, display preferences and open overlays are not part of this history.
+
+| Page | Selection | URL parameter | History behavior |
+|---|---|---|---|
+| Chat | Room | `room` | Add an entry |
+| Chat | All, Unread or Starred view | `view` | Add an entry |
+| Chat | Search result or task link | `room`, `task` | Add an entry |
+| Chat | Cited message | `room`, `msg` | Add an entry |
+| Briefings | Archive item | `id` | Add an entry |
+| Briefings | Briefing name filter | `name` | Add an entry |
+| Feeds | Feed, category, Starred or Unread view | `feed`, `category`, `view` | Add an entry |
+| Money transactions | Account | `account` | Add an entry |
+| Money transactions | Year (`all` for All years) | `year` | Replace the current entry |
+| Admin logs | Log source | `source` | Add an entry |
+| Health stats | Date range | `range` | Replace the current entry |
+
 ## Prerequisites
 
 - A Nextcloud instance for Nextcloud login, or operator-created email identities for email login
