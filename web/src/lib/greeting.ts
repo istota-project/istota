@@ -98,10 +98,6 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
     when: (c) => !!c.email,
   },
   {
-    text: 'Labs takes urine and stool results now, not only blood work. See the Health tab.',
-    when: (c) => !!c.features?.health,
-  },
-  {
     text: 'Briefings arrive on whatever schedule you set — see the Briefings tab.',
     when: (c) => !!c.features?.briefings,
   },
