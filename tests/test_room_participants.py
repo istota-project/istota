@@ -37,6 +37,8 @@ def config(db_path):
     cfg = Config()
     cfg.db_path = db_path
     cfg.users = {"alice": UserConfig(), "bob": UserConfig()}
+    cfg.speech_gate.mode = "mention"  # these cases are about mention mode
+    cfg.speech_gate.disposition = "reserved"
     return cfg
 
 

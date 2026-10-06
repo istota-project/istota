@@ -350,8 +350,8 @@ class SpeechGateConfig:
     leaves ``ack_reaction`` alone. Read by ``rooms.ack_reaction``.
     """
 
-    mode: str = "mention"
-    disposition: str = "reserved"
+    mode: str = "classifier"
+    disposition: str = "friendly"
     ack_reaction: str = "👍"
     ack_reactions: dict[str, list[str]] = field(
         default_factory=lambda: {k: list(v) for k, v in DEFAULT_ACK_REACTIONS.items()}

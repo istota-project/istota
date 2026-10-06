@@ -493,8 +493,8 @@ istota_conversation_talk_context_limit: 100  # max messages to fetch from Talk m
 # Speech gate: whether the bot replies to an unaddressed turn in a room with more
 # than one human. "mention" replies only when mentioned; "classifier" lets a
 # cheap model decide and stays silent if it fails; "off" replies to every turn.
-istota_speech_gate_mode: "mention"
-istota_speech_gate_disposition: "reserved"  # or "friendly"; read only by the classifier
+istota_speech_gate_mode: "classifier"
+istota_speech_gate_disposition: "friendly"  # or "reserved"; read only by the classifier
 istota_speech_gate_ack_reaction: "👍"  # a friendly room's reaction to thanks; "" replies instead
 # Per-kind reaction lists, rendered as [speech_gate.ack_reactions]; keys are
 # default, thanks, agreement, funny, celebration. A kind not listed uses

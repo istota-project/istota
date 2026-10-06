@@ -935,12 +935,12 @@ talk_context_limit = 100
 # always gets a reply. "mention" replies only when mentioned (Talk's rule);
 # "classifier" lets a cheap model decide and does not reply if it fails;
 # "off" replies to every turn. Every turn is recorded whichever mode is set.
-mode = "mention"
+mode = "classifier"
 # How wide the classifier reads "for the bot". "reserved" answers a turn
 # addressed to it, asking it for something, or answering its question.
 # "friendly" also answers thanks and other reactions to its last answer, in
 # one short line. An unknown value is "reserved".
-disposition = "reserved"
+disposition = "friendly"
 # Under "friendly", a turn the classifier reads as only thanks is answered on
 # Talk and in WhatsApp groups with this reaction instead of a message, and
 # falls back to the one short line if the reaction cannot be sent. Empty

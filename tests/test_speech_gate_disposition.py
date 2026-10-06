@@ -251,8 +251,8 @@ class TestTheAuditRow:
 
 
 class TestConfig:
-    def test_the_default_is_reserved(self):
-        assert SpeechGateConfig().disposition == "reserved"
+    def test_the_default_is_friendly(self):
+        assert SpeechGateConfig().disposition == "friendly"
 
     def test_the_key_is_read(self, tmp_path):
         p = tmp_path / "config.toml"
@@ -324,6 +324,7 @@ class TestThroughTheIngestPath:
         assert "the person Istota last answered: yes" in prompts[0]
 
     def test_reserved_sends_the_reserved_prompt(self, config):
+        config.speech_gate.disposition = "reserved"
         _seed(config)
         task_id, row, prompts = _ask_and_ingest(
             config, '{"speak": false, "reason": "not addressed"}',
@@ -526,6 +527,7 @@ class TestAReplyToTheBot:
             config, task_id)
 
     def test_reserved_asks_nothing(self, config):
+        config.speech_gate.disposition = "reserved"
         _seed(config)
         classified, prompts = self._classify_reply(config)
         assert (classified, prompts) == (None, [])

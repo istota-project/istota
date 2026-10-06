@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Shared rooms use the classifier and the friendly disposition by default.** `[speech_gate] mode` now defaults to `"classifier"` and `disposition` to `"friendly"`, in the loader, Ansible, Docker and the example config. The bot now answers a turn in a room with more than one human when a cheap model reads it as meant for the bot, and it reacts to thanks rather than staying quiet. Private chats are not gated, and email thread rooms still answer only when the bot is addressed.
+
+  **Upgrade note:** every turn in a multi-human room that does not address the bot now costs one classifier call on the `fast` role. To keep the old behaviour, set `mode = "mention"` (`istota_speech_gate_mode`, `ISTOTA_SPEECH_GATE_MODE`), or `disposition = "reserved"` to keep the classifier and drop the acks.
+
 - **A question the bot parks on an email thread is only in your private chat** (#665). The thread room is the record of the mail, so it no longer shows the question's card, live or after a reload, and web chat refuses a confirm sent from it. Answer it from the note in your private chat, from the bell, or with `!confirm`, as before. Retrying a failed turn and acting on a held draft in the thread room are unchanged.
 - **The dashboard's welcome card has ten new tips about recent features**: shared rooms and the `!<bot name> off` switch, replying to the bot's messages, private answers, the Retry and Continue buttons, Run now for a failed job, quoted answers, pinned memory, email threads and urine and stool results in Labs. The email and Labs tips show only where email or the Health module is available.
 - **A mail card shows the sender check as an icon after the sender's address** (#652). It replaces the text badge that took a line of its own under From and To; hovering the icon names the check (trusted, verified, unverified, failed), and screen readers read the same text. A trusted sender whose check failed gets both icons, the failure one in red. The row under the recipients now appears only for a sent mail's state.
