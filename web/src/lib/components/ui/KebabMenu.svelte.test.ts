@@ -30,7 +30,7 @@ describe('KebabMenu', () => {
       items: [{ label: 'Edit', onSelect: () => {} }],
       ariaLabel: 'Block actions',
     });
-    expect(screen.getByLabelText('Block actions')).not.toBeNull();
+    expect(screen.getByLabelText('Block actions')).toHaveClass('touch-target');
   });
 
   it('renders every item once opened', async () => {

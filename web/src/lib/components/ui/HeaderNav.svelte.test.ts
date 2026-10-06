@@ -33,6 +33,7 @@ describe('HeaderNav', () => {
     // global stylesheet jsdom does not apply.
     const { container } = render(HeaderNav, { items, ariaLabel: 'Health section' });
     expect(container.querySelector('select')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Health section' })).toHaveClass('touch-target');
     expect(screen.getByRole('button', { name: 'Health section' }).tagName).toBe('BUTTON');
   });
 

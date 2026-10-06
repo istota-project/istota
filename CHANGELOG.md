@@ -107,6 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Feed stars and section dropdowns are easier to tap on phones and tablets. Dropdown choices have taller touch rows, and room action menus have more space beside the room name.
+
 - **Cards in the web chat transcript use a card fill** (#671). A received mail, a message from outside the room and the activity chip were filled with the badge colour, a mid grey on the light theme's white transcript, and a quoted reply had no visible card at all in the dark theme. All four now share one fill, a step off the transcript background in each theme.
 - **A WhatsApp message the scheduler was still handling when it stopped is no longer lost** (#669). On Baileys, a message the scheduler had received but not yet recorded, such as a group turn waiting on the speech gate's classifier during a deploy, was dropped when the scheduler stopped, and nothing sent it again. Each incoming message, delivery status and group roster change is now kept in `whatsapp-inbound/` beside the database until it is applied, and the next start applies anything left there before new messages. A message that was already recorded before the stop is recognised and not answered twice.
 - **A follow-up to the bot's answer in a friendly room is always answered** (#670). When the person the bot just answered spoke next, the classifier could still decide not to reply. Under `disposition = "friendly"` that turn now always gets an answer; the classifier only decides whether it is a short acknowledgement. Decision rows record it under the new `follow_up` rung. Reserved rooms are unchanged. A WhatsApp group guest with no name is no longer shown to the classifier as the room's host.

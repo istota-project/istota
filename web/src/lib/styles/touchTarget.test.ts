@@ -142,3 +142,39 @@ describe('migrated touch targets', () => {
     for (const names of classes) expect(names).toContain('touch-target');
   });
 });
+
+describe('reported touch controls', () => {
+  it.each([
+    [
+      'lib/components/ui/HeaderNav.svelte',
+      '.nav-select',
+      '--touch-target-h: var(--touch-comfort);',
+    ],
+    [
+      'lib/components/ui/Select.svelte',
+      ':global(.ui-select-item)',
+      'min-height: var(--touch-comfort);',
+    ],
+    ['lib/components/ui/Select.svelte', ':global(.ui-select-viewport)', 'gap: 0;'],
+    [
+      'lib/components/ui/KebabMenu.svelte',
+      ':global(.ui-kebab-trigger)',
+      'min-width: var(--touch-min);',
+    ],
+    ['lib/styles/sidebar.css', '.sidebar .list-row', 'gap: var(--space-2);'],
+    [
+      'routes/feeds/+page.svelte',
+      '.feed-grid :global(.star-btn)',
+      '--touch-target-w: var(--touch-comfort);',
+    ],
+    [
+      'routes/feeds/+page.svelte',
+      '.feed-grid :global(.star-btn)',
+      '--touch-target-h: var(--touch-comfort);',
+    ],
+  ])('gates %s %s %s on a coarse pointer', (file, selector, declaration) => {
+    const source = stripComments(readFileSync(resolve(SRC, file), 'utf8'));
+    const coarse = blockAfter(source, '@media (pointer: coarse)') ?? '';
+    expect(blockAfter(coarse, selector)).toContain(declaration);
+  });
+});

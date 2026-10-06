@@ -86,7 +86,9 @@
 
 <BitsSelect.Root type="single" bind:value {onValueChange} {disabled}>
   <BitsSelect.Trigger
-    class="ui-select-trigger ui-select-trigger--{size}{fullWidth ? ' ui-select-trigger--full' : ''}"
+    class="touch-target ui-select-trigger ui-select-trigger--{size}{fullWidth
+      ? ' ui-select-trigger--full'
+      : ''}"
     aria-label={ariaLabel}
   >
     <span class="ui-select-label" style={labelStyle}>{selectedLabel}</span>
@@ -240,5 +242,15 @@
   :global(.ui-select-item[data-disabled]) {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  @media (pointer: coarse) {
+    :global(.ui-select-item) {
+      min-height: var(--touch-comfort);
+      display: flex;
+      align-items: center;
+    }
+    :global(.ui-select-viewport) {
+      gap: 0;
+    }
   }
 </style>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { readCascade, blockAfter, rules, styleFiles, styleBlocks } from './cascade';
+import { readCascade, readLayer, blockAfter, rules, styleFiles, styleBlocks } from './cascade';
 
 /**
  * iOS zooms the page whenever a focused text control computes under 16px, and
@@ -44,7 +44,7 @@ function remToPx(value: string): number | null {
 }
 
 const rootBody = blockAfter(css, ':root {') ?? '';
-const coarseBody = blockAfter(css, '@media (pointer: coarse)') ?? '';
+const coarseBody = blockAfter(readLayer('primitives'), '@media (pointer: coarse)') ?? '';
 const coarseRules = rules(coarseBody);
 
 /** The rule carrying the token floors, the one carrying the fallback, and the

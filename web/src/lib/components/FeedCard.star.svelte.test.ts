@@ -86,3 +86,27 @@ describe('FeedCard star failure', () => {
     expect(get(currentNotice)?.count).toBe(2);
   });
 });
+
+describe('FeedCard star target', () => {
+  it('toggles the star without opening the surrounding card', async () => {
+    api.updateEntryStarred.mockResolvedValue(undefined);
+    const onOpen = vi.fn();
+    const onStarToggle = vi.fn();
+    const cardEntry = entry();
+    const { container } = render(FeedCard, {
+      entry: cardEntry,
+      onImageClick: vi.fn(),
+      onOpen,
+      onStarToggle,
+    });
+    const star = screen.getByLabelText('Star entry');
+    expect(star).toHaveClass('touch-target');
+    await fireEvent.click(star);
+    expect(api.updateEntryStarred).toHaveBeenCalledWith(1, true);
+    expect(onStarToggle).toHaveBeenCalledWith(1, true);
+    expect(cardEntry.starred).toBe(true);
+    expect(onOpen).not.toHaveBeenCalled();
+    await fireEvent.click(container.querySelector('.card-body')!);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+});
