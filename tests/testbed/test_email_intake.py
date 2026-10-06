@@ -13,6 +13,12 @@ the room with no task. The recorded-only cases are the ones that tell that
 rule apart from "every admitted mail is asked", which is what the stage's
 negative control (`thread_addressed` always true) turns red.
 
+The config is the shipped default, `[speech_gate] mode = "classifier"`, and
+deliberately not pinned to `mention`: an email thread room is kept off the
+classifier by its own rule (`room_policy.effective_speech_mode`), and the
+recorded-only cases read the gate's rung to say that rule decided. A pin
+would make them pass whether or not the rule held.
+
 Each case opens its own thread with addresses carrying a per-test nonce, so
 nothing depends on another case's rows, and asserts on the rows its own
 Message-IDs resolve to rather than on table counts.
@@ -30,7 +36,7 @@ from istota.config import UserConfig
 from istota.transport.email.private_room import email_conversation_token
 from testbed.services import mail
 
-from ..support.email_flow import new_nonce, stamp
+from ..support.email_flow import gate_rung, new_nonce, stamp
 from .conftest import USER_ADDRESS, USER_ID, USER_TAG_ADDRESS
 
 pytestmark = pytest.mark.testbed
@@ -186,6 +192,7 @@ class TestTheHostsOwnMail:
         }
         recorded = _rows_for_mail(wire, mid)
         assert [(r["room_token"], r["task_id"]) for r in recorded] == [(room, None)]
+        assert gate_rung(wire.probe, recorded[0]["id"]) == ["mode_mention"]
 
     def test_the_bot_in_cc_named_is_asked(self, wire):
         nonce = new_nonce()
@@ -324,6 +331,9 @@ class TestACorrespondentsMail:
         assert [(r["room_token"], r["task_id"]) for r in recorded] == [
             (thread.room, None),
         ]
+        # Decided by the email room's own rule, on a deployment whose default
+        # is the classifier: the room is kept on `mention` and no model is asked.
+        assert gate_rung(wire.probe, recorded[0]["id"]) == ["mode_mention"]
 
 
 class TestTheThreadsPeople:
