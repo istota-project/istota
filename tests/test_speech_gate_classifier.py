@@ -264,6 +264,30 @@ class TestTheCompleterAndItsUsage:
             ).fetchall()
         assert [tuple(r) for r in rows] == [("speech_gate", None, "alice", "talk", 5)]
 
+    @patch("istota.brain.claude_code.subprocess.run")
+    def test_a_cli_timeout_is_logged_as_the_gate_s(self, mock_run, config, caplog):
+        """ISSUE-667: the gate borrows context triage's CLI helper, and a
+        timeout there was logged as "Context triage failed", which sends a
+        reader looking at the wrong subsystem."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=8)
+        completer = build_speech_gate_completer(
+            config, user_id="alice", source_type="talk",
+        )
+
+        with caplog.at_level("WARNING"):
+            assert completer("prompt") is None
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("Speech gate classifier") for m in messages), messages
+        assert not any("Context triage" in m for m in messages), messages
+
+    def test_the_default_timeout_covers_a_cli_cold_start(self):
+        """ISSUE-667: on the CLI path every call starts `claude` from scratch,
+        and eleven calls on one deployment took 4.4 to 7.6 seconds against an
+        8 second bound. A timeout fails closed, so a busy host silenced the
+        turn."""
+        assert Config().speech_gate.timeout_seconds >= 20
+
     def test_the_native_path_uses_the_gate_s_model(self, config):
         config.brain = BrainConfig(
             kind="native",

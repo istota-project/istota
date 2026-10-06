@@ -952,7 +952,9 @@ model = "fast"
 # Transcript turns the classifier sees, and the per-turn character cap
 window_messages = 8
 max_message_chars = 400
-timeout_seconds = 8.0
+# Seconds the classifier may take. A timeout means no reply, and on the
+# claude_code brain each call starts the CLI from scratch.
+timeout_seconds = 20.0
 # Days to keep the speech_gate_decisions audit rows (0 keeps them forever)
 decision_retention_days = 30
 
