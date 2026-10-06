@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -28,6 +28,7 @@
   import { HeaderSave } from '$lib/components/settings';
   import { Cog } from '@lucide/svelte';
   import { formatDateTime } from '$lib/dateFormat';
+  import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();
 
@@ -52,12 +53,71 @@
 
   let onSettings = $derived(page.url.pathname.startsWith(`${base}/briefings/settings`));
 
+  type BriefingSelection = { id: number | null; name: string };
+  let initialized = $state(false);
+  let loadGeneration = 0;
+
+  function encodeSelection(selection: BriefingSelection): Params {
+    const params: Params = {};
+    if (selection.id !== null) params.id = String(selection.id);
+    if (selection.name) params.name = selection.name;
+    return params;
+  }
+
+  function readerUrl(selection: BriefingSelection): string {
+    const query = new URLSearchParams(encodeSelection(selection)).toString();
+    return `${base}/briefings/${query ? `?${query}` : ''}`;
+  }
+
+  function applySelection(selection: BriefingSelection): void | Promise<void> {
+    const nameChanged = selection.name !== $briefingFilterName;
+    briefingFilterName.set(selection.name);
+    selectedBriefingId.set(selection.id);
+    if (nameChanged || !items.some((item) => item.id === selection.id)) {
+      offset = 0;
+      return load();
+    }
+  }
+
+  const briefingSel = createUrlSelection<BriefingSelection>({
+    key: 'briefings',
+    params: ['id', 'name'],
+    encode: encodeSelection,
+    decode(params) {
+      if (onSettings) return null;
+      const id = Number(params.id);
+      return {
+        id: Number.isSafeInteger(id) && id > 0 ? id : null,
+        name: params.name ?? '',
+      };
+    },
+    read: () =>
+      initialized && !onSettings ? { id: $selectedBriefingId, name: $briefingFilterName } : null,
+    apply: applySelection,
+  });
+
+  // This layout survives settings navigation. A real goto changes page.url;
+  // the helper's shallow entries instead change its page.state namespace.
+  let lastUrl = page.url;
+  $effect(() => {
+    const url = page.url;
+    if (url === lastUrl) return;
+    lastUrl = url;
+    untrack(() => {
+      if (!initialized || onSettings) return;
+      const selection = briefingSel.current();
+      if (selection) void applySelection(selection);
+    });
+  });
+  briefingSel.start();
+
   function toggleSettings() {
-    if (onSettings) goto(`${base}/briefings`);
+    if (onSettings) goto(readerUrl({ id: $selectedBriefingId, name: $briefingFilterName }));
     else goto(`${base}/briefings/settings`);
   }
 
   async function load(reset = true) {
+    const generation = ++loadGeneration;
     loadingMore = !reset;
     try {
       const params: Record<string, string> = {
@@ -66,6 +126,12 @@
       };
       if ($briefingFilterName) params.briefing_name = $briefingFilterName;
       const resp = await getBriefingArchive(params);
+      if (generation !== loadGeneration) return;
+      if ($briefingFilterName && !resp.briefing_names.includes($briefingFilterName)) {
+        briefingFilterName.set('');
+        offset = 0;
+        return await load();
+      }
       items = reset ? resp.items : [...items, ...resp.items];
       total = resp.total;
       names = resp.briefing_names;
@@ -77,6 +143,7 @@
         if (!stillPresent) selectedBriefingId.set(items[0]?.id ?? null);
       }
     } catch {
+      if (generation !== loadGeneration) return;
       // Published rather than swallowed. This used to read "the reader page
       // surfaces its own load errors", which is false for the only case that
       // reaches here: the reader fetches the *selected* briefing, a failed list
@@ -91,21 +158,21 @@
       briefingArchiveCount.set(items.length);
       briefingArchiveError.set('Failed to load briefings');
     } finally {
-      loadingMore = false;
+      if (generation === loadGeneration) loadingMore = false;
     }
   }
 
   function pickName(name: string) {
-    briefingFilterName.set(name);
-    offset = 0;
-    selectedBriefingId.set(null);
-    void load();
+    const selection = { id: null, name };
+    if (onSettings) goto(readerUrl(selection));
+    else briefingSel.push(selection);
   }
 
   function pickItem(id: number) {
-    selectedBriefingId.set(id);
     sidebarOpen = false;
-    if (onSettings) goto(`${base}/briefings`);
+    const selection = { id, name: $briefingFilterName };
+    if (onSettings) goto(readerUrl(selection));
+    else briefingSel.push(selection);
   }
 
   function loadMore() {
@@ -153,7 +220,12 @@
     }
   });
 
-  onMount(() => load());
+  onMount(() => {
+    const selection = briefingSel.current();
+    if (selection) void applySelection(selection);
+    else void load();
+    initialized = true;
+  });
 </script>
 
 <!-- insetBottom only on the settings sub-route. The reader is a card-colored

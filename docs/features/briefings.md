@@ -159,6 +159,8 @@ The **writer** chooses whether the fetch or the synthesis is shared, via the sto
 
 The briefings tab is a reader for generated briefings, with an archive sidebar for past results (filterable by briefing name from the header, each result deletable from its kebab menu) and a settings page behind the cog for editing blocks, sources, schedule and delivery. Source paths use a searching file picker with an advisory existence check — advisory rather than blocking, because the path resolver is fail-soft, so a not-yet-created file must not trap the editor. Admins additionally get a "Shared blocks" card for the module-owned blocks.
 
+Selecting an archived briefing or changing the briefing-name filter adds a browser history entry. Back and Forward restore the selection, and reloading or sharing the URL opens the same briefing and filter. Returning from settings keeps the selection. If a briefing or filter is no longer available, the reader falls back to the first available briefing or All and updates the current URL without adding an entry.
+
 Each generated briefing is archived on delivery and pruned by `[briefings] archive_retention_days` (default 90) on insert, alongside the manual per-result delete.
 
 ## Output format
