@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fileLinks } from '$lib/fileViewer/links';
   import hljs from 'highlight.js/lib/common';
-  import { Modal, Button } from '$lib/components/ui';
+  import { Modal, Button, TextArea } from '$lib/components/ui';
   import { chatFileUrl, previewChatFile, type FilePreview } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { formatDateTime } from '$lib/dateFormat';
@@ -21,9 +21,7 @@
   let text = $derived(preview?.text ?? '');
   let presentation = $derived(presentationFor(name));
   let split = $derived(splitFrontmatter(text));
-  let language = $derived(
-    presentation.kind === 'code' ? presentation.language : source ? 'markdown' : null,
-  );
+  let language = $derived(presentation.kind === 'code' ? presentation.language : null);
   let highlighted = $derived(
     language && text.length <= HIGHLIGHT_MAX_CHARS
       ? hljs.highlight(text, { language, ignoreIllegals: true }).value
@@ -127,17 +125,26 @@
           >
         </div>
       {/if}
-      <div use:fileLinks class="file-body markdown prose">
+      <div use:fileLinks class="file-body">
         {#if presentation.kind === 'markdown' && !source}
-          {#if split.frontmatter !== null}<details>
-              <summary>Frontmatter</summary>
-              <pre>{split.frontmatter}</pre>
-            </details>{/if}
-          {@html renderDocument(split.body)}
+          <div class="markdown prose">
+            {#if split.frontmatter !== null}<details>
+                <summary>Frontmatter</summary>
+                <pre>{split.frontmatter}</pre>
+              </details>{/if}
+            {@html renderDocument(split.body)}
+          </div>
         {:else if highlighted !== null}
-          <pre><code class="hljs">{@html highlighted}</code></pre>
+          <div class="markdown"><pre><code class="hljs">{@html highlighted}</code></pre></div>
         {:else}
-          <pre>{text}</pre>
+          <TextArea
+            value={text}
+            rows={18}
+            monospace
+            readonly
+            spellcheck="false"
+            aria-label={`Source of ${name}`}
+          />
         {/if}
       </div>
     {/if}
@@ -155,12 +162,16 @@
     margin-bottom: var(--space-3);
   }
   .file-body {
+    font-size: var(--text-base);
     overflow-wrap: anywhere;
   }
   pre {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     font-family: var(--font-mono);
+  }
+  pre code {
+    font-size: var(--text-sm);
   }
   audio,
   video {

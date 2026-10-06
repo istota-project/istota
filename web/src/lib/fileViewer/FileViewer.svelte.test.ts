@@ -54,14 +54,23 @@ describe('workspace file viewer through the host', () => {
   it('renders plain text safely', async () => {
     preview.mockResolvedValue(text());
     open();
-    await waitFor(() => expect(document.querySelector('pre')?.textContent).toBe('hello <world>'));
+    const source = await screen.findByRole('textbox', { name: 'Source of note.txt' });
+    expect(source).toHaveValue('hello <world>');
+    expect(source).toHaveAttribute('readonly');
+    expect(source).not.toBeDisabled();
   });
   it('renders markdown, frontmatter, and source', async () => {
     preview.mockResolvedValue(text('note.md', '---\ntitle: Note\n---\n# Hello'));
     open('/note.md');
     expect(await screen.findByRole('heading', { name: 'Hello' })).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
-    expect(document.querySelector('pre')?.textContent).toContain('# Hello');
+    const source = screen.getByRole('textbox', { name: 'Source of note.md' });
+    expect(source).toHaveValue('---\ntitle: Note\n---\n# Hello');
+    expect(source).toHaveAttribute('readonly');
+    expect(screen.queryByRole('heading', { name: 'Hello' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Rendered' }));
+    expect(screen.getByRole('heading', { name: 'Hello' })).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
   });
   it('shows HTML as escaped source', async () => {
     preview.mockResolvedValue(text('note.html', '<script>alert(1)</script>'));
@@ -126,10 +135,10 @@ describe('workspace file viewer through the host', () => {
     await tick();
     preview.mockResolvedValue(text('new.txt', 'fresh'));
     viewer.openFile('/note.txt');
-    expect(await screen.findByText('fresh')).toBeTruthy();
+    expect(await screen.findByDisplayValue('fresh')).toBeTruthy();
     resolve(text('old.txt', 'stale'));
     await tick();
-    expect(screen.queryByText('stale')).toBeNull();
+    expect(screen.queryByDisplayValue('stale')).toBeNull();
   });
   it.each(['audio', 'video'] as const)(
     'mounts a controlled %s and provides decode fallback',
