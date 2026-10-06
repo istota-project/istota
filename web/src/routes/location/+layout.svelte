@@ -31,10 +31,11 @@
     SidebarToggle,
     CategoryGroup,
     HeaderNav,
+    IconButton,
     Chip,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { Cog } from '@lucide/svelte';
+  import { Cog, Pencil, X } from '@lucide/svelte';
   import { formatDate as formatIsoDate, formatMinutes } from '$lib/dateFormat';
 
   let { children } = $props();
@@ -301,20 +302,26 @@
               <div class="stats-header">
                 <span class="stats-name">{selectedPlace.name}</span>
                 <div class="stats-actions">
-                  <button
-                    class="stats-edit"
+                  <IconButton
+                    class="stats-edit touch-target"
+                    size="sm"
+                    label="Edit place"
                     onclick={() => handleEditPlace(selectedPlace!)}
-                    type="button"
-                    title="Edit place">&#9998;</button
+                    title="Edit place"
                   >
-                  <button
-                    class="stats-close"
+                    <Pencil size={13} />
+                  </IconButton>
+                  <IconButton
+                    class="stats-close touch-target"
+                    size="sm"
+                    label="Close place stats"
                     onclick={() => {
                       selectedPlace = null;
                       placeStats = null;
                     }}
-                    type="button">&times;</button
                   >
+                    <X size={13} />
+                  </IconButton>
                 </div>
               </div>
               {#if selectedPlace.notes}
@@ -457,20 +464,10 @@
     gap: 0.15rem;
   }
 
-  .stats-edit,
-  .stats-close {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: var(--text-sm);
-    cursor: pointer;
-    padding: 0 var(--space-1);
-    line-height: 1;
-  }
-
-  .stats-edit:hover,
-  .stats-close:hover {
-    color: var(--text-muted);
+  @media (pointer: coarse) {
+    .stats-actions {
+      gap: var(--space-2);
+    }
   }
 
   .stats-grid {

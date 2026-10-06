@@ -13,6 +13,7 @@ describe('Select', () => {
   it('shows the selected option label on the trigger', () => {
     render(Select, { value: '2026', options: yearOptions, ariaLabel: 'Year' });
     expect(screen.getByRole('button', { name: 'Year' })).toHaveTextContent('2026');
+    expect(screen.getByRole('button', { name: 'Year' })).toHaveClass('touch-target');
   });
 
   it('falls back to the placeholder when nothing matches', () => {

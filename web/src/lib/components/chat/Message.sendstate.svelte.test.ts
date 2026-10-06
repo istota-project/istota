@@ -199,7 +199,10 @@ describe('user row queued state', () => {
       'Edit queued message',
       'Remove queued message',
     ]);
-    for (const b of icons) expect(b.querySelector('svg')).not.toBeNull();
+    for (const b of icons) {
+      expect(b.querySelector('svg')).not.toBeNull();
+      expect(b.classList.contains('touch-target')).toBe(true);
+    }
     expect(container.querySelector('.send-queued')?.textContent?.trim()).toBe('Waiting to send');
   });
 

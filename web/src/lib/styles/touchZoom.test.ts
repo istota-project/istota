@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { readCascade } from './cascade';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { readCascade, readLayer, blockAfter, rules, styleFiles, styleBlocks } from './cascade';
 
 /**
  * iOS zooms the page whenever a focused text control computes under 16px, and
@@ -28,42 +28,6 @@ const css = readCascade();
 const ROOT_PX = 16;
 const ZOOM_FLOOR_PX = 16;
 
-/** Body of the first block whose header starts at `needle`, braces balanced. */
-function blockAfter(source: string, needle: string): string | null {
-  const at = source.indexOf(needle);
-  if (at === -1) return null;
-  const open = source.indexOf('{', at);
-  if (open === -1) return null;
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === '{') depth += 1;
-    else if (source[i] === '}') {
-      depth -= 1;
-      if (depth === 0) return source.slice(open + 1, i);
-    }
-  }
-  return null;
-}
-
-interface Rule {
-  selector: string;
-  body: string;
-}
-
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '');
-}
-
-/** Flat `selector { body }` rules of a block body. Comments are stripped first:
- *  five in this tree quote a brace, which desynchronizes the walk. */
-function rules(body: string): Rule[] {
-  const out: Rule[] = [];
-  for (const m of stripComments(body).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    out.push({ selector: m[1].trim().replace(/\s+/g, ' '), body: m[2] });
-  }
-  return out;
-}
-
 /** `--name: value` pairs declared anywhere in a block body. */
 function customProps(body: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -80,7 +44,7 @@ function remToPx(value: string): number | null {
 }
 
 const rootBody = blockAfter(css, ':root {') ?? '';
-const coarseBody = blockAfter(css, '@media (pointer: coarse)') ?? '';
+const coarseBody = blockAfter(readLayer('primitives'), '@media (pointer: coarse)') ?? '';
 const coarseRules = rules(coarseBody);
 
 /** The rule carrying the token floors, the one carrying the fallback, and the
@@ -179,21 +143,6 @@ describe('app.css touch-zoom floor', () => {
     expect(selector.endsWith(')')).toBe(true);
   });
 });
-
-function styleFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) styleFiles(path, out);
-    else if (/\.(svelte|css)$/.test(entry.name)) out.push(path);
-  }
-  return out;
-}
-
-/** Every `<style>` body in a component, or the whole file for a stylesheet. */
-function styleBlocks(file: string, source: string): string[] {
-  if (file.endsWith('.css')) return [source];
-  return [...source.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]);
-}
 
 /**
  * A control whose size is inherited or written as a literal reads no token, so

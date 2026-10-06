@@ -107,6 +107,22 @@
     background var(--transition-fast);
 }
 
+/* Keep the narrow-window spacing, and extend it with the overlays to every
+   coarse pointer. A smaller gap lets adjacent icons take each other's taps. */
+@media (pointer: coarse), (max-width: 640px) {
+  .app-nav .nav-right {
+    gap: 1.25rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .app-nav .nav-right .nav-icon-btn {
+    /* Out of flow so the nav keeps its visible height. */
+    --touch-target-w: 2.5rem;
+    --touch-target-h: 2.5rem;
+  }
+}
+
 /* All three share one hover; only the resting color differs. It lives here
    rather than beside each control because the reset above sets `background`,
    and a component-scoped hover rule ties it on specificity — which side wins

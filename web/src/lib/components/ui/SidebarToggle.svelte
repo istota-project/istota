@@ -22,7 +22,7 @@
   content it sat on top of. Anchored in the bar, this one needs no chrome at all.
 -->
 <button
-  class="sidebar-toggle"
+  class="sidebar-toggle touch-target"
   class:open
   {onclick}
   type="button"
@@ -37,6 +37,9 @@
 
 <style>
   .sidebar-toggle {
+    /* Keep the bar compact; any overlap with its title opens the same drawer. */
+    --touch-target-w: 2.5rem;
+    --touch-target-h: 2.75rem;
     display: none;
     font: inherit;
     cursor: pointer;
@@ -47,8 +50,6 @@
   @media (max-width: 768px) {
     .sidebar-toggle {
       display: inline-flex;
-      /* Anchor for the hit-area pseudo below. */
-      position: relative;
       /* The bar's height is set by its tallest child, which is the title's line
 			   box (1.5rem). Matching it means adding this control can't make the bar
 			   taller — the touch target is bought back by the ::before overlay, which
@@ -68,20 +69,6 @@
 			   either way — only the box's contribution to layout shrinks. */
       margin-inline-start: -0.35rem;
       margin-inline-end: -0.15rem;
-    }
-
-    /* Touch target, decoupled from the visible box: out of flow, so it grows
-		   the tappable area to ~44x48 without touching the bar's height. It bleeds
-		   a little over the title, which is harmless — where a page makes the title
-		   tappable, it drives this same toggle. */
-    .sidebar-toggle::before {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: 2.5rem;
-      height: 2.75rem;
-      transform: translate(-50%, -50%);
     }
 
     .sidebar-toggle:hover {

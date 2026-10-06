@@ -81,3 +81,9 @@
 .sidebar .list-row.active {
   background: var(--surface-raised);
 }
+
+@media (pointer: coarse) {
+  .sidebar .list-row {
+    gap: var(--space-2);
+  }
+}

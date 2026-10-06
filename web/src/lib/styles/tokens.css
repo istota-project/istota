@@ -254,6 +254,10 @@
 	   around a table, not the subject of the page. See .control-row. */
   --control-height-lg: 1.75rem;
 
+  /* Touch target floor and the comfort size for reported controls. */
+  --touch-min: 24px;
+  --touch-comfort: 44px;
+
   /* The corner a control resolves. The root value is the app-bar shape, so a
 	   component adopting this channel changes nothing outside a .control-row;
 	   there the field tier squares it off to match the input beside it. Text

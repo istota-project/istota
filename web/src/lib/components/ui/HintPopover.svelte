@@ -40,7 +40,7 @@
           role="button"
           tabindex="0"
           aria-label={label}
-          class="ui-hint-trigger"
+          class="ui-hint-trigger touch-target"
           onclick={(e) => {
             // This span sits inside the field's <label>, so a click on it also
             // activates the label and focuses the input behind the popover.

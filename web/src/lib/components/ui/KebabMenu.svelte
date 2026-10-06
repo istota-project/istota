@@ -31,7 +31,7 @@
 <DropdownMenu.Root>
   <DropdownMenu.Trigger
     bind:ref={trigger}
-    class="ui-kebab-trigger"
+    class="ui-kebab-trigger touch-target"
     aria-label={ariaLabel}
     onclick={(e) => e.stopPropagation()}
   >
@@ -129,5 +129,10 @@
   }
   :global(.ui-kebab-item--danger[data-highlighted]) {
     color: var(--status-danger-fg);
+  }
+  @media (pointer: coarse) {
+    :global(.ui-kebab-trigger) {
+      min-width: var(--touch-min);
+    }
   }
 </style>

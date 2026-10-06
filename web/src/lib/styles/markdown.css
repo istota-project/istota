@@ -366,28 +366,6 @@
   .app-nav .nav-links {
     display: none;
   }
-  /* Wide enough that the ~44px hit areas below stay disjoint. The icons are
-     14–18px glyphs, so at the old 0.75rem their targets would have overlapped
-     and a tap in the seam would land on whichever won the stacking order —
-     which is the accidental-logout bug, not a fix for it. */
-  .app-nav .nav-right {
-    gap: 1.25rem;
-  }
-  /* Touch target, decoupled from the visible box: out of flow, so it reaches
-     the ~44px minimum without making the nav taller. Same device as
-     SidebarToggle uses in the shell header. */
-  .app-nav .nav-right .nav-icon-btn {
-    position: relative;
-  }
-  .app-nav .nav-right .nav-icon-btn::before {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 2.5rem;
-    height: 2.5rem;
-    transform: translate(-50%, -50%);
-  }
   .app-content {
     padding: 1rem 0.75rem;
     padding-bottom: max(1rem, var(--safe-bottom));

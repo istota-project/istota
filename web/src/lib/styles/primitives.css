@@ -11,12 +11,14 @@
        .spinner + @keyframes spin, .banner and its status variants
      - one global :focus-visible ring, and the text-field exception to it
      - the iOS date-input and 16px-zoom-floor fixes (see @media pointer:coarse)
+     - .touch-target, the coarse-pointer hit-area overlay (24px floor;
+       --touch-target-w / --touch-target-h override it at the call site)
      - .control-row (the field tier) and .content-frame (the content column)
      - body / a base rules, .nav-hang, .overlay-safe
 
    Each block carries its own rationale below; AGENTS.md "Small shared blocks"
    is the index. Pinned by contentFrame / controlTier / touchZoom / dateInputs
-   / captions tests in this directory. */
+   / touchTarget / captions tests in this directory. */
 
 *,
 *::before,
@@ -343,6 +345,21 @@ input[type='week']::-webkit-date-and-time-value {
 	   field. `max()` so a raised browser base size still wins. */
   :root {
     --control-height-lg: max(1.75rem, 32px);
+  }
+}
+
+@media (pointer: coarse) {
+  .touch-target {
+    position: relative;
+  }
+  .touch-target::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--touch-target-w, var(--touch-min)));
+    height: max(100%, var(--touch-target-h, var(--touch-min)));
+    transform: translate(-50%, -50%);
   }
 }
 

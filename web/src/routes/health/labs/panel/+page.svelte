@@ -22,9 +22,11 @@
     Button,
     ConfirmDialog,
     Field,
+    IconButton,
     Select,
     type SelectOption,
   } from '$lib/components/ui';
+  import { X } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
 
   // Read the panel id from ?id=… so the page is statically prerenderable
@@ -358,7 +360,15 @@
                 </td>
                 {#if editing}
                   <td>
-                    <button class="del" type="button" onclick={() => removeRow(i)}>×</button>
+                    <IconButton
+                      class="del touch-target"
+                      size="sm"
+                      danger
+                      label="Remove biomarker"
+                      onclick={() => removeRow(i)}
+                    >
+                      <X size={13} />
+                    </IconButton>
                   </td>
                 {/if}
               </tr>
@@ -528,16 +538,6 @@
   }
   .add {
     margin-top: var(--space-2);
-  }
-  .del {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 1.1rem;
-    cursor: pointer;
-  }
-  .del:hover {
-    color: var(--status-danger-fg);
   }
   .source {
     display: flex;

@@ -81,4 +81,9 @@
       margin-inline-start: var(--space-2);
     }
   }
+  @media (pointer: coarse) {
+    .nav-select {
+      --touch-target-h: var(--touch-comfort);
+    }
+  }
 </style>

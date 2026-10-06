@@ -218,6 +218,7 @@ describe('star affordance', () => {
     const btn = container.querySelector('.star-btn');
     expect(btn).not.toBeNull();
     expect(btn?.getAttribute('aria-label')).toBe('Star message');
+    expect(btn?.classList.contains('touch-target')).toBe(true);
     expect(btn?.getAttribute('aria-pressed')).toBe('false');
     // Hidden at rest (hover/focus reveals it via CSS); not marked starred.
     expect(btn?.classList.contains('starred')).toBe(false);

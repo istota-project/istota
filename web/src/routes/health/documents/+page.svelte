@@ -387,7 +387,7 @@
                     <span class="link-label">{link.label}</span>
                     <button
                       type="button"
-                      class="detach"
+                      class="detach touch-target"
                       disabled={busy.has(doc.id)}
                       onclick={() => detach(doc, link)}
                       aria-label="Detach from {link.label}">×</button

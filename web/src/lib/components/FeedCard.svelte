@@ -350,7 +350,7 @@
   <div class="meta">
     <button
       type="button"
-      class="star-btn"
+      class="star-btn touch-target"
       class:starred={entry.starred}
       onclick={toggleStar}
       title={entry.starred ? 'Unstar' : 'Star'}

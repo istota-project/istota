@@ -39,7 +39,7 @@
     <!-- Selectable header: caret collapses, label filters to this category. -->
     <div class="cat-header" class:active>
       <button
-        class="caret-btn"
+        class="caret-btn touch-target"
         onclick={toggle}
         type="button"
         aria-label={open ? 'Collapse' : 'Expand'}
@@ -179,5 +179,15 @@
     color: var(--text-dim);
     text-transform: none;
     letter-spacing: 0;
+  }
+  @media (pointer: coarse) {
+    .caret-btn {
+      min-width: var(--touch-min);
+      --touch-target-w: 100%;
+    }
+
+    .cat-header {
+      gap: var(--space-1);
+    }
   }
 </style>
