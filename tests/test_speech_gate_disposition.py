@@ -561,3 +561,93 @@ class TestTheWarningIsOnce:
             normalize_disposition("once-only")
             normalize_disposition("once-only")
         assert caplog.text.count("once-only") == 1
+
+
+class TestAFollowUpToTheBotsAnswer:
+    """ISSUE-670: in a friendly room, the person the bot just answered speaking
+    next is answered whatever the classifier says; it only picks the kind."""
+
+    def test_the_structural_rule(self):
+        assert speech_gate.is_follow_up(THANKS_AFTER_ANSWER)
+        assert not speech_gate.is_follow_up(TALKING_PAST)
+        assert not speech_gate.is_follow_up(SOMEONE_ELSE_AFTER_ANSWER)
+        assert not speech_gate.is_follow_up(PASSING_MENTION)
+        assert not speech_gate.is_follow_up([])
+
+    def _row(self, config):
+        with db.get_db(config.db_path) as conn:
+            return dict(conn.execute(
+                "SELECT spoke, rung, kind, reason FROM speech_gate_decisions "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone())
+
+    def test_a_declined_follow_up_is_answered(self, config):
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        task_id, _row, _prompts = _ask_and_ingest(
+            config,
+            '{"speak": false, "reason": "re-sending a GIF, not initiating"}',
+            text="This guy",
+        )
+        assert task_id is not None
+        row = self._row(config)
+        assert (row["spoke"], row["rung"], row["kind"]) == (1, "follow_up", "reply")
+
+    def test_the_classifier_still_picks_an_ack(self, config):
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        task_id, row, _prompts = _ask_and_ingest(
+            config, '{"speak": true, "kind": "ack", "ack_type": "thanks"}',
+        )
+        assert task_id is not None
+        assert row["kind"] == "ack"
+        assert self._row(config)["rung"] == "follow_up"
+
+    def test_a_failed_classifier_is_a_plain_reply(self, config):
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        task_id, _row, _prompts = _ask_and_ingest(config, None, text="This guy")
+        assert task_id is not None
+        row = self._row(config)
+        assert (row["spoke"], row["rung"], row["kind"]) == (1, "follow_up", "reply")
+
+    def test_someone_else_is_still_classified(self, config):
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        with db.get_db(config.db_path) as conn:
+            db.add_message(conn, "grp", role="user", body="see you at five",
+                           origin_surface="talk", author_user_id="bob")
+        task_id, _row, _prompts = _ask_and_ingest(
+            config, '{"speak": false, "reason": "talking to bob"}', text="ok",
+        )
+        assert task_id is None
+        assert self._row(config)["rung"] == "classifier"
+
+    def test_a_reserved_room_is_unchanged(self, config):
+        config.speech_gate.disposition = "reserved"
+        _seed(config)
+        task_id, _row, _prompts = _ask_and_ingest(
+            config, '{"speak": false}', text="This guy",
+        )
+        assert task_id is None
+        assert self._row(config)["rung"] == "classifier"
+
+    def test_a_room_post_is_not_the_bots_answer(self, config):
+        config.speech_gate.disposition = "friendly"
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "grp", "alice", origin="talk", name="Family")
+            db.add_message(conn, "grp", role="user", body="who's bringing cake?",
+                           origin_surface="talk", author_user_id="alice")
+            db.add_message(conn, "grp", role="assistant", body="I'll bring it",
+                           origin_surface="talk", delivery_reference="room-post:7")
+        task_id, _row, _prompts = _ask_and_ingest(
+            config, '{"speak": false}', text="thanks!",
+        )
+        assert task_id is None
+        assert self._row(config)["rung"] == "classifier"
+
+    def test_a_failed_classifier_stays_findable_in_the_reason(self, config):
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        _ask_and_ingest(config, "not json", text="This guy")
+        assert self._row(config)["reason"] == "classifier failed: unparseable output"
