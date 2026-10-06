@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Workspace links and upload chips in chat, briefings and viewed Markdown now open an in-app preview. Modified clicks keep their usual browser behavior, and Download saves the original file.
 
-- Workspace file previews can show Markdown, source text, audio, video and PDF pages in a shared viewer with Download and Close. Images open in the zoom viewer, which now has a visible close button on phones. Markdown source and plain text use the same monospace field as room memory, and preview text follows the app’s text-size setting.
+- Workspace file previews can show Markdown, source text, audio, video and PDF pages in a shared viewer with Download and Close. Images open in the zoom viewer, which now has a visible close button on phones. Markdown source and plain text use the same monospace field as room memory. Frontmatter uses smaller text, and preview text follows the app’s text-size setting.
 
 - Workspace files now have an authenticated preview API for text, raster images, audio, video and PDFs. Text previews are bounded, and HTML and SVG remain source text; original downloads keep their existing behavior.
 

@@ -170,6 +170,7 @@
     overflow-wrap: anywhere;
     font-family: var(--font-mono);
   }
+  details pre,
   pre code {
     font-size: var(--text-sm);
   }
