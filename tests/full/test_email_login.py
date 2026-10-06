@@ -33,7 +33,8 @@ def _delivered_code(service, since: int, recipient: str) -> str:
             for message in inbox.fetch_new_since(since):
                 if recipient not in message.recipients or not message.subject.endswith(" sign-in code"):
                     continue
-                codes = re.findall(r"^(\d{6})$", message.body_text, re.M)
+                # A multipart sign-in mail's text part arrives with CRLF line ends.
+                codes = re.findall(r"^(\d{6})\r?$", message.body_text, re.M)
                 assert len(codes) == 1, "Delivered sign-in mail must carry one code on its own line"
                 assert "http" not in message.body_text, "A sign-in mail must not carry a link (ISSUE-574)"
                 assert message.subject.startswith(codes[0])
