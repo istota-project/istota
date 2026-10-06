@@ -31,13 +31,18 @@ function entry(id: number): FeedEntry {
     file_url: '',
     media_url: '',
     media_type: '',
-    feed: { id: 1, title: 'Example feed', site_url: 'https://example.com', category: null },
+    feed: {
+      id: 1,
+      title: 'Example feed',
+      site_url: 'https://example.com',
+      category: { id: 1, title: 'Example category' },
+    },
     status: 'unread',
     starred: false,
     starred_at: '',
     published_at: '',
     created_at: '',
-  } as FeedEntry;
+  };
 }
 function deferred() {
   let resolve!: () => void;
@@ -132,7 +137,7 @@ it('rolls back a late failed star only on the captured entry', async () => {
   const entries = [entry(1), entry(2)];
   render(Fixture, { entries });
   await open();
-  await fireEvent.click(screen.getByRole('button', { name: 'Star', exact: true }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Star' }));
   await fireEvent.click(next());
   star.reject(new Error('Star failed'));
   await waitFor(() => expect(get(currentNotice)?.message).toBe("Couldn't update star."));
