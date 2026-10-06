@@ -328,8 +328,6 @@
   .ui-viewer-next {
     align-self: center;
     justify-self: center;
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
   }
   .ui-viewer-mobile-navigation {
     display: none;
