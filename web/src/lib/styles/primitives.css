@@ -346,6 +346,21 @@ input[type='week']::-webkit-date-and-time-value {
   }
 }
 
+@media (pointer: coarse) {
+  .touch-target {
+    position: relative;
+  }
+  .touch-target::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, var(--touch-target-w, var(--touch-min)));
+    height: max(100%, var(--touch-target-h, var(--touch-min)));
+    transform: translate(-50%, -50%);
+  }
+}
+
 /* The field tier's scope. A body form or toolbar — anywhere a text input
    shares a row with buttons and selects — marks its container with this, and
    every control inside resolves the taller, squarer box.

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 /**
@@ -49,4 +49,55 @@ export function readCascade(): string {
   return layerPaths()
     .map((p) => readFileSync(p, 'utf8'))
     .join('\n');
+}
+
+/** Body of the first block whose header starts at `needle`, braces balanced. */
+export function blockAfter(source: string, needle: string): string | null {
+  const at = source.indexOf(needle);
+  if (at === -1) return null;
+  const open = source.indexOf('{', at);
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+interface Rule {
+  selector: string;
+  body: string;
+}
+
+export function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+/** Flat `selector { body }` rules of a block body. Comments are stripped first:
+ *  five in this tree quote a brace, which desynchronizes the walk. */
+export function rules(body: string): Rule[] {
+  const out: Rule[] = [];
+  for (const m of stripComments(body).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    out.push({ selector: m[1].trim().replace(/\s+/g, ' '), body: m[2] });
+  }
+  return out;
+}
+
+export function styleFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) styleFiles(path, out);
+    else if (/\.(svelte|css)$/.test(entry.name)) out.push(path);
+  }
+  return out;
+}
+
+/** Every `<style>` body in a component, or the whole file for a stylesheet. */
+export function styleBlocks(file: string, source: string): string[] {
+  if (file.endsWith('.css')) return [source];
+  return [...source.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]);
 }
