@@ -88,6 +88,9 @@ def plain_talk_room(
     canonical = token if explicit_legacy else None
     canonical = db.register_room(conn, canonical, user_id, origin="talk", name=name).token
     db.add_room_binding(conn, canonical, "talk", token)
+    # `record_inbound`'s next write: the binding keeps the last-seen Talk name
+    # (ISSUE-637). The same call, so the two cannot disagree about it.
+    db.observe_external_room_name(conn, canonical, "talk", name)
     return RoomShape(canonical=canonical, talk_ref=token, origin="talk", name=name)
 
 
