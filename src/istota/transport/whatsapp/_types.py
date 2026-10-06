@@ -194,6 +194,9 @@ class InboundWhatsAppEvent:
     #: keys (`video`, `sticker`, …), or `None` when the adapter did not say.
     #: A group records the turn under a stand-in naming it (ISSUE-646).
     unsupported_kind: str | None = None
+    #: The earlier group message whose file `media` is, when this turn claimed
+    #: it (ISSUE-658); `None` when `media` is this message's own.
+    claimed_from: str | None = None
 
 
 @dataclass(frozen=True)

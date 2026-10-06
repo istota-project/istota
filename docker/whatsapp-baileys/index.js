@@ -75,6 +75,10 @@ const MSG_SHUTDOWN = 'shutdown';
 const MSG_LEAVE_GROUP = 'leave_group';
 // React to an inbound message (ISSUE-655), answered with a `send_result`.
 const MSG_REACT = 'react';
+// Fetch the file of an inbound message still in `inboundMessages`, for a
+// later turn that claims it (ISSUE-658), answered with a `media_result`.
+const MSG_FETCH_MEDIA = 'fetch_media';
+const MSG_MEDIA_RESULT = 'media_result';
 
 // Every `reason` the daemon's fixed table knows. Anything else there renders
 // as the generic sentence, which is a worse diagnostic rather than a leak —
@@ -2736,6 +2740,33 @@ class Session {
     }
   }
 
+  /*
+   * Fetch an earlier inbound message's file for a later turn that claims it
+   * (ISSUE-658). Only a message this process still holds can be fetched,
+   * from the same in-memory cache a quote and a reaction read, so nothing new
+   * is kept: the message object already carries its media key, and
+   * `downloadMedia`'s `reuploadRequest` covers a URL that has expired. A miss
+   * answers `ok: false` and the daemon claims nothing.
+   */
+  async fetchMedia(payload) {
+    const requestId = payload && payload.request_id;
+    if (typeof requestId !== 'string' || !requestId) {
+      log('warn', 'a media fetch arrived with no request id');
+      return;
+    }
+    const reply = (fields) => this.link.send(
+      MSG_MEDIA_RESULT, Object.assign({ request_id: requestId }, fields),
+    );
+    const original = recallInbound(payload.message_id, payload.chat);
+    const part = original ? mediaPart(original) : null;
+    if (!this.sock || !part) {
+      reply({ ok: false });
+      return;
+    }
+    const media = await this.downloadMedia(original);
+    reply(Object.assign({ ok: true, message_type: part.kind }, media));
+  }
+
   // D14: the daemon asks the bot to leave a group whose host left it.
   async leaveGroup(jid) {
     if (!isGroupJid(jid) || !this.sock) return;
@@ -3218,6 +3249,12 @@ function main() {
       });
       return;
     }
+    if (type === MSG_FETCH_MEDIA) {
+      session.fetchMedia(payload).catch((err) => {
+        log('error', 'a media fetch escaped', { kind: err && err.name });
+      });
+      return;
+    }
     if (type === MSG_LEAVE_GROUP) {
       session.leaveGroup(payload && payload.group_jid).catch((err) => {
         log('error', 'a group leave escaped', { kind: err && err.name });
@@ -3279,6 +3316,9 @@ module.exports = {
   MSG_SEND,
   MSG_SHUTDOWN,
   MSG_LEAVE_GROUP,
+  MSG_REACT,
+  MSG_FETCH_MEDIA,
+  MSG_MEDIA_RESULT,
   MAX_GROUP_MEMBERS,
   SEND_REASONS,
   MAX_MEDIA_BYTES,

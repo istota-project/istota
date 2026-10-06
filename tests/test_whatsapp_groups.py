@@ -30,12 +30,15 @@ from istota.transport.routing import resolve_delivery_plan
 from istota.transport.whatsapp import WhatsAppTransport, outbound
 from istota.transport.whatsapp import baileys_protocol as proto
 from istota.transport.whatsapp import media as media_rules
-from istota.transport.whatsapp._types import WhatsAppSendResult
+from istota.transport.whatsapp._types import (
+    WhatsAppInboundMedia,
+    WhatsAppSendResult,
+)
 from istota.transport.whatsapp.providers._types import (
     WhatsAppProviderAdapter,
     WhatsAppProviderCaps,
 )
-from istota.transport.whatsapp.webhook import handle_whatsapp_batch
+from istota.transport.whatsapp.webhook import GIF_FRAMES_NOTE, handle_whatsapp_batch
 
 from .support.whatsapp_config import build_whatsapp_config
 
@@ -1169,3 +1172,217 @@ class TestWhoseInboxAGroupFileGoesTo:
             decision = classify_group_event(group, _media_message("the cat?"))
 
         assert decision is not None and decision.speak
+
+
+# ---------------------------------------------------------------------------
+# A later turn claiming earlier media (ISSUE-658)
+# ---------------------------------------------------------------------------
+
+
+def _claimed(event, claimed_from, *, kind="image", attached_for="alice",
+             staged=INBOX_COPY):
+    """*event* as the bridge hands it on after fetching *claimed_from*'s file
+    and staging it for *attached_for*."""
+    media = WhatsAppInboundMedia(
+        staged_path=staged, mime_type="image/jpeg", byte_count=10,
+        attached_for_user=attached_for, error=None, kind=kind,
+    )
+    return dataclasses.replace(event, media=media, claimed_from=claimed_from)
+
+
+class TestALaterTurnClaimsEarlierMedia:
+    """`groups.claim_candidate`: which earlier, unopened file an addressed turn
+    may pull in. Read before anything is fetched, on its own connection."""
+
+    @staticmethod
+    def _ask(config, event):
+        from istota.lib import sqlite_util
+        from istota.transport.whatsapp.groups import claim_candidate
+
+        return claim_candidate(
+            lambda: sqlite_util.connect_read_only(config.db_path), config, event,
+        )
+
+    def _unopened(self, config, **kwargs):
+        _apply(config, _media_message(**kwargs))
+
+    def test_a_quoted_members_photo_is_claimed(self, group):
+        self._unopened(group, message_id="P1")
+
+        claim = self._ask(group, _message(
+            "Istota what is this?", reply_to="P1", message_id="T1",
+        ))
+
+        assert (claim.message_id, claim.kind) == ("P1", "image")
+
+    def test_another_members_quoted_photo_is_claimed(self, group):
+        """Decided (ISSUE-658): everyone in the group has already seen it, so
+        the quoter's inbox may hold a copy."""
+        self._unopened(group, sender=BOB_JID, message_id="P1")
+
+        claim = self._ask(group, _message(
+            "Istota what is this?", reply_to="P1", message_id="T1",
+        ))
+
+        assert claim.message_id == "P1"
+
+    def test_a_quoted_gif_is_claimed_as_a_gif(self, group):
+        self._unopened(group, kind="gif", message_id="G1")
+
+        claim = self._ask(group, _message(
+            "Istota?", reply_to="G1", message_id="T1",
+        ))
+
+        assert claim.kind == "gif"
+
+    def test_a_quoted_guests_photo_is_never_claimed(self, group):
+        self._unopened(group, sender=GUEST_JID, message_id="P1")
+
+        assert self._ask(group, _message(
+            "Istota what is this?", reply_to="P1", message_id="T1",
+        )) is None
+
+    def test_a_guest_quoting_a_members_photo_claims_nothing(self, group):
+        self._unopened(group, message_id="P1")
+
+        assert self._ask(group, _message(
+            "Istota what is this?", sender=GUEST_JID, reply_to="P1",
+            message_id="T1",
+        )) is None
+
+    def test_a_quoted_text_claims_nothing(self, group):
+        _apply(group, _message("look at this", message_id="X1"))
+
+        assert self._ask(group, _message(
+            "Istota?", reply_to="X1", message_id="T1",
+        )) is None
+
+    def test_a_follow_up_from_the_same_sender_claims_their_photo(self, group):
+        self._unopened(group, message_id="P1")
+
+        claim = self._ask(group, _message("Istota what's this?", message_id="T1"))
+
+        assert claim.message_id == "P1"
+
+    def test_a_follow_up_from_someone_else_claims_nothing(self, group):
+        self._unopened(group, sender=BOB_JID, message_id="P1")
+
+        assert self._ask(group, _message("Istota what's this?", message_id="T1")) is None
+
+    def test_a_follow_up_outside_the_window_claims_nothing(self, group):
+        self._unopened(group, message_id="P1")
+        with db.get_db(group.db_path) as conn:
+            conn.execute(
+                "UPDATE messages SET created_at = datetime('now', '-10 minutes')"
+            )
+
+        assert self._ask(group, _message("Istota what's this?", message_id="T1")) is None
+
+    def test_an_answered_turn_in_between_ends_the_follow_up(self, group):
+        self._unopened(group, message_id="P1")
+        _apply(group, _message("Istota, when is dinner?", sender=BOB_JID,
+                               message_id="B1"))
+
+        assert self._ask(group, _message("Istota what's this?", message_id="T1")) is None
+
+    def test_an_unaddressed_follow_up_claims_nothing_once_gated(self, group):
+        """The candidate is the claim's first half; `media_recipient` is the
+        gate, and an unaddressed turn fails it."""
+        from istota.lib import sqlite_util
+        from istota.transport.whatsapp.groups import media_recipient
+
+        self._unopened(group, message_id="P1")
+        event = _message("what's this?", message_id="T1")
+
+        assert media_recipient(
+            lambda: sqlite_util.connect_read_only(group.db_path), group, event,
+        ) is None
+
+    def test_a_turn_that_carries_its_own_file_claims_nothing(self, group):
+        self._unopened(group, message_id="P1")
+
+        assert self._ask(group, _media_message(
+            "Istota what is this?", message_id="P2",
+        )) is None
+
+    def test_a_claimed_photo_is_not_claimed_twice(self, group):
+        self._unopened(group, message_id="P1")
+        _apply(group, _claimed(
+            _message("Istota what is this?", reply_to="P1", message_id="T1"), "P1",
+        ))
+
+        assert self._ask(group, _message(
+            "Istota and now?", reply_to="P1", message_id="T2",
+        )) is None
+
+
+class TestTheClaimingTurn:
+    """The transaction's half: the claimed file is attached to the addressed
+    turn, and the earlier row stops saying it was not opened."""
+
+    def test_the_claimed_file_reaches_the_task_and_the_old_row_changes(self, group):
+        _apply(group, _media_message(message_id="P1"))
+
+        (result,) = _apply(group, _claimed(
+            _message("Istota what is this?", reply_to="P1", message_id="T1"), "P1",
+        ))
+
+        assert result.disposition == "task"
+        task = _task(group, result.task_id)
+        assert task.attachments == [INBOX_COPY]
+        assert task.prompt == "Istota what is this?"
+        rows = _user_rows(group)
+        assert rows[0]["body"] == "[Sent an image, opened for a later message.]"
+        assert rows[1]["body"] == "Istota what is this?"
+        assert "whatsapp_0123456789abcdef.jpg" in rows[1]["attachments"]
+
+    def test_a_claimed_gif_carries_the_frames_note(self, group):
+        _apply(group, _media_message(kind="gif", message_id="G1"))
+
+        (result,) = _apply(group, _claimed(
+            _message("Istota?", reply_to="G1", message_id="T1"), "G1", kind="gif",
+        ))
+
+        assert GIF_FRAMES_NOTE in _task(group, result.task_id).prompt
+
+    def test_a_claim_the_transaction_cannot_confirm_is_not_attached(self, group):
+        """A guest's row is never claimable, whatever the bridge sent."""
+        _apply(group, _media_message(sender=GUEST_JID, message_id="P1"))
+
+        (result,) = _apply(group, _claimed(
+            _message("Istota what is this?", reply_to="P1", message_id="T1"), "P1",
+        ))
+
+        task = _task(group, result.task_id)
+        assert not task.attachments
+        assert "Files from guests are not opened." in _user_rows(group)[0]["body"]
+
+    def test_the_fetchs_own_time_does_not_close_the_window(self, group):
+        """The pre-check passed at 100 s; the fetch answered past 120 s."""
+        from istota.lib import sqlite_util
+        from istota.transport.whatsapp.groups import claim_candidate
+
+        _apply(group, _media_message(message_id="P1"))
+        with db.get_db(group.db_path) as conn:
+            conn.execute(
+                "UPDATE messages SET created_at = datetime('now', '-150 seconds')"
+            )
+        follow_up = _message("Istota what is this?", message_id="T1")
+        assert claim_candidate(
+            lambda: sqlite_util.connect_read_only(group.db_path), group, follow_up,
+        ) is None
+
+        (result,) = _apply(group, _claimed(follow_up, "P1"))
+
+        assert _task(group, result.task_id).attachments == [INBOX_COPY]
+
+    def test_a_claim_staged_for_someone_else_is_not_attached(self, group):
+        _apply(group, _media_message(message_id="P1"))
+
+        (result,) = _apply(group, _claimed(
+            _message("Istota what is this?", reply_to="P1", message_id="T1"), "P1",
+            attached_for="bob",
+        ))
+
+        assert not _task(group, result.task_id).attachments
+        assert _user_rows(group)[0]["body"] == "[Sent an image, which was not opened.]"

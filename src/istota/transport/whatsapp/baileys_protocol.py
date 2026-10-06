@@ -101,6 +101,12 @@ MSG_LEAVE_GROUP = "leave_group"
 #: the frame as unexpected and never answers, which the bridge reads as a
 #: failed reaction after its timeout, so the version does not move.
 MSG_REACT = "react"
+#: Fetch the file of an inbound message the sidecar still holds, for a later
+#: turn that claims it (ISSUE-658). Answered with a `media_result` under the
+#: same request id; a sidecar that predates it never answers, which the
+#: bridge reads as nothing to claim, so the version does not move.
+MSG_FETCH_MEDIA = "fetch_media"
+MSG_MEDIA_RESULT = "media_result"
 
 # The two group types are additive and the version does not move: a sidecar
 # that predates them sends a group message with no sender, which the daemon
@@ -109,12 +115,12 @@ MSG_REACT = "react"
 #: Sidecar to daemon.
 UP_MESSAGES: frozenset[str] = frozenset({
     MSG_HELLO, MSG_READY, MSG_QR, MSG_INBOUND, MSG_RECEIPT,
-    MSG_SEND_RESULT, MSG_FATAL, MSG_GROUP_ROSTER,
+    MSG_SEND_RESULT, MSG_FATAL, MSG_GROUP_ROSTER, MSG_MEDIA_RESULT,
 })
 
 #: Daemon to sidecar.
 DOWN_MESSAGES: frozenset[str] = frozenset({
-    MSG_SEND, MSG_SHUTDOWN, MSG_LEAVE_GROUP, MSG_REACT,
+    MSG_SEND, MSG_SHUTDOWN, MSG_LEAVE_GROUP, MSG_REACT, MSG_FETCH_MEDIA,
 })
 
 #: One line's ceiling, enforced by `encode` and by `decode` both. A cap only on
@@ -773,6 +779,26 @@ def react_payload(
         "message_id": message_id,
         "reaction": reaction,
     }
+
+
+def fetch_media_payload(
+    request_id: str, *, chat: str, message_id: str,
+) -> dict[str, Any]:
+    """A `fetch_media` frame: which chat, and which inbound message's file."""
+    return {"request_id": request_id, "chat": chat, "message_id": message_id}
+
+
+def fetched_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
+    """A `media_result` as the record a claimed file carries, or None.
+
+    None when the sidecar held nothing to fetch. Otherwise the same decoding
+    an `inbound` frame's media fields get, so a staged name is validated as
+    one component here as there, and a failed fetch is a record with an
+    `error`.
+    """
+    if payload.get("ok") is not True:
+        return None
+    return _inbound_media(payload)
 
 
 def send_payload(request_id: str, request: WhatsAppSendRequest) -> dict[str, Any]:

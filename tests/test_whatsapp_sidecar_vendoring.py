@@ -180,6 +180,8 @@ class TestTheSidecarSpeaksTheSameProtocol:
             ("MSG_GROUP_ROSTER", "MSG_GROUP_ROSTER"),
             ("MSG_LEAVE_GROUP", "MSG_LEAVE_GROUP"),
             ("MSG_REACT", "MSG_REACT"),
+            ("MSG_FETCH_MEDIA", "MSG_FETCH_MEDIA"),
+            ("MSG_MEDIA_RESULT", "MSG_MEDIA_RESULT"),
         ],
     )
     def test_each_message_type_is_spelled_the_same(self, js_name, py_name):
@@ -3935,3 +3937,82 @@ class TestTheSidecarsOutboundMedia:
             "type": "send_result", "request_id": "r1", "ok": False,
             "reason": "rejected", "definite": True,
         }]
+
+
+class TestTheSidecarFetchesAClaimedFile:
+    """`Session.fetchMedia` (ISSUE-658), executed against a stand-in link and
+    a stubbed download: only a message still in the inbound cache, in the
+    chat named, with a file this surface fetches, is fetched."""
+
+    _run = TestTheSidecarsInboundMedia._run
+
+    GROUP = "120363000000000001@g.us"
+
+    def _fetch(self, remembered, payload):
+        script = (
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "const answers = []; const fetched = [];"
+            "const link = {greeted: true, send: (t, f) => {"
+            " answers.push(Object.assign({type: t}, f)); return true; }};"
+            "const s = new m.Session(link); s.sock = {};"
+            "s.downloadMedia = async (message) => { fetched.push(message.key.id);"
+            " return {media_name: 'aa.jpg', media_mime: 'image/jpeg',"
+            "  media_bytes: 3, media_error: null}; };"
+            f"for (const [chat, message] of {json.dumps(remembered)})"
+            " m.rememberInbound(chat, message);"
+            f"s.fetchMedia({json.dumps(payload)}).then(() =>"
+            " process.stdout.write(JSON.stringify({answers, fetched})));"
+        )
+        return self._run(script)
+
+    def _photo(self, message_id="P1"):
+        return [self.GROUP, {
+            "key": {"id": message_id, "remoteJid": self.GROUP},
+            "message": {"imageMessage": {"mimetype": "image/jpeg"}},
+        }]
+
+    def test_a_held_photo_is_fetched_and_typed(self):
+        out = self._fetch([self._photo()], {
+            "request_id": "r1", "chat": self.GROUP, "message_id": "P1",
+        })
+
+        assert out["fetched"] == ["P1"]
+        assert out["answers"] == [{
+            "type": "media_result", "request_id": "r1", "ok": True,
+            "message_type": "image", "media_name": "aa.jpg",
+            "media_mime": "image/jpeg", "media_bytes": 3, "media_error": None,
+        }]
+
+    def test_the_answer_decodes_as_the_staged_file(self):
+        out = self._fetch([self._photo()], {
+            "request_id": "r1", "chat": self.GROUP, "message_id": "P1",
+        })
+
+        decoded = proto.fetched_media(out["answers"][0])
+        assert (decoded.staged_path, decoded.kind, decoded.error) == (
+            "aa.jpg", "image", None)
+
+    @pytest.mark.parametrize("payload", [
+        {"request_id": "r1", "chat": GROUP, "message_id": "GONE"},
+        {"request_id": "r1", "chat": "999@g.us", "message_id": "P1"},
+    ])
+    def test_a_message_not_held_for_that_chat_fetches_nothing(self, payload):
+        out = self._fetch([self._photo()], payload)
+
+        assert out["fetched"] == []
+        assert out["answers"] == [
+            {"type": "media_result", "request_id": "r1", "ok": False},
+        ]
+        assert proto.fetched_media(out["answers"][0]) is None
+
+    def test_a_text_message_fetches_nothing(self):
+        text = [self.GROUP, {
+            "key": {"id": "T1", "remoteJid": self.GROUP},
+            "message": {"conversation": "hello"},
+        }]
+        out = self._fetch([text], {
+            "request_id": "r1", "chat": self.GROUP, "message_id": "T1",
+        })
+
+        assert out["fetched"] == []
+        assert out["answers"][0]["ok"] is False
