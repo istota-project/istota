@@ -311,6 +311,7 @@ def _hold_if_unapproved(
                     body=draft_source.delivery_body_for(
                         subject, draft_id,
                         draft_source.visible_recipients([to_addr, *cc]),
+                        config=config,
                     ),
                     room_token=room,
                 )
@@ -391,6 +392,7 @@ def _announce_hold(
             config, task.user_id,
             draft_source.title_for(to_addr) + ". " + draft_source.delivery_body_for(
                 subject, draft_id, draft_source.visible_recipients([to_addr]),
+                config=config,
             ),
             purpose="alert",
         )

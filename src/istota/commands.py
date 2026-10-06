@@ -3989,27 +3989,10 @@ async def cmd_drafts(ctx: CommandContext):
         return refusal
 
     conn, user_id = ctx.conn, ctx.user_id
-    words = ctx.args.split()
-
-    verb = ""
-    if words and not words[0].lstrip("#").isdecimal():
-        verb = words.pop(0).lower()
-        if verb not in ("send", "discard", "list"):
-            return (
-                f"Don't know what `{verb}` means here. Try `!drafts`, "
-                "`!drafts send <id>` or `!drafts discard <id>`."
-            )
-
-    target_id: int | None = None
-    if words:
-        token = words.pop(0)
-        target_id = parse_task_id(token)
-        if target_id is None:
-            return f"`{token}` is not a draft id. Try `!drafts` to see the open ones."
-    if words:
-        return (
-            f"Too many arguments. Try `!drafts {verb or 'send'} <id>`."
-        )
+    parsed = parse_drafts_words(ctx.args)
+    if isinstance(parsed, str):
+        return parsed
+    verb, target_id = parsed
 
     pending = drafts.pending_for_user(conn, user_id)
     if not pending:
@@ -4087,28 +4070,69 @@ async def cmd_drafts(ctx: CommandContext):
     # asyncio loop that also carries every Talk request, so the send goes to a
     # thread rather than stalling Talk for an SMTP conversation plus the IMAP
     # append to Sent.
-    try:
-        message_id = await asyncio.to_thread(
-            drafts.release, ctx.config, draft.id, by=ctx.surface,
+    return await asyncio.to_thread(
+        release_draft_reply, ctx.config, draft.id, recipients, by=ctx.surface,
+    )
+
+
+def parse_drafts_words(args: str) -> tuple[str, int | None] | str:
+    """Read `!drafts`' arguments as (verb, draft id), or the refusal to say.
+
+    The verb is ``""`` when none was written. Shared with the email answer
+    reader (ISSUE-662), so a mailed `!drafts` reads exactly as a typed one.
+    """
+    words = (args or "").split()
+
+    verb = ""
+    if words and not words[0].lstrip("#").isdecimal():
+        verb = words.pop(0).lower()
+        if verb not in ("send", "discard", "list"):
+            return (
+                f"Don't know what `{verb}` means here. Try `!drafts`, "
+                "`!drafts send <id>` or `!drafts discard <id>`."
+            )
+
+    target_id: int | None = None
+    if words:
+        token = words.pop(0)
+        target_id = parse_task_id(token)
+        if target_id is None:
+            return f"`{token}` is not a draft id. Try `!drafts` to see the open ones."
+    if words:
+        return (
+            f"Too many arguments. Try `!drafts {verb or 'send'} <id>`."
         )
+    return verb, target_id
+
+
+def release_draft_reply(config, draft_id: int, recipients: str, *, by: str) -> str:
+    """Send a held draft and say what happened. Blocks on SMTP; never raises.
+
+    Must run with no write transaction open on the caller's side, since
+    `drafts.release` opens its own connection and commits a claim.
+    """
+    from istota.mail import drafts
+
+    try:
+        message_id = drafts.release(config, draft_id, by=by)
     except drafts.DraftSentButUnrecorded as e:
         # Checked before the DraftError branch it belongs to. The mail is gone;
         # calling this "failed, try again" would be the one wrong thing to say.
-        logger.error("!drafts send: draft %s sent but unrecorded: %s", draft.id, e)
+        logger.error("!drafts send: draft %s sent but unrecorded: %s", draft_id, e)
         return (
-            f"#{draft.id} **was sent** to {recipients} (`{e.message_id}`), but "
+            f"#{draft_id} **was sent** to {recipients} (`{e.message_id}`), but "
             f"recording it failed: {e.cause}. Do not resend it. A reply on this "
             "thread may not route back to this conversation."
         )
     except drafts.DraftError as e:
-        return f"Couldn't send #{draft.id}: {e}"
+        return f"Couldn't send #{draft_id}: {e}"
     except Exception as e:  # noqa: BLE001 — SMTP failure; the row stays pending
-        logger.warning("!drafts send failed for draft %s: %s", draft.id, e)
+        logger.warning("!drafts send failed for draft %s: %s", draft_id, e)
         return (
-            f"Sending #{draft.id} failed: {e}. The draft is still waiting — "
-            "try `!drafts send` again."
+            f"Sending #{draft_id} failed: {e}. The draft is still waiting — "
+            f"try `!drafts send {draft_id}` again."
         )
-    return f"Sent #{draft.id} to {recipients} (`{message_id}`)."
+    return f"Sent #{draft_id} to {recipients} (`{message_id}`)."
 
 
 @command("untrust", "Remove a trusted email sender: `!untrust sender@example.com`")
