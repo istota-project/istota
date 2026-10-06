@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -123,10 +124,13 @@ class TestTheMarkerIsWired:
         # A file added without `pytestmark` would run in the default suite and
         # hang on a Docker build. The marker is applied at module level, so this
         # is a check that the module-level line is present in each file.
+        # Either spelling: the bare mark, or a list that carries it (the email
+        # files add their profile beside it).
+        marked = re.compile(r"^pytestmark = (\[[^\n]*)?pytest\.mark\.smoke\b", re.M)
         files = sorted((REPO / "tests" / "smoke").glob("test_*.py"))
         assert files, "no smoke tests found; this guard would pass vacuously"
         for path in files:
-            assert "pytestmark = pytest.mark.smoke" in path.read_text(), path
+            assert marked.search(path.read_text()), path
 
 
 class TestTheXdistGuard:

@@ -214,11 +214,12 @@ The rule is not real-versus-stubbed. It is what the subsystem needs in order to 
 | Sandbox masks, secret isolation | lean | Cheapest place to run them. Both shapes carry the same concessions, so this is a cost choice rather than a constraint — and `tests/full/test_provisioning.py` repeats the mask assertion, since the full shape's two `security_opt` lines are otherwise checked only by parsing a compose file |
 | Email, wire level | neither | A mail server standalone, no istota container at all. That is the `testbed` marker |
 | Email, deployed path | lean | `poll_emails` needs no Nextcloud for attachment-free mail |
+| Email notes, drafts and thread rooms in the web app | full | A private room is user-created, and only the full shape runs the web app to create one through |
 | Email attachments | full | The write lands under `/mnt/shared` on both shapes; only the full one can read the bytes back out of Nextcloud |
 | Talk, storage, shares, notifications | full | The client negotiates capabilities. A stub that answers that wrongly is worse than no test |
 | Provisioning and first boot | full | The thing under test *is* `entrypoint.sh` and `provision-nc.sh` |
 
-Eight profiles carry that split. A profile is a named shape plus the services it runs plus any extra config, declared per test as `@pytest.mark.profile("forge")` and defaulting to `base`; `StackPool` keys by name and boots each one once per session.
+Ten profiles carry that split. A profile is a named shape plus the services it runs plus any extra config, declared per test as `@pytest.mark.profile("forge")` and defaulting to `base`; `StackPool` keys by name and boots each one once per session.
 
 | Profile | Shape | Services |
 |---|---|---|
@@ -229,7 +230,9 @@ Eight profiles carry that split. A profile is a named shape plus the services it
 | `feeds` | lean | model, feeds |
 | `mail` | lean | model, mail |
 | `signaling` | lean | model, signaling |
-| `full` | full | model, nextcloud, mail, signaling |
+| `email` | lean | model, mail, ntfy, with `confirm_sender_match = "verify"` |
+| `email-hold-all` | lean | model, mail, ntfy, as `email` with the outbound approval floor at `all` |
+| `full` | full | model, nextcloud, mail, signaling, ntfy |
 
 Fine-grained on the lean shape, exactly one on the full shape. Many profiles is an argument about a thirty-second boot — a stack with every subsystem on has the daemon polling mail, feeds and Talk during every unrelated test — and it inverts at a cold six-container one, where a second full profile would be a second cold boot to run one more scenario. A test that needs a stack nobody else has touched declares `@pytest.mark.profile("full", fresh=True)` and pays for a private one.
 
@@ -324,6 +327,20 @@ def test_the_thing(stack):
 **A negative assertion needs `stack.mark`**, the watermark `reset` returned, *and* a discriminating column — see the third rule above.
 
 `@pytest.mark.profile("full", fresh=True)` buys a private stack torn down at test end, for anything asserting on start-up behaviour. Note what that costs on the full shape: a fresh six-container boot per test. Where a whole file shares one start-up stack, take a module-scoped fixture calling `stacks.get(profiles.FULL, fresh=True)` instead — `tests/full/test_provisioning.py` is the worked example.
+
+### The email suite
+
+The email suite drives every sender class and gate of email on rooms through the deployed daemon, against a real mail server and a scripted model. Run it with:
+
+```bash
+uv run pytest -m testbed -n0 tests/testbed/test_email_intake.py tests/testbed/test_email_prompt_push.py
+uv run pytest -m smoke -n0 tests/smoke/test_email_*.py
+uv run pytest -m full -n0 tests/full/test_email_rooms.py
+```
+
+The wire tier covers intake (who is asked, recorded or held, and who becomes a participant). The lean files cover what needs a task to finish: replies and their recipients, the gate answered by mail, the outbound gate, the email note and the notification pushes. On lean the host has no private room, so every note is a `private-note:<task>` bell row. The full file signs the host in through the web app and creates three rooms: a private room pinned as the default, a second room of the host's own, and a room shared with a second user. It covers the note in the private room, draft release and discard through `/chat/drafts/{id}` (for a thread reply and for an `email send` to a stranger), the hidden read-only thread room, `about_room`, the private park, the web confirm route, a `room post` into a thread refused, and the gate prompt in the Talk alerts room.
+
+Scenarios share `tests/support/email_flow.py`: `person` and `send` put a mail on the wire with an `[e2e:<nonce>]` marker in its body, `route` scripts the model's turns for the request carrying that marker, and `assert_outcome` checks eight dimensions of one mail and reports every mismatch. Turns are routed by marker rather than served in order, because a background poller can otherwise take a scenario's turn. The full rules, including how a negative is read after the worker's completion line, are in `.claude/rules/testbed.md` under "The email suite".
 
 ### When a stack fails
 

@@ -51,8 +51,12 @@ import subprocess
 
 import pytest
 
+from testbed import stack as stack_support
+
 from ..conftest import REPO, _require_no_xdist, require_docker, resolve_platform
 from ..image import conftest as image_support
+from ..support import email_flow
+from ..support import email_people as email_people_support
 
 NO_FORGE_DOCKERFILE = REPO / "docker" / "test" / "Dockerfile.no-forge"
 
@@ -110,3 +114,57 @@ def no_forge_image(pytestconfig) -> str:
             pytrace=False,
         )
     return tag
+
+
+# -- the email suite ---------------------------------------------------------
+
+#: The lean shape's seeding: no Talk, so the host's alerts go to email and ntfy.
+EmailPeople = email_people_support.EmailPeople
+HOST_ALERT_ROUTE = email_people_support.LEAN_ALERT_ROUTE
+
+
+@pytest.fixture
+def email_people(stack) -> EmailPeople:
+    """The email suite's users, seeded once per stack and proven live.
+
+    Once per stack rather than per test, and kept on the stack object rather
+    than in a session-scoped fixture, because `stack` is per test while the
+    stack it hands out lives for the session. A fresh stack is a new object
+    and seeds again. The seeding itself is `tests/support/email_people.py`,
+    shared with the full shape.
+    """
+    seeded = getattr(stack, "_email_people", None)
+    if seeded is None:
+        try:
+            seeded = email_people_support.seed_email_people(
+                stack, alert_route=HOST_ALERT_ROUTE,
+            )
+        except (TimeoutError, stack_support.StackError) as exc:
+            pytest.fail(str(exc), pytrace=False)
+        stack._email_people = seeded
+    return seeded
+
+
+@pytest.fixture(autouse=True)
+def _no_unmatched_marked_requests(request):
+    """Fail an email scenario whose own marked request found no turn.
+
+    A request whose current marker, the rightmost `[e2e:...]` in it, is one this
+    test sent, and which matched no route or ran past its route's turns, is a
+    task the scenario did not describe; the endpoint answers it with
+    `NO_ACTION` or the exhausted frame, and without this it would pass
+    silently. A request with no marker is a daemon poller's. One whose
+    rightmost marker this test did not send is a daemon job quoting earlier
+    mail (the memory extraction reads a day of conversation), and is ignored
+    too. Only in `test_email_*` files that use a stack.
+    """
+    module = request.module.__name__.rsplit(".", 1)[-1]
+    if not module.startswith("test_email_") or "stack" not in request.fixturenames:
+        yield
+        return
+    stack = request.getfixturevalue("stack")
+    ours = email_flow.sent_markers(stack)
+    ours.clear()
+    yield
+    unmatched = email_people_support.unmatched_marked_requests(stack, ours)
+    assert not unmatched, email_people_support.describe_unmatched(unmatched)

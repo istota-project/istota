@@ -15,6 +15,7 @@ the daemon is written in it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -39,6 +40,11 @@ POLL_INTERVAL = 0.5
 #: trusts a sender does not add a row a later test can filter past, it changes
 #: what every later scenario means, and a watermark on it would invite exactly
 #: the assertion shape that hides that.
+#:
+#: `notifications` has a caveat the others do not: a row that is *bumped* or
+#: *reopened* keeps its id, so a watermark finds only rows created after it.
+#: A scenario reads a fresh object's row (a new task, a new draft) by its dedup
+#: key, and "no push happened" is read off the ntfy stub, not off this table.
 WATERMARK_TABLES = (
     "tasks",
     "task_logs",
@@ -46,7 +52,51 @@ WATERMARK_TABLES = (
     "processed_emails",
     "sent_emails",
     "messages",
+    "notifications",
+    "outbound_drafts",
+    "room_participants",
 )
+
+#: The `surface_ref` of a user's private email room, restated rather than
+#: imported, since this package imports nothing from `istota`:
+#: `transport.email.private_room.email_conversation_token`. A guard in the
+#: default suite holds the two equal.
+PRIVATE_EMAIL_REF_PREFIX = "email-"
+
+
+def private_email_ref(user_id: str) -> str:
+    """`email_conversation_token(user_id)`, restated."""
+    digest = hashlib.sha256(f"istota-email-v1\0{user_id}".encode()).hexdigest()[:24]
+    return PRIVATE_EMAIL_REF_PREFIX + digest
+
+
+#: The reference an email note's room row carries
+#: (`rooms.private_replies.deliver_email_note`).
+def email_note_reference(task_id: int) -> str:
+    return f"private-pass_on:{task_id}:pass-on"
+
+
+def _message_id_forms(message_id: str) -> list[str]:
+    """A Message-ID as it was sent and in the other bracket form.
+
+    The mail driver returns `<id@host>`; a column may hold either, and a probe
+    that guessed wrong would read "no row" for a row that is there.
+    """
+    bare = message_id.strip().strip("<>")
+    return [f"<{bare}>", bare]
+
+
+def _decoded(row: dict, *columns: str) -> dict:
+    """`row` with each JSON column parsed; an unparseable value stays a string."""
+    out = dict(row)
+    for column in columns:
+        value = out.get(column)
+        if isinstance(value, str):
+            try:
+                out[column] = json.loads(value)
+            except ValueError:
+                pass
+    return out
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -292,6 +342,197 @@ class Probe:
         return self.query(
             "SELECT * FROM task_logs WHERE task_id = ? ORDER BY id", [task_id]
         )
+
+    def task_log(self, task_id: int, *, contains: str) -> list[dict]:
+        """The task's `task_logs` rows whose message contains `contains`.
+
+        `instr` rather than `LIKE`, so a `%` or `_` in the text is literal. The
+        one reader today is the email note: `scheduler._write_email_note` logs
+        `Private note to the host: <outcome>` when it writes one, which is the
+        only record of the computed outcome a lean test can read.
+        """
+        return self.query(
+            "SELECT * FROM task_logs WHERE task_id = ? AND instr(message, ?) > 0 "
+            "ORDER BY id",
+            [task_id, contains],
+        )
+
+    # -- email: the mail, its room and what the room holds -----------------
+
+    def processed(self, message_id: str) -> dict | None:
+        """The newest `processed_emails` row for an inbound Message-ID.
+
+        `mail_meta` and `recipients` come back decoded from JSON.
+        """
+        forms = _message_id_forms(message_id)
+        rows = self.query(
+            "SELECT * FROM processed_emails WHERE message_id IN (?, ?) "
+            "ORDER BY id DESC LIMIT 1",
+            forms,
+        )
+        return _decoded(rows[0], "mail_meta", "recipients") if rows else None
+
+    def _canonical_room(self, token: str) -> str:
+        """`db._canonical_room_token(conn, token, cross_surface=False)`, in SQL.
+
+        A live room is itself; a permanent alias to a deleted room is a
+        tombstone and stays as given; any other alias resolves to its target.
+        """
+        rows = self.query(
+            "SELECT (SELECT 1 FROM rooms WHERE token = ?1) AS live, "
+            "m.new_token AS new_token, r.token AS target "
+            "FROM (SELECT 1) LEFT JOIN room_token_migration m ON m.old_token = ?1 "
+            "LEFT JOIN rooms r ON r.token = m.new_token",
+            [token],
+        )
+        row = rows[0] if rows else {}
+        if row.get("live") or not row.get("new_token") or not row.get("target"):
+            return token
+        return row["new_token"]
+
+    def _thread_room(self, token: str | None) -> str | None:
+        """`threads.thread_binding`: the token when its room is a thread room.
+
+        Refused when the room has no email binding, or when the binding's ref
+        is the room creator's private email ref.
+        """
+        if not token:
+            return None
+        rows = self.query(
+            "SELECT r.user_id AS owner, b.surface_ref AS ref FROM rooms r "
+            "JOIN room_bindings b ON b.room_token = r.token AND b.surface = 'email' "
+            "WHERE r.token = ?",
+            [token],
+        )
+        if not rows or rows[0]["ref"] == private_email_ref(rows[0]["owner"] or ""):
+            return None
+        return token
+
+    def email_room(self, message_id: str) -> str | None:
+        """The thread room holding a mail, as `threads.find_thread_room` finds it.
+
+        For one Message-ID: the room bound to it, else the room a stored mail
+        with that id was filed under (`processed_emails.thread_id`, then
+        `sent_emails.conversation_token`), each canonicalised and each refused
+        when it is a private email room. None for a mail in no thread room,
+        which for the host's own mail to the bot is the private email room
+        (`private_email_room`).
+        """
+        for form in _message_id_forms(message_id):
+            bound = self.query(
+                "SELECT room_token FROM room_bindings "
+                "WHERE surface = 'email' AND surface_ref = ?",
+                [form],
+            )
+            if bound:
+                return self._thread_room(self._canonical_room(bound[0]["room_token"]))
+        # `_token_by_stored_mail`'s order: processed mail, then sent mail, the
+        # newest row of each first.
+        for table, column in (("processed_emails", "thread_id"),
+                              ("sent_emails", "conversation_token")):
+            stored = self.query(
+                f"SELECT {column} AS token FROM {table} WHERE message_id IN (?, ?) "
+                "ORDER BY id DESC",
+                _message_id_forms(message_id),
+            )
+            for row in stored:
+                if not row["token"]:
+                    continue
+                found = self._thread_room(self._canonical_room(row["token"]))
+                if found is not None:
+                    return found
+        return None
+
+    def private_email_room(self, user_id: str) -> str | None:
+        """The canonical token of a user's private email room, or None."""
+        ref = private_email_ref(user_id)
+        bound = self.query(
+            "SELECT room_token FROM room_bindings WHERE surface = 'email' "
+            "AND surface_ref = ?",
+            [ref],
+        )
+        token = self._canonical_room(bound[0]["room_token"] if bound else ref)
+        live = self.query("SELECT 1 FROM rooms WHERE token = ?", [token])
+        return token if live else None
+
+    def participants(self, room_token: str) -> list[dict]:
+        """The room's `room_participants` rows, present and departed."""
+        return self.query(
+            "SELECT id, surface, surface_ref, user_id, kind, display_name, "
+            "joined_at, left_at FROM room_participants WHERE room_token = ? "
+            "ORDER BY id",
+            [room_token],
+        )
+
+    def room_messages(self, room_token: str, id_above: int | None = None) -> list[dict]:
+        """The room's `messages` rows, with the three mail cards decoded."""
+        clauses, params = ["room_token = ?"], [room_token]
+        if id_above is not None:
+            clauses.append("id > ?")
+            params.append(id_above)
+        rows = self.query(
+            f"SELECT * FROM messages WHERE {' AND '.join(clauses)} ORDER BY id",
+            params,
+        )
+        return [
+            _decoded(row, "outgoing_mail", "received_mail", "email_note")
+            for row in rows
+        ]
+
+    def email_note(self, task_id: int) -> dict | None:
+        """The email note's room row for a task, in any room, or None.
+
+        None on the lean shape, where nobody has a private room and the note
+        is the `private-note:<task>` bell row (`notifications`).
+        """
+        rows = self.query(
+            "SELECT * FROM messages WHERE delivery_reference = ? ORDER BY id LIMIT 1",
+            [email_note_reference(task_id)],
+        )
+        return _decoded(rows[0], "email_note") if rows else None
+
+    def notifications(
+        self,
+        user_id: str,
+        *,
+        source: str | None = None,
+        dedup_key: str | None = None,
+        id_above: int | None = None,
+    ) -> list[dict]:
+        """A user's `notifications` rows, `params` decoded.
+
+        `dedup_key` is how a scenario finds its own row: `private-note:<task>`
+        for a note in the bell, `task:<id>` for a park. See the caveat on
+        `WATERMARK_TABLES` before reading `id_above` as "written by this test".
+        """
+        clauses, params = ["user_id = ?"], [user_id]
+        for column, value in (("source", source), ("dedup_key", dedup_key)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if id_above is not None:
+            clauses.append("id > ?")
+            params.append(id_above)
+        rows = self.query(
+            f"SELECT * FROM notifications WHERE {' AND '.join(clauses)} ORDER BY id",
+            params,
+        )
+        return [_decoded(row, "params") for row in rows]
+
+    def drafts(self, user_id: str, *, id_above: int | None = None) -> list[dict]:
+        """A user's `outbound_drafts` rows, the address lists decoded."""
+        clauses, params = ["user_id = ?"], [user_id]
+        if id_above is not None:
+            clauses.append("id > ?")
+            params.append(id_above)
+        rows = self.query(
+            f"SELECT * FROM outbound_drafts WHERE {' AND '.join(clauses)} ORDER BY id",
+            params,
+        )
+        return [
+            _decoded(row, "to_addrs", "cc_addrs", "bcc_addrs", "attachments")
+            for row in rows
+        ]
 
     def wait_for_task(self, *, status: str, timeout: float = 60, **filters) -> dict:
         """Block until one task reaches `status`, and return it.

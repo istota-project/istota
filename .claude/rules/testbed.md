@@ -34,7 +34,9 @@ A profile is a named shape plus the services it runs plus any extra config. `Sta
 | `feeds` | lean | model, feeds | the poller against real HTTP, with `ISTOTA_FEEDS_ENABLED` in `Profile.config` |
 | `mail` | lean | model, mail | the deployed email round trip, no Nextcloud |
 | `signaling` | lean | model, signaling | the Talk signaling wire protocol against a real HPB |
-| `full` | full | model, nextcloud, mail, signaling | provisioning, Talk, storage, attachments, the signaling event stream |
+| `email` | lean | model, mail, ntfy | the email suite: `confirm_sender_match = "verify"`, the default `untrusted` outbound floor |
+| `email-hold-all` | lean | model, mail, ntfy | the same with `ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR=all` |
+| `full` | full | model, nextcloud, mail, signaling, ntfy | provisioning, Talk, storage, attachments, the signaling event stream, email seen from the web app |
 
 Fine-grained on the lean shape, exactly one on the full shape. Many lean profiles keep unrelated pollers quiet during a test; at a cold six-container boot that argument inverts, so `full` carries mail and the watermark discipline absorbs the extra poller.
 
@@ -45,6 +47,32 @@ A test declares its profile as a string, `@pytest.mark.profile("forge")`, so a s
 `Probe.wait_for_task` is filtered on `task_id`, `conversation_token` or `id_above`, never on `user_id` alone: the scheduler queues its own work for the same user at startup (a `source_type='scheduled'` row nobody wrote).
 
 There is no `backend` field and no `LOCAL` profile. See "The storage backend".
+
+## The email suite
+
+The email suite drives every sender class and gate of email on rooms through the deployed daemon: `tests/testbed/test_email_intake.py` and `tests/testbed/test_email_prompt_push.py` on the wire tier, six `tests/smoke/test_email_*.py` files on the `email` and `email-hold-all` profiles (the older `test_email_e2e.py` beside them runs on `mail`), and `tests/full/test_email_rooms.py` on `full`. The vocabulary they share is `tests/support/email_flow.py`; the users they assume are seeded by `tests/support/email_people.py`.
+
+```bash
+uv run pytest -m testbed -n0 tests/testbed/test_email_intake.py tests/testbed/test_email_prompt_push.py
+uv run pytest -m smoke -n0 tests/smoke/test_email_*.py
+uv run pytest -m full -n0 tests/full/test_email_rooms.py
+```
+
+**Turns are routed by the request, not served in order.** A script item `{"when": "<marker>", "turns": [...]}` is a route (`testbed/services/model_endpoint.py`). Each mail a scenario sends carries `[e2e:<nonce>]` in its body, and the request whose first user message holds that marker gets the route's turns; the turn index is the number of assistant messages already in the request, so a tool round trip takes the next turn and a retried attempt starts again at 0. Where several markers appear (a thread's history precedes the request), the one whose last occurrence is furthest right wins. A request matching no route takes the next positional item, or `NO_ACTION: unscripted`, and is recorded in `endpoint.unmatched`. The autouse fixture in both email conftests fails a test whose own marked request found no turn, and ignores a request whose rightmost marker the test did not send, because the nightly memory extraction and a channel's memory pass quote earlier mail, markers included. A test that rescripts mid-way keeps its earlier routes for the same reason.
+
+**Seeding.** `seed_email_people` runs once per stack through the shipped CLI: testuser with `*@trusted.test` as a trusted-sender pattern, `*@quiet.test` as a quiet one, an ntfy secret and an alert route, then alice. Profile patterns rather than the runtime trust table, since `reset_framework_state` clears the table. A readiness mail from alice, routed `sender_match`, proves the profiles reached the running daemon before any scenario runs. The alert route is `email,ntfy` on lean, which has no Talk, and `talk:<alerts room>,ntfy` on full, so a push the product cuts to `ROOM_FREE_SURFACES` (ntfy and email) shows as no post in Talk.
+
+**`email_flow.assert_outcome` checks eight dimensions** of one mail and reports every mismatch: the `processed_emails` row, the task, the room, its participants, the transcript rows, the reply on the wire, the email note, and the notification rows with the ntfy pushes and alert mails. `Expected` has no defaults. Three readings are not obvious:
+
+- "No note" and "no reply" are read after the worker's `task N completed` log line (`worker_done`); #651 has since added an `Email note step:` `task_logs` line the harness could wait on instead, and "no reply" is then watched for a bounded ten seconds, since a sent mail reaches IMAP after the line. A held mail no worker ran gets the same bounded settle before "nothing was pushed".
+- Every push on the alert route is a title plus fixed or composed text (#638). The check is that the sender's words and the note's remark are in no push and no alert mail, not that some push happened.
+- `WATERMARK_TABLES` includes `notifications`, but a row that is bumped or reopened keeps its id. A scenario finds its own row by dedup key on a fresh object (a new task, a new draft), and reads "no push" off the ntfy stub.
+
+**The note's two homes.** On lean nobody has a private room (rooms are user-created, and lean runs no web app), so every email note is the `private-note:<task>` bell row and its push is `PRIVATE_NOTE_POINTER`. On full, `test_email_rooms.py` signs testuser in, creates its web rooms through the API, and pins one as `default_room`, which `private_replies.private_room_for` then resolves for every thread. The note is a system row there, and its bell push is room-free.
+
+**Where the suite departs from its spec, as built.** The gate is answered by mail through #649's authenticated `!confirm`, with a forged answer that changes nothing as a case of its own. Approving a held mail on a vetoed thread asserts #650's fix: the task is cancelled, the ack says so, and the room gains no participant. Release and discard run through `/chat/drafts/{id}` on the full shape. #662 has since made a draft answerable by an authenticated `!drafts` mail, which no case here drives yet. The web confirm route's 409 for a room that is not a preview room applies to relay-held tasks, so the full file drives it with a `room post`; since #665 it also refuses a `room` naming a thread room, which no case drives yet. A question parked in a web-only private room is pushed with `PARK_BODY`, its row being the delivery (#661). The full file signs in once per stack and keeps the client, since the email login throttles attempts per address.
+
+**What the email seeding leaves on a session stack.** Nothing undoes it, so every later test on the same stack runs with it: testuser's trusted and quiet patterns, the alert route naming ntfy, the ntfy secret, alice as a user, and on full the three web rooms, alice in the shared one, and testuser's `default_room` pinned to the private room. A later scenario that delivers to testuser's default web room, or counts testuser's rooms, has to allow for that.
 
 ## Services
 
@@ -190,7 +218,7 @@ No variable names the checkout a stack builds from. `LeanShape` and `FullShape` 
 
 One developer machine, August 2026 (arm64, 10 cores, Docker Desktop 29.6), warm caches, runs serialized through `scripts/qtest`. Treat them as shape, not threshold; the tier prints its own `docker compose exec` fraction at the end of each session.
 
-- Lean tier: seven stacks per session (`base`, `forge`, `no-forge`, `notify`, `feeds`, `mail`, `signaling`). About 165 seconds for the first six, measured before `signaling` was added. Per-profile boot 6.5 to 9 seconds, per-test setup after that about 0.7 seconds.
+- Lean tier: nine stacks per session (`base`, `forge`, `no-forge`, `notify`, `feeds`, `mail`, `signaling`, `email`, `email-hold-all`). About 165 seconds for the first six, measured before `signaling` and the two email profiles were added. Per-profile boot 6.5 to 9 seconds, per-test setup after that about 0.7 seconds.
 - Full tier: one cold boot of six containers, 50 to 84 seconds to both healthchecks. Nextcloud is healthy before `up` returns, because `istota` declares `depends_on: service_healthy`.
 - `docker compose exec` is about 31% of a lean session (123 to 127 ms a call) and 5 to 8% of a full one. No optimization was built; the counters stay.
 

@@ -286,6 +286,62 @@ class TestARefusedCommandIsNotAnEmptyMailbox:
             _session(_RefusingConnection("select")).uids("Archive")
 
 
+class _FetchConnection:
+    """Answers `UID FETCH` with an unsolicited flags update ahead of the
+    literal, which imaplib returns in the same `data` list."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def uid(self, command, *args):
+        assert command == "fetch"
+        return "OK", self.data
+
+
+_RAW = b"From: a@ext.test\r\nTo: b@ext.test\r\nSubject: hi\r\n\r\nbody\r\n"
+
+
+class TestTheFetchFindsItsOwnLiteral:
+    def test_an_unsolicited_flags_update_ahead_of_the_literal_is_skipped(self):
+        # Maddy's order: the literal first, `UID` in the closing element.
+        data = [b"13 (UID 13 FLAGS (\\Seen))", (b"14 (BODY[] {60}", _RAW), b" UID 14)"]
+        message = _session(None)._fetch(_FetchConnection(data), 14)
+        assert message.subject == "hi"
+
+    def test_the_plain_answer_still_reads(self):
+        data = [(b"14 (BODY[] {60}", _RAW), b" UID 14)"]
+        assert _session(None)._fetch(_FetchConnection(data), 14).subject == "hi"
+
+    def test_an_answer_with_no_literal_is_refused_once_the_settle_runs_out(
+        self, monkeypatch,
+    ):
+        monkeypatch.setattr(mail, "FETCH_SETTLE", 0.0)
+        data = [b"13 (UID 13 FLAGS (\\Seen))"]
+        with pytest.raises(RuntimeError, match="could not fetch uid 14"):
+            _session(None)._fetch(_FetchConnection(data), 14)
+
+    def test_a_message_outside_the_sessions_view_is_read_after_a_noop(
+        self, monkeypatch,
+    ):
+        """UID SEARCH lists a message delivered after SELECT; UID FETCH answers
+        `OK [None]` for it until a NOOP brings it into the session's view."""
+        monkeypatch.setattr(mail.time, "sleep", lambda _s: None)
+
+        class Stale:
+            refreshed = False
+
+            def uid(self, command, *args):
+                if not self.refreshed:
+                    return "OK", [None]
+                return "OK", [(b"14 (BODY[] {60}", _RAW), b" UID 14)"]
+
+            def noop(self):
+                self.refreshed = True
+                return "OK", [b"14 EXISTS"]
+
+        assert _session(None)._fetch(Stale(), 14).subject == "hi"
+
+
 class TestTheSessionReadsTheFolderItWasOpenedOn:
     def test_a_method_with_no_folder_uses_the_sessions_own(self):
         """Not a hardcoded INBOX. A session opened on another folder would

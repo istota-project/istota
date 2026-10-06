@@ -33,6 +33,12 @@ import pytest
 from testbed.services import mail
 from testbed.services.nextcloud import BOT_MOUNT_POINT
 
+# A clean verdict from the authserv-id this profile configured, and a failing
+# one. The `full` profile runs `confirm_sender_match = "verify"`, and every
+# scenario here writes `From: testuser@ext.test`, which is a self-claim: without
+# a passing stamp the mail is held for confirmation and never completes.
+from ..support.email_flow import FAILING_STAMP, PASSING_STAMP
+
 pytestmark = pytest.mark.full
 
 USER_ID = "testuser"
@@ -48,20 +54,6 @@ SCRIPT = [{"text": json.dumps({"body": ANSWER, "format": "plain"})}] * 4
 
 ATTACHMENT_BODY = b"the bytes that arrived by email\n"
 
-#: A clean verdict from the authserv-id this profile configured, and a failing
-#: one.
-#:
-#: The `full` profile runs `confirm_sender_match = "verify"`, so a sender
-#: claiming the user's own address is proof only when the receiving MTA says so.
-#: Every scenario here writes `From: testuser@ext.test`, which is that claim, so
-#: without a passing stamp the mail is held for confirmation and never
-#: completes. Maddy passes an inbound `Authentication-Results` through verbatim,
-#: which is what makes writing one from a test mean anything.
-PASSING_STAMP = {
-    "Authentication-Results": "mail; spf=pass smtp.mailfrom=ext.test; "
-    "dkim=pass; dmarc=pass header.from=ext.test"
-}
-FAILING_STAMP = {"Authentication-Results": "mail; dmarc=fail header.from=ext.test"}
 
 
 def _wait_for_email_task(stack, *, status: str = "completed", timeout: float = 300):

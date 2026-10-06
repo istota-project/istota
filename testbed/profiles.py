@@ -231,10 +231,18 @@ FULL_CONFIG = {
 #: `participants/active` or Nextcloud's authorization, because all three need a
 #: real Talk behind them. A second full profile would be a second cold boot of
 #: the same six containers to run one chain.
+#:
+#: And ntfy, for `tests/full/test_email_rooms.py`: a push the product confines
+#: to ntfy and email (`notifications.store.ROOM_FREE_SURFACES`) can only be told
+#: apart from one on the whole alert route where that route also names a Talk
+#: room, which is the one thing the lean `email` profile has no way to offer.
+#: The stub runs in the pytest process and the daemon reaches it only through
+#: the per-user secret the email seeding writes. Until a test seeds it, nothing
+#: pushes there; after, testuser's alerts reach it for the rest of the session.
 FULL = Profile(
     "full",
     shape="full",
-    services=("model", "nextcloud", "mail", "signaling"),
+    services=("model", "nextcloud", "mail", "signaling", "ntfy"),
     config=FULL_CONFIG,
     compose_overlays=(MAIL_OVERLAY, MAIL_WEB_OVERLAY),
     compose_profiles=("signaling",),
@@ -251,6 +259,36 @@ MAIL = Profile(
     compose_overlays=(MAIL_OVERLAY,),
 )
 
+#: The email suite's lean profiles: mail, the model and an ntfy stub, with the
+#: self-claim gate in `verify`.
+#:
+#: `verify` rather than `off`, because it is the mode in which a header decides
+#: between running and holding, and `off` is already `mail`'s. So mail the
+#: stack's own user sends from their own address must carry a passing
+#: `Authentication-Results` stamp (`tests/support/email_flow.py`), or it is
+#: held. ntfy because the suite asserts what every push carries, and a profile
+#: without the stub could only count them. Both variables pass the two-file
+#: rule: `render-config.sh` reads them and `docker-compose.yml` passes them.
+EMAIL_CONFIG = {
+    **MAIL_CONFIG,
+    "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify",
+}
+EMAIL = Profile(
+    "email",
+    services=("model", "mail", "ntfy"),
+    config=EMAIL_CONFIG,
+    compose_overlays=(MAIL_OVERLAY,),
+)
+#: The same, with every outbound mail held for approval. A profile rather than
+#: a runtime flip, because a lean boot is seconds and a config change reaching
+#: a running daemon is not something a test can observe.
+EMAIL_HOLD_ALL = Profile(
+    "email-hold-all",
+    services=("model", "mail", "ntfy"),
+    config={**EMAIL_CONFIG, "ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR": "all"},
+    compose_overlays=(MAIL_OVERLAY,),
+)
+
 #: Every profile this package defines, for the guard that checks each one names
 #: services that exist. A profile absent from here is invisible to that check,
 #: so add to it when adding a profile.
@@ -261,6 +299,8 @@ ALL: tuple[Profile, ...] = (
     NOTIFY,
     FEEDS,
     MAIL,
+    EMAIL,
+    EMAIL_HOLD_ALL,
     SIGNALING,
     FULL,
 )

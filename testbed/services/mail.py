@@ -216,9 +216,11 @@ def send(
     server: MailServer,
     *,
     from_addr: str,
-    to_addr: str,
+    to_addr: str | list[str],
     subject: str,
     body: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
     from_name: str | None = None,
     reply_to: str | None = None,
     in_reply_to: str | None = None,
@@ -250,6 +252,12 @@ def send(
     `Authentication-Results` headers is a case and their order is what the
     canary reads.
 
+    `to_addr` may be a list, and `cc` adds a `Cc:` header; every address in
+    either is an envelope recipient, as a real client would send it, so a
+    human's copy of a multi-party mail lands in the catch-all beside the bot's
+    replies. Readers there tell them apart by sender. `bcc` adds envelope
+    recipients and no header, which is all a Bcc is on the wire.
+
     `attachments` is `(filename, content_type, payload)`. A `content_type` of
     `"application/octet-stream"` is the safe default; the string is split on `/`
     and handed to `add_attachment`.
@@ -261,7 +269,11 @@ def send(
     """
     message = EmailMessage(policy=email.policy.SMTP)
     message["From"] = email.utils.formataddr((from_name or "", from_addr))
-    message["To"] = to_addr
+    to_list = [to_addr] if isinstance(to_addr, str) else list(to_addr)
+    cc_list = list(cc or [])
+    message["To"] = ", ".join(to_list)
+    if cc_list:
+        message["Cc"] = ", ".join(cc_list)
     message["Subject"] = subject
     message["Date"] = email.utils.formatdate(localtime=True)
     message["Message-ID"] = message_id or email.utils.make_msgid(
@@ -311,7 +323,9 @@ def send(
         server.host, server.smtp_port, context=server.context(), timeout=NETWORK_TIMEOUT
     ) as client:
         client.login(*auth)
-        client.sendmail(from_addr, [to_addr], raw, mail_options=options)
+        client.sendmail(
+            from_addr, to_list + cc_list + list(bcc or []), raw, mail_options=options,
+        )
     return message["Message-ID"]
 
 
@@ -335,6 +349,25 @@ def _expect_ok(answer, what: str, account: str):
             "empty or successfully-emptied mailbox."
         )
     return data
+
+
+#: How long `_fetch` retries, with a NOOP between tries, a listed message that
+#: answers with no literal.
+FETCH_SETTLE = 2.0
+
+
+def _body_literal(data) -> tuple | None:
+    """The `BODY[]` literal in a UID FETCH answer, or None.
+
+    imaplib returns every untagged response, so an unsolicited
+    `FETCH (FLAGS ...)` for another message can precede the literal. A flags
+    update carries no literal and a fetch here names one message, so the tuple
+    carrying `BODY[]` is the answer (Maddy puts `UID` after it).
+    """
+    for item in data or []:
+        if isinstance(item, tuple) and b"BODY[]" in item[0]:
+            return item
+    return None
 
 
 class ImapSession:
@@ -518,10 +551,24 @@ class ImapSession:
         So headers come from a `compat32` parse, which hands back the wire text,
         and the body from a `default` one.
         """
-        typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
-        if typ != "OK" or not data or not isinstance(data[0], tuple):
-            raise RuntimeError(f"could not fetch uid {uid} from {self.account}")
-        payload = data[0][1]
+        # A message delivered after this session's SELECT can be listed by
+        # UID SEARCH, which reads the store, while UID FETCH answers only from
+        # the session's view and returns `OK [None]` for it. A NOOP brings the
+        # new message into the view, so an empty answer is retried after one.
+        deadline = time.monotonic() + FETCH_SETTLE
+        while True:
+            typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
+            literal = _body_literal(data)
+            if typ == "OK" and literal is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"could not fetch uid {uid} from {self.account}: "
+                    f"{typ} {data!r:.300}"
+                )
+            conn.noop()
+            time.sleep(0.2)
+        payload = literal[1]
         parsed = email.message_from_bytes(payload, policy=email.policy.default)
         raw = email.message_from_bytes(payload, policy=email.policy.compat32)
         # First occurrence wins, which for a repeated header is the topmost —
