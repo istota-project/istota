@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Health image documents now open in the zoom viewer from their name or Open menu. Download still saves the original file, and PDFs keep downloading as before.
+
+- Workspace links and upload chips in chat, briefings and viewed Markdown now open an in-app preview. Modified clicks keep their usual browser behavior, and Download saves the original file.
+
+- Workspace file previews can show Markdown, source text, audio, video and PDF pages in a shared viewer with Download and Close. Images open in the zoom viewer, which now has a visible close button on phones. Markdown source and plain text use the same monospace field as room memory. Frontmatter uses smaller text, and preview text follows the app’s text-size setting.
+
+- Workspace files now have an authenticated preview API for text, raster images, audio, video and PDFs. Text previews are bounded, and HTML and SVG remain source text; original downloads keep their existing behavior.
+
 - **A WhatsApp group question about an earlier photo now sees the photo** (#658). On Baileys, a member who quotes a photo, GIF or voice note left unopened and addresses the bot gets the file attached to that question, and so does a member who sends a photo and then, within two minutes and with nothing answered in between, asks the bot about it. The file goes to the asking member's inbox, the earlier message's line in the room changes to say it was opened, and a guest's file is still never opened either way. A quoted file can be another member's, since everyone in the group has seen it.
 
   **Upgrade note:** update the Baileys sidecar with the daemon; an older sidecar does not answer the new fetch frame, and the question goes ahead without the file.

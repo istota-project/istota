@@ -45,6 +45,8 @@ vi.mock('$lib/stores/chat', async () => {
 
 import { getChatSession } from '$lib/stores/chat';
 import Page from './+page.svelte';
+import FileViewerHost from '$lib/fileViewer/FileViewerHost.svelte';
+import { viewer } from '$lib/fileViewer/store.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import type { User } from '$lib/api';
 
@@ -99,7 +101,10 @@ function seedTranscript() {
   ]);
 }
 
-const renderPage = () => render(Harness, { component: Page, user: person });
+const renderPage = () => {
+  render(FileViewerHost);
+  return render(Harness, { component: Page, user: person });
+};
 
 /** The lightbox's own image, which exists only while it is open. */
 const lightboxImg = () => document.querySelector<HTMLImageElement>('.lightbox img');
@@ -117,6 +122,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  viewer.close();
   vi.unstubAllGlobals();
 });
 

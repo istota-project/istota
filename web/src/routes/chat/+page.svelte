@@ -28,7 +28,7 @@
     CategoryGroup,
   } from '$lib/components/ui';
   import { isHiddenRoom } from '$lib/stores/roomOrder';
-  import Lightbox from '$lib/components/Lightbox.svelte';
+  import { viewer } from '$lib/fileViewer/store.svelte';
   import { roomColorVar } from '$lib/roomColors';
   import Message from '$lib/components/chat/Message.svelte';
   import Composer from '$lib/components/chat/Composer.svelte';
@@ -386,17 +386,6 @@
       excerpt: m.text.slice(0, REPLY_EXCERPT_CHARS),
     };
   }
-
-  // Lightbox for an inline image in a transcript. One instance for the page,
-  // as on the feeds route: a zoom controller per message would put one in every
-  // row of a long room. `Message` supplies the list, scoped to the message the
-  // click landed in.
-  //
-  // Wired on every row, the cross-room views included and unlike the handlers
-  // beside it there: opening a zoom reads the transcript and changes nothing
-  // in it, so there is nothing for a read-only pane to withhold.
-  let lightboxImages = $state<string[]>([]);
-  let lightboxIndex = $state<number | null>(null);
 
   // A send whose cited parent turned out to be gone: the store took the row
   // off the transcript, so the text comes back here rather than being lost.
@@ -1492,10 +1481,7 @@
                 onJump={(token, taskId) => session.jumpToTask(token, taskId)}
                 onOpenRoom={(token) => session.selectRoomByToken(token)}
                 onDiscuss={inViewMode ? undefined : discussInPrivate}
-                onImageOpen={(imgs, idx) => {
-                  lightboxImages = imgs;
-                  lightboxIndex = idx;
-                }}
+                onImageOpen={viewer.openImages}
                 drafts={draftsForRow(message)}
                 draftActions={inViewMode ? undefined : draftActions}
                 externalDisplay={$externalTurnDisplay}
@@ -1681,7 +1667,6 @@
 
   <!-- Rendered unconditionally: the component's own `{#if}` is inside it, and
        its gesture teardown assumes it is never unmounted between two opens. -->
-  <Lightbox images={lightboxImages} index={lightboxIndex} onClose={() => (lightboxIndex = null)} />
 </AppShell>
 
 <style>

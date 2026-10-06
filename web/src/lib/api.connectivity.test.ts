@@ -298,3 +298,30 @@ describe('what a failed request says', () => {
     await expect(api.getVaultStatus()).rejects.toBeInstanceOf(api.AuthError);
   });
 });
+
+describe('workspace file preview', () => {
+  it('encodes the path and uses the authenticated, abortable API seam', async () => {
+    const body = {
+      kind: 'text',
+      text: 'note',
+      name: 'note.txt',
+      size: 4,
+      modified: '',
+      truncated: false,
+    };
+    fetchMock.mockResolvedValue(jsonResponse(200, body));
+    const controller = new AbortController();
+    expect(await api.previewChatFile('/notes/a#b.txt', controller.signal)).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/chat/files/preview?path=%2Fnotes%2Fa%23b.txt',
+      expect.objectContaining({ credentials: 'same-origin', signal: controller.signal }),
+    );
+  });
+  it('preserves refusal status and the server message for the download decision', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { error: 'File not found' }));
+    await expect(api.previewChatFile('/missing')).rejects.toMatchObject({
+      status: 404,
+      message: 'File not found',
+    });
+  });
+});

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { Dialog } from 'bits-ui';
+  import { Button } from '$lib/components/ui';
   import { ChevronLeft, ChevronRight } from '@lucide/svelte';
   import {
     FIT,
@@ -23,13 +25,32 @@
     images = [],
     index = null,
     onClose,
+    download = false,
   }: {
     images?: string[];
     index?: number | null;
     onClose: () => void;
+    download?: boolean;
   } = $props();
 
   let current = $state<number | null>(null);
+  let imageFailed = $state(false);
+  let imageSource = $derived(current === null ? null : images[current]);
+  $effect(() => {
+    imageSource;
+    imageFailed = false;
+  });
+  let downloadHref = $derived(current === null ? '' : (images[current] ?? '').split('#')[0]);
+  let downloadName = $derived.by(() => {
+    if (!downloadHref) return '';
+    try {
+      const path = new URL(downloadHref, 'https://example.com').searchParams.get('path');
+      return path?.split('/').pop() ?? '';
+    } catch {
+      return '';
+    }
+  });
+
   let zoom = $state<ZoomState>(FIT);
   let smooth = $state(false);
   let imgEl = $state<HTMLImageElement | null>(null);
@@ -129,18 +150,13 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (current === null) return;
-    if (e.key === 'Escape') onClose();
-    else if (e.key === 'ArrowRight') next();
+    if (e.key === 'ArrowRight') next();
     else if (e.key === 'ArrowLeft') prev();
     else if (e.key === '+' || e.key === '=') zoomFromCenter(KEY_ZOOM_STEP);
     else if (e.key === '-' || e.key === '_') zoomFromCenter(1 / KEY_ZOOM_STEP);
     else if (e.key === '0') resetGestures();
     else return;
-    // Only the zoom keys are ours alone. Escape and the arrows are also bound
-    // by the feed reader underneath, on `document`, and it registers first — so
-    // claiming them here would suppress the browser's default without stopping
-    // the other handler, which is a promise this cannot keep.
-    if (e.key !== 'Escape' && e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') {
       e.preventDefault();
     }
   }
@@ -251,7 +267,7 @@
 
   /** The nav buttons keep their own behaviour; a tap on one is not a gesture. */
   function isControl(target: EventTarget | null): boolean {
-    return target instanceof Element && target.closest('.controls') !== null;
+    return target instanceof Element && target.closest('.controls, .file-controls') !== null;
   }
 
   function onPointerDown(e: PointerEvent) {
@@ -416,41 +432,107 @@
   }
 </script>
 
-{#if current !== null && images.length > 0}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="lightbox open"
-    bind:this={backdropEl}
-    onpointerdown={onPointerDown}
-    onpointermove={onPointerMove}
-    onpointerup={onPointerUp}
-    onpointercancel={onPointerUp}
-    onwheel={onWheel}
-  >
-    <img
-      bind:this={imgEl}
-      src={images[current]}
-      alt=""
-      draggable="false"
-      class:zoomed={isZoomed(zoom)}
-      style:transform="translate({zoom.x}px, {zoom.y}px) scale({zoom.scale})"
-      style:transition={smooth ? 'transform 180ms ease-out' : 'none'}
-    />
-    {#if images.length > 1}
-      <div class="controls">
-        <button class="nav" onclick={prev} aria-label="Previous image">
-          <ChevronLeft size={24} />
-        </button>
-        <div class="counter">{current + 1} / {images.length}</div>
-        <button class="nav" onclick={next} aria-label="Next image">
-          <ChevronRight size={24} />
-        </button>
-      </div>
-    {/if}
-  </div>
-{/if}
+<Dialog.Root
+  open={current !== null && images.length > 0}
+  onOpenChange={(open) => {
+    if (!open) onClose();
+  }}
+>
+  {#if current !== null && images.length > 0}
+    <Dialog.Content>
+      {#snippet child({ props })}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          {...props}
+          aria-label="Image viewer"
+          class="lightbox open"
+          bind:this={backdropEl}
+          onpointerdown={onPointerDown}
+          onpointermove={onPointerMove}
+          onpointerup={onPointerUp}
+          onpointercancel={onPointerUp}
+          onwheel={onWheel}
+          onkeydown={(event) => {
+            // Keep the reader beneath this dialog from consuming the same keys.
+            event.stopPropagation();
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              onClose();
+            } else {
+              if (typeof props.onkeydown === 'function') props.onkeydown(event);
+              handleKeydown(event);
+            }
+          }}
+        >
+          <img
+            bind:this={imgEl}
+            src={images[current ?? 0]}
+            alt=""
+            hidden={imageFailed}
+            onerror={() => (imageFailed = true)}
+            draggable="false"
+            class:zoomed={isZoomed(zoom)}
+            style:transform="translate({zoom.x}px, {zoom.y}px) scale({zoom.scale})"
+            style:transition={smooth ? 'transform 180ms ease-out' : 'none'}
+          />
+          {#if imageFailed}
+            <p class="image-error" role="alert">
+              This image could not be displayed.{#if download}
+                {' '}Download it to open it in another app.{/if}
+            </p>
+          {/if}
+          <div class="file-controls">
+            {#if download}
+              <Button
+                href={downloadHref}
+                download={downloadName}
+                onclick={(e) => e.stopPropagation()}>Download</Button
+              >
+            {/if}
+            <Button
+              ariaLabel="Close image"
+              onclick={(e) => {
+                e.stopPropagation();
+                onClose();
+              }}>Close</Button
+            >
+          </div>
+          {#if images.length > 1}
+            <div class="controls">
+              <button class="nav" onclick={prev} aria-label="Previous image">
+                <ChevronLeft size={24} />
+              </button>
+              <div class="counter">{(current ?? 0) + 1} / {images.length}</div>
+              <button class="nav" onclick={next} aria-label="Next image">
+                <ChevronRight size={24} />
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/snippet}
+    </Dialog.Content>
+  {/if}
+</Dialog.Root>
 
 <style>
+  .image-error {
+    color: var(--on-scrim-fg);
+    padding: var(--space-4);
+    text-align: center;
+  }
+
+  .file-controls {
+    position: absolute;
+    top: max(var(--space-4), var(--safe-top));
+    right: max(var(--space-4), var(--safe-right));
+    left: max(var(--space-4), var(--safe-left));
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    cursor: default;
+    touch-action: manipulation;
+  }
+
   .lightbox {
     position: fixed;
     inset: 0;

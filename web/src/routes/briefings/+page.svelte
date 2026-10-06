@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fileLinks } from '$lib/fileViewer/links';
   import { base } from '$app/paths';
   import { renderMarkdown } from '$lib/markdown';
   import { getBriefingArchiveItem, type BriefingArchiveItem } from '$lib/api';
@@ -66,7 +67,7 @@
            Svelte's scoping class outranks the global ones — and only cover where
            a reading surface genuinely differs from a chat bubble (flush lists,
            larger headings). -->
-      <div class="body markdown">{@html renderMarkdown(current.body_md ?? '')}</div>
+      <div use:fileLinks class="body markdown">{@html renderMarkdown(current.body_md ?? '')}</div>
     </article>
   {:else if loading || $briefingArchiveCount === null}
     <p class="center-msg">Loading…</p>

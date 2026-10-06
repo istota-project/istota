@@ -6,6 +6,8 @@
  * testable without mounting anything.
  */
 
+import { isPlainClick } from '$lib/fileViewer/links';
+import { viewer } from '$lib/fileViewer/store.svelte';
 import type {
   Diagnosis,
   DocumentEntity,
@@ -289,4 +291,17 @@ export function attachOptions(
     value: String(i.id),
     label: `${formatDate(i.date_given)} · ${i.name}`,
   }));
+}
+
+/** Preview the raster formats admitted by the Health document store. */
+export function openDocumentImage(event: MouseEvent, doc: HealthDocument): void {
+  if (!isPlainClick(event)) return;
+  if (
+    !['image/jpeg', 'image/png', 'image/heic', 'image/heif', 'image/webp', 'image/tiff'].includes(
+      doc.mime,
+    )
+  )
+    return;
+  event.preventDefault();
+  viewer.openImages([doc.url], 0);
 }

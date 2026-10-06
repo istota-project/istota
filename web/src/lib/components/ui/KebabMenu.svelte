@@ -10,6 +10,8 @@
     // open-in-new-tab and the status-bar URL preview. A menu item that only
     // navigates should use this rather than an onSelect + goto().
     href?: string;
+    // Optional interception of a link; its normal menu selection still closes.
+    onClick?: (event: MouseEvent) => void;
     // An href the server answers rather than a page (a `/chat/r/...` deep
     // link), so the client does a full navigation instead of routing it.
     reload?: boolean;
@@ -23,10 +25,12 @@
   }
 
   let { items, ariaLabel = 'Actions' }: Props = $props();
+  let trigger: HTMLButtonElement | null = $state(null);
 </script>
 
 <DropdownMenu.Root>
   <DropdownMenu.Trigger
+    bind:ref={trigger}
     class="ui-kebab-trigger"
     aria-label={ariaLabel}
     onclick={(e) => e.stopPropagation()}
@@ -40,8 +44,18 @@
         {#if item.href}
           <DropdownMenu.Item class={cls} disabled={item.disabled}>
             {#snippet child({ props })}
-              <a {...props} href={item.href} data-sveltekit-reload={item.reload ? '' : undefined}
-                >{item.label}</a
+              <a
+                {...props}
+                href={item.href}
+                data-sveltekit-reload={item.reload ? '' : undefined}
+                onclick={(event) => {
+                  if (typeof props.onclick === 'function') props.onclick(event);
+                  if (!item.disabled && item.onClick) {
+                    // A viewer opened here must return to the surviving trigger.
+                    trigger?.focus();
+                    item.onClick(event);
+                  }
+                }}>{item.label}</a
               >
             {/snippet}
           </DropdownMenu.Item>

@@ -4,6 +4,7 @@ import { noteTransport } from '$lib/stores/connectivity';
 import type { BasemapSpec } from '$lib/basemap';
 
 class AuthError extends Error {
+  readonly status = 401;
   constructor() {
     super('Not authenticated');
     this.name = 'AuthError';
@@ -93,7 +94,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
     // Reported before the status branches, since a status is an answer.
     noteTransport(true);
     if (resp.status === 401) throw new AuthError();
-    if (!resp.ok) throw new Error(await errorMessage(resp));
+    if (!resp.ok) throw Object.assign(new Error(await errorMessage(resp)), { status: resp.status });
     try {
       // **Awaited**, so the read happens inside this `try` and ahead of the
       // `finally` below. `return resp.json()` cleared the timer on the headers
@@ -3593,7 +3594,7 @@ export async function removeRoomMember(id: number, userId: string): Promise<void
     method: 'DELETE',
     credentials: 'same-origin',
   });
-  if (!resp.ok) throw new Error(await errorMessage(resp));
+  if (!resp.ok) throw Object.assign(new Error(await errorMessage(resp)), { status: resp.status });
 }
 
 export interface DirectoryUser {
@@ -4253,6 +4254,20 @@ export class UploadUnreachableError extends Error {
  */
 export function chatFileUrl(path: string): string {
   return `${base}/api/chat/files?path=${encodeURIComponent(path)}`;
+}
+
+export interface FilePreview {
+  name: string;
+  size: number;
+  modified: string;
+  kind: 'image' | 'audio' | 'video' | 'pdf' | 'text' | 'binary';
+  media_type?: string;
+  text?: string;
+  truncated: boolean;
+}
+
+export function previewChatFile(path: string, signal?: AbortSignal): Promise<FilePreview> {
+  return apiFetch(`/chat/files/preview?path=${encodeURIComponent(path)}`, { signal });
 }
 
 /**

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import FileViewerHost from '$lib/fileViewer/FileViewerHost.svelte';
   import { base } from '$app/paths';
   import { afterNavigate } from '$app/navigation';
   import { page, updated } from '$app/state';
@@ -539,6 +540,7 @@
       isActive('/settings')}
   >
     {@render children()}
+    <FileViewerHost />
   </main>
 {/if}
 

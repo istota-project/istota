@@ -742,6 +742,23 @@ let mockChatTaskSeq = 1000;
     createdAt: base + 24_000,
     variant: 'images',
   });
+  const viewerAttachments = [
+    ['Images', ['image.png', 'image.jpg', 'image.gif', 'image.webp']],
+    ['Audio and video', ['tone.mp3', 'tone.wav', 'voice.ogg', 'tone.webm', 'clip.mp4']],
+    ['PDF documents', ['document.pdf', 'scanned.pdf', 'cjk-cmap.pdf']],
+    ['Text and source', ['note.md', 'note.txt', 'source.html', 'drawing.svg', 'binary.bin']],
+  ] as const;
+  for (const [index, [label, names]] of viewerAttachments.entries()) {
+    const id = 214 + index;
+    mockChatTasks.set(id, {
+      id,
+      roomToken: 'web-carol-screenshots',
+      prompt: `${label}: tap an attachment to preview it.`,
+      createdAt: base + 32_000 + index * 8_000,
+      attachments: [...names],
+      attachmentPaths: names.map((name) => `/Users/carol/istota/${name}`),
+    });
+  }
 })();
 
 // A canned event timeline for a mock task (ms offsets from creation). Models the
@@ -940,7 +957,13 @@ function mockImageTaskEvents(task: MockChatTask) {
     'The circle in the middle is the tell: it is a circle in the file, so ' +
     'anything other than a circle on screen is the box being the wrong shape. ' +
     'This paragraph is here to be shoved down the page when the box is not ' +
-    'reserved before the bytes arrive.';
+    'reserved before the bytes arrive.\n\n' +
+    [...Object.keys(VIEWER_MEDIA), ...Object.keys(VIEWER_TEXT), 'binary.bin']
+      .map(
+        (name) =>
+          `[${name}](/istota/api/chat/files?path=${encodeURIComponent(`/Users/carol/istota/${name}`)})`,
+      )
+      .join(' · ');
   const events: { seq: number; kind: string; payload: Record<string, unknown>; at: number }[] = [];
   let seq = 1;
   let at = 0;
@@ -4083,6 +4106,60 @@ function makeGridPng(w: number, h: number): Buffer {
   return png;
 }
 
+// Small generated media fixtures, shared by the preview and download mocks.
+const VIEWER_MEDIA: Record<string, { kind: 'image' | 'audio' | 'video' | 'pdf'; mime: string }> = {
+  'image.png': { kind: 'image', mime: 'image/png' },
+  'image.jpg': { kind: 'image', mime: 'image/jpeg' },
+  'image.gif': { kind: 'image', mime: 'image/gif' },
+  'image.webp': { kind: 'image', mime: 'image/webp' },
+  'tone.mp3': { kind: 'audio', mime: 'audio/mpeg' },
+  'tone.wav': { kind: 'audio', mime: 'audio/wav' },
+  'tone.webm': { kind: 'video', mime: 'video/webm' },
+  'voice.ogg': { kind: 'audio', mime: 'audio/ogg' },
+  'clip.mp4': { kind: 'video', mime: 'video/mp4' },
+  'document.pdf': { kind: 'pdf', mime: 'application/pdf' },
+  'scanned.pdf': { kind: 'pdf', mime: 'application/pdf' },
+  'cjk-cmap.pdf': { kind: 'pdf', mime: 'application/pdf' },
+};
+const VIEWER_TEXT: Record<string, string> = {
+  'note.md': '---\ntitle: Example note\n---\n# Workspace note\n\nA **Markdown** document.\n',
+  'note.txt': 'A plain text file.\nSecond line.\n',
+  'source.html': '<script>alert("example")</script><h1>Source only</h1>',
+  'drawing.svg': '<svg xmlns="http://www.w3.org/2000/svg"><circle r="20" /></svg>',
+};
+function viewerFixture(name: string): Buffer | null {
+  if (Object.hasOwn(VIEWER_MEDIA, name)) {
+    return readFileSync(new URL(`./test-fixtures/file-viewer/${name}`, import.meta.url));
+  }
+  if (Object.hasOwn(VIEWER_TEXT, name)) return Buffer.from(VIEWER_TEXT[name]);
+  if (name === 'binary.bin') return Buffer.from([0, 1, 2, 255]);
+  return null;
+}
+const chatFilePreviewHandler: MockHandler = ({ url }) => {
+  if (!url.startsWith('/istota/api/chat/files/preview?')) return undefined;
+  const path = new URLSearchParams(url.split('?')[1] ?? '').get('path') ?? '';
+  const name = path.split('/').pop() ?? '';
+  const media = Object.hasOwn(VIEWER_MEDIA, name) ? VIEWER_MEDIA[name] : null;
+  const bytes = viewerFixture(name);
+  const grid = /-\d+x\d+\.png$/.test(name);
+  if (!bytes && !grid) return { __status: 404, error: 'File not found' };
+  return {
+    name,
+    size: bytes?.length ?? 1024,
+    modified: '2026-01-01T12:00:00Z',
+    truncated: false,
+    kind: media?.kind ?? (grid ? 'image' : name === 'binary.bin' ? 'binary' : 'text'),
+    ...(media
+      ? { media_type: media.mime }
+      : grid
+        ? { media_type: 'image/png' }
+        : name === 'binary.bin'
+          ? {}
+          : { text: bytes!.toString('utf8') }),
+    __headers: { 'Cache-Control': 'private, no-store' },
+  };
+};
+
 /* The size comes off the filename (`shot-800x600.png`), so the URL carries
  * only `path`, the way the real endpoint does — the dimensions a reader is
  * testing against live in the file's name rather than in a query parameter
@@ -4090,6 +4167,17 @@ function makeGridPng(w: number, h: number): Buffer {
 const chatFilesHandler: MockHandler = ({ url }) => {
   if (!url.startsWith('/istota/api/chat/files?')) return undefined;
   const path = new URLSearchParams(url.split('?')[1] ?? '').get('path') ?? '';
+  const name = path.split('/').pop() ?? '';
+  const bytes = viewerFixture(name);
+  if (bytes) {
+    const media = VIEWER_MEDIA[name];
+    return {
+      __raw: bytes,
+      __contentType: media?.mime ?? 'application/octet-stream',
+      __disposition: media?.kind === 'image' ? 'inline' : 'attachment',
+      __headers: { 'Cache-Control': 'private, no-store' },
+    };
+  }
   const dims = path.match(/-(\d+)x(\d+)\.png$/);
   if (!dims) return { __status: 404, error: 'not found' };
   const w = Math.min(Number(dims[1]), 4000);
@@ -4324,6 +4412,7 @@ const adminUsersHandler: MockHandler = ({ url, method, body }) => {
 const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   avatarsHandler,
+  chatFilePreviewHandler,
   chatFilesHandler,
   chatHandler,
   notificationsHandler,

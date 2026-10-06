@@ -50,6 +50,7 @@
     attachPoolNotice,
     attachedRecordsWarning,
     documentName,
+    openDocumentImage,
     entityTypeLabel,
     fetchAllPages,
     formatBytes,
@@ -285,7 +286,7 @@
 
   function menu(doc: HealthDocument): KebabItem[] {
     return [
-      { label: 'Open', href: doc.url },
+      { label: 'Open', href: doc.url, onClick: (event) => openDocumentImage(event, doc) },
       { label: 'Attach to a record', onSelect: () => openAttach(doc) },
       { label: 'Delete', danger: true, onSelect: () => (deleteTargetId = doc.id) },
     ];
@@ -367,7 +368,12 @@
         {#each rows as doc (doc.id)}
           <tr class:busy={busy.has(doc.id)}>
             <td>
-              <a class="name" href={doc.url} title={documentName(doc)}>{documentName(doc)}</a>
+              <a
+                class="name"
+                href={doc.url}
+                onclick={(event) => openDocumentImage(event, doc)}
+                title={documentName(doc)}>{documentName(doc)}</a
+              >
               <p class="source">{sourceLabel(doc.source)}</p>
               {#if doc.notes}<p class="notes">{doc.notes}</p>{/if}
             </td>
