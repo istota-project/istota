@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import { ChevronLeft, ChevronRight, FileText, Play, Star, X, ExternalLink } from '@lucide/svelte';
+  import { tick, untrack } from 'svelte';
+  import { FileText, Play, Star, ExternalLink } from '@lucide/svelte';
+  import { Modal, IconButton, Button } from '$lib/components/ui';
+  import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, inlineMedia, playerUrl, providerLabel } from '$lib/feeds/embed';
@@ -31,7 +33,7 @@
   } = $props();
 
   let current = $state<number | null>(null);
-  let bodyEl = $state<HTMLElement | null>(null);
+  let pendingPage: object | null = null;
   let loadingMore = $state(false);
 
   $effect(() => {
@@ -70,7 +72,7 @@
   // A still that is itself playable is refused, so a pre-v7 binary's re-filed
   // mp4 cannot come back as a poster.
   const mediaPoster = $derived(
-    media && entry?.images.length === 1 && !inlineMedia(entry.images[0])
+    media?.kind === 'video' && entry?.images.length === 1 && !inlineMedia(entry.images[0])
       ? entry.images[0]
       : undefined,
   );
@@ -92,13 +94,40 @@
     if (entry) playingId = entry.id;
   }
 
-  // Mark read + scroll to top whenever we land on an entry.
+  // Only a new selection marks the entry viewed or invalidates pagination.
+  // Star/status mutations and appended pages keep the article in place.
+  const entryId = $derived(entry?.id ?? null);
   $effect(() => {
-    if (entry) {
-      onView?.(entry.id);
-      if (bodyEl) bodyEl.scrollTop = 0;
-    }
+    const id = entryId;
+    pendingPage = null;
+    loadingMore = false;
+    playingId = null;
+    if (id !== null) untrack(() => onView?.(id));
+    return () => {
+      pendingPage = null;
+    };
   });
+
+  function close() {
+    pendingPage = null;
+    current = null;
+    onClose();
+  }
+
+  // Sanitized article HTML may contain its own native players.
+  function articleMedia(node: HTMLElement) {
+    return {
+      destroy() {
+        for (const media of node.querySelectorAll('audio, video')) {
+          const player = media as HTMLMediaElement;
+          player.pause();
+          player.removeAttribute('src');
+          for (const source of player.querySelectorAll('source')) source.removeAttribute('src');
+          player.load();
+        }
+      },
+    };
+  }
 
   function prev(e?: Event) {
     e?.stopPropagation();
@@ -116,14 +145,30 @@
     // advance if it grew. Respects the active filter (feed/category/unread/
     // starred) because the page loads with those same params.
     if (hasMore && onNeedMore) {
+      const request = {};
+      const targetId = entryId;
+      const targetIndex = current;
+      pendingPage = request;
       loadingMore = true;
       try {
         const before = entries.length;
         await onNeedMore();
         await tick();
-        if (entries.length > before) current = current + 1;
+        if (
+          pendingPage === request &&
+          entryId === targetId &&
+          current === targetIndex &&
+          entries.length > before
+        ) {
+          current = targetIndex + 1;
+        }
+      } catch {
+        // The page owns load failure reporting. Leave the article and retry available.
       } finally {
-        loadingMore = false;
+        if (pendingPage === request) {
+          pendingPage = null;
+          loadingMore = false;
+        }
       }
     }
   }
@@ -145,83 +190,52 @@
 
   const formatDate = (iso: string) =>
     formatIsoDate(iso, { locale: 'en-US', month: 'short', day: 'numeric', year: 'numeric' });
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (current === null) return;
-    if (e.key === 'Escape') onClose();
-    else if (e.key === 'ArrowRight') next();
-    else if (e.key === 'ArrowLeft') prev();
-  }
-
-  onMount(() => {
-    document.addEventListener('keydown', handleKeydown);
-    return () => document.removeEventListener('keydown', handleKeydown);
-  });
-
-  // Lock background scroll while the reader is open.
-  $effect(() => {
-    if (typeof document === 'undefined') return;
-    const open = entry !== null;
-    document.body.style.overflow = open ? 'hidden' : '';
-    return () => {
-      document.body.style.overflow = '';
-    };
-  });
 </script>
 
 {#if entry}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="reader-backdrop overlay-safe" onclick={onClose}>
-    <button class="nav prev" onclick={prev} disabled={!hasPrev} aria-label="Previous post">
-      <ChevronLeft size={28} />
-    </button>
-    <button
-      class="nav next"
-      class:loading={loadingMore}
-      onclick={next}
-      disabled={!hasNext || loadingMore}
-      aria-label="Next post"
-    >
-      <ChevronRight size={28} />
-    </button>
-
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <article class="reader-panel" onclick={(e) => e.stopPropagation()}>
-      <header class="reader-head">
-        <span class="feed-name">{entry.feed.title}</span>
-        {#if entry.published_at}
-          <span class="dot">·</span>
-          <time datetime={entry.published_at}>{formatDate(entry.published_at)}</time>
-        {/if}
-        <span class="spacer"></span>
-        <button
-          type="button"
-          class="icon-btn star"
-          class:starred={entry.starred}
-          onclick={toggleStar}
-          aria-label={entry.starred ? 'Unstar' : 'Star'}
-        >
+  <Modal
+    open={true}
+    variant="viewer"
+    title={entry.feed.title || 'Feed entry'}
+    bodyKey={entry.id}
+    onOpenChange={(open) => {
+      if (!open) close();
+    }}
+    navigation={{
+      previousLabel: 'Previous post',
+      nextLabel: 'Next post',
+      canPrevious: hasPrev,
+      canNext: hasNext,
+      busy: loadingMore,
+      onPrevious: prev,
+      onNext: next,
+    }}
+  >
+    {#snippet metadata()}
+      {#if entry.published_at}<time datetime={entry.published_at}
+          >{formatDate(entry.published_at)}</time
+        >{/if}
+    {/snippet}
+    {#snippet actions()}
+      <span class="reader-star" class:starred={entry.starred}>
+        <IconButton label={entry.starred ? 'Unstar' : 'Star'} onclick={toggleStar}>
           <Star size={18} fill={entry.starred ? 'currentColor' : 'none'} />
-        </button>
-        {#if permalink}
-          <a
-            class="icon-btn"
-            href={permalink}
-            target="_blank"
-            rel="noopener"
-            aria-label="Open original"
-          >
-            <ExternalLink size={18} />
-          </a>
-        {/if}
-        <button type="button" class="icon-btn" onclick={onClose} aria-label="Close">
-          <X size={20} />
-        </button>
-      </header>
-
-      <div class="reader-body" bind:this={bodyEl}>
+        </IconButton>
+      </span>
+      {#if permalink}
+        <Button
+          variant="ghost"
+          href={permalink}
+          target="_blank"
+          rel="noopener"
+          ariaLabel="Open original"
+        >
+          <ExternalLink size={18} />
+        </Button>
+      {/if}
+    {/snippet}
+    {#key entry.id}
+      <article>
         {#if entry.title}
           <h1 class="reader-title">
             {#if permalink}
@@ -260,19 +274,15 @@
             {/if}
           </div>
         {:else if media}
-          <!-- A media file we serve ourselves. The element is the player, so
-               there is no poster-then-swap step; sized by the stylesheet, as
-               every other piece of media in the reader is. -->
           <div class="reader-hero">
-            <div class="reader-media" class:audio={media.kind === 'audio'}>
-              {#if media.kind === 'video'}
-                <!-- svelte-ignore a11y_media_has_caption -->
-                <video src={media.url} poster={mediaPoster} controls playsinline preload="metadata"
-                ></video>
-              {:else}
-                <audio src={media.url} controls preload="metadata"></audio>
-              {/if}
-            </div>
+            <MediaPreview
+              kind={media.kind}
+              url={media.url}
+              poster={mediaPoster}
+              failureMessage={permalink
+                ? 'Your browser could not play this media. Open the original to try it there.'
+                : 'Your browser could not play this media.'}
+            />
           </div>
           {#if mediaImages.length > 0}
             <!-- Stills the player did not take as its poster. The reader is the
@@ -331,7 +341,7 @@
         {/if}
 
         {#if entry.content}
-          <div class="reader-content prose">{@html entry.content}</div>
+          <div class="reader-content prose" use:articleMedia>{@html entry.content}</div>
         {/if}
 
         {#if permalink}
@@ -339,105 +349,15 @@
             Open original <ExternalLink size={15} />
           </a>
         {/if}
-      </div>
-    </article>
-  </div>
+      </article>
+    {/key}
+  </Modal>
 {/if}
 
 <style>
-  /* Mirror the Lightbox backdrop so the two overlays feel like one surface.
-	   align-items: center keeps the panel vertically centered; the panel caps
-	   at the padded box and scrolls internally, so a short post centers on
-	   screen while a long one fills the height without overflowing the viewport.
-
-	   Padding comes from .overlay-safe (app.css) — the scrim stays edge to edge
-	   while the panel keeps clear of the Dynamic Island and the home indicator.
-	   These two values are the no-inset baseline it raises. */
-  .reader-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: var(--z-viewer);
-    /* design-lint-allow: fixed chrome — a modal scrim is dark in both themes;
-       it exists to darken whatever is behind it, not to follow the surface. */
-    background: rgba(0, 0, 0, 0.9);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    --overlay-pad-block: 3vh;
-    --overlay-pad-inline: 1rem;
-    overflow: auto;
-  }
-
-  /* Same surface/border/radius tokens the grid & list cards use. */
-  .reader-panel {
-    position: relative;
-    width: 100%;
-    max-width: 720px;
-    background: var(--surface-card);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-card);
-    box-shadow: var(--shadow-lg);
-    display: flex;
-    flex-direction: column;
-    /* Resolves against the backdrop's padded content box, so the cap tracks the
-		   safe-area insets instead of restating a vh figure that ignores them. */
-    max-height: 100%;
-    overflow: hidden;
-  }
-
-  .reader-head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-sm);
-    color: var(--text-dim); /* matches the card .meta row */
-  }
-
-  .reader-head .feed-name {
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  .reader-head .dot {
-    opacity: 0.5;
-  }
-
-  .reader-head .spacer {
-    flex: 1;
-  }
-
-  .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--space-1);
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    border-radius: var(--radius-card);
-    transition:
-      color var(--transition-fast),
-      background var(--transition-fast);
-  }
-
-  .icon-btn:hover {
-    color: var(--text-primary);
-    background: var(--surface-raised);
-  }
-
-  .icon-btn.star.starred,
-  .icon-btn.star:hover {
+  .reader-star.starred :global(button),
+  .reader-star :global(button:hover) {
     color: var(--accent-amber);
-  }
-
-  /* Same 0.5rem/0.75rem the grid card's .card-body / .excerpt / .meta use, so
-	   a post sits at the same inset inline and expanded. */
-  .reader-body {
-    overflow-y: auto;
-    padding: var(--space-2) var(--space-3);
   }
 
   .reader-title {
@@ -482,41 +402,6 @@
     display: block;
     width: 100%;
     height: auto;
-  }
-
-  /* A media file we play ourselves (ISSUE-356). Same letterbox as the heroes
-	   below, and bounded the same way the reader's inline <video> is: the clip
-	   keeps its own aspect ratio and the stylesheet caps it. No fixed 16/9 box
-	   — that is for the iframe player, which has no intrinsic size. */
-  .reader-media {
-    display: flex;
-    justify-content: center;
-    /* design-lint-allow: fixed chrome — letterbox behind media of unknown
-       aspect ratio; stays dark in both themes so the clip reads as the
-       lit surface. */
-    background: #0e0e0e;
-    border-radius: var(--radius-card);
-    overflow: hidden;
-  }
-
-  .reader-media video {
-    display: block;
-    max-width: 100%;
-    /* The reader panel scrolls, so cap against the viewport rather than a
-		   fixed pixel height: a portrait clip otherwise fills the whole pane and
-		   pushes the body copy off the bottom. */
-    max-height: 70vh;
-    height: auto;
-  }
-
-  /* Audio draws nothing to letterbox, so it sits on the panel's own surface. */
-  .reader-media.audio {
-    background: none;
-  }
-
-  .reader-media audio {
-    display: block;
-    width: 100%;
   }
 
   /* Media heroes. Same visual language as the grid's .card-video /
@@ -672,56 +557,5 @@
 
   .open-original:hover {
     background: var(--surface-badge);
-  }
-
-  /* Same treatment as the Lightbox nav buttons. */
-  .nav {
-    position: fixed;
-    top: 50%;
-    transform: translateY(-50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 3rem;
-    height: 3rem;
-    border: none;
-    border-radius: 50%;
-    /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
-       the scrim and the glyph on it are fixed in both themes. */
-    background: rgba(0, 0, 0, 0.5);
-    color: #fff;
-    /* design-lint-allow-end */
-    cursor: pointer;
-    z-index: var(--z-viewer-control);
-    transition: background var(--transition-fast);
-  }
-
-  .nav:hover:not(:disabled) {
-    /* design-lint-allow: fixed chrome — the scrim above, one step darker. */
-    background: rgba(0, 0, 0, 0.75);
-  }
-
-  .nav:disabled {
-    opacity: 0.25;
-    cursor: default;
-  }
-
-  .nav.loading {
-    opacity: 0.6;
-    cursor: progress;
-  }
-
-  .nav.prev {
-    left: max(1rem, calc(50vw - 420px));
-  }
-
-  .nav.next {
-    right: max(1rem, calc(50vw - 420px));
-  }
-
-  @media (max-width: 640px) {
-    .nav {
-      display: none;
-    }
   }
 </style>

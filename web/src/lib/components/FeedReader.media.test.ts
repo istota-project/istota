@@ -10,13 +10,20 @@
  * attachment's hero is a real link to the file, and neither reaches the
  * lightbox. An ordinary image post is untouched.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import type { FeedEntry } from '$lib/api';
 import FeedReader from './FeedReader.svelte';
 import Lightbox from './Lightbox.svelte';
 
-afterEach(cleanup);
+beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function entry(over: Partial<FeedEntry> = {}): FeedEntry {
   return {
@@ -80,12 +87,12 @@ describe('the reader on playable media', () => {
   });
 
   it('swaps in a player on click, sandboxed and pointed at the no-cookie host', async () => {
-    const { container, getByLabelText } = mount(video());
-    expect(container.querySelector('iframe')).toBeNull();
+    const { getByLabelText } = mount(video());
+    expect(document.querySelector('iframe')).toBeNull();
 
     await fireEvent.click(getByLabelText(/play/i));
 
-    const frame = container.querySelector('iframe') as HTMLIFrameElement;
+    const frame = document.querySelector('iframe') as HTMLIFrameElement;
     expect(frame).toBeTruthy();
     expect(frame.getAttribute('src')).toBe(
       'https://www.youtube-nocookie.com/embed/B0sO1wdBhMY?autoplay=1',
@@ -95,20 +102,20 @@ describe('the reader on playable media', () => {
   });
 
   it('falls back to the ordinary image hero for a provider it cannot vouch for', () => {
-    const { container } = mount(entry({ embed_url: 'https://evil.test/watch?v=abc' }));
-    expect(container.querySelector('.reader-video')).toBeNull();
-    expect(container.querySelector('.hero-img')).toBeTruthy();
+    mount(entry({ embed_url: 'https://evil.test/watch?v=abc' }));
+    expect(document.querySelector('.reader-video')).toBeNull();
+    expect(document.querySelector('.hero-img')).toBeTruthy();
   });
 });
 
 describe('the reader on an attached document', () => {
   it('makes the cover a link to the file rather than a lightbox trigger', async () => {
     let opened = false;
-    const { container } = mount(doc(), () => {
+    mount(doc(), () => {
       opened = true;
     });
 
-    const hero = container.querySelector('.reader-document') as HTMLAnchorElement;
+    const hero = document.querySelector('.reader-document') as HTMLAnchorElement;
     expect(hero).toBeTruthy();
     expect(hero.tagName).toBe('A');
     expect(hero.getAttribute('href')).toBe('https://attachments.are.na/1/e.pdf');
@@ -120,24 +127,24 @@ describe('the reader on an attached document', () => {
   });
 
   it('badges the format', () => {
-    const { container } = mount(doc());
-    expect(container.querySelector('.doc-badge')?.textContent?.trim()).toBe('PDF');
+    mount(doc());
+    expect(document.querySelector('.doc-badge')?.textContent?.trim()).toBe('PDF');
   });
 
   it('still shows something for a document with no cover page', () => {
-    const { container } = mount(doc() && entry({ file_url: 'https://a.are.na/1.pdf', images: [] }));
-    expect(container.querySelector('.reader-document')).toBeTruthy();
+    mount(doc() && entry({ file_url: 'https://a.are.na/1.pdf', images: [] }));
+    expect(document.querySelector('.reader-document')).toBeTruthy();
   });
 
   it('prefers the player when an entry somehow carries both', () => {
-    const { container } = mount(
+    mount(
       entry({
         embed_url: 'https://www.youtube.com/watch?v=B0sO1wdBhMY',
         file_url: 'https://a.are.na/1.pdf',
       }),
     );
-    expect(container.querySelector('.reader-video')).toBeTruthy();
-    expect(container.querySelector('.reader-document')).toBeNull();
+    expect(document.querySelector('.reader-video')).toBeTruthy();
+    expect(document.querySelector('.reader-document')).toBeNull();
   });
 });
 
@@ -153,14 +160,14 @@ describe('the reader on a direct media attachment (ISSUE-356)', () => {
   }
 
   it('renders a <video>, not an <img>', () => {
-    const { container } = mount(clip());
-    expect(container.querySelector('video')).toBeTruthy();
-    expect(container.querySelector('img[src$=".mp4"]')).toBeNull();
+    mount(clip());
+    expect(document.querySelector('video')).toBeTruthy();
+    expect(document.querySelector('img[src$=".mp4"]')).toBeNull();
   });
 
   it('is bounded by CSS alone — no width or height attribute', () => {
-    const { container } = mount(clip());
-    const video = container.querySelector('video') as HTMLVideoElement;
+    mount(clip());
+    const video = document.querySelector('video') as HTMLVideoElement;
     expect(video.hasAttribute('width')).toBe(false);
     expect(video.hasAttribute('height')).toBe(false);
     expect(video.hasAttribute('controls')).toBe(true);
@@ -169,72 +176,66 @@ describe('the reader on a direct media attachment (ISSUE-356)', () => {
 
   it('does not reach the lightbox', async () => {
     let opened = false;
-    const { container } = mount(clip(), () => {
+    mount(clip(), () => {
       opened = true;
     });
-    await fireEvent.click(container.querySelector('video') as HTMLElement);
+    await fireEvent.click(document.querySelector('video') as HTMLElement);
     expect(opened).toBe(false);
   });
 
   it('uses an accompanying still as the poster', () => {
-    const { container } = mount(
-      clip({ images: ['https://assets.example.town/media/119/still.jpg'] }),
-    );
-    const video = container.querySelector('video') as HTMLVideoElement;
+    mount(clip({ images: ['https://assets.example.town/media/119/still.jpg'] }));
+    const video = document.querySelector('video') as HTMLVideoElement;
     expect(video.getAttribute('poster')).toBe('https://assets.example.town/media/119/still.jpg');
     // The still is the poster, not a second hero beside the player.
-    expect(container.querySelector('.hero-img')).toBeNull();
+    expect(document.querySelector('.hero-img')).toBeNull();
   });
 
   it('draws several stills under the player rather than eating one', () => {
     // The reader is the last place a picture could be recovered, so an entry
     // carrying both a clip and a gallery must not lose the gallery.
     const images = ['https://a.example/1.jpg', 'https://a.example/2.jpg'];
-    const { container } = mount(clip({ images }));
-    const video = container.querySelector('video') as HTMLVideoElement;
+    mount(clip({ images }));
+    const video = document.querySelector('video') as HTMLVideoElement;
     expect(video.hasAttribute('poster')).toBe(false);
-    expect(container.querySelectorAll('.hero-img img')).toHaveLength(2);
+    expect(document.querySelectorAll('.hero-img img')).toHaveLength(2);
   });
 
   it('never uses a playable URL as the poster', () => {
-    const { container } = mount(
-      clip({ images: ['https://assets.example.town/media/117/clip.mp4'] }),
-    );
-    const video = container.querySelector('video') as HTMLVideoElement;
+    mount(clip({ images: ['https://assets.example.town/media/117/clip.mp4'] }));
+    const video = document.querySelector('video') as HTMLVideoElement;
     expect(video.hasAttribute('poster')).toBe(false);
   });
 
   it('renders an <audio> for a podcast enclosure', () => {
-    const { container } = mount(
-      clip({ media_url: 'https://pod.example.com/12.mp3', media_type: 'audio/mpeg' }),
-    );
-    expect(container.querySelector('audio')).toBeTruthy();
-    expect(container.querySelector('video')).toBeNull();
+    mount(clip({ media_url: 'https://pod.example.com/12.mp3', media_type: 'audio/mpeg' }));
+    expect(document.querySelector('audio')).toBeTruthy();
+    expect(document.querySelector('video')).toBeNull();
   });
 
   it('plays nothing for a URL that is not http(s)', () => {
-    const { container } = mount(clip({ media_url: 'javascript:alert(1)' }));
-    expect(container.querySelector('video')).toBeNull();
-    expect(container.querySelector('audio')).toBeNull();
+    mount(clip({ media_url: 'javascript:alert(1)' }));
+    expect(document.querySelector('video')).toBeNull();
+    expect(document.querySelector('audio')).toBeNull();
   });
 
   it('prefers a provider player when an entry carries both', () => {
-    const { container } = mount(clip({ embed_url: 'https://www.youtube.com/watch?v=B0sO1wdBhMY' }));
-    expect(container.querySelector('.reader-video')).toBeTruthy();
-    expect(container.querySelector('video')).toBeNull();
+    mount(clip({ embed_url: 'https://www.youtube.com/watch?v=B0sO1wdBhMY' }));
+    expect(document.querySelector('.reader-video')).toBeTruthy();
+    expect(document.querySelector('video')).toBeNull();
   });
 });
 
 describe('the reader on an ordinary image post', () => {
   it('keeps the lightbox hero', async () => {
     let opened = false;
-    const { container } = mount(entry(), () => {
+    mount(entry(), () => {
       opened = true;
     });
-    expect(container.querySelector('.reader-video')).toBeNull();
-    expect(container.querySelector('.reader-document')).toBeNull();
+    expect(document.querySelector('.reader-video')).toBeNull();
+    expect(document.querySelector('.reader-document')).toBeNull();
 
-    await fireEvent.click(container.querySelector('.hero-img') as HTMLElement);
+    await fireEvent.click(document.querySelector('.hero-img') as HTMLElement);
     expect(opened).toBe(true);
   });
 });
@@ -255,4 +256,84 @@ it('Escape in an image viewer keeps the feed reader open underneath', async () =
   await fireEvent.keyDown(close, { key: 'Escape' });
   expect(closeImage).toHaveBeenCalledTimes(1);
   expect(closeReader).not.toHaveBeenCalled();
+});
+
+it('keeps a lone audio artwork image available for zoom', () => {
+  mount(entry({ media_url: 'https://example.com/episode.mp3', media_type: 'audio/mpeg' }));
+  expect(document.querySelector('audio')).toBeTruthy();
+  expect(document.querySelector('.hero-img img')).toHaveAttribute(
+    'src',
+    'https://cdn.are.na/76969/thumb.jpg',
+  );
+});
+
+it('releases the player on entry replacement even when the URL is shared', async () => {
+  const first = entry({ media_url: 'https://example.com/clip.mp4', media_type: 'video/mp4' });
+  const second = entry({ ...first, id: 2, title: 'Second clip' });
+  const { rerender } = render(FeedReader, { entries: [first, second], index: 0, onClose: vi.fn() });
+  const old = document.querySelector('video')!;
+  await rerender({ index: 1 });
+  expect(document.querySelector('video')).not.toBe(old);
+  expect(old).not.toHaveAttribute('src');
+  expect(HTMLMediaElement.prototype.pause).toHaveBeenCalled();
+  expect(HTMLMediaElement.prototype.load).toHaveBeenCalled();
+  const current = document.querySelector('video')!;
+  await rerender({ index: null });
+  expect(current).not.toHaveAttribute('src');
+});
+
+it('releases article-body players on replacement and close', async () => {
+  const first = entry({
+    images: [],
+    content: '<video src="https://example.com/body.mp4" controls></video>',
+  });
+  const second = entry({
+    id: 2,
+    images: [],
+    content: '<audio controls><source src="https://example.com/body.mp3"></audio>',
+  });
+  const { rerender } = render(FeedReader, { entries: [first, second], index: 0, onClose: vi.fn() });
+  const video = document.querySelector('video')!;
+  await rerender({ index: 1 });
+  expect(video).not.toHaveAttribute('src');
+  const source = document.querySelector('source')!;
+  await rerender({ index: null });
+  expect(source).not.toHaveAttribute('src');
+  expect(HTMLMediaElement.prototype.pause).toHaveBeenCalledTimes(2);
+  expect(HTMLMediaElement.prototype.load).toHaveBeenCalledTimes(2);
+});
+
+it('displays decode failure advice while preserving the original link', async () => {
+  mount(entry({ media_url: 'https://example.com/clip.mp4', media_type: 'video/mp4' }));
+  await fireEvent.error(document.querySelector('video')!);
+  expect(screen.getByRole('alert')).toHaveTextContent('Open the original to try it there.');
+  expect(screen.getAllByRole('link', { name: 'Open original' }).length).toBeGreaterThan(0);
+});
+
+it('does not suggest an original link when none exists', async () => {
+  const item = entry({
+    url: '',
+    media_url: 'https://example.com/clip.mp4',
+    media_type: 'video/mp4',
+  });
+  item.feed.site_url = '';
+  mount(item);
+  await fireEvent.error(document.querySelector('video')!);
+  expect(screen.getByRole('alert')).toHaveTextContent(/^Your browser could not play this media\.$/);
+});
+
+it('destroys provider frames and requires Play again on return', async () => {
+  const first = video();
+  const { rerender } = render(FeedReader, {
+    entries: [first, entry({ id: 2 })],
+    index: 0,
+    onClose: vi.fn(),
+  });
+  await fireEvent.click(screen.getByLabelText(/Play video/));
+  const frame = document.querySelector('iframe')!;
+  await rerender({ index: 1 });
+  expect(frame.isConnected).toBe(false);
+  await rerender({ index: 0 });
+  expect(document.querySelector('iframe')).toBeNull();
+  expect(screen.getByLabelText(/Play video/)).toBeTruthy();
 });

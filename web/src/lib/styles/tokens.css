@@ -169,6 +169,7 @@
 	   change. A media viewer (lightbox, feed reader) deliberately goes heavier
 	   and keeps its own literal behind an allow comment. */
   --scrim-bg: rgba(0, 0, 0, 0.6);
+  --scrim-viewer-bg: rgba(0, 0, 0, 0.9);
   /* A small pill laid over media of unknown lightness — it flips scrim
 	   direction with the theme so it reads on a dark card and a light one. */
   --scrim-pill-bg: rgba(0, 0, 0, 0.55);
@@ -488,6 +489,7 @@
 
   /* Overlay + scrim chrome. --on-accent-fg and --on-scrim-fg are deliberately
 	   NOT redefined: both sit on a surface this theme does not lighten. */
+  --scrim-viewer-bg: rgba(0, 0, 0, 0.9);
   --scrim-pill-bg: rgba(255, 255, 255, 0.82);
   --scrim-pill-fg: var(--text-secondary);
   --shimmer-tint: rgba(0, 0, 0, 0.06);
