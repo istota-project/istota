@@ -46,6 +46,7 @@ import email.utils
 import imaplib
 import logging
 import os
+import re
 import smtplib
 import socket
 import ssl
@@ -533,9 +534,16 @@ class ImapSession:
         and the body from a `default` one.
         """
         typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
-        if typ != "OK" or not data or not isinstance(data[0], tuple):
+        # imaplib returns every untagged response, so an unsolicited
+        # `FETCH (FLAGS ...)` for another message can precede the literal.
+        literal = next(
+            (item for item in data or [] if isinstance(item, tuple)
+             and re.search(rb"\bUID %d\b" % uid, item[0])),
+            None,
+        )
+        if typ != "OK" or literal is None:
             raise RuntimeError(f"could not fetch uid {uid} from {self.account}")
-        payload = data[0][1]
+        payload = literal[1]
         parsed = email.message_from_bytes(payload, policy=email.policy.default)
         raw = email.message_from_bytes(payload, policy=email.policy.compat32)
         # First occurrence wins, which for a repeated header is the topmost —

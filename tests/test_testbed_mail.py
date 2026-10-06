@@ -286,6 +286,33 @@ class TestARefusedCommandIsNotAnEmptyMailbox:
             _session(_RefusingConnection("select")).uids("Archive")
 
 
+class _FetchConnection:
+    """Answers `UID FETCH` with an unsolicited flags update ahead of the
+    literal, which imaplib returns in the same `data` list."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def uid(self, command, *args):
+        assert command == "fetch"
+        return "OK", self.data
+
+
+_RAW = b"From: a@ext.test\r\nTo: b@ext.test\r\nSubject: hi\r\n\r\nbody\r\n"
+
+
+class TestTheFetchFindsItsOwnLiteral:
+    def test_an_unsolicited_flags_update_ahead_of_the_literal_is_skipped(self):
+        data = [b"13 (UID 13 FLAGS (\\Seen))", (b"14 (UID 14 BODY[] {60}", _RAW), b")"]
+        message = _session(None)._fetch(_FetchConnection(data), 14)
+        assert message.subject == "hi"
+
+    def test_a_literal_for_another_uid_is_not_taken(self):
+        data = [(b"13 (UID 13 BODY[] {60}", _RAW), b")"]
+        with pytest.raises(RuntimeError, match="could not fetch uid 14"):
+            _session(None)._fetch(_FetchConnection(data), 14)
+
+
 class TestTheSessionReadsTheFolderItWasOpenedOn:
     def test_a_method_with_no_folder_uses_the_sessions_own(self):
         """Not a hardcoded INBOX. A session opened on another folder would
