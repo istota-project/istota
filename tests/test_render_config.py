@@ -44,7 +44,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.config import Config, load_config
+from istota.config import DEFAULT_ACK_REACTIONS, Config, load_config
 
 REPO = Path(__file__).resolve().parent.parent
 RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
@@ -706,10 +706,20 @@ class TestNoHeredocRunsACommand:
 class TestTheAckReactions:
     """ISSUE-657: one variable per kind, each a comma-separated list."""
 
-    def test_no_variable_writes_no_table(self, tmp_path):
+    def test_no_variable_writes_the_shipped_lists(self, tmp_path):
         rendered = tomllib.loads(render(tmp_path, **REQUIRED).read_text())
-        assert "ack_reactions" not in rendered["speech_gate"]
-        assert load_config(render(tmp_path / "b", **REQUIRED)).speech_gate.ack_reactions == {}
+        shipped = {k: list(v) for k, v in DEFAULT_ACK_REACTIONS.items()}
+        assert rendered["speech_gate"]["ack_reactions"] == shipped
+        assert load_config(render(tmp_path / "b", **REQUIRED)).speech_gate.ack_reactions == shipped
+
+    def test_every_kind_set_empty_leaves_only_ack_reaction(self, tmp_path):
+        empty = {
+            f"ISTOTA_SPEECH_GATE_ACK_REACTIONS_{kind}": ""
+            for kind in ("DEFAULT", "THANKS", "AGREEMENT", "FUNNY", "CELEBRATION")
+        }
+        config = load_config(render(tmp_path, **REQUIRED, **empty))
+        assert config.speech_gate.ack_reactions == {}
+        assert config.speech_gate.ack_reaction == "\N{THUMBS UP SIGN}"
 
     def test_the_lists_reach_the_loader(self, tmp_path):
         laugh = "\N{SMILING FACE WITH OPEN MOUTH AND SMILING EYES}"
@@ -723,6 +733,7 @@ class TestTheAckReactions:
         gate = config.speech_gate
         assert gate.ack_reactions == {
             "funny": [laugh, "\N{OCTOPUS}"], "celebration": ["\N{PARTY POPPER}"],
+            "agreement": ["\N{OK HAND SIGN}"],
         }
         assert gate.decision_retention_days == 9
         assert gate.ack_reaction == "\N{THUMBS UP SIGN}"
@@ -737,7 +748,7 @@ class TestTheAckReactions:
             ISTOTA_PLAYBOOKS_ENABLED="true",
             ISTOTA_SPEECH_GATE_ACK_REACTIONS_FUNNY="\N{OCTOPUS}",
         ))
-        assert config.speech_gate.ack_reactions == {"funny": ["\N{OCTOPUS}"]}
+        assert config.speech_gate.ack_reactions["funny"] == ["\N{OCTOPUS}"]
         assert config.memory_search.auto_recall is True
 
 

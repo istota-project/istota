@@ -319,6 +319,18 @@ class ConversationConfig:
     talk_context_limit: int = 100  # Messages to fetch from Talk API for context (max 200)
 
 
+#: The shipped `[speech_gate.ack_reactions]`. No ``default`` entry, so
+#: ``ack_reaction`` still answers an ack of no named kind. Ansible's
+#: ``istota_speech_gate_ack_reactions`` and Docker's render-config defaults
+#: restate it; tests hold the three equal.
+DEFAULT_ACK_REACTIONS: dict[str, tuple[str, ...]] = {
+    "thanks": ("👍", "🐙"),
+    "agreement": ("👌",),
+    "funny": ("😄", "🐙"),
+    "celebration": ("🎉",),
+}
+
+
 @dataclass
 class SpeechGateConfig:
     """Whether the bot replies to an unaddressed turn in a multi-human room.
@@ -333,14 +345,17 @@ class SpeechGateConfig:
     on Talk and in WhatsApp groups, instead of a reply; empty turns that off.
     ``ack_reactions`` (``[speech_gate.ack_reactions]``) maps an ack's type to
     a list of emoji, ``default`` included; it wins over ``ack_reaction``,
-    which only fills ``default`` when the table has none. Read by
-    ``rooms.ack_reaction``.
+    which only fills ``default`` when the table has none. A table in the
+    config file replaces `DEFAULT_ACK_REACTIONS` whole, and an empty one
+    leaves ``ack_reaction`` alone. Read by ``rooms.ack_reaction``.
     """
 
     mode: str = "mention"
     disposition: str = "reserved"
-    ack_reaction: str = "\N{THUMBS UP SIGN}"
-    ack_reactions: dict[str, list[str]] = field(default_factory=dict)
+    ack_reaction: str = "👍"
+    ack_reactions: dict[str, list[str]] = field(
+        default_factory=lambda: {k: list(v) for k, v in DEFAULT_ACK_REACTIONS.items()}
+    )
     model: str = "fast"  # role alias, resolved per brain namespace; not a pin
     window_messages: int = 8  # transcript turns the classifier sees
     max_message_chars: int = 400  # per-turn cap inside the window
