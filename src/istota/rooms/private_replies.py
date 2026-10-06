@@ -139,6 +139,12 @@ class PrivateDestination:
     #: The member's private WhatsApp room: sent to their own chat.
     whatsapp: bool = False
 
+    @property
+    def pushes(self) -> bool:
+        """Whether a note here is also sent to a surface: a web-only room's
+        row is its delivery, so ``send_private``'s False there is no failure."""
+        return bool(self.talk_ref or self.whatsapp)
+
 
 @dataclass(frozen=True)
 class PrivateDelivery:

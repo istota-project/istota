@@ -83,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A question parked in a web-only private room no longer pushes as undelivered** (#661). The question is written into your private room, but because a web room has no push of its own the scheduler read that as a failed delivery and the push said the question could not be delivered. The push now says the question is in the conversation, like any other park.
 - **Approving a held mail on a thread you switched off no longer runs it** (#650). Before, the approval added the sender to the switched-off thread as a participant, ran the model, and failed the task on delivery. Now the held mail is cancelled with nothing recorded and nothing run, and the answer says so.
 
 - **A held mail can be answered by email, and only by an authenticated answer** (#649). A mail whose first line is `!confirm <id>`, or a reply to the mailed request itself (now titled `Confirm task #<id>`) saying `yes` or `no`, answers it. It is accepted only when your mail server's own topmost stamp, under `[email] authserv_id`, is a DMARC pass aligned with your address, whatever `confirm_sender_match` says; a forged answer approves nothing, starts no task and raises no second request, and you get one notice that it was ignored. Before, a mailed `!confirm` became an ordinary task and the held mail expired. Without `authserv_id` the request names where to answer instead, and `istota doctor` warns when alerts reach only email.

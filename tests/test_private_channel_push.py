@@ -266,6 +266,27 @@ class TestThePark:
         (pushed,) = [r for r in delivered if r.notification_id]
         assert pushed.room_free is True
 
+    def test_a_web_only_private_rooms_push_says_the_question_is_there(
+        self, config, ntfy, fake_talk,
+    ):
+        """#661: a web room has no push of its own, so `send_private` reports
+        False for it. That is not a failed delivery: the row is in the room,
+        and the push says so rather than sending the user to the bell."""
+        fake_talk.db_path = config.db_path
+        with db.get_db(config.db_path) as conn:
+            thread = _email_thread(conn)
+            web = db.create_web_chat_room(conn, "alice", "general").token
+            ident = db.create_task(conn, prompt="cancel it", user_id="alice",
+                                   source_type="email", conversation_token=thread)
+        config.users["alice"].routing = {"alert": "ntfy"}
+        task = _run(config, ident, QUESTION)
+        assert task.status == "pending_confirmation"
+        parked = _rows(config, "SELECT id FROM messages WHERE room_token = ? AND "
+                               "delivery_reference LIKE 'private-confirmation:%'", (web,))
+        assert len(parked) == 1
+        ((_user, message),) = ntfy
+        assert message == confirmation_source.PARK_BODY
+
     def test_a_private_park_with_no_private_room_pushes_to_talk(
         self, config, ntfy, fake_talk,
     ):

@@ -3865,7 +3865,10 @@ def process_one_task(
                 # none, the bell is the only place the question is, whatever
                 # the shared room was told.
                 if private_park is not None:
-                    _withhold = private_park.dest is not None
+                    # A web-only private room has no push of its own: the row
+                    # is in the room, and the park's push is owed now (#661).
+                    _withhold = (private_park.dest is not None
+                                 and private_park.dest.pushes)
                 else:
                     _withhold = (
                         post_talk_message is not None
@@ -4668,7 +4671,9 @@ def process_one_task(
         private_delivered = run_coro(private_replies.send_private(
             config, private_park, body=_private_body,
         ))
-        private_undelivered = _dest is not None and not private_delivered
+        private_undelivered = (
+            _dest is not None and _dest.pushes and not private_delivered
+        )
         if private_delivered and _dest is not None and _dest.talk_ref:
             try:
                 with db.get_db(config.db_path) as conn:
