@@ -2378,6 +2378,210 @@ _SVG_BYTES = (
 
 
 @_needs_web_deps
+class TestChatFilePreview:
+    async def _get(self, client, cookies, path):
+        return await client.get(
+            "/istota/api/chat/files/preview", params={"path": path}, cookies=cookies,
+        )
+
+    async def test_text_metadata(self, chat_client, tmp_path):
+        import os
+        path = _workspace_file(tmp_path, "alice", "notes.md", "# Notes\né\n")
+        os.utime(tmp_path / "mount" / path.lstrip("/"), (1727104320, 1727104320))
+        cookies = await _login(chat_client, "alice")
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "name": "notes.md", "size": len("# Notes\né\n".encode()),
+            "modified": "2024-09-23T15:12:00.000Z", "kind": "text",
+            "text": "# Notes\né\n", "truncated": False,
+        }
+        assert resp.headers["cache-control"] == "private, no-store"
+
+    @pytest.mark.parametrize("name,body,text", [
+        ("empty", b"", ""),
+        ("bom.txt", b"\xef\xbb\xbfhello", "hello"),
+        ("document.svg", _SVG_BYTES, _SVG_BYTES.decode()),
+        ("fake.png", _SVG_BYTES, _SVG_BYTES.decode()),
+        ("fake.pdf", b"<script>alert(1)</script>", "<script>alert(1)</script>"),
+        ("fake.mp4", b"plain text", "plain text"),
+        ("fake.mp3", b"plain text", "plain text"),
+    ])
+    async def test_text_is_source(self, chat_client, tmp_path, name, body, text):
+        path = _workspace_bytes(tmp_path, "alice", name, body)
+        cookies = await _login(chat_client, "alice")
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 200
+        assert resp.json()["kind"] == "text"
+        assert resp.json()["text"] == text
+        assert "media_type" not in resp.json()
+
+    @pytest.mark.parametrize("body", [b"a\x00b", b"\xff\xfe abc", b"incomplete\xc3"])
+    async def test_binary(self, chat_client, tmp_path, body):
+        path = _workspace_bytes(tmp_path, "alice", "data.bin", body)
+        cookies = await _login(chat_client, "alice")
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 200
+        assert resp.json()["kind"] == "binary"
+        assert resp.json()["truncated"] is False
+        assert "text" not in resp.json()
+        assert "media_type" not in resp.json()
+
+    @pytest.mark.parametrize("name,body,kind,media_type", [
+        ("x.txt", _PNG_BYTES, "image", "image/png"),
+        ("x.txt", b"\xff\xd8\xff\xe0", "image", "image/jpeg"),
+        ("x.txt", b"GIF89a", "image", "image/gif"),
+        ("x.txt", b"RIFF\x00\x00\x00\x00WEBP", "image", "image/webp"),
+        ("x.txt", b"%PDF-1.7\n", "pdf", "application/pdf"),
+        ("x.mp3", b"ID3\x00", "audio", "audio/mpeg"),
+        ("x.txt", b"\xff\xfb\x90", "audio", "audio/mpeg"),
+        ("x.wav", b"RIFF\x00\x00\x00\x00WAVE", "audio", "audio/wav"),
+        ("x.opus", b"OggS\x00", "audio", "audio/ogg"),
+        ("x.ogg", b"OggS\x00", "audio", "audio/ogg"),
+        ("x.ogv", b"OggS\x00", "video", "video/ogg"),
+        ("x.flac", b"fLaC\x00", "audio", "audio/flac"),
+        ("x.aac", b"\xff\xf1\x50", "audio", "audio/aac"),
+        ("x.M4A", b"\x00\x00\x00\x18ftypisom", "audio", "audio/mp4"),
+        ("x.m4b", b"\x00\x00\x00\x18ftypM4B ", "audio", "audio/mp4"),
+        ("x.mp4", b"\x00\x00\x00\x18ftypisom", "video", "video/mp4"),
+        ("x.txt", b"\x00\x00\x00\x18ftypM4A ", "video", "video/mp4"),
+        ("x.mp4", b"\x00\x00\x00\x18ftypavc1", "video", "video/mp4"),
+        ("x.webm", b"\x1a\x45\xdf\xa3", "video", "video/webm"),
+        ("x.weba", b"\x1a\x45\xdf\xa3", "audio", "audio/webm"),
+        ("x.opus", b"\x1a\x45\xdf\xa3", "audio", "audio/webm"),
+    ])
+    async def test_media_and_download_policy(
+        self, chat_client, tmp_path, name, body, kind, media_type,
+    ):
+        path = _workspace_bytes(tmp_path, "alice", name, body)
+        cookies = await _login(chat_client, "alice")
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["kind"] == kind
+        assert data["media_type"] == media_type
+        assert data["truncated"] is False
+        assert "text" not in data
+        download = await chat_client.get(
+            "/istota/api/chat/files", params={"path": path}, cookies=cookies,
+        )
+        assert download.content == body
+        disposition = "inline" if kind == "image" else "attachment"
+        assert download.headers["content-disposition"].startswith(disposition)
+        assert download.headers["x-content-type-options"] == "nosniff"
+        assert download.headers["cache-control"] == "private, no-store"
+
+    @pytest.mark.parametrize("body,expected", [
+        (b"a" * (1_048_576 + 10), "a" * 1_048_576),
+        (b"a" + "é".encode() * 524_288, "a" + "é" * 524_287),
+    ])
+    async def test_bounded_text(self, chat_client, tmp_path, monkeypatch, body, expected):
+        import istota.webui.app as mod
+        path = _workspace_bytes(tmp_path, "alice", "large.txt", body)
+        cookies = await _login(chat_client, "alice")
+        real_read = mod.os.read
+        reads = []
+
+        def read(fd, count):
+            chunk = real_read(fd, count)
+            reads.append(len(chunk))
+            return chunk
+
+        monkeypatch.setattr(mod.os, "read", read)
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 200
+        assert resp.json()["kind"] == "text"
+        assert resp.json()["text"] == expected
+        assert resp.json()["truncated"] is True
+        assert resp.json()["size"] == len(body)
+        assert sum(reads) == mod.PREVIEW_MAX_BYTES == 1_048_576
+
+    async def test_short_reads(self, chat_client, tmp_path, monkeypatch):
+        import istota.webui.app as mod
+        path = _workspace_file(tmp_path, "alice", "short.txt", "a" * 100)
+        cookies = await _login(chat_client, "alice")
+        real_read = mod.os.read
+        monkeypatch.setattr(mod.os, "read", lambda fd, count: real_read(fd, min(count, 7)))
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 200
+        assert resp.json()["text"] == "a" * 100
+        assert resp.json()["truncated"] is False
+
+    @pytest.mark.parametrize("prefix,kind", [(b"%PDF-1.7\n", "pdf"), (b"\x00", "binary")])
+    async def test_large_nontext_is_not_marked_truncated(
+        self, chat_client, tmp_path, prefix, kind,
+    ):
+        path = _workspace_bytes(tmp_path, "alice", "large.bin", prefix + b"a" * 1_048_576)
+        cookies = await _login(chat_client, "alice")
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 200
+        assert resp.json()["kind"] == kind
+        assert resp.json()["truncated"] is False
+        assert "text" not in resp.json()
+
+    async def test_later_read_error_closes_descriptor(self, chat_client, tmp_path, monkeypatch):
+        import errno
+        import istota.webui.app as mod
+        path = _workspace_file(tmp_path, "alice", "read-error.txt", "a" * 100)
+        cookies = await _login(chat_client, "alice")
+        real_read = mod.os.read
+        descriptors = []
+
+        def read(fd, count):
+            if descriptors:
+                raise OSError(errno.EIO, "read failed")
+            descriptors.append(fd)
+            return real_read(fd, min(count, 7))
+
+        monkeypatch.setattr(mod.os, "read", read)
+        resp = await self._get(chat_client, cookies, path)
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "file could not be read"}
+        with pytest.raises(OSError) as exc:
+            mod.os.fstat(descriptors[0])
+        assert exc.value.errno == errno.EBADF
+
+    @pytest.mark.parametrize("case,status", [
+        ("outside", 403), ("traversal", 403), ("symlink", 403),
+        ("directory", 400), ("missing", 404), ("fifo", 400),
+        ("empty", 400), ("nul", 400), ("root", 400),
+    ])
+    async def test_refusal_parity(self, chat_client, tmp_path, case, status):
+        import os
+        root = tmp_path / "mount" / "Users" / "alice"
+        root.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("private")
+        (root / "link").symlink_to(outside)
+        (root / "directory").mkdir()
+        os.mkfifo(root / "fifo")
+        path = {
+            "outside": "/Users/bob/private.txt", "traversal": "../bob/private.txt",
+            "symlink": "link", "directory": "directory", "missing": "missing",
+            "fifo": "fifo", "empty": " ", "nul": "x\x00", "root": "/Users/alice",
+        }[case]
+        cookies = await _login(chat_client, "alice")
+        preview = await self._get(chat_client, cookies, path)
+        download = await chat_client.get(
+            "/istota/api/chat/files", params={"path": path}, cookies=cookies,
+        )
+        assert preview.status_code == download.status_code == status
+        assert preview.json() == download.json()
+
+    async def test_no_mount(self, chat_client, monkeypatch):
+        import istota.webui.app as mod
+        monkeypatch.setattr(mod._config, "workspace_path", None)
+        cookies = await _login(chat_client, "alice")
+        resp = await self._get(chat_client, cookies, "a.txt")
+        assert resp.status_code == 503
+        assert "share link" in resp.json()["error"]
+
+    async def test_requires_auth(self, chat_client):
+        resp = await self._get(chat_client, {}, "a.txt")
+        assert resp.status_code == 401
+
+
+@_needs_web_deps
 class TestChatFileDownload:
     """Web chat has no outbound attachment channel, so this is how a task hands
     a file over. It exists specifically so the alternative — minting a public
