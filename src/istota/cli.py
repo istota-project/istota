@@ -3205,7 +3205,7 @@ async def _whatsapp_pair(config, argv, *, reset: bool = False) -> int:
         BaileysBridge, SessionResetIncomplete, SessionResetRefused,
     )
 
-    bridge = BaileysBridge(config, sidecar_argv=argv, on_qr=_render_qr)
+    bridge = BaileysBridge(config, sidecar_argv=argv, on_qr=_render_qr, spool=False)
     reset_done = False
     try:
         # `start()` is **inside** the `try`, which is the shape the bridge's
