@@ -174,6 +174,11 @@ describe('Discuss in private chat with no note', () => {
     expect(session().selectRoomByToken).toHaveBeenCalledWith('web-2');
     await waitFor(() => expect(chip()).toBeTruthy());
     expect(chip()!.textContent?.replace(/\s+/g, ' ').trim()).toContain('re: Book club');
+    expect(__history.entries[__history.index].url).toBe('/istota/chat/?room=web-2');
+    expect(__history.entries).toHaveLength(2);
+    __history.back();
+    await waitFor(() => expect(session().selectRoomByToken).toHaveBeenLastCalledWith('thr-1'));
+    await waitFor(() => expect(chip()).toBeNull());
   });
 
   it('sends the thread once and clears the chip', async () => {

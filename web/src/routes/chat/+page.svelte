@@ -86,10 +86,13 @@
   } = session;
 
   type ChatSelection =
-    { kind: 'room'; room: string; task?: number; msg?: number } | { kind: 'view'; view: ChatView };
+    | { kind: 'room'; room: string; task?: number; msg?: number }
+    | { kind: 'view'; view: ChatView }
+    | { kind: 'empty' };
   let selectionReady = $state(false);
 
   async function applyChatSelection(selection: ChatSelection): Promise<void> {
+    if (selection.kind === 'empty') return;
     if (selection.kind === 'view') await session.selectView(selection.view);
     else if (selection.task !== undefined) await session.jumpToTask(selection.room, selection.task);
     else if (selection.msg !== undefined) await session.jumpToMsgId(selection.room, selection.msg);
@@ -101,6 +104,7 @@
     params: ['room', 'view', 'task', 'msg'],
     compareKeys: ['room', 'view'],
     encode(selection) {
+      if (selection.kind === 'empty') return {};
       if (selection.kind === 'view') return { view: selection.view };
       const params: Params = { room: selection.room };
       if (selection.task !== undefined) params.task = String(selection.task);
@@ -127,7 +131,7 @@
       if (!selectionReady) return null;
       if ($view !== 'room') return { kind: 'view', view: $view };
       const room = $rooms.find((room) => room.id === $activeRoomId);
-      return room ? { kind: 'room', room: room.token } : null;
+      return room ? { kind: 'room', room: room.token } : { kind: 'empty' };
     },
     apply: applyChatSelection,
   });
@@ -488,8 +492,16 @@
     return $rooms.find((r) => r.token === token)?.name ?? 'the email thread';
   }
 
+  function openRoom(token: string) {
+    if (get(rooms).some((room) => room.token === token)) {
+      chatSel.push({ kind: 'room', room: token });
+    } else {
+      void session.selectRoomByToken(token);
+    }
+  }
+
   function discussInPrivate(discuss: MailDiscuss) {
-    void session.selectRoomByToken(discuss.room);
+    openRoom(discuss.room);
     linkTarget = { room: discuss.room, about: discuss.about, name: threadName(discuss.about) };
   }
 
@@ -502,7 +514,7 @@
   /** Follow a rendered citation back to the message it names. */
   function jumpToCitedMessage(msgId: number) {
     const token = activeRoom?.token;
-    if (token) void session.jumpToMsgId(token, msgId);
+    if (token) chatSel.push({ kind: 'room', room: token, msg: msgId });
   }
 
   // The room's standing model default as a header badge — the canonical model
@@ -1528,7 +1540,7 @@
                 onQueueRemove={inViewMode ? undefined : session.removeQueued}
                 onReply={inViewMode || readOnlyPhone || readOnlyThread ? undefined : stageReply}
                 onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
-                onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
+                onRoomClick={inViewMode ? openRoom : undefined}
                 onJump={(token, taskId) => {
                   if (get(rooms).some((room) => room.token === token)) {
                     chatSel.push({ kind: 'room', room: token, task: taskId });
@@ -1537,7 +1549,7 @@
                     void session.jumpToTask(token, taskId);
                   }
                 }}
-                onOpenRoom={(token) => session.selectRoomByToken(token)}
+                onOpenRoom={openRoom}
                 onDiscuss={inViewMode ? undefined : discussInPrivate}
                 onImageOpen={viewer.openImages}
                 drafts={draftsForRow(message)}

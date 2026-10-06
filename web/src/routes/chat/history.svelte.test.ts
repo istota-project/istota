@@ -221,6 +221,12 @@ describe('chat selection history', () => {
     await waitFor(() => expect(get(session.activeRoomId)).toBe(1));
     expect(session.selectRoomByToken).toHaveBeenLastCalledWith('room-a');
     expect(currentUrl()).toBe('/istota/chat/?room=room-a');
+    session.jumpToTask.mockClear();
+    __history.forward();
+    await waitFor(() => expect(session.jumpToTask).toHaveBeenCalledWith('room-b', 42));
+    expect(get(session.activeRoomId)).toBe(2);
+    expect(currentUrl()).toBe('/istota/chat/?room=room-b&task=42');
+    expect(__history.entries).toHaveLength(2);
   });
   it('keeps the current URL when a saved search result names a missing room', async () => {
     session.rooms.set([rooms[0]]);
@@ -257,5 +263,117 @@ describe('chat selection history', () => {
     expect(get(session.activeRoomId)).toBe(1);
     expect(currentUrl()).toBe('/istota/chat/?room=room-a');
     expect(__history.entries).toHaveLength(1);
+  });
+});
+
+describe('chat jump history', () => {
+  it('pushes citations as message jumps and replays them on Forward', async () => {
+    session.messages.set([
+      {
+        cid: 1,
+        role: 'user',
+        text: 'A follow-up',
+        segments: [],
+        streaming: false,
+        replyTo: { msgId: 22, role: 'assistant', excerpt: 'the earlier answer' },
+      },
+    ]);
+    renderPage();
+    await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
+    await fireEvent.click(screen.getByTitle('Go to the message this replies to'));
+    expect(session.jumpToMsgId).toHaveBeenCalledWith('room-a', 22);
+    expect(currentUrl()).toBe('/istota/chat/?room=room-a&msg=22');
+    expect(__history.entries).toHaveLength(2);
+    __history.back();
+    await waitFor(() => expect(currentUrl()).toBe('/istota/chat/?room=room-a'));
+    session.jumpToMsgId.mockClear();
+    __history.forward();
+    await waitFor(() => expect(session.jumpToMsgId).toHaveBeenCalledWith('room-a', 22));
+    expect(currentUrl()).toBe('/istota/chat/?room=room-a&msg=22');
+  });
+
+  it.each(['room chip', 'about chip'])('pushes the room opened by a %s', async (chip) => {
+    const aggregate = chip === 'room chip';
+    session.view.set(aggregate ? 'all' : 'room');
+    session.messages.set([
+      {
+        cid: 1,
+        role: 'user',
+        text: 'A message about the trip',
+        segments: [],
+        streaming: false,
+        ...(aggregate
+          ? { roomToken: 'room-b', roomName: 'Room B' }
+          : { aboutRoom: { token: 'room-b', name: 'Room B' } }),
+      },
+    ]);
+    const { container } = renderPage();
+    const initial = aggregate ? '/istota/chat/?view=all' : '/istota/chat/?room=room-a';
+    await waitFor(() => expect(currentUrl()).toBe(initial));
+    await fireEvent.click(container.querySelector('button.room-chip')!);
+    expect(session.selectRoomByToken).toHaveBeenCalledWith('room-b');
+    expect(currentUrl()).toBe('/istota/chat/?room=room-b');
+    expect(__history.entries).toHaveLength(2);
+    __history.back();
+    await waitFor(() => expect(get(session.view)).toBe(aggregate ? 'all' : 'room'));
+    expect(currentUrl()).toBe(initial);
+  });
+
+  it('restores a citation jump from the initial URL', async () => {
+    __history.reset('/istota/chat/?room=room-b&msg=22');
+    session.jumpToMsgId = vi.fn(async (token: string) => session.selectRoomByToken(token));
+    renderPage();
+    await waitFor(() => expect(session.jumpToMsgId).toHaveBeenCalledWith('room-b', 22));
+    expect(get(session.activeRoomId)).toBe(2);
+    expect(currentUrl()).toBe('/istota/chat/?room=room-b&msg=22');
+    expect(__history.entries).toHaveLength(1);
+  });
+
+  it('keeps history unchanged for a room link whose room disappeared', async () => {
+    session.rooms.set([rooms[0]]);
+    session.messages.set([
+      {
+        cid: 1,
+        role: 'user',
+        text: 'A private reply',
+        segments: [],
+        streaming: false,
+        aboutRoom: { token: 'room-b', name: 'Room B' },
+      },
+    ]);
+    renderPage();
+    await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
+    await fireEvent.click(screen.getByTitle('Open the room'));
+    expect(get(session.activeRoomId)).toBe(1);
+    expect(currentUrl()).toBe('/istota/chat/?room=room-a');
+    expect(__history.entries).toHaveLength(1);
+  });
+
+  it('replaces Back onto a deleted room with the current room', async () => {
+    renderPage();
+    await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B', exact: true }));
+    session.rooms.set([rooms[1]]);
+    session.selectRoomByToken.mockClear();
+    __history.back();
+    await waitFor(() => expect(currentUrl()).toBe('/istota/chat/?room=room-b'));
+    expect(get(session.activeRoomId)).toBe(2);
+    expect(session.selectRoomByToken).not.toHaveBeenCalled();
+    expect(__history.index).toBe(0);
+    expect(__history.entries).toHaveLength(2);
+  });
+
+  it('clears the URL when the final room disappears, including old Back entries', async () => {
+    renderPage();
+    await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B', exact: true }));
+    session.rooms.set([]);
+    session.activeRoomId.set(null);
+    await waitFor(() => expect(currentUrl()).toBe('/istota/chat/'));
+    expect(__history.entries).toHaveLength(2);
+    __history.back();
+    await waitFor(() => expect(currentUrl()).toBe('/istota/chat/'));
+    expect(__history.index).toBe(0);
+    expect(get(session.activeRoomId)).toBeNull();
   });
 });
