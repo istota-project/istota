@@ -59,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **In a friendly room the bot now decides whether an unaddressed turn was for it** (#675). The classifier only filters out people clearly talking among themselves; a turn it lets through can be declined by the bot, which then posts nothing, shows no progress and pushes nothing. A member's uncaptioned photo or GIF in a friendly WhatsApp group is now put to the classifier and, on a yes, opened for the bot. Reserved rooms are unchanged. **Upgrade note:** expect more classifier yeses in friendly rooms. Each declined turn costs a task run and is logged in `speech_gate_decisions` as `agent_declined`. The new `tasks.declinable` column is added on startup.
 
+- In a friendly room, the person the bot just answered no longer gets an answer to every next message. The classifier's verdict now decides their follow-up like any other turn, so turning to greet someone else stays unanswered. A follow-up still reaches the bot when the classifier call fails.
+
 - When a member calls the bot back (its name alone, `?` or `hello?`) within two minutes of a turn it skipped or declined, that turn is logged as `probable_miss` in `speech_gate_decisions`, for tuning the classifier (#656).
 
 - Feed articles now use the same compact viewer as workspace files, with previous and next controls on phones. Audio artwork remains visible, and closing image zoom returns to the same article position.

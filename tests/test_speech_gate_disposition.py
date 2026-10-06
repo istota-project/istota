@@ -578,8 +578,9 @@ class TestTheWarningIsOnce:
 
 
 class TestAFollowUpToTheBotsAnswer:
-    """ISSUE-670: in a friendly room, the person the bot just answered speaking
-    next is answered whatever the classifier says; it only picks the kind."""
+    """In a friendly room, the person the bot just answered speaking next takes
+    the classifier's verdict like any turn; only a failed call speaks anyway
+    (ISSUE-670, narrowed once follow-ups became declinable)."""
 
     def test_the_structural_rule(self):
         assert speech_gate.is_follow_up(THANKS_AFTER_ANSWER)
@@ -595,17 +596,32 @@ class TestAFollowUpToTheBotsAnswer:
                 "ORDER BY id DESC LIMIT 1"
             ).fetchone())
 
-    def test_a_declined_follow_up_is_answered(self, config):
+    def test_a_follow_up_the_classifier_declines_stays_silent(self, config):
         config.speech_gate.disposition = "friendly"
         _seed(config)
         task_id, _row, _prompts = _ask_and_ingest(
             config,
-            '{"speak": false, "reason": "re-sending a GIF, not initiating"}',
-            text="This guy",
+            '{"speak": false, "reason": "greeting someone else"}',
+            text="office good to see you here",
+        )
+        assert task_id is None
+        row = self._row(config)
+        assert (row["spoke"], row["rung"]) == (0, "classifier")
+        assert row["reason"] == "greeting someone else"
+
+    def test_a_follow_up_the_classifier_answers_is_declinable(self, config):
+        config.speech_gate.disposition = "friendly"
+        _seed(config)
+        task_id, _row, _prompts = _ask_and_ingest(
+            config, '{"speak": true, "reason": "asks about the answer"}',
+            text="and on Sunday?",
         )
         assert task_id is not None
-        row = self._row(config)
-        assert (row["spoke"], row["rung"], row["kind"]) == (1, "follow_up", "reply")
+        assert (self._row(config)["rung"], self._row(config)["spoke"]) == (
+            "classifier", 1,
+        )
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).declinable
 
     def test_the_classifier_still_picks_an_ack(self, config):
         config.speech_gate.disposition = "friendly"
@@ -615,7 +631,7 @@ class TestAFollowUpToTheBotsAnswer:
         )
         assert task_id is not None
         assert row["kind"] == "ack"
-        assert self._row(config)["rung"] == "follow_up"
+        assert self._row(config)["rung"] == "classifier"
 
     def test_a_failed_classifier_is_a_plain_reply(self, config):
         config.speech_gate.disposition = "friendly"
@@ -624,6 +640,8 @@ class TestAFollowUpToTheBotsAnswer:
         assert task_id is not None
         row = self._row(config)
         assert (row["spoke"], row["rung"], row["kind"]) == (1, "follow_up", "reply")
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).declinable
 
     def test_someone_else_is_still_classified(self, config):
         config.speech_gate.disposition = "friendly"
