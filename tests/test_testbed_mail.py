@@ -303,12 +303,17 @@ _RAW = b"From: a@ext.test\r\nTo: b@ext.test\r\nSubject: hi\r\n\r\nbody\r\n"
 
 class TestTheFetchFindsItsOwnLiteral:
     def test_an_unsolicited_flags_update_ahead_of_the_literal_is_skipped(self):
-        data = [b"13 (UID 13 FLAGS (\\Seen))", (b"14 (UID 14 BODY[] {60}", _RAW), b")"]
+        # Maddy's order: the literal first, `UID` in the closing element.
+        data = [b"13 (UID 13 FLAGS (\\Seen))", (b"14 (BODY[] {60}", _RAW), b" UID 14)"]
         message = _session(None)._fetch(_FetchConnection(data), 14)
         assert message.subject == "hi"
 
-    def test_a_literal_for_another_uid_is_not_taken(self):
-        data = [(b"13 (UID 13 BODY[] {60}", _RAW), b")"]
+    def test_the_plain_answer_still_reads(self):
+        data = [(b"14 (BODY[] {60}", _RAW), b" UID 14)"]
+        assert _session(None)._fetch(_FetchConnection(data), 14).subject == "hi"
+
+    def test_an_answer_with_no_literal_is_refused(self):
+        data = [b"13 (UID 13 FLAGS (\\Seen))"]
         with pytest.raises(RuntimeError, match="could not fetch uid 14"):
             _session(None)._fetch(_FetchConnection(data), 14)
 

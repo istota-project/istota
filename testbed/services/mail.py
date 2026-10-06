@@ -46,7 +46,6 @@ import email.utils
 import imaplib
 import logging
 import os
-import re
 import smtplib
 import socket
 import ssl
@@ -535,10 +534,12 @@ class ImapSession:
         """
         typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
         # imaplib returns every untagged response, so an unsolicited
-        # `FETCH (FLAGS ...)` for another message can precede the literal.
+        # `FETCH (FLAGS ...)` for another message can precede the literal. A
+        # flags update carries no literal, and this asks for one message, so
+        # the tuple carrying `BODY[]` is ours (Maddy puts `UID` after it).
         literal = next(
             (item for item in data or [] if isinstance(item, tuple)
-             and re.search(rb"\bUID %d\b" % uid, item[0])),
+             and b"BODY[]" in item[0]),
             None,
         )
         if typ != "OK" or literal is None:
