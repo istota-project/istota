@@ -76,3 +76,24 @@ describe('KebabMenu', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 });
+
+describe('KebabMenu link interception', () => {
+  it('passes the click event and closes even when navigation is prevented', async () => {
+    const onClick = vi.fn((event: MouseEvent) => event.preventDefault());
+    await openMenu([{ label: 'Open', href: '/istota/api/health/documents/1/file', onClick }]);
+    const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+    await fireEvent(await screen.findByRole('menuitem', { name: 'Open' }), event);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('does not run interception for disabled links', async () => {
+    const onClick = vi.fn();
+    await openMenu([
+      { label: 'Open', href: '/istota/api/health/documents/1/file', disabled: true, onClick },
+    ]);
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Open' }));
+    expect(onClick).not.toHaveBeenCalled();
+  });
+});

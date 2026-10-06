@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Health image documents now open in the zoom viewer from their name or Open menu. Download still saves the original file, and PDFs keep downloading as before.
+
 - Workspace links and upload chips in chat, briefings and viewed Markdown now open an in-app preview. Modified clicks keep their usual browser behavior, and Download saves the original file.
 
 - Workspace file previews can show Markdown, source text, audio, video and PDF pages in a shared viewer with Download and Close. Images open in the zoom viewer, which now has a visible close button on phones.

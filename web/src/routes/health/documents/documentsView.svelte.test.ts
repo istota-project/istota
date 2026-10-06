@@ -69,8 +69,12 @@ import {
   type HealthDocument,
 } from '$lib/api';
 import Page from './+page.svelte';
+import { viewer } from '$lib/fileViewer/store.svelte';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  viewer.close();
+});
 
 function doc(id: number, name: string, links: DocumentLink[]): HealthDocument {
   return {
@@ -385,5 +389,30 @@ describe('the Documents view', () => {
     const row = screen.getByText('discharge.pdf').closest('tr') as HTMLElement;
     expect(within(row).getByLabelText('Document actions')).toBeTruthy();
     expect(container.querySelector('.attach')).toBeTruthy();
+  });
+});
+
+describe('document list image links', () => {
+  it('opens an image from its title and menu while PDFs still download', async () => {
+    const image = { ...loose, mime: 'image/png', filename: 'scan.png' };
+    vi.mocked(listDocuments).mockResolvedValue({ documents: [attached, image] });
+    render(Page);
+    const title = await screen.findByRole('link', { name: 'scan.png' });
+    await fireEvent.click(title, { ctrlKey: true });
+    expect(viewer.state.mode).toBe('closed');
+    await fireEvent.click(title);
+    expect(viewer.state).toEqual({ mode: 'images', images: [image.url], index: 0 });
+    viewer.close();
+    const pdfClick = new MouseEvent('click', { bubbles: true, cancelable: true });
+    await fireEvent(screen.getByRole('link', { name: 'discharge.pdf' }), pdfClick);
+    expect(pdfClick.defaultPrevented).toBe(false);
+    expect(viewer.state.mode).toBe('closed');
+    const row = title.closest('tr')!;
+    await fireEvent.keyDown(within(row).getByRole('button', { name: /actions/i }), {
+      key: 'Enter',
+    });
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Open' }));
+    expect(viewer.state).toEqual({ mode: 'images', images: [image.url], index: 0 });
+    expect(screen.queryByRole('menu')).toBeNull();
   });
 });

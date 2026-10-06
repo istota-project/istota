@@ -1,7 +1,7 @@
 <script lang="ts">
   import { KebabMenu, type KebabItem } from '$lib/components/ui';
   import type { DocumentEntity, HealthDocument } from '$lib/api';
-  import { documentName, formatBytes, mimeLabel } from '$lib/health/documents';
+  import { documentName, openDocumentImage, formatBytes, mimeLabel } from '$lib/health/documents';
   import { formatDate } from '$lib/dateFormat';
 
   interface Props {
@@ -19,7 +19,9 @@
   const name = $derived(documentName(doc));
 
   const menu = $derived.by(() => {
-    const items: KebabItem[] = [{ label: 'Open', href: doc.url }];
+    const items: KebabItem[] = [
+      { label: 'Open', href: doc.url, onClick: (event) => openDocumentImage(event, doc) },
+    ];
     if (onDetach && entityType && entityId) {
       items.push({ label: 'Detach', onSelect: () => onDetach(doc) });
     }
@@ -34,7 +36,9 @@
   <div class="card-head">
     <!-- The whole card is not a link: the kebab lives inside it, and a
          nested interactive element inside an anchor is not addressable. -->
-    <a class="name" href={doc.url} title={name}>{name}</a>
+    <a class="name" href={doc.url} onclick={(event) => openDocumentImage(event, doc)} title={name}
+      >{name}</a
+    >
     <KebabMenu items={menu} ariaLabel="Document actions" />
   </div>
   <div class="tags">
