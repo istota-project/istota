@@ -45,6 +45,12 @@
 	   which is enough to say "a picture is coming" and not enough to compete
 	   with the text beside it. */
   --surface-media-placeholder: #262626;
+  /* A card inside the reading surface: a received mail, an external turn, the
+	   activity chip, a citation. Not --surface-card, which in dark *is* the
+	   reading surface, and not --surface-badge, the pill fill, which in light is
+	   a mid grey on the white pane. About 11 levels off --surface-reading in
+	   both themes. */
+  --surface-reading-card: #252525;
 
   /* Text */
   --text-primary: #e0e0e0;
@@ -433,6 +439,7 @@
   /* Measured against white rather than against the card, for the reason given
 	   on the dark value. */
   --surface-media-placeholder: #f0f0f2;
+  --surface-reading-card: #f4f4f5;
 
   /* Text */
   --text-primary: #1a1a1a;
@@ -492,7 +499,7 @@
   --scrim-viewer-bg: rgba(0, 0, 0, 0.9);
   --scrim-pill-bg: rgba(255, 255, 255, 0.82);
   --scrim-pill-fg: var(--text-secondary);
-  --shimmer-tint: rgba(0, 0, 0, 0.06);
+  --shimmer-tint: rgba(0, 0, 0, 0.1);
   --shadow-overlay: 0 1px 2px rgba(0, 0, 0, 0.1);
   /* Much lighter than their dark counterparts. A shadow at 0.4 alpha separates
 	   two dark surfaces; on white the same value reads as a smudge. */
