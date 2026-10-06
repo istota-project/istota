@@ -742,6 +742,23 @@ let mockChatTaskSeq = 1000;
     createdAt: base + 24_000,
     variant: 'images',
   });
+  const viewerAttachments = [
+    ['Images', ['image.png', 'image.jpg', 'image.gif', 'image.webp']],
+    ['Audio and video', ['tone.mp3', 'tone.wav', 'voice.ogg', 'tone.webm', 'clip.mp4']],
+    ['PDF documents', ['document.pdf', 'scanned.pdf', 'cjk-cmap.pdf']],
+    ['Text and source', ['note.md', 'note.txt', 'source.html', 'drawing.svg', 'binary.bin']],
+  ] as const;
+  for (const [index, [label, names]] of viewerAttachments.entries()) {
+    const id = 214 + index;
+    mockChatTasks.set(id, {
+      id,
+      roomToken: 'web-carol-screenshots',
+      prompt: `${label}: tap an attachment to preview it.`,
+      createdAt: base + 32_000 + index * 8_000,
+      attachments: [...names],
+      attachmentPaths: names.map((name) => `/Users/carol/istota/${name}`),
+    });
+  }
 })();
 
 // A canned event timeline for a mock task (ms offsets from creation). Models the
