@@ -468,6 +468,14 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
             user_id = (
                 identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
             )
+            # A guest is labelled as their stored row is: with no label the
+            # window would name them as the host, whose follow-up then speaks.
+            guest_label = None if user_id else participants.guest_label(ParticipantRef(
+                surface=SURFACE,
+                surface_ref=sender_jid
+                or identity_rules.normalize_lid(group.sender_lid) or "",
+                display_name=event.from_user.username,
+            ))
             text = render_mentions(conn, config, room.token, text, group.mentions)
             # A quote is addressed but still classified, for its kind
             # (ISSUE-653); a mention or the name first is not.
@@ -483,7 +491,7 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
         config, surface=SURFACE, surface_ref=group_jid,
         user_id=user_id or room.user_id, text=text, is_group_chat=False,
         addressed_to_bot=addressed, source_type="whatsapp", room_container=True,
-        author_label=None if user_id else (event.from_user.username or None),
+        author_label=guest_label,
         replied_to_bot=quoted,
     )
 

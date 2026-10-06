@@ -1683,7 +1683,7 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     user_id    TEXT NOT NULL,
     message_id INTEGER,
     spoke      INTEGER NOT NULL,
-    -- 'agent_author'|'host_lost'|'guest_command'|'guest_reply_off'|'loop_cap'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'failed'
+    -- 'agent_author'|'host_lost'|'guest_command'|'guest_reply_off'|'loop_cap'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'follow_up'|'failed'
     rung       TEXT NOT NULL,
     reason     TEXT,
     model      TEXT,
