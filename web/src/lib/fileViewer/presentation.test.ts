@@ -78,6 +78,8 @@ describe('splitFrontmatter', () => {
     '---\ntitle: Note',
     '---\ntitle: Note\n--- ',
     '--- \ntitle: Note\n---',
+    '---\ntitle: Note\n---\rjunk\nbody',
+    '---\ntitle: Note\u2028---\nbody',
   ])('leaves absent or unterminated frontmatter untouched: %j', (text) => {
     expect(splitFrontmatter(text)).toEqual({ frontmatter: null, body: text });
   });

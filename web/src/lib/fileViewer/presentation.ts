@@ -41,10 +41,10 @@ export function splitFrontmatter(text: string): { frontmatter: string | null; bo
   const opening = /^---\r?\n/.exec(text);
   if (!opening) return { frontmatter: null, body: text };
   const rest = text.slice(opening[0].length);
-  const closing = /^(?:---|\.\.\.)(?:\r?\n|$)/m.exec(rest);
+  const closing = /(^|\n)(?:---|\.\.\.)(?:\r?\n|(?![\s\S]))/.exec(rest);
   if (!closing) return { frontmatter: null, body: text };
   return {
-    frontmatter: rest.slice(0, closing.index),
+    frontmatter: rest.slice(0, closing.index + closing[1].length),
     body: rest.slice(closing.index + closing[0].length),
   };
 }
