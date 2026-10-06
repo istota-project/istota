@@ -18,15 +18,6 @@ function handWrittenOverlays(source: string): string[] {
     .map(({ selector }) => selector);
 }
 
-// Stage 2 removes these as their controls move onto the shared primitive.
-const KNOWN_OVERLAYS = [
-  '/lib/components/chat/Message.svelte: .send-queued :global(.icon-btn)::before',
-  '/lib/components/chat/Message.svelte: .turn-action::before',
-  '/lib/components/ui/NoticeDrawer.svelte: .notice-dismiss::before',
-  '/lib/components/ui/SidebarToggle.svelte: .sidebar-toggle::before',
-  '/lib/styles/markdown.css: .app-nav .nav-right .nav-icon-btn::before',
-];
-
 describe('shared touch target', () => {
   it('declares the AA floor and comfort size in the tokens layer', () => {
     const root = blockAfter(stripComments(readLayer('tokens')), ':root {') ?? '';
@@ -68,7 +59,7 @@ describe('shared touch target', () => {
 });
 
 describe('hand-written overlay drift guard', () => {
-  it('finds exactly the known file and selector exceptions', () => {
+  it('allows no hand-written overlays outside the primitive', () => {
     const found: string[] = [];
     for (const file of styleFiles(SRC)) {
       if (file === resolve(SRC, 'lib/styles/primitives.css')) continue;
@@ -78,7 +69,7 @@ describe('hand-written overlay drift guard', () => {
         }
       }
     }
-    expect(found.sort()).toEqual([...KNOWN_OVERLAYS].sort());
+    expect(found).toEqual([]);
   });
 
   it('recognizes both fixed sizes and gap-derived widths without matching decoration', () => {
@@ -92,5 +83,62 @@ describe('hand-written overlay drift guard', () => {
       }
     `),
     ).toEqual(['.fixed::before', '.gap :global(.icon-btn)::before']);
+  });
+});
+
+describe('migrated touch targets', () => {
+  it.each([
+    ['lib/components/ui/SidebarToggle.svelte', '.sidebar-toggle', '2.5rem', '2.75rem'],
+    [
+      'lib/components/ui/NoticeDrawer.svelte',
+      '.notice-dismiss',
+      'var(--touch-comfort)',
+      'var(--touch-comfort)',
+    ],
+    [
+      'lib/components/chat/Message.svelte',
+      '.turn-action',
+      'calc(100% + var(--turn-action-gap))',
+      'var(--touch-comfort)',
+    ],
+    [
+      'lib/components/chat/Message.svelte',
+      '.send-queued',
+      'calc(100% + var(--space-2))',
+      'var(--touch-comfort)',
+    ],
+    ['lib/styles/app-shell.css', '.app-nav .nav-right .nav-icon-btn', '2.5rem', '2.5rem'],
+  ])('preserves %s %s dimensions', (file, selector, width, height) => {
+    const source = readFileSync(resolve(SRC, file), 'utf8');
+    const bodies = styleBlocks(file, source)
+      .flatMap(rules)
+      .filter((r) => r.selector === selector)
+      .map((r) => r.body)
+      .join('\n');
+    expect(bodies).toContain(`--touch-target-w: ${width};`);
+    expect(bodies).toContain(`--touch-target-h: ${height};`);
+  });
+
+  it('keeps the nav gap for coarse pointers and narrow windows in the shell layer', () => {
+    const shell = stripComments(readLayer('app-shell'));
+    const gap = blockAfter(shell, '@media (pointer: coarse), (max-width: 640px)') ?? '';
+    expect(blockAfter(gap, '.app-nav .nav-right')).toMatch(/gap:\s*1.25rem;/);
+    expect(readLayer('markdown')).not.toContain('.nav-icon-btn');
+  });
+
+  it.each([
+    ['lib/components/ui/SidebarToggle.svelte', 'sidebar-toggle'],
+    ['lib/components/ui/NoticeDrawer.svelte', 'notice-dismiss'],
+    ['lib/components/chat/Message.svelte', 'turn-action'],
+    ['lib/components/ui/NotificationBell.svelte', 'nav-icon-btn'],
+    ['lib/components/LogoutButton.svelte', 'nav-icon-btn'],
+    ['routes/+layout.svelte', 'nav-icon-btn'],
+  ])('opts every %s %s call site into the primitive', (file, control) => {
+    const source = readFileSync(resolve(SRC, file), 'utf8');
+    const classes = [...source.matchAll(/class="([^"]+)"/g)]
+      .map((m) => m[1].split(' '))
+      .filter((names) => names.includes(control));
+    expect(classes.length).toBeGreaterThan(0);
+    for (const names of classes) expect(names).toContain('touch-target');
   });
 });

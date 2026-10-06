@@ -408,7 +408,7 @@
       <NotificationBell />
       <button
         type="button"
-        class="nav-icon-btn theme-btn"
+        class="nav-icon-btn touch-target theme-btn"
         onclick={toggleTheme}
         title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
         aria-label="Toggle color theme"
@@ -423,7 +423,11 @@
       <DropdownMenu.Root>
         <DropdownMenu.Trigger>
           {#snippet child({ props })}
-            <button class="nav-icon-btn hamburger-btn" aria-label="Open menu" {...props}>
+            <button
+              class="nav-icon-btn touch-target hamburger-btn"
+              aria-label="Open menu"
+              {...props}
+            >
               <Menu size={18} />
             </button>
           {/snippet}

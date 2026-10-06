@@ -143,7 +143,7 @@
       {/if}
       <button
         type="button"
-        class="notice-dismiss"
+        class="notice-dismiss touch-target"
         aria-label="Dismiss notification"
         onclick={dismissCurrent}
       >
@@ -264,8 +264,9 @@
      preference, with the touch target added out of flow — a 44px-tall control
      here would make the band taller than the text needs. */
   .notice-dismiss {
+    --touch-target-w: var(--touch-comfort);
+    --touch-target-h: var(--touch-comfort);
     font: inherit;
-    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -279,16 +280,6 @@
     color: inherit;
     opacity: 0.75;
     cursor: pointer;
-  }
-
-  .notice-dismiss::before {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 44px;
-    height: 44px;
-    transform: translate(-50%, -50%);
   }
 
   .notice-dismiss:hover {

@@ -131,7 +131,7 @@ describe('touch targets with a fourth button', () => {
     // is ~322px (375 minus the 2.25rem gutter sum and the trailing inset), so
     // the row takes about a third of the narrowest bubble; at the large text
     // scale it is ~127px against ~317px. Comfortable either way.
-    expect(source).toContain('width: calc(100% + var(--turn-action-gap));');
+    expect(source).toContain('--touch-target-w: calc(100% + var(--turn-action-gap));');
     expect(source).toContain('--turn-action-gap: var(--space-2);');
   });
 });

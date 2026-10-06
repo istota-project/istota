@@ -11,6 +11,7 @@
      */
     label: string;
     size?: Size;
+    class?: string;
     /** Hover turns the glyph red rather than raising it. For a delete action. */
     danger?: boolean;
     /** Pressed/open state, for a menu trigger. */
@@ -25,6 +26,7 @@
   let {
     label,
     size = 'md',
+    class: className = '',
     danger = false,
     active = false,
     type = 'button',
@@ -36,7 +38,7 @@
 </script>
 
 <button
-  class="icon-btn icon-btn-{size}"
+  class="icon-btn icon-btn-{size} {className}"
   class:danger
   class:active
   {type}

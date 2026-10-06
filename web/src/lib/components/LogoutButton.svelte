@@ -46,7 +46,7 @@
 -->
 <button
   type="button"
-  class="nav-icon-btn logout-btn"
+  class="nav-icon-btn touch-target logout-btn"
   onclick={() => (confirming = true)}
   title="Log out"
   aria-label="Log out"

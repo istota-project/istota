@@ -621,7 +621,7 @@
   <div class="turn-actions" class:revealed>
     {#if showCopy}
       <button
-        class="turn-action"
+        class="turn-action touch-target"
         onclick={(e) => {
           void copyText(copySource, { label: 'Copied' });
           // Same reason as the star: a pointer click leaves the button
@@ -643,7 +643,7 @@
            ascending consequence, and the destructive button ends up at the end
            of the row rather than immediately beside the benign one. -->
       <button
-        class="turn-action star"
+        class="turn-action touch-target star"
         class:starred={message.starred}
         onclick={(e) => {
           onToggleStar?.(message.cid);
@@ -663,7 +663,7 @@
            private mark and less than a destructive removal — and keeping
            delete last leaves it terminal. -->
       <button
-        class="turn-action"
+        class="turn-action touch-target"
         onclick={(e) => {
           onReply?.(message.cid);
           if (e.detail > 0) e.currentTarget.blur();
@@ -677,7 +677,7 @@
     {/if}
     {#if showDelete}
       <button
-        class="turn-action danger"
+        class="turn-action touch-target danger"
         onclick={(e) => {
           onDelete?.(message.cid);
           if (e.detail > 0) e.currentTarget.blur();
@@ -1111,6 +1111,7 @@
             {#if onQueueEdit}
               <IconButton
                 size="sm"
+                class="touch-target"
                 label="Edit queued message"
                 title="Edit"
                 onclick={() => onQueueEdit?.(message.cid)}
@@ -1125,6 +1126,7 @@
               <IconButton
                 size="sm"
                 danger
+                class="touch-target"
                 label="Remove queued message"
                 title="Remove"
                 onclick={() => onQueueRemove?.(message.cid)}
@@ -1512,33 +1514,16 @@
   .turn-action.star:hover {
     color: var(--accent-amber);
   }
-  /* Touch targets, as an out-of-flow overlay so reaching them costs the row no
-	   height (SidebarToggle's device).
-
-	   The full 44px is only taken vertically. Horizontally the overlay is the
-	   button plus one gap, so two adjacent overlays meet exactly at the gap's
-	   midpoint: a tap in the seam resolves to the side it actually fell on,
-	   rather than to whichever won the stacking order. Two 44px-wide overlays
-	   would need ~21px between these buttons to stay apart, which is far wider
-	   than two adjacent icons should sit — so the width is what gives, and it is
-	   derived from the gap rather than restated, or tightening one would silently
-	   reintroduce the overlap. */
-  @media (max-width: 768px) {
+  /* Adjacent overlays meet at the gap midpoint, so neither takes its
+     neighbour's taps. Only the height takes the full comfort size. */
+  @media (pointer: coarse), (max-width: 768px) {
     .turn-actions {
       --turn-action-gap: var(--space-2);
       gap: var(--turn-action-gap);
     }
     .turn-action {
-      position: relative;
-    }
-    .turn-action::before {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: calc(100% + var(--turn-action-gap));
-      height: 44px;
-      transform: translate(-50%, -50%);
+      --touch-target-w: calc(100% + var(--turn-action-gap));
+      --touch-target-h: var(--touch-comfort);
     }
   }
 
@@ -1949,30 +1934,13 @@
   .send-queued-text {
     min-width: 0;
   }
-  /* Touch targets for the row's two icon buttons, the same out-of-flow overlay
-	   device the turn-action row uses so the line keeps its height. Two
-	   differences, both because of what this row holds: the overlay grows by one
-	   `--space-2` rather than by the whole pitch, and the gap widens to
-	   `--space-3`, so no two overlays touch and none of them reaches into the
-	   Send button beside them — Send is a real control here, not a gap, and an
-	   overlay lapping its edge would take taps meant for it. That leaves 4px of
-	   dead space between the icons, which is the safe way to be wrong: a tap
-	   there hits nothing rather than the button next door. */
-  @media (max-width: 768px) {
+  /* Grow by less than the gap: neither icon's overlay reaches its neighbour
+     or the Send button, and the status line keeps its visible height. */
+  @media (pointer: coarse), (max-width: 768px) {
     .send-queued {
+      --touch-target-w: calc(100% + var(--space-2));
+      --touch-target-h: var(--touch-comfort);
       gap: var(--space-3);
-    }
-    .send-queued :global(.icon-btn) {
-      position: relative;
-    }
-    .send-queued :global(.icon-btn)::before {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      width: calc(100% + var(--space-2));
-      height: 44px;
-      transform: translate(-50%, -50%);
     }
   }
   /* The body is dimmed, not hidden: the user is meant to reread what they wrote

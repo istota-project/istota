@@ -16,7 +16,7 @@
    * Layout, hit area, reset and hover all come from the shared `.nav-icon-btn`
    * rule in `app-shell.css`, like its three siblings in the nav — only the
    * resting colour is set here. The row's ~44px touch overlays are sized against
-   * a fixed 1.25rem gap in `markdown.css`; a fourth control does not change that
+   * a fixed 1.25rem gap in `app-shell.css`; a fourth control does not change that
    * pitch, so nothing there needs re-deriving.
    */
   import { Bell } from '@lucide/svelte';
@@ -35,7 +35,7 @@
     <button
       {...props}
       type="button"
-      class="nav-icon-btn notification-btn"
+      class="nav-icon-btn touch-target notification-btn"
       title="Notifications"
       aria-label={label}
     >
