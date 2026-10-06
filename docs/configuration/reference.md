@@ -201,10 +201,10 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 | `model` | `"fast"` | Role alias for the classifier, resolved per brain namespace |
 | `window_messages` | `8` | Transcript turns the classifier sees |
 | `max_message_chars` | `400` | Per-turn character cap inside the window |
-| `timeout_seconds` | `8.0` | Classifier call timeout |
+| `timeout_seconds` | `20.0` | Classifier call timeout. A timeout means no reply. On the `claude_code` brain each call starts the CLI from scratch, which takes 4 to 8 seconds |
 | `decision_retention_days` | `30` | Days to keep `speech_gate_decisions` rows (`0` keeps them) |
 
-Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_DISPOSITION`, `ISTOTA_SPEECH_GATE_MODEL`, `ISTOTA_SPEECH_GATE_WINDOW_MESSAGES`, `ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS`, `ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS`, `ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS`. Ansible: `istota_speech_gate_*` with the same suffixes.
+Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_DISPOSITION`, `ISTOTA_SPEECH_GATE_MODEL`, `ISTOTA_SPEECH_GATE_WINDOW_MESSAGES`, `ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS`, `ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS`, `ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS`. Ansible: `istota_speech_gate_*` with the same suffixes. Both generators leave a setting out of `config.toml` when its variable is unset or empty, so the default in this table applies; `ack_reaction` is the exception and is always written, since an empty value turns reactions off.
 
 ## `[logging]`
 

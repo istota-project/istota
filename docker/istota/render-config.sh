@@ -203,6 +203,30 @@ ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND="$(toml_escape "${ISTOTA_WHATSAPP_BAILEY
 # parse — which on this shape is a container that will not boot.
 ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH="$(toml_escape "${ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH:-}")"
 
+# The [speech_gate] tunables, each written only when the operator set it, so
+# SpeechGateConfig holds the defaults (ISSUE-667). Empty counts as unset,
+# since compose passes every one through as `${NAME:-}`.
+#
+# Literal names, not a loop over a built name: the compose and .env.example
+# guards in tests/test_render_config.py find a variable by reading this file.
+speech_gate_tunables() {
+    toml_str_line mode "${ISTOTA_SPEECH_GATE_MODE:-}"
+    toml_str_line disposition "${ISTOTA_SPEECH_GATE_DISPOSITION:-}"
+    toml_str_line model "${ISTOTA_SPEECH_GATE_MODEL:-}"
+    toml_raw_line window_messages "${ISTOTA_SPEECH_GATE_WINDOW_MESSAGES:-}"
+    toml_raw_line max_message_chars "${ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS:-}"
+    toml_raw_line timeout_seconds "${ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS:-}"
+    toml_raw_line decision_retention_days "${ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS:-}"
+}
+
+# `key = "value"` / `key = value`, or nothing for an empty value.
+toml_str_line() {
+    [ -z "$2" ] || printf '%s = "%s"\n' "$1" "$(toml_escape "$2")"
+}
+toml_raw_line() {
+    [ -z "$2" ] || printf '%s = %s\n' "$1" "$2"
+}
+
 render_config() {
     echo "[istota] Generating config.toml..."
 
@@ -648,14 +672,8 @@ previous_tasks_count = ${ISTOTA_CONVERSATION_PREVIOUS_TASKS_COUNT:-3}
 talk_context_limit = ${ISTOTA_CONVERSATION_TALK_CONTEXT_LIMIT:-100}
 
 [speech_gate]
-mode = "${ISTOTA_SPEECH_GATE_MODE:-classifier}"
-disposition = "${ISTOTA_SPEECH_GATE_DISPOSITION:-friendly}"
 ack_reaction = "${ISTOTA_SPEECH_GATE_ACK_REACTION-👍}"
-model = "${ISTOTA_SPEECH_GATE_MODEL:-fast}"
-window_messages = ${ISTOTA_SPEECH_GATE_WINDOW_MESSAGES:-8}
-max_message_chars = ${ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS:-400}
-timeout_seconds = ${ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS:-8.0}
-decision_retention_days = ${ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS:-30}
+$(speech_gate_tunables)
 
 [logging]
 level = "${ISTOTA_LOGGING_LEVEL:-INFO}"

@@ -535,14 +535,30 @@ previous_tasks_count = {{ istota_conversation_previous_tasks_count }}
 talk_context_limit = {{ istota_conversation_talk_context_limit }}
 
 [speech_gate]
+{# Each tunable is written only when set, so SpeechGateConfig holds the
+   defaults (ISSUE-667). ack_reaction is always written: "" turns reactions off. #}
+{% if istota_speech_gate_mode is not none and istota_speech_gate_mode | string | length %}
 mode = "{{ istota_speech_gate_mode | istota_toml_escape }}"
+{% endif %}
+{% if istota_speech_gate_disposition is not none and istota_speech_gate_disposition | string | length %}
 disposition = "{{ istota_speech_gate_disposition | istota_toml_escape }}"
+{% endif %}
 ack_reaction = "{{ istota_speech_gate_ack_reaction | istota_toml_escape }}"
+{% if istota_speech_gate_model is not none and istota_speech_gate_model | string | length %}
 model = "{{ istota_speech_gate_model | istota_toml_escape }}"
+{% endif %}
+{% if istota_speech_gate_window_messages is not none and istota_speech_gate_window_messages | string | length %}
 window_messages = {{ istota_speech_gate_window_messages }}
+{% endif %}
+{% if istota_speech_gate_max_message_chars is not none and istota_speech_gate_max_message_chars | string | length %}
 max_message_chars = {{ istota_speech_gate_max_message_chars }}
+{% endif %}
+{% if istota_speech_gate_timeout_seconds is not none and istota_speech_gate_timeout_seconds | string | length %}
 timeout_seconds = {{ istota_speech_gate_timeout_seconds }}
+{% endif %}
+{% if istota_speech_gate_decision_retention_days is not none and istota_speech_gate_decision_retention_days | string | length %}
 decision_retention_days = {{ istota_speech_gate_decision_retention_days }}
+{% endif %}
 
 {# Always written: an empty table is how {} means "ack_reaction only" rather
    than the loader's shipped lists. #}

@@ -561,8 +561,11 @@ def classify(
     latency = int((time.monotonic() - started) * 1000)
     verdict = parse_decision(raw)
     if verdict is None:
-        logger.warning("speech gate: unparseable classifier output, not speaking")
         reason = "no output" if not raw else "unparseable output"
+        logger.warning(
+            "speech gate: %s, not speaking",
+            "no classifier output" if not raw else "unparseable classifier output",
+        )
         return GateDecision(
             False, RUNG_FAILED, reason=reason, model=model, latency_ms=latency,
         )

@@ -173,6 +173,21 @@ class TestTheParser:
         assert parse_decision('{"speak": true, "reason": 7}').reason is None
 
 
+    @pytest.mark.parametrize("raw, reason, logged", [
+        (None, "no output", "no classifier output"),
+        ("", "no output", "no classifier output"),
+        ("sure, why not", "unparseable output", "unparseable classifier output"),
+    ])
+    def test_the_warning_matches_the_recorded_reason(self, raw, reason, logged, caplog):
+        """ISSUE-667: an empty answer (a timeout) was logged as unparseable
+        while its decision row said "no output"."""
+        with caplog.at_level("WARNING"):
+            decision = speech_gate.classify("window", lambda _w: raw, "fast")
+        assert decision.reason == reason
+        assert [r.getMessage() for r in caplog.records] == [
+            f"speech gate: {logged}, not speaking"
+        ]
+
 def _room(conn, token="room-1"):
     db.register_room(conn, token, "alice", origin="web")
     return token

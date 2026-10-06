@@ -359,7 +359,10 @@ class SpeechGateConfig:
     model: str = "fast"  # role alias, resolved per brain namespace; not a pin
     window_messages: int = 8  # transcript turns the classifier sees
     max_message_chars: int = 400  # per-turn cap inside the window
-    timeout_seconds: float = 8.0
+    # Covers a `claude` CLI cold start on a busy host: 4.4 to 7.6 s measured,
+    # and a timeout fails closed (ISSUE-667). It is also a hang bound: a Talk
+    # poll batch waits up to this times ceil(turns / 4) plus 5 s on its pass.
+    timeout_seconds: float = 20.0
     decision_retention_days: int = 30  # speech_gate_decisions rows; 0 keeps them forever
 
 

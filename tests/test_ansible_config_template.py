@@ -43,7 +43,7 @@ from jinja2 import Environment, StrictUndefined
 
 from istota import config as config_module
 from istota.brain.claude_code import HAIKU, OPUS, SONNET
-from istota.config import DEFAULT_ACK_REACTIONS, Config, devbox_container_backend, load_config
+from istota.config import DEFAULT_ACK_REACTIONS, Config, SpeechGateConfig, devbox_container_backend, load_config
 
 
 @functools.cache
@@ -2452,3 +2452,45 @@ class TestTheAckReactionsTable:
         }
         # The table follows every scalar of its section, so none is reparented.
         assert gate.decision_retention_days == 9
+
+
+#: The `[speech_gate]` scalars whose default lives in `SpeechGateConfig` alone
+#: (ISSUE-667). `ack_reaction` is not one: an empty string there turns
+#: reactions off, so the role writes it as given.
+GATE_TUNABLES = (
+    "mode", "disposition", "model", "window_messages", "max_message_chars",
+    "timeout_seconds", "decision_retention_days",
+)
+
+
+class TestTheSpeechGateDefaultsLiveInTheDataclass:
+    """ISSUE-667: the role restated every `[speech_gate]` default and always
+    rendered it, so a changed default in `config.py` reached no Ansible host.
+    The classifier timeout was the one that bit: raised in the dataclass, it
+    would have stayed 8.0 on every deployment."""
+
+    def test_the_default_render_writes_none_of_them(self, parsed):
+        written = sorted(set(GATE_TUNABLES) & set(parsed["speech_gate"]))
+        assert not written, f"the role still restates {written}"
+
+    def test_the_loaded_config_takes_the_dataclass_values(self, rendered):
+        gate = load_config_from(rendered).speech_gate
+        shipped = SpeechGateConfig()
+        for key in GATE_TUNABLES:
+            assert getattr(gate, key) == getattr(shipped, key), key
+
+    def test_an_operator_value_still_reaches_the_loader(self):
+        gate = load_config_from(render(
+            istota_speech_gate_mode="mention",
+            istota_speech_gate_disposition="reserved",
+            istota_speech_gate_model="capable",
+            istota_speech_gate_window_messages=5,
+            istota_speech_gate_max_message_chars=300,
+            istota_speech_gate_timeout_seconds=30.0,
+            istota_speech_gate_decision_retention_days=0,
+        )).speech_gate
+        assert (gate.mode, gate.disposition, gate.model) == ("mention", "reserved", "capable")
+        assert (gate.window_messages, gate.max_message_chars) == (5, 300)
+        assert gate.timeout_seconds == 30.0
+        assert gate.decision_retention_days == 0
+

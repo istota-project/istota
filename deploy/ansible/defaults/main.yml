@@ -493,8 +493,9 @@ istota_conversation_talk_context_limit: 100  # max messages to fetch from Talk m
 # Speech gate: whether the bot replies to an unaddressed turn in a room with more
 # than one human. "mention" replies only when mentioned; "classifier" lets a
 # cheap model decide and stays silent if it fails; "off" replies to every turn.
-istota_speech_gate_mode: "classifier"
-istota_speech_gate_disposition: "friendly"  # or "reserved"; read only by the classifier
+# A null tunable is left out of config.toml, so SpeechGateConfig's default holds.
+istota_speech_gate_mode: null  # "classifier", "mention" or "off"
+istota_speech_gate_disposition: null  # "friendly" or "reserved"; read only by the classifier
 istota_speech_gate_ack_reaction: "👍"  # a friendly room's reaction to thanks; "" replies instead
 # Per-kind reaction lists, rendered as [speech_gate.ack_reactions]; keys are
 # default, thanks, agreement, funny, celebration. A kind not listed uses
@@ -506,11 +507,11 @@ istota_speech_gate_ack_reactions:
   funny: ["😄", "🐙"]
   celebration: ["🎉"]
 
-istota_speech_gate_model: "fast"  # role alias; override through istota_models_aliases
-istota_speech_gate_window_messages: 8  # transcript turns the classifier sees
-istota_speech_gate_max_message_chars: 400  # per-turn cap inside the window
-istota_speech_gate_timeout_seconds: 8.0
-istota_speech_gate_decision_retention_days: 30  # 0 keeps speech_gate_decisions rows forever
+istota_speech_gate_model: null  # a role alias; override through istota_models_aliases
+istota_speech_gate_window_messages: null  # transcript turns the classifier sees
+istota_speech_gate_max_message_chars: null  # per-turn cap inside the window
+istota_speech_gate_timeout_seconds: null  # classifier bound in seconds; a timeout means no reply
+istota_speech_gate_decision_retention_days: null  # 0 keeps speech_gate_decisions rows forever
 
 # Admin users — full system access (DB, all mount paths, admin-only skills).
 # Deployed as /etc/<namespace>/admins, root-owned. An EMPTY list is asymmetric:

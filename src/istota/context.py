@@ -174,8 +174,13 @@ def _claude_cli_triage(
     timeout: float,
     config: Config,
     on_usage: "UsageSink | None" = None,
+    *,
+    label: str = "Context triage",
 ) -> str | None:
     """Default triage inference: a one-shot, tool-less run through ``ClaudeCodeBrain``.
+
+    ``label`` names the caller in the log lines, since the speech gate borrows
+    this path too.
 
     Returns the raw model output, or None on a failed attempt / timeout /
     missing CLI / any error. JSON parsing and validation stay in
@@ -252,19 +257,20 @@ def _claude_cli_triage(
         )
         result = ClaudeCodeBrain().execute(req)
     except Exception as e:  # never let triage crash context assembly
-        logger.warning("Context triage error: %s", e)
+        logger.warning("%s error: %s", label, e)
         return None
 
-    _report_triage_usage(on_usage, result, model)
+    _report_triage_usage(on_usage, result, model, label)
 
     if result.stop_reason == "cancelled":
         # Not a user cancel — nothing wires one here. The deadline above fired
         # mid-backoff, which is the budget working as intended.
-        logger.warning("Context triage gave up after its %ds budget", budget)
+        logger.warning("%s gave up after its %ds budget", label, budget)
         return None
     if not result.success:
         logger.warning(
-            "Context triage failed (stop_reason=%s): %s",
+            "%s failed (stop_reason=%s): %s",
+            label,
             result.stop_reason,
             (result.result_text or "")[:200],
         )
@@ -315,11 +321,13 @@ def _run_triage(
         config.conversation.selection_timeout,
         config,
         on_usage,
+        label=f"{label} triage",
     )
 
 
 def _report_triage_usage(
-    on_usage: "UsageSink | None", result: Any, requested_model: str
+    on_usage: "UsageSink | None", result: Any, requested_model: str,
+    label: str = "Context triage",
 ) -> None:
     """Hand one triage attempt's spend to the caller's sink. Never raises."""
     if on_usage is None or getattr(result, "usage", None) is None:
@@ -333,7 +341,7 @@ def _report_triage_usage(
             success=result.success,
         )
     except Exception:
-        logger.warning("Context triage usage sink failed", exc_info=True)
+        logger.warning("%s usage sink failed", label, exc_info=True)
 
 
 def _parse_relevant_ids(raw: str | None, n: int) -> list[int] | None:

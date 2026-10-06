@@ -2797,7 +2797,10 @@ def build_speech_gate_completer(
         from .context import _claude_cli_triage
 
         model = ClaudeCodeBrain().resolve_model_name(gate.model)
-        return _claude_cli_triage(prompt, model, gate.timeout_seconds, config, sink)
+        return _claude_cli_triage(
+            prompt, model, gate.timeout_seconds, config, sink,
+            label="Speech gate classifier",
+        )
 
     return _cli
 

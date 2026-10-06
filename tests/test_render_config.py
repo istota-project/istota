@@ -44,7 +44,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.config import DEFAULT_ACK_REACTIONS, Config, load_config
+from istota.config import DEFAULT_ACK_REACTIONS, Config, SpeechGateConfig, load_config
 
 REPO = Path(__file__).resolve().parent.parent
 RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
@@ -655,8 +655,9 @@ class TestNoHeredocRunsACommand:
     one, either brain block — is not on that path and is caught by nothing else,
     which is why this reads the files instead of running them.
 
-    `$(...)` is not checked, because these scripts use it deliberately outside
-    heredocs and there is no such use inside one to distinguish. Backticks have
+    `$(...)` is not checked, because these scripts use it deliberately, inside
+    heredocs too (`$(toml_escape ...)`, `$(speech_gate_tunables)`), and a
+    substitution there is written on purpose. Backticks have
     no legitimate use in any of them: `render-config.sh`'s own header comments
     use them for markup and every one of those is outside a heredoc, which is
     what makes the heredoc-scoped rule expressible rather than a style edict.
@@ -751,6 +752,59 @@ class TestTheAckReactions:
         assert config.speech_gate.ack_reactions["funny"] == ["\N{OCTOPUS}"]
         assert config.memory_search.auto_recall is True
 
+
+
+class TestTheSpeechGateDefaultsLiveInTheDataclass:
+    """ISSUE-667: the render restated every `[speech_gate]` default, and so
+    did compose and `.env.example`, so a changed default in `config.py`
+    reached no Docker deployment. `ack_reaction` stays written, since an
+    empty value there turns reactions off."""
+
+    TUNABLES = {
+        "mode": "MODE", "disposition": "DISPOSITION", "model": "MODEL",
+        "window_messages": "WINDOW_MESSAGES",
+        "max_message_chars": "MAX_MESSAGE_CHARS",
+        "timeout_seconds": "TIMEOUT_SECONDS",
+        "decision_retention_days": "DECISION_RETENTION_DAYS",
+    }
+
+    def test_unset_writes_none_of_them(self, tmp_path):
+        rendered = tomllib.loads(render(tmp_path, **REQUIRED).read_text())
+        written = sorted(set(self.TUNABLES) & set(rendered["speech_gate"]))
+        assert not written, f"the render still restates {written}"
+
+    def test_empty_writes_none_of_them(self, tmp_path):
+        """Compose passes each one through as `${NAME:-}`, so an operator who
+        leaves it out of `.env` hands the render a set, empty variable."""
+        empty = {f"ISTOTA_SPEECH_GATE_{v}": "" for v in self.TUNABLES.values()}
+        gate = load_config(render(tmp_path, **REQUIRED, **empty)).speech_gate
+        shipped = SpeechGateConfig()
+        for key in self.TUNABLES:
+            assert getattr(gate, key) == getattr(shipped, key), key
+
+    def test_an_operator_value_still_reaches_the_loader(self, tmp_path):
+        gate = load_config(render(
+            tmp_path, **REQUIRED,
+            ISTOTA_SPEECH_GATE_MODE="mention",
+            ISTOTA_SPEECH_GATE_DISPOSITION="reserved",
+            ISTOTA_SPEECH_GATE_MODEL="capable",
+            ISTOTA_SPEECH_GATE_WINDOW_MESSAGES="5",
+            ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS="300",
+            ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS="30.0",
+            ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS="0",
+        )).speech_gate
+        assert (gate.mode, gate.disposition, gate.model) == ("mention", "reserved", "capable")
+        assert (gate.window_messages, gate.max_message_chars) == (5, 300)
+        assert gate.timeout_seconds == 30.0
+        assert gate.decision_retention_days == 0
+
+    def test_compose_and_env_example_state_no_default(self):
+        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+        env_example = (REPO / "docker" / ".env.example").read_text()
+        for suffix in self.TUNABLES.values():
+            name = f"ISTOTA_SPEECH_GATE_{suffix}"
+            assert f"{name}: ${{{name}:-}}" in compose, name
+            assert not re.search(rf"^{name}=", env_example, re.M), name
 
 class TestTheStorageBackend:
     """`NC_URL` decides which of the two shipped storage backends is rendered.
