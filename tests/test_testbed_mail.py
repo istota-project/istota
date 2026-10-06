@@ -320,15 +320,26 @@ class TestTheFetchFindsItsOwnLiteral:
         with pytest.raises(RuntimeError, match="could not fetch uid 14"):
             _session(None)._fetch(_FetchConnection(data), 14)
 
-    def test_a_literal_that_arrives_on_a_retry_is_read(self, monkeypatch):
+    def test_a_message_outside_the_sessions_view_is_read_after_a_noop(
+        self, monkeypatch,
+    ):
+        """UID SEARCH lists a message delivered after SELECT; UID FETCH answers
+        `OK [None]` for it until a NOOP brings it into the session's view."""
         monkeypatch.setattr(mail.time, "sleep", lambda _s: None)
-        answers = [[None], [(b"14 (BODY[] {60}", _RAW), b" UID 14)"]]
 
-        class Settling:
+        class Stale:
+            refreshed = False
+
             def uid(self, command, *args):
-                return "OK", answers.pop(0)
+                if not self.refreshed:
+                    return "OK", [None]
+                return "OK", [(b"14 (BODY[] {60}", _RAW), b" UID 14)"]
 
-        assert _session(None)._fetch(Settling(), 14).subject == "hi"
+            def noop(self):
+                self.refreshed = True
+                return "OK", [b"14 EXISTS"]
+
+        assert _session(None)._fetch(Stale(), 14).subject == "hi"
 
 
 class TestTheSessionReadsTheFolderItWasOpenedOn:

@@ -351,7 +351,8 @@ def _expect_ok(answer, what: str, account: str):
     return data
 
 
-#: How long `_fetch` retries a listed message that answers with no literal.
+#: How long `_fetch` retries, with a NOOP between tries, a listed message that
+#: answers with no literal.
 FETCH_SETTLE = 2.0
 
 
@@ -550,8 +551,10 @@ class ImapSession:
         So headers come from a `compat32` parse, which hands back the wire text,
         and the body from a `default` one.
         """
-        # A message SEARCH has just listed can briefly answer FETCH with no
-        # literal while delivery settles, so an empty answer is retried, bounded.
+        # A message delivered after this session's SELECT can be listed by
+        # UID SEARCH, which reads the store, while UID FETCH answers only from
+        # the session's view and returns `OK [None]` for it. A NOOP brings the
+        # new message into the view, so an empty answer is retried after one.
         deadline = time.monotonic() + FETCH_SETTLE
         while True:
             typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
@@ -563,6 +566,7 @@ class ImapSession:
                     f"could not fetch uid {uid} from {self.account}: "
                     f"{typ} {data!r:.300}"
                 )
+            conn.noop()
             time.sleep(0.2)
         payload = literal[1]
         parsed = email.message_from_bytes(payload, policy=email.policy.default)
