@@ -8609,20 +8609,50 @@ def _chat_upload_roots(username: str) -> list[Path]:
 
 
 def _validate_chat_attachments(username: str, paths: list) -> list[str] | None:
-    """Keep only attachment paths that resolve inside the user's web-chat upload
-    roots. Returns the cleaned list, or ``None`` if any path is foreign — a
-    client must not point the brain at arbitrary host paths or escape via
-    symlink / ``..``. ``realpath`` collapses both."""
+    """Accept files under the upload roots by spelling, refusing symlinks.
+
+    Anchor the descriptor walk above the task-writable upload directories, so
+    a link cannot move both the allowed root and the attachment together.
+    This validates admission; later readers must still open paths safely.
+    """
     if not paths:
         return []
-    roots = [os.path.realpath(r) for r in _chat_upload_roots(username)]
+    roots = _chat_upload_roots(username)
     out: list[str] = []
     for p in paths:
-        if not isinstance(p, str) or not p:
+        if not isinstance(p, str) or not p or "\0" in p:
             return None
-        real = os.path.realpath(p)
-        if not any(real == r or real.startswith(r + os.sep) for r in roots):
+        path = Path(p)
+        if ".." in path.parts:
             return None
+        root = next((r for r in roots if path.is_relative_to(r)), None)
+        if root is None or path == root:
+            return None
+        anchor = _config.temp_dir if root == roots[-1] else _config.workspace_path
+        parts = path.relative_to(anchor).parts
+        dir_fd = None
+        try:
+            dir_fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+            for component in parts[:-1]:
+                nxt = os.open(
+                    component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+                os.close(dir_fd)
+                dir_fd = nxt
+            info = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                return None
+        except FileNotFoundError:
+            # Preserve retries of an accepted send after its file or directory
+            # was removed. Unlike open_overlay_dir, this walk must distinguish
+            # absence from a symlink refusal; a dangling leaf is caught by stat.
+            pass
+        except OSError:
+            return None
+        finally:
+            if dir_fd is not None:
+                os.close(dir_fd)
         out.append(p)
     return out
 
@@ -11919,14 +11949,16 @@ def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     ext = filename_parts(filename)[1].lower()
     day = date.today().isoformat()
     dest_dir = _chat_attachment_dir(username, day)
-    dest_dir.mkdir(parents=True, exist_ok=True)
     # Lead with the uploaded name so the inbox is browsable (a voice message
     # reads as `voice-20260726-131512-a3f91c02.webm`, not a bare UUID), and
     # keep a random suffix so two same-named uploads in one day can't collide.
     stem = _attachment_stem(filename)
     suffix = uuid.uuid4().hex[:8] if stem else uuid.uuid4().hex
     dest = dest_dir / f"{stem}-{suffix}{ext}" if stem else dest_dir / f"{suffix}{ext}"
-    dest.write_bytes(data)
+    from istota.workspace.writes import write_new_file
+
+    anchor = _config.workspace_path or _config.temp_dir
+    write_new_file(anchor, dest.relative_to(anchor).parts, data)
     return str(dest)
 
 
@@ -11954,7 +11986,10 @@ async def chat_upload_attachment(
             {"error": f"file exceeds {chat.max_attachment_mb} MB"}, status_code=413,
         )
     username = user["username"]
-    path = await asyncio.to_thread(_save_chat_attachment, username, name, data)
+    try:
+        path = await asyncio.to_thread(_save_chat_attachment, username, name, data)
+    except OSError:
+        return JSONResponse({"error": "attachment could not be saved"}, status_code=400)
     # `workspace_path` is what `/chat/files` takes, so the composer can link the
     # chip it renders optimistically instead of waiting for the turn to come
     # back from history. None on a mountless deployment, where nothing is
