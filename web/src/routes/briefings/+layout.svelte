@@ -5,6 +5,7 @@
   import { page } from '$app/state';
   import {
     getBriefingArchive,
+    getBriefingArchiveItem,
     deleteBriefingArchiveItem,
     type BriefingArchiveItem,
   } from '$lib/api';
@@ -139,7 +140,19 @@
       briefingArchiveError.set(null);
       // Seed a selection so the reader has something to show.
       if (reset) {
-        const stillPresent = items.some((i) => i.id === $selectedBriefingId);
+        const selectedId = $selectedBriefingId;
+        let stillPresent = items.some((i) => i.id === selectedId);
+        // An absent row may be older than this page, rather than deleted.
+        if (!stillPresent && selectedId !== null) {
+          try {
+            const selected = await getBriefingArchiveItem(selectedId);
+            stillPresent = !$briefingFilterName || selected.briefing_name === $briefingFilterName;
+          } catch (error) {
+            if (generation !== loadGeneration || $selectedBriefingId !== selectedId) return;
+            if ((error as { status?: number } | null)?.status !== 404) throw error;
+          }
+          if (generation !== loadGeneration || $selectedBriefingId !== selectedId) return;
+        }
         if (!stillPresent) selectedBriefingId.set(items[0]?.id ?? null);
       }
     } catch {

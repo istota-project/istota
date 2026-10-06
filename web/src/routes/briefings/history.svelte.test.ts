@@ -15,7 +15,14 @@ vi.mock('$app/navigation', async (original) => ({
 }));
 await fillApiDouble(api);
 
-import { getBriefingArchive, type BriefingArchiveItem } from '$lib/api';
+import {
+  getBriefingArchive,
+  getBriefingArchiveItem,
+  type BriefingArchiveItem,
+  type User,
+} from '$lib/api';
+import Page from './+page.svelte';
+import Harness from '$lib/currentUserHarness.test.svelte';
 import {
   selectedBriefingId,
   briefingFilterName,
@@ -44,6 +51,11 @@ const archive = (name = '') => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getBriefingArchiveItem).mockImplementation(async (id) => {
+    const item = items.find((item) => item.id === id);
+    if (!item) throw Object.assign(new Error('briefing not found'), { status: 404 });
+    return item;
+  });
   __history.reset('/istota/briefings/');
   selectedBriefingId.set(null);
   briefingFilterName.set('');
@@ -171,12 +183,102 @@ describe('briefing selection history', () => {
       items: items.slice(1),
       total: 2,
     });
+    vi.mocked(getBriefingArchiveItem).mockRejectedValue(
+      Object.assign(new Error('briefing not found'), { status: 404 }),
+    );
     briefingsRefreshNonce.update((n) => n + 1);
     await waitFor(() => expect(get(briefingArchiveCount)).toBe(2));
     __history.back();
     await waitFor(() => expect(currentUrl()).toBe('/istota/briefings/?id=2'));
     expect(get(selectedBriefingId)).toBe(2);
     expect(__history.entries).toHaveLength(2);
+  });
+
+  it('restores an older briefing outside the first archive page in the real reader', async () => {
+    const firstPage = Array.from({ length: 20 }, (_, index) => ({ ...items[0], id: index + 10 }));
+    const older = { ...items[2], id: 30, subject: 'An older briefing' };
+    __history.reset('/istota/briefings/?id=30');
+    vi.mocked(getBriefingArchive).mockResolvedValue({
+      items: firstPage,
+      total: 21,
+      briefing_names: ['Morning', 'Evening'],
+    });
+    vi.mocked(getBriefingArchiveItem).mockResolvedValue(older);
+    render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+    await screen.findByRole('heading', { name: 'An older briefing' });
+    await waitFor(() => expect(get(briefingArchiveCount)).toBe(20));
+    await tick();
+    expect(get(selectedBriefingId)).toBe(30);
+    expect(currentUrl()).toBe('/istota/briefings/?id=30');
+    expect(__history.entries).toHaveLength(1);
+  });
+
+  it('falls back when an unloaded briefing belongs to a different name', async () => {
+    __history.reset('/istota/briefings/?id=3&name=Morning');
+    render(Layout, { children });
+    await waitFor(() => expect(currentUrl()).toBe('/istota/briefings/?id=2&name=Morning'));
+    expect(get(selectedBriefingId)).toBe(2);
+    expect(getBriefingArchiveItem).toHaveBeenCalledWith(3);
+  });
+
+  it('keeps an unresolved id and reports a transient detail lookup failure', async () => {
+    __history.reset('/istota/briefings/?id=30');
+    vi.mocked(getBriefingArchiveItem).mockRejectedValue(new TypeError('Failed to fetch'));
+    render(Layout, { children });
+    await waitFor(() => expect(get(briefingArchiveError)).toBe('Failed to load briefings'));
+    expect(get(selectedBriefingId)).toBe(30);
+    expect(currentUrl()).toBe('/istota/briefings/?id=30');
+  });
+
+  it('does not let a late missing-id error replace the successful fallback reader', async () => {
+    __history.reset('/istota/briefings/?id=999');
+    let rejectMissing!: (error: Error) => void;
+    let finishArchive!: (value: ReturnType<typeof archive>) => void;
+    vi.mocked(getBriefingArchive).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishArchive = resolve;
+        }),
+    );
+    let missingCalls = 0;
+    vi.mocked(getBriefingArchiveItem).mockImplementation((id) => {
+      if (id !== 999) return Promise.resolve(items[0]);
+      if (missingCalls++ === 0)
+        return new Promise((_resolve, reject) => {
+          rejectMissing = reject;
+        });
+      return Promise.reject(Object.assign(new Error('briefing not found'), { status: 404 }));
+    });
+    render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+    await waitFor(() => expect(getBriefingArchiveItem).toHaveBeenCalledWith(999));
+    finishArchive(archive());
+    await screen.findByRole('heading', { name: 'Evening news' });
+    rejectMissing(Object.assign(new Error('briefing not found'), { status: 404 }));
+    await tick();
+    await tick();
+    expect(screen.queryByText('briefing not found')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Evening news' })).toBeTruthy();
+  });
+
+  it('ignores a reader failure after the selection is cleared', async () => {
+    selectedBriefingId.set(999);
+    briefingArchiveCount.set(0);
+    let rejectMissing!: (error: Error) => void;
+    vi.mocked(getBriefingArchiveItem).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectMissing = reject;
+        }),
+    );
+    render(Page);
+    await waitFor(() => expect(getBriefingArchiveItem).toHaveBeenCalledWith(999));
+    selectedBriefingId.set(null);
+    await tick();
+    rejectMissing(new Error('briefing not found'));
+    await tick();
+    await tick();
+    expect(screen.queryByText('briefing not found')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'No briefings yet' })).toBeTruthy();
   });
 
   it('carries the current selection back from settings without writing its URL', async () => {
