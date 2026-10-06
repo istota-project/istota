@@ -35,6 +35,9 @@ describe('PDF lifecycle', () => {
     expect(options.url).toBe('/istota/api/chat/files?path=%2Fdoc.pdf');
     expect(options.enableXfa).toBe(false);
     expect(options.useWorkerFetch).toBe(false);
+    expect(options.wasmUrl).toMatch(/^\/pdfjs\/[\d.]+\/wasm\/$/);
+    expect(options.cMapUrl).toMatch(/^\/pdfjs\/[\d.]+\/cmaps\/$/);
+    expect(options.stopAtErrors).toBe(true);
     const canvas = document.querySelector('canvas')!;
     expect(canvas.width * canvas.height).toBeLessThanOrEqual(8_000_000);
     expect(Math.max(canvas.width, canvas.height)).toBeLessThanOrEqual(4096);

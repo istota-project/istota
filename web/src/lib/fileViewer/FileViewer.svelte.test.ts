@@ -34,6 +34,24 @@ function open(path = '/note.txt') {
   viewer.openFile(path);
 }
 describe('workspace file viewer through the host', () => {
+  it.each(['text', 'image'] as const)(
+    'restores the focused opener after %s closes',
+    async (kind) => {
+      const opener = document.createElement('button');
+      document.body.append(opener);
+      opener.focus();
+      preview.mockResolvedValue({ ...text(), kind });
+      open();
+      await fireEvent.click(
+        await screen.findByRole('button', {
+          name: kind === 'image' ? 'Close image' : 'Close',
+          exact: true,
+        }),
+      );
+      await waitFor(() => expect(document.activeElement).toBe(opener));
+      opener.remove();
+    },
+  );
   it('renders plain text safely', async () => {
     preview.mockResolvedValue(text());
     open();

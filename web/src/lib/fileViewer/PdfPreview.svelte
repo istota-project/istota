@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { base } from '$app/paths';
+  import { version } from 'pdfjs-dist/package.json';
   import type { PDFDocumentProxy, PDFDocumentLoadingTask, RenderTask } from 'pdfjs-dist';
   import { Button } from '$lib/components/ui';
 
@@ -29,6 +31,11 @@
         pdf.GlobalWorkerOptions.workerSrc = worker.default;
         loading = pdf.getDocument({
           url: requested,
+          wasmUrl: `${base}/pdfjs/${version}/wasm/`,
+          cMapUrl: `${base}/pdfjs/${version}/cmaps/`,
+          cMapPacked: true,
+          standardFontDataUrl: `${base}/pdfjs/${version}/standard_fonts/`,
+          stopAtErrors: true,
           enableXfa: false,
           useWorkerFetch: false,
           useWasm: false,

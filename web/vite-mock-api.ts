@@ -4101,6 +4101,8 @@ const VIEWER_MEDIA: Record<string, { kind: 'image' | 'audio' | 'video' | 'pdf'; 
   'voice.ogg': { kind: 'audio', mime: 'audio/ogg' },
   'clip.mp4': { kind: 'video', mime: 'video/mp4' },
   'document.pdf': { kind: 'pdf', mime: 'application/pdf' },
+  'scanned.pdf': { kind: 'pdf', mime: 'application/pdf' },
+  'cjk-cmap.pdf': { kind: 'pdf', mime: 'application/pdf' },
 };
 const VIEWER_TEXT: Record<string, string> = {
   'note.md': '---\ntitle: Example note\n---\n# Workspace note\n\nA **Markdown** document.\n',
