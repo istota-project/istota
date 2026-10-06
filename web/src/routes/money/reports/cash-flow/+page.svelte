@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { Collapsible } from 'bits-ui';
   import {
@@ -18,7 +17,7 @@
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
   import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { selectedYear, selectedAccount } from '$lib/money/stores/transactions';
+  import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
   import { parseAmount, formatAmount } from '$lib/money/utils/accounts';
   import { untrack } from 'svelte';
   import { theme } from '$lib/stores/theme';
@@ -37,8 +36,7 @@
   );
 
   function navigateToAccount(fullName: string) {
-    selectedAccount.set(fullName);
-    goto(`${base}/money/transactions`);
+    goto(transactionsUrl(fullName, $selectedYear));
   }
 
   let loading = $state(true);

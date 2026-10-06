@@ -1,9 +1,16 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { page } from '$app/state';
-  import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
+  import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { getAccounts, type AccountRow } from '$lib/money/api';
-  import { selectedAccount, selectedYear, filterText } from '$lib/money/stores/transactions';
+  import {
+    selectedAccount,
+    selectedYear,
+    filterText,
+    encodeTransactionSelection,
+    setTransactionNavigation,
+    type TransactionSelection,
+  } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { Sidebar, SidebarToggle, Select } from '$lib/components/ui';
 
@@ -16,7 +23,6 @@
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 11 }, (_, i) => currentYear - i);
 
-  type TransactionSelection = { account: string; year: number };
   let selectionReady = $state(false);
 
   function applySelection(selection: TransactionSelection) {
@@ -27,12 +33,7 @@
   const transactionSel = createUrlSelection<TransactionSelection>({
     key: 'transactions',
     params: ['account', 'year'],
-    encode(selection) {
-      const params: Params = {};
-      if (selection.account) params.account = selection.account;
-      params.year = selection.year ? String(selection.year) : 'all';
-      return params;
-    },
+    encode: encodeTransactionSelection,
     decode(params) {
       const year = Number(params.year);
       const validYear = /^\d{4}$/.test(params.year ?? '') && year >= 1900 && year <= 2100;
@@ -112,12 +113,14 @@
     expandedSet = next;
   }
 
-  function selectAccount(fullName: string) {
-    transactionSel.push({
-      account: $selectedAccount === fullName ? '' : fullName,
-      year: $selectedYear,
-    });
+  function navigateToAccount(account: string) {
+    transactionSel.push({ account, year: $selectedYear });
     sidebarOpen = false;
+  }
+  setTransactionNavigation(navigateToAccount);
+
+  function selectAccount(fullName: string) {
+    navigateToAccount($selectedAccount === fullName ? '' : fullName);
   }
 
   function handleFilterInput(value: string) {

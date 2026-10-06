@@ -1,15 +1,13 @@
 <script lang="ts">
-  import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { getAccounts, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { selectedYear, selectedAccount } from '$lib/money/stores/transactions';
+  import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
   import { accountFilter } from '$lib/money/stores/accounts';
   import { buildTree, displayBalance, type AccountNode } from '$lib/money/utils/accounts';
 
   function navigateToAccount(fullName: string) {
-    selectedAccount.set(fullName);
-    goto(`${base}/money/transactions`);
+    goto(transactionsUrl(fullName, $selectedYear));
   }
 
   let accounts: AccountRow[] = $state([]);
