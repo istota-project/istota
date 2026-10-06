@@ -11,7 +11,7 @@ export type Daypart = 'lateNight' | 'earlyMorning' | 'morning' | 'afternoon' | '
    bot — it is an introduction. */
 export const dayparts: Record<Daypart, string[]> = {
   lateNight: [
-    '{bot} here. {bot} never sleeps — and apparently neither do you.',
+    "{bot} here. I sleep with one eye open — and apparently you don't sleep at all.",
     '{bot} here, keeping the night shift warm.',
     "{bot} here. It's the small hours where you are, but I'm not one to judge.",
   ],
@@ -68,23 +68,23 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
   },
   { text: 'Trouble getting started? Ask me for help in chat.' },
   { text: 'Type ! in the chat box to see every command I know.' },
-  { text: '!model opus runs a single message on a bigger model. !models lists them.' },
+  { text: '!models lists the models I can use; !model <name> runs one message on one.' },
   { text: '!stop cancels whatever I am working on, mid-task.' },
   { text: '!search looks across everything we have talked about before.' },
   { text: '!status shows what I am working on and what is still queued.' },
   { text: '!retry re-runs a failed task; !resume picks it up where it stopped.' },
   /* design-lint-allow: #1234 is a sample task id in prose, not a color */
-  { text: '!more #1234 replays the whole tool trace of a finished task.' },
+  { text: '!more #1234 shows step by step how I worked through a finished task.' },
   { text: '!memory user shows everything I have remembered about you.' },
-  { text: '!skills lists what I can actually reach on this deployment.' },
-  { text: '!cron lists the scheduled jobs, and can disable one that misbehaves.' },
+  { text: '!skills lists what I can do for you here.' },
+  { text: '!cron lists your scheduled jobs, and can switch one off.' },
   { text: '!export writes the conversation out to a file in your workspace.' },
   { text: '!room model sets a standing model for a room, so you stop prefixing.' },
   { text: 'Drop a file into the chat box and I will read it.' },
   { text: 'Reply to one message and I answer that one, not the room in general.' },
   { text: 'Star a message and it turns up in the Starred view, whichever room it was in.' },
-  { text: 'Rooms hold separate conversations — each keeps its own memory.' },
-  { text: "Add a line to TASKS.md in your workspace and I'll pick it up." },
+  { text: 'Rooms hold separate conversations, each with its own notes.' },
+  { text: "Write a to-do in the TASKS.md file in my config folder and I'll pick it up." },
   { text: 'Add other people to a chat room to share it. I answer when someone talks to me.' },
   { text: 'In a shared room, anyone can type !{cmd} off to quiet me, and !{cmd} on to wake me.' },
   { text: 'In a shared room, reply to one of my messages and I know you are talking to me.' },
@@ -92,14 +92,11 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
   { text: 'A reply that failed has Retry and Continue: start over, or pick up where it stopped.' },
   { text: 'If a scheduled job fails, the bell offers Run now instead of waiting for next time.' },
   { text: 'When a room has moved on, I quote the message I am answering so you know which.' },
-  { text: 'Ask me to pin part of what I remember about you, and the nightly tidy-up keeps it.' },
+  { text: "Ask me to pin something I remember about you, and I won't drop it later." },
+  { text: 'Every night I dream over the day. That is how what matters reaches long-term memory.' },
   {
     text: 'Copy me on an email thread and start a line with {bot} when you want my answer.',
     when: (c) => !!c.email,
-  },
-  {
-    text: 'Labs takes urine and stool results now, not only blood work. See the Health tab.',
-    when: (c) => !!c.features?.health,
   },
   {
     text: 'Briefings arrive on whatever schedule you set — see the Briefings tab.',
@@ -114,11 +111,11 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
     when: (c) => !!c.features?.health,
   },
   {
-    text: 'Money runs on a beancount ledger — invoices, reports and transactions.',
+    text: 'Money keeps your accounts: invoices, reports and transactions.',
     when: (c) => !!c.features?.money,
   },
   {
-    text: 'Location builds a place history from your phone once Overland is pointed at it.',
+    text: "Location builds a history of the places you visit, from your phone's GPS.",
     when: (c) => !!c.features?.location,
   },
 ];

@@ -2225,6 +2225,141 @@ class TestChatTaskRetry:
 
 @_needs_web_deps
 class TestChatAttachments:
+    @pytest.mark.parametrize("component", ["inbox", "web-chat", "day", "temp"])
+    @pytest.mark.parametrize("operation", ["upload", "send"])
+    async def test_symlinked_upload_directories_are_refused(
+        self, chat_client, tmp_path, component, operation,
+    ):
+        from datetime import date
+        import istota.webui.app as mod
+
+        cookies = await _login(chat_client, "alice")
+        if component == "temp":
+            mod._config.workspace_path = None
+            mod._config.temp_dir = tmp_path / "temp"
+            root = mod._config.temp_dir / "alice" / "web-chat-uploads"
+            link = root
+        else:
+            inbox = mod._config.workspace_path / "Users" / "alice" / "inbox"
+            root = inbox / "web-chat"
+            link = {"inbox": inbox, "web-chat": root, "day": root / date.today().isoformat()}[component]
+        link.parent.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        link.symlink_to(outside, target_is_directory=True)
+
+        if operation == "upload":
+            resp = await chat_client.post(
+                "/istota/api/chat/attachments",
+                files={"file": ("private.txt", b"private upload", "text/plain")},
+                cookies=cookies, headers={"origin": "https://example.com"},
+            )
+            assert list(outside.rglob("*")) == []
+        else:
+            path = root / date.today().isoformat() / "existing.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("redirected attachment")
+            room = (await chat_client.get(
+                "/istota/api/chat/rooms", cookies=cookies,
+            )).json()["rooms"][0]
+            resp = await chat_client.post(
+                f"/istota/api/chat/rooms/{room['id']}/messages",
+                json={"text": "read this", "attachments": [str(path)]},
+                cookies=cookies, headers={"origin": "https://example.com"},
+            )
+            with db.get_db(mod._config.db_path) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert resp.status_code == 400
+
+    @pytest.mark.parametrize("workspace", [True, False])
+    async def test_upload_then_send_with_a_configured_root_symlink(
+        self, chat_client, tmp_path, workspace,
+    ):
+        from pathlib import Path
+        import istota.webui.app as mod
+
+        target = tmp_path / "configured-root"
+        target.mkdir()
+        alias = tmp_path / "root-alias"
+        alias.symlink_to(target, target_is_directory=True)
+        mod._config.workspace_path = alias if workspace else None
+        mod._config.temp_dir = alias
+        cookies = await _login(chat_client, "alice")
+        uploaded = await chat_client.post(
+            "/istota/api/chat/attachments",
+            files={"file": ("note.txt", b"hello", "text/plain")},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert uploaded.status_code == 200
+        path = uploaded.json()["path"]
+        assert Path(path).read_bytes() == b"hello"
+        assert (uploaded.json()["workspace_path"] is not None) == workspace
+        room = (await chat_client.get(
+            "/istota/api/chat/rooms", cookies=cookies,
+        )).json()["rooms"][0]
+        sent = await chat_client.post(
+            f"/istota/api/chat/rooms/{room['id']}/messages",
+            json={"text": "read this", "attachments": [path]},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert sent.status_code == 200
+        with db.get_db(mod._config.db_path) as conn:
+            assert db.get_task(conn, sent.json()["task_id"]).attachments == [path]
+
+    @pytest.mark.parametrize("removed", ["file", "directory"])
+    async def test_accepted_send_replays_after_attachment_removal(
+        self, chat_client, removed,
+    ):
+        from pathlib import Path
+        import istota.webui.app as mod
+
+        cookies = await _login(chat_client, "alice")
+        room = (await chat_client.get(
+            "/istota/api/chat/rooms", cookies=cookies,
+        )).json()["rooms"][0]
+        path = Path(mod._save_chat_attachment("alice", "note.txt", b"hello"))
+        payload = {"text": "read this", "attachments": [str(path)], "client_msg_id": "upload-replay"}
+        url = f"/istota/api/chat/rooms/{room['id']}/messages"
+        first = await chat_client.post(
+            url, json=payload, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert first.status_code == 200
+        path.unlink()
+        if removed == "directory":
+            path.parent.rmdir()
+        replay = await chat_client.post(
+            url, json=payload, cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert replay.status_code == 200
+        assert replay.json()["task_id"] == first.json()["task_id"]
+        with db.get_db(mod._config.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+    @pytest.mark.parametrize("kind", ["file", "directory"])
+    @pytest.mark.parametrize("dangling", [False, True])
+    async def test_validation_rejects_symlinks(self, chat_client, tmp_path, kind, dangling):
+        import istota.webui.app as mod
+
+        root = mod._chat_upload_roots("alice")[0]
+        root.mkdir(parents=True)
+        target = root / "real"
+        if kind == "directory":
+            target.mkdir()
+            file = target / "note.txt"
+        else:
+            file = target
+        file.write_text("hello")
+        link = root / "link"
+        link.symlink_to(target, target_is_directory=(kind == "directory"))
+        path = link / "note.txt" if kind == "directory" else link
+        if dangling:
+            file.unlink()
+            if kind == "directory":
+                target.rmdir()
+        assert mod._validate_chat_attachments("alice", [str(path)]) is None
+        if not dangling:
+            assert mod._validate_chat_attachments("alice", [str(file)]) == [str(file)]
+
     async def test_upload_saves_file(self, chat_client):
         import os
         cookies = await _login(chat_client, "alice")
