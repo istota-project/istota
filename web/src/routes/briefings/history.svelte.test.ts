@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { tick } from 'svelte';
-import { __history, goto } from '$app/navigation';
-import { page } from '$app/state';
+import { goto } from '$app/navigation';
+import { __history } from '../../../vitest-stubs/app-navigation';
+import { page } from '../../../vitest-stubs/app-state.svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
@@ -79,7 +80,7 @@ async function chooseName(name: string) {
   await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
   await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
   await fireEvent.click(trigger);
-  const option = await screen.findByRole('option', { name, exact: true });
+  const option = await screen.findByRole('option', { name });
   await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
   await fireEvent.click(option);
 }

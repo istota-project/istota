@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
-import { __history } from '$app/navigation';
+import { __history } from '../../../../vitest-stubs/app-navigation';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -53,7 +53,7 @@ afterEach(cleanup);
 describe('health range history', () => {
   it('replaces range changes and restores the range on reload', async () => {
     render(Page);
-    await fireEvent.click(await screen.findByRole('button', { name: 'all', exact: true }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'all' }));
     await waitFor(() => expect(healthStatsSeries).toHaveBeenLastCalledWith('weight', {}));
     expect(currentUrl()).toBe('/istota/health/stats/?range=all');
     expect(__history.entries).toHaveLength(1);
@@ -62,11 +62,9 @@ describe('health range history', () => {
     __history.reset(currentUrl());
     render(Page);
     await waitFor(() => expect(healthStatsSeries).toHaveBeenCalledWith('weight', {}));
-    expect(
-      (await screen.findByRole('button', { name: 'all', exact: true })).classList.contains(
-        'active',
-      ),
-    ).toBe(true);
+    expect((await screen.findByRole('button', { name: 'all' })).classList.contains('active')).toBe(
+      true,
+    );
   });
 
   it('replaces an invalid range with the default', async () => {

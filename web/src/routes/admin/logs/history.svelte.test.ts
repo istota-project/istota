@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { __history } from '$app/navigation';
+import { __history } from '../../../../vitest-stubs/app-navigation';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
 import { get, type Writable } from 'svelte/store';
-import { __history } from '$app/navigation';
+import { __history } from '../../../vitest-stubs/app-navigation';
 
 vi.mock('$lib/stores/chat', async () => {
   const { writable } = await import('svelte/store');
@@ -51,6 +51,9 @@ const rooms = [
 ].map((room) => ({
   ...room,
   origin: 'web',
+  archived: false,
+  created_at: '2026-01-01T12:00:00Z',
+  updated_at: '2026-01-01T12:00:00Z',
   talk_token: null,
   model: null,
   effort: null,
@@ -121,10 +124,10 @@ describe('chat selection history', () => {
   it('pushes sidebar rooms once and restores the previous room on Back', async () => {
     renderPage();
     await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Room B', exact: true }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B' }));
     expect(currentUrl()).toBe('/istota/chat/?room=room-b');
     expect(__history.entries).toHaveLength(2);
-    await fireEvent.click(screen.getByRole('button', { name: 'Room B', exact: true }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B' }));
     expect(__history.entries).toHaveLength(2);
     session.selectRoomByToken.mockClear();
     __history.back();
@@ -136,10 +139,10 @@ describe('chat selection history', () => {
   it('pushes a view and then a room with mutually exclusive params', async () => {
     renderPage();
     await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Unread', exact: true }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
     expect(currentUrl()).toBe('/istota/chat/?view=unread');
     expect(get(session.view)).toBe('unread');
-    await fireEvent.click(screen.getByRole('button', { name: 'Room B', exact: true }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B' }));
     expect(currentUrl()).toBe('/istota/chat/?room=room-b');
     __history.back();
     await waitFor(() => expect(get(session.view)).toBe('unread'));
@@ -360,7 +363,7 @@ describe('chat jump history', () => {
   it('replaces Back onto a deleted room with the current room', async () => {
     renderPage();
     await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Room B', exact: true }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B' }));
     session.rooms.set([rooms[1]]);
     session.selectRoomByToken.mockClear();
     __history.back();
@@ -374,7 +377,7 @@ describe('chat jump history', () => {
   it('clears the URL when the final room disappears, including old Back entries', async () => {
     renderPage();
     await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
-    await fireEvent.click(screen.getByRole('button', { name: 'Room B', exact: true }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Room B' }));
     session.rooms.set([]);
     session.activeRoomId.set(null);
     await waitFor(() => expect(currentUrl()).toBe('/istota/chat/'));

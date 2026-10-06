@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { tick } from 'svelte';
-import { __history, goto } from '$app/navigation';
-import { page } from '$app/state';
+import { goto } from '$app/navigation';
+import { __history } from '../../../../vitest-stubs/app-navigation';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
@@ -66,7 +67,7 @@ describe('transaction selection history', () => {
       __history.reset('/istota/money/accounts/');
       selectedYear.set(year);
       render(AccountsPage);
-      await fireEvent.click(await screen.findByRole('button', { name: 'Checking', exact: true }));
+      await fireEvent.click(await screen.findByRole('button', { name: 'Checking' }));
       const target = vi.mocked(goto).mock.calls.at(-1)?.[0];
       expect(target).toBe(
         `/istota/money/transactions/?account=Assets%3AChecking&year=${year || 'all'}`,
@@ -141,13 +142,9 @@ describe('transaction selection history', () => {
         await fireEvent.click(
           await screen.findByRole('button', { name: /Example merchant Example purchase/ }),
         );
-        await fireEvent.click(
-          await screen.findByRole('button', { name: 'Assets:Wallet', exact: true }),
-        );
+        await fireEvent.click(await screen.findByRole('button', { name: 'Assets:Wallet' }));
       } else {
-        await fireEvent.click(
-          await screen.findByRole('button', { name: 'Expenses:Supplies', exact: true }),
-        );
+        await fireEvent.click(await screen.findByRole('button', { name: 'Expenses:Supplies' }));
       }
       const target = control === 'posting' ? 'Assets:Wallet' : 'Expenses:Supplies';
       await waitFor(() => expect(get(selectedAccount)).toBe(target));
