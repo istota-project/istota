@@ -186,6 +186,8 @@ From Talk or any other surface with a composer:
 
 With exactly one draft pending the id may be omitted. With several it is required, and the command lists them rather than guessing.
 
+By email, the same commands work as the first line of a mail from your own address, under the rule for [answering a held mail by email](#answering-a-held-mail-by-email): the mail has to carry your mail server's DMARC pass under `authserv_id`, whatever `confirm_sender_match` says, or it changes nothing and you get one notice that it was ignored. The id is always required by mail, even with one draft pending, since a mailed answer can arrive long after the notice and a sent message cannot be recalled. The reply tells you what happened: sent, discarded or still waiting. If no reply arrives, nothing was sent and the draft is still waiting. Without `authserv_id`, the draft notice says where to answer instead.
+
 One state needs a human rather than a button. If the process dies between claiming a draft and recording the send, the draft is left marked as sending, and nobody can know from the outside whether the mail went out — so the card shows it and offers no action, because one of the actions would send it twice. Check your Sent folder. There is currently no way to dismiss such a row.
 
 **A held draft does not expire.** It is your own unfinished reply, and binning it silently after a couple of hours would lose work with no trace — so unlike the inbound confirmation gate, nothing cancels it. A draft still waiting after 24 hours raises one notification (not a hundred, and never as a briefing item) naming the recipient and subject. Turning the policy off later does not auto-send anything already held.

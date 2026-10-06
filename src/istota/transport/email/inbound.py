@@ -1993,9 +1993,9 @@ def poll_emails(config: Config) -> list[int]:
                             ))
                         continue
 
-                    # An answer to a held task (ISSUE-649), recognised before
-                    # routing so it never becomes an ordinary task. Only from a
-                    # user's own address, and acted on only when it
+                    # An answer to a held task (ISSUE-649) or a held draft
+                    # (ISSUE-662), recognised before routing so it never
+                    # becomes an ordinary task. Only from a user's own address, and acted on only when it
                     # authenticates by its own rule: `confirm_sender_match`
                     # decides nothing here, since its default takes the From on
                     # trust and a forged `!confirm` would then approve held
@@ -2007,6 +2007,11 @@ def poll_emails(config: Config) -> list[int]:
                         if answer_user else None
                     )
                     if mail_answer is not None:
+                        answer_kind = (
+                            "draft"
+                            if isinstance(mail_answer, email_answers.DraftsAnswer)
+                            else "task"
+                        )
                         refused = _answer_refusal(config, email, envelope.sender)
                         if refused is not None:
                             db.mark_email_processed(
@@ -2018,12 +2023,27 @@ def poll_emails(config: Config) -> list[int]:
                             )
                             pending_answer_notices.append(
                                 email_answers.write_refusal_notice(
-                                    conn, config, answer_user, refused,
+                                    conn, config, answer_user, refused, answer_kind,
                                 ),
                             )
                             logger.warning(
                                 "Ignored an answer by email from %s for user %s: %s",
                                 envelope.sender, answer_user, refused,
+                            )
+                            continue
+                        if answer_kind == "draft":
+                            # A release sends mail as the user, so it runs
+                            # only after this message's transaction commits,
+                            # with the ack (`email_answers.deliver_acks`).
+                            answer_ack = email_answers.apply_drafts_answer(
+                                conn, config, answer_user, mail_answer,
+                            )
+                            db.mark_email_processed(
+                                conn, email_id=envelope.id,
+                                sender_email=envelope.sender,
+                                subject=envelope.subject, user_id=answer_user,
+                                routing_method="drafts_answer",
+                                uidvalidity=uidvalidity,
                             )
                             continue
                         answered, ack = email_answers.apply_mail_answer(
