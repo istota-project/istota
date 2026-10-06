@@ -322,3 +322,32 @@ class TestThePromptUsesTheCard:
             assert "OPERATOR PERSONA" in text
             assert "PERSONA OF" not in text
             assert "GLOBAL PERSONA" not in text
+
+
+class TestTheDeclineLine:
+    """#675: a declinable turn is told it may decline; nothing else is."""
+
+    def test_a_declinable_turn_gets_the_line(self, config):
+        from istota.rooms import speech_gate
+
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        card = _card(config, _task(declinable=True))
+        assert speech_gate.DECLINE_TASK_LINE in card
+
+    def test_an_addressed_turn_does_not(self, config):
+        from istota.rooms import speech_gate
+
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+        assert speech_gate.DECLINE_TASK_LINE not in _card(config, _task())
+
+    def test_the_line_survives_a_card_that_cannot_be_read(self, config, tmp_path):
+        from istota.rooms import speech_gate
+
+        config.db_path = tmp_path / "missing" / "nowhere.db"
+        card = room_card(
+            config, _task(declinable=True), withheld_scopes=None,
+            room_cli_available=False,
+        )
+        assert speech_gate.DECLINE_TASK_LINE in card

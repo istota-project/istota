@@ -440,12 +440,18 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
     `ingest.classify_ahead` gives: the model call must not hold the write lock.
     None for anything that is not a worded turn (text, or a caption) in a
     registered group, and for a group whose effective mode is not the
-    classifier. Never raises.
+    classifier. A member's file with no caption is asked about too, as its
+    stand-in line, but only in a ``friendly`` room (#675): one verdict that
+    `media_recipient` and the transaction both read. Never raises.
     """
     group = getattr(event, "group", None)
-    if group is None or getattr(event, "message_type", None) not in _WORDED_TYPES:
+    message_type = getattr(event, "message_type", None)
+    if group is None or message_type not in _WORDED_TYPES:
         return None
     text = (getattr(event, "text", None) or "").strip()
+    media_only = not text and message_type in media_rules.MEDIA_KINDS
+    if media_only:
+        text = _unopened_stand_in(message_type)
     if not text or text.startswith("!"):
         return None
     from istota.rooms import policy as room_policy
@@ -468,6 +474,9 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
             user_id = (
                 identity_rules.group_member_user(conn, sender_jid) if sender_jid else None
             )
+            if media_only and not user_id:
+                # A guest's file is never opened, whatever a verdict says.
+                return None
             # A guest is labelled as their stored row is: with no label the
             # window would name them as the host, whose follow-up then speaks.
             guest_label = None if user_id else participants.guest_label(ParticipantRef(
@@ -476,10 +485,11 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
                 or identity_rules.normalize_lid(group.sender_lid) or "",
                 display_name=event.from_user.username,
             ))
-            text = render_mentions(conn, config, room.token, text, group.mentions)
+            if not media_only:
+                text = render_mentions(conn, config, room.token, text, group.mentions)
             # A quote is addressed but still classified, for its kind
             # (ISSUE-653); a mention or the name first is not.
-            addressed = addressed_to_bot(
+            addressed = not media_only and addressed_to_bot(
                 conn, config, text, mentions_bot=group.mentions_bot,
                 reply_to_message_id=None,
             )
@@ -493,6 +503,7 @@ def classify_group_event(config: "Config", event) -> "GateDecision | None":
         addressed_to_bot=addressed, source_type="whatsapp", room_container=True,
         author_label=guest_label,
         replied_to_bot=quoted,
+        media_only=media_only,
     )
 
 
@@ -596,8 +607,9 @@ def _stand_in(event: InboundWhatsAppEvent, *, guest: bool) -> str:
 
 
 def _unopened_stand_in(kind: str) -> str:
-    label = media_rules.MEDIA_LABELS.get(kind, "a file")
-    return f"[Sent {label}, which was not opened.]"
+    from istota.rooms.speech_gate import unopened_file_line
+
+    return unopened_file_line(media_rules.MEDIA_LABELS.get(kind, "a file"))
 
 
 def _claimed_stand_in(kind: str) -> str:

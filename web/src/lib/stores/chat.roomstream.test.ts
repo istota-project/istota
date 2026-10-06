@@ -408,6 +408,32 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('does not follow a turn the bot may still decline (#675)', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    queueEvents(
+      [
+        row(10, 't1', {
+          role: 'user',
+          text: 'anyone know a plumber?',
+          task_id: 78,
+          status: 'running',
+          declinable: true,
+        }),
+      ],
+      10,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    const msgs = get(s.messages);
+    expect(msgs.map((m) => m.text)).toContain('anyone know a plumber?');
+    expect(msgs.some((m) => m.role === 'assistant' && m.taskId === 78)).toBe(false);
+    expect(get(s.activeTaskId)).not.toBe(78);
+    s.teardown();
+  });
+
   it('hydrates an active task from its durable events before another SSE frame arrives', async () => {
     const es = installFakeEventSource();
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });

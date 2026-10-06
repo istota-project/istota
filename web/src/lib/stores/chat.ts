@@ -2094,7 +2094,9 @@ function createSession(): ChatSession {
         });
         // The turn is live after all, so pick up its stream the way a freshly
         // streamed user row would.
-        if (unsettled(row.status)) pickUpStreamedTask(row.task_id, row.status);
+        if (unsettled(row.status) && !row.declinable) {
+          pickUpStreamedTask(row.task_id, row.status);
+        }
         return;
       }
     }
@@ -2103,7 +2105,15 @@ function createSession(): ChatSession {
       seenNotifIds.add(row.notif_id);
     }
     messages.update((arr) => insertStreamedRow(arr, buildHistoryMessage(row)));
-    if (row.role === 'user' && typeof row.task_id === 'number' && unsettled(row.status)) {
+    // A turn the bot may still decline is not followed (#675): a decline has to
+    // leave the room as if the bot never looked, so no placeholder is drawn and
+    // an answer arrives as its stored row.
+    if (
+      row.role === 'user' &&
+      typeof row.task_id === 'number' &&
+      unsettled(row.status) &&
+      !row.declinable
+    ) {
       pickUpStreamedTask(row.task_id, row.status);
     }
     // Content just landed in the room the user is looking at — persist the read

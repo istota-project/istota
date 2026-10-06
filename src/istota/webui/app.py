@@ -7944,7 +7944,7 @@ _AUX_TS_ABOVE = "tasks.created_at >= datetime(?, '-1 hour')"
 # cursor AND rendered key for these rows; the raw `created_at` is selected only
 # as the COALESCE fallback source and for `_task_duration_seconds`.
 _AUX_COLUMNS = (
-    "SELECT id, prompt, result, status, error, confirmation_prompt, "
+    "SELECT id, prompt, result, status, error, confirmation_prompt, declinable, "
     "created_at, actions_taken, execution_trace, started_at, completed_at, "
     f"model_used, attachments, {_AUX_TURN_TS} AS turn_ts FROM tasks "
 )
@@ -8523,6 +8523,13 @@ def _chat_room_messages(
         status = r["status"]
         if ("assistant", tid) in seen:
             continue  # the store already rendered (and enriched) this answer
+        if r["declinable"] and (
+            status in ("pending", "locked", "running")
+            or (status == "completed" and r["result"] is None)
+        ):
+            # A declinable turn shows nothing until it stores an answer (#675):
+            # no slot to stream into while it runs, and none after a decline.
+            continue
         if status == "completed":
             messages.append(_assistant_message_dict(r, r["result"] or "", status))
         elif status == "pending_confirmation":
@@ -8896,6 +8903,13 @@ def _chat_create_web_task(
     # A replay of a turn that was recorded unanswered has no task either.
     if result.task_id is None and result.message_id is not None:
         return ("recorded", result.message_id)
+    if result.task_id is not None and result.message_id is not None:
+        with db.get_db(_config.db_path) as conn:
+            created = db.get_task(conn, result.task_id)
+        if created is not None and created.declinable:
+            # The bot may decline it (#675), so the sender's browser treats it
+            # as recorded: no stream to follow, and an answer arrives as a row.
+            return ("declinable", (result.task_id, result.message_id))
     return ("ok", result.task_id)
 
 
@@ -10589,6 +10603,10 @@ def _cross_room_message_dict(
                 r, username, mail=(mail_views or {}).get(r["room_token"]),
             ),
         }
+        if _row_get(r, "declinable"):
+            # The bot may still decline this turn (#675), so nobody follows its
+            # task: an answer arrives as its stored row, a decline as nothing.
+            d["declinable"] = True
         d.update(_row_attachment_fields(r, username))
     elif r["role"] == "assistant":
         d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
@@ -11018,6 +11036,12 @@ async def chat_send_message(
             username, room.token, text, None, reply_to_msg_id, message_id=value,
         )
         return {"task_id": None, "message_id": value, "status": "recorded"}
+    if outcome == "declinable":
+        task_id, message_id = value
+        await _mirror_web_turn_as_user(
+            username, room.token, text, task_id, reply_to_msg_id,
+        )
+        return {"task_id": None, "message_id": message_id, "status": "recorded"}
     task_id = value
     # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,
     # best-effort). When it succeeds the scheduler suppresses its completion-

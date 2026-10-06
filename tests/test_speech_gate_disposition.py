@@ -135,15 +135,29 @@ class TestTheTwoPrompts:
         instructions = prompt.split("[UNTRUSTED")[0]
         assert "reacts to what Istota just said" in instructions
         assert "thanks" in instructions.lower()
-        assert "for example" in instructions.lower()
         assert '"kind": "reply" or "ack"' in prompt
 
-    @pytest.mark.parametrize("disposition", [RESERVED, FRIENDLY])
-    def test_both_keep_people_talking_to_each_other_silent(self, disposition):
-        prompt = build_window(TALKING_PAST, bot_name="Istota",
-                              disposition=disposition)
+    def test_reserved_keeps_people_talking_to_each_other_silent(self):
+        prompt = build_window(TALKING_PAST, bot_name="Istota", disposition=RESERVED)
         assert "Do not reply when people are talking to each other" in prompt
         assert "mention Istota in passing" in prompt
+
+    def test_friendly_is_a_lenient_filter_not_a_list_of_bans(self):
+        """#675: the agent can decline, so the friendly prompt says what a yes
+        costs and drops the "in passing" ban, while still naming the one no."""
+        prompt = build_window(TALKING_PAST, bot_name="Istota", disposition=FRIENDLY)
+        instructions = prompt.split("[UNTRUSTED")[0]
+        assert "in passing" not in instructions
+        assert "decide for itself whether to answer" in instructions
+        assert "Say no only when people are clearly talking among themselves" in (
+            instructions
+        )
+
+    def test_reserved_carries_neither_new_fact(self):
+        prompt = build_window(THANKS_AFTER_ANSWER, bot_name="Istota",
+                              disposition=RESERVED)
+        assert "ends with Istota's name" not in prompt
+        assert "has not opened" not in prompt
 
     def test_an_unknown_disposition_builds_the_reserved_prompt(self):
         assert build_window(THANKS_AFTER_ANSWER, bot_name="Istota",
