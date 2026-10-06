@@ -66,8 +66,10 @@ On Talk this means every human turn is recorded, guests and non-Istota users inc
 | `not_multi_human` | a room with one human | speak |
 | `addressed` | a turn the surface detected as addressed to the bot | speak |
 | `mode_off` | `[speech_gate] mode = "off"` | speak |
-| `mode_mention` | `mode = "mention"` (the default) | record only |
-| `classifier` | `mode = "classifier"` | the model decides; any failure records only |
+| `mode_mention` | `mode = "mention"` | record only |
+| `classifier` | `mode = "classifier"` (the default) | the model decides; a turn with no words records only |
+| `follow_up` | `classifier` under `friendly`, when the newest turn is the last-answered person's, straight after the bot | speak, whatever the model says |
+| `failed` | the classifier failed, timed out or gave no parseable verdict, or the mode is unknown | record only |
 
 The agent rung comes first, before an explicit mention, because two bots mentioning each other is the loop it exists to stop. The `addressed` rung comes before any classifier, so a failing classifier can never make the bot unreachable. That is also why the gate can fail closed everywhere else: the cost of a wrong "no" is one retyped name.
 

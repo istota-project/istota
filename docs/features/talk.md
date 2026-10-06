@@ -16,7 +16,7 @@ It is off by default, needs the `signaling` extra, and refuses to boot rather th
 
 ## Multi-user rooms
 
-A group conversation is a [shared room](shared-rooms.md). Every message in it is recorded, including those from guests, Nextcloud users who are not Istota users, and other bots, so the bot knows what was said when it is asked. By default it answers only when @mentioned; `[speech_gate] mode` changes that. Two-person rooms behave like DMs. Participant counts are cached (5 min TTL).
+A group conversation is a [shared room](shared-rooms.md). Every message in it is recorded, including those from guests, Nextcloud users who are not Istota users, and other bots, so the bot knows what was said when it is asked. It always answers an @mention or a reply to one of its messages; by default a small model decides whether any other message is meant for it, and a thanks for its last answer gets an emoji reaction instead of a reply. `[speech_gate] mode` and `!room speak` change that (see [when the bot speaks](shared-rooms.md#when-the-bot-speaks)). Two-person rooms behave like DMs. Participant counts are cached (5 min TTL).
 
 The bot's own @mention is stripped from the prompt in every conversation, a DM included: a DM that is only `@bot` is ignored, `@bot !help` runs the command, and `@bot yes` answers a waiting confirmation. Other mentions are resolved to `@DisplayName`.
 

@@ -34,6 +34,7 @@ The context columns are NULL rather than 0 when unmeasured, because SQL `AVG` sk
 | `shared_blocks` | Generating a module-owned shared briefing block |
 | `code_review` | The `code_review` skill's reviewer |
 | `context_triage` | Selecting conversation context for a task. The most frequent non-task origin, and it carries no `task_id` |
+| `speech_gate` | The speech gate's classifier deciding whether to answer a turn in a shared room ([when the bot speaks](shared-rooms.md#when-the-bot-speaks)) |
 | `health_ocr` | Reading an uploaded health document |
 | `health_encounter_ocr` | Reading an uploaded encounter document |
 | `health_immunization_ocr` | Reading an uploaded immunization record |
