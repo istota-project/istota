@@ -939,7 +939,8 @@ mode = "classifier"
 # How wide the classifier reads "for the bot". "reserved" answers a turn
 # addressed to it, asking it for something, or answering its question.
 # "friendly" also answers thanks and other reactions to its last answer, in
-# one short line. An unknown value is "reserved".
+# one short line, and lets the bot decline a turn the classifier passed, in
+# which case nothing is posted. An unknown value is "reserved".
 disposition = "friendly"
 # Under "friendly", a turn the classifier reads as only an acknowledgement
 # (thanks, agreement, a joke, good news) is answered on

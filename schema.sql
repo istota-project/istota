@@ -96,6 +96,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- with the host on neither To nor Cc. A `NO_ACTION:` answer then becomes
     -- a pass-on note in the host's private room instead of a reply.
     host_absent INTEGER NOT NULL DEFAULT 0,
+    -- 1 for a turn the speech gate let through on the classifier or
+    -- follow-up rung of a `friendly` room (#675): the agent may answer
+    -- `NO_ACTION:`, and then nothing is stored or posted.
+    declinable INTEGER NOT NULL DEFAULT 0,
 
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
@@ -1683,7 +1687,11 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     user_id    TEXT NOT NULL,
     message_id INTEGER,
     spoke      INTEGER NOT NULL,
-    -- 'agent_author'|'host_lost'|'guest_command'|'guest_reply_off'|'loop_cap'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'follow_up'|'failed'
+    -- 'agent_author'|'host_lost'|'guest_command'|'guest_reply_off'|'loop_cap'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'follow_up'|'failed',
+    -- plus two rows written after the fact against an earlier row's
+    -- `message_id`: 'agent_declined' (the agent answered `NO_ACTION:` on a
+    -- declinable turn, #675) and 'probable_miss' (a member nudged the bot
+    -- soon after a turn it skipped or declined, #656)
     rung       TEXT NOT NULL,
     reason     TEXT,
     model      TEXT,

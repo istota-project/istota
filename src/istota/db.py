@@ -136,6 +136,9 @@ class Task:
     #: host on neither To nor Cc. A `NO_ACTION:` answer then becomes a pass-on
     #: note to the host instead of a reply.
     host_absent: bool = False
+    #: A turn the speech gate let through on its classifier or follow-up rung
+    #: in a `friendly` room (#675): `NO_ACTION:` then posts nothing.
+    declinable: bool = False
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -1207,6 +1210,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Email on rooms, stage 2. Nothing to backfill: no earlier task was asked
     # whether its host was on the message.
     _add_columns(conn, "tasks", {"host_absent": "INTEGER NOT NULL DEFAULT 0"})
+    # #675. Nothing to backfill: no earlier task could decline.
+    _add_columns(conn, "tasks", {"declinable": "INTEGER NOT NULL DEFAULT 0"})
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1462,6 +1467,9 @@ def create_task(
     # An email thread room's turn the host is not on (`Task.host_absent`).
     # Written only by `record_inbound`, from the email poller's intake facts.
     host_absent: bool = False,
+    # A friendly room's classifier turn the agent may decline (`Task.declinable`).
+    # Written only by `record_inbound`, from the speech gate's decision.
+    declinable: bool = False,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1515,11 +1523,11 @@ def create_task(
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
             reply_to_message_id, guest_participant_id, audience,
-            about_room_token, host_absent,
+            about_room_token, host_absent, declinable,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1542,6 +1550,7 @@ def create_task(
             audience,
             about_room_token or None,
             1 if host_absent else 0,
+            1 if declinable else 0,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1574,7 +1583,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, reply_to_message_id, "
-    "guest_participant_id, audience, about_room_token, host_absent, heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "guest_participant_id, audience, about_room_token, host_absent, declinable, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
@@ -1620,6 +1629,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         audience=row["audience"],
         about_room_token=row["about_room_token"],
         host_absent=bool(row["host_absent"]),
+        declinable=bool(row["declinable"]),
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
@@ -6981,7 +6991,8 @@ _CROSS_ROOM_COLUMNS = (
     "  m.room_token AS room_token, COALESCE(r.name, h.name) AS room_name, "
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
     "  m.attachment_paths AS attachment_paths, "
-    "  t.status AS status, t.actions_taken AS actions_taken, "
+    "  t.status AS status, t.declinable AS declinable, "
+    "  t.actions_taken AS actions_taken, "
     "  t.execution_trace AS execution_trace, t.started_at AS started_at, "
     "  t.completed_at AS completed_at, t.model_used AS model_used, "
     "  (s.message_id IS NOT NULL) AS starred, "

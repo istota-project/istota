@@ -260,8 +260,9 @@ def _ask_gate(
     author_kind: str = participants.PRINCIPAL,
     policy: "_PolicyAnswer | None" = None,
     worded: bool = True,
-) -> speech_gate.GateDecision:
-    """Whether a stored turn gets a task, with the decision audited.
+) -> tuple[speech_gate.GateDecision, str]:
+    """Whether a stored turn gets a task, with the decision audited, and the
+    disposition the row records.
 
     No completer is built here: this runs inside the caller's write
     transaction, and a model call would hold its lock. The classifier rung
@@ -286,18 +287,18 @@ def _ask_gate(
         model=config.speech_gate.model,
         worded=worded,
     )
+    disposition = (
+        classified.disposition
+        if classified is not None and classified.disposition
+        else room_policy.effective_disposition(
+            conn, room_token, config.speech_gate.disposition,
+        )
+    )
     speech_gate.record_decision(
         conn, room_token=room_token, surface=surface, user_id=user_id,
-        message_id=message_id, decision=decision,
-        disposition=(
-            classified.disposition
-            if classified is not None and classified.disposition
-            else room_policy.effective_disposition(
-                conn, room_token, config.speech_gate.disposition,
-            )
-        ),
+        message_id=message_id, decision=decision, disposition=disposition,
     )
-    return decision
+    return decision, disposition
 
 
 @dataclass(frozen=True)
@@ -412,6 +413,7 @@ def classify_ahead(
     room_container: bool = False,
     author_label: str | None = None,
     replied_to_bot: bool = False,
+    media_only: bool = False,
 ) -> speech_gate.GateDecision | None:
     """Run the speech gate's classifier for a turn before it is recorded.
 
@@ -442,6 +444,11 @@ def classify_ahead(
     ``reserved`` nothing is asked, since the answer could change nothing. The
     disposition is the room's effective one
     (`room_policy.effective_disposition`, ISSUE-654).
+
+    ``media_only`` is a member's file with no caption, whose ``text`` is the
+    stand-in line the transaction will store (#675). It is asked about only
+    under ``friendly``, where a yes reaches an agent that opens the file and
+    can still decline; under ``reserved`` it stays unclassified.
     """
     gate = config.speech_gate
     if addressed_to_bot or not is_room_member_for(surface, room_container=room_container):
@@ -462,7 +469,7 @@ def classify_ahead(
             disposition = room_policy.effective_disposition(
                 conn, room_token, gate.disposition,
             )
-            if replied_to_bot and disposition != speech_gate.FRIENDLY:
+            if (replied_to_bot or media_only) and disposition != speech_gate.FRIENDLY:
                 return None
             if room_veto.is_vetoed(conn, room_token):
                 return None
@@ -981,14 +988,25 @@ def record_inbound(
             conn, transcript_token, is_group_chat=multi_human,
         )
     decision = None
+    declinable = False
     if message_id is not None:
-        decision = _ask_gate(
+        decision, disposition = _ask_gate(
             conn, config, room_token=transcript_token, surface=surface,
             user_id=user_id, message_id=message_id,
             is_multi_human=multi_human, addressed_to_bot=addressed_to_bot,
             classified=classified, author_kind=author_kind, policy=policy,
             worded=worded,
         )
+        declinable = speech_gate.is_declinable(decision, disposition)
+        if (
+            multi_human and author_kind == participants.PRINCIPAL
+            and speech_gate.is_nudge(text, config.bot_name)
+        ):
+            # #656: a member calling the bot back marks the turn it passed
+            # over, the likeliest wrong answer, for an operator to review.
+            speech_gate.record_probable_miss(
+                conn, room_token=transcript_token, message_id=message_id,
+            )
         if not decision.speak:
             return InboundResult(
                 room_token, None, message_id, "recorded", decision.rung,
@@ -1032,6 +1050,7 @@ def record_inbound(
         audience=audience,
         about_room_token=about_room_token,
         host_absent=host_absent,
+        declinable=declinable,
         output_target=output_target,
         talk_delivery_token=delivery_token,
         model=model,

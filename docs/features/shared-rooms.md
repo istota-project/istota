@@ -74,26 +74,31 @@ The disposition, `[speech_gate] disposition`, decides how widely the classifier 
 | `friendly` (the default) | is addressed to the bot, asks it for something, answers a question it just asked, or reacts to what it just said: thanks, agreement, a joke, good news, a follow-up remark or a correction about its answer | An ordinary reply, or, for a turn that only reacts ("thanks", "perfect, that worked"), one short line or an emoji reaction (see [acknowledgements](#acknowledgements)) |
 | `reserved` | is addressed to the bot, asks it for something, or answers a question it just asked | Always an ordinary reply |
 
-Under both, people talking to each other stay unanswered, including when they mention the bot in passing ("I asked the bot yesterday").
+In a reserved room people talking to each other stay unanswered, including when they mention the bot in passing ("I asked the bot yesterday"), and every "yes" is a message in the room.
 
-Two more rules apply only in a friendly room:
+A friendly room works the other way round: the classifier is a lenient filter and the bot makes the last call. The classifier says yes whenever the newest message might be for the bot, and no only when people are clearly talking among themselves. A turn it lets through runs as a *declinable* turn: the bot reads the whole conversation, with its files and memory, and when the message turns out not to be for it, or a reply would add nothing, it declines. A declined turn leaves the room exactly as if the bot had never looked: nothing is posted on any surface, no progress or typing shows, no notification is pushed, and web chat draws no placeholder for it. A turn addressed to the bot is never declinable.
 
-- **A follow-up is always answered.** When the newest message comes straight after the bot's answer and is from the person the bot just answered, the bot answers it, even when it turns to someone else and even when the classifier fails. The classifier is still asked, and decides only whether the answer is the short acknowledgement or a full reply. A message from anyone else after the bot's answer goes to the classifier as usual.
+Three more rules apply only in a friendly room:
+
+- **A follow-up always reaches the bot.** When the newest message comes straight after the bot's answer and is from the person the bot just answered, it goes to the bot even when it turns to someone else and even when the classifier fails. Like any classifier turn it is declinable, so the bot decides whether it was meant for it. The classifier is still asked, and decides only whether the answer is the short acknowledgement or a full reply. A message from anyone else after the bot's answer goes to the classifier as usual.
 - **A reply to one of the bot's messages** is addressed, so it is always answered, but the classifier is still asked whether it only reacts. A quoted "thanks" then gets the short answer rather than a full reply. In a reserved room the classifier is not asked about a reply at all.
+- **A member's file with no caption** goes to the classifier too, on WhatsApp groups, before the file is opened. On a yes the file is opened and handed to the bot, which looks at it and answers or declines; on a no, or a failed call, it stays unopened. A guest's file is never opened, and a reserved room never asks.
 
 ### How the classifier decides
 
 The classifier is one short model call per turn that is not addressed to the bot, in a room more than one human reads, while the room is on `classifier`. It does not run in a private chat, on an addressed turn (apart from the friendly-room reply above), or in a room on `mention` or `off`.
 
 - **What it reads.** The last `window_messages` (8) turns of the room's conversation, the turn being decided included. Notices and other system rows are not counted. Each turn is cut to `max_message_chars` (400) characters, keeping the start and the end, since the end of a message is usually where the question is. The window starts at the latest join, like the bot's other context (see [newcomers and history](#newcomers-and-history)).
-- **What it is told.** The bot's name, the cases its disposition answers, and three facts read off the transcript rather than left for the model to infer: whether the bot's most recent message ended with a question, whether the bot wrote the message just before the newest one, and whether the newest message is from the person the bot last answered.
+- **What it is told.** The bot's name, the cases its disposition answers, and three facts read off the transcript rather than left for the model to infer: whether the bot's most recent message ended with a question, whether the bot wrote the message just before the newest one, and whether the newest message is from the person the bot last answered. A friendly room adds two more: whether the newest message ends with the bot's name ("seems relevant Zorg"), and whether a file was just posted that the bot has not opened.
 - **How it treats the transcript.** The window is marked as text the participants wrote, and the model is told to ignore any instruction inside it, so a participant cannot talk the classifier into answering.
 - **What it answers.** A JSON object saying whether to speak, with a short reason. In a friendly room it also says whether the turn is a reply or only an acknowledgement, and which kind of acknowledgement. Anything that does not parse as a clear `true` or `false` is a failure, and a failure is silence. The reason is kept for tuning and never reaches a prompt.
 - **Which model.** `[speech_gate] model`, the `fast` role by default, resolved on the room's brain. A call that takes longer than `timeout_seconds` (20) is a failure. On the `claude_code` brain each call starts the CLI from scratch, which takes several seconds.
 - **What it costs.** Each call is recorded in [token usage](usage.md) with origin `speech_gate`.
-- **A turn with no words**, such as a photo sent without a caption, is not classified and not answered unless it is addressed to the bot.
+- **A turn with no words**, such as a photo sent without a caption, is not classified and not answered unless it is addressed to the bot. The exception is a member's file in a friendly WhatsApp group, above.
 
-The gate fails closed on purpose: a wrong "no" costs somebody retyping the bot's name, while a wrong "yes" is the bot interrupting two people talking to each other. Addressing the bot always works, so a broken classifier can never make the bot unreachable.
+The gate fails closed on purpose: a wrong "no" costs somebody retyping the bot's name, while in a reserved room a wrong "yes" is the bot interrupting two people talking to each other. In a friendly room a wrong "yes" costs one declined turn, which uses compute but posts nothing. Addressing the bot always works, so a broken classifier can never make the bot unreachable.
+
+**Every decision is logged** in `speech_gate_decisions`, with the turn's id and never its text. Two kinds of row are written after the fact, against the turn they are about: `agent_declined`, with the bot's one-line reason, when the bot declined a turn, and `probable_miss` when a member calls the bot back (its name alone, `?`, or `hello?`) within two minutes of a turn the classifier skipped or the bot declined. Those two are where to start when tuning the classifier, since they are the decisions most likely to be wrong.
 
 ### Acknowledgements
 

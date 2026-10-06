@@ -3281,10 +3281,13 @@ def process_one_task(
             # `conversation_token` stays in the guard so this can only redirect
             # an ack that would have been posted anyway — see the
             # `process_one_task` bullet in `.claude/rules/transport.md`.
+            # A declinable turn (#675) posts nothing before the agent decides,
+            # so it gets no ack and, with none, no progress edits.
             ack_token = (
                 _talk_target_for_delivery(config, task)
                 if (_supports_ack and task.source_type == "talk"
-                    and task.conversation_token and not dry_run)
+                    and task.conversation_token and not dry_run
+                    and not task.declinable)
                 else None
             )
             if ack_token:
@@ -3320,7 +3323,8 @@ def process_one_task(
                 event_writer.subscribe(log_callback)
 
             # Push notification subscriber, gated by source type.
-            if task.source_type in config.scheduler.push_notification_sources and not dry_run:
+            if (task.source_type in config.scheduler.push_notification_sources
+                    and not dry_run and not task.declinable):
                 event_writer.subscribe(PushNotificationSubscriber(
                     config, task,
                     threshold_seconds=config.scheduler.push_notification_threshold_seconds,
@@ -3539,6 +3543,35 @@ def process_one_task(
             if event_writer is not None:
                 event_writer.finish()
             return (task_id, success)
+
+    # A declinable turn the agent declined (#675): nothing is stored, posted or
+    # pushed on any surface, and the room is left as if the bot never looked.
+    # `result` stays NULL, so neither history reader nor the transcript
+    # backfill can turn the reason into an answer; the reason is in the audit.
+    _decline = speech_gate.decline_reason(result) if (
+        success and task.declinable and not dry_run
+    ) else None
+    if _decline is not None:
+        from .executor import task_deferred_dir
+        # What a declined turn wrote for later (a subtask, a post) would act
+        # in the room after all, so it is dropped rather than replayed.
+        _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
+        with db.get_db(config.db_path) as conn:
+            db.update_task_status(
+                conn, task_id, "completed", result=None,
+                actions_taken=actions_taken, execution_trace=execution_trace,
+            )
+            speech_gate.record_decline(conn, task_id, _decline)
+            db.log_task(conn, task_id, "info", "Declined: the turn was not for the bot")
+        logger.info("Task %d: agent declined an unaddressed turn", task_id)
+        if event_writer is not None:
+            event_writer.emit("result", result_event_payload(task, ""))
+            event_writer.emit("done", {
+                "stop_reason": "completed",
+                "duration_seconds": round(event_writer.elapsed_seconds(), 1),
+            })
+            event_writer.finish()
+        return (task_id, True)
 
     # Log result quality metrics
     if result:

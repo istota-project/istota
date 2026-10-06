@@ -78,8 +78,12 @@ def answer_is_stored_verbatim(task: "db.Task") -> bool:
     `[scheduler] progress_show_text` on, a brain's text blocks still reach the
     log as `progress_text`; that setting is off by default.) Keep this in step with the
     body-selection chain in `scheduler.process_one_task`; a new transformation
-    there that is missing here shows a live view the store contradicts."""
-    if getattr(task, "heartbeat_silent", False):
+    there that is missing here shows a live view the store contradicts.
+
+    A declinable task (#675) is False too: until it finishes nobody knows
+    whether it stores anything, and a decline must leave the room as if the
+    bot never looked, so no answer text streams ahead of the stored row."""
+    if getattr(task, "heartbeat_silent", False) or getattr(task, "declinable", False):
         return False
     return (task.source_type or "") not in _TRANSFORMED_SOURCE_TYPES
 

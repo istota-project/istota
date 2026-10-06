@@ -3080,6 +3080,9 @@ export interface ChatHistoryMessage {
   task_id?: number;
   notif_id?: number;
   status?: string;
+  // A user turn the bot may still decline (#675): its task is not followed,
+  // and an answer arrives as its own stored row.
+  declinable?: boolean;
   confirmation?: boolean;
   created_at: string;
   // Finished task-backed turns carry their tool-use descriptions (in order)

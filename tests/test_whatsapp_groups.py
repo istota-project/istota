@@ -1220,6 +1220,103 @@ class TestWhoseInboxAGroupFileGoesTo:
 
 
 # ---------------------------------------------------------------------------
+# A member's captionless file in a friendly room (#675)
+# ---------------------------------------------------------------------------
+
+
+class TestACaptionlessMemberFile:
+    """The verdict comes before the file is placed, and `media_recipient` and
+    the transaction read the same one."""
+
+    @staticmethod
+    def _classify(config, event, answer):
+        from istota.transport.whatsapp.groups import classify_group_event
+
+        prompts = []
+
+        def completer(prompt):
+            prompts.append(prompt)
+            return answer
+
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=completer):
+            return classify_group_event(config, event), prompts
+
+    @staticmethod
+    def _recipient(config, event, classified):
+        from istota.lib import sqlite_util
+        from istota.transport.whatsapp.groups import media_recipient
+
+        return media_recipient(
+            lambda: sqlite_util.connect_read_only(config.db_path), config, event,
+            classified=classified,
+        )
+
+    def _setup(self, group, disposition):
+        group.speech_gate.mode = "classifier"
+        group.speech_gate.disposition = disposition
+        return group
+
+    def test_a_yes_places_the_file_and_runs_a_declinable_task(self, group):
+        self._setup(group, "friendly")
+        bare = _media_message(None, kind="gif", message_id="G1")
+        decision, prompts = self._classify(group, bare, '{"speak": true}')
+
+        assert decision is not None and decision.speak
+        assert "[Sent a GIF, which was not opened.]" in prompts[0]
+        assert "has not opened: yes (a GIF)" in prompts[0]
+        assert self._recipient(group, bare, decision) == "alice"
+
+        placed = _media_message(None, kind="gif", message_id="G1", attached_for="alice")
+        with db.get_db(group.db_path) as conn:
+            (result,) = handle_whatsapp_batch(
+                conn, group, [placed], provider=BAILEYS, classified={"G1": decision},
+            )
+        task = _task(group, result.task_id)
+        assert task.declinable
+        assert task.attachments == [INBOX_COPY]
+
+    def test_a_no_places_nothing_and_stores_the_stand_in(self, group):
+        self._setup(group, "friendly")
+        bare = _media_message(None, message_id="G2")
+        decision, _ = self._classify(group, bare, '{"speak": false}')
+
+        assert self._recipient(group, bare, decision) is None
+        with db.get_db(group.db_path) as conn:
+            (result,) = handle_whatsapp_batch(
+                conn, group, [bare], provider=BAILEYS, classified={"G2": decision},
+            )
+        assert result.task_id is None
+        (row,) = _rows(group, "SELECT body FROM messages WHERE external_ids LIKE ?",
+                       ("%G2%",))
+        assert row["body"] == "[Sent an image, which was not opened.]"
+
+    def test_a_failed_classifier_places_nothing(self, group):
+        self._setup(group, "friendly")
+        bare = _media_message(None, message_id="G3")
+        decision, _ = self._classify(group, bare, "no json here")
+
+        assert decision is not None and decision.rung == "failed"
+        assert self._recipient(group, bare, decision) is None
+
+    def test_a_guests_file_is_never_asked_about(self, group):
+        self._setup(group, "friendly")
+        bare = _media_message(None, sender=GUEST_JID, message_id="G4")
+        decision, prompts = self._classify(group, bare, '{"speak": true}')
+
+        assert (decision, prompts) == (None, [])
+        assert self._recipient(group, bare, decision) is None
+
+    def test_a_reserved_room_never_asks(self, group):
+        self._setup(group, "reserved")
+        bare = _media_message(None, message_id="G5")
+        decision, prompts = self._classify(group, bare, '{"speak": true}')
+
+        assert (decision, prompts) == (None, [])
+        assert self._recipient(group, bare, decision) is None
+
+
+# ---------------------------------------------------------------------------
 # A later turn claiming earlier media (ISSUE-658)
 # ---------------------------------------------------------------------------
 

@@ -3166,7 +3166,8 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
     ``guest_participant_id`` and ``audience`` go with it (multiplayer D2/D3):
     the prompt is a guest's fenced words, and without the guest a retry would
     run them as the host's own turn, at the host's grants. ``host_absent`` too,
-    so a retried pass-on still passes on rather than replying.
+    so a retried pass-on still passes on rather than replying. ``declinable``
+    is not copied: a retry is somebody asking the bot again, so it answers.
     """
     return db.create_task(
         conn,
