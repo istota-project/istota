@@ -71,22 +71,27 @@ describe('RoomMembers', () => {
     expect(screen.queryAllByText('Alice')).toHaveLength(1);
   });
 
-  it('states how much history an add discloses, and adds only on confirm', async () => {
+  it('hands a picked add to its owner to confirm, with the room’s message count', async () => {
     getRoomMembers.mockResolvedValue(listing());
-    addRoomMember.mockResolvedValue({ member: BOB });
-    const onChanged = vi.fn();
-    render(RoomMembers, { roomId: 1, userId: 'alice', onChanged });
+    const onRequestAdd = vi.fn();
+    render(RoomMembers, { roomId: 1, userId: 'alice', onRequestAdd });
     await screen.findByText('Alice');
     await pick('Member to add', 'Bob');
     await fireEvent.click(button('Add'));
-    // The count comes from the server, and nothing is sent until confirmed.
-    expect(await screen.findByText(/Bob will see all 412 messages/)).toBeTruthy();
+    // The confirmation is the owner's, so nothing is sent from here.
+    expect(onRequestAdd).toHaveBeenCalledWith({
+      userId: 'bob',
+      displayName: 'Bob',
+      messageCount: 412,
+    });
     expect(addRoomMember).not.toHaveBeenCalled();
-    getRoomMembers.mockResolvedValue(listing({ members: [ALICE, BOB] }));
-    await fireEvent.click(button('Add and share the history'));
-    await waitFor(() => expect(addRoomMember).toHaveBeenCalledWith(1, 'bob'));
-    await waitFor(() => expect(onChanged).toHaveBeenCalled());
-    expect(await screen.findByText('Bob')).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('shows the owner’s add failure beside the list', async () => {
+    getRoomMembers.mockResolvedValue(listing());
+    render(RoomMembers, { roomId: 1, userId: 'alice', addError: 'room is full' });
+    expect(await screen.findByText('room is full')).toBeTruthy();
   });
 
   it('lets the creator remove a member', async () => {

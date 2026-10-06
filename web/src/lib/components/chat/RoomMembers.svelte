@@ -1,13 +1,21 @@
+<script lang="ts" module>
+  /** An add the viewer asked for, which still needs confirming. */
+  export interface AddRequest {
+    userId: string;
+    displayName: string;
+    messageCount: number;
+  }
+</script>
+
 <script lang="ts">
   import {
-    addRoomMember,
     getChatUsers,
     getRoomMembers,
     removeRoomMember,
     type DirectoryUser,
     type RoomMembers,
   } from '$lib/api';
-  import { Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Select, type SelectOption } from '$lib/components/ui';
 
   interface Props {
     roomId: number;
@@ -23,16 +31,29 @@
     onChanged?: () => void;
     /** The viewer left the room, which is no longer theirs to show. */
     onLeft?: () => void;
+    /** The viewer picked someone to add. The owner confirms it, because the
+     *  confirmation replaces the settings dialog this pane lives in. */
+    onRequestAdd?: (request: AddRequest) => void;
+    /** Why the owner's last confirmed add failed, shown beside the list. */
+    addError?: string;
   }
 
-  let { roomId, userId, talkBound = false, phoneLabel = null, onChanged, onLeft }: Props = $props();
+  let {
+    roomId,
+    userId,
+    talkBound = false,
+    phoneLabel = null,
+    onChanged,
+    onLeft,
+    onRequestAdd,
+    addError = '',
+  }: Props = $props();
 
   let data = $state<RoomMembers | null>(null);
   let directory = $state<DirectoryUser[]>([]);
   let error = $state('');
   let busy = $state(false);
   let pick = $state('');
-  let confirmAdd = $state(false);
 
   async function load() {
     error = '';
@@ -64,13 +85,6 @@
       .filter((u) => !data?.members.some((m) => m.user_id === u.user_id))
       .map((u) => ({ value: u.user_id, label: u.display_name })),
   ]);
-  const pickedName = $derived(directory.find((u) => u.user_id === pick)?.display_name ?? pick);
-  const count = $derived(data?.message_count ?? 0);
-  // The add discloses the whole transcript, so the dialog states how much.
-  const disclosure = $derived(
-    `${pickedName} will see all ${count} message${count === 1 ? '' : 's'} in this room, ` +
-      'everything said here before they joined included.',
-  );
 
   async function run(action: () => Promise<unknown>) {
     busy = true;
@@ -100,11 +114,15 @@
     }
   }
 
-  function add() {
+  function requestAdd() {
     const target = pick;
-    confirmAdd = false;
+    if (!target) return;
     pick = '';
-    if (target) run(() => addRoomMember(roomId, target));
+    onRequestAdd?.({
+      userId: target,
+      displayName: directory.find((u) => u.user_id === target)?.display_name ?? target,
+      messageCount: data?.message_count ?? 0,
+    });
   }
 </script>
 
@@ -150,23 +168,14 @@
           fullWidth
           disabled={busy}
         />
-        <Button size="sm" disabled={!pick || busy} onclick={() => (confirmAdd = true)}>Add</Button>
+        <Button size="sm" disabled={!pick || busy} onclick={requestAdd}>Add</Button>
       </div>
     {/if}
   {:else if !error}
     <p class="caption">Loading…</p>
   {/if}
-  {#if error}<p class="form-error">{error}</p>{/if}
+  {#if error || addError}<p class="form-error">{error || addError}</p>{/if}
 </div>
-
-<ConfirmDialog
-  bind:open={confirmAdd}
-  title={`Add ${pickedName}`}
-  message={disclosure}
-  confirmLabel="Add and share the history"
-  confirmVariant="primary"
-  onConfirm={add}
-/>
 
 <style>
   ul {
