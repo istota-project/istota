@@ -10,6 +10,8 @@ The **Feeds** tab is a masonry card grid with an image/text filter, sort by publ
 
 The sidebar scopes the view to everything, unread only, a single feed, or a whole category. Per-entry starring is bound to `f`; bulk mark-as-read (`Shift-A`) honours whatever scope is active rather than clearing the whole account. Entries mark themselves read after 1.5 seconds in the viewport.
 
+Feed, category, All, Unread and Starred selections are saved in the URL and browser history. Back and Forward restore earlier selections, and reloading or sharing the URL opens the same selection. Clicking the active feed or category returns to All and adds a history entry. Returning from settings keeps the selection; a feed or category that no longer exists falls back to All.
+
 Video embedded in a post plays inline with ordinary controls. Nothing autoplays — a grid of cards all starting at once is not what scrolling a reader asks for — and the image/text filter hides inline video along with pictures, since a filter that left clips playing would only mean "some of the media". Embeds resolve through a host allowlist (YouTube, youtube-nocookie, Vimeo) rather than passing a provider's own iframe HTML through the sanitizer.
 
 ### Repeat images
