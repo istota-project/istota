@@ -2,7 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { page } from '$app/state';
-  import { describeRoomOff } from '$lib/roomOff';
+  import { codeSpans, describeRoomOff } from '$lib/roomOff';
   import {
     Plus,
     MessageSquare,
@@ -12,6 +12,7 @@
     Star,
     CheckCheck,
     Users,
+    PowerOff,
   } from '@lucide/svelte';
   import PhoneSurfaceIcon from '$lib/components/chat/PhoneSurfaceIcon.svelte';
   import {
@@ -50,7 +51,14 @@
   import { dropDraft } from '$lib/stores/drafts';
   import { dropQueue, MAX_QUEUED_PER_ROOM } from '$lib/stores/sendQueue';
   import { isImeComposing } from '$lib/platform/input';
-  import type { ChatAttachment, ChatRoom, ChatView, MailDiscuss, RoomMember } from '$lib/api';
+  import type {
+    ChatAttachment,
+    ChatRoom,
+    ChatView,
+    MailDiscuss,
+    RoomMember,
+    RoomOffView,
+  } from '$lib/api';
   import { loadRoomMembers, dropRoomMembers } from '$lib/roomMembers';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -1112,6 +1120,21 @@
   }
 </script>
 
+{#snippet roomOffNotice(off: RoomOffView)}
+  <!-- The room's current state, as the transcript's last row rather than a
+       banner over it: nothing is recorded while the room is off, so this is
+       what follows the last message. Rendered from the listing, not stored,
+       since who has agreed changes without a new message. -->
+  <div class="room-off-row" role="status">
+    <span class="room-off-title"><PowerOff size={14} /> This room is switched off</span>
+    <p>
+      {describeRoomOff(off)} Nothing said here is recorded or answered.
+      {#each codeSpans(off.way_back) as part, i (i)}{#if part.code}<code>{part.text}</code
+          >{:else}{part.text}{/if}{/each}
+    </p>
+  </div>
+{/snippet}
+
 <!-- insetBottom={false}: the Composer holds the bottom safe-area inset itself, so
      its fill reaches the screen edge while its controls stay above the indicator. -->
 <AppShell insetBottom={false}>
@@ -1384,15 +1407,6 @@
         </NoticeBanner>
       </div>
     {/if}
-    {#if roomOff && !inViewMode}
-      <div class="room-notice">
-        <NoticeBanner title="This room is switched off" variant="warn" collapsed={false}>
-          <p>
-            {describeRoomOff(roomOff)} Nothing said here is recorded or answered. {roomOff.way_back}
-          </p>
-        </NoticeBanner>
-      </div>
-    {/if}
     <div class="messages-wrap">
       <div
         class="messages"
@@ -1432,6 +1446,8 @@
                 Its messages are here again when you’re back online. You can still write one — it
                 waits until then.
               </span>
+            {:else if roomOff}
+              {@render roomOffNotice(roomOff)}
             {:else}
               <MessageSquare size={28} />
               <p>
@@ -1493,6 +1509,9 @@
                 mentions={mentionTargets}
               />
             {/each}
+            {#if roomOff && !inViewMode}
+              {@render roomOffNotice(roomOff)}
+            {/if}
           </div>
         {/if}
         <!-- Bottom reserve: keeps the newest message clear of the docked
@@ -2040,6 +2059,26 @@
   }
   .room-notice p {
     margin: 0 0 var(--space-2);
+  }
+  .room-off-row {
+    margin: var(--space-3) auto var(--space-2);
+    max-width: 36rem;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    text-align: center;
+  }
+  .room-off-title {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .room-off-row p {
+    margin: var(--space-1) 0 0;
   }
   .room-row.tinted {
     background: color-mix(in srgb, var(--room-tint) 14%, transparent);
