@@ -784,10 +784,16 @@ def _thread_reply_outcome(conn, task, thread_token: str, *, delivery_failed: boo
     return "none"
 
 
+# The prefix of the `task_logs` line every completed email task gets once its
+# note step has run (#651), so an observer can tell "no note" from "not yet".
+EMAIL_NOTE_STEP_LOG = "Email note step:"
+
+
 def _write_email_note(config, task, *, thread_token: str, result: str,
-                      mailed: str | None, delivery_failed: bool) -> None:
+                      mailed: str | None, delivery_failed: bool) -> str:
     """Write the host's private note for one mail on an email thread, after
-    delivery, when one is due (hidden email threads, section 2).
+    delivery, when one is due (hidden email threads, section 2), and return
+    what the step decided, for `_record_email_note_step`.
 
     After delivery because whether the reply was held is decided there. Its
     own transaction, then the push; a failure is logged and never fails the
@@ -806,7 +812,7 @@ def _write_email_note(config, task, *, thread_token: str, result: str,
             due_remark = "" if no_action and not task.host_absent else remark
             if not private_replies.email_note_due(host_absent=bool(task.host_absent),
                                                   outcome=outcome, remark=due_remark):
-                return
+                return f"no note due ({outcome})"
             note, body = private_replies.deliver_email_note(
                 conn, config, task, outcome=outcome, remark=remark,
             )
@@ -814,8 +820,20 @@ def _write_email_note(config, task, *, thread_token: str, result: str,
     except Exception as exc:
         logger.warning("Task %d: could not write the private note (%s)",
                        task.id, type(exc).__name__)
-        return
+        return "the note could not be written"
     run_coro(private_replies.send_private(config, note, body=body))
+    return f"note written ({outcome})"
+
+
+def _record_email_note_step(config, task, decision: str) -> None:
+    """Record, as the email task's last `task_logs` line, that its note step
+    ran and what it decided (#651). Never fails the task."""
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.log_task(conn, task.id, "info", f"{EMAIL_NOTE_STEP_LOG} {decision}")
+    except Exception as exc:
+        logger.warning("Task %d: could not record the email note step (%s)",
+                       task.id, type(exc).__name__)
 
 
 def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | None:
@@ -4790,13 +4808,20 @@ def process_one_task(
                 )
                 failure_alert_title = f"Could not send the email reply — task #{task.id}"
                 failure_alert_push = task_alert_source.undelivered_push(failure_alert_title)
-    if (success and _thread_token is not None and not is_confirmation_request
-            and task.guest_participant_id is None):
-        _write_email_note(
-            config, task, thread_token=_thread_token, result=result,
-            mailed=thread_mailed_body,
-            delivery_failed=post_email and not email_ok,
-        )
+    if (success and task.source_type == "email" and not is_confirmation_request
+            and not dry_run):
+        if _thread_token is None:
+            note_step = "not an email thread"
+        elif task.guest_participant_id is not None:
+            # A thread room has no guest mode; kept from the old guard.
+            note_step = "no note for a guest turn"
+        else:
+            note_step = _write_email_note(
+                config, task, thread_token=_thread_token, result=result,
+                mailed=thread_mailed_body,
+                delivery_failed=post_email and not email_ok,
+            )
+        _record_email_note_step(config, task, note_step)
     sms_undelivered = False
     if post_sms_message:
         # `send_record` rather than `deliver`, because `Transport.deliver`
