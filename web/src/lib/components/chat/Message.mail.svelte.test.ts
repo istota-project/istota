@@ -6,6 +6,9 @@
  * above, since the row body is the mailed body. A user row carrying
  * `receivedMail` renders as the incoming card in place of the bubble.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import type { ChatMessage } from '$lib/stores/segments';
@@ -149,5 +152,51 @@ describe('an incoming mail row', () => {
       } as ChatMessage,
     });
     expect(container.querySelector('.attachments')?.textContent).toContain('report.pdf');
+  });
+});
+
+/**
+ * ISSUE-660: an email note's incoming and outgoing cards are siblings in
+ * `.content`, and `.mail-card` has no outer margin of its own, so the second
+ * card sat flush under the first. jsdom applies no component styles and
+ * computes no layout, so this checks the two halves apart: the rendered cards
+ * are adjacent siblings under `.content`, and `Message.svelte` carries a
+ * sibling rule that spaces exactly that shape.
+ */
+describe('two mail cards in one row', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(here, 'Message.svelte'), 'utf8');
+  const style = src
+    .slice(src.indexOf('>', src.indexOf('<style')) + 1, src.lastIndexOf('</style>'))
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  it("renders an email note's cards as adjacent siblings in .content", () => {
+    const { container } = render(Message, {
+      ...base,
+      message: {
+        cid: 4,
+        role: 'system',
+        text: 'alice@example.com wrote on Dinner plans',
+        segments: [],
+        streaming: false,
+        msgId: 12,
+        taskId: 9,
+        emailNote: { header: 'alice@example.com wrote on Dinner plans', outcome: '', remark: '' },
+        receivedMail: received,
+        mail: sent,
+      } as ChatMessage,
+    });
+    const cards = container.querySelectorAll<HTMLElement>('[data-testid="mail-card"]');
+    expect(cards.length).toBe(2);
+    expect(cards[0].parentElement?.classList.contains('content')).toBe(true);
+    expect(cards[0].nextElementSibling).toBe(cards[1]);
+  });
+
+  it('spaces a mail card that follows another mail card', () => {
+    const body = style.match(
+      /\.content\s*>\s*:global\(\.mail-card\)\s*\+\s*:global\(\.mail-card\)\s*\{([^}]*)\}/,
+    )?.[1];
+    expect(body, 'no sibling rule for consecutive mail cards').toBeDefined();
+    expect(body).toMatch(/margin-top:\s*var\(--space-[1-9]\)/);
   });
 });

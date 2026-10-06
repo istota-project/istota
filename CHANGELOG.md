@@ -83,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An email note's two mail cards no longer run together** (#660). In web chat, a note about a reply showed the received mail and the sent reply stacked with no space between them, so the two cards read as one block. The second card now sits a small gap below the first.
 - **A parked question shows the same title in the notification bell as in its push** (#663). A question the bot asked while answering a mail on an email thread was pushed as "Task #N is waiting for your approval", while the bell listed it under the held-mail label with the sender and subject. The bell now shows the title the push carried, for every parked question.
 - **A question parked in a web-only private room no longer pushes as undelivered** (#661). The question is written into your private room, but because a web room has no push of its own the scheduler read that as a failed delivery and the push said the question could not be delivered. The push now says the question is in the conversation, like any other park.
 - **Approving a held mail on a thread you switched off no longer runs it** (#650). Before, the approval added the sender to the switched-off thread as a participant, ran the model, and failed the task on delivery. Now the held mail is cancelled with nothing recorded and nothing run, and the answer says so.
