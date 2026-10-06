@@ -287,6 +287,33 @@ class TestThePark:
         ((_user, message),) = ntfy
         assert message == confirmation_source.PARK_BODY
 
+    def test_an_email_thread_parks_bell_title_is_its_push_title(
+        self, config, ntfy, fake_talk,
+    ):
+        """#663: the row and the push carry `park_title`; the bell rendered the
+        held-mail label (`describe_email`) because the task's source is email.
+        One item, one title, whichever surface shows it."""
+        from istota.notifications.store import list_open
+
+        fake_talk.db_path = config.db_path
+        with db.get_db(config.db_path) as conn:
+            thread = _email_thread(conn)
+            ident = db.create_task(conn, prompt="cancel it", user_id="alice",
+                                   source_type="email", conversation_token=thread)
+            db.mark_email_processed(conn, "1", "carol@example.com",
+                                    subject="Standing order", user_id="alice",
+                                    task_id=ident, thread_id=thread)
+        config.users["alice"].routing = {"alert": "ntfy"}
+        with patch("istota.rooms.private_replies.private_room_for", return_value=None):
+            assert _run(config, ident, QUESTION).status == "pending_confirmation"
+        (stored,) = _rows(config, "SELECT title FROM notifications "
+                                  "WHERE source = 'confirmation'")
+        assert stored["title"] == confirmation_source.park_title(ident)
+        with db.get_db(config.db_path) as conn:
+            (item,), _total = list_open(config, conn, "alice")
+        assert item.title == stored["title"]
+        assert "invite" in item.body
+
     def test_a_private_park_with_no_private_room_pushes_to_talk(
         self, config, ntfy, fake_talk,
     ):
