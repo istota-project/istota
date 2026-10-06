@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+from istota.confirmations import SWITCHED_OFF_ACK
 from istota.notifications.resolvers.task_alert import flatten_body
 from testbed.services import mail
 
@@ -87,10 +88,6 @@ def _trusted_thread(stack, email_people, nonce: str) -> tuple[flow.Sent, str]:
         assert time.monotonic() < deadline, "the opener's note never reached the host"
         time.sleep(flow.POLL_INTERVAL)
     return sent, room
-
-
-class Issue650(AssertionError):
-    """The behaviour #650 reports, raised only by the checks of it."""
 
 
 def _trusted_rows(stack, user_id: str, address: str) -> list[dict]:
@@ -363,24 +360,22 @@ class TestAThreadThatAlreadyExists:
         ), since=since)
         assert seen.room == room, (seen.room, room)
 
-    @pytest.mark.xfail(strict=True, raises=Issue650, reason="#650")
     def test_approving_on_a_vetoed_thread_records_nothing(self, stack, email_people):
         """A held reply on a thread then switched off, approved by mail.
 
-        Today `confirmations.approve` has no veto check: `_admit_approved_mail`
-        adds the sender as a participant before `record_inbound` refuses the
-        vetoed room, the task runs with no conversation token, so
-        `task_room_vetoed` cannot stop it, and it ends `failed` on delivery.
-        A vetoed room records no participant (multiplayer D12); #650 asks for a
-        refusal or a dropped task with no model run.
-
-        The xfail covers only `Issue650`, raised by the two checks of that
-        behaviour. A setup step that fails is a plain failure, so the strict
-        xfail cannot pass for the wrong reason.
+        `confirmations.approve` finds the held mail's thread
+        (`threads.held_mail_room_vetoed`) and, with the room off, cancels the
+        task and raises `RoomSwitchedOff`; the email answer acks with
+        `SWITCHED_OFF_ACK` (#650). So the vetoed room gains no participant
+        (multiplayer D12), the model is never called for the held mail, and
+        the task ends `cancelled` rather than running and failing on delivery.
         """
         nonce = flow.new_nonce()
+        # The held mail's own route has no turns: a model call for it would be
+        # an exhausted frame recorded in `unmatched`, which the autouse
+        # fixture fails on.
         stack.script([flow.route(f"t-{nonce}", [flow.email_answer(f"opened {nonce}")]),
-                      flow.route(nonce, [flow.email_answer(f"vetoed {nonce}")])])
+                      flow.route(nonce, [])])
         opener, room = _trusted_thread(stack, email_people, nonce)
         stranger = flow.person("stranger", nonce)
         sent, task, request = _hold(stack, email_people, nonce, sender=stranger,
@@ -406,18 +401,17 @@ class TestAThreadThatAlreadyExists:
 
         reply = flow.answer_by_mail(stack, request, "yes", nonce=nonce)
         _answered(stack, reply, task)
-        # Settle whichever way #650 is fixed: a run ends in the worker's line,
-        # a refusal leaves the task parked or cancelled.
-        if not flow.worker_done(stack, task["id"], timeout=60):
-            [after] = stack.probe.tasks(task_id=task["id"])
-            assert after["status"] in ("pending_confirmation", "cancelled"), after
+        ack = _ack(stack, reply, task)
+        assert SWITCHED_OFF_ACK in ack.body_text, ack.body_text
+
         [after] = stack.probe.tasks(task_id=task["id"])
+        assert after["status"] == "cancelled", after
+        # A cancelled task never reaches a worker, so there is no completion
+        # line to wait on; the ack above is mailed after the cancel commits.
+        assert not flow.worker_done(stack, task["id"], timeout=5), after
         present = {p["surface_ref"] for p in stack.probe.participants(room)
                    if p.get("left_at") is None}
-        if stranger.address in present:
-            raise Issue650(f"the vetoed room gained a participant: {present}")
-        if after["status"] == "failed":
-            raise Issue650(f"the approved task ran and failed: {after}")
+        assert stranger.address not in present, present
 
 
 class TestAForgedAnswer:
