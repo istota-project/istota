@@ -11,7 +11,7 @@ export type Daypart = 'lateNight' | 'earlyMorning' | 'morning' | 'afternoon' | '
    bot — it is an introduction. */
 export const dayparts: Record<Daypart, string[]> = {
   lateNight: [
-    '{bot} here. {bot} never sleeps — and apparently neither do you.',
+    "{bot} here. I sleep with one eye open — and apparently you don't sleep at all.",
     '{bot} here, keeping the night shift warm.',
     "{bot} here. It's the small hours where you are, but I'm not one to judge.",
   ],
