@@ -932,7 +932,8 @@
       --touch-target-h: var(--touch-comfort);
       /* Padding clears the card's clipped footer edges. Extra end padding
          moves the hit centre inward; negative margins keep the glyph's inset. */
-      padding: var(--space-2) var(--space-3) var(--space-2) var(--space-1);
+      padding: var(--space-2) var(--space-1);
+      padding-inline-end: var(--space-3);
       margin-inline-end: calc(-1 * var(--space-2));
       margin-inline-start: calc(-1 * var(--space-1));
     }

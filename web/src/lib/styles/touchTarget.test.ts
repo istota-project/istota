@@ -165,6 +165,11 @@ describe('reported touch controls', () => {
     [
       'routes/feeds/+page.svelte',
       '.feed-grid :global(.star-btn)',
+      'padding-inline-end: var(--space-3);',
+    ],
+    [
+      'routes/feeds/+page.svelte',
+      '.feed-grid :global(.star-btn)',
       '--touch-target-w: var(--touch-comfort);',
     ],
     [
