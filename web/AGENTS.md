@@ -152,7 +152,7 @@ Every recurring meaning-bearing color is a token in `src/app.css`, defined in **
 
 `--status-partial-{bg,fg}` sits beside the severity scale rather than on it, for a state that is part-done rather than late (an incomplete vaccine series). It is a token pair and not a categorical hue because two pages were each carrying the same purple plus its own light override; what keeps it off the ramp is that ranking it against "overdue" would say something false.
 
-Supporting scales: `--surface-{base,card,raised,badge,overlay,reading}`, `--text-{primary,secondary,muted,dim,reading}`, `--border-{default,subtle,hover}`, `--text-{2xs,xs,sm,base,lg,xl}`, `--font-{sans,mono}`, `--shadow-{overlay,md,lg}`.
+Supporting scales: `--surface-{base,card,raised,badge,overlay,reading,reading-card}`, `--text-{primary,secondary,muted,dim,reading}`, `--border-{default,subtle,hover}`, `--text-{2xs,xs,sm,base,lg,xl}`, `--font-{sans,mono}`, `--shadow-{overlay,md,lg}`.
 
 **Spacing** is `--space-{1,2,3,4,6,8}` — a 4px ramp (0.25 / 0.5 / 0.75 / 1 / 1.5 / 2rem) in `rem`, so it tracks the text-scale preference. Use a step; the `off-scale-space` rule flags a raw `rem` in a spacing property. Values below `--space-1` are off the ramp on purpose (hairline nudges, icon gaps) and are baselined rather than rounded. `px` is right for a border, `em` for something sized against its own control.
 
@@ -166,6 +166,7 @@ Not colors, but declared alongside them and read the same way: `--font-sans`, `-
 
 - `--surface-overlay` — chrome floating _over_ content: a feed card's title overlay, the fixed status badge, an autocomplete popover, jump-to-latest.
 - `--surface-reading` / `--text-reading` — a long-form reading pane (the chat transcript, the briefings reader) and its softened body text. The surface is card-colored in dark but pure white in light.
+- `--surface-reading-card` — a card inside a reading pane (a received mail, an external turn, the activity chip, a citation). Not `--surface-card`, which is the reading surface itself in dark, and not `--surface-badge`, the pill fill.
 - `--border-hover` — one step stronger than `--border-default`, for the hover state of an interactive card or link-tile. Use it rather than a literal, or the hover affordance silently vanishes on white.
 
 For chrome that sits on a surface the theme does _not_ control: `--on-accent-fg` (text on a filled accent), `--on-scrim-fg` (text on a scrim that stays dark in both themes), `--scrim-pill-{bg,fg}` (a pill over media, which flips scrim direction), `--shimmer-tint`, `--shadow-overlay`. The first two are deliberately one value in both themes, like `--status-dot-*`.

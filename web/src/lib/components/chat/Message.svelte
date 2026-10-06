@@ -1559,7 +1559,7 @@
     max-width: var(--chat-body-max);
     margin-bottom: var(--space-3);
     padding: var(--space-1) var(--space-2);
-    background: var(--surface-card);
+    background: var(--surface-reading-card);
     border: none;
     border-left: 2px solid var(--border-default);
     border-radius: var(--radius-sm);
@@ -1821,7 +1821,7 @@
     max-width: var(--chat-body-max);
     margin: 0;
     padding: var(--space-2);
-    background: var(--surface-badge);
+    background: var(--surface-reading-card);
     border-left: 2px solid var(--border-hover);
     border-radius: var(--radius-sm);
   }
