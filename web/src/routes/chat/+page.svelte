@@ -1529,8 +1529,14 @@
                 onReply={inViewMode || readOnlyPhone || readOnlyThread ? undefined : stageReply}
                 onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
                 onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
-                onJump={(token, taskId) =>
-                  chatSel.push({ kind: 'room', room: token, task: taskId })}
+                onJump={(token, taskId) => {
+                  if (get(rooms).some((room) => room.token === token)) {
+                    chatSel.push({ kind: 'room', room: token, task: taskId });
+                  } else {
+                    // Keep the store's missing-room notice without adding an unreachable entry.
+                    void session.jumpToTask(token, taskId);
+                  }
+                }}
                 onOpenRoom={(token) => session.selectRoomByToken(token)}
                 onDiscuss={inViewMode ? undefined : discussInPrivate}
                 onImageOpen={viewer.openImages}

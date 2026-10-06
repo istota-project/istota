@@ -222,4 +222,40 @@ describe('chat selection history', () => {
     expect(session.selectRoomByToken).toHaveBeenLastCalledWith('room-a');
     expect(currentUrl()).toBe('/istota/chat/?room=room-a');
   });
+  it('keeps the current URL when a saved search result names a missing room', async () => {
+    session.rooms.set([rooms[0]]);
+    session.messages.set([
+      {
+        cid: 1,
+        role: 'system',
+        text: '',
+        segments: [],
+        streaming: false,
+        searchResults: {
+          kind: 'search_results',
+          query: 'falcon',
+          text: '',
+          results: [
+            {
+              source_type: 'conversation',
+              summary: 'the falcon timeline',
+              date: '2026-01-01',
+              room_token: 'room-b',
+              room_name: 'Room B',
+              task_id: 42,
+              talk_message_id: null,
+              talk_link: null,
+            },
+          ],
+        },
+      },
+    ]);
+    const { container } = renderPage();
+    await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
+    await fireEvent.click(container.querySelector('.jump-btn')!);
+    expect(session.jumpToTask).toHaveBeenCalledWith('room-b', 42);
+    expect(get(session.activeRoomId)).toBe(1);
+    expect(currentUrl()).toBe('/istota/chat/?room=room-a');
+    expect(__history.entries).toHaveLength(1);
+  });
 });
