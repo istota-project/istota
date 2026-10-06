@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Workspace previews now use a compact reading panel with Download and Close in the header. Short documents fit their content; source files and PDF pages use a wider panel.
+
 - **A switched-off room says so at the end of its transcript, not in a banner over it.** Web chat used to pin a warning above the messages; the notice is now a status row after the last message, where the next message would go, since nothing is recorded while the room is off. The `!<bot name> on` command in it renders as code.
 - **Shared rooms use the classifier and the friendly disposition by default.** `[speech_gate] mode` now defaults to `"classifier"` and `disposition` to `"friendly"`, in the loader, Ansible, Docker and the example config. The bot now answers a turn in a room with more than one human when a cheap model reads it as meant for the bot, and it reacts to thanks rather than staying quiet. Private chats are not gated, and email thread rooms still answer only when the bot is addressed.
 
