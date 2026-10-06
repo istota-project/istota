@@ -511,10 +511,25 @@
     stagedReplyId = m?.msgId ?? null;
   }
 
+  function pushChatJump(selection: Extract<ChatSelection, { kind: 'room' }>) {
+    const current = chatSel.current();
+    if (
+      current?.kind === 'room' &&
+      current.room === selection.room &&
+      current.task === selection.task &&
+      current.msg === selection.msg
+    ) {
+      // Repeat the scroll even when this jump already owns the history entry.
+      void applyChatSelection(selection);
+    } else {
+      chatSel.push(selection);
+    }
+  }
+
   /** Follow a rendered citation back to the message it names. */
   function jumpToCitedMessage(msgId: number) {
     const token = activeRoom?.token;
-    if (token) chatSel.push({ kind: 'room', room: token, msg: msgId });
+    if (token) pushChatJump({ kind: 'room', room: token, msg: msgId });
   }
 
   // The room's standing model default as a header badge — the canonical model
@@ -1543,7 +1558,7 @@
                 onRoomClick={inViewMode ? openRoom : undefined}
                 onJump={(token, taskId) => {
                   if (get(rooms).some((room) => room.token === token)) {
-                    chatSel.push({ kind: 'room', room: token, task: taskId });
+                    pushChatJump({ kind: 'room', room: token, task: taskId });
                   } else {
                     // Keep the store's missing-room notice without adding an unreachable entry.
                     void session.jumpToTask(token, taskId);

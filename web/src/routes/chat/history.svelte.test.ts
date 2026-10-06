@@ -211,12 +211,18 @@ describe('chat selection history', () => {
         },
       },
     ]);
+    const searchMessage = get(session.messages)[0];
     const { container } = renderPage();
     await waitFor(() => expect(currentUrl()).toContain('room=room-a'));
     await fireEvent.click(container.querySelector('.jump-btn')!);
     expect(session.jumpToTask).toHaveBeenCalledWith('room-b', 42);
     expect(get(session.activeRoomId)).toBe(2);
     expect(currentUrl()).toBe('/istota/chat/?room=room-b&task=42');
+    session.messages.set([searchMessage]);
+    await waitFor(() => expect(container.querySelector('.jump-btn')).toBeTruthy());
+    await fireEvent.click(container.querySelector('.jump-btn')!);
+    expect(session.jumpToTask).toHaveBeenCalledTimes(2);
+    expect(__history.entries).toHaveLength(2);
     __history.back();
     await waitFor(() => expect(get(session.activeRoomId)).toBe(1));
     expect(session.selectRoomByToken).toHaveBeenLastCalledWith('room-a');
@@ -283,6 +289,8 @@ describe('chat jump history', () => {
     await fireEvent.click(screen.getByTitle('Go to the message this replies to'));
     expect(session.jumpToMsgId).toHaveBeenCalledWith('room-a', 22);
     expect(currentUrl()).toBe('/istota/chat/?room=room-a&msg=22');
+    await fireEvent.click(screen.getByTitle('Go to the message this replies to'));
+    expect(session.jumpToMsgId).toHaveBeenCalledTimes(2);
     expect(__history.entries).toHaveLength(2);
     __history.back();
     await waitFor(() => expect(currentUrl()).toBe('/istota/chat/?room=room-a'));
