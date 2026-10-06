@@ -7,7 +7,7 @@ import re
 import stat
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -540,68 +540,54 @@ def _check_calendar_conflicts(check: HeartbeatCheck, config: "Config", user_id: 
         return CheckResult(healthy=False, message="CalDAV not configured")
 
     try:
-        from .skills.calendar import list_calendars, list_events
+        from .skills.calendar import get_caldav_client, get_events, owned_calendars
 
-        # Get user's calendars
-        calendars = list_calendars(
-            caldav_url=config.caldav_url,
-            username=config.caldav_username,
-            password=config.caldav_password,
-            user_id=user_id,
-        )
-
-        if not calendars:
-            return CheckResult(healthy=True, message="No calendars found")
-
-        # Collect all events
         now = datetime.now()
-        end_time = datetime.now().replace(
-            hour=23, minute=59, second=59
-        )
-        # Extend to lookahead hours
-        from datetime import timedelta
         end_time = now + timedelta(hours=lookahead_hours)
 
+        # The bot's account sees every calendar shared with it; only the
+        # user's own are theirs, the skill CLI's rule (ISSUE-673).
         all_events = []
-        for cal in calendars:
-            try:
-                events = list_events(
-                    caldav_url=config.caldav_url,
-                    username=config.caldav_username,
-                    password=config.caldav_password,
-                    calendar_path=cal["path"],
-                    start_date=now.strftime("%Y-%m-%d"),
-                    end_date=end_time.strftime("%Y-%m-%d"),
-                )
-                for event in events:
-                    if event.get("start") and event.get("end"):
-                        all_events.append(event)
-            except Exception as e:
-                logger.debug("Error listing events from %s: %s", cal.get("name"), e)
+        with get_caldav_client(
+            config.caldav_url, config.caldav_username, config.caldav_password,
+        ) as client:
+            calendars = owned_calendars(client, user_id)
+            if not calendars:
+                return CheckResult(healthy=True, message="No calendars found")
+            for name, url in calendars:
+                try:
+                    events = get_events(client, url, now, end_time)
+                except Exception as e:
+                    logger.debug("Error listing events from %s: %s", name, e)
+                    continue
+                all_events.extend(e for e in events if not e.all_day)
 
         if not all_events:
             return CheckResult(healthy=True, message="No upcoming events")
 
-        # Check for overlaps
+        # get_events strips each event's zone, so put it back before
+        # comparing; a floating event is in the user's own zone.
+        user_zone = ZoneInfo(config.resolve_user_timezone(user_id))
+
+        def _aware(event, value):
+            try:
+                zone = ZoneInfo(event.timezone) if event.timezone else user_zone
+            except (ValueError, KeyError):
+                zone = user_zone
+            return value.replace(tzinfo=zone)
+
+        spans = [(_aware(e, e.start), _aware(e, e.end)) for e in all_events]
         conflicts = []
         for i, event1 in enumerate(all_events):
-            for event2 in all_events[i + 1:]:
-                # Parse times (simplified - assumes ISO format)
-                try:
-                    start1 = datetime.fromisoformat(event1["start"].replace("Z", "+00:00"))
-                    end1 = datetime.fromisoformat(event1["end"].replace("Z", "+00:00"))
-                    start2 = datetime.fromisoformat(event2["start"].replace("Z", "+00:00"))
-                    end2 = datetime.fromisoformat(event2["end"].replace("Z", "+00:00"))
-
-                    # Check overlap
-                    if start1 < end2 and start2 < end1:
-                        conflicts.append({
-                            "event1": event1.get("summary", "Untitled"),
-                            "event2": event2.get("summary", "Untitled"),
-                            "time": event1["start"],
-                        })
-                except (ValueError, TypeError):
-                    continue
+            for j in range(i + 1, len(all_events)):
+                event2 = all_events[j]
+                (start1, end1), (start2, end2) = spans[i], spans[j]
+                if start1 < end2 and start2 < end1:
+                    conflicts.append({
+                        "event1": event1.summary,
+                        "event2": event2.summary,
+                        "time": event1.start.isoformat(),
+                    })
 
         if conflicts:
             conflict_desc = ", ".join(

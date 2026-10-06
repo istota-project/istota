@@ -1092,9 +1092,23 @@ def _make_calendar_event(
 
 _DENTIST = {"name": "dentist office", "lat": 34.05, "lon": -118.4, "radius_meters": 200}
 
+_ALICE_CAL = "https://cloud.example.com/remote.php/dav/calendars/istota/personal_shared_by_alice/"
+_BOB_CAL = "https://cloud.example.com/remote.php/dav/calendars/istota/personal_shared_by_bob/"
+
+
+def _owned_calendar(name, url, owner):
+    cal = MagicMock()
+    cal.name = name
+    cal.url = url
+    cal.get_properties.return_value = {
+        "{DAV:}owner": f"/remote.php/dav/principals/users/{owner}/",
+    }
+    return cal
+
 
 class TestCmdAttendance:
-    def _run_attendance(self, tmp_path, events, pings=None, places=None, args_overrides=None):
+    def _run_attendance(self, tmp_path, events, pings=None, places=None, args_overrides=None,
+                        env_overrides=None, exit_code=None):
         """Helper to run cmd_attendance with mocked CalDAV and DB.
 
         Uses two DBs to mirror production: per-user location.db for
@@ -1134,13 +1148,35 @@ class TestCmdAttendance:
         for k, v in (args_overrides or {}).items():
             setattr(args, k, v)
 
-        mock_calendars = [("Personal", "https://cal.example.com/personal")]
+        env.update(env_overrides or {})
 
+        # The bot account sees a calendar shared by bob as well (ISSUE-673).
+        client = MagicMock()
+        client.principal.return_value.calendars.return_value = [
+            _owned_calendar("Personal", _ALICE_CAL, "alice"),
+            _owned_calendar("Bob", _BOB_CAL, "bob"),
+        ]
+
+        def _events_for(_client, url, _start, _end):
+            self.read_urls.append(url)
+            return events
+
+        self.read_urls = []
         with patch.dict("os.environ", env), \
-                patch("istota.skills.calendar.get_caldav_client", return_value=MagicMock()), \
-                patch("istota.skills.calendar.list_calendars", return_value=mock_calendars), \
-                patch("istota.skills.calendar.get_events", return_value=events):
-            return _capture(cmd_attendance, args)
+                patch("istota.skills.calendar.get_caldav_client", return_value=client), \
+                patch("istota.skills.calendar.get_events", side_effect=_events_for):
+            return _capture(cmd_attendance, args, exit_code=exit_code)
+
+    def test_reads_only_the_task_users_calendars(self, tmp_path):
+        self._run_attendance(tmp_path, events=[])
+        assert self.read_urls == [_ALICE_CAL]
+
+    def test_no_user_id_refuses(self, tmp_path):
+        result = self._run_attendance(
+            tmp_path, events=[], env_overrides={"ISTOTA_USER_ID": ""}, exit_code=1,
+        )
+        assert "ISTOTA_USER_ID" in result["error"]
+        assert self.read_urls == []
 
     def test_no_events(self, tmp_path):
         result = self._run_attendance(tmp_path, events=[])

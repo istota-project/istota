@@ -430,8 +430,9 @@ def cmd_attendance(args):
     from istota.skills.calendar import (
         CalendarEvent,
         get_caldav_client,
-        list_calendars,
         get_events,
+        owned_calendars,
+        task_user_id,
     )
     from istota.location import db as location_db
     from istota.location.logic import resolve_timezone
@@ -463,13 +464,20 @@ def cmd_attendance(args):
         framework_conn.close()
         _fail("CalDAV credentials not set (CALDAV_URL, CALDAV_USERNAME, CALDAV_PASSWORD)")
 
+    try:
+        user_id = task_user_id()
+    except ValueError as e:
+        conn.close()
+        framework_conn.close()
+        _fail(str(e))
+
     # ISSUE-101: DAVClient owns urllib3 pools whose watchdog threads
     # leak unless close() is called. Use try/finally because the function
     # already branches into sys.exit on errors.
     client = get_caldav_client(caldav_url, caldav_user, caldav_pass)
     try:
         try:
-            calendars = list_calendars(client)
+            calendars = owned_calendars(client, user_id)
         except Exception as e:
             conn.close()
             framework_conn.close()
