@@ -770,7 +770,7 @@ class ParkPushSaysUndelivered(AssertionError):
 class TestThePrivatePark:
     @pytest.mark.xfail(
         strict=True, raises=ParkPushSaysUndelivered,
-        reason="TODO-issue: a question parked in a web-only private room is "
+        reason="#661: a question parked in a web-only private room is "
                "pushed with PARK_UNDELIVERED_BODY",
     )
     def test_a_thread_question_is_asked_in_the_private_room(
