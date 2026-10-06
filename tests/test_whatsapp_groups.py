@@ -1431,3 +1431,36 @@ class TestTheClaimingTurn:
 
         assert not _task(group, result.task_id).attachments
         assert _user_rows(group)[0]["body"] == "[Sent an image, which was not opened.]"
+
+
+class TestANamelessGuestAfterTheHostsAnswer:
+    """ISSUE-670 review: a guest with no username is labelled as their stored
+    row would be, never as the host, so it cannot pass for the host's follow-up."""
+
+    def test_the_guest_is_not_the_hosts_follow_up(self, group):
+        from istota.transport.whatsapp.groups import classify_group_event
+
+        group.speech_gate.mode = "classifier"
+        group.speech_gate.disposition = "friendly"
+        with db.get_db(group.db_path) as conn:
+            token = _room(group)
+            db.add_message(conn, token, role="user", body="plumber?",
+                           origin_surface="whatsapp", author_user_id="alice")
+            db.add_message(conn, token, role="assistant", body="Try Joe's.",
+                           origin_surface="whatsapp")
+        prompts = []
+
+        def completer(prompt):
+            prompts.append(prompt)
+            return '{"speak": false, "reason": "not for the bot"}'
+
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=completer):
+            decision = classify_group_event(group, _message(
+                "great, thanks Alice", sender=GUEST_JID, username="",
+                message_id="G1",
+            ))
+
+        assert decision is not None
+        assert (decision.speak, decision.rung) == (False, "classifier")
+        assert "the person Istota last answered: no" in prompts[0]
