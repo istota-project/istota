@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
-  import { page } from '$app/state';
+  import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
   import { codeSpans, describeRoomOff } from '$lib/roomOff';
   import {
     Plus,
@@ -84,6 +84,54 @@
     outboundDrafts,
     externalTurnDisplay,
   } = session;
+
+  type ChatSelection =
+    { kind: 'room'; room: string; task?: number; msg?: number } | { kind: 'view'; view: ChatView };
+  let selectionReady = $state(false);
+
+  async function applyChatSelection(selection: ChatSelection): Promise<void> {
+    if (selection.kind === 'view') await session.selectView(selection.view);
+    else if (selection.task !== undefined) await session.jumpToTask(selection.room, selection.task);
+    else if (selection.msg !== undefined) await session.jumpToMsgId(selection.room, selection.msg);
+    else await session.selectRoomByToken(selection.room);
+  }
+
+  const chatSel = createUrlSelection<ChatSelection>({
+    key: 'chat',
+    params: ['room', 'view', 'task', 'msg'],
+    compareKeys: ['room', 'view'],
+    encode(selection) {
+      if (selection.kind === 'view') return { view: selection.view };
+      const params: Params = { room: selection.room };
+      if (selection.task !== undefined) params.task = String(selection.task);
+      else if (selection.msg !== undefined) params.msg = String(selection.msg);
+      return params;
+    },
+    decode(params) {
+      if (params.room) {
+        if (!get(rooms).some((room) => room.token === params.room)) return null;
+        const selection: ChatSelection = { kind: 'room', room: params.room };
+        const task = Number(params.task);
+        const msg = Number(params.msg);
+        if (Number.isSafeInteger(task) && task > 0) selection.task = task;
+        else if (Number.isSafeInteger(msg) && msg > 0) selection.msg = msg;
+        return selection;
+      }
+      if (params.view === 'all' || params.view === 'unread' || params.view === 'starred') {
+        return { kind: 'view', view: params.view };
+      }
+      return null;
+    },
+    read() {
+      // Initialization must apply the deep link before a seed can replace it.
+      if (!selectionReady) return null;
+      if ($view !== 'room') return { kind: 'view', view: $view };
+      const room = $rooms.find((room) => room.id === $activeRoomId);
+      return room ? { kind: 'room', room: room.token } : null;
+    },
+    apply: applyChatSelection,
+  });
+  chatSel.start();
 
   // Cross-room views: the transcript pane renders either the active room
   // ('room') or a read-only aggregate stream (all/unread/starred).
@@ -598,23 +646,9 @@
 
   onMount(() => {
     session.init().then(() => {
-      // Deep link: /chat?room=<token> selects that room for this load,
-      // overriding the persisted-room default. An unknown / not-owned token
-      // isn't in the per-user list → silent fallback to the default.
-      // /chat?view=all|unread|starred opens an aggregate view instead; an
-      // unknown value falls back silently, same as an unknown room token.
-      const token = page.url.searchParams.get('room');
-      const v = page.url.searchParams.get('view');
-      const taskParam = page.url.searchParams.get('task');
-      if (token) {
-        // /chat?room=<token>&task=<id>: after selecting the room, jump to
-        // the referenced turn (paging older history if needed). A bare
-        // ?room= just selects the room. jumpToTask itself selects the room,
-        // so a valid &task supersedes the plain select.
-        const taskId = taskParam ? Number(taskParam) : NaN;
-        if (Number.isFinite(taskId)) session.jumpToTask(token, taskId);
-        else session.selectRoomByToken(token);
-      } else if (v === 'all' || v === 'unread' || v === 'starred') session.selectView(v);
+      const selection = chatSel.current();
+      if (selection) void applyChatSelection(selection);
+      selectionReady = true;
     });
   });
 
@@ -934,7 +968,8 @@
   });
 
   function selectRoom(id: number) {
-    session.selectRoom(id);
+    const room = get(rooms).find((room) => room.id === id);
+    if (room) chatSel.push({ kind: 'room', room: room.token });
     sidebarOpen = false;
   }
 
@@ -961,7 +996,7 @@
   }
 
   function selectView(v: ChatView) {
-    session.selectView(v);
+    chatSel.push({ kind: 'view', view: v });
     sidebarOpen = false;
   }
 
@@ -1494,7 +1529,8 @@
                 onReply={inViewMode || readOnlyPhone || readOnlyThread ? undefined : stageReply}
                 onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
                 onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
-                onJump={(token, taskId) => session.jumpToTask(token, taskId)}
+                onJump={(token, taskId) =>
+                  chatSel.push({ kind: 'room', room: token, task: taskId })}
                 onOpenRoom={(token) => session.selectRoomByToken(token)}
                 onDiscuss={inViewMode ? undefined : discussInPrivate}
                 onImageOpen={viewer.openImages}

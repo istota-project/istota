@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
+import { __history } from '$app/navigation';
 
 const { brainCatalogue } = vi.hoisted(() => ({
   brainCatalogue: vi.fn(async () => [
@@ -139,6 +140,7 @@ async function discuss() {
 }
 
 beforeEach(() => {
+  __history.reset('/istota/chat/');
   vi.stubGlobal(
     'fetch',
     vi.fn(() => new Promise<Response>(() => {})),
