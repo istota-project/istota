@@ -23,7 +23,7 @@ export default defineConfig({
       // the `ui` barrel (HeaderNav pulls in `$app/navigation`).
       '$app/navigation': resolve(__dirname, 'vitest-stubs/app-navigation.ts'),
       '$app/paths': resolve(__dirname, 'vitest-stubs/app-paths.ts'),
-      '$app/state': resolve(__dirname, 'vitest-stubs/app-state.ts'),
+      '$app/state': resolve(__dirname, 'vitest-stubs/app-state.svelte.ts'),
       // Same reasoning for `$service-worker`, which Kit generates per build
       // and resolves only inside the worker bundle.
       '$service-worker': resolve(__dirname, 'vitest-stubs/service-worker.ts'),
