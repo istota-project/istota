@@ -35,12 +35,9 @@ and `process_one_task` stores the model's answer there
 (`db.set_task_confirmation(conn, task_id, result, ...)`). The note-shaped body
 (`email_note(..., outcome="parked")`, `Question for you.`) is built only for
 `deliver_private`, which has no room to put it in here. On the full shape it is
-the private room's row instead. The bell's title is not the push's: the push
-and the stored row say `park_title` ("Task #N is waiting for your approval"),
-while the resolver's title is `confirmations.describe`, which for an email
-task is the gate's label, `describe_email(sender, subject)`. The test pins
-what the code does; whether a park should keep the gate's label is a product
-question, not settled here.
+the private room's row instead. The bell's title is the push's: the resolver
+renders the row's stored title, `park_title` ("Task #N is waiting for your
+approval"), rather than recomputing the gate's label from the task (#663).
 
 **The `14cec6c2` control cannot turn this file red.** With the alert route
 `email,ntfy`, the whole route and the room-free cut (`ROOM_FREE_SURFACES`) are
@@ -55,7 +52,6 @@ import json
 
 import pytest
 
-from istota.confirmations import describe_email
 from istota.notifications.resolvers.confirmation import (
     PARK_BELL_BODY,
     body_for,
@@ -184,6 +180,6 @@ class TestTheSchedulerPark:
         view = json.loads(result.stdout.strip().splitlines()[-1])
         assert view is not None, "the resolver called a live park's row stale"
         assert view["body"] == body_for(question), view
-        assert view["title"] == describe_email(sender.address, sent.subject), view
+        assert view["title"] == title, view
         assert NOTE_OUTCOMES["parked"] not in view["body"], view
         assert view["actions"] == ["confirm", "discard"], view

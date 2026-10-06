@@ -26,9 +26,10 @@ asserted:
 
 - **The web confirm route's 409** applies to a relay-held task only, one with
   `whatsapp_confirmation_request_id` (a relay question, a `room post`, a guest
-  proposal): `webui.app._chat_confirm_task` asks `preview_rooms` only then. A
-  parked email-thread question has no request, so its confirm is accepted
-  from any room; the 409 case here is a `room post` into the shared room.
+  proposal): `webui.app._chat_confirm_task` asks `preview_rooms` only then.
+  A parked email-thread question has no request; since #665 its confirm is
+  refused only from the thread room itself. The 409 case here is a
+  `room post` into the shared room.
 - **"Default routing"** for the gate prompt is the user's alert route, which
   the seeding sets to the Talk alerts room plus ntfy rather than leaving
   unset; the Talk half is the provisioned alerts room either way
@@ -762,17 +763,8 @@ class TestDiscussingAThread:
             "tasks", since, conversation_token=web.rooms.other["token"]) == []
 
 
-class ParkPushSaysUndelivered(AssertionError):
-    """The park's push said the question was not delivered, while it was."""
-
-
 @FULL
 class TestThePrivatePark:
-    @pytest.mark.xfail(
-        strict=True, raises=ParkPushSaysUndelivered,
-        reason="#661: a question parked in a web-only private room is "
-               "pushed with PARK_UNDELIVERED_BODY",
-    )
     def test_a_thread_question_is_asked_in_the_private_room(
         self, stack, email_people, web,
     ):
@@ -783,16 +775,9 @@ class TestThePrivatePark:
         the `confirmation` row's push is room-free: ntfy only on this route,
         titled `park_title`, and no Talk post.
 
-        **The push's text is wrong, and that is the xfail.** `send_private`
-        reports False for a web room by design (the room-event stream is its
-        delivery), so `process_one_task` sets `private_undelivered` and pushes
-        the row through `confirmation.owed_push`, whose `PARK_UNDELIVERED_BODY`
-        says the question "could not be delivered where it was asked". It was:
-        it is the private room's row asserted below. The expected text is
-        `PARK_BODY`, the one a park whose question is in a room carries.
-        `assert_outcome` expects that text; the xfail is raised only when the
-        push text is its sole mismatch, so a fixed product XPASSes and any
-        other difference is an ordinary failure.
+        The push carries `PARK_BODY`, not `PARK_UNDELIVERED_BODY`: a web-only
+        private room has no surface to push to, so its row is the delivery and
+        the park is not owed a re-push (`PrivateDestination.pushes`, #661).
         """
         talk_mark = _alerts_mark(stack)
         nonce = flow.new_nonce()
@@ -824,25 +809,17 @@ class TestThePrivatePark:
         assert question not in " ".join(pushes[0].headers.values())
         assert _alerts_posts(stack, talk_mark) == []
 
-        # Everything else, with the push text the room-free park should carry.
-        # The one mismatch the defect produces is turned into the xfail; any
-        # other is a plain failure, and a fixed product passes and XPASSes.
-        try:
-            flow.assert_outcome(stack, sent, _thread_expected(
-                email_people, sender, other, plus, status="pending_confirmation",
-                bot=None, reply=None, note=None,
-                notices=flow.Notices(
-                    rows=frozenset({("confirmation", "task:{task}")}),
-                    pushes=(PARK_BODY,), alert_mails=0,
-                ),
-            ))
-        except AssertionError as exc:
-            message = str(exc)
-            if (message.startswith("1 dimension(s) differ")
-                    and "notices.pushes:" in message
-                    and PARK_UNDELIVERED_BODY in message):
-                raise ParkPushSaysUndelivered(message) from exc
-            raise
+        flow.assert_outcome(stack, sent, _thread_expected(
+            email_people, sender, other, plus, status="pending_confirmation",
+            bot=None, reply=None, note=None,
+            notices=flow.Notices(
+                rows=frozenset({("confirmation", "task:{task}")}),
+                pushes=(PARK_BODY,), alert_mails=0,
+            ),
+        ))
+        assert PARK_UNDELIVERED_BODY not in " ".join(
+            " ".join(p.headers.values()) + p.body.decode("utf-8", "replace")
+            for p in ntfy.pushes()), pushes
 
 
 @FULL
