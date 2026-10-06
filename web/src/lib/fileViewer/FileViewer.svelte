@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fileLinks } from '$lib/fileViewer/links';
   import hljs from 'highlight.js/lib/common';
   import { Modal, Button } from '$lib/components/ui';
   import { chatFileUrl, previewChatFile, type FilePreview } from '$lib/api';
@@ -126,7 +127,7 @@
           >
         </div>
       {/if}
-      <div class="file-body markdown prose">
+      <div use:fileLinks class="file-body markdown prose">
         {#if presentation.kind === 'markdown' && !source}
           {#if split.frontmatter !== null}<details>
               <summary>Frontmatter</summary>

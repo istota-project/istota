@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fileLinks } from '$lib/fileViewer/links';
   import { Copy, Star, Trash2, Reply, Mail, Info, Pencil, X, RotateCcw } from '@lucide/svelte';
   import PhoneSurfaceIcon from './PhoneSurfaceIcon.svelte';
   import { chatFileUrl, type ExternalTurnDisplay } from '$lib/api';
@@ -821,7 +822,7 @@
          which the renderer already marks `role="button"` and `tabindex="0"`.
          This is where their events are listened for, not what they are. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="content" onclick={imageClick} onkeydown={imageKeydown}>
+    <div use:fileLinks class="content" onclick={imageClick} onkeydown={imageKeydown}>
       <!-- The header line a notice does get. The author half of `.meta` stays
            gone — nobody wrote a notice — but the time was only dropped with it
            because the two shared that one element, and an alert has a perfectly
@@ -954,7 +955,7 @@
          message, which is also what scopes the gallery to this message, and
          the same reason it carries no role. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="content" onclick={imageClick} onkeydown={imageKeydown}>
+    <div use:fileLinks class="content" onclick={imageClick} onkeydown={imageKeydown}>
       {#if !continuation}
         <div class="meta">
           <span class="author" class:bot={!isUser}>{author}</span>
