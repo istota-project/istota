@@ -34,6 +34,7 @@ from email.utils import getaddresses, parseaddr
 from istota.confirmations import request_subject
 from istota.notifications.resolvers.task_alert import PRIVATE_NOTE_POINTER, flatten_body
 from istota.rooms.private_replies import NOTE_OUTCOMES
+from istota.scheduler import EMAIL_NOTE_STEP_LOG
 from testbed.services import mail
 
 #: The stack's own user and the second istota user `email_people` seeds.
@@ -62,9 +63,11 @@ AUTHSERV_ID = mail.SERVICE_NAME
 NOTE_LOG_LINE = "Private note to the host: "
 
 #: What `UserWorker.run` logs once `process_one_task` has returned, which is
-#: after the reply, the note and the note's push. The one marker a test can
-#: read that comes after the note step: nothing in the database does. It is in
-#: the daemon's log, not a table, so `worker_done` reads `Stack.logs`.
+#: after the reply, the note and the note's push. A completed email task has a
+#: better marker, the note step's own `task_logs` line (`note_step`, #651);
+#: this one is for a task that ends any other way (parked, or failed, whether
+#: or not its run wrote that line before its delivery failed). It
+#: is in the daemon's log, not a table, so `worker_done` reads `Stack.logs`.
 WORKER_DONE_RE = r"Worker [^/\s]+/[a-z]+: task {task_id} (completed|failed)\b"
 
 DEFAULT_TIMEOUT = 90.0
@@ -632,6 +635,54 @@ def worker_done(stack, task_id: int, *, attempts: int = 1,
         time.sleep(POLL_INTERVAL)
 
 
+def note_step(stack, task_id: int, timeout: float = DEFAULT_TIMEOUT) -> str | None:
+    """What the note step decided for `task_id`, once it has run, or None.
+
+    The scheduler writes one `task_logs` line, `EMAIL_NOTE_STEP_LOG` and the
+    decision, after `_write_email_note` and its push, for every email run
+    that succeeds without parking (#651), including one whose mail then
+    failed to send: `note written (<outcome>)`,
+    `no note due (<outcome>)`, `the note could not be written` or
+    `not an email thread`. A table row, so it needs no log scrape and no
+    settle, and "no note" becomes a decision read rather than an absence.
+    """
+    rows = _wait(lambda: stack.probe.task_log(task_id, contains=EMAIL_NOTE_STEP_LOG),
+                 timeout=timeout)
+    if not rows:
+        return None
+    return rows[-1]["message"][len(EMAIL_NOTE_STEP_LOG):].strip()
+
+
+def expected_note_step(expected: Expected) -> str:
+    """The note-step decision `expected` implies, or the prefix of one.
+
+    `no note due (` is a prefix: the outcome inside it (`sent`, `none`, …) is
+    not a dimension `Expected` names when no note is written.
+    """
+    if expected.note is not None:
+        return f"note written ({expected.note.outcome})"
+    if expected.room == "thread":
+        return "no note due ("
+    return "not an email thread"
+
+
+def gate_rung(probe, message_row_id: int) -> list[str]:
+    """The speech gate's recorded rungs for one stored turn, oldest first.
+
+    An unaddressed mail on a thread room is recorded only, and the rung says
+    on which rule: `mode_mention` is the email room's own (`room_policy.
+    effective_speech_mode` keeps an email-origin room off the classifier
+    whatever the deployment's mode), while `classifier` or `failed` would mean
+    the classifier was asked and its answer, or its failure, decided.
+    """
+    return [
+        row["rung"] for row in probe.query(
+            "SELECT rung FROM speech_gate_decisions WHERE message_id = ? ORDER BY id",
+            [message_row_id],
+        )
+    ]
+
+
 def parse_note(body: str) -> tuple[str | None, bool, str | None]:
     """`(outcome key, without_you, remark)` read off a note's text body.
 
@@ -669,9 +720,11 @@ def assert_outcome(
     In the order the dimensions are listed, collecting every mismatch before
     failing, so a broken run says everything that is wrong with it. Waits are
     bounded. A negative claim about something that happens after delivery (no
-    reply, no note) is read after the worker's completion line for the task,
-    the one marker that follows the note step, and "no reply" is then watched
-    for `NEGATIVE_SETTLE`, since a sent mail reaches IMAP after the line.
+    reply, no note) is read after the note step has recorded its decision
+    (`note_step`), which is itself checked against the expected note, for a
+    completed email task; a task that parked or failed is read after the
+    worker's completion line instead. "No reply" is then watched for `NEGATIVE_SETTLE`,
+    since a sent mail reaches IMAP after either line.
 
     Rows, transcript and pushes are read above the test's watermark, or above
     `since` for a later step of a test that has already sent mail. Alert mails
@@ -726,11 +779,19 @@ def assert_outcome(
                   bool(task.get("host_absent")))
     seen.task = task
     ran = task is not None and bool(task.get("started_at"))
-    attempts = int(task.get("attempt_count") or 0) + 1 if task else 1
-    settled = (worker_done(stack, task_id, attempts=attempts, timeout=timeout)
-               if ran else True)
-    if ran and not settled:
-        misses.append(f"worker: no completion line for task {task_id} in the log")
+    # A completed email task records its note step's decision; anything else
+    # that ran (parked, failed) is waited for by the worker's log line.
+    stepped = (ran and task.get("status") == "completed"
+               and task.get("source_type") == "email")
+    decision = None
+    if stepped:
+        decision = note_step(stack, task_id, timeout=timeout)
+        if decision is None:
+            misses.append(f"note step: no {EMAIL_NOTE_STEP_LOG!r} line for task {task_id}")
+    elif ran:
+        attempts = int(task.get("attempt_count") or 0) + 1
+        if not worker_done(stack, task_id, attempts=attempts, timeout=timeout):
+            misses.append(f"worker: no completion line for task {task_id} in the log")
 
     # 3. the room
     thread = probe.email_room(sent.message_id)
@@ -841,6 +902,9 @@ def assert_outcome(
                 r["message"] for r in probe.task_log(task_id, contains=NOTE_LOG_LINE)
             ])
     seen.note_body = body
+    if decision is not None and not decision.startswith(expected_note_step(expected)):
+        misses.append(f"note step: expected {expected_note_step(expected)!r}, "
+                      f"observed {decision!r}")
 
     # 8. notifications and pushes
     def fill(text: str) -> str:
@@ -947,5 +1011,5 @@ __all__ = [
     "confirm_command_from", "email_answer", "email_output_then", "person", "route",
     "send", "stamp", "wait_for_reply", "worker_done", "held_task", "prompt_push",
     "request_mail", "answer_by_mail", "filed_row", "assert_unknown_sender_prompt",
-    "held_draft",
+    "held_draft", "note_step", "expected_note_step", "gate_rung",
 ]

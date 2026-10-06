@@ -24,12 +24,14 @@ list) is read through its own routes.
 Two cases differ from the spec's wording, and the product is what is
 asserted:
 
-- **The web confirm route's 409** applies to a relay-held task only, one with
-  `whatsapp_confirmation_request_id` (a relay question, a `room post`, a guest
-  proposal): `webui.app._chat_confirm_task` asks `preview_rooms` only then.
-  A parked email-thread question has no request; since #665 its confirm is
-  refused only from the thread room itself. The 409 case here is a
-  `room post` into the shared room.
+- **The web confirm route's 409** has two arms, and both are driven. A
+  relay-held task, one with `whatsapp_confirmation_request_id` (a relay
+  question, a `room post`, a guest proposal), is refused from any room that
+  does not show its preview (`webui.app._chat_confirm_task` asks
+  `preview_rooms` only then): a `room post` into the shared room. A parked
+  email-thread question has no request, and since #665 it is refused only
+  from the thread room itself, which shows no question to answer:
+  `TestThePrivatePark`.
 - **"Default routing"** for the gate prompt is the user's alert route, which
   the seeding sets to the Talk alerts room plus ntfy rather than leaving
   unset; the Talk half is the provisioned alerts room either way
@@ -59,6 +61,7 @@ from istota.notifications.resolvers.outbound_draft import dedup_key as draft_ded
 from istota.rooms.private_replies import NOTE_OUTCOMES
 from istota.webui.app import (
     _CONFIRM_FROM_PRIVATE_CHAT,
+    _CONFIRM_NOT_IN_THREAD,
     ABOUT_ROOM_REFUSED,
     EMAIL_THREAD_READ_ONLY,
 )
@@ -820,6 +823,68 @@ class TestThePrivatePark:
         assert PARK_UNDELIVERED_BODY not in " ".join(
             " ".join(p.headers.values()) + p.body.decode("utf-8", "replace")
             for p in ntfy.pushes()), pushes
+
+    def test_the_thread_room_hides_the_question_and_refuses_its_confirm(
+        self, stack, email_people, web,
+    ):
+        """A thread task's parked question belongs to the host's private room
+        (#665). The thread room's history keeps the mail as a turn and renders
+        no answer and no `active_tasks` entry for the task, while the private
+        room shows the question. `POST /chat/tasks/{id}/confirm` naming the
+        thread room is refused 409 (`_CONFIRM_NOT_IN_THREAD`) and changes
+        nothing; naming the private room approves it, and the re-run, scripted
+        afresh, answers on the thread.
+        """
+        nonce = flow.new_nonce()
+        question = (f"I can move the delivery to Friday {nonce}.\n\n"
+                    "Should I proceed?")
+        sent, sender, _other, _plus = _trusted_thread(
+            stack, email_people, nonce, [{"text": question}])
+        task_id = flow.filed_row(stack, sent)["task_id"]
+        assert task_id is not None, sent
+        _finished(stack, task_id, status="pending_confirmation")
+        assert flow.worker_done(stack, task_id), f"task {task_id} never finished"
+        thread = _listed(web, stack.probe.email_room(sent.message_id))
+
+        answer = web.get(f"/chat/rooms/{thread['id']}/messages", params={"limit": 200})
+        assert answer.status_code == 200, answer.text
+        payload = answer.json()
+        mine = [r for r in payload["messages"] if r.get("task_id") == task_id]
+        assert [r["role"] for r in mine] == ["user"], mine
+        assert [t for t in payload["active_tasks"] if t["id"] == task_id] == [], payload
+        park = _wait(lambda: [
+            r for r in stack.probe.room_messages(web.rooms.private["token"])
+            if (r.get("delivery_reference") or "").startswith(
+                f"private-confirmation:{task_id}:")])
+        assert park and len(park) == 1, park
+        shown = _history_row(web, web.rooms.private, park[0]["id"])
+        assert "Should I proceed?" in (shown.get("text") or ""), shown
+
+        refused = web.post(f"/chat/tasks/{task_id}/confirm", {"room": thread["token"]})
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["detail"] == _CONFIRM_NOT_IN_THREAD
+        assert stack.probe.tasks(task_id=task_id)[0]["status"] == "pending_confirmation"
+
+        # The re-run carries the same marker and starts at turn 0 again, so
+        # its route is replaced before the approval that queues it.
+        done = f"Moved to Friday {nonce}."
+        stack.script([
+            *[item for item in stack.endpoint.turns
+              if not (isinstance(item, dict)
+                      and item.get("when") == flow.marker_text(nonce))],
+            flow.route(nonce, [flow.email_answer(done)]),
+        ])
+        confirmed = web.post(f"/chat/tasks/{task_id}/confirm",
+                             {"room": web.rooms.private["token"]})
+        assert confirmed.status_code == 200, confirmed.text
+        # The park attempt already logged its worker line, so `_finished`
+        # alone would return at once; the re-run's last step is its note.
+        _finished(stack, task_id)
+        decision = flow.note_step(stack, task_id)
+        assert decision is not None and decision.startswith("note written ("), decision
+        reply = _wait(lambda: flow.reply_to(stack, sent))
+        assert reply is not None and flow.recipients(reply, "To") == (
+            sender.address,), reply
 
 
 @FULL

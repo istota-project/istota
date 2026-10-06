@@ -260,7 +260,9 @@ class TestAMixedThread:
            the host on the mail (`email_note_due`).
         3. alice replies to all, adding two strangers, without naming the
            bot, the host in Cc: recorded only (`thread_addressed`), each
-           newcomer a participant and an epoch split.
+           newcomer a participant and an epoch split. The gate's rung is
+           `mode_mention`: the email room stays off the classifier that is
+           the deployment's default (`room_policy.effective_speech_mode`).
         4. A stranger now on the thread replies to all, naming the bot: not
            held at the gate, since they are present, and asked. The reply is
            held, a draft whose Open link is the draft's own room on lean
@@ -367,7 +369,7 @@ class TestAMixedThread:
             text=f"looping in two colleagues who know the area {nonce}",
             marker=f"3-{nonce}", reply_to_msg=two,
         )
-        flow.assert_outcome(stack, three, flow.Expected(
+        seen_three = flow.assert_outcome(stack, three, flow.Expected(
             processed=flow.Processed(
                 routing_method="thread_room", user_id=email_people.host_id,
                 host_asked=False, sender_check="verified",
@@ -384,6 +386,10 @@ class TestAMixedThread:
             reply=None, note=None,
             notices=flow.Notices(rows=frozenset(), pushes=(), alert_mails=0),
         ), since=since)
+        # Recorded on the email room's own rule, `mention`, though the
+        # deployment's default is the classifier: no model was asked.
+        [incoming] = [r for r in seen_three.rows if r["role"] == "user"]
+        assert flow.gate_rung(stack.probe, incoming["id"]) == ["mode_mention"]
         assert [(e["reason"], e["person"]) for e in _split_epochs(stack, room)] == [
             ("email_join", f"email:{stranger.address}"),
             ("email_join", f"email:{newcomer.address}"),
