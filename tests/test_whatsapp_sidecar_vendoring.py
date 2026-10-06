@@ -338,9 +338,11 @@ def _js_send_keys(message_const: str) -> set[str]:
     that assertion's pattern rather than loosening this.
     """
     source = PROGRAM.read_text()
-    marker = f"this.link.send({message_const}, {{"
-    sites = source.count(marker)
+    # `hold` is `send` with a queue behind it (ISSUE-666); both are send sites.
+    markers = [f"this.link.{verb}({message_const}, {{" for verb in ("send", "hold")]
+    sites = sum(source.count(marker) for marker in markers)
     assert sites == 1, f"{message_const} has {sites} send sites, not 1"
+    marker = next(marker for marker in markers if marker in source)
     start = source.index(marker) + len(marker)
     depth = 1
     index = start
@@ -1460,7 +1462,7 @@ class TestTheSidecarsControlFlow:
         # Ordering, not merely presence: the withhold has to sit ahead of the
         # frame, because what it is protecting is the daemon's dedup claim.
         assert (body.index("hasReadableContent(message)")
-                < body.index("this.link.send(MSG_INBOUND"))
+                < body.index("this.link.hold(MSG_INBOUND"))
         assert "isForwardableJid" in _js_function("chatAddress")
         assert "@s.whatsapp.net" in _js_const("USER_JID_DOMAIN")
         assert "@lid" in _js_const("LID_JID_DOMAIN")
@@ -4016,3 +4018,206 @@ class TestTheSidecarFetchesAClaimedFile:
 
         assert out["fetched"] == []
         assert out["answers"][0]["ok"] is False
+
+
+class TestAFrameIsHeldWhileTheLinkIsDown:
+    """ISSUE-666: an inbound message arriving while the daemon link is down is
+    held and sent after the next ``hello``, not dropped.
+
+    Baileys has already acknowledged the message to WhatsApp by the time the
+    sidecar forwards it, so nothing redelivers one the sidecar drops. A
+    scheduler restart leaves a gap of several seconds with no socket, and every
+    message in that gap used to be logged as reaching nobody and lost.
+
+    Held in memory only, on the session directory's "no content on disk" rule:
+    a scheduler restart is the common case and memory survives it. A frame
+    is shifted out of the hold as it is written, so nothing is resent.
+    """
+
+    @staticmethod
+    def _run(script: str):
+        return TestTheSidecarsInboundMedia._run(script)
+
+    PREAMBLE = (
+        f"const m = require({json.dumps(str(PROGRAM))});"
+        "const writes = [];"
+        "const fake = () => ({ destroyed: false, write(raw) {"
+        " writes.push(JSON.parse(raw.toString('utf8'))); } });"
+    )
+
+    def test_a_frame_held_while_down_is_sent_after_hello(self):
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused'); let done = 0;"
+            "const roster = link.hold(m.MSG_GROUP_ROSTER, {group_jid: 'g'});"
+            "const held = link.hold(m.MSG_INBOUND, {message_id: 'M1'},"
+            " () => { done += 1; });"
+            "const before = done;"
+            "link.socket = fake(); link.greet();"
+            "process.stdout.write(JSON.stringify({roster, held, before, done,"
+            " writes, left: link.held.length}));"
+        )
+
+        assert (out["roster"], out["held"]) == (False, False)
+        assert out["before"] == 0
+        assert [w["type"] for w in out["writes"]] == [
+            proto.MSG_HELLO, proto.MSG_GROUP_ROSTER, proto.MSG_INBOUND]
+        assert out["done"] == 1
+        assert out["left"] == 0
+
+    def test_a_frame_on_a_connecting_socket_is_not_written_ahead_of_hello(self):
+        """``net.createConnection`` returns a socket that is not yet connected
+        and not destroyed, so the old liveness test let a frame be written
+        ahead of ``hello``. The daemon reads anything else first as a peer
+        talking before introducing itself and drops the link, frame and all."""
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused'); link.socket = fake();"
+            "const sent = link.send(m.MSG_INBOUND, {message_id: 'M1'});"
+            "const held = link.hold(m.MSG_INBOUND, {message_id: 'M2'});"
+            "const early = writes.length; link.greet();"
+            "process.stdout.write(JSON.stringify({sent, held, early, writes}));"
+        )
+
+        assert out["sent"] is False
+        assert out["held"] is False
+        assert out["early"] == 0
+        assert [w.get("message_id") for w in out["writes"]] == [None, "M2"]
+
+    def test_a_live_link_sends_at_once(self):
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused'); link.socket = fake();"
+            "link.greet(); let done = 0;"
+            "const sent = link.hold(m.MSG_INBOUND, {message_id: 'M1'},"
+            " () => { done += 1; });"
+            "process.stdout.write(JSON.stringify({sent, done, writes,"
+            " left: link.held.length}));"
+        )
+
+        assert out["sent"] is True
+        assert out["done"] == 1
+        assert [w["type"] for w in out["writes"]] == [
+            proto.MSG_HELLO, proto.MSG_INBOUND]
+        assert out["left"] == 0
+
+    def test_a_half_closed_socket_holds_rather_than_writes(self):
+        """The daemon's FIN makes the socket unwritable a few ticks before
+        ``close`` destroys it; a write in that gap is lost."""
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused'); link.socket = fake();"
+            "link.greet(); link.socket.writable = false;"
+            "const held = link.hold(m.MSG_INBOUND, {message_id: 'M1'});"
+            "link.socket = fake(); link.greeted = false; link.greet();"
+            "process.stdout.write(JSON.stringify({held,"
+            " ids: writes.map((w) => w.message_id || w.type)}));"
+        )
+
+        assert out["held"] is False
+        assert out["ids"] == [proto.MSG_HELLO, proto.MSG_HELLO, "M1"]
+
+    def test_a_failed_receipt_is_held_too(self):
+        """Baileys has consumed a status update by the time it is forwarded,
+        and a lost ``failed`` leaves the ledger row at its accept-time state."""
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused');"
+            "const s = new m.Session(link);"
+            "s.onReceipts([{key: {id: 'OUT1', fromMe: true}, update: {status: 0}}]);"
+            "link.socket = fake(); link.greet();"
+            "process.stdout.write(JSON.stringify(writes.slice(1)));"
+        )
+
+        assert [(f["type"], f["message_id"], f["status"]) for f in out] == [
+            (proto.MSG_RECEIPT, "OUT1", "failed")]
+
+    def test_a_roster_that_never_reaches_the_daemon_is_sent_again(self):
+        """A group's first message fetches its roster only while the group is
+        unknown, so a refused roster has to be forgotten, or the group's later
+        messages arrive at a daemon that never registered the room."""
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused');"
+            "for (let i = 0; i < m.HOLD_LIMIT; i += 1)"
+            " link.hold(m.MSG_INBOUND, {message_id: 'M' + i});"
+            "const s = new m.Session(link);"
+            "s.sendGroupRoster('1203@g.us', {metadata: {participants: [],"
+            " subject: 'x'}}).then(() => process.stdout.write(JSON.stringify("
+            "{known: s.groupRosters.has('1203@g.us')})));"
+        )
+
+        assert out["known"] is False
+
+    def test_the_hold_is_bounded_by_count(self):
+        """Past the limit a new frame is refused rather than an old one
+        evicted: a group's roster is held ahead of its first message, and
+        evicting from the front could drop the roster and keep the message."""
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused'); const answers = [];"
+            "for (let i = 0; i <= m.HOLD_LIMIT; i += 1)"
+            " answers.push(link.hold(m.MSG_INBOUND, {message_id: 'M' + i}));"
+            "link.socket = fake(); link.greet();"
+            "process.stdout.write(JSON.stringify({limit: m.HOLD_LIMIT,"
+            " refused: answers.filter((a) => a === null).length,"
+            " ids: writes.slice(1).map((w) => w.message_id)}));"
+        )
+
+        assert out["refused"] == 1
+        assert len(out["ids"]) == out["limit"]
+        assert out["ids"][0] == "M0"
+        assert out["ids"][-1] == f"M{out['limit'] - 1}"
+
+    def test_a_frame_held_past_its_age_is_dropped(self):
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused'); let now = 1000; let done = 0;"
+            "link.now = () => now;"
+            "link.hold(m.MSG_INBOUND, {message_id: 'OLD'}, () => { done += 1; });"
+            "now += m.HOLD_MAX_AGE_MS + 1;"
+            "link.hold(m.MSG_INBOUND, {message_id: 'NEW'});"
+            "link.socket = fake(); link.greet();"
+            "process.stdout.write(JSON.stringify({done,"
+            " ids: writes.slice(1).map((w) => w.message_id)}));"
+        )
+
+        assert out["ids"] == ["NEW"]
+        assert out["done"] == 0
+
+    def test_the_age_bound_is_inside_the_daemons_orphan_window(self):
+        """A held frame can name a staged media file, and the daemon's sweep
+        unlinks any staged file older than ``MEDIA_ORPHAN_SECONDS``. A frame
+        held longer than that would arrive naming a file already swept."""
+        held_ms = int(_js_const("HOLD_MAX_AGE_MS").replace("_", ""))
+        assert held_ms * 2 <= media.MEDIA_ORPHAN_SECONDS * 1000
+
+    def test_handle_messages_holds_a_message_and_remembers_it_on_delivery(self):
+        """Through the seam: ``handleMessages`` on a link with no socket, then
+        a reconnect. ``rememberInbound`` runs when the frame is delivered, so
+        a quote of the held message still resolves, and the frame decodes on
+        the daemon's side."""
+        chat = "15550001111@s.whatsapp.net"
+        message = {
+            "key": {"id": "H1", "remoteJid": chat},
+            "message": {"conversation": "hello there"},
+        }
+        out = self._run(
+            self.PREAMBLE
+            + "const link = new m.Link('unused');"
+            "const s = new m.Session(link);"
+            f"s.handleMessages({{type: 'notify', messages: [{json.dumps(message)}]}})"
+            ".then(() => {"
+            f" const before = Boolean(m.recallInbound('H1', {json.dumps(chat)}));"
+            " link.socket = fake(); link.greet();"
+            f" const after = Boolean(m.recallInbound('H1', {json.dumps(chat)}));"
+            " process.stdout.write(JSON.stringify({before, after,"
+            "  frames: writes.slice(1)}));"
+            "});"
+        )
+
+        assert out["before"] is False
+        assert out["after"] is True
+        assert [f["type"] for f in out["frames"]] == [proto.MSG_INBOUND]
+        event = proto.inbound_event(out["frames"][0])
+        assert (event.message_id, event.text) == ("H1", "hello there")

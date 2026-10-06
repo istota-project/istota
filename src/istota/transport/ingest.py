@@ -259,6 +259,7 @@ def _ask_gate(
     classified: speech_gate.GateDecision | None,
     author_kind: str = participants.PRINCIPAL,
     policy: "_PolicyAnswer | None" = None,
+    worded: bool = True,
 ) -> speech_gate.GateDecision:
     """Whether a stored turn gets a task, with the decision audited.
 
@@ -283,6 +284,7 @@ def _ask_gate(
         ),
         classified=classified,
         model=config.speech_gate.model,
+        worded=worded,
     )
     speech_gate.record_decision(
         conn, room_token=room_token, surface=surface, user_id=user_id,
@@ -601,6 +603,9 @@ def record_inbound(
     # caller ran before opening its transaction. Read only on the gate's
     # classifier rung; without it that rung fails closed.
     classified: speech_gate.GateDecision | None = None,
+    # False for a turn with no words of its own (an uncaptioned file): with
+    # nothing to classify, the classifier rung records that rather than a fault.
+    worded: bool = True,
     # Who wrote the turn, when it is not `user_id` speaking for themselves: a
     # guest or a bot in a room. A ref with no user id is recorded and never
     # creates a task; `user_id` is then empty and feeds only the audit row.
@@ -981,6 +986,7 @@ def record_inbound(
             user_id=user_id, message_id=message_id,
             is_multi_human=multi_human, addressed_to_bot=addressed_to_bot,
             classified=classified, author_kind=author_kind, policy=policy,
+            worded=worded,
         )
         if not decision.speak:
             return InboundResult(
