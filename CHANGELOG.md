@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workspace file previews can show Markdown, source text, audio, video and PDF pages in a shared viewer with Download and Close. Images open in the zoom viewer, which now has a visible close button on phones.
+
 - Workspace files now have an authenticated preview API for text, raster images, audio, video and PDFs. Text previews are bounded, and HTML and SVG remain source text; original downloads keep their existing behavior.
 
 - **A WhatsApp group question about an earlier photo now sees the photo** (#658). On Baileys, a member who quotes a photo, GIF or voice note left unopened and addresses the bot gets the file attached to that question, and so does a member who sends a photo and then, within two minutes and with nothing answered in between, asks the bot about it. The file goes to the asking member's inbox, the earlier message's line in the room changes to say it was opened, and a guest's file is still never opened either way. A quoted file can be another member's, since everyone in the group has seen it.

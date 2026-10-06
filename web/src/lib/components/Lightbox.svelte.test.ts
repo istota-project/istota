@@ -495,3 +495,31 @@ describe('trackpad and mouse wheel', () => {
     expect(scaleOf(img)).toBe(1);
   });
 });
+
+describe('visible viewer controls', () => {
+  it('has a close button for a single image even after zoom', async () => {
+    const onClose = vi.fn();
+    const { container } = render(Lightbox, { images: [IMAGES[0]], index: 0, onClose });
+    await pinch(container.querySelector('img')!, 100, 250);
+    await fireEvent.click(screen.getByRole('button', { name: 'Close image' }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it('downloads the current image without its sizing fragment', async () => {
+    const onClose = vi.fn();
+    render(Lightbox, {
+      images: ['/istota/api/chat/files?path=%2Freport.png#w=80'],
+      index: 0,
+      onClose,
+      download: true,
+    });
+    const link = screen.getByRole('link', { name: 'Download' });
+    expect(link.getAttribute('href')).toBe('/istota/api/chat/files?path=%2Freport.png');
+    expect(link.getAttribute('download')).toBe('report.png');
+    await fireEvent.click(link);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+  it('omits Download when not requested', () => {
+    open();
+    expect(screen.queryByRole('link', { name: 'Download' })).toBeNull();
+  });
+});

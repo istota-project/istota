@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { Button } from '$lib/components/ui';
   import { ChevronLeft, ChevronRight } from '@lucide/svelte';
   import {
     FIT,
@@ -23,13 +24,26 @@
     images = [],
     index = null,
     onClose,
+    download = false,
   }: {
     images?: string[];
     index?: number | null;
     onClose: () => void;
+    download?: boolean;
   } = $props();
 
   let current = $state<number | null>(null);
+  let downloadHref = $derived(current === null ? '' : (images[current] ?? '').split('#')[0]);
+  let downloadName = $derived.by(() => {
+    if (!downloadHref) return '';
+    try {
+      const path = new URL(downloadHref, 'https://example.com').searchParams.get('path');
+      return path?.split('/').pop() ?? '';
+    } catch {
+      return '';
+    }
+  });
+
   let zoom = $state<ZoomState>(FIT);
   let smooth = $state(false);
   let imgEl = $state<HTMLImageElement | null>(null);
@@ -251,7 +265,7 @@
 
   /** The nav buttons keep their own behaviour; a tap on one is not a gesture. */
   function isControl(target: EventTarget | null): boolean {
-    return target instanceof Element && target.closest('.controls') !== null;
+    return target instanceof Element && target.closest('.controls, .file-controls') !== null;
   }
 
   function onPointerDown(e: PointerEvent) {
@@ -436,6 +450,20 @@
       style:transform="translate({zoom.x}px, {zoom.y}px) scale({zoom.scale})"
       style:transition={smooth ? 'transform 180ms ease-out' : 'none'}
     />
+    <div class="file-controls">
+      {#if download}
+        <Button href={downloadHref} download={downloadName} onclick={(e) => e.stopPropagation()}
+          >Download</Button
+        >
+      {/if}
+      <Button
+        ariaLabel="Close image"
+        onclick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}>Close</Button
+      >
+    </div>
     {#if images.length > 1}
       <div class="controls">
         <button class="nav" onclick={prev} aria-label="Previous image">
@@ -451,6 +479,18 @@
 {/if}
 
 <style>
+  .file-controls {
+    position: absolute;
+    top: max(var(--space-4), var(--safe-top));
+    right: max(var(--space-4), var(--safe-right));
+    left: max(var(--space-4), var(--safe-left));
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    cursor: default;
+    touch-action: manipulation;
+  }
+
   .lightbox {
     position: fixed;
     inset: 0;

@@ -41,6 +41,7 @@
     "highlight.js": "^11.11.1",
     "maplibre-gl": "^5.21.1",
     "markdown-it": "^14.2.0",
+    "pdfjs-dist": "^6.4.299",
     "uqr": "^0.1.3"
   }
 }
