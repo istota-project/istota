@@ -554,7 +554,7 @@ describe('chat store — live room stream', () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].msgId).toBe(10);
     expect(msgs[0].starred).toBe(true);
-    // An assistant body belongs to the task stream — never overwritten here.
+    // The stored body is the answer of record (#659); here it is unchanged.
     expect(msgs[0].text).toBe('already here');
     s.teardown();
   });

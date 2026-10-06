@@ -177,7 +177,11 @@ from istota.rooms.surfaces import (
     is_room_view,
     origin_surface_for_source_type,
 )
-from .transport.registry import _surface_for_source_type
+from .transport.registry import (
+    _surface_for_source_type,
+    answer_is_stored_verbatim,
+    result_event_payload,
+)
 from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
 from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
@@ -2876,9 +2880,9 @@ def run_task_inline(
         if is_cancelled:
             event_writer.emit("cancelled")
         elif success:
-            # Full answer — the `result` event is the deliverable to stream
-            # surfaces (web/REPL) and must not be clipped (ISSUE-178).
-            event_writer.emit("result", {"text": result, "truncated": False})
+            # Full answer, never clipped (ISSUE-178), and only where the store
+            # keeps it verbatim (#659).
+            event_writer.emit("result", result_event_payload(task, result))
         else:
             event_writer.emit(
                 "error",
@@ -2894,7 +2898,7 @@ def run_task_inline(
         # the terminal event has fired — the in-process subscriber already
         # rendered them live, so retaining the rows only bloats the log.
         from .transport.registry import task_is_stream_surface
-        if task_is_stream_surface(config, task):
+        if task_is_stream_surface(config, task) or not answer_is_stored_verbatim(task):
             with db.get_db(config.db_path) as _prune_conn:
                 db.delete_task_events_by_kind(_prune_conn, task.id, "text_delta")
                 db.delete_task_events_by_kind(_prune_conn, task.id, "thinking")
@@ -4466,9 +4470,12 @@ def process_one_task(
             if is_confirmation_request:
                 event_writer.emit("confirmation", {"prompt": result})
             elif success:
-                # Full answer — see ISSUE-178. The canonical body is stored
-                # untruncated in `messages`; the live `result` event must match.
-                event_writer.emit("result", {"text": result, "truncated": False})
+                # Full answer — see ISSUE-178 — and only where every stored
+                # row is the result unchanged. Otherwise the frame carries no
+                # text: a follower takes the body from the room's stored row,
+                # since one task can store into several rooms and the frame is
+                # one for all of them (#659).
+                event_writer.emit("result", result_event_payload(task, result))
             elif flags["is_cancelled"]:
                 event_writer.emit("cancelled")
             else:
@@ -4492,7 +4499,10 @@ def process_one_task(
             # record of the text above the question (ISSUE-592). The re-run's
             # own terminal prune takes them; a question that is declined or
             # expires leaves them to task retention.
-            if plan_web and not is_confirmation_request:
+            # A task whose stored body is transformed streamed no preview, and
+            # the prune makes that hold for a row written before the gate
+            # existed or by a path that bypassed it (#659).
+            if (plan_web or not answer_is_stored_verbatim(task)) and not is_confirmation_request:
                 with db.get_db(config.db_path) as _prune_conn:
                     db.delete_task_events_by_kind(_prune_conn, task_id, "text_delta")
                     db.delete_task_events_by_kind(_prune_conn, task_id, "thinking")
