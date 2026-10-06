@@ -4069,9 +4069,13 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
     frames: list[dict] = []
     if task.status == "completed":
         # Full answer from the durable task row — the resume/backstop frame
-        # must not re-clip what the live path now delivers whole (ISSUE-178).
-        frames.append({"seq": seq, "kind": "result",
-                       "payload": {"text": task.result or ""}})
+        # must not re-clip what the live path now delivers whole (ISSUE-178)
+        # — under the live frame's rule: no text where the store transformed
+        # it, since `tasks.result` is then the raw result (#659).
+        from istota.transport.registry import result_event_payload
+        payload = result_event_payload(task, task.result or "")
+        payload.pop("truncated", None)
+        frames.append({"seq": seq, "kind": "result", "payload": payload})
     elif task.status == "cancelled":
         frames.append({"seq": seq, "kind": "cancelled", "payload": {}})
     else:  # failed — mirror the live error frame's raw-ish message

@@ -209,6 +209,13 @@ The second linking route (`.claude/rules/transport.md`, "Private replies", which
 - `db.replace_room_binding` is a compare-and-set; the race loser deletes its conversation. Same transaction: `db.clear_room_external_ids` and `db.clear_stale_talk_delivery_token` (non-terminal tasks holding the old ref).
 - Returns `{status, room}`. No explicit unbind, deliberately.
 
+### A followed turn is the stored row (#659)
+
+- The assistant placeholder for task N takes its body from the room's stored assistant row for task N, which arrives over the room stream. `appendStreamedRow` adopts it whichever stream lands first (`segments.adoptStoredAnswer`, plus the row's `mail`), including when `done` already stamped the row's `msg_id`; `storedAnswer` then stops a late `text_delta` or a `result` frame from changing the text.
+- `dropUnstoredTurn` removes the placeholder when `done` arrives with `stop_reason: completed`, no `msg_id`, and no row adopted yet. A row that lands later (an email thread's mail, stored by another path than the one `done` reports) is inserted as an ordinary new row. A question, an error and a cancellation stay: a `confirmation` frame is not a stored row, and an email thread's parked question is answerable from the thread room by design, so its card shows there live for the host (the only follower) though the room stores no row for it.
+- The `(task_id, role)` merge is for `user` and `assistant` rows only. A room can hold several system rows for one task (a private park, then its pass-on note), which dedup on their own ids.
+- The server sends `result` text only where the store keeps the answer verbatim (`.claude/rules/scheduler.md`), so the raw answer of an email thread task, which is the host's private note, never reaches the client. The dev mock's `done` carries `msg_id` for the same reason the real one does.
+
 ### Live room-event stream
 
 - `GET /chat/stream`: one session-lived connection tailing `messages` for every member room. An unsettled streamed `user` row opens a task stream. Cursor is `messages.id`.

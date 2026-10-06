@@ -58,6 +58,47 @@ def task_is_stream_surface(config: "Config", task: "db.Task") -> bool:
     )
 
 
+# Source types whose stored body is never the raw result: an email task records
+# the composed mail (a thread room) or the unwrapped envelope (a private email
+# room), a briefing its parsed body. The silent-job `ACTION:` strip is the third
+# transformation and is read off `heartbeat_silent`.
+_TRANSFORMED_SOURCE_TYPES = frozenset({"email", "briefing"})
+
+
+def answer_is_stored_verbatim(task: "db.Task") -> bool:
+    """Whether every room this task stores into will hold its raw result
+    unchanged (#659).
+
+    Decided once, from the task alone, because the live stream needs the answer
+    before the result exists: it gates the `text_delta` preview
+    (`task_streams_answer`) and whether the terminal `result` frame carries
+    text at all. Where it is False, a follower sees progress and then the room's
+    stored row, and neither the preview nor the `result` frame carries the raw
+    result, which on an email thread is the host's private note. (With
+    `[scheduler] progress_show_text` on, a brain's text blocks still reach the
+    log as `progress_text`; that setting is off by default.) Keep this in step with the
+    body-selection chain in `scheduler.process_one_task`; a new transformation
+    there that is missing here shows a live view the store contradicts."""
+    if getattr(task, "heartbeat_silent", False):
+        return False
+    return (task.source_type or "") not in _TRANSFORMED_SOURCE_TYPES
+
+
+def task_streams_answer(config: "Config", task: "db.Task") -> bool:
+    """Whether answer and reasoning text stream live as `text_delta` and
+    `thinking`: a stream surface whose stored body is the result unchanged."""
+    return task_is_stream_surface(config, task) and answer_is_stored_verbatim(task)
+
+
+def result_event_payload(task: "db.Task", result: str) -> dict:
+    """The terminal `result` frame. It carries the answer only where the store
+    keeps it verbatim; otherwise a follower takes the body from the room's
+    stored row, or shows nothing when there is none (#659)."""
+    if answer_is_stored_verbatim(task):
+        return {"text": result, "truncated": False}
+    return {"truncated": False}
+
+
 class TransportRegistry:
     """Holds the enabled transports and resolves one for a task."""
 
