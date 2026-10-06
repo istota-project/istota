@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { addRoomMember } from '$lib/api';
   import type {
     ChatRoom,
     GuestReply,
@@ -9,7 +10,7 @@
     SpeechMode,
   } from '$lib/api';
   import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
-  import RoomMembers from './RoomMembers.svelte';
+  import RoomMembers, { type AddRequest } from './RoomMembers.svelte';
   import RoomGroupLink from './RoomGroupLink.svelte';
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';
   import {
@@ -286,6 +287,11 @@
   // is set. Per member, like the colour, so the host lock does not apply.
   let listedValue = $state(untrack(() => !!room.listed));
   let showDeleteConfirm = $state(false);
+  // A member add waiting on its confirmation, and why the last one failed.
+  let pendingAdd = $state<AddRequest | null>(null);
+  let addError = $state('');
+  // Bumped after a confirmed add so the members pane lists the new member.
+  let membersEpoch = $state(0);
   let copied = $state(false);
   let copyError = $state('');
   let lastRoomId = $state(untrack(() => room.id));
@@ -303,6 +309,8 @@
       speechModeValue = room.policy?.speech_mode ?? '';
       dispositionValue = room.policy?.disposition ?? '';
       showDeleteConfirm = false;
+      pendingAdd = null;
+      addError = '';
       copied = false;
       copyError = '';
     }
@@ -369,16 +377,49 @@
     onSave(patch);
   }
 
-  // Only one dialog is up at a time: settings steps aside while the delete
-  // confirm is shown, and its unsaved edits are still here if that is cancelled.
-  // Hiding it for the confirm is not a close, so it must not reach `onClose`.
+  // Only one dialog is up at a time: settings steps aside while the delete or
+  // add confirm is shown, and its unsaved edits are still here afterwards.
+  // Hiding it for a confirm is not a close, so it must not reach `onClose`.
+  // The add confirm lives here rather than in the members pane because that
+  // pane is unmounted while settings is hidden.
+  const confirming = $derived(showDeleteConfirm || pendingAdd !== null);
+
   function handleOpenChange(next: boolean) {
-    if (!next && !showDeleteConfirm) onClose();
+    if (!next && !confirming) onClose();
+  }
+
+  // The add discloses the whole transcript, so the dialog states how much.
+  function addDisclosure(request: AddRequest): string {
+    const count = request.messageCount;
+    return (
+      `${request.displayName} will see all ${count} message${count === 1 ? '' : 's'} in this ` +
+      'room, everything said here before they joined included.'
+    );
+  }
+
+  function requestAdd(request: AddRequest) {
+    addError = '';
+    pendingAdd = request;
+  }
+
+  async function confirmAdd() {
+    const request = pendingAdd;
+    pendingAdd = null;
+    if (!request) return;
+    const forRoom = room.id;
+    try {
+      await addRoomMember(forRoom, request.userId);
+      if (forRoom !== room.id) return;
+      membersEpoch += 1;
+      onMembersChanged?.();
+    } catch (e) {
+      if (forRoom === room.id) addError = e instanceof Error ? e.message : 'That didn’t work.';
+    }
   }
 </script>
 
 <Modal
-  open={open && !showDeleteConfirm}
+  open={open && !confirming}
   title="Room settings"
   onOpenChange={handleOpenChange}
   width="380px"
@@ -587,14 +628,18 @@
 
   <div class="field">
     <span>Members</span>
-    <RoomMembers
-      roomId={room.id}
-      {userId}
-      talkBound={onTalk}
-      phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
-      onChanged={onMembersChanged}
-      {onLeft}
-    />
+    {#key membersEpoch}
+      <RoomMembers
+        roomId={room.id}
+        {userId}
+        talkBound={onTalk}
+        phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
+        onChanged={onMembersChanged}
+        {onLeft}
+        onRequestAdd={requestAdd}
+        {addError}
+      />
+    {/key}
   </div>
 
   <div class="field">
@@ -687,6 +732,16 @@
   challenge={room.name}
   confirmLabel="Delete this room"
   onConfirm={onDelete}
+/>
+
+<ConfirmDialog
+  open={pendingAdd !== null}
+  title={pendingAdd ? `Add ${pendingAdd.displayName}` : 'Add member'}
+  message={pendingAdd ? addDisclosure(pendingAdd) : ''}
+  confirmLabel="Add and share the history"
+  confirmVariant="primary"
+  onConfirm={confirmAdd}
+  onCancel={() => (pendingAdd = null)}
 />
 
 <style>

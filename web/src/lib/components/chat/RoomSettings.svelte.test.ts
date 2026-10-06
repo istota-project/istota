@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
+import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
 // The members and group panes fetch on mount. Answered with an empty room so
@@ -832,5 +832,104 @@ describe('RoomSettings — show in room list', () => {
     await fireEvent.click(box()!);
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(onSave).toHaveBeenCalledWith({ listed: false });
+  });
+});
+
+describe('RoomSettings — add a member', () => {
+  afterEach(() => {
+    cleanup();
+    api.getRoomMembers.mockResolvedValue({ members: [], can_manage: false, message_count: 0 });
+    api.getChatUsers.mockResolvedValue({ users: [] });
+  });
+
+  /** bits-ui's select commits on pointerup, not on click. */
+  async function pickMember(optionLabel: string) {
+    const trigger = await screen.findByRole('button', { name: 'Member to add' });
+    await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+    await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+    await fireEvent.click(trigger);
+    const item = (await screen.findByText(optionLabel)).closest('[data-select-item]');
+    if (!item) throw new Error(`no option ${optionLabel}`);
+    await fireEvent.pointerMove(item, { pointerType: 'mouse' });
+    await fireEvent.pointerDown(item, { pointerType: 'mouse', button: 0 });
+    await fireEvent.pointerUp(item, { pointerType: 'mouse', button: 0 });
+  }
+
+  it('shows one dialog at a time, adds on confirm, and returns to settings with edits kept', async () => {
+    const alice = { user_id: 'alice', display_name: 'Alice', is_owner: true };
+    const bob = { user_id: 'bob', display_name: 'Bob', is_owner: false };
+    api.getRoomMembers.mockResolvedValue({ members: [alice], can_manage: true, message_count: 7 });
+    api.getChatUsers.mockResolvedValue({
+      users: [
+        { user_id: 'alice', display_name: 'Alice' },
+        { user_id: 'bob', display_name: 'Bob' },
+      ],
+    });
+    api.addRoomMember.mockResolvedValue({ member: bob });
+    const onClose = vi.fn();
+    const onMembersChanged = vi.fn();
+    render(RoomSettings, {
+      props: {
+        open: true,
+        room: room(),
+        userId: 'alice',
+        onSave: vi.fn(),
+        onDelete: vi.fn(),
+        onPromote: vi.fn(),
+        onClose,
+        onMembersChanged,
+      },
+    });
+    await fireEvent.input(screen.getByDisplayValue('general'), { target: { value: 'renamed' } });
+    await pickMember('Bob');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Add Bob' })).toBeTruthy();
+    expect(screen.getByText(/Bob will see all 7 messages/)).toBeTruthy();
+    expect(api.addRoomMember).not.toHaveBeenCalled();
+
+    api.getRoomMembers.mockResolvedValue({
+      members: [alice, bob],
+      can_manage: true,
+      message_count: 7,
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add and share the history' }));
+    await waitFor(() => expect(api.addRoomMember).toHaveBeenCalledWith(1, 'bob'));
+    await waitFor(() => expect(onMembersChanged).toHaveBeenCalled());
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Room settings' })).toBeTruthy();
+    expect(await screen.findByText('Bob')).toBeTruthy();
+    expect(screen.getByDisplayValue('renamed')).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('a cancelled add returns to settings and sends nothing', async () => {
+    api.getRoomMembers.mockResolvedValue({
+      members: [{ user_id: 'alice', display_name: 'Alice', is_owner: true }],
+      can_manage: true,
+      message_count: 1,
+    });
+    api.getChatUsers.mockResolvedValue({ users: [{ user_id: 'bob', display_name: 'Bob' }] });
+    api.addRoomMember.mockClear();
+    const onClose = vi.fn();
+    render(RoomSettings, {
+      props: {
+        open: true,
+        room: room(),
+        userId: 'alice',
+        onSave: vi.fn(),
+        onDelete: vi.fn(),
+        onPromote: vi.fn(),
+        onClose,
+      },
+    });
+    await pickMember('Bob');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Room settings' })).toBeTruthy();
+    expect(api.addRoomMember).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
