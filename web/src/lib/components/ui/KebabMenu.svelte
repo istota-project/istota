@@ -49,7 +49,7 @@
                 href={item.href}
                 data-sveltekit-reload={item.reload ? '' : undefined}
                 onclick={(event) => {
-                  props.onclick?.(event);
+                  if (typeof props.onclick === 'function') props.onclick(event);
                   if (!item.disabled && item.onClick) {
                     // A viewer opened here must return to the surviving trigger.
                     trigger?.focus();

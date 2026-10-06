@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
+vi.mock('$lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/api')>()),
   previewChatFile: vi.fn(),
   getBriefingArchiveItem: vi.fn(),
 }));
@@ -74,17 +74,17 @@ describe('delegated links through the real viewer host', () => {
     const opener = screen.getByRole('link', { name: 'Read file' });
     opener.focus();
     expect(await fireEvent.click(opener)).toBe(false);
-    expect(await screen.findByRole('heading', { name: 'First', exact: true })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'First' })).toBeTruthy();
     expect(await fireEvent.click(screen.getByAltText('Inline'))).toBe(true);
     expect(document.querySelector('.lightbox')).toBeNull();
     const nested = screen.getByText('Next file');
     expect(await fireEvent.click(nested, { metaKey: true })).toBe(true);
     expect(preview).toHaveBeenCalledTimes(1);
     expect(await fireEvent.click(nested)).toBe(false);
-    expect(await screen.findByRole('heading', { name: 'Second', exact: true })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Second' })).toBeTruthy();
     expect(preview.mock.calls.map(([path]) => path)).toEqual([first, second]);
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
-    expect(screen.queryByRole('heading', { name: 'First', exact: true })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'First' })).toBeNull();
     const download = screen.getByRole('link', { name: 'Download' });
     expect(download.getAttribute('href')).toBe(chatFileUrl(second));
     expect(await fireEvent.click(download)).toBe(true);
@@ -94,8 +94,8 @@ describe('delegated links through the real viewer host', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(opener));
     await fireEvent.click(opener);
-    expect(await screen.findByRole('heading', { name: 'First', exact: true })).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Close', exact: true }));
+    expect(await screen.findByRole('heading', { name: 'First' })).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
@@ -116,7 +116,8 @@ describe('delegated links through the real viewer host', () => {
     await waitFor(() =>
       expect(document.querySelector('.lightbox img')?.getAttribute('src')).toBe(chatFileUrl(image)),
     );
-    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Image viewer' })).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Close image' }));
     expect(document.querySelector('.lightbox')).toBeNull();
   });

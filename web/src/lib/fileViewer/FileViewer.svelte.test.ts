@@ -2,8 +2,8 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
+vi.mock('$lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/api')>()),
   previewChatFile: vi.fn(),
 }));
 import { previewChatFile, chatFileUrl, type FilePreview } from '$lib/api';
@@ -45,7 +45,6 @@ describe('workspace file viewer through the host', () => {
       await fireEvent.click(
         await screen.findByRole('button', {
           name: kind === 'image' ? 'Close image' : 'Close',
-          exact: true,
         }),
       );
       await waitFor(() => expect(document.activeElement).toBe(opener));

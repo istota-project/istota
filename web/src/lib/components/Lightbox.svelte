@@ -459,14 +459,14 @@
               event.preventDefault();
               onClose();
             } else {
-              props.onkeydown?.(event);
+              if (typeof props.onkeydown === 'function') props.onkeydown(event);
               handleKeydown(event);
             }
           }}
         >
           <img
             bind:this={imgEl}
-            src={images[current]}
+            src={images[current ?? 0]}
             alt=""
             hidden={imageFailed}
             onerror={() => (imageFailed = true)}
@@ -502,7 +502,7 @@
               <button class="nav" onclick={prev} aria-label="Previous image">
                 <ChevronLeft size={24} />
               </button>
-              <div class="counter">{current + 1} / {images.length}</div>
+              <div class="counter">{(current ?? 0) + 1} / {images.length}</div>
               <button class="nav" onclick={next} aria-label="Next image">
                 <ChevronRight size={24} />
               </button>
