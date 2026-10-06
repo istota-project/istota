@@ -12,6 +12,7 @@ from pathlib import Path
 import tomli
 
 from . import db
+from .workspace.writes import open_or_create_dirs as _open_or_create_dirs
 from istota.sandbox.host_paths import owner_path_parts
 from .storage import OWNER_FILE_MAX_BYTES, get_user_scripts_path, read_owner_text
 
@@ -882,35 +883,6 @@ def _write_generated_prompt(dir_fd: int, filename: str, prompt: str) -> None:
         return
     with os.fdopen(fd, "wb") as f:
         f.write(data)
-
-
-def _open_or_create_dirs(root: Path, parts: list[str]) -> int:
-    """An fd on ``{root}/{parts...}``, creating what is missing. Raises OSError.
-
-    The write-side counterpart of ``open_overlay_dir``: each component is made
-    with ``mkdir(dir_fd=)`` and opened ``O_NOFOLLOW | O_DIRECTORY`` relative to
-    the one above, so a symlink anywhere below the user root (``scripts ->
-    /anywhere``) fails the open instead of steering a daemon write. ``root``
-    itself is the daemon's own ``{mount}/Users/{user_id}`` and is created and
-    opened by name, as ``open_overlay_dir`` opens it.
-    """
-    root.mkdir(parents=True, exist_ok=True)
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in parts:
-            try:
-                os.mkdir(part, 0o755, dir_fd=fd)
-            except FileExistsError:
-                pass
-            nxt = os.open(
-                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
-            )
-            os.close(fd)
-            fd = nxt
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) -> None:
