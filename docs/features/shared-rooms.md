@@ -80,7 +80,7 @@ A friendly room works the other way round: the classifier is a lenient filter an
 
 Three more rules apply only in a friendly room:
 
-- **A follow-up always reaches the bot.** When the newest message comes straight after the bot's answer and is from the person the bot just answered, it goes to the bot even when it turns to someone else and even when the classifier fails. Like any classifier turn it is declinable, so the bot decides whether it was meant for it. The classifier is still asked, and decides only whether the answer is the short acknowledgement or a full reply. A message from anyone else after the bot's answer goes to the classifier as usual.
+- **A follow-up reaches the bot even when the classifier fails.** When the newest message comes straight after the bot's answer and is from the person the bot just answered, the classifier decides it as usual and is told that it is a follow-up. If the classifier call fails, the turn still goes to the bot, which can decline it. Every other failed call stays silent.
 - **A reply to one of the bot's messages** is addressed, so it is always answered, but the classifier is still asked whether it only reacts. A quoted "thanks" then gets the short answer rather than a full reply. In a reserved room the classifier is not asked about a reply at all.
 - **A member's file with no caption** goes to the classifier too, on WhatsApp groups, before the file is opened. On a yes the file is opened and handed to the bot, which looks at it and answers or declines; on a no, or a failed call, it stays unopened. A guest's file is never opened, and a reserved room never asks.
 

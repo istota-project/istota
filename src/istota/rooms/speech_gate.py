@@ -22,9 +22,10 @@ it. The decision is a ladder, first match wins:
 3. **mode "off"** -> speak.
 4. **mode "mention"** -> record only (rung 2 already answered the addressed
    case). The default, and what Talk did before this module existed.
-5. **mode "classifier"** -> ask the completer. Any failure -> record only.
-   Under ``friendly``, a follow-up from the person the bot just answered
-   speaks whatever the completer says (ISSUE-670); it picks only the kind.
+5. **mode "classifier"** -> ask the completer. Any failure -> record only,
+   except a follow-up from the person the bot just answered under
+   ``friendly``, which speaks when the completer fails (ISSUE-670). A
+   follow-up the completer answers takes its verdict like any other turn.
 
 **Fail closed, the opposite of context triage.** A false positive is the bot
 interrupting two people talking to each other; a false negative is one retyped
@@ -666,22 +667,24 @@ def classify(
     else is a ``reply``, so a reserved room never shortens an answer.
 
     ``follow_up`` is :func:`is_follow_up` over the same window. Under
-    ``friendly`` it makes the turn speak whatever the completer answers,
-    failure included, and the completer is still asked so a "thanks" can stay
-    an ``ack`` rather than become a full reply (ISSUE-670).
+    ``friendly`` it changes one outcome: a failed call speaks, as a plain
+    reply under rung ``follow_up``, rather than staying silent (ISSUE-670). A
+    verdict stands as given. It used to be overridden to speak, which threw
+    away the call it had just paid for; the friendly prompt already states
+    the follow-up facts, and the turn is declinable (#675), so a lenient yes
+    costs a declined task rather than a message.
     """
     decision = _classify(window, completer, model, disposition=disposition)
-    if not follow_up or normalize_disposition(disposition, warn=False) != FRIENDLY:
+    if (
+        not follow_up
+        or normalize_disposition(disposition, warn=False) != FRIENDLY
+        or decision.rung != RUNG_FAILED
+    ):
         return decision
-    ack = decision.speak and decision.kind == KIND_ACK
-    reason = decision.reason
-    if decision.rung == RUNG_FAILED:
-        # Kept findable: the rung no longer says the classifier failed.
-        reason = f"classifier failed: {reason or 'unknown'}"
     return dataclasses.replace(
-        decision, speak=True, rung=RUNG_FOLLOW_UP, reason=reason,
-        kind=KIND_ACK if ack else KIND_REPLY,
-        ack_type=decision.ack_type if ack else None,
+        decision, speak=True, rung=RUNG_FOLLOW_UP,
+        reason=f"classifier failed: {decision.reason or 'unknown'}",
+        kind=KIND_REPLY, ack_type=None,
     )
 
 
