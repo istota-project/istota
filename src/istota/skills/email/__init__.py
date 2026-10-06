@@ -2572,6 +2572,7 @@ def _outbound_gate(
                 body=draft_source.delivery_body_for(
                     subject, draft_id,
                     draft_source.visible_recipients(to, cc, bcc),
+                    config=app_config,
                 ),
                 room_token=room_token,
             )

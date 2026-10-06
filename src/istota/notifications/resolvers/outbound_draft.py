@@ -94,7 +94,9 @@ def visible_recipients(to_addrs, cc_addrs=(), bcc_addrs=()) -> str:
     return text
 
 
-def delivery_body_for(subject: str | None, draft_id: int, recipients: str = "") -> str:
+def delivery_body_for(
+    subject: str | None, draft_id: int, recipients: str = "", *, config=None,
+) -> str:
     """The stored body, which is also what the push says.
 
     Carries the `!drafts` verbs because a push lands on a surface with no
@@ -102,11 +104,23 @@ def delivery_body_for(subject: str | None, draft_id: int, recipients: str = "") 
     (ISSUE-246) named them. The panel never shows this: the resolver rebuilds
     title and body from the live draft, and the stored text is the fallback for
     a row whose object can no longer be read.
+
+    With ``config``, it also says when the verbs cannot be answered by email
+    (ISSUE-662), since the push can be a mail. The backfill has no config.
     """
-    return (
+    text = (
         f"{body_for(subject, recipients)} Review it with `!drafts`, then "
         f"`!drafts send {draft_id}` or `!drafts discard {draft_id}`."
     )
+    if config is not None and config.email.enabled:
+        from istota.transport.email.answers import answer_places, email_answers_available
+
+        if not email_answers_available(config):
+            text += (
+                f" Answers are not accepted by email on this deployment; use "
+                f"{answer_places(config)}."
+            )
+    return text
 
 
 def write(

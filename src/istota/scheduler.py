@@ -8196,6 +8196,7 @@ def nag_stale_outbound_drafts(config: Config) -> int:
     retries.
     """
     from istota.mail import drafts
+    from istota.transport.email.answers import drafts_answer_places
 
     # Read and deliver in separate transactions, and deliver outside both: an
     # alert routed to the web surface opens a second connection to this
@@ -8218,7 +8219,7 @@ def nag_stale_outbound_drafts(config: Config) -> int:
             f"An email to {recipients} has been waiting for your approval "
             f"since {draft.created_at} and has not gone out.\n\n"
             f"Subject: {subject}\n\n"
-            f"In Talk or web chat: `!drafts` lists it, `!drafts send {draft.id}` "
+            f"{drafts_answer_places(config)}: `!drafts` lists it, `!drafts send {draft.id}` "
             f"releases it, `!drafts discard {draft.id}` bins it."
         )
         try:
