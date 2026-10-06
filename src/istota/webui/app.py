@@ -8310,7 +8310,9 @@ def _chat_room_messages(
     verbatim as `before_ts`.
     """
     from istota import db
+    from istota.rooms.scopes import is_email_thread_room
     with db.get_db(_config.db_path) as conn:
+        thread_room = is_email_thread_room(conn, token)
         # 1. Spine: durable turns, keyset-paginated. limit*2 because a turn is
         #    two rows (user + assistant); scheduled posts contribute one, so this
         #    over-fetches a little for scheduled-heavy rooms, which is harmless.
@@ -8521,6 +8523,10 @@ def _chat_room_messages(
         if status == "completed":
             messages.append(_assistant_message_dict(r, r["result"] or "", status))
         elif status == "pending_confirmation":
+            # An email thread room records the mail; its task's question is
+            # the host's private room's, so here it is no turn at all (#665).
+            if thread_room:
+                continue
             messages.append(_assistant_message_dict(
                 r, r["confirmation_prompt"] or r["result"] or "", status, confirmation=True,
             ))
@@ -11003,6 +11009,9 @@ _CONFIRM_PREVIEW_CHANGED = (
     "This changed since it was shown. Open the notification again to review it."
 )
 _CONFIRM_UNAVAILABLE = "This can no longer be approved."
+_CONFIRM_NOT_IN_THREAD = (
+    "This is an email thread. Answer the question in your private chat."
+)
 
 
 def _chat_confirm_task(
@@ -11012,6 +11021,7 @@ def _chat_confirm_task(
     from istota import confirmations, db
     from istota.relay.requests import RequestError
     from istota.rooms.private_replies import canonical_token, preview_rooms
+    from istota.rooms.scopes import is_email_thread_room
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
         if task is None or task.status != "pending_confirmation":
@@ -11027,6 +11037,12 @@ def _chat_confirm_task(
         if actor_user_id != task.user_id:
             from fastapi import HTTPException
             raise HTTPException(status_code=403, detail="not your task")
+        # An email thread room shows no question to answer (#665): its task's
+        # park is the host's private room's, the bell's and `!confirm`'s.
+        if room and is_email_thread_room(conn, room):
+            from fastapi import HTTPException
+            logger.info("task %s: confirm refused from an email thread room", task_id)
+            raise HTTPException(status_code=409, detail=_CONFIRM_NOT_IN_THREAD)
         # A relay question, room post or guest proposal is approved only where
         # its preview is shown: a private room showing it, whose card sends the
         # room it rendered in (#624), or, for an owner with no such room, the

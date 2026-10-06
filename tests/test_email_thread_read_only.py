@@ -3,8 +3,9 @@
 The thread room is the mail thread itself. A web send there became an ordinary
 web task, answered in web and mailed to nobody, so the server refuses it the
 way it refuses a phone room, and the listing says the room is read-only. What
-stays open is what is not a web turn: confirming a parked question on the
-thread's task and approving a held draft.
+stays open is what is not a web turn: approving a held draft. A parked question
+on the thread's task is the host's private room's alone (#665): the thread room
+shows no card for it and refuses a confirm sent from it.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -215,16 +216,87 @@ class TestTheSendRefusal:
         assert resp.status_code == 200, resp.text
 
 
+def _parked_thread_task(conn, thread, user="alice"):
+    task_id = db.create_task(
+        conn, prompt="reply to the invite", user_id=user,
+        source_type="email", conversation_token=thread,
+    )
+    db.add_message(
+        conn, thread, role="user", body="Come on Saturday?",
+        origin_surface="email", task_id=task_id,
+    )
+    db.set_task_confirmation(conn, task_id, "Send the reply?")
+    return task_id
+
+
 @web_only
-class TestWhatStaysOpen:
-    async def test_a_parked_question_is_still_confirmed(self, client, db_path):
+class TestTheParkedQuestionIsNotInTheThread:
+    """#665: the thread room records what took place on the mail; the question
+    is the host's private room's (and the bell's, and `!confirm`'s)."""
+
+    def test_the_history_shows_no_card(self, client, db_path):
+        import istota.webui.app as mod
         with db.get_db(db_path) as conn:
             thread = _thread_room(conn)
+            task_id = _parked_thread_task(conn, thread)
+        hist = mod._chat_room_messages("alice", thread, 50, None)
+        assert [m for m in hist["messages"] if m.get("confirmation")] == []
+        assert [m["role"] for m in hist["messages"] if m.get("task_id") == task_id] == ["user"]
+        assert hist["active_tasks"] == []
+        assert hist["active_task"] is None
+
+    def test_a_web_room_still_shows_its_card(self, client, db_path):
+        import istota.webui.app as mod
+        with db.get_db(db_path) as conn:
+            web = db.create_web_chat_room(conn, "alice", "general").token
             task_id = db.create_task(
-                conn, prompt="reply to the invite", user_id="alice",
-                source_type="email", conversation_token=thread,
+                conn, prompt="send it", user_id="alice",
+                source_type="web", conversation_token=web,
             )
             db.set_task_confirmation(conn, task_id, "Send the reply?")
+        hist = mod._chat_room_messages("alice", web, 50, None)
+        cards = [m for m in hist["messages"] if m.get("confirmation")]
+        assert [c["task_id"] for c in cards] == [task_id]
+
+    def test_the_question_is_not_on_screen_in_the_thread(self, db_path):
+        with db.get_db(db_path) as conn:
+            thread = _thread_room(conn)
+            task_id = _parked_thread_task(conn, thread)
+            assert db.task_shown_in_room(conn, task_id, "alice", thread) is False
+
+    async def test_a_confirm_from_the_thread_room_is_refused(self, client, db_path):
+        with db.get_db(db_path) as conn:
+            thread = _thread_room(conn)
+            task_id = _parked_thread_task(conn, thread)
+        cookies = await _login(client)
+        resp = await client.post(
+            f"/istota/api/chat/tasks/{task_id}/confirm",
+            json={"room": thread}, cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 409, resp.text
+        assert "private chat" in resp.json()["detail"]
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+
+    async def test_a_confirm_from_the_private_room_works(self, client, db_path):
+        with db.get_db(db_path) as conn:
+            thread = _thread_room(conn)
+            private = db.create_web_chat_room(conn, "alice", "general").token
+            task_id = _parked_thread_task(conn, thread)
+        cookies = await _login(client)
+        resp = await client.post(
+            f"/istota/api/chat/tasks/{task_id}/confirm",
+            json={"room": private}, cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 200, resp.text
+        with db.get_db(db_path) as conn:
+            assert db.get_task(conn, task_id).status != "pending_confirmation"
+
+    async def test_a_confirm_from_the_bell_works(self, client, db_path):
+        """The bell's POST names no room."""
+        with db.get_db(db_path) as conn:
+            thread = _thread_room(conn)
+            task_id = _parked_thread_task(conn, thread)
         cookies = await _login(client)
         resp = await client.post(
             f"/istota/api/chat/tasks/{task_id}/confirm", cookies=cookies, headers=ORIGIN,
@@ -233,6 +305,9 @@ class TestWhatStaysOpen:
         with db.get_db(db_path) as conn:
             assert db.get_task(conn, task_id).status != "pending_confirmation"
 
+
+@web_only
+class TestWhatStaysOpen:
     async def test_a_draft_in_the_thread_is_still_approved(self, client, db_path):
         with db.get_db(db_path) as conn:
             thread = _thread_room(conn)
