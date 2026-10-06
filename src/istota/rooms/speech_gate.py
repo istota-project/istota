@@ -111,6 +111,10 @@ RUNG_MODE_MENTION = "mode_mention"
 RUNG_CLASSIFIER = "classifier"
 RUNG_FAILED = "failed"
 
+#: The classifier rung's reason for a turn with no words (an uncaptioned file):
+#: nothing was asked, because there is nothing to judge (ISSUE-666).
+NO_WORDS_REASON = "no words to classify"
+
 #: Cap on a stored reason. The classifier is asked for <=120 characters; this
 #: is what holds when it ignores that.
 MAX_REASON_CHARS = 120
@@ -462,6 +466,7 @@ def should_speak(
     completer: Completer | None = None,
     model: str | None = None,
     classified: GateDecision | None = None,
+    worded: bool = True,
 ) -> GateDecision:
     """Walk the ladder. Never raises.
 
@@ -477,6 +482,9 @@ def should_speak(
     opening its write transaction, so the model call never holds the lock. It
     is used on the classifier rung only; every rung above it still decides
     first, from this call's own arguments.
+
+    ``worded`` False is a turn with no text: an unaddressed one does not speak
+    on the classifier rung, and that is not a classifier fault.
     """
     try:
         if author_is_agent:
@@ -517,6 +525,8 @@ def should_speak(
             return GateDecision(False, RUNG_FAILED, reason="unknown mode")
         if classified is not None:
             return classified
+        if not worded:
+            return GateDecision(False, RUNG_CLASSIFIER, reason=NO_WORDS_REASON)
         return classify(window, completer, model)
     except Exception as e:  # pragma: no cover - the ladder above cannot raise
         logger.warning("speech gate failed: %s", e)

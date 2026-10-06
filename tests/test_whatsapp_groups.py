@@ -779,6 +779,40 @@ class TestTheClassifierReachesTheGroup:
         assert _rows(group, "SELECT rung FROM speech_gate_decisions "
                      "ORDER BY id DESC LIMIT 1") == [{"rung": "classifier"}]
 
+    def test_an_uncaptioned_file_is_recorded_as_nothing_to_classify(
+        self, group, caplog,
+    ):
+        """ISSUE-666: the audit row for a wordless turn says there was nothing
+        to classify, not that the classifier failed."""
+        from istota.rooms import speech_gate
+
+        group.speech_gate.mode = "classifier"
+        with caplog.at_level("WARNING"), db.get_db(group.db_path) as conn:
+            (result,) = handle_whatsapp_batch(
+                conn, group, [_media_message(message_id="G1")], provider=BAILEYS,
+            )
+
+        assert result.task_id is None
+        assert _rows(group, "SELECT spoke, rung, reason FROM speech_gate_decisions "
+                     "ORDER BY id DESC LIMIT 1") == [{
+            "spoke": 0, "rung": speech_gate.RUNG_CLASSIFIER,
+            "reason": speech_gate.NO_WORDS_REASON,
+        }]
+        assert "no classifier available" not in caplog.text
+
+    def test_a_worded_turn_with_no_answer_still_fails_closed(self, group):
+        """The control: words that reached the gate unclassified are a fault."""
+        group.speech_gate.mode = "classifier"
+        with db.get_db(group.db_path) as conn:
+            handle_whatsapp_batch(
+                conn, group, [_message("anyone know a plumber?", message_id="C9")],
+                provider=BAILEYS,
+            )
+
+        assert _rows(group, "SELECT rung, reason FROM speech_gate_decisions "
+                     "ORDER BY id DESC LIMIT 1") == [
+            {"rung": "failed", "reason": "no completer"}]
+
     def test_an_ack_is_held_for_a_reaction_to_the_inbound_id(self, group):
         """ISSUE-655: the result tells the bridge which message to react to."""
         from istota.rooms import speech_gate
@@ -1135,6 +1169,17 @@ class TestWhoseInboxAGroupFileGoesTo:
         assert self._ask(group, _media_message(
             "Istota what is this?", sender=GUEST_JID,
         )) is None
+
+    def test_an_uncaptioned_file_in_a_classifier_group_is_no_classifier_fault(
+        self, group, caplog,
+    ):
+        """ISSUE-666: a turn with no words has nothing to classify, so
+        `classify_group_event` asks nothing and the gate used to report a
+        missing classifier at WARNING."""
+        group.speech_gate.mode = "classifier"
+        with caplog.at_level("WARNING"):
+            assert self._ask(group, _media_message()) is None
+        assert "no classifier available" not in caplog.text
 
     def test_a_group_with_one_human_answers_every_turn(self, config):
         _apply(config, _roster([ALICE_JID], added_by=ALICE_JID))
