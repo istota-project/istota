@@ -195,13 +195,16 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 | Setting | Default | Description |
 |---|---|---|
 | `mode` | `"mention"` | `"mention"` answers only when addressed; `"classifier"` lets a cheap model decide and stays quiet when it fails; `"off"` answers every turn. An unknown value stays quiet |
+| `disposition` | `"reserved"` | With the classifier: `"reserved"` answers a turn addressed to the bot, asking it for something or answering its question; `"friendly"` also answers thanks and other reactions to its last answer, in one short line. An unknown value is `"reserved"`. A room's host can override it for one room with `!room disposition` |
+| `ack_reaction` | `"\U0001F44D"` | Under `"friendly"`, the reaction a thanks-only turn gets on Talk and in WhatsApp groups instead of a reply. One emoji; empty, or anything that is not one emoji, replies with one short line instead. Empty also turns off `ack_reactions` |
+| `ack_reactions` | `{}` | A sub-table, `[speech_gate.ack_reactions]`: a list of emoji for each kind of ack the classifier names (`thanks`, `agreement`, `funny`, `celebration`) plus `default`. One is picked per message by its id, so a message always gets the same one. A kind that is missing, empty or holds no valid emoji uses `default`; with no `default`, `ack_reaction` is used. The table wins over `ack_reaction`. Docker: `ISTOTA_SPEECH_GATE_ACK_REACTIONS_<KIND>`, comma-separated. Ansible: `istota_speech_gate_ack_reactions` |
 | `model` | `"fast"` | Role alias for the classifier, resolved per brain namespace |
 | `window_messages` | `8` | Transcript turns the classifier sees |
 | `max_message_chars` | `400` | Per-turn character cap inside the window |
 | `timeout_seconds` | `8.0` | Classifier call timeout |
 | `decision_retention_days` | `30` | Days to keep `speech_gate_decisions` rows (`0` keeps them) |
 
-Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_MODEL`, `ISTOTA_SPEECH_GATE_WINDOW_MESSAGES`, `ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS`, `ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS`, `ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS`. Ansible: `istota_speech_gate_*` with the same suffixes.
+Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_DISPOSITION`, `ISTOTA_SPEECH_GATE_MODEL`, `ISTOTA_SPEECH_GATE_WINDOW_MESSAGES`, `ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS`, `ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS`, `ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS`. Ansible: `istota_speech_gate_*` with the same suffixes.
 
 ## `[logging]`
 

@@ -776,6 +776,27 @@ class TestTheClassifierReachesTheGroup:
         assert _rows(group, "SELECT rung FROM speech_gate_decisions "
                      "ORDER BY id DESC LIMIT 1") == [{"rung": "classifier"}]
 
+    def test_an_ack_is_held_for_a_reaction_to_the_inbound_id(self, group):
+        """ISSUE-655: the result tells the bridge which message to react to."""
+        from istota.rooms import speech_gate
+
+        group.speech_gate.mode = "classifier"
+        decision = speech_gate.GateDecision(
+            True, speech_gate.RUNG_CLASSIFIER, kind=speech_gate.KIND_ACK,
+            ack_type="celebration",
+        )
+        with db.get_db(group.db_path) as conn:
+            (result,) = handle_whatsapp_batch(
+                conn, group, [_message("thanks!", message_id="C4")],
+                provider=BAILEYS, classified={"C4": decision},
+            )
+
+        assert (result.disposition, result.react_jid, result.react_message_id) == (
+            "group_ack", GROUP, "C4")
+        assert result.react_ack_type == "celebration"
+        assert _rows(group, "SELECT scheduled_for IS NOT NULL AS held FROM tasks "
+                     "WHERE id = ?", (result.task_id,)) == [{"held": 1}]
+
     def test_without_an_answer_it_still_fails_closed(self, group):
         group.speech_gate.mode = "classifier"
         (result,) = _apply(group, _message("anyone know a plumber?", message_id="C2"))

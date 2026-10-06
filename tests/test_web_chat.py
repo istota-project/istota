@@ -925,6 +925,35 @@ class TestChatMessagesApi:
         await self._send(chat_client, cookies, room["id"], text="hello bob")
         assert seen == [True, False]
 
+    async def test_a_reply_to_the_bots_message_addresses_it(
+        self, chat_client, monkeypatch,
+    ):
+        """ISSUE-653: citing one of the bot's own rows is a structural address;
+        citing a person's row is not."""
+        from istota.rooms.speech_gate import GateDecision
+
+        seen: list[bool] = []
+
+        def _spy(**kw):
+            seen.append(kw["addressed_to_bot"])
+            return GateDecision(True, "not_multi_human")
+
+        monkeypatch.setattr("istota.transport.ingest.speech_gate.should_speak", _spy)
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        import istota.webui.app as mod
+        with db.get_db(mod._config.db_path) as c:
+            bot_row = db.add_message(c, room["token"], role="assistant",
+                                     body="It closes at 6pm.", origin_surface="web")
+            person_row = db.add_message(c, room["token"], role="user",
+                                        body="five then?", origin_surface="web",
+                                        author_user_id="bob")
+        await self._send(chat_client, cookies, room["id"], text="Thanks!",
+                         reply_to_msg_id=bot_row)
+        await self._send(chat_client, cookies, room["id"], text="sounds good",
+                         reply_to_msg_id=person_row)
+        assert seen == [True, False]
+
     async def test_recorded_turns_count_toward_the_send_rate_limit(
         self, chat_client, monkeypatch,
     ):

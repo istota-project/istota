@@ -6320,6 +6320,7 @@ def _chat_update_room(
     model=_UNSET, effort=_UNSET, brain=_UNSET, color=_UNSET, guest_reply=_UNSET,
     listed=_UNSET,
     speech_mode=_UNSET,
+    disposition=_UNSET,
 ) -> dict | None:
     """Apply a room PATCH. `_UNSET` on a field means its key was absent.
 
@@ -6378,7 +6379,8 @@ def _chat_update_room(
 
             if not is_email_thread_room(conn, room.token):
                 raise _RoomNotListable(ROOM_NOT_LISTABLE)
-        if speech_mode is not _UNSET:
+        # The disposition is part of when the bot speaks, so the same rule.
+        if speech_mode is not _UNSET or disposition is not _UNSET:
             refusal = room_policy.speech_mode_refusal(conn, room.token, username)
             if refusal:
                 raise _RoomSettingsRefused(refusal)
@@ -6460,6 +6462,8 @@ def _chat_update_room(
                 room_policy.set_guest_reply(conn, updated.token, guest_reply)
             if speech_mode is not _UNSET:
                 room_policy.set_speech_mode(conn, updated.token, speech_mode)
+            if disposition is not _UNSET:
+                room_policy.set_disposition(conn, updated.token, disposition)
             if archived is not None:
                 reg = db.get_room(conn, updated.token)
                 if _is_talk_backed(conn, reg, updated.token):
@@ -6669,6 +6673,14 @@ def _room_sharing(conn, reg, username: str) -> dict:
             "deployment_speech_mode": (
                 room_policy.normalize_mode(_config.speech_gate.mode)
                 or _config.speech_gate.mode
+            ),
+            # The same three for the classifier's disposition (ISSUE-654).
+            "disposition": room_policy.own_disposition(policy),
+            "effective_disposition": room_policy.effective_disposition(
+                conn, reg.token, _config.speech_gate.disposition,
+            ),
+            "deployment_disposition": room_policy.normalize_disposition(
+                _config.speech_gate.disposition, warn=False,
             ),
             "settings_refusal": refusal,
         },
@@ -8699,13 +8711,21 @@ def _chat_create_web_task(
     addressed = addressed_to_bot_in_text(
         text, (_config.bot_name, _config.talk.bot_username),
     )
+    replied_to_bot = False
+    if not addressed and reply_to_msg_id is not None:
+        # A reply to the bot's own answer addresses it, as a quote does on
+        # WhatsApp (ISSUE-653). The citation is validated again in the write
+        # transaction below; this read only decides the gate's rung.
+        with db.get_db(_config.db_path) as conn:
+            replied_to_bot = db.is_bot_message_in_room(conn, token, reply_to_msg_id)
     # Ahead of BEGIN IMMEDIATE, so a classifier call never holds the write
     # lock. None unless the gate could reach its classifier rung.
     classified = classify_ahead(
         _config, surface="web", surface_ref=token, user_id=username,
         text=text, is_group_chat=False, addressed_to_bot=addressed,
-        source_type="web",
+        source_type="web", replied_to_bot=replied_to_bot,
     )
+    addressed = addressed or replied_to_bot
     with db.get_db(_config.db_path) as conn:
         # Take the write lock up front so the count and the insert are one
         # critical section — a plain SELECT takes no lock under WAL, so two
@@ -9665,6 +9685,16 @@ async def chat_update_room(
         )
         if speech_mode not in SPEECH_MODE_VALUES:
             return JSONResponse({"error": "invalid speech_mode"}, status_code=400)
+    # How wide the classifier reads "for the bot" here (ISSUE-654). Same rule
+    # and the same "" / null means `default`.
+    disposition = _UNSET
+    if "disposition" in data:
+        from istota.rooms.policy import DEFAULT_DISPOSITION, DISPOSITION_VALUES
+        disposition = (
+            str(data["disposition"] or "").strip().lower() or DEFAULT_DISPOSITION
+        )
+        if disposition not in DISPOSITION_VALUES:
+            return JSONResponse({"error": "invalid disposition"}, status_code=400)
     # Per-room brain pin. Same key-presence contract as `model` — absent leaves
     # it alone, "" / null clears it, a string sets it — and the same three
     # answers `!brain` gives, in the same order and for the same reasons.
@@ -9734,7 +9764,7 @@ async def chat_update_room(
     try:
         updated = await asyncio.to_thread(
             _chat_update_room, user["username"], room_id, name, archived, model,
-            effort, brain, color, guest_reply, listed, speech_mode,
+            effort, brain, color, guest_reply, listed, speech_mode, disposition,
         )
     except _RoomSettingsRefused as refused:
         return JSONResponse({"error": str(refused)}, status_code=403)
@@ -11014,6 +11044,11 @@ def _chat_confirm_task(
         try:
             confirmations.approve(conn, task, config=_config, by="web",
                                   preview_digest=preview_digest)
+        except confirmations.RoomSwitchedOff:
+            # The cancel stands: it is committed with the response.
+            conn.commit()
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail=confirmations.SWITCHED_OFF_ACK)
         except RequestError:
             from fastapi import HTTPException
             logger.info("task %s: confirm refused, preview no longer current", task_id)

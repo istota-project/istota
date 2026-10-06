@@ -1608,7 +1608,8 @@ CREATE TABLE IF NOT EXISTS room_policy (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     vetoed_at    TEXT,
     veto_on_by   TEXT,
-    announced_at TEXT
+    announced_at TEXT,
+    disposition  TEXT
 );
 
 -- Everyone who switched the bot off in a room (Stage 20, D12), one row per
@@ -1687,10 +1688,24 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     reason     TEXT,
     model      TEXT,
     latency_ms INTEGER,
+    -- 'reserved'|'friendly': `[speech_gate] disposition` when the row was written
+    disposition TEXT,
+    -- 'reply'|'ack' on a turn the bot answers, NULL otherwise
+    kind       TEXT,
+    -- On an ack only: 1 answered with a reaction and no task, 0 the reaction
+    -- failed and the held task replied; NULL when no reaction was tried
+    reacted    INTEGER,
+    -- On an ack only: 'thanks'|'agreement'|'funny'|'celebration'|'default',
+    -- the classifier's reading, which picks the reaction list
+    ack_type   TEXT,
+    -- The emoji sent, when `reacted` is 1; NULL otherwise
+    reaction   TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_speech_gate_room ON speech_gate_decisions (room_token, id);
 CREATE INDEX IF NOT EXISTS idx_speech_gate_created ON speech_gate_decisions (created_at);
+-- The room card's reply-kind lookup goes from a task's message to its decision.
+CREATE INDEX IF NOT EXISTS idx_speech_gate_message ON speech_gate_decisions (message_id);
 
 -- One-time data-migration ledger (markered, so heavy backfills run once).
 CREATE TABLE IF NOT EXISTS _migration_state (

@@ -394,6 +394,13 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     ISSUE-261 shipped green and killed inbound email for two days.
     """
     _add_columns(conn, "message_relays", {"return_claimed_at": "TEXT"})
+    # No backfill: NULL is what a row from before the disposition existed is.
+    _add_columns(conn, "speech_gate_decisions", {"disposition": "TEXT", "kind": "TEXT"})
+    # ISSUE-655: whether an ack was answered with a reaction. NULL on every
+    # older row, which is what "no reaction was tried" is.
+    _add_columns(conn, "speech_gate_decisions", {"reacted": "INTEGER"})
+    # ISSUE-657: what kind of ack the classifier read, and the emoji sent.
+    _add_columns(conn, "speech_gate_decisions", {"ack_type": "TEXT", "reaction": "TEXT"})
     # Tasks table migrations
     _add_columns(conn, "tasks", {
         "whatsapp_confirmation_request_id": "TEXT",
@@ -6914,6 +6921,25 @@ def get_reply_target(
     return (row["room_token"], row["body"]) if row else None
 
 
+def is_bot_message_in_room(
+    conn: sqlite3.Connection, room_token: str, message_id: int,
+) -> bool:
+    """Whether ``message_id`` is one of the bot's own answers in this room.
+
+    A reply to one is a structural address for the speech gate (ISSUE-653).
+    Scoped to the room, so a cited row from elsewhere addresses nothing, and an
+    approved room post is a member's words, not the bot's.
+    """
+    from istota.rooms.speech_gate import is_bots_own_words
+
+    row = conn.execute(
+        "SELECT delivery_reference FROM messages "
+        "WHERE id = ? AND room_token = ? AND role = 'assistant'",
+        (message_id, room_token),
+    ).fetchone()
+    return row is not None and is_bots_own_words(row[0])
+
+
 def get_starred_message_ids(
     conn: sqlite3.Connection, user_id: str, message_ids: list[int],
 ) -> set[int]:
@@ -8435,7 +8461,8 @@ CREATE TABLE IF NOT EXISTS room_policy (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     vetoed_at    TEXT,
     veto_on_by   TEXT,
-    announced_at TEXT
+    announced_at TEXT,
+    disposition  TEXT
 )
 """
 
@@ -8494,6 +8521,9 @@ def _migrate_room_veto(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "room_policy", {
         "vetoed_at": "TEXT", "veto_on_by": "TEXT", "announced_at": "TEXT",
     })
+    # ISSUE-654: the room's own speech gate disposition. NULL follows
+    # `[speech_gate] disposition`, so nothing is backfilled.
+    _add_columns(conn, "room_policy", {"disposition": "TEXT"})
     conn.execute(_ROOM_VETOES_DDL)
     conn.execute(_ROOM_NOTICES_DDL)
     try:

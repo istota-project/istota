@@ -703,6 +703,44 @@ class TestNoHeredocRunsACommand:
             ), f"{script.name} has no unquoted heredoc; drop it from the list"
 
 
+class TestTheAckReactions:
+    """ISSUE-657: one variable per kind, each a comma-separated list."""
+
+    def test_no_variable_writes_no_table(self, tmp_path):
+        rendered = tomllib.loads(render(tmp_path, **REQUIRED).read_text())
+        assert "ack_reactions" not in rendered["speech_gate"]
+        assert load_config(render(tmp_path / "b", **REQUIRED)).speech_gate.ack_reactions == {}
+
+    def test_the_lists_reach_the_loader(self, tmp_path):
+        laugh = "\N{SMILING FACE WITH OPEN MOUTH AND SMILING EYES}"
+        config = load_config(render(
+            tmp_path, **REQUIRED,
+            ISTOTA_SPEECH_GATE_ACK_REACTIONS_FUNNY=f"{laugh}, \N{OCTOPUS},",
+            ISTOTA_SPEECH_GATE_ACK_REACTIONS_CELEBRATION="\N{PARTY POPPER}",
+            ISTOTA_SPEECH_GATE_ACK_REACTIONS_THANKS=" , ",
+            ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS="9",
+        ))
+        gate = config.speech_gate
+        assert gate.ack_reactions == {
+            "funny": [laugh, "\N{OCTOPUS}"], "celebration": ["\N{PARTY POPPER}"],
+        }
+        assert gate.decision_retention_days == 9
+        assert gate.ack_reaction == "\N{THUMBS UP SIGN}"
+
+    def test_the_table_takes_no_other_section_s_keys(self, tmp_path):
+        """Several sections are finished by a conditional block after their
+        header; a table written between the two took `[memory_search]`'s keys."""
+        config = load_config(render(
+            tmp_path, **REQUIRED,
+            ISTOTA_MEMORY_SEARCH_ENABLED="true",
+            ISTOTA_MEMORY_SEARCH_AUTO_RECALL="true",
+            ISTOTA_PLAYBOOKS_ENABLED="true",
+            ISTOTA_SPEECH_GATE_ACK_REACTIONS_FUNNY="\N{OCTOPUS}",
+        ))
+        assert config.speech_gate.ack_reactions == {"funny": ["\N{OCTOPUS}"]}
+        assert config.memory_search.auto_recall is True
+
+
 class TestTheStorageBackend:
     """`NC_URL` decides which of the two shipped storage backends is rendered.
 

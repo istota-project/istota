@@ -10,8 +10,9 @@
     formatMailDate,
     formatSize,
     MAIL_STATE_LABELS,
-    senderBadge,
-    trustedButFailed,
+    SENDER_CHECKS,
+    senderCheck,
+    senderMarks,
     type MailCardData,
   } from './mailCard';
   import type { MailAddress, MailDiscuss } from '$lib/api';
@@ -41,7 +42,8 @@
 
   const incoming = $derived(card.direction === 'in');
   const directionLabel = $derived(incoming ? 'Received by email' : 'Sent by email');
-  const badge = $derived(senderBadge(card));
+  const check = $derived(senderCheck(card));
+  const marks = $derived(senderMarks(card));
   const stateLabel = $derived(card.state ? MAIL_STATE_LABELS[card.state] : null);
   const date = $derived(formatMailDate(card.date));
   const counterpart = $derived.by(() => {
@@ -143,36 +145,34 @@
       <div class="mail-subject">{card.subject}</div>
     {/if}
     {#if incoming && card.from}
-      <div class="mail-people">
-        From: <span class="mail-person">{addressLabel(card.from, card.labels)}</span>
+      <div class="mail-people" data-testid="mail-from">
+        From:<span class="mail-person">{addressLabel(card.from, card.labels)}</span>
         {#if addressLabel(card.from, card.labels) !== card.from.address}
           <span class="mail-address">&lt;{card.from.address}&gt;</span>
         {/if}
+        {#each marks as mark (mark)}
+          {@const { label, icon: Icon, warn } = SENDER_CHECKS[mark]}
+          <span
+            class="mail-check"
+            class:mail-check-warn={warn}
+            role="img"
+            title={label}
+            aria-label={label}
+            data-testid="sender-check"
+            data-check={mark}><Icon size={13} aria-hidden="true" /></span
+          >
+        {/each}
       </div>
     {/if}
     {@render people('To', card.to)}
     {@render people('Cc', card.cc)}
-    {#if badge || stateLabel}
+    {#if stateLabel}
       <div class="mail-badges">
-        {#if badge}
-          <span
-            class="mail-badge"
-            class:mail-badge-warn={card.senderCheck === 'failed' && !card.trusted}
-            data-testid="sender-badge">{badge}</span
-          >
-          {#if trustedButFailed(card)}
-            <span class="mail-badge mail-badge-warn" data-testid="sender-check-failed"
-              >Failed sender check</span
-            >
-          {/if}
-        {/if}
-        {#if stateLabel}
-          <span
-            class="mail-badge"
-            class:mail-badge-warn={card.state === 'failed'}
-            data-testid="mail-state">{stateLabel}</span
-          >
-        {/if}
+        <span
+          class="mail-badge"
+          class:mail-badge-warn={card.state === 'failed'}
+          data-testid="mail-state">{stateLabel}</span
+        >
         {#if card.state === 'held' && card.notePath}
           <a class="mail-link" href="{base}{card.notePath}" data-sveltekit-reload
             >Open in your private chat</a
@@ -224,7 +224,9 @@
         <dt>Date</dt>
         <dd>{card.date || '—'}</dd>
         <dt>Sender check</dt>
-        <dd>{checkLabel[card.senderCheck ?? 'none']} ({badge})</dd>
+        <dd>
+          {checkLabel[card.senderCheck ?? 'none']}{check ? ` (${SENDER_CHECKS[check].label})` : ''}
+        </dd>
         <dt>Trusted</dt>
         <dd>{card.trusted ? 'Yes' : 'No'}</dd>
       </dl>
@@ -308,8 +310,15 @@
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
-  .mail-badge-warn {
+  .mail-badge-warn,
+  .mail-check-warn {
     color: var(--status-danger-fg);
+  }
+  .mail-check {
+    display: inline-flex;
+    vertical-align: -2px;
+    margin-left: var(--space-1);
+    color: var(--text-muted);
   }
   .mail-link {
     padding: 0;

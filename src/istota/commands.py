@@ -883,10 +883,15 @@ async def cmd_confirm(ctx: CommandContext):
             ctx, f"Declined #{task.id} — {label}. Nothing was run.",
         )
 
-    trusted = confirmations.approve(
-        conn, task, trust_sender=(verb == "trust"), config=ctx.config,
-        by=ctx.surface,
-    )
+    try:
+        trusted = confirmations.approve(
+            conn, task, trust_sender=(verb == "trust"), config=ctx.config,
+            by=ctx.surface,
+        )
+    except confirmations.RoomSwitchedOff:
+        return _record_confirm_exchange(
+            ctx, f"Cancelled #{task.id} — {label}. {confirmations.SWITCHED_OFF_ACK}",
+        )
     if trusted:
         return _record_confirm_exchange(
             ctx,
@@ -1621,6 +1626,9 @@ async def cmd_room(ctx: CommandContext):
     if sub == "speak":
         return _room_speak(conn, config, token, ctx.user_id, rest.lower())
 
+    if sub == "disposition":
+        return _room_disposition(conn, config, token, ctx.user_id, rest.lower())
+
     if sub == "group":
         return _room_group(conn, room, ctx.user_id, rest)
 
@@ -1635,6 +1643,7 @@ async def cmd_room(ctx: CommandContext):
         "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
         "`!room host`, `!room guests <off|held|direct>`, "
         "`!room speak [mention|classifier|off|default]`, "
+        "`!room disposition [reserved|friendly|default]`, "
         "`!room group [<id>|none]`, `!room notes [<room>]`. "
         "Use `default` to clear."
     )
@@ -1787,6 +1796,50 @@ def _room_speak(conn, config, token: str, user_id: str, value: str) -> str:
             f"speaking here instead, use `!{room_veto.command_word(config)} off`."
         )
     return reply
+
+
+#: What each disposition means, for `!room disposition`'s replies.
+_DISPOSITION_WORDS = {
+    "reserved": "only to a message addressed to me or asking me something",
+    "friendly": "also to thanks or a remark about what I just said",
+}
+
+
+def _room_disposition(conn, config, token: str, user_id: str, value: str) -> str:
+    """`!room disposition [reserved|friendly|default]`: how wide the classifier
+    reads "for me" here (ISSUE-654). Any member may read it; setting it is the
+    host's, under `speech_mode_refusal`, since it is part of when I speak."""
+    from istota.rooms import policy as room_policy
+
+    mode = room_policy.effective_speech_mode(conn, token, config.speech_gate.mode)
+    mode = room_policy.normalize_mode(mode) or mode
+    inert = ""
+    if mode != "classifier":
+        inert = (
+            f" This room is on `{mode}`, so the setting does nothing until "
+            "`!room speak classifier`."
+        )
+    if not value:
+        disposition, own = room_policy.disposition_source(
+            conn, token, config.speech_gate.disposition,
+        )
+        source = "this room" if own else "deployment default"
+        return (
+            f"When I judge whether to answer, I answer "
+            f"{_DISPOSITION_WORDS[disposition]}: `{disposition}` ({source}).{inert}"
+        )
+    if value not in room_policy.DISPOSITION_VALUES:
+        return "Usage: `!room disposition [reserved|friendly|default]`."
+    refusal = room_policy.speech_mode_refusal(conn, token, user_id)
+    if refusal:
+        return refusal
+    room_policy.set_disposition(conn, token, value)
+    if value == room_policy.DEFAULT_DISPOSITION:
+        disposition = room_policy.effective_disposition(
+            conn, token, config.speech_gate.disposition,
+        )
+        return f"This room now follows the deployment: `{disposition}`.{inert}"
+    return f"I now answer here {_DISPOSITION_WORDS[value]} (`{value}`).{inert}"
 
 
 @command("status", "Show your running/pending tasks and system status")

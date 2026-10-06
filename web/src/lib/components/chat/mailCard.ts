@@ -11,6 +11,8 @@ import type {
   ReceivedMail,
 } from '$lib/api';
 import type { ChatMessage } from '$lib/stores/segments';
+import type { Component } from 'svelte';
+import { BadgeCheck, ShieldCheck, ShieldQuestion, ShieldX } from '@lucide/svelte';
 
 export type MailDirection = 'in' | 'out';
 
@@ -106,21 +108,35 @@ export function formatSize(bytes: number | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** A failed sender check on a trusted sender: the trust list matches the
- *  From address alone, so a forged trusted address is the case to flag. */
-export function trustedButFailed(card: MailCardData): boolean {
-  return (
-    card.direction === 'in' && !card.fallback && !!card.trusted && card.senderCheck === 'failed'
-  );
+export type SenderCheck = 'trusted' | 'verified' | 'unverified' | 'failed';
+
+/** How each sender check is named and drawn: the label is the icon's hover
+ *  text and accessible name. */
+export const SENDER_CHECKS: Record<SenderCheck, { label: string; icon: Component; warn: boolean }> =
+  {
+    trusted: { label: 'Trusted sender', icon: BadgeCheck, warn: false },
+    verified: { label: 'Verified sender', icon: ShieldCheck, warn: false },
+    unverified: { label: 'Unverified sender', icon: ShieldQuestion, warn: false },
+    failed: { label: 'Failed sender check', icon: ShieldX, warn: true },
+  };
+
+/** The incoming card's sender check; null on an outgoing or fallback card. */
+export function senderCheck(card: MailCardData): SenderCheck | null {
+  if (card.direction !== 'in' || card.fallback) return null;
+  if (card.trusted) return 'trusted';
+  if (card.senderCheck === 'verified') return 'verified';
+  if (card.senderCheck === 'failed') return 'failed';
+  return 'unverified';
 }
 
-/** The incoming card's sender badge; null on an outgoing or fallback card. */
-export function senderBadge(card: MailCardData): string | null {
-  if (card.direction !== 'in' || card.fallback) return null;
-  if (card.trusted) return 'Trusted sender';
-  if (card.senderCheck === 'verified') return 'Verified sender';
-  if (card.senderCheck === 'failed') return 'Failed sender check';
-  return 'Unverified sender';
+/** The marks the From line carries, in order. A trusted sender whose check
+ *  failed gets the failure beside the trust mark: the trust list matches the
+ *  From address alone, so a forged trusted address is the case to flag. */
+export function senderMarks(card: MailCardData): SenderCheck[] {
+  const check = senderCheck(card);
+  if (!check) return [];
+  if (check === 'trusted' && card.senderCheck === 'failed') return ['trusted', 'failed'];
+  return [check];
 }
 
 export const MAIL_STATE_LABELS: Record<OutgoingMailState, string> = {

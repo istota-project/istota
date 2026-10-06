@@ -221,6 +221,13 @@ class WhatsAppEventResult:
     # chat (the veto's answer, multiplayer D8), on `group_post_owner`'s ledger.
     group_post_room: str | None = None
     group_post_owner: str | None = None
+    # A group ack whose task was created held (ISSUE-655): the bridge reacts
+    # to `react_message_id` in `react_jid` after the commit, then settles.
+    react_jid: str | None = None
+    react_message_id: str | None = None
+    react_turn_id: int | None = None
+    # The ack's type, which picks its reaction list (ISSUE-657).
+    react_ack_type: str | None = None
 
 
 # ---------------------------------------------------------------------------

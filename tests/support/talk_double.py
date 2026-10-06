@@ -554,6 +554,14 @@ class FakeTalkClient:
         })
         return {"id": message_id}
 
+    async def add_reaction(
+        self, conversation_token: str, message_id: int, reaction: str,
+    ) -> dict:
+        self._check("add_reaction", conversation_token, {
+            "message_id": message_id, "reaction": reaction,
+        })
+        return {reaction: []}
+
     async def get_conversation_info(self, conversation_token: str) -> dict:
         self._check("get_conversation_info", conversation_token, {})
         name = self.display_names.get(conversation_token)

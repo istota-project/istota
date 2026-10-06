@@ -2417,3 +2417,32 @@ class TestTheWordPressSection:
         config = load_config_from(text)
         assert config.wordpress.private_hosts == ["wp.internal.example.com", "wp.example.org"]
         assert config.wordpress.max_upload_mb == 40
+
+
+class TestTheAckReactionsTable:
+    """ISSUE-657: ``istota_speech_gate_ack_reactions`` renders
+    ``[speech_gate.ack_reactions]``, and ``istota_speech_gate_ack_reaction``
+    keeps feeding ``default`` when the dict is empty."""
+
+    def test_the_default_render_emits_no_table(self, parsed):
+        assert "ack_reactions" not in parsed["speech_gate"]
+        assert parsed["speech_gate"]["ack_reaction"] == "\N{THUMBS UP SIGN}"
+
+    def test_the_dict_reaches_the_loader(self):
+        laugh = "\N{SMILING FACE WITH OPEN MOUTH AND SMILING EYES}"
+        config = load_config_from(render(
+            istota_speech_gate_ack_reactions={
+                "default": ["\N{PARTY POPPER}"],
+                "funny": [laugh, "\N{OCTOPUS}"],
+                "thanks": "\N{OCTOPUS}",
+            },
+            istota_speech_gate_decision_retention_days=9,
+        ))
+        gate = config.speech_gate
+        assert gate.ack_reactions == {
+            "default": ["\N{PARTY POPPER}"],
+            "funny": [laugh, "\N{OCTOPUS}"],
+            "thanks": ["\N{OCTOPUS}"],
+        }
+        # The table follows every scalar of its section, so none is reparented.
+        assert gate.decision_retention_days == 9

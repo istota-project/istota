@@ -113,19 +113,37 @@ describe('an incoming card', () => {
     expect(text()).toContain('<img src=x');
   });
 
+  const marks = () =>
+    [...card().querySelectorAll<HTMLElement>('[data-testid="sender-check"]')].map((m) => ({
+      title: m.getAttribute('title'),
+      label: m.getAttribute('aria-label'),
+      warn: m.classList.contains('mail-check-warn'),
+      onFromLine: !!m.closest('[data-testid="mail-from"]'),
+    }));
+
   it.each([
-    [{ trusted: true, sender_check: 'failed' as const }, 'Trusted sender'],
-    [{ sender_check: 'verified' as const }, 'Verified sender'],
-    [{ sender_check: 'none' as const }, 'Unverified sender'],
-    [{ sender_check: 'failed' as const }, 'Failed sender check'],
-  ])('badges the sender %#', (over, badge) => {
+    [{ trusted: true }, 'Trusted sender', false],
+    [{ sender_check: 'verified' as const }, 'Verified sender', false],
+    [{ sender_check: 'none' as const }, 'Unverified sender', false],
+    [{ sender_check: 'failed' as const }, 'Failed sender check', true],
+  ])('marks the sender check with an icon on the From line %#', (over, title, warn) => {
     render(MailCard, { card: receivedCard(received(over)) });
-    expect(card().querySelector('[data-testid="sender-badge"]')?.textContent?.trim()).toBe(badge);
+    expect(marks()).toEqual([{ title, label: title, warn, onFromLine: true }]);
+    // The text is the hover and the accessible name, not a visible badge.
+    expect(text()).not.toContain(title);
   });
 
-  it('flags a failed check on a trusted sender beside the trust badge', () => {
+  it('shows the trust mark and a visible warning for a trusted sender that failed', () => {
     render(MailCard, { card: receivedCard(received({ trusted: true, sender_check: 'failed' })) });
-    expect(card().querySelector('[data-testid="sender-check-failed"]')).toBeTruthy();
+    expect(marks()).toEqual([
+      { title: 'Trusted sender', label: 'Trusted sender', warn: false, onFromLine: true },
+      { title: 'Failed sender check', label: 'Failed sender check', warn: true, onFromLine: true },
+    ]);
+  });
+
+  it('renders no badges row when there is no state to show', () => {
+    render(MailCard, { card: receivedCard(received()) });
+    expect(card().querySelector('.mail-badges')).toBeNull();
   });
 
   it('puts the address beside a display name that reads as a label', () => {
@@ -225,7 +243,7 @@ describe('an incoming card', () => {
     });
     expect(text()).toContain('alice@ext.example');
     expect(text()).toContain('Dinner plans');
-    expect(card().querySelector('[data-testid="sender-badge"]')).toBeNull();
+    expect(card().querySelector('[data-testid="sender-check"]')).toBeNull();
     await openMenu();
     expect(await screen.findByText('Copy address')).toBeTruthy();
     expect(screen.queryByText('Show headers')).toBeNull();
@@ -241,7 +259,7 @@ describe('an outgoing card', () => {
     labels: { 'carol@test.com': 'you' },
   };
 
-  it('carries the mailed body and the state, and no sender badge', () => {
+  it('carries the mailed body and the state, and no sender check', () => {
     render(MailCard, { card: sentCard(sent, 'Thursday after 7 works') });
     expect(card().dataset.direction).toBe('out');
     expect(text()).toContain('Sent by email');
@@ -250,7 +268,7 @@ describe('an outgoing card', () => {
     // Mailed as plain text, so it reads as typed rather than rendered.
     expect(card().querySelector('.mail-body.markdown')).toBeNull();
     expect(card().querySelector('[data-testid="mail-state"]')?.textContent?.trim()).toBe('Sent');
-    expect(card().querySelector('[data-testid="sender-badge"]')).toBeNull();
+    expect(card().querySelector('[data-testid="sender-check"]')).toBeNull();
   });
 
   it('shows the sent body as typed', () => {

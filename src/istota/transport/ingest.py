@@ -15,12 +15,14 @@ transport's `poll()`; this performs the resolve + store + decide + create step.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Sequence
 
 from istota import db
+from istota.rooms import ack_reaction
 from istota.rooms import policy as room_policy
 from istota.rooms import veto as room_veto
 from istota.rooms import speech_gate
@@ -184,7 +186,10 @@ class InboundResult:
 
     ``message_id`` is the stored `role='user'` row, None when the surface keeps
     no transcript for this turn. ``gate_reason`` is the gate's rung when it
-    declined, for the caller's log only.
+    declined, for the caller's log only. ``held_for_reaction`` is a task
+    created held because the gate read the turn as an ack: the caller sends
+    `ack_reaction.pick` for ``ack_type`` after its commit, then
+    `ack_reaction.settle` (ISSUE-655, ISSUE-657).
     """
 
     room_token: str
@@ -192,6 +197,8 @@ class InboundResult:
     message_id: int | None
     outcome: Literal["created", "recorded", "dropped", "replayed"]
     gate_reason: str | None = None
+    held_for_reaction: bool = False
+    ack_type: str | None = None
 
 
 def _prior_turn(
@@ -280,6 +287,13 @@ def _ask_gate(
     speech_gate.record_decision(
         conn, room_token=room_token, surface=surface, user_id=user_id,
         message_id=message_id, decision=decision,
+        disposition=(
+            classified.disposition
+            if classified is not None and classified.disposition
+            else room_policy.effective_disposition(
+                conn, room_token, config.speech_gate.disposition,
+            )
+        ),
     )
     return decision
 
@@ -395,6 +409,7 @@ def classify_ahead(
     earlier: Sequence[tuple[str, str]] = (),
     room_container: bool = False,
     author_label: str | None = None,
+    replied_to_bot: bool = False,
 ) -> speech_gate.GateDecision | None:
     """Run the speech gate's classifier for a turn before it is recorded.
 
@@ -418,6 +433,13 @@ def classify_ahead(
     one in the same unrecorded batch, oldest first; they belong in the window
     and are not stored yet. Never raises: a failure is a failed decision, which
     the gate reads as "do not speak".
+
+    ``replied_to_bot`` is a reply to one of the bot's own messages: addressed,
+    so it speaks whatever the model says, but in a ``friendly`` room the model
+    is still asked whether it is only a reaction (ISSUE-653). Under
+    ``reserved`` nothing is asked, since the answer could change nothing. The
+    disposition is the room's effective one
+    (`room_policy.effective_disposition`, ISSUE-654).
     """
     gate = config.speech_gate
     if addressed_to_bot or not is_room_member_for(surface, room_container=room_container):
@@ -434,6 +456,12 @@ def classify_ahead(
             room_token = (
                 db.resolve_room_token(conn, surface, surface_ref) or surface_ref
             )
+            # The room's own disposition, not the deployment's (ISSUE-654).
+            disposition = room_policy.effective_disposition(
+                conn, room_token, gate.disposition,
+            )
+            if replied_to_bot and disposition != speech_gate.FRIENDLY:
+                return None
             if room_veto.is_vetoed(conn, room_token):
                 return None
             if not participants.is_multi_human(
@@ -465,9 +493,14 @@ def classify_ahead(
             config, user_id=user_id, source_type=source_type,
             brain_kind=room.brain if room is not None else None,
         )
-        return speech_gate.classify(
-            speech_gate.build_window(turns, bot_name=config.bot_name),
-            completer, gate.model,
+        return dataclasses.replace(
+            speech_gate.classify(
+                speech_gate.build_window(
+                    turns, bot_name=config.bot_name, disposition=disposition,
+                ),
+                completer, gate.model, disposition=disposition,
+            ),
+            disposition=disposition,
         )
     except Exception as e:  # noqa: BLE001 — a classifier failure never costs the turn
         logger.warning("speech gate: classifying ahead failed: %s", type(e).__name__)
@@ -595,6 +628,9 @@ def record_inbound(
     host_absent: bool = False,
     # Email only: the mail card's metadata, written onto the stored user row.
     mail_meta: dict | None = None,
+    # The caller can answer an ack with a reaction after its commit (Talk, a
+    # WhatsApp group). An ack's task is then created held (ISSUE-655).
+    can_react: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -938,6 +974,7 @@ def record_inbound(
         audience = room_policy.audience_class(
             conn, transcript_token, is_group_chat=multi_human,
         )
+    decision = None
     if message_id is not None:
         decision = _ask_gate(
             conn, config, room_token=transcript_token, surface=surface,
@@ -966,7 +1003,9 @@ def record_inbound(
     if record_only:
         return InboundResult(room_token, None, message_id, "recorded")
 
-    # 5. Create the task and stamp the stored row with it.
+    # 5. Create the task and stamp the stored row with it. An ack the caller
+    #    can react to is held, not claimable, until the reaction is settled.
+    held = ack_reaction.should_hold(config, decision, can_react=can_react)
     task_id = db.create_task(
         conn,
         prompt=task_prompt,
@@ -994,12 +1033,16 @@ def record_inbound(
         model_namespace=model_namespace,
         priority=priority,
         queue=queue,
+        scheduled_for=ack_reaction.hold_until() if held else None,
     )
     if message_id is not None:
         conn.execute(
             "UPDATE messages SET task_id = ? WHERE id = ?", (task_id, message_id),
         )
-    return InboundResult(room_token, task_id, message_id, "created")
+    return InboundResult(
+        room_token, task_id, message_id, "created", held_for_reaction=held,
+        ack_type=decision.ack_type if held else None,
+    )
 
 
 def record_phone_turn(
@@ -1053,7 +1096,13 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
     `platform_message_id` + `channel_token`) the existing task's id comes back
     rather than a second one.
     """
-    result = record_inbound(
+    return ingest(conn, config, msg).task_id
+
+
+def ingest(conn, config: "Config", msg: IncomingMessage) -> InboundResult:
+    """`ingest_message`, answering the whole `InboundResult`, for a caller that
+    needs ``held_for_reaction``."""
+    return record_inbound(
         conn,
         config,
         surface=msg.surface,
@@ -1086,5 +1135,5 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         room_container=msg.room_container,
         host_absent=msg.host_absent,
         mail_meta=msg.mail_meta,
+        can_react=msg.can_react,
     )
-    return result.task_id

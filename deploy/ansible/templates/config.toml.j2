@@ -536,11 +536,21 @@ talk_context_limit = {{ istota_conversation_talk_context_limit }}
 
 [speech_gate]
 mode = "{{ istota_speech_gate_mode | istota_toml_escape }}"
+disposition = "{{ istota_speech_gate_disposition | istota_toml_escape }}"
+ack_reaction = "{{ istota_speech_gate_ack_reaction | istota_toml_escape }}"
 model = "{{ istota_speech_gate_model | istota_toml_escape }}"
 window_messages = {{ istota_speech_gate_window_messages }}
 max_message_chars = {{ istota_speech_gate_max_message_chars }}
 timeout_seconds = {{ istota_speech_gate_timeout_seconds }}
 decision_retention_days = {{ istota_speech_gate_decision_retention_days }}
+{% if istota_speech_gate_ack_reactions %}
+
+[speech_gate.ack_reactions]
+{% for kind, value in istota_speech_gate_ack_reactions | dictsort %}
+{% set items = [value] if value is string else (value if value is iterable and value is not mapping else []) %}
+"{{ kind | istota_toml_escape }}" = [{% for item in items %}"{{ item | istota_toml_escape }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+{% endfor %}
+{% endif %}
 
 [logging]
 level = "{{ istota_logging_level | istota_toml_escape }}"

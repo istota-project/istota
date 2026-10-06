@@ -289,6 +289,31 @@ class TalkClient:
             response, f"delete message {message_id} in {conversation_token}",
         )
 
+    async def add_reaction(
+        self, conversation_token: str, message_id: int, reaction: str,
+    ) -> dict:
+        """React to a message with one emoji (ISSUE-655).
+
+        Returns the ``ocs.data`` dict, the message's reactions. Talk answers
+        200 when the reaction is already there and 201 when it added it; both
+        are success.
+        """
+        url = (
+            f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/reaction"
+            f"/{conversation_token}/{message_id}"
+        )
+        client = await self._ensure_open()
+        response = await client.post(
+            url,
+            auth=self.auth,
+            headers=self._headers(json_body=True),
+            json={"reaction": reaction},
+        )
+        response.raise_for_status()
+        return _write_data(
+            response, f"react to message {message_id} in {conversation_token}",
+        )
+
     async def create_conversation(
         self, name: str, room_type: int = 2,
     ) -> dict:

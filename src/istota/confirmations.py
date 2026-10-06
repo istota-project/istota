@@ -293,6 +293,20 @@ def cancel_for_conversation(
     return cancelled
 
 
+#: The ack for an approval `approve` settled as cancelled because the held
+#: mail's room was switched off while it waited (ISSUE-650).
+SWITCHED_OFF_ACK = "The room was switched off while this waited, so nothing was run."
+
+
+class RoomSwitchedOff(Exception):
+    """`approve` cancelled the task: its held mail's room was switched off.
+
+    Raised after the cancel is written on the caller's connection, so a caller
+    that catches it and commits keeps the cancel; one that does not rolls it
+    back and the task stays held, which admits nobody either way.
+    """
+
+
 def approve(
     conn, task: db.Task, *, trust_sender: bool = False, config=None,
     by: str = "system", preview_digest: str | None = None,
@@ -336,6 +350,24 @@ def approve(
     from istota.relay.requests import (
         RequestError, approve_request, text_hash, write_transaction,
     )
+    switched_off = False
+    with write_transaction(conn):
+        current = db.get_task(conn, task.id)
+        if current is None or current.status != "pending_confirmation":
+            # Answered, expired or cancelled since the caller read it: nothing
+            # to release, and admission or a trust write would act on a task
+            # that is not waiting.
+            return False
+        if _held_in_vetoed_room(conn, current, config):
+            # The room was switched off while the mail was held: settle it as
+            # the veto settles queued work, not as a run nothing can deliver.
+            db.cancel_task(conn, task.id)
+            db.log_task(conn, task.id, "info",
+                        "Cancelled on approval: the room was switched off")
+            _close_notification(conn, task, by)
+            switched_off = True
+    if switched_off:
+        raise RoomSwitchedOff(task.id)
     with write_transaction(conn):
         current = db.get_task(conn, task.id)
         proposal = None
@@ -403,6 +435,13 @@ def approve(
         _restore_transcript_mirror(conn, task, config)
     _close_notification(conn, task, by)
     return trusted
+
+
+def _held_in_vetoed_room(conn, task: db.Task, config) -> bool:
+    if config is None or task.source_type != "email":
+        return False
+    from .transport.email.threads import held_mail_room_vetoed
+    return held_mail_room_vetoed(conn, config, task)
 
 
 def decline(conn, task: db.Task, *, by: str = "system") -> None:
@@ -601,9 +640,12 @@ def apply_answer(
         decline(conn, task, by=by)
         return "Task cancelled."
 
-    trusted = approve(
-        conn, task, trust_sender=answer.trust_sender, config=config, by=by,
-    )
+    try:
+        trusted = approve(
+            conn, task, trust_sender=answer.trust_sender, config=config, by=by,
+        )
+    except RoomSwitchedOff:
+        return SWITCHED_OFF_ACK
     if trusted:
         record = db.get_email_for_task(conn, task.id)
         if record is not None:

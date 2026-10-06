@@ -128,7 +128,9 @@ describe('an incoming mail row', () => {
     const mail = card(container);
     expect(mail?.dataset.direction).toBe('in');
     expect(mail?.textContent).toContain('Thursday works.');
-    expect(mail?.textContent).toContain('Trusted sender');
+    expect(mail?.querySelector('[data-testid="sender-check"]')?.getAttribute('title')).toBe(
+      'Trusted sender',
+    );
     // Not also the external block.
     expect(container.querySelector('.external')).toBeNull();
   });

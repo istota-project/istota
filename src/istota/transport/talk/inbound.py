@@ -19,7 +19,7 @@ from ...async_runtime import get_talk_client
 from ...config import Config
 from istota.nextcloud.talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage, ParticipantRef
-from ..ingest import classifier_refs, classify_ahead, ingest_message
+from ..ingest import classifier_refs, classify_ahead, ingest
 from ..participants import classify as classify_participant
 from ..participants import guest_label
 from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
@@ -176,6 +176,39 @@ def is_bot_mentioned(message: dict, bot_username: str) -> bool:
             if value.get("id") == bot_username:
                 return True
     return False
+
+
+def replies_to_bot(message: dict, bot_username: str) -> bool:
+    """Whether a Talk message is a reply to one of the bot's own posts.
+
+    The bot posts as the Nextcloud user ``bot_username``, so its own message
+    is a ``users`` actor with that id. A deleted parent no longer says whom it
+    was from, and counts as no reply. A post carrying somebody else's words
+    (the attributed repost of a web turn, an approved room post) is not the
+    bot's, by its ``referenceId``.
+    """
+    if not bot_username:
+        return False
+    parent = message.get("parent")
+    if not isinstance(parent, dict) or not parent.get("id") or parent.get("deleted"):
+        return False
+    return (
+        parent.get("actorType", "users") == "users"
+        and parent.get("actorId") == bot_username
+        and speech_gate.is_bots_own_words(parent.get("referenceId"))
+    )
+
+
+def is_addressed(message: dict, bot_username: str) -> bool:
+    """A structural address (speech gate rung 2): a mention, or a reply to the bot.
+
+    WhatsApp groups count a quote of the bot's message the same way; a reply
+    reacting to the bot's answer ("Thanks!") is aimed at it as plainly as a
+    mention is (ISSUE-653).
+    """
+    return is_bot_mentioned(message, bot_username) or replies_to_bot(
+        message, bot_username,
+    )
 
 
 async def _get_participants(
@@ -1627,6 +1660,7 @@ async def _classify_batch_ahead(
                     is_group_chat=_is_multi_user(participants),
                     addressed_to_bot=False, source_type="talk",
                     earlier=tuple(earlier),
+                    replied_to_bot=replies_to_bot(msg, config.talk.bot_username),
                 )))
             earlier.append((actor_id, text))
     if not jobs:
@@ -1681,6 +1715,10 @@ async def _process_poll_results(
     swallows fetch errors. A drain calling this owes the raise a ``finally``.
     """
     created: list[int] = []
+    # Acks whose task was created held, `(token, talk id, task id, message
+    # id, ack type)`; reacted to once the transaction below has committed
+    # (ISSUE-655).
+    held_acks: list[tuple[str, int, int, int | None, str | None]] = []
     # Before the transaction opens: a classifier call under it would hold the
     # WAL write lock for the whole model call.
     ahead = await _classify_batch_ahead(config, client, results, conv_types)
@@ -1779,7 +1817,7 @@ async def _process_poll_results(
                     synced_rosters.add(conversation_token)
                     _sync_talk_roster(conn, config, conversation_token, participants)
                 is_multi_user = _is_multi_user(participants)
-                addressed = is_bot_mentioned(msg, config.talk.bot_username)
+                addressed = is_addressed(msg, config.talk.bot_username)
                 # An unmentioned turn in a group room is recorded and nothing
                 # else: `record_inbound` stores it and the speech gate decides
                 # whether it gets a task. Everything between here and the ingest
@@ -2003,7 +2041,7 @@ async def _process_poll_results(
                 # when the speech gate speaks, create its task) in the SAME
                 # transaction as the poll-state advance above — see the
                 # docstring's atomicity note.
-                task_id = ingest_message(conn, config, IncomingMessage(
+                result = ingest(conn, config, IncomingMessage(
                     user_id=actor_id if is_user else "",
                     author=None if is_user else author,
                     # A user's command was dispatched above; a guest's is
@@ -2024,11 +2062,82 @@ async def _process_poll_results(
                     model=model_override,
                     effort=effort_override,
                     model_prefix_used=prefix.matched,
+                    can_react=True,
                 ))
-                if task_id is not None:
-                    created.append(task_id)
+                if result.held_for_reaction and message_id:
+                    held_acks.append(
+                        (conversation_token, message_id, result.task_id,
+                         result.message_id, result.ack_type),
+                    )
+                elif result.task_id is not None:
+                    created.append(result.task_id)
 
+    created.extend(await _react_to_held_acks(config, client, held_acks))
     return created
+
+
+#: One Talk reaction's bound, well inside `ack_reaction.HOLD_SECONDS`.
+REACT_DEADLINE_SECONDS = 20.0
+
+
+async def _react_to_held_acks(
+    config: Config, client: TalkClient,
+    held: list[tuple[str, int, int, int | None, str | None]],
+) -> list[int]:
+    """React to each held ack, after the batch committed; the task ids that
+    now run as a reply because their reaction could not be sent.
+
+    The reactions go out together, each bounded by `REACT_DEADLINE_SECONDS`
+    so a slow server cannot run a batch past the hold, then each ack is
+    settled in a short transaction of its own: the task is deleted when the
+    reaction landed, released otherwise. A failure of the settle write leaves
+    the hold to expire, which answers the turn with the reply. Never raises.
+    """
+    from istota.rooms import ack_reaction
+
+    released: list[int] = []
+    if not held:
+        return released
+    reactions = [
+        ack_reaction.pick(config, ack_type, talk_id)
+        for _t, talk_id, _task, _m, ack_type in held
+    ]
+
+    async def react(conversation_token: str, talk_id: int, reaction: str | None) -> bool:
+        if reaction is None:
+            return False
+        try:
+            await asyncio.wait_for(
+                client.add_reaction(conversation_token, talk_id, reaction),
+                timeout=REACT_DEADLINE_SECONDS,
+            )
+            return True
+        except Exception as e:  # noqa: BLE001 — a failed reaction is a reply
+            logger.warning(
+                "Could not react to message %s in %s, replying instead: %s",
+                talk_id, conversation_token, type(e).__name__,
+            )
+            return False
+
+    outcomes = await asyncio.gather(*(
+        react(token, talk_id, reaction)
+        for (token, talk_id, _t, _m, _a), reaction in zip(held, reactions)
+    ))
+    for (_token, _talk_id, task_id, message_id, _a), reaction, reacted in zip(
+        held, reactions, outcomes,
+    ):
+        try:
+            async with talk_db(config.db_path) as conn:
+                removed = ack_reaction.settle(
+                    conn, task_id=task_id, message_id=message_id, reacted=reacted,
+                    reaction=reaction,
+                )
+        except Exception:  # noqa: BLE001 — the hold expiring is the fallback
+            logger.warning("Could not settle held ack task %s", task_id, exc_info=True)
+            continue
+        if not removed:
+            released.append(task_id)
+    return released
 
 
 async def handle_confirmation_reply(
