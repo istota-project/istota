@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
+import { tick } from 'svelte';
+import { selectedFeedId } from '$lib/stores/feeds';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { clearNotices, currentNotice } from '$lib/stores/notices';
 import Page from './+page.svelte';
@@ -10,6 +12,7 @@ await fillApiDouble(api);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  selectedFeedId.set(0);
   clearNotices();
   vi.stubGlobal(
     'IntersectionObserver',
@@ -90,4 +93,33 @@ it('reports a failed next page once and keeps Next available for retry', async (
     expect(within(reader).getAllByRole('button', { name: 'Next post' })[0]).not.toBeDisabled(),
   );
   expect(within(reader).getByRole('heading', { name: 'A gallery' })).toBeTruthy();
+});
+
+it('ignores a previous feed pagination response after a selection change', async () => {
+  const { reader } = await open();
+  const firstPage = await api.getFeeds.mock.results[0].value;
+  let finish!: (value: typeof firstPage) => void;
+  api.getFeeds.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await fireEvent.click(within(reader).getAllByRole('button', { name: 'Next post' })[0]);
+  await waitFor(() => expect(api.getFeeds).toHaveBeenCalledTimes(2));
+  await fireEvent.keyDown(reader, { key: 'Escape' });
+  api.getFeeds.mockResolvedValue({
+    entries: [{ ...firstPage.entries[0], id: 2, content: '<p>New feed body</p>' }],
+    total: 1,
+  });
+  selectedFeedId.set(2);
+  await screen.findByText('New feed body');
+  finish({
+    entries: [{ ...firstPage.entries[0], id: 3, content: '<p>Old feed page</p>' }],
+    total: 2,
+  });
+  await tick();
+  await tick();
+  expect(screen.getByText('New feed body')).toBeTruthy();
+  expect(screen.queryByText('Old feed page')).toBeNull();
 });

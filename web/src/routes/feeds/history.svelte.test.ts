@@ -15,7 +15,7 @@ vi.mock('$app/navigation', async (original) => ({
 }));
 await fillApiDouble(api);
 
-import { getFeeds, type Feed, type User } from '$lib/api';
+import { getFeeds, type Feed, type FeedEntry, type User } from '$lib/api';
 import {
   feedsList,
   selectedFeedId,
@@ -249,6 +249,70 @@ describe('feed selection history', () => {
     expect(currentUrl()).toBe('/istota/feeds/?feed=2');
     expect(__history.entries).toHaveLength(1);
   });
+
+  it('keeps view history usable after the subscription request fails', async () => {
+    vi.mocked(getFeeds).mockImplementation(async (params) => {
+      if (params?.limit === '1') throw new TypeError('Failed to fetch');
+      return response;
+    });
+    render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+    const scrollRoot = document.querySelector('.shell-main') as HTMLElement;
+    scrollRoot.scrollTo = vi.fn();
+    await waitFor(() => expect(getFeeds).toHaveBeenCalledWith({ limit: '1', offset: '0' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Unread', exact: true }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Starred', exact: true }));
+    vi.mocked(getFeeds).mockClear();
+    __history.back();
+    await waitFor(() => expect(get(showUnseen)).toBe(true));
+    expect(get(showStarred)).toBe(false);
+    expect(getFeeds).toHaveBeenCalledWith(expect.objectContaining({ status: 'unread' }));
+  });
+
+  it.each(['success', 'error'])(
+    'ignores a late initial All %s after restoring a feed in the actual reader',
+    async (outcome) => {
+      __history.reset('/istota/feeds/?feed=2');
+      const entry: FeedEntry = {
+        id: 2,
+        title: 'Selected article',
+        url: 'https://example.org/article',
+        content: '<p>Selected feed body</p>',
+        images: [],
+        duplicate_image_count: 0,
+        embed_url: '',
+        file_url: '',
+        media_url: '',
+        media_type: '',
+        feed: feeds[1],
+        status: 'read',
+        starred: false,
+        starred_at: '',
+        published_at: '',
+        created_at: '',
+      };
+      let finish!: () => void;
+      vi.mocked(getFeeds).mockImplementation((params) => {
+        if (params?.limit === '1') return Promise.resolve(response);
+        if (params?.feed_id === '2')
+          return Promise.resolve({ ...response, entries: [entry], total: 1 });
+        return new Promise((resolve, reject) => {
+          finish = () =>
+            outcome === 'error' ? reject(new Error('Old request failed')) : resolve(response);
+        });
+      });
+      render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+      const scrollRoot = document.querySelector('.shell-main') as HTMLElement;
+      scrollRoot.scrollTo = vi.fn();
+      await screen.findByText('Selected feed body');
+      finish();
+      await tick();
+      await tick();
+      expect(screen.getByText('Selected feed body')).toBeTruthy();
+      expect(screen.queryByText('Failed to load feeds')).toBeNull();
+      expect(get(selectedFeedId)).toBe(2);
+      expect(currentUrl()).toBe('/istota/feeds/?feed=2');
+    },
+  );
 
   it('restores the actual reader API filter on Back', async () => {
     render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });

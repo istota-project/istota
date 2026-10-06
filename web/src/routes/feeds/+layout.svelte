@@ -46,6 +46,7 @@
   type FeedSelection = { feed: number; category: number; view: '' | 'starred' | 'unread' };
   const all: FeedSelection = { feed: 0, category: 0, view: '' };
   let feedsReady = $state(false);
+  let selectionReady = $state(false);
   let mounted = false;
   let loadGeneration = 0;
 
@@ -76,14 +77,16 @@
     params: ['feed', 'category', 'view'],
     encode: encodeSelection,
     decode(params) {
-      if (!feedsReady || onSettings) return null;
+      if (onSettings) return null;
       if (params.feed) {
+        if (!feedsReady) return null;
         const id = Number(params.feed);
         return Number.isSafeInteger(id) && id > 0 && feeds.some((feed) => feed.id === id)
           ? { ...all, feed: id }
           : null;
       }
       if (params.category) {
+        if (!feedsReady) return null;
         const id = Number(params.category);
         return Number.isSafeInteger(id) && id > 0 && feeds.some((feed) => feed.category.id === id)
           ? { ...all, category: id }
@@ -94,7 +97,7 @@
       }
       return params.view ? null : all;
     },
-    read: () => (feedsReady && !onSettings ? readSelection() : null),
+    read: () => (selectionReady && !onSettings ? readSelection() : null),
     apply: applySelection,
   });
 
@@ -129,7 +132,10 @@
   function pickSelection(selection: FeedSelection) {
     sidebarOpen = false;
     if (onSettings) goto(readerUrl(selection));
-    else feedSel.push(selection);
+    else {
+      selectionReady = true;
+      feedSel.push(selection);
+    }
   }
 
   let groupedFeeds = $derived.by(() => {
@@ -192,14 +198,22 @@
   async function loadFeeds() {
     const generation = ++loadGeneration;
     feedsReady = false;
+    selectionReady = false;
     try {
       const data = await getFeeds({ limit: '1', offset: '0' });
       if (generation !== loadGeneration) return;
       feedsList.set(data.feeds);
       feedsReady = true;
       if (!onSettings) applySelection(feedSel.current() ?? all);
+      selectionReady = true;
     } catch {
-      // Keep the query while subscriptions are unknown; the page shows errors.
+      if (generation !== loadGeneration) return;
+      // Views do not need subscriptions. Keep unresolved ids in the URL.
+      const selection = feedSel.current();
+      if (selection) {
+        applySelection(selection);
+        selectionReady = true;
+      }
     }
   }
 

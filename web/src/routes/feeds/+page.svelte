@@ -34,6 +34,7 @@
   let loadingMore = $state(false);
   let error = $state('');
   let hasMore = $state(true);
+  let loadGeneration = 0;
 
   // Watch for unseen toggle — reload with/without server-side status filter
   let prevSu = false;
@@ -170,24 +171,28 @@
   }
 
   async function loadEntries(feedId: number) {
+    const generation = ++loadGeneration;
+    loadingMore = false;
     loading = true;
     error = '';
     try {
       const data = await loadPage({ offset: 0, feedId });
+      if (generation !== loadGeneration) return;
       entries = data.entries;
       total = data.total;
       hasMore = entries.length < total;
     } catch {
-      error = 'Failed to load feeds';
+      if (generation === loadGeneration) error = 'Failed to load feeds';
     } finally {
-      loading = false;
+      if (generation === loadGeneration) loading = false;
     }
-    // Scroll to top on reload
-    getScrollRoot?.()?.scrollTo(0, 0);
+    // A stale response must not scroll the new selection.
+    if (generation === loadGeneration) getScrollRoot?.()?.scrollTo(0, 0);
   }
 
   async function loadMore() {
-    if (loadingMore || !hasMore) return;
+    if (loading || loadingMore || !hasMore) return;
+    const generation = loadGeneration;
     loadingMore = true;
     try {
       // Under the unread filter, offset is unstable: cards get marked read
@@ -210,6 +215,7 @@
       }
 
       const data = await loadPage(opts);
+      if (generation !== loadGeneration) return;
       if (data.entries.length === 0) {
         hasMore = false;
       } else {
@@ -226,11 +232,12 @@
         }
       }
     } catch {
+      if (generation !== loadGeneration) return;
       notifyError('Failed to load more feeds.');
       // Keep Next retryable, but do not immediately re-observe a failed page.
       return;
     } finally {
-      loadingMore = false;
+      if (generation === loadGeneration) loadingMore = false;
     }
     // Re-observe sentinel so the observer fires again if it's still visible —
     // a short page (or one whose cards are compact because the Images chip is
@@ -274,6 +281,7 @@
   });
 
   onDestroy(() => {
+    loadGeneration++;
     if (flushTimer) clearTimeout(flushTimer);
     if (flushMaxTimer) clearTimeout(flushMaxTimer);
     flushPending();
