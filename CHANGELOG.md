@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Feed articles now use the same compact viewer as workspace files, with previous and next controls on phones. Audio artwork remains visible, and closing image zoom returns to the same article position.
+
 - Workspace previews now use a compact reading panel with Download and Close in the header. Short documents fit their content; source files and PDF pages use a wider panel.
 
 - **A switched-off room says so at the end of its transcript, not in a banner over it.** Web chat used to pin a warning above the messages; the notice is now a status row after the last message, where the next message would go, since nothing is recorded while the room is off. The `!<bot name> on` command in it renders as code.

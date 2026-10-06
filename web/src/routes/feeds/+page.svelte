@@ -226,7 +226,9 @@
         }
       }
     } catch {
-      hasMore = false;
+      notifyError('Failed to load more feeds.');
+      // Keep Next retryable, but do not immediately re-observe a failed page.
+      return;
     } finally {
       loadingMore = false;
     }
