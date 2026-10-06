@@ -351,6 +351,24 @@ def _expect_ok(answer, what: str, account: str):
     return data
 
 
+#: How long `_fetch` retries a listed message that answers with no literal.
+FETCH_SETTLE = 2.0
+
+
+def _body_literal(data) -> tuple | None:
+    """The `BODY[]` literal in a UID FETCH answer, or None.
+
+    imaplib returns every untagged response, so an unsolicited
+    `FETCH (FLAGS ...)` for another message can precede the literal. A flags
+    update carries no literal and a fetch here names one message, so the tuple
+    carrying `BODY[]` is the answer (Maddy puts `UID` after it).
+    """
+    for item in data or []:
+        if isinstance(item, tuple) and b"BODY[]" in item[0]:
+            return item
+    return None
+
+
 class ImapSession:
     """A logged-in IMAP connection over implicit TLS, as a context manager.
 
@@ -532,18 +550,20 @@ class ImapSession:
         So headers come from a `compat32` parse, which hands back the wire text,
         and the body from a `default` one.
         """
-        typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
-        # imaplib returns every untagged response, so an unsolicited
-        # `FETCH (FLAGS ...)` for another message can precede the literal. A
-        # flags update carries no literal, and this asks for one message, so
-        # the tuple carrying `BODY[]` is ours (Maddy puts `UID` after it).
-        literal = next(
-            (item for item in data or [] if isinstance(item, tuple)
-             and b"BODY[]" in item[0]),
-            None,
-        )
-        if typ != "OK" or literal is None:
-            raise RuntimeError(f"could not fetch uid {uid} from {self.account}")
+        # A message SEARCH has just listed can briefly answer FETCH with no
+        # literal while delivery settles, so an empty answer is retried, bounded.
+        deadline = time.monotonic() + FETCH_SETTLE
+        while True:
+            typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
+            literal = _body_literal(data)
+            if typ == "OK" and literal is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"could not fetch uid {uid} from {self.account}: "
+                    f"{typ} {data!r:.300}"
+                )
+            time.sleep(0.2)
         payload = literal[1]
         parsed = email.message_from_bytes(payload, policy=email.policy.default)
         raw = email.message_from_bytes(payload, policy=email.policy.compat32)

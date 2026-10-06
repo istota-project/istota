@@ -312,10 +312,23 @@ class TestTheFetchFindsItsOwnLiteral:
         data = [(b"14 (BODY[] {60}", _RAW), b" UID 14)"]
         assert _session(None)._fetch(_FetchConnection(data), 14).subject == "hi"
 
-    def test_an_answer_with_no_literal_is_refused(self):
+    def test_an_answer_with_no_literal_is_refused_once_the_settle_runs_out(
+        self, monkeypatch,
+    ):
+        monkeypatch.setattr(mail, "FETCH_SETTLE", 0.0)
         data = [b"13 (UID 13 FLAGS (\\Seen))"]
         with pytest.raises(RuntimeError, match="could not fetch uid 14"):
             _session(None)._fetch(_FetchConnection(data), 14)
+
+    def test_a_literal_that_arrives_on_a_retry_is_read(self, monkeypatch):
+        monkeypatch.setattr(mail.time, "sleep", lambda _s: None)
+        answers = [[None], [(b"14 (BODY[] {60}", _RAW), b" UID 14)"]]
+
+        class Settling:
+            def uid(self, command, *args):
+                return "OK", answers.pop(0)
+
+        assert _session(None)._fetch(Settling(), 14).subject == "hi"
 
 
 class TestTheSessionReadsTheFolderItWasOpenedOn:
