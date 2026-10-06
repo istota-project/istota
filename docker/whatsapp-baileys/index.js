@@ -62,6 +62,15 @@ const path = require('path');
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 256 * 1024;
 
+// ISSUE-666: inbound frames the link could not take are held and sent after
+// the next `hello`, since Baileys has already acknowledged them to WhatsApp
+// and nothing redelivers one dropped here. Memory only, like every other
+// piece of message content this process keeps. The age bound stays well
+// inside the daemon's `MEDIA_ORPHAN_SECONDS` (600 s), because a held frame
+// can name a staged file that sweep would otherwise unlink first.
+const HOLD_LIMIT = 100;
+const HOLD_MAX_AGE_MS = 240_000;
+
 const MSG_HELLO = 'hello';
 const MSG_READY = 'ready';
 const MSG_QR = 'qr';
@@ -376,6 +385,10 @@ class Link {
     // closed has to say so again, or the bridge reports `connected` and not
     // `ready` for ever and `istota whatsapp pair` can never finish.
     this.onReady = () => {};
+    // Frames `hold` could not send yet, oldest first: `{type, fields,
+    // onDelivered, at}`. Survives a reconnect; not a sidecar restart.
+    this.held = [];
+    this.now = () => Date.now();
   }
 
   connect() {
@@ -384,9 +397,7 @@ class Link {
     socket.setEncoding('utf8');
     socket.on('connect', () => {
       log('info', 'connected to the daemon');
-      this.send(MSG_HELLO, { protocol_version: PROTOCOL_VERSION });
-      this.greeted = true;
-      this.onReady();
+      this.greet();
     });
     socket.on('data', (chunk) => this.feed(chunk));
     socket.on('error', (err) => log('warn', 'socket error', { code: err.code }));
@@ -438,8 +449,101 @@ class Link {
     this.onMessage(parsed.type, parsed);
   }
 
+  // `hello`, then everything held, then `ready`: a frame held during the gap
+  // goes ahead of anything sent after it, and a group's roster ahead of the
+  // message that needs its room.
+  greet() {
+    this.send(MSG_HELLO, { protocol_version: PROTOCOL_VERSION });
+    this.greeted = true;
+    this.flushHeld();
+    this.onReady();
+  }
+
+  // `writable` turns false when the daemon's FIN arrives, a few ticks before
+  // `close` destroys the socket; a write in that gap is lost.
+  writable() {
+    return Boolean(
+      this.socket && !this.socket.destroyed && this.socket.writable !== false
+      && this.greeted,
+    );
+  }
+
+  /*
+   * Send a frame now, or hold it for the next `hello` if the link cannot take
+   * it. True when written, false when held, null when dropped (over the
+   * limit, or a frame that cannot be encoded). `onDelivered` runs when the
+   * frame is written, whichever of the two calls writes it; `onDropped` when
+   * it is refused, or expires while held.
+   *
+   * Over the limit the new frame is refused rather than the oldest evicted,
+   * because evicting from the front could drop a roster and keep the message
+   * that needs it.
+   */
+  hold(type, fields, onDelivered = null, onDropped = null) {
+    this.pruneHeld();
+    if (this.writable() && this.held.length === 0) {
+      if (!this.send(type, fields)) {
+        if (onDropped) onDropped();
+        return null;
+      }
+      if (onDelivered) onDelivered();
+      return true;
+    }
+    if (this.held.length >= HOLD_LIMIT) {
+      log('warn', 'an inbound frame reached nobody', {
+        frame: type, why: 'hold_full', held: this.held.length,
+      });
+      if (onDropped) onDropped();
+      return null;
+    }
+    this.held.push({ type, fields, onDelivered, onDropped, at: this.now() });
+    log('info', 'an inbound frame is held for the daemon', {
+      frame: type, held: this.held.length,
+    });
+    return false;
+  }
+
+  pruneHeld() {
+    const cutoff = this.now() - HOLD_MAX_AGE_MS;
+    let dropped = 0;
+    while (this.held.length && this.held[0].at < cutoff) {
+      const entry = this.held.shift();
+      if (entry.onDropped) entry.onDropped();
+      dropped += 1;
+    }
+    if (dropped) {
+      log('warn', 'held inbound frames reached nobody', {
+        why: 'hold_expired', count: dropped,
+      });
+    }
+  }
+
+  // A daemon that refuses this connection's `hello` loses what was flushed
+  // into it, as any frame written to a link that then drops is lost: there is
+  // no acknowledgement on this protocol to hold a frame against.
+  flushHeld() {
+    this.pruneHeld();
+    let sent = 0;
+    while (this.held.length && this.writable()) {
+      const entry = this.held.shift();
+      if (!this.send(entry.type, entry.fields)) {
+        if (entry.onDropped) entry.onDropped();
+        continue;
+      }
+      sent += 1;
+      if (entry.onDelivered) entry.onDelivered();
+    }
+    if (sent) log('info', 'held inbound frames sent', { count: sent });
+  }
+
+  // `false` for a link that cannot take a frame — none, destroyed, or not yet
+  // past `hello`. A frame written to a socket still connecting would reach
+  // the daemon ahead of `hello`, which it answers by dropping the link.
   send(type, fields) {
-    if (!this.socket || this.socket.destroyed) return false;
+    if (!this.socket || this.socket.destroyed || this.socket.writable === false) {
+      return false;
+    }
+    if (!this.greeted && type !== MSG_HELLO) return false;
     let raw;
     try {
       raw = encode(type, fields);
@@ -2678,12 +2782,16 @@ class Session {
       if (!adder.endsWith(USER_JID_DOMAIN)) adder = '';
       subject = meta && typeof meta.subject === 'string' ? meta.subject.slice(0, 256) : null;
     }
-    this.link.send(MSG_GROUP_ROSTER, {
+    this.link.hold(MSG_GROUP_ROSTER, {
       group_jid: jid,
       subject,
       participants,
       added_by: adder,
       bot_present: !botRemoved,
+    }, null, () => {
+      // Never reached the daemon: forget it, so the group's next message
+      // fetches and sends the roster again.
+      if (!botRemoved) this.groupRosters.delete(jid);
     });
   }
 
@@ -2839,7 +2947,8 @@ class Session {
       // answers "that image (or voice message) could not be fetched", which
       // is a different and better answer from "that message type is not
       // supported yet".
-      const delivered = this.link.send(MSG_INBOUND, {
+      // ISSUE-666: held, not dropped, while the daemon link is down.
+      const outcome = this.link.hold(MSG_INBOUND, {
         message_id: message.key.id,
         jid,
         username: message.pushName || null,
@@ -2860,15 +2969,10 @@ class Session {
         media_bytes: media.media_bytes,
         media_error: media.media_error,
         unsupported_kind: content.unsupportedKind,
-      });
-      if (delivered) rememberInbound(jid, message);
-      if (!delivered) {
-        // `Link.send` answers false for a destroyed socket and says nothing.
-        // Before the chain existed the send happened inside the event
-        // handler, so this could only lose a message to an encode failure;
-        // now a download can outlive the daemon link and the loss is silent.
+      }, () => rememberInbound(jid, message));
+      if (outcome === null) {
         log('warn', 'an inbound message reached nobody', {
-          why: 'link_unavailable', staged: Boolean(media.media_name),
+          why: 'not_held', staged: Boolean(media.media_name),
         });
       }
     }
@@ -3004,7 +3108,9 @@ class Session {
       if (typeof id !== 'string' || !id || status === undefined) continue;
       const mapped = receiptStatus(status);
       if (!mapped) continue;
-      this.link.send(MSG_RECEIPT, {
+      // Held for the same reason as an inbound message: Baileys has consumed
+      // the status, and a lost `failed` leaves the ledger row wrong.
+      this.link.hold(MSG_RECEIPT, {
         message_id: id,
         status: mapped,
         timestamp: Math.floor(Date.now() / 1000),
@@ -3305,6 +3411,9 @@ module.exports = {
   applyPrivateUmask,
   PROTOCOL_VERSION,
   MAX_LINE_BYTES,
+  HOLD_LIMIT,
+  HOLD_MAX_AGE_MS,
+  Link,
   MSG_HELLO,
   MSG_READY,
   MSG_QR,

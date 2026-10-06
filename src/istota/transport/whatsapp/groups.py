@@ -559,6 +559,7 @@ def media_recipient(
                 conn, room.token, config.speech_gate.mode,
             ),
             classified=classified,
+            worded=bool(text),
         )
         return user_id if decision.speak else None
     except Exception as e:  # noqa: BLE001 — a failed read places nothing
@@ -939,6 +940,7 @@ def handle_group_message(
         is_command=is_command,
         room_container=True,
         classified=classified,
+        worded=bool(text),
         can_react=True,
     )
     if claimed is not None and outcome.task_id is not None:

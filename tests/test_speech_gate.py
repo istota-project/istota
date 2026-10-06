@@ -131,6 +131,19 @@ class TestTheLadder:
         assert (decision.speak, decision.rung) == (False, RUNG_FAILED)
         assert stub.prompts == []
 
+    def test_a_turn_with_no_words_is_not_classified_and_not_a_fault(self):
+        """ISSUE-666: an uncaptioned file has nothing for the classifier."""
+        stub = StubCompleter('{"speak": true}')
+        decision = _gate(window=None, completer=stub, worded=False)
+        assert decision == GateDecision(
+            False, speech_gate.RUNG_CLASSIFIER, reason=speech_gate.NO_WORDS_REASON,
+        )
+        assert stub.prompts == []
+
+    def test_an_addressed_turn_with_no_words_still_speaks(self):
+        decision = _gate(addressed_to_bot=True, worded=False)
+        assert (decision.speak, decision.rung) == (True, "addressed")
+
 
 class TestTheParser:
     def test_a_fenced_answer_is_read(self):
