@@ -146,7 +146,7 @@
     {/if}
     {#if incoming && card.from}
       <div class="mail-people" data-testid="mail-from">
-        From:<span class="mail-person">{addressLabel(card.from, card.labels)}</span>
+        From:{' '}<span class="mail-person">{addressLabel(card.from, card.labels)}</span>
         {#if addressLabel(card.from, card.labels) !== card.from.address}
           <span class="mail-address">&lt;{card.from.address}&gt;</span>
         {/if}

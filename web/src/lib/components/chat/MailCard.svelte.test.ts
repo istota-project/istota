@@ -48,7 +48,7 @@ describe('an incoming card', () => {
     render(MailCard, { card: receivedCard(received()) });
     expect(card().dataset.direction).toBe('in');
     expect(text()).toContain('Received by email');
-    expect(text()).toContain('Alice Ash');
+    expect(text()).toContain('From: Alice Ash');
     expect(text()).toContain('alice@ext.example');
     expect(text()).toContain('Re: Dinner plans');
     // The bot is named, not addressed.
