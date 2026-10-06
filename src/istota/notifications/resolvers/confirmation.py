@@ -10,9 +10,14 @@ task stops being ``pending_confirmation``, so a confirmation answered over Talk
 can never render as still-waiting in the panel even if the close path was missed.
 
 **The title never comes from ``tasks.prompt``.** For a gated email that column
-*is* the untrusted message the gate is withholding. It comes from
-``confirmations.describe``, which reads the sender and subject off
-``processed_emails`` and flattens both.
+*is* the untrusted message the gate is withholding. The bell renders the
+row's stored title, which each producer builds from fixed text: the gate from
+``confirmations.describe_email`` (the sender and subject, flattened), the
+scheduler's park from :func:`park_title`. Rendering the stored title rather
+than recomputing one from the task is what keeps the bell and the push on one
+title (#663): the two producers cannot be told apart from the task, and an
+email-origin park recomputed as the gate's held-mail label. A relay hold is
+the one exception, rendered by ``describe_title`` for the web view only.
 """
 
 from __future__ import annotations
@@ -176,6 +181,13 @@ def _task_id(row: "NotificationRow") -> int | None:
     return _common.coerce_object_id(row, noun="task", logger=logger)
 
 
+def _title(conn, row: "NotificationRow", task) -> str:
+    """The title the row was stored with, so the bell names what the push did."""
+    from istota.confirmations import describe
+
+    return row.title or describe(conn, task)
+
+
 # Lines of a relay hold's preview the bell shows when a private room shows the
 # whole of it: there the bell is a pointer to the preview, not the place to
 # approve.
@@ -258,7 +270,7 @@ class ConfirmationResolver:
     def resolve(
         self, config: "Config", conn: "sqlite3.Connection", row: "NotificationRow",
     ) -> "NotificationView | None":
-        from istota import confirmations, db
+        from istota import db
         from istota.notifications.sources import NotificationAction, NotificationView
 
         task_id = _task_id(row)
@@ -298,7 +310,7 @@ class ConfirmationResolver:
             question = body_for(task.confirmation_prompt)
             reply = f"Reply by {label} to answer this question."
             return NotificationView(
-                title=confirmations.describe(conn, task),
+                title=_title(conn, row, task),
                 body=f"{question}\n\n{reply}" if question else reply,
                 severity=row.severity,
                 actions=(),
@@ -308,7 +320,7 @@ class ConfirmationResolver:
             return _relay_held_view(conn, row, task)
 
         return NotificationView(
-            title=confirmations.describe(conn, task),
+            title=_title(conn, row, task),
             body=body_for(task.confirmation_prompt),
             severity=row.severity,
             actions=(

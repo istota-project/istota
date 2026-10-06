@@ -81,9 +81,13 @@ class TaskStreamAdapter:
         # this name through ``istota.transport.registry``, and a name bound at
         # import time would make both patches inert while the tests still
         # passed. Moving it up means re-pointing those patch targets.
-        from .transport.registry import task_is_stream_surface
+        #
+        # A stream surface whose stored body is not the raw result (a briefing,
+        # an email task, a silent job) streams nothing either: its follower sees
+        # progress and then the room's stored row (#659).
+        from .transport.registry import task_streams_answer
 
-        self.is_stream_surface = task_is_stream_surface(config, task)
+        self.is_stream_surface = task_streams_answer(config, task)
 
         # Per-task coalescing buffer for streamed answer text. Incoming deltas
         # (NativeBrain's TextDeltaEvent, or ClaudeCodeBrain's block TextEvent)

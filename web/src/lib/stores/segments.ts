@@ -211,6 +211,10 @@ export interface ChatMessage {
   // Set by approve, read once when the stream reopens: the seq to resume after.
   resumeAfterSeq?: number;
   error?: boolean;
+  // The answer was taken from the room's stored row (#659). Nothing the task
+  // stream delivers afterwards may change the text: a late `text_delta` from
+  // a lagging poll, or a `result` frame, is a preview of what is already here.
+  storedAnswer?: boolean;
   streaming: boolean;
   // Ack verb shown before the first segment exists.
   progress?: string;
@@ -476,6 +480,16 @@ function setTrailingText(m: ChatMessage, text: string): void {
   }
 }
 
+/** Make the room's stored row the turn's answer (#659). The stored body is
+ * the answer of record; the live stream's text was only a preview of it, and
+ * for some tasks (an email thread, a briefing) not even that. Tool and
+ * reasoning segments stay, so the activity above the answer is kept. */
+export function adoptStoredAnswer(m: ChatMessage, text: string): void {
+  setTrailingText(m, text);
+  m.text = answerText(m);
+  m.storedAnswer = true;
+}
+
 /** Put the question a task parked on into the turn as a gate segment. The
  * trailing open text block is that question as it streamed, so it becomes the
  * gate (the canonical prompt replacing the streamed one, as `result` replaces
@@ -682,8 +696,8 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
 
     case 'text_delta': {
       // A late stray delta after the message terminated must not reopen a
-      // finished answer.
-      if (!m.streaming) break;
+      // finished answer, nor append to one taken from the stored row.
+      if (!m.streaming || m.storedAnswer) break;
       // Settle an open thinking block first (thinking → answer boundary) so the
       // reasoning lead-in folds into the chip and the answer opens fresh.
       settleOpenOfKind(m, 'thinking');
@@ -760,8 +774,11 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
     case 'result': {
       // Reconcile the canonical (CM-composed) answer. Only overwrite when
       // non-empty: an empty result keeps whatever streamed in as the answer.
+      // The server sends text only where the store keeps the result verbatim,
+      // and the room's stored row outranks it either way (#659): a frame with
+      // no text is a task whose turn is the row, or nothing.
       const text = String(payload.text ?? '');
-      if (text) setTrailingText(m, text);
+      if (text && !m.storedAnswer) setTrailingText(m, text);
       m.text = answerText(m);
       m.progress = undefined;
       m.streaming = false;

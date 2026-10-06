@@ -833,7 +833,12 @@ const SLOW_HOLD_MS = 45_000;
  * knob is for.
  */
 function mockTaskEvents(task: MockChatTask) {
-  const events = mockTaskEventsRaw(task);
+  // The real `done` names the stored row a web turn landed in, and the client
+  // drops a completed turn whose `done` names none and whose row has not
+  // arrived (#659), so every mock answer carries its row's id.
+  const events = mockTaskEventsRaw(task).map((e) =>
+    e.kind === 'done' ? { ...e, payload: { ...e.payload, msg_id: mockAsstMsgId(task) } } : e,
+  );
   if (!task.holdMs) return events;
   return events.map((e) => (e.kind === 'task_started' ? e : { ...e, at: e.at + task.holdMs! }));
 }

@@ -348,3 +348,66 @@ class TestTheRemarkAndTheLink:
             db.add_message(conn, noted, role="system", body="n", origin_surface="web",
                            delivery_reference=f"private-pass_on:{task_id}:pass-on")
             assert private_replies.note_room_for_task(conn, task_id, HOST) == noted
+
+
+# ---------------------------------------------------------------------------
+# The step is recorded (#651)
+# ---------------------------------------------------------------------------
+
+
+def _step_lines(db_path, task_id):
+    from istota.scheduler import EMAIL_NOTE_STEP_LOG
+
+    rows = _rows(db_path, "SELECT message FROM task_logs WHERE task_id = ? ORDER BY id",
+                 (task_id,))
+    messages = [r["message"] for r in rows]
+    return [m for m in messages if m.startswith(EMAIL_NOTE_STEP_LOG)], messages
+
+
+class TestTheNoteStepIsRecorded:
+    """A completed email task says its note step ran and what it decided, so
+    "no note" can be asserted against a row rather than a log line or a timer."""
+
+    def test_a_note_written_is_recorded_last(self, config, db_path):
+        task_id, _private = _absent_turn(config, db_path)
+        _complete(config, "NO_ACTION:", task_id=task_id)
+        steps, messages = _step_lines(db_path, task_id)
+        assert steps == ["Email note step: note written (none)"]
+        assert messages[-1] == steps[0]
+
+    def test_no_note_due_is_recorded(self, config, db_path):
+        task_id, private = _present_turn(config, db_path)
+        _complete(config, "Told them Friday works.", task_id=task_id,
+                  deferred_body="Friday works.")
+        assert _notes(db_path, private) == []
+        steps, _ = _step_lines(db_path, task_id)
+        assert steps == ["Email note step: no note due (sent)"]
+
+    def test_a_failed_send_still_records_the_step(self, config, db_path):
+        task_id, _private = _absent_turn(config, db_path)
+        _complete(config, "Friday works.", task_id=task_id, deferred_body="Friday works.",
+                  send_fails=True)
+        steps, _ = _step_lines(db_path, task_id)
+        assert steps == ["Email note step: note written (failed)"]
+
+    def test_a_note_that_could_not_be_written_is_recorded(self, config, db_path):
+        task_id, private = _absent_turn(config, db_path)
+        with patch("istota.rooms.private_replies.deliver_email_note",
+                   side_effect=RuntimeError("boom")):
+            _complete(config, "NO_ACTION:", task_id=task_id)
+        assert _notes(db_path, private) == []
+        steps, _ = _step_lines(db_path, task_id)
+        assert steps == ["Email note step: the note could not be written"]
+
+    def test_a_parked_question_records_no_step(self, config, db_path):
+        task_id, _private = _absent_turn(config, db_path)
+        _complete(config, "Shall I tell Alice Friday works? Please confirm.",
+                  task_id=task_id)
+        steps, _ = _step_lines(db_path, task_id)
+        assert steps == []
+
+    def test_mail_outside_a_thread_records_that_no_note_applies(self, config, db_path):
+        (task_id,) = _poll(config, sender=HOST_ADDR, to=(BOT,), message_id="<p1@test.com>")
+        _complete(config, "Nothing today.", task_id=task_id)
+        steps, _ = _step_lines(db_path, task_id)
+        assert steps == ["Email note step: not an email thread"]

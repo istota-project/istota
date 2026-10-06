@@ -1794,6 +1794,11 @@
   .content > .body + :global(.mail-card) {
     margin-top: var(--space-3);
   }
+  /* An email note stacks the received mail and the sent reply as siblings;
+     without a gap their left rules join and the two read as one block. */
+  .content > :global(.mail-card) + :global(.mail-card) {
+    margin-top: var(--space-2);
+  }
 
   .msg.error .body,
   .cmd-output.error {

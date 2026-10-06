@@ -92,6 +92,7 @@ import {
 } from '$lib/components/chat/autocomplete/providers';
 import {
   applyEvent as applySegmentEvent,
+  adoptStoredAnswer,
   isStranded,
   isQueued,
   isRetryableTurn,
@@ -1351,6 +1352,34 @@ function createSession(): ChatSession {
     });
   }
 
+  /**
+   * A completed turn this room stores no row for has no turn here (#659).
+   *
+   * The turn's body is the room's stored row, adopted by `appendStreamedRow`
+   * whichever of the two streams lands first. `done` names the row when the
+   * task's own room stored it (`msg_id`); a row stored by another path (an
+   * email thread's mail) may still be on its way, and then it arrives as an
+   * ordinary new row. So the placeholder goes unless it already holds a row:
+   * what is left otherwise is the live preview of an answer the store did not
+   * keep, which on an email thread is the host's private note. A question, an
+   * error and a cancellation are not answers and stay.
+   */
+  function dropUnstoredTurn(cid: number, payload: Record<string, any>) {
+    if (payload.stop_reason !== 'completed') return;
+    const m = get(messages).find((x) => x.cid === cid);
+    if (!m || m.role !== 'assistant' || m.msgId !== undefined) return;
+    if (m.confirmation || m.error || m.status === 'cancelled') return;
+    messages.update((arr) => arr.filter((x) => x.cid !== cid));
+  }
+
+  /** Whether the open room is an email thread, which shows no parked
+   *  question: its task's park is the host's private room's (#665). The
+   *  server refuses a confirm sent from one, so this is display only. */
+  function openRoomIsEmailThread(): boolean {
+    const rid = get(activeRoomId);
+    return rid != null && !!get(rooms).find((r) => r.id === rid)?.email_thread;
+  }
+
   function streamTask(taskId: number, cid: number): { stop: () => void } {
     // An approved question already on screen: resume past it rather than
     // replaying events this message has already applied (ISSUE-592).
@@ -1421,6 +1450,14 @@ function createSession(): ChatSession {
         applyEvent(cid, kind, payload);
       } catch {
         /* swallow */
+      }
+      if (kind === 'done') dropUnstoredTurn(cid, payload);
+      if (kind === 'confirmation' && openRoomIsEmailThread()) {
+        // The question is the host's private room's (#665): the thread room
+        // records the mail, so the parked task leaves no turn here.
+        messages.update((arr) => arr.filter((x) => x.cid !== cid));
+        settle('done');
+        return;
       }
       if (kind === 'confirmation') {
         paused = true;
@@ -1933,6 +1970,7 @@ function createSession(): ChatSession {
   // renders, which the old poller skipped outright.
   function pickUpStreamedTask(taskId: number, status?: string) {
     if (get(messages).some((m) => m.role === 'assistant' && m.taskId === taskId)) return;
+    if (status === 'pending_confirmation' && openRoomIsEmailThread()) return;
     const ph: ChatMessage = {
       cid: nextCid(),
       role: 'assistant',
@@ -1952,8 +1990,14 @@ function createSession(): ChatSession {
   // own optimistic placeholders carry, and notif_id for system rows.
   function appendStreamedRow(row: ChatRoomEvent) {
     const cur = get(messages);
-    if (typeof row.msg_id === 'number' && cur.some((m) => m.msgId === row.msg_id)) return;
-    if (typeof row.task_id === 'number') {
+    const onScreen = typeof row.msg_id === 'number' && cur.some((m) => m.msgId === row.msg_id);
+    // An assistant row already on screen still has its body to give: the turn
+    // there may be a placeholder `done` stamped before this row arrived.
+    if (onScreen && row.role !== 'assistant') return;
+    // A turn is one user and one assistant row per task; a room can hold several
+    // system rows for one task (a private park, then its note), so those dedup
+    // on their own ids only.
+    if (typeof row.task_id === 'number' && (row.role === 'user' || row.role === 'assistant')) {
       const mine = cur.find((m) => m.taskId === row.task_id && m.role === row.role);
       if (mine) {
         // Already on screen (our own send, or a placeholder being streamed
@@ -1961,31 +2005,39 @@ function createSession(): ChatSession {
         // reload, then drop the frame.
         const msgId = typeof row.msg_id === 'number' ? row.msg_id : null;
         const starred = !!row.starred;
-        // For a user turn, adopt the canonical body too. The server does not
-        // always store what was typed — an attachment-only send becomes a
-        // descriptor, a `!model …` prefix is stripped — and without this the
-        // web transcript would keep showing the raw text while Talk, a reload
-        // and the LLM's own context all show the stored one. Never for an
-        // assistant row: that text is the task stream's to build.
-        const body = row.role === 'user' && typeof row.text === 'string' ? row.text : null;
+        // Adopt the canonical body. The server does not always store what was
+        // typed (an attachment-only send becomes a descriptor, a `!model …`
+        // prefix is stripped), nor what the model answered: an email thread
+        // records the mail it sent, never the note to its host, and a briefing
+        // its parsed body (#659). The stored row is what Talk, a reload and the
+        // model's own context show, so it is what this transcript shows.
+        const body = typeof row.text === 'string' ? row.text : null;
+        const assistant = row.role === 'assistant';
+        const mail = assistant ? rowMail(row) : undefined;
         // An answer that quotes its question (ISSUE-641) carries the citation
         // only on its stored row, which the task stream never saw.
         const cited = replyCitation(row.reply_to);
         if (
           (msgId != null && mine.msgId !== msgId) ||
-          (body != null && body !== mine.text) ||
+          (body != null && (assistant ? !mine.storedAnswer : body !== mine.text)) ||
           (cited != null && mine.replyTo?.msgId !== cited.msgId)
         ) {
           updateMsg(mine.cid, (m) => {
             if (msgId != null) m.msgId = msgId;
             m.starred = starred;
-            if (body != null) m.text = body;
+            if (body != null && assistant) {
+              adoptStoredAnswer(m, body);
+              if (mail) m.mail = mail;
+            } else if (body != null) {
+              m.text = body;
+            }
             if (cited != null) m.replyTo = cited;
           });
         }
         return;
       }
     }
+    if (onScreen) return;
     // A send we gave up on that the server had in fact accepted. A timeout, or
     // a socket dropped after the request was processed, leaves the row marked
     // failed with no task id — and its echo then arrives as a *second* bubble,
@@ -2702,6 +2754,20 @@ function createSession(): ChatSession {
   // Build a render-ready ChatMessage from a server history row. Shared by the
   // first load and the scroll-up older-page prepend so both reconstruct the
   // segment list identically (ISSUE-122 / ISSUE-131).
+  function rowMail(m: ChatHistory['messages'][number]): ChatMessage['mail'] {
+    if (!((m.role === 'assistant' || m.role === 'system') && m.mail)) return undefined;
+    return {
+      to: m.mail.to ?? [],
+      cc: m.mail.cc ?? [],
+      subject: m.mail.subject || undefined,
+      state: m.mail.state,
+      body: m.mail.body || undefined,
+      labels: m.mail.labels ?? undefined,
+      notePath: m.mail.note_path || undefined,
+      discuss: m.mail.discuss ?? undefined,
+    };
+  }
+
   function buildHistoryMessage(m: ChatHistory['messages'][number]): ChatMessage {
     // Rebuild the ordered segment list from the persisted trace so a finished
     // turn renders the same interleaved layout across reloads. Prefer the
@@ -2756,19 +2822,7 @@ function createSession(): ChatSession {
         : undefined,
       // An assistant row's own mail, or (on an email note) the thread row's,
       // which the server attaches under the note.
-      mail:
-        (m.role === 'assistant' || m.role === 'system') && m.mail
-          ? {
-              to: m.mail.to ?? [],
-              cc: m.mail.cc ?? [],
-              subject: m.mail.subject || undefined,
-              state: m.mail.state,
-              body: m.mail.body || undefined,
-              labels: m.mail.labels ?? undefined,
-              notePath: m.mail.note_path || undefined,
-              discuss: m.mail.discuss ?? undefined,
-            }
-          : undefined,
+      mail: rowMail(m),
       receivedMail:
         (m.role === 'user' || (m.role === 'system' && m.email_note)) && m.received_mail
           ? m.received_mail
