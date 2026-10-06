@@ -23,6 +23,8 @@ it. The decision is a ladder, first match wins:
 4. **mode "mention"** -> record only (rung 2 already answered the addressed
    case). The default, and what Talk did before this module existed.
 5. **mode "classifier"** -> ask the completer. Any failure -> record only.
+   Under ``friendly``, a follow-up from the person the bot just answered
+   speaks whatever the completer says (ISSUE-670); it picks only the kind.
 
 **Fail closed, the opposite of context triage.** A false positive is the bot
 interrupting two people talking to each other; a false negative is one retyped
@@ -47,6 +49,7 @@ nothing from ``executor``. Nothing here raises.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import sqlite3
@@ -109,6 +112,7 @@ RUNG_ADDRESSED = "addressed"
 RUNG_MODE_OFF = "mode_off"
 RUNG_MODE_MENTION = "mode_mention"
 RUNG_CLASSIFIER = "classifier"
+RUNG_FOLLOW_UP = "follow_up"
 RUNG_FAILED = "failed"
 
 #: The classifier rung's reason for a turn with no words (an uncaptioned file):
@@ -154,6 +158,9 @@ class WindowTurn:
     #: Whether the full body ended in a question, read before the cap so a
     #: long answer ending in an offer still reads as one.
     asks: bool = False
+    #: False on a bot-posted row carrying somebody else's words
+    #: (`is_bots_own_words`): a follow-up to it is not a follow-up to the bot.
+    own_words: bool = True
 
 
 def _flatten(value: object, limit: int) -> str:
@@ -204,6 +211,7 @@ def window_turns(
                 text=_flatten_body(msg.body, max_message_chars),
                 is_bot=True,
                 asks=_flatten(msg.body, 0).endswith("?"),
+                own_words=is_bots_own_words(getattr(msg, "delivery_reference", None)),
             ))
         elif msg.role == "user":
             author = msg.author_label or msg.author_user_id or "someone"
@@ -301,6 +309,13 @@ def _structural_facts(turns: Sequence[WindowTurn]) -> tuple[bool, bool, bool]:
         not newest.is_bot and answered is not None and newest.author == answered
     )
     return turns[last_bot].asks, bot_just_before, newest_is_asker
+
+
+def is_follow_up(turns: Sequence[WindowTurn]) -> bool:
+    """Whether the newest turn comes right after the bot, from the person it
+    last answered: the clearest friendly case, decided without the model."""
+    _asked, bot_just_before, newest_is_asker = _structural_facts(turns)
+    return bot_just_before and newest_is_asker and turns[-2].own_words
 
 
 def _yes(value: bool) -> str:
@@ -505,7 +520,8 @@ def should_speak(
             # in a friendly room the classifier was still asked whether it is
             # only a reaction, and its kind is the one thing taken from it.
             if (
-                classified is not None and classified.rung == RUNG_CLASSIFIER
+                classified is not None
+                and classified.rung in (RUNG_CLASSIFIER, RUNG_FOLLOW_UP)
                 and classified.kind == KIND_ACK
             ):
                 return GateDecision(
@@ -535,13 +551,37 @@ def should_speak(
 
 def classify(
     window: str | None, completer: Completer | None, model: str | None,
-    *, disposition: str = RESERVED,
+    *, disposition: str = RESERVED, follow_up: bool = False,
 ) -> GateDecision:
     """Rung 5 on its own: ask the completer about ``window``. Never raises.
 
     An ``ack`` survives only a speaking verdict under ``friendly``; anything
     else is a ``reply``, so a reserved room never shortens an answer.
+
+    ``follow_up`` is :func:`is_follow_up` over the same window. Under
+    ``friendly`` it makes the turn speak whatever the completer answers,
+    failure included, and the completer is still asked so a "thanks" can stay
+    an ``ack`` rather than become a full reply (ISSUE-670).
     """
+    decision = _classify(window, completer, model, disposition=disposition)
+    if not follow_up or normalize_disposition(disposition, warn=False) != FRIENDLY:
+        return decision
+    ack = decision.speak and decision.kind == KIND_ACK
+    reason = decision.reason
+    if decision.rung == RUNG_FAILED:
+        # Kept findable: the rung no longer says the classifier failed.
+        reason = f"classifier failed: {reason or 'unknown'}"
+    return dataclasses.replace(
+        decision, speak=True, rung=RUNG_FOLLOW_UP, reason=reason,
+        kind=KIND_ACK if ack else KIND_REPLY,
+        ack_type=decision.ack_type if ack else None,
+    )
+
+
+def _classify(
+    window: str | None, completer: Completer | None, model: str | None,
+    *, disposition: str,
+) -> GateDecision:
     if completer is None:
         logger.warning("speech gate: no classifier available, not speaking")
         return GateDecision(False, RUNG_FAILED, reason="no completer", model=model)

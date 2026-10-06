@@ -74,6 +74,7 @@ from istota.lib import du
 from ...config import Config
 from . import (
     baileys_protocol as proto,
+    inbound_spool,
     media as media_rules,
     message_fingerprint,
     pairing_relay,
@@ -130,6 +131,13 @@ FETCH_MEDIA_TIMEOUT_SECONDS = 75.0
 #: blocked on a full queue is a deadlock. At this depth the sidecar has been
 #: unanswerable for a very long time and the drop is loud.
 INBOUND_QUEUE_MAX = 1024
+
+#: How long the worker waits for the sidecar's link before it replays frames a
+#: previous run left unapplied (ISSUE-669). A replayed turn's reply goes out
+#: through the sidecar, so it waits for the `hello` that every new frame also
+#: comes after; past the bound it replays anyway, and a reply then fails as a
+#: send to an unlinked sidecar does.
+REPLAY_LINK_WAIT_SECONDS = 30.0
 
 #: A database failure is retried in place, in order, rather than dropped — the
 #: spec's error-handling rule, and the analogue of the webhook answering 503 so
@@ -1260,6 +1268,9 @@ class BridgeStatus:
     dropped_events: int = 0
     failed_events: int = 0
     inbound_applied: int = 0
+    #: Frames a previous run took off the socket and never finished, handed to
+    #: the worker at this start (ISSUE-669).
+    replayed_events: int = 0
     queue_depth: int = 0
     session_files_hardened: int = 0
     session_files_unfixed: int = 0
@@ -1536,6 +1547,8 @@ class BaileysBridge:
         socket_path: Path | None = None,
         session_dir: Path | None = None,
         media_dir: Path | None = None,
+        spool_dir: Path | None = None,
+        spool: bool = True,
         send_timeout: float = SEND_TIMEOUT_SECONDS,
         pairing_relay_path: Path | None = None,
         pairing_window_seconds: float = PAIRING_WINDOW_SECONDS,
@@ -1556,6 +1569,16 @@ class BaileysBridge:
         # of it, so a test that cannot move it would have to write into the
         # deployment's own directory.
         self._media_dir = Path(media_dir or media_rules.default_media_dir(config))
+        self._spool_dir = Path(spool_dir or inbound_spool.default_spool_dir(config))
+        # `istota whatsapp pair` passes False: a pairing CLI must not replay the
+        # daemon's kept frames on a session that cannot answer them.
+        self._spool_wanted = bool(spool)
+        # False when the spool is not wanted or its directory could not be
+        # made private at start; frames are then held in memory only.
+        self._spool_enabled = False
+        self._spool_count = 0
+        # Frames a previous run left unapplied, worked before the queue.
+        self._replay: list[inbound_spool.SpooledFrame] = []
         self._send_timeout = send_timeout
         self._on_qr = on_qr
         # The pairing window and its relay. Every one of these is a
@@ -2253,6 +2276,7 @@ class BaileysBridge:
         self._stopping = False
         ensure_session_dir(self._session_dir)
         media_rules.ensure_media_dir(self._media_dir)
+        self._load_spool()
         # A sweep at the one moment nothing can be mid-consume: this process
         # holds no staged file yet and the sidecar has not started. Everything
         # standing here is an orphan from a previous run — a daemon killed
@@ -2299,6 +2323,45 @@ class BaileysBridge:
         self._worker = asyncio.create_task(self._drain_inbound())
         if self._sidecar_argv:
             self._supervisor = asyncio.create_task(self._supervise())
+
+    def _load_spool(self) -> None:
+        """Pick up what the last run read and never finished (ISSUE-669).
+
+        Before the media sweep below, because a kept frame can name a staged
+        file older than the orphan window, and the sweep would take it. Each
+        such file is touched instead, so the window starts again for it. A
+        spool directory that cannot be made private turns the spool off rather
+        than failing the start: it narrows a loss, and a bridge that did not
+        start loses everything.
+        """
+        if not self._spool_wanted:
+            self._spool_enabled = False
+            return
+        try:
+            media_rules.ensure_media_dir(self._spool_dir)
+        except (OSError, ValueError):
+            self._spool_enabled = False
+            logger.error(
+                "whatsapp.baileys.spool_unavailable dir=%s: inbound frames are "
+                "held in memory only, and a scheduler stop loses any not yet "
+                "applied", self._spool_dir, exc_info=True,
+            )
+            return
+        self._spool_enabled = True
+        self._replay = inbound_spool.pending(self._spool_dir)
+        self._spool_count = len(self._replay)
+        for frame in self._replay:
+            name = frame.payload.get("media_name")
+            if frame.staged is None and media_rules.is_staged_name(name):
+                with contextlib.suppress(OSError):
+                    os.utime(self._media_dir / name, follow_symlinks=False)
+        self._status.replayed_events = len(self._replay)
+        if self._replay:
+            logger.info(
+                "whatsapp.baileys.spool_replay count=%d: frames the last run "
+                "read and did not finish are applied first",
+                len(self._replay),
+            )
 
     async def stop(self) -> None:
         """Ask the sidecar to stop, then insist, then close the socket.
@@ -3925,9 +3988,24 @@ class BaileysBridge:
             future.set_result(payload)
 
     def _enqueue(self, message_type: str, payload: dict) -> None:
+        # Kept on disk before it is queued: once the sidecar has written a
+        # frame it holds no copy, so from here a stop would otherwise lose it.
+        kept = None
+        if self._spool_enabled:
+            if self._spool_count >= inbound_spool.SPOOL_MAX_ENTRIES:
+                logger.warning(
+                    "whatsapp.baileys.spool_full count=%d: this frame is held "
+                    "in memory only and is lost if the scheduler stops before "
+                    "it is applied", self._spool_count,
+                )
+            else:
+                kept = inbound_spool.write(self._spool_dir, message_type, payload)
+                if kept is not None:
+                    self._spool_count += 1
         try:
-            self._queue.put_nowait((message_type, payload))
+            self._queue.put_nowait((message_type, payload, kept))
         except asyncio.QueueFull:
+            self._forget(kept)
             self._status.dropped_events += 1
             logger.error(
                 "whatsapp.baileys.inbound_dropped type=%s depth=%s: the receiver "
@@ -3945,18 +4023,65 @@ class BaileysBridge:
         next question, are not the same exchange in the other order. The reader
         is what stays free, so a send the worker is waiting on still lands.
         """
+        replay, self._replay = self._replay, []
+        if replay:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + REPLAY_LINK_WAIT_SECONDS
+            while not self._status.connected and loop.time() < deadline:
+                await asyncio.sleep(0.05)
+        for frame in replay:
+            await self._work(
+                frame.message_type, frame.payload, frame.path, frame.staged,
+            )
         while True:
-            message_type, payload = await self._queue.get()
+            message_type, payload, kept = await self._queue.get()
             try:
-                await self._handle_event(message_type, payload)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning("whatsapp.baileys.inbound_failed", exc_info=True)
+                await self._work(message_type, payload, kept)
             finally:
                 self._queue.task_done()
 
-    async def _handle_event(self, message_type: str, payload: dict) -> None:
+    def _forget(self, kept) -> None:
+        if kept is not None:
+            inbound_spool.remove(kept)
+            self._spool_count = max(0, self._spool_count - 1)
+
+    async def _work(self, message_type: str, payload: dict, kept, staged=None) -> None:
+        """Handle one frame and forget its kept copy, unless cancelled.
+
+        A cancellation is the stop this copy exists for, so the file stays for
+        the next start. Every other ending removes it, a failure included:
+        `_apply_with_retry` has already retried a database fault, and anything
+        else would fail the same way at every replay.
+        """
+        try:
+            await self._handle_event(message_type, payload, kept=kept, staged=staged)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("whatsapp.baileys.inbound_failed", exc_info=True)
+        self._forget(kept)
+
+    def _stage_and_keep(self, message_type, payload, kept, event, classified):
+        """Stage a frame's file, then record the result beside the kept frame.
+
+        One worker-thread call, so the record is written even when the task
+        awaiting it was cancelled: the thread runs on, and the staged file is
+        gone into the inbox by then, so a replay has only this record to go on.
+        """
+        staged_event = stage_inbound_media(
+            self._config, self._media_dir, event, classified,
+        )
+        media = staged_event.media
+        inbound_spool.record_staged(
+            kept, message_type, payload,
+            dataclasses.asdict(media) if media is not None else None,
+            staged_event.claimed_from,
+        )
+        return staged_event
+
+    async def _handle_event(
+        self, message_type: str, payload: dict, *, kept=None, staged=None,
+    ) -> None:
         try:
             if message_type == proto.MSG_INBOUND:
                 event = proto.inbound_event(payload)
@@ -3978,6 +4103,24 @@ class BaileysBridge:
             # A receipt status this surface does not model.
             logger.debug("whatsapp.baileys.receipt_ignored")
             return
+        if staged is not None and isinstance(event, InboundWhatsAppEvent):
+            # A replayed frame whose file was staged before the stop: the
+            # staged copy is in the inbox now, so the record stands in for it.
+            media = staged.get("media")
+            try:
+                event = dataclasses.replace(
+                    event,
+                    media=WhatsAppInboundMedia(**media) if media else None,
+                    claimed_from=staged.get("claimed_from"),
+                )
+            except TypeError:
+                logger.warning(
+                    "whatsapp.baileys.spool_staged_unreadable message=%s",
+                    message_fingerprint(event.message_id),
+                )
+            else:
+                await self._apply_with_retry(event)
+                return
         classified = _ASK_CLASSIFIER
         if (
             isinstance(event, InboundWhatsAppEvent) and event.group is not None
@@ -4000,7 +4143,7 @@ class BaileysBridge:
             # ladder, because a rolled-back batch would otherwise re-stage a
             # file the first attempt already consumed.
             event = await asyncio.to_thread(
-                stage_inbound_media, self._config, self._media_dir, event,
+                self._stage_and_keep, message_type, payload, kept, event,
                 None if classified is _ASK_CLASSIFIER else classified,
             )
         await self._apply_with_retry(event, classified)

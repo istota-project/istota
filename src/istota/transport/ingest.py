@@ -501,6 +501,7 @@ def classify_ahead(
                     turns, bot_name=config.bot_name, disposition=disposition,
                 ),
                 completer, gate.model, disposition=disposition,
+                follow_up=speech_gate.is_follow_up(turns),
             ),
             disposition=disposition,
         )

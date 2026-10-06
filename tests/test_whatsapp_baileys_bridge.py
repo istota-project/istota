@@ -34,6 +34,7 @@ import dataclasses
 import os
 import shutil
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -44,6 +45,7 @@ from istota import db
 from istota.config import Config, UserConfig
 from istota.transport.whatsapp import baileys_protocol as proto, outbound
 from istota.transport.whatsapp import baileys_bridge as bridge_module
+from istota.transport.whatsapp import inbound_spool
 from istota.transport.whatsapp import webhook as webhook_module
 from istota.transport.whatsapp._types import WhatsAppSendRequest
 from istota.transport.whatsapp.baileys_bridge import (
@@ -730,13 +732,365 @@ class TestTheInboundReceiver:
         full queue waits for a line it is itself responsible for reading.
         """
         monkeypatch.setattr(bridge, "_queue", asyncio.Queue(maxsize=1))
-        bridge._queue.put_nowait((proto.MSG_INBOUND, inbound_line()))
+        bridge._queue.put_nowait((proto.MSG_INBOUND, inbound_line(), None))
         await sidecar.say(proto.MSG_INBOUND, **inbound_line(message_id="BAE5F00E"))
 
         await wait_for(lambda: bridge.status.dropped_events == 1)
         # Still reading.
         await sidecar.say(proto.MSG_READY)
         await wait_for(lambda: bridge.status.ready is True)
+        # A dropped frame is not kept for a replay at the next start.
+        assert inbound_spool.pending(bridge._spool_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# Frames kept across a restart (ISSUE-669)
+# ---------------------------------------------------------------------------
+
+
+def _paired_bridge(config, sockets) -> BaileysBridge:
+    sockets.session.mkdir(parents=True, exist_ok=True)
+    creds = sockets.session / "creds.json"
+    creds.write_text('{"me":"the paired device"}')
+    creds.chmod(0o600)
+    return BaileysBridge(
+        config, socket_path=sockets.socket, session_dir=sockets.session,
+        send_timeout=2.0,
+    )
+
+
+def _claims(config) -> list[tuple[str, str, int | None]]:
+    with db.get_db(config.db_path) as conn:
+        return [
+            (row["message_id"], row["disposition"], row["task_id"])
+            for row in conn.execute(
+                "SELECT message_id, disposition, task_id FROM processed_whatsapp "
+                "ORDER BY task_id"
+            )
+        ]
+
+
+async def _runtime_shutdown(bridge) -> None:
+    """What `AsyncRuntime._shutdown` does: cancel every task, then the hook."""
+    bridge._worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await bridge._worker
+    await bridge.stop()
+
+
+class TestFramesSurviveARestart:
+    async def test_a_frame_in_the_workers_hands_at_a_stop_is_applied_by_the_next_start(
+        self, config, sockets, monkeypatch
+    ):
+        """The prod case: a turn mid-classify when the scheduler was told to stop.
+
+        The first apply never commits (the process died under it), and the
+        sidecar has already forgotten the frame, so only the spool has it.
+        """
+        bind_user(config)
+        real_apply = webhook_module.handle_whatsapp_batch
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        release = mock.MagicMock()
+        gate = threading.Event()
+
+        def hangs(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            gate.wait(5.0)
+            release()
+            raise RuntimeError("the process is gone")
+
+        monkeypatch.setattr(webhook_module, "handle_whatsapp_batch", hangs)
+        first = _paired_bridge(config, sockets)
+        await first.start()
+        async with connected(first, sockets) as fake:
+            await fake.say(proto.MSG_INBOUND, **inbound_line())
+            await asyncio.wait_for(entered.wait(), timeout=5.0)
+            await _runtime_shutdown(first)
+        gate.set()
+        await wait_for(lambda: release.called)
+        assert _claims(config) == []
+        assert len(inbound_spool.pending(first._spool_dir)) == 1
+
+        monkeypatch.setattr(webhook_module, "handle_whatsapp_batch", real_apply)
+        second = _paired_bridge(config, sockets)
+        await second.start()
+        try:
+            assert second.status.replayed_events == 1
+            async with connected(second, sockets):
+                await wait_for(lambda: len(_claims(config)) == 1)
+                [(message_id, disposition, task_id)] = _claims(config)
+                assert (message_id, disposition) == ("BAE5F00D", "task")
+                assert task_id is not None
+                await wait_for(
+                    lambda: inbound_spool.pending(second._spool_dir) == []
+                )
+        finally:
+            await second.stop()
+
+    async def test_an_applied_frame_leaves_nothing_to_replay(
+        self, bridge, sidecar, config
+    ):
+        bind_user(config)
+        await sidecar.say(proto.MSG_INBOUND, **inbound_line())
+        await wait_for(lambda: bridge.status.inbound_applied == 1)
+        await wait_for(lambda: inbound_spool.pending(bridge._spool_dir) == [])
+
+    async def test_a_replayed_frame_that_was_applied_is_a_duplicate(
+        self, config, sockets
+    ):
+        """The kill can land after the commit and before the spool removal."""
+        bind_user(config)
+        first = _paired_bridge(config, sockets)
+        await first.start()
+        async with connected(first, sockets) as fake:
+            await fake.say(proto.MSG_INBOUND, **inbound_line())
+            await wait_for(lambda: first.status.inbound_applied == 1)
+        await first.stop()
+        inbound_spool.write(first._spool_dir, proto.MSG_INBOUND, inbound_line())
+
+        second = _paired_bridge(config, sockets)
+        await second.start()
+        try:
+            async with connected(second, sockets):
+                await wait_for(
+                    lambda: inbound_spool.pending(second._spool_dir) == []
+                )
+            with db.get_db(config.db_path) as conn:
+                tasks = conn.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE source_type = 'whatsapp'"
+                ).fetchone()[0]
+            assert tasks == 1
+            assert len(_claims(config)) == 1
+        finally:
+            await second.stop()
+
+    async def test_kept_frames_are_applied_before_anything_new(self, config, sockets):
+        """The worker's order is the conversation's order, across a restart too."""
+        bind_user(config)
+        first = _paired_bridge(config, sockets)
+        spool_dir = first._spool_dir
+        spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inbound_spool.write(
+            spool_dir, proto.MSG_INBOUND,
+            inbound_line(message_id="BAE5AAAA", text="first"),
+        )
+        await first.start()
+        try:
+            async with connected(first, sockets) as fake:
+                await fake.say(
+                    proto.MSG_INBOUND,
+                    **inbound_line(message_id="BAE5BBBB", text="second"),
+                )
+                await wait_for(lambda: len(_claims(config)) == 2)
+        finally:
+            await first.stop()
+        assert [claim[0] for claim in _claims(config)] == ["BAE5AAAA", "BAE5BBBB"]
+
+    async def test_the_replay_waits_for_the_link_and_then_goes_ahead(
+        self, config, sockets, monkeypatch
+    ):
+        """Bounded, so a sidecar that never dials does not hold the replay."""
+        bind_user(config)
+        monkeypatch.setattr(bridge_module, "REPLAY_LINK_WAIT_SECONDS", 0.3)
+        first = _paired_bridge(config, sockets)
+        first._spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inbound_spool.write(first._spool_dir, proto.MSG_INBOUND, inbound_line())
+        await first.start()
+        try:
+            await asyncio.sleep(0.1)
+            assert _claims(config) == []
+            await wait_for(lambda: len(_claims(config)) == 1)
+        finally:
+            await first.stop()
+
+    async def test_a_kept_frame_saves_its_staged_file_from_the_sweep(
+        self, config, sockets
+    ):
+        """The start-up sweep takes files past the orphan window, and a frame
+        kept across a long stop can name one."""
+        first = _paired_bridge(config, sockets)
+        media_dir = first._media_dir
+        media_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        first._spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        kept = media_dir / "kept-photo.jpg"
+        orphan = media_dir / "orphan-photo.jpg"
+        for path in (kept, orphan):
+            path.write_bytes(b"x")
+            old = path.stat().st_mtime - 3600
+            os.utime(path, (old, old))
+        inbound_spool.write(
+            first._spool_dir, proto.MSG_INBOUND,
+            inbound_line(message_type="image", media_name=kept.name),
+        )
+        first._load_spool()
+        bridge_module.media_rules.prune_media_dir(media_dir)
+        assert kept.exists()
+        assert not orphan.exists()
+
+    async def test_a_stop_during_the_replay_keeps_what_was_not_reached(
+        self, config, sockets, monkeypatch
+    ):
+        """A second stop mid-replay costs nothing either: the frame in hand and
+        everything behind it are still there for a third start."""
+        bind_user(config)
+        real_apply = webhook_module.handle_whatsapp_batch
+        first = _paired_bridge(config, sockets)
+        spool_dir = first._spool_dir
+        spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inbound_spool.write(spool_dir, proto.MSG_INBOUND, inbound_line(message_id="BAE5AAAA"))
+        inbound_spool.write(spool_dir, proto.MSG_INBOUND, inbound_line(message_id="BAE5BBBB"))
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        gate = threading.Event()
+
+        def hangs(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            gate.wait(5.0)
+            raise RuntimeError("the process is gone")
+
+        monkeypatch.setattr(webhook_module, "handle_whatsapp_batch", hangs)
+        await first.start()
+        async with connected(first, sockets):
+            await asyncio.wait_for(entered.wait(), timeout=5.0)
+            await _runtime_shutdown(first)
+        gate.set()
+        assert len(inbound_spool.pending(spool_dir)) == 2
+
+        monkeypatch.setattr(webhook_module, "handle_whatsapp_batch", real_apply)
+        third = _paired_bridge(config, sockets)
+        await third.start()
+        try:
+            async with connected(third, sockets):
+                await wait_for(lambda: len(_claims(config)) == 2)
+                await wait_for(lambda: inbound_spool.pending(spool_dir) == [])
+        finally:
+            await third.stop()
+        assert [claim[0] for claim in _claims(config)] == ["BAE5AAAA", "BAE5BBBB"]
+
+    async def test_a_stop_after_the_file_was_placed_keeps_the_placed_file(
+        self, config, sockets, monkeypatch
+    ):
+        """Staging moves the file into the inbox and unlinks the staged copy,
+        so a replay that staged again would answer "media failed" for a photo
+        already in the inbox. The kept frame carries the placement instead."""
+        bind_user(config)
+        first = _paired_bridge(config, sockets)
+        first._media_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staged = first._media_dir / "BAE5F00D-abc.jpg"
+        staged.write_bytes(b"\xff\xd8\xff\xe0 a photo")
+        placed: list = []
+
+        def fake_stage(config_, media_dir, event, classified=None):
+            staged.unlink()
+            placed.append(event.message_id)
+            return dataclasses.replace(
+                event, media=dataclasses.replace(
+                    event.media, staged_path="/Users/alice/inbox/whatsapp_photo.jpg",
+                    attached_for_user=USER,
+                ),
+            )
+
+        monkeypatch.setattr(bridge_module, "stage_inbound_media", fake_stage)
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        gate = threading.Event()
+
+        def hangs(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            gate.wait(5.0)
+            raise RuntimeError("the process is gone")
+
+        monkeypatch.setattr(webhook_module, "handle_whatsapp_batch", hangs)
+        frame = inbound_line(
+            message_type="image", text=None, media_name=staged.name,
+            media_mime="image/jpeg", media_bytes=staged.stat().st_size,
+            media_kind="image",
+        )
+        await first.start()
+        async with connected(first, sockets) as fake:
+            await fake.say(proto.MSG_INBOUND, **frame)
+            await asyncio.wait_for(entered.wait(), timeout=5.0)
+            await _runtime_shutdown(first)
+        gate.set()
+        [kept] = inbound_spool.pending(first._spool_dir)
+        assert kept.staged["media"]["attached_for_user"] == USER
+
+        seen = []
+
+        def records(conn, config_, events, **kwargs):
+            seen.extend(events)
+            return []
+
+        monkeypatch.setattr(webhook_module, "handle_whatsapp_batch", records)
+        second = _paired_bridge(config, sockets)
+        await second.start()
+        try:
+            async with connected(second, sockets):
+                await wait_for(lambda: len(seen) == 1)
+        finally:
+            await second.stop()
+        assert placed == ["BAE5F00D"]
+        assert seen[0].media.staged_path == "/Users/alice/inbox/whatsapp_photo.jpg"
+        assert seen[0].media.error is None
+
+    async def test_a_kept_frame_past_its_age_is_not_applied(self, config, sockets):
+        bind_user(config)
+        first = _paired_bridge(config, sockets)
+        first._spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = inbound_spool.write(first._spool_dir, proto.MSG_INBOUND, inbound_line())
+        old = path.stat().st_mtime - inbound_spool.SPOOL_MAX_AGE_SECONDS - 60
+        os.utime(path, (old, old))
+        await first.start()
+        try:
+            assert first.status.replayed_events == 0
+            assert inbound_spool.pending(first._spool_dir) == []
+        finally:
+            await first.stop()
+        assert _claims(config) == []
+
+    async def test_a_bridge_without_the_spool_neither_keeps_nor_replays(
+        self, config, sockets
+    ):
+        """What `istota whatsapp pair` builds: its session cannot answer."""
+        bind_user(config)
+        spool_dir = inbound_spool.default_spool_dir(config)
+        spool_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inbound_spool.write(spool_dir, proto.MSG_INBOUND, inbound_line(message_id="BAE5AAAA"))
+        sockets.session.mkdir(parents=True, exist_ok=True)
+        (sockets.session / "creds.json").write_text('{"me":"the paired device"}')
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            spool=False,
+        )
+        await instance.start()
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_INBOUND, **inbound_line(message_id="BAE5BBBB"))
+                await wait_for(lambda: instance.status.inbound_applied == 1)
+        finally:
+            await instance.stop()
+        assert [claim[0] for claim in _claims(config)] == ["BAE5BBBB"]
+        assert len(inbound_spool.pending(spool_dir)) == 1
+
+    async def test_a_full_spool_carries_the_frame_in_memory(
+        self, bridge, sidecar, config, monkeypatch
+    ):
+        """The spool narrows a loss and never causes one."""
+        bind_user(config)
+        monkeypatch.setattr(inbound_spool, "SPOOL_MAX_ENTRIES", 0)
+        await sidecar.say(proto.MSG_INBOUND, **inbound_line())
+        await wait_for(lambda: bridge.status.inbound_applied == 1)
+        assert [claim[0] for claim in _claims(config)] == ["BAE5F00D"]
+        assert inbound_spool.pending(bridge._spool_dir) == []
+
+    async def test_an_unreadable_frame_is_not_kept(self, bridge, sidecar):
+        """Dropped for a reason that would recur, so a replay would drop it again."""
+        payload = inbound_line()
+        payload.pop("jid")
+        await sidecar.say(proto.MSG_INBOUND, **payload)
+        await wait_for(lambda: bridge.status.malformed_lines == 1)
+        await wait_for(lambda: inbound_spool.pending(bridge._spool_dir) == [])
 
 
 # ---------------------------------------------------------------------------
