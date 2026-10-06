@@ -26,57 +26,6 @@ import hljs from 'highlight.js/lib/common';
 import { base } from '$app/paths';
 import { findMentions, mentionMatcher, type MentionTarget } from '$lib/mentions';
 
-const md = new MarkdownIt({
-  html: false, // never emit raw HTML from source — safe-by-construction
-  linkify: true, // auto-link bare URLs
-  breaks: true, // single newline -> <br>, which reads better in chat
-  typographer: false,
-  // Syntax-highlight fenced blocks. Returning a full `<pre><code>…</code></pre>`
-  // string tells markdown-it to use it verbatim (it won't re-wrap). The `hljs`
-  // class on <code> activates the token palette; `language-<lang>` is kept for
-  // parity with the un-highlighted path and CSS hooks.
-  highlight(str, lang): string {
-    const langClass = lang ? ` language-${md.utils.escapeHtml(lang)}` : '';
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        const { value } = hljs.highlight(str, { language: lang, ignoreIllegals: true });
-        return `<pre><code class="hljs${langClass}">${value}</code></pre>`;
-      } catch {
-        // Fall through to the escaped-plain path on any hljs failure.
-      }
-    }
-    // Unknown / missing language: escape the body ourselves and still tag it
-    // `hljs` so the block background/padding match highlighted blocks.
-    return `<pre><code class="hljs${langClass}">${md.utils.escapeHtml(str)}</code></pre>`;
-  },
-});
-
-// Disable linkify's fuzzy (schema-less) link detection. Without this, bare
-// tokens like `FILENAME.md` get auto-linked because `.md` is a real TLD
-// (Moldova) — chat text is full of `something.md` filenames that must stay
-// plain text. Bare URLs that carry an explicit http(s)://  scheme still linkify.
-md.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
-
-const SAFE_URL = /^(https?:\/\/|mailto:|\/)/i;
-
-// Restrict link + image hrefs to a safe scheme allowlist. markdown-it already
-// blocks javascript:/vbscript:/etc.; this tightens it to exactly what chat
-// content should ever produce.
-md.validateLink = (url: string): boolean => SAFE_URL.test(url.trim());
-
-// Open links in a new tab with noopener/noreferrer. We layer onto the default
-// renderer rather than replacing it so URL normalization/encoding still runs.
-const defaultLinkOpen =
-  md.renderer.rules.link_open ??
-  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
-
-md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-  const token = tokens[idx];
-  token.attrSet('target', '_blank');
-  token.attrSet('rel', 'noopener noreferrer');
-  return defaultLinkOpen(tokens, idx, options, env, self);
-};
-
 /** Where a link goes, as a reader checks it: the host of a web URL, the
  *  address of a mailto, otherwise the href as written. */
 function linkDestination(href: string): string {
@@ -90,28 +39,6 @@ function linkDestination(href: string): string {
   }
   return href;
 }
-
-// Untrusted text (`renderUntrustedMarkdown`): a link whose visible text is not
-// its own target says where it goes, so `[https://bank.example](https://evil.example)`
-// cannot pass for the bank. An autolink's text is its target and gets nothing.
-md.renderer.rules.link_close = (tokens, idx, options, env, self) => {
-  const close = self.renderToken(tokens, idx, options);
-  if (!env?.untrusted) return close;
-  let open = idx - 1;
-  while (open >= 0 && tokens[open].type !== 'link_open') open--;
-  if (open < 0) return close;
-  const opener = tokens[open];
-  if (opener.markup === 'linkify' || opener.markup === 'autolink') return close;
-  const href = opener.attrGet('href') ?? '';
-  const text = tokens
-    .slice(open + 1, idx)
-    .map((t) => t.content)
-    .join('')
-    .trim();
-  const destination = linkDestination(href);
-  if (!destination || text === href || text === destination) return close;
-  return `${close} <span class="md-link-dest">(${md.utils.escapeHtml(destination)})</span>`;
-};
 
 // The one `src` prefix an <img> may be drawn from: our own authenticated
 // chat-files endpoint. This restates the shape `chatFileUrl` builds (api.ts) and
@@ -131,7 +58,7 @@ md.renderer.rules.link_close = (tokens, idx, options, env, self) => {
 // `validateLink` cannot carry this rule: markdown-it shares it between links and
 // images, and a *link* to this same endpoint is the shipped file-handover form
 // (`chatFileUrl`), which must keep working.
-const CHAT_FILES_PREFIX = `${base}/api/chat/files?`;
+export const CHAT_FILES_PREFIX = `${base}/api/chat/files?`;
 
 /**
  * Is this token inside an `<a>`? Walk left for an unmatched `link_open`.
@@ -213,158 +140,245 @@ function sizeAttrs(src: string): string {
   return ` width="${width}" height="${height}" style="--md-img-ratio:${ratio}"`;
 }
 
-/**
- * Images: draw one only for our own chat-files endpoint, and degrade the rest
- * to links.
- *
- * A `![](https://someone-elses-host/x.png)` in an assistant body renders inline
- * under markdown-it's default rule, which fetches from a host the model picked
- * out of a page it was reading, with the reader's IP and referer, before the
- * reader has agreed to anything. `FeedCard` draws remote images too, but a
- * subscription is consent and a model's page-read is not. So an unadmitted src
- * becomes an ordinary link — the URL stays visible and following it is the
- * reader's choice. Nothing is silently dropped.
- *
- * A src the shared `validateLink` already refused (`javascript:`, `data:`) never
- * reaches here at all: markdown-it abandons the image token and leaves the
- * source as literal text, which is the existing refusal and stays as it is.
- * `![alt]()` is the one exception — an *empty* destination is refused by
- * `validateLink` and still yields a token, with `src=''` (measured) — so it is
- * handled here rather than assumed away. It renders as its own alt text: there
- * is nothing to link to, and an `<a href="">` would navigate to a second copy
- * of the current page.
- *
- * `role="button"` / `tabindex="0"` are the affordance for the lightbox: the
- * output goes through `{@html}`, so there is no element to wrap in a real
- * `<button>` and no Svelte-side way to make one focusable. `Message.svelte`
- * delegates click and Enter/Space off them.
- *
- * An admitted image *inside a link* gets neither, and gets `md-image-linked`
- * instead. `[![](chat-files-url)](https://anywhere)` is a shape the model can
- * write, and with the plain affordance it is a navigation to a host the model
- * chose wearing a zoom-in cursor and a button role — a worse version of the
- * thing the degradation above exists to prevent, and an interactive element
- * nested in another one. Here the anchor is the control, with the `target`/`rel`
- * hardening and a visible URL, and the image is its content. A Stage 3 click
- * handler must skip an image with an `<a>` ancestor for the same reason.
- *
- * This is the only rule here that builds its own markup rather than layering
- * onto `renderToken`, so it is the only one that has to escape by hand. Every
- * `escapeHtml` call on the src is defence rather than the guard: markdown-it's
- * `normalizeLink` has already percent-encoded a `"` in the src by the time the
- * rule sees it (measured). Keep them anyway — the thing being escaped is
- * model-authored text landing in a `{@html}` sink, and that upstream property
- * is not ours to rely on. A test pinning the src half would be vacuous for that
- * reason and is deliberately not written; `alt` and `title` have one each,
- * since neither `renderInlineAsText` nor the raw attr escapes.
- */
-md.renderer.rules.image = (tokens, idx, options, env, self) => {
-  const token = tokens[idx];
-  const src = token.attrGet('src') ?? '';
-  // markdown-it puts the alt text in the token's inline children, not the attr.
-  const alt = self.renderInlineAsText(token.children ?? [], options, env).trim();
-  // Carried through rather than dropped: the default rule emits every attr, so
-  // discarding `title` would be a silent behaviour change for `![a](x "t")`.
-  const title = token.attrGet('title');
-  const titleAttr = title ? ` title="${md.utils.escapeHtml(title)}"` : '';
-  const href = md.utils.escapeHtml(src);
-
-  if (!src) return md.utils.escapeHtml(alt);
-
-  // Untrusted text may point at any file in the reader's own workspace, so it
-  // never draws one inline; the image is a link like any foreign src.
-  if (!src.startsWith(CHAT_FILES_PREFIX) || env?.untrusted) {
-    // The label falls back to the URL rather than to nothing: an empty alt would
-    // render an anchor with no text, which is invisible and unreachable.
-    const label = md.utils.escapeHtml(alt || src);
-    return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${label}</a>`;
-  }
-
-  // Forced non-empty: a broken image with an empty alt is a blank space with
-  // nothing to say what was lost.
-  const altAttr = md.utils.escapeHtml(alt || 'image');
-  const linked = insideLink(tokens, idx);
-  const cls = linked ? 'md-image md-image-linked' : 'md-image';
-  const affordance = linked ? '' : ' role="button" tabindex="0"';
-  return (
-    `<img class="${cls}" src="${href}" alt="${altAttr}"${titleAttr}${sizeAttrs(src)}` +
-    ` loading="lazy" decoding="async"${affordance} />`
-  );
-};
-
-/**
- * `@name` mentions, as their own token (ISSUE-578).
- *
- * Runs over `text` tokens only, so a literal `@` inside a code span, a fenced
- * block or a link's text is never a mention: those reach here as
- * `code_inline`, `fence` and text between `link_open` and `link_close`, and
- * the last is skipped by depth. Which names match is the caller's list
- * (`env.mentions`), never any `@word`; see `$lib/mentions`.
- *
- * After `text_join`, not straight after `inline`: before it an escape such as
- * `a\_@bob` is three tokens, and `@bob` at the start of its own token loses
- * the `_` that, as the reader sees it, sits right before the `@`.
- *
- * Its renderer escapes the matched text, which is the only thing from the
- * source that reaches the `{@html}` sink; the class names are fixed strings.
- */
-md.core.ruler.after('text_join', 'mention', (state) => {
-  const targets: MentionTarget[] | undefined = state.env?.mentions;
-  if (!targets || targets.length === 0) return;
-  const matcher = mentionMatcher(targets);
-  if (!matcher) return;
-  for (const block of state.tokens) {
-    if (block.type !== 'inline' || !block.children) continue;
-    const out: typeof block.children = [];
-    let linkDepth = 0;
-    for (const tok of block.children) {
-      if (tok.type === 'link_open') linkDepth++;
-      else if (tok.type === 'link_close') linkDepth = Math.max(0, linkDepth - 1);
-      const spans =
-        tok.type === 'text' && linkDepth === 0 ? findMentions(tok.content, targets, matcher) : [];
-      if (spans.length === 0) {
-        out.push(tok);
-        continue;
+/** Build each presentation with the same escaping, link and image rules. */
+function createRenderer(opts: {
+  breaks: boolean;
+  imageAffordance: boolean;
+  untrusted?: boolean;
+}): (src: string, mentions?: readonly MentionTarget[]) => string {
+  const md = new MarkdownIt({
+    html: false, // never emit raw HTML from source — safe-by-construction
+    linkify: true, // auto-link bare URLs
+    breaks: opts.breaks, // chat uses hard breaks; documents keep soft breaks
+    typographer: false,
+    // Syntax-highlight fenced blocks. Returning a full `<pre><code>…</code></pre>`
+    // string tells markdown-it to use it verbatim (it won't re-wrap). The `hljs`
+    // class on <code> activates the token palette; `language-<lang>` is kept for
+    // parity with the un-highlighted path and CSS hooks.
+    highlight(str, lang): string {
+      const langClass = lang ? ` language-${md.utils.escapeHtml(lang)}` : '';
+      if (lang && hljs.getLanguage(lang)) {
+        try {
+          const { value } = hljs.highlight(str, { language: lang, ignoreIllegals: true });
+          return `<pre><code class="hljs${langClass}">${value}</code></pre>`;
+        } catch {
+          // Fall through to the escaped-plain path on any hljs failure.
+        }
       }
-      let at = 0;
-      for (const span of spans) {
-        if (span.start > at) {
+      // Unknown / missing language: escape the body ourselves and still tag it
+      // `hljs` so the block background/padding match highlighted blocks.
+      return `<pre><code class="hljs${langClass}">${md.utils.escapeHtml(str)}</code></pre>`;
+    },
+  });
+
+  // Disable linkify's fuzzy (schema-less) link detection. Without this, bare
+  // tokens like `FILENAME.md` get auto-linked because `.md` is a real TLD
+  // (Moldova) — chat text is full of `something.md` filenames that must stay
+  // plain text. Bare URLs that carry an explicit http(s)://  scheme still linkify.
+  md.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
+
+  const SAFE_URL = /^(https?:\/\/|mailto:|\/)/i;
+
+  // Restrict link + image hrefs to a safe scheme allowlist. markdown-it already
+  // blocks javascript:/vbscript:/etc.; this tightens it to exactly what chat
+  // content should ever produce.
+  md.validateLink = (url: string): boolean => SAFE_URL.test(url.trim());
+
+  // Open links in a new tab with noopener/noreferrer. We layer onto the default
+  // renderer rather than replacing it so URL normalization/encoding still runs.
+  const defaultLinkOpen =
+    md.renderer.rules.link_open ??
+    ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+
+  md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    const token = tokens[idx];
+    token.attrSet('target', '_blank');
+    token.attrSet('rel', 'noopener noreferrer');
+    return defaultLinkOpen(tokens, idx, options, env, self);
+  };
+
+  // Untrusted text (`renderUntrustedMarkdown`): a link whose visible text is not
+  // its own target says where it goes, so `[https://bank.example](https://evil.example)`
+  // cannot pass for the bank. An autolink's text is its target and gets nothing.
+  md.renderer.rules.link_close = (tokens, idx, options, env, self) => {
+    const close = self.renderToken(tokens, idx, options);
+    if (!env?.untrusted) return close;
+    let open = idx - 1;
+    while (open >= 0 && tokens[open].type !== 'link_open') open--;
+    if (open < 0) return close;
+    const opener = tokens[open];
+    if (opener.markup === 'linkify' || opener.markup === 'autolink') return close;
+    const href = opener.attrGet('href') ?? '';
+    const text = tokens
+      .slice(open + 1, idx)
+      .map((t) => t.content)
+      .join('')
+      .trim();
+    const destination = linkDestination(href);
+    if (!destination || text === href || text === destination) return close;
+    return `${close} <span class="md-link-dest">(${md.utils.escapeHtml(destination)})</span>`;
+  };
+
+  /**
+   * Images: draw one only for our own chat-files endpoint, and degrade the rest
+   * to links.
+   *
+   * A `![](https://someone-elses-host/x.png)` in an assistant body renders inline
+   * under markdown-it's default rule, which fetches from a host the model picked
+   * out of a page it was reading, with the reader's IP and referer, before the
+   * reader has agreed to anything. `FeedCard` draws remote images too, but a
+   * subscription is consent and a model's page-read is not. So an unadmitted src
+   * becomes an ordinary link — the URL stays visible and following it is the
+   * reader's choice. Nothing is silently dropped.
+   *
+   * A src the shared `validateLink` already refused (`javascript:`, `data:`) never
+   * reaches here at all: markdown-it abandons the image token and leaves the
+   * source as literal text, which is the existing refusal and stays as it is.
+   * `![alt]()` is the one exception — an *empty* destination is refused by
+   * `validateLink` and still yields a token, with `src=''` (measured) — so it is
+   * handled here rather than assumed away. It renders as its own alt text: there
+   * is nothing to link to, and an `<a href="">` would navigate to a second copy
+   * of the current page.
+   *
+   * `role="button"` / `tabindex="0"` are the affordance for the lightbox: the
+   * output goes through `{@html}`, so there is no element to wrap in a real
+   * `<button>` and no Svelte-side way to make one focusable. `Message.svelte`
+   * delegates click and Enter/Space off them.
+   *
+   * An admitted image *inside a link* gets neither, and gets `md-image-linked`
+   * instead. `[![](chat-files-url)](https://anywhere)` is a shape the model can
+   * write, and with the plain affordance it is a navigation to a host the model
+   * chose wearing a zoom-in cursor and a button role — a worse version of the
+   * thing the degradation above exists to prevent, and an interactive element
+   * nested in another one. Here the anchor is the control, with the `target`/`rel`
+   * hardening and a visible URL, and the image is its content. A Stage 3 click
+   * handler must skip an image with an `<a>` ancestor for the same reason.
+   *
+   * This is the only rule here that builds its own markup rather than layering
+   * onto `renderToken`, so it is the only one that has to escape by hand. Every
+   * `escapeHtml` call on the src is defence rather than the guard: markdown-it's
+   * `normalizeLink` has already percent-encoded a `"` in the src by the time the
+   * rule sees it (measured). Keep them anyway — the thing being escaped is
+   * model-authored text landing in a `{@html}` sink, and that upstream property
+   * is not ours to rely on. A test pinning the src half would be vacuous for that
+   * reason and is deliberately not written; `alt` and `title` have one each,
+   * since neither `renderInlineAsText` nor the raw attr escapes.
+   */
+  md.renderer.rules.image = (tokens, idx, options, env, self) => {
+    const token = tokens[idx];
+    const src = token.attrGet('src') ?? '';
+    // markdown-it puts the alt text in the token's inline children, not the attr.
+    const alt = self.renderInlineAsText(token.children ?? [], options, env).trim();
+    // Carried through rather than dropped: the default rule emits every attr, so
+    // discarding `title` would be a silent behaviour change for `![a](x "t")`.
+    const title = token.attrGet('title');
+    const titleAttr = title ? ` title="${md.utils.escapeHtml(title)}"` : '';
+    const href = md.utils.escapeHtml(src);
+
+    if (!src) return md.utils.escapeHtml(alt);
+
+    // Untrusted text may point at any file in the reader's own workspace, so it
+    // never draws one inline; the image is a link like any foreign src.
+    if (!src.startsWith(CHAT_FILES_PREFIX) || env?.untrusted) {
+      // The label falls back to the URL rather than to nothing: an empty alt would
+      // render an anchor with no text, which is invisible and unreachable.
+      const label = md.utils.escapeHtml(alt || src);
+      return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${label}</a>`;
+    }
+
+    // Forced non-empty: a broken image with an empty alt is a blank space with
+    // nothing to say what was lost.
+    const altAttr = md.utils.escapeHtml(alt || 'image');
+    const linked = insideLink(tokens, idx);
+    const cls = linked ? 'md-image md-image-linked' : 'md-image';
+    const affordance = linked || !opts.imageAffordance ? '' : ' role="button" tabindex="0"';
+    return (
+      `<img class="${cls}" src="${href}" alt="${altAttr}"${titleAttr}${sizeAttrs(src)}` +
+      ` loading="lazy" decoding="async"${affordance} />`
+    );
+  };
+
+  /**
+   * `@name` mentions, as their own token (ISSUE-578).
+   *
+   * Runs over `text` tokens only, so a literal `@` inside a code span, a fenced
+   * block or a link's text is never a mention: those reach here as
+   * `code_inline`, `fence` and text between `link_open` and `link_close`, and
+   * the last is skipped by depth. Which names match is the caller's list
+   * (`env.mentions`), never any `@word`; see `$lib/mentions`.
+   *
+   * After `text_join`, not straight after `inline`: before it an escape such as
+   * `a\_@bob` is three tokens, and `@bob` at the start of its own token loses
+   * the `_` that, as the reader sees it, sits right before the `@`.
+   *
+   * Its renderer escapes the matched text, which is the only thing from the
+   * source that reaches the `{@html}` sink; the class names are fixed strings.
+   */
+  md.core.ruler.after('text_join', 'mention', (state) => {
+    const targets: MentionTarget[] | undefined = state.env?.mentions;
+    if (!targets || targets.length === 0) return;
+    const matcher = mentionMatcher(targets);
+    if (!matcher) return;
+    for (const block of state.tokens) {
+      if (block.type !== 'inline' || !block.children) continue;
+      const out: typeof block.children = [];
+      let linkDepth = 0;
+      for (const tok of block.children) {
+        if (tok.type === 'link_open') linkDepth++;
+        else if (tok.type === 'link_close') linkDepth = Math.max(0, linkDepth - 1);
+        const spans =
+          tok.type === 'text' && linkDepth === 0 ? findMentions(tok.content, targets, matcher) : [];
+        if (spans.length === 0) {
+          out.push(tok);
+          continue;
+        }
+        let at = 0;
+        for (const span of spans) {
+          if (span.start > at) {
+            const text = new state.Token('text', '', 0);
+            text.content = tok.content.slice(at, span.start);
+            out.push(text);
+          }
+          const mention = new state.Token('mention', '', 0);
+          mention.content = tok.content.slice(span.start, span.end);
+          mention.meta = { self: !!span.target.self };
+          out.push(mention);
+          at = span.end;
+        }
+        if (at < tok.content.length) {
           const text = new state.Token('text', '', 0);
-          text.content = tok.content.slice(at, span.start);
+          text.content = tok.content.slice(at);
           out.push(text);
         }
-        const mention = new state.Token('mention', '', 0);
-        mention.content = tok.content.slice(span.start, span.end);
-        mention.meta = { self: !!span.target.self };
-        out.push(mention);
-        at = span.end;
       }
-      if (at < tok.content.length) {
-        const text = new state.Token('text', '', 0);
-        text.content = tok.content.slice(at);
-        out.push(text);
-      }
+      block.children = out;
     }
-    block.children = out;
-  }
-});
+  });
 
-md.renderer.rules.mention = (tokens, idx) => {
-  const tok = tokens[idx];
-  const cls = tok.meta?.self ? 'mention mention-self' : 'mention';
-  return `<span class="${cls}">${md.utils.escapeHtml(tok.content)}</span>`;
-};
+  md.renderer.rules.mention = (tokens, idx) => {
+    const tok = tokens[idx];
+    const cls = tok.meta?.self ? 'mention mention-self' : 'mention';
+    return `<span class="${cls}">${md.utils.escapeHtml(tok.content)}</span>`;
+  };
+
+  return (src: string, mentions?: readonly MentionTarget[]): string => {
+    if (!src) return '';
+    const env = opts.untrusted ? { untrusted: true } : mentions?.length ? { mentions } : {};
+    return md.render(src, env);
+  };
+}
 
 /** Render a chat message. `mentions` names who may be `@`-mentioned where it
  *  is shown; without it nothing is styled as a mention. */
-export function renderMarkdown(src: string, mentions?: readonly MentionTarget[]): string {
-  if (!src) return '';
-  return md.render(src, mentions && mentions.length > 0 ? { mentions } : {});
-}
+export const renderMarkdown = createRenderer({ breaks: true, imageAffordance: true });
+
+/** Render a document without chat's hard line breaks or image controls. */
+export const renderDocument = createRenderer({ breaks: false, imageAffordance: false });
+
+const renderUntrusted = createRenderer({ breaks: true, imageAffordance: false, untrusted: true });
 
 /** Render text somebody outside the room wrote, such as a mail body. No
  *  mentions, no inline images, and every labelled link names its destination. */
 export function renderUntrustedMarkdown(src: string): string {
-  if (!src) return '';
-  return md.render(src, { untrusted: true });
+  return renderUntrusted(src);
 }
