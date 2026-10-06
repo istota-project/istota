@@ -6315,8 +6315,14 @@ def task_shown_in_room(
     A parked task's question has no transcript row of its own; the web view
     renders it from `tasks.confirmation_prompt`, and only for a task inside
     `TASK_ROOM_SCOPE_SQL`. So this is the answer to "is the question on screen
-    anywhere" once its push has failed (#635). False for no room."""
+    anywhere" once its push has failed (#635). False for no room, and for an
+    email thread room, whose view renders no parked question (#665); a thread
+    park is a private park, so its row in the private room shows it."""
+    from istota.rooms.scopes import is_email_thread_room
+
     if not room_token or get_room(conn, room_token) is None:
+        return False
+    if is_email_thread_room(conn, room_token):
         return False
     row = conn.execute(
         "SELECT 1 FROM tasks WHERE id = ? AND user_id = ? AND " + TASK_ROOM_SCOPE_SQL,

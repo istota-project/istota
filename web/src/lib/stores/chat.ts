@@ -1372,6 +1372,14 @@ function createSession(): ChatSession {
     messages.update((arr) => arr.filter((x) => x.cid !== cid));
   }
 
+  /** Whether the open room is an email thread, which shows no parked
+   *  question: its task's park is the host's private room's (#665). The
+   *  server refuses a confirm sent from one, so this is display only. */
+  function openRoomIsEmailThread(): boolean {
+    const rid = get(activeRoomId);
+    return rid != null && !!get(rooms).find((r) => r.id === rid)?.email_thread;
+  }
+
   function streamTask(taskId: number, cid: number): { stop: () => void } {
     // An approved question already on screen: resume past it rather than
     // replaying events this message has already applied (ISSUE-592).
@@ -1444,6 +1452,13 @@ function createSession(): ChatSession {
         /* swallow */
       }
       if (kind === 'done') dropUnstoredTurn(cid, payload);
+      if (kind === 'confirmation' && openRoomIsEmailThread()) {
+        // The question is the host's private room's (#665): the thread room
+        // records the mail, so the parked task leaves no turn here.
+        messages.update((arr) => arr.filter((x) => x.cid !== cid));
+        settle('done');
+        return;
+      }
       if (kind === 'confirmation') {
         paused = true;
         if (seq) {
@@ -1955,6 +1970,7 @@ function createSession(): ChatSession {
   // renders, which the old poller skipped outright.
   function pickUpStreamedTask(taskId: number, status?: string) {
     if (get(messages).some((m) => m.role === 'assistant' && m.taskId === taskId)) return;
+    if (status === 'pending_confirmation' && openRoomIsEmailThread()) return;
     const ph: ChatMessage = {
       cid: nextCid(),
       role: 'assistant',
