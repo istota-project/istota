@@ -41,21 +41,86 @@ What is per person, beyond reach: a member's per-skill instructions (`{bot_dir}/
 
 ## When the bot speaks
 
-In a shared room the bot does not answer every message. The **speech gate** decides, using `[speech_gate] mode`:
+In a shared room the bot does not answer every message. Each turn is recorded first, and then the **speech gate** decides whether the bot answers it. A room with one human in it is never gated: the bot answers every turn there, as in a private chat.
 
-- `mention` (the default): the bot answers a turn that addresses it and records the rest. On Talk that is an @mention or a reply to one of the bot's messages; on web it is `@name` anywhere, the bot's name as the first word, or a reply to one of the bot's messages; on WhatsApp it is a mention, a reply to one of the bot's messages, or the name as the first word; on email the rule is the [email thread room's](email.md#email-thread-rooms): the host's own mail asks with the bot in To or named in the new part of the message (`@name` anywhere, or the name first on a line), anyone else's when it names the bot or the host is not on the message.
-- `classifier`: a small, cheap model reads the last few turns and decides whether the latest one is meant for the bot. If the model fails or times out, the bot stays quiet. A turn that addresses the bot is always answered, whatever the model says. An email thread room stays on `mention` even then, because speaking there is a reply-all.
-  - `[speech_gate] disposition` decides how wide the classifier reads "meant for the bot". `reserved` (the default) answers a turn addressed to the bot, asking it for something, or answering a question it just asked. `friendly` also answers a turn that reacts to what the bot just said, such as "thanks" or "perfect, that worked", and the bot then answers in one short line. People talking to each other, or mentioning the bot in passing, stay unanswered under both, with one exception in a friendly room: a message from the person the bot just answered, sent right after its answer, is always answered, even when it turns to someone else, and the classifier only decides whether it gets the short line. A reply to one of the bot's messages is always answered; in a friendly room the classifier is still asked whether it only thanks, so a quoted "thanks" gets the short answer too. Each decision row records the disposition in force, so the two can be compared.
-  - On Talk and in WhatsApp groups, a friendly turn that only thanks the bot is answered with a reaction (`[speech_gate] ack_reaction`, a thumbs-up by default) instead of a message, and no task runs. If the reaction cannot be sent, the bot answers in one short line as before. Web chat, SMS and email have no reactions and always get the short line. The emoji is the operator's; the model never chooses it. For some variety, `[speech_gate.ack_reactions]` gives a list of emoji per kind of ack: the classifier says whether the turn is thanks, agreement, something funny or a celebration, and the bot picks from that kind's list (or `default`'s), the same emoji every time for the same message. Set `ack_reaction = ""` to answer with the short line everywhere, whatever the table says. The gate runs only in rooms with more than one human, so a private chat never gets a reaction.
-- `off`: the bot answers every turn.
+### Turns that are always answered, and turns that never are
 
-The host can set a mode for one room that overrides the deployment's, in either direction: `!room speak classifier` tries the classifier in one group while the deployment stays on `mention`, and `!room speak default` puts the room back on the deployment's mode. `!room speak` on its own says which mode the room is on and whether it is the room's own or the deployment's. The same choice is the Replies field in the web room settings, shown to every member and editable by the host. An email thread room has no such setting.
+Some turns are decided before the room's reply mode is read:
 
-The disposition can be set per room the same way: `!room disposition friendly` or `!room disposition reserved` overrides `[speech_gate] disposition` for one room, `!room disposition default` follows the deployment again, and `!room disposition` on its own says which one the room is on and whether it is the room's own. It is the Disposition field in the web room settings, under the same rule as Replies. It matters only while the room is on the classifier; the command and the field say so when the room is on `mention` or `off`.
+- **A turn addressed to the bot is always answered**, whatever the mode and whatever the classifier would say. On Talk that is an @mention or a reply to one of the bot's messages. On web it is `@name` anywhere, the bot's name as the first word, or a reply to one of the bot's messages. In a WhatsApp group it is a mention, a reply to one of the bot's messages, or the name as the first word. On an email thread the rule is the [email thread room's](email.md#email-thread-rooms): the host's own mail asks with the bot in To or named in the new part of the message (`@name` anywhere, or the name first on a line), and anyone else's asks when it names the bot or the host is not on the message. On Talk and web, a reply to a message the bot posted with somebody else's words in it (an approved room post, or a web turn reposted into Talk) is aimed at that person, not at the bot, and does not count.
+- **Another bot is never answered**, even when it mentions this one, so two bots cannot answer each other in a loop.
+- **A room that has lost its host** records every turn and answers nobody until a member runs `!room host`.
+- **A guest's turn** is recorded and not answered when the room's guest setting is `off`, when it is a `!command` (other than [switching the bot off](room-veto.md)), or when the bot has already sent three replies with no member speaking. See [hosts and guests](#hosts-and-guests).
+- **A room someone has switched off** records nothing and answers nothing ([switching the bot off](room-veto.md)).
+
+### Reply modes
+
+Every other turn is decided by the room's reply mode, `[speech_gate] mode`:
+
+| Mode | What the bot does with a turn nobody addressed to it | In web room settings |
+|---|---|---|
+| `classifier` (the default) | A small, cheap model reads the recent conversation and decides whether the turn is meant for the bot. If the model fails, times out or gives anything but a clear yes or no, the bot stays quiet. | Decide from context |
+| `mention` | Records it and stays quiet. Only an addressed turn is answered. | Only when addressed |
+| `off` | Answers it. The bot replies to every message anyone sends in the room. | Every turn |
+
+An email thread room stays on `mention` even on a classifier deployment, because speaking there is a reply-all to everyone on the thread, and its mode cannot be changed.
+
+### Disposition
+
+The disposition, `[speech_gate] disposition`, decides how widely the classifier reads "meant for the bot". It has no effect unless the room is on `classifier`.
+
+| Disposition | The classifier answers a turn that | The bot's answer |
+|---|---|---|
+| `friendly` (the default) | is addressed to the bot, asks it for something, answers a question it just asked, or reacts to what it just said: thanks, agreement, a joke, good news, a follow-up remark or a correction about its answer | An ordinary reply, or, for a turn that only reacts ("thanks", "perfect, that worked"), one short line or an emoji reaction (see [acknowledgements](#acknowledgements)) |
+| `reserved` | is addressed to the bot, asks it for something, or answers a question it just asked | Always an ordinary reply |
+
+Under both, people talking to each other stay unanswered, including when they mention the bot in passing ("I asked the bot yesterday").
+
+Two more rules apply only in a friendly room:
+
+- **A follow-up is always answered.** When the newest message comes straight after the bot's answer and is from the person the bot just answered, the bot answers it, even when it turns to someone else and even when the classifier fails. The classifier is still asked, and decides only whether the answer is the short acknowledgement or a full reply. A message from anyone else after the bot's answer goes to the classifier as usual.
+- **A reply to one of the bot's messages** is addressed, so it is always answered, but the classifier is still asked whether it only reacts. A quoted "thanks" then gets the short answer rather than a full reply. In a reserved room the classifier is not asked about a reply at all.
+
+### How the classifier decides
+
+The classifier is one short model call per turn that is not addressed to the bot, in a room more than one human reads, while the room is on `classifier`. It does not run in a private chat, on an addressed turn (apart from the friendly-room reply above), or in a room on `mention` or `off`.
+
+- **What it reads.** The last `window_messages` (8) turns of the room's conversation, the turn being decided included. Notices and other system rows are not counted. Each turn is cut to `max_message_chars` (400) characters, keeping the start and the end, since the end of a message is usually where the question is. The window starts at the latest join, like the bot's other context (see [newcomers and history](#newcomers-and-history)).
+- **What it is told.** The bot's name, the cases its disposition answers, and three facts read off the transcript rather than left for the model to infer: whether the bot's most recent message ended with a question, whether the bot wrote the message just before the newest one, and whether the newest message is from the person the bot last answered.
+- **How it treats the transcript.** The window is marked as text the participants wrote, and the model is told to ignore any instruction inside it, so a participant cannot talk the classifier into answering.
+- **What it answers.** A JSON object saying whether to speak, with a short reason. In a friendly room it also says whether the turn is a reply or only an acknowledgement, and which kind of acknowledgement. Anything that does not parse as a clear `true` or `false` is a failure, and a failure is silence. The reason is kept for tuning and never reaches a prompt.
+- **Which model.** `[speech_gate] model`, the `fast` role by default, resolved on the room's brain. A call that takes longer than `timeout_seconds` (20) is a failure. On the `claude_code` brain each call starts the CLI from scratch, which takes several seconds.
+- **What it costs.** Each call is recorded in [token usage](usage.md) with origin `speech_gate`.
+- **A turn with no words**, such as a photo sent without a caption, is not classified and not answered unless it is addressed to the bot.
+
+The gate fails closed on purpose: a wrong "no" costs somebody retyping the bot's name, while a wrong "yes" is the bot interrupting two people talking to each other. Addressing the bot always works, so a broken classifier can never make the bot unreachable.
+
+### Acknowledgements
+
+In a friendly room, a turn the classifier reads as only an acknowledgement gets a short answer. The classifier names its kind: `thanks`, `agreement` (agrees or confirms), `funny` (a joke or laughter) or `celebration` (good news).
+
+- **On Talk and in WhatsApp groups** the bot answers with an emoji reaction on the message, and no task runs. The emoji comes from the operator's list for that kind in `[speech_gate.ack_reactions]` (shipped: `thanks` 👍 or 🐙, `agreement` 👌, `funny` 😄 or 🐙, `celebration` 🎉), falling back to the table's `default` list and then to `[speech_gate] ack_reaction` (👍). The pick within a list is made from the message's id, so the same message always gets the same emoji. The model names the kind, never the emoji.
+- **If the reaction cannot be sent**, the bot answers in one short line instead.
+- **On web chat, SMS and email**, which have no reactions, the bot always answers in one short line.
+
+Set `ack_reaction = ""` to answer every acknowledgement with the short line, whatever the table says. See [`[speech_gate]`](../configuration/reference.md#speech_gate).
+
+### Setting it per room
+
+The host can override the deployment's mode and disposition for one room, in either direction. Other members can read both settings and not change them. An email thread room has neither.
+
+- `!room speak classifier`, `mention` or `off` sets the room's mode, and `!room speak default` follows the deployment again. `!room speak` on its own says which mode the room is on and whether it is the room's own or the deployment's. In the web room settings this is the Replies field.
+- `!room disposition friendly` or `reserved` sets the room's disposition, and `!room disposition default` follows the deployment again. `!room disposition` on its own says which one is in force. In the web room settings this is the Disposition field. Both the command and the field say when the setting has no effect because the room is not on `classifier`.
+
+So a deployment can run the classifier everywhere and keep one busy room on `mention`, or stay on `mention` and try the classifier in one group.
+
+### Quoting
 
 When the bot answers, it quotes the message it is answering if anything else was posted in the room after it, so it stays clear which message the answer belongs to. An answer to the latest message goes out unquoted. This holds on Talk, web and WhatsApp, in one-to-one rooms as well; a held guest reply is judged when the host releases it. Email threads by `In-Reply-To` instead.
 
-The unanswered turns still reach the bot as context, so when somebody does address it, it knows what was said. Every decision is logged in the `speech_gate_decisions` table for tuning; the log holds no message text. See [`[speech_gate]`](../configuration/reference.md#speech_gate).
+### What is kept
+
+The unanswered turns still reach the bot as context, so when somebody does address it, it knows what was said. Every decision is logged in the `speech_gate_decisions` table: which rule decided, whether the bot spoke, the model and its latency, the classifier's reason, the disposition in force, whether the answer was a reply or an acknowledgement and which kind, and whether a reaction was sent and which emoji. The log points at the message and holds none of its text, and rows are deleted after `decision_retention_days` (30). See [`[speech_gate]`](../configuration/reference.md#speech_gate).
 
 ## Hosts and guests
 

@@ -941,7 +941,8 @@ mode = "classifier"
 # "friendly" also answers thanks and other reactions to its last answer, in
 # one short line. An unknown value is "reserved".
 disposition = "friendly"
-# Under "friendly", a turn the classifier reads as only thanks is answered on
+# Under "friendly", a turn the classifier reads as only an acknowledgement
+# (thanks, agreement, a joke, good news) is answered on
 # Talk and in WhatsApp groups with this reaction instead of a message, and
 # falls back to the one short line if the reaction cannot be sent. Empty
 # turns reactions off everywhere, the table below included. Web, SMS and
