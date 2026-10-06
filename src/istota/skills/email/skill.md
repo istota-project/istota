@@ -104,7 +104,7 @@ This is a **successful outcome**, not a failure. What to do with it:
 - Tell the user their message is drafted and waiting, and say who it is addressed to. Quote or summarize what you wrote so they can decide without opening it.
 - Do **not** retry the send. Rephrasing it, splitting the recipients, or switching verb changes nothing — the check is on the recipient, and reaching for a way past it is the exact behaviour this exists to stop.
 - Do not treat it as an error, and do not report the message as sent. Nothing was sent.
-- The user answers with `!drafts` (to see what is waiting) and `!drafts send <id>` / `!drafts discard <id>`, in Talk or web chat. Approving sends exactly the text they read. Point them at those commands — there is no draft card or drafts page to look at yet.
+- The user answers with `!drafts` (to see what is waiting) and `!drafts send <id>` / `!drafts discard <id>`, in Talk or web chat, or as the first line of a mail from their own address where the deployment accepts answers by email. Approving sends exactly the text they read. Point them at those commands — there is no draft card or drafts page to look at yet.
 
 There is no flag that skips this. If you believe the hold is wrong, say so to the user and let them decide.
 
