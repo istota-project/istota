@@ -72,6 +72,9 @@ def test_precedence_consumes_all_losing_sources(tmp_path, otp):
     (None, {"TimeOtp-Period": "30", "TOTP Seed": SEED}, "secret_unparseable"),
     (None, {"HmacOtp-Secret-Base32": SEED}, "hotp_unsupported"),
     (None, {"TOTP Seed": "bad!", "TOTP Settings": "30;6"}, "secret_unparseable"),
+    (None, {"TOTP Seed": ""}, "secret_unparseable"),
+    (None, {"TimeOtp-Secret-Base32": ""}, "secret_unparseable"),
+    (None, {"TimeOtp-Secret-Base32": SEED, "TimeOtp-Period": ""}, "period_out_of_range"),
 ])
 def test_bad_winner_never_falls_back_or_leaks(tmp_path, caplog, otp, fields, code):
     with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
@@ -150,3 +153,26 @@ def test_ambiguous_seed_name_keeps_its_seed_kind(tmp_path, db_path, monkeypatch)
     vault.apply_vault(db_path, "alice", read)
     with db.get_db(db_path) as conn:
         assert get_binding(conn, "alice", "acme_totp")["kind"] == "totp"
+
+
+@pytest.mark.parametrize("replacement,custom", [("", ""), ("malformed-sensitive-uri", ""), ("", "x" * 8193)])
+def test_held_row_cannot_downgrade_a_previously_imported_seed(tmp_path, db_path, monkeypatch, replacement, custom):
+    from pykeepass import PyKeePass
+    from istota.credentials.broker.bindings import is_otp_seed
+
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = _file(tmp_path, otp=URI)
+    vault.apply_vault(db_path, "alice", _read(path))
+    stored = store.get_secret(db_path, "alice", vault.VAULT_ENTRY_SERVICE, "acme_totp")
+    kp = PyKeePass(str(path), password=PASSPHRASE)
+    entry = kp.find_entries(title="Acme", first=True)
+    entry.otp = replacement
+    entry.set_custom_property("TOTP", custom)
+    entry.tags = ["istota:reveal"]
+    kp.save()
+    read = _read(path)
+    assert "acme_totp" in read.held
+    vault.apply_vault(db_path, "alice", read)
+    assert store.get_secret(db_path, "alice", vault.VAULT_ENTRY_SERVICE, "acme_totp") == stored
+    with db.get_db(db_path) as conn:
+        assert is_otp_seed(conn, "alice", "acme_totp")

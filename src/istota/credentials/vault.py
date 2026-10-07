@@ -1020,7 +1020,7 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
     # A held value stays stored, but an edited URL or removed reveal tag must
     # still revoke its old policy. Ambiguous names are unbound by the parser.
     from istota import db
-    from istota.credentials.broker.bindings import put_binding
+    from istota.credentials.broker.bindings import is_otp_seed, put_binding
     from istota.credentials.broker.grants import auto_grant_vault_entries
     owners = {read.bindings.get(name, {}).get("credential", name) for name in written}
     with db.get_db(db_path) as conn:
@@ -1028,7 +1028,11 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
             conn.execute("BEGIN IMMEDIATE")
         for name in sorted(read.held & stored):
             if name in read.bindings:
-                put_binding(conn, user_id, name, read.bindings[name])
+                binding = read.bindings[name]
+                # The held value is unchanged, so its seed classification must survive.
+                if is_otp_seed(conn, user_id, name):
+                    binding = {**binding, "kind": "totp"}
+                put_binding(conn, user_id, name, binding)
         result.auto_granted = auto_grant_vault_entries(
             conn, user_id, owners, declined=read.no_auto_grant, scoped=read.scoped,
         )
@@ -1605,7 +1609,7 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
     for field_name, raw in attributes.items():
         folded = str(field_name).casefold()
         if folded in {"totp seed", "totp settings"} or folded.startswith(("timeotp-", "hmacotp-")):
-            otp_fields[folded] = raw
+            otp_fields[folded] = str(raw or "")
             # Consumed properties still spend the walk's field budget.
             fields.append((None, None))
 
