@@ -423,3 +423,13 @@ def test_frame_pagination_reassembles_without_changing_markdown():
             break
         offset = result["next_offset"]
     assert "".join(chunks) == whole
+
+
+def test_render_scrubs_converted_text_before_window():
+    number = "4242" * 4
+    result = render.to_markdown(
+        "<p>42424242&#52;2424242</p>", base_url="https://shop.example/",
+        max_chars=8, scrub=lambda value: value.replace(number, "[REDACTED]"),
+    )
+    assert result["markdown"] == "[REDACTE"
+    assert result["text_total_chars"] == len("[REDACTED]")

@@ -173,6 +173,8 @@ def describe(conn, task: db.Task) -> str:
     """
     if task.whatsapp_confirmation_request_id:
         row = held_request(conn, task)
+        if row is not None and row["kind"] == "purchase":
+            return "a purchase awaiting approval"
         if row is not None and row["kind"] == "room_post":
             return "a room post awaiting approval"
         return "a private relay question"
@@ -214,6 +216,9 @@ def describe_title(conn, task: db.Task) -> str:
     row = held_request(conn, task)
     if row is None:
         return describe(conn, task)
+    if row["kind"] == "purchase":
+        from istota.notifications.resolvers.confirmation import PURCHASE_TITLE
+        return PURCHASE_TITLE
     if row["kind"] != "room_post":
         return "Relay question waiting for approval"
     destination = held_destination(row)
@@ -377,7 +382,7 @@ def approve(
             request_id = current.whatsapp_confirmation_request_id
             approve_request(conn, task=current, request_id=request_id,
                             preview_digest=preview_digest
-                            or text_hash(current.confirmation_prompt or ""))
+                            or text_hash(current.confirmation_prompt or ""), config=config)
             if current.guest_participant_id is not None:
                 # Only the proposal the scheduler made of the guest's answer;
                 # a room post the task asked for itself re-runs as any does.
@@ -446,6 +451,8 @@ def _held_in_vetoed_room(conn, task: db.Task, config) -> bool:
 
 def decline(conn, task: db.Task, *, by: str = "system") -> None:
     """Discard a held task. The withheld transcript mirror stays withheld."""
+    from istota.relay.relays import close_task_questions
+    close_task_questions(conn, task.id, reason="declined")
     db.cancel_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User cancelled task")
     _close_notification(conn, task, by)

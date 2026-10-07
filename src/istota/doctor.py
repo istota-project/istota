@@ -3707,6 +3707,103 @@ def check_vault_isolation(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_wallet(config: "Config", probe: bool) -> list[CheckResult]:
+    """Report wallet readiness without exposing card metadata or changing rows."""
+    import sqlite3
+    from istota.credentials import store, vault
+
+    prefix = "security.wallet"
+    if "wallet" not in config.experimental.features:
+        return [CheckResult(prefix, SKIP, "wallet is disabled")]
+    results = []
+    if not vault.vault_has_other_users(config):
+        results.append(CheckResult(prefix + ".isolation", OK, "single-user wallet deployment"))
+    else:
+        effective, why = _deployment_sandboxing(config, probe)
+        if effective:
+            results.append(CheckResult(prefix + ".isolation", OK, "wallet users are separated by the sandbox"))
+        elif config.security.allow_unsandboxed_multi_user_vaults is True:
+            results.append(CheckResult(
+                prefix + ".isolation", WARN,
+                "the operator allowed unsandboxed multi-user wallets; same-uid tasks can access another user's cards",
+                remedy="Enable a working sandbox to separate users' tasks.",
+            ))
+        elif effective is None:
+            results.append(CheckResult(
+                prefix + ".isolation", WARN, "wallet isolation could not be established: " + why,
+                remedy="Run `istota doctor --only security.wallet` on the host.",
+            ))
+        else:
+            results.append(CheckResult(
+                prefix + ".isolation", FAIL, vault.VAULT_ISOLATION_REASON,
+                remedy="Enable a working sandbox or explicitly accept the exposure, then restart services.",
+            ))
+    try:
+        conn = sqlite_util.connect_read_only(config.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT number.encrypted_value, cvc.encrypted_value FROM wallet_cards AS card "
+                "LEFT JOIN secrets AS number ON number.user_id=card.user_id AND number.service='wallet' "
+                "AND number.key='card:' || card.id || ':number' "
+                "LEFT JOIN secrets AS cvc ON cvc.user_id=card.user_id AND cvc.service='wallet' "
+                "AND cvc.key='card:' || card.id || ':cvc' WHERE card.issuer='manual'"
+            ).fetchall()
+        finally:
+            conn.close()
+        # get_secret writes last_accessed_at and logs row identities on failure.
+        # Doctor needs neither side effect; use the store's cipher on read-only rows.
+        unreadable = 0
+        fernet = None
+        if rows:
+            try:
+                fernet = store._get_fernet()
+            except Exception:
+                pass
+        if rows and fernet is None:
+            results.append(CheckResult(
+                prefix + ".cards", WARN,
+                f"{len(rows)} card(s) not checked; this process could not initialize secret decryption",
+                remedy="Run doctor with the daemon's secret-key environment; "
+                "check security.secret_key for deployment key availability.",
+            ))
+        else:
+            for values in rows:
+                try:
+                    if not all(value and fernet.decrypt(value).decode("utf-8") for value in values):
+                        unreadable += 1
+                except Exception:
+                    unreadable += 1
+            results.append(CheckResult(
+                prefix + ".cards", WARN if unreadable else OK,
+                f"{unreadable} of {len(rows)} card(s) have missing or undecryptable secrets",
+                remedy="Restore the deployment's secret key or re-add affected cards in Wallet settings." if unreadable else "",
+            ))
+    except (OSError, sqlite3.Error):
+        results.append(CheckResult(prefix + ".cards", WARN, "card counts unavailable; database not ready"))
+    if not config.browser.enabled:
+        results.append(CheckResult(prefix + ".browser", WARN, "browser is disabled; wallet cards cannot be filled",
+                                   remedy="Enable the browser and deploy an image with card_fill support."))
+    elif not probe:
+        results.append(CheckResult(prefix + ".browser", SKIP, "browser card_fill capability was not probed"))
+    else:
+        import httpx
+
+        supported = False
+        try:
+            # /health is management metadata: it neither selects nor starts a user's browser.
+            response = httpx.get(config.browser.api_url.rstrip("/") + "/health", timeout=5.0)
+            data = response.json()
+            supported = response.is_success and isinstance(data, dict) and data.get("card_fill") is True
+        except Exception:
+            pass
+        results.append(CheckResult(
+            prefix + ".browser", OK if supported else WARN,
+            "browser supports card_fill" if supported else "browser card_fill support could not be confirmed",
+            remedy="Check browser connectivity and rebuild the browser image with card_fill support." if not supported else "",
+        ))
+    return results
+
+
 def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     """Whether a guest's turn is kept out of the host's files on disk.
 
@@ -9647,6 +9744,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
     ("security.vault_isolation", check_vault_isolation),
+    ("security.wallet", check_wallet),
     ("security.room_scope_confinement", check_room_scope_confinement),
     ("security.credential_vault", check_credential_vault),
     ("security.vault_contents", check_vault_contents),
@@ -9763,6 +9861,7 @@ CHECK_SCOPES: dict[str, str] = {
     # users a rendered config declares, a file on that install's workspace, and
     # a row in its own secrets table. A bare `docker run` has none of the three.
     "security.vault_isolation": DEPLOYMENT,
+    "security.wallet": DEPLOYMENT,
     # Deployment: a room policy and a sandbox are properties of an install.
     "security.room_scope_confinement": DEPLOYMENT,
     "security.credential_vault": DEPLOYMENT,

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Wallet settings let you add a payment card, set automatic purchase limits and approve purchases that need your decision. Tasks can fill an authorized checkout without receiving the card number or security code in their output; the purchase list records their declared amounts and reported outcomes. With a static card these limits govern permission to fill, not what a merchant charges, so use a card with its own issuer-side limit.
+
+  **Upgrade note:** Wallet is experimental and off by default. Update the browser image with the daemon before enabling it; the approval-request table gains a purchase kind by migration.
+
 - Browser Back and Forward now follow selections within chat, briefings, feeds, transactions and admin logs, including returning from a chat search result to the previous room. Links and reloads restore the selection; transaction years and health date ranges update the current history entry. The iOS app's Back gesture uses the same history.
 
 - Health image documents now open in the zoom viewer from their name or Open menu. Download still saves the original file, and PDFs keep downloading as before.

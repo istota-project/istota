@@ -55,7 +55,7 @@ def _private_relay_tool(name: str, input_data: dict) -> bool:
     # still type it, and the argv would carry the question all the same. A
     # `room whisper` is for the principal alone, and a shared room's progress
     # trace is read by the whole room; a `room post` is not yet approved.
-    return bool(re.search(r"\b(?:(?:relay|whatsapp)\s+ask|room\s+(?:whisper|post))\b", command))
+    return bool(re.search(r"\b(?:(?:relay|whatsapp)\s+ask|room\s+(?:whisper|post)|wallet(?:\s+--)?\s+(?:cards|request|status|complete|fail|cancel))\b", command))
 
 
 # Outside quotes the shell would treat any of these as more than one plain

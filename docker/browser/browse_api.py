@@ -885,13 +885,13 @@ def _document_url(url):
     )
 
 
-def _navigation_error_response(error):
+def _navigation_error_response(error, secrets=()):
     if isinstance(error, NavigationMismatch):
-        return jsonify({
+        return jsonify(_scrub_extracted({
             "status": "error", "error": "navigation_mismatch",
             "requested": error.requested, "landed": error.landed,
-        }), 502
-    return jsonify({"status": "error", "error": str(error)}), 500
+        }, secrets)), 502
+    return jsonify(_scrub_extracted({"status": "error", "error": str(error)}, secrets)), 500
 
 
 def _navigate_and_wait(page, url, timeout_ms=30000):
@@ -1268,11 +1268,13 @@ def browse():
             max_chars=data.get("max_chars"),
             max_links=data.get("max_links"),
             offset=offset,
+            scrub=lambda value: _scrub_extracted(value, _credential_values),
         )
         result = {"status": "ok", **content}
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
+        result = _scrub_extracted(result, _credential_values)
         if keep_session or not created_new:
             result["session_id"] = session_id
         else:
@@ -1283,7 +1285,7 @@ def browse():
     except Exception as e:
         if created_new and not keep_session:
             _close_session(session_id)
-        return _navigation_error_response(e)
+        return _navigation_error_response(e, _credential_values)
 
 
 @app.route("/screenshot", methods=["POST"])
@@ -1719,10 +1721,13 @@ def render_page():
 
         html = page.content()
         frame_payload, frames_capped = _collect_frames(page, include_frames)
+        html = _scrub_extracted(html, _credential_values)
+        frame_payload = _scrub_extracted(frame_payload, _credential_values)
         rendered = render.to_markdown(
             html, base_url=page.url, mode=mode, max_chars=max_chars,
             frames=frame_payload, include_frames=include_frames,
             frames_capped=frames_capped, offset=offset,
+            scrub=lambda value: _scrub_extracted(value, _credential_values),
         )
         result = {
             "status": "ok",
@@ -1733,6 +1738,7 @@ def render_page():
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
+        result = _scrub_extracted(result, _credential_values)
         if keep_session or not created_new:
             result["session_id"] = session_id
         else:
@@ -1743,7 +1749,7 @@ def render_page():
     except Exception as e:
         if created_new and not keep_session:
             _close_session(session_id)
-        return _navigation_error_response(e)
+        return _navigation_error_response(e, _credential_values)
 
 
 # Asked of the module that does the typing rather than written down here.
@@ -2462,11 +2468,35 @@ def _cdp_selector_action(page, action, path, why):
     }
 
 
-_CREDENTIAL_FILL_JS = """(el, {value, origin}) => {
+_CREDENTIAL_FILL_JS = """(el, {value, origin, card_field}) => {
     if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
         return {ok: false, error: "credential_origin_mismatch"};
     if (el.disabled || el.readOnly)
         return {ok: false, error: "credential_field_unfillable"};
+    if (card_field && el instanceof HTMLSelectElement) {
+        let equivalents = [value];
+        if (card_field === "exp_month") {
+            const month = Number(value);
+            if (month >= 1 && month <= 12) {
+                const date = new Date(Date.UTC(2000, month - 1, 1));
+                equivalents = [String(month), String(month).padStart(2, "0"),
+                    date.toLocaleString("en-US", {month: "long", timeZone: "UTC"}),
+                    date.toLocaleString("en-US", {month: "short", timeZone: "UTC"})];
+            }
+        } else if (card_field === "exp_year") {
+            const year = value.length === 2 ? "20" + value : value;
+            equivalents = [year, year.slice(-2)];
+        }
+        const option = Array.from(el.options).find(option =>
+            !option.disabled && !option.parentElement.disabled &&
+            (equivalents.includes(option.value) || equivalents.includes(option.text.trim())));
+        if (!option) return {ok: false, error: "credential_option_missing"};
+        el.__istotaCredential = true;
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(el, option.value);
+        el.dispatchEvent(new Event("input", {bubbles: true}));
+        el.dispatchEvent(new Event("change", {bubbles: true}));
+        return {ok: true};
+    }
     let setter;
     if (el instanceof HTMLInputElement &&
         ["text", "email", "password", "search", "tel", "url", "number"].includes(el.type))
@@ -2476,6 +2506,8 @@ _CREDENTIAL_FILL_JS = """(el, {value, origin}) => {
     else if (!el.isContentEditable)
         return {ok: false, error: "credential_field_unfillable"};
     el.__istotaCredential = true;
+    if (el instanceof HTMLInputElement && ["number", "cvc"].includes(card_field))
+        el.style.setProperty("-webkit-text-security", "disc", "important");
     if (setter) setter.call(el, value);
     else el.textContent = value;
     el.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: value}));
@@ -2495,9 +2527,15 @@ def _selector_action(session, page, action, others=(), owned=()):
     action_type = action["type"]
     selector = action.get("selector") or ""
     if selector and action_type == "fill" and action.get("credential"):
-        handle = page.wait_for_selector(
-            selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
-        )
+        if action.get("card_field") and ">>>" in selector:
+            frame_selector, inner_selector = selector.split(">>>", 1)
+            locator = page.frame_locator(frame_selector.strip()).locator(inner_selector.strip())
+            locator.wait_for(state="visible", timeout=SELECTOR_TIMEOUT_MS)
+            handle = locator.element_handle(timeout=SELECTOR_TIMEOUT_MS)
+        else:
+            handle = page.wait_for_selector(
+                selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
+            )
         # Read the field's own document, including a selector into a frame.
         # Filling that handle cannot re-resolve the selector after navigation.
         frame = handle.owner_frame()
@@ -2516,7 +2554,10 @@ def _selector_action(session, page, action, others=(), owned=()):
             _credential_values.add(value)
         # Even ElementHandle.fill uses keyboard insertion internally. Keep the
         # origin check and DOM write in one evaluation, with no focus dispatch.
-        result = handle.evaluate(_CREDENTIAL_FILL_JS, {"value": value, "origin": origin})
+        fill_args = {"value": value, "origin": origin}
+        if action.get("card_field"):
+            fill_args["card_field"] = action["card_field"]
+        result = handle.evaluate(_CREDENTIAL_FILL_JS, fill_args)
         return {"action": "fill", "selector": selector, **result,
                 "path": "cdp", "path_reason": "credential origin checked"}
     if not selector:
@@ -2676,6 +2717,14 @@ def interact():
             if action_type in _SELECTOR_ACTIONS:
                 results.append(
                     _selector_action(session, page, action, others, owned))
+                if action.get("card_field") and results[-1].get("ok") is False:
+                    result = _scrub_extracted({
+                        "status": "error", "actions": results,
+                        "error": results[-1].get("error", "card_fill_failed"),
+                        "actions_not_run": len(actions) - len(results),
+                    }, _credential_values)
+                    result["session_id"] = session_id
+                    return jsonify(result)
             elif action_type == "wait":
                 timeout_ms = action.get("timeout", 2000)
                 page.wait_for_timeout(min(timeout_ms, 30000))
@@ -2715,15 +2764,18 @@ def interact():
             if solved != CHALLENGE_CLEARED:
                 return _captcha_response(session_id, actions=results, challenge_press=solved)
 
-        content = browsing.extract_page_content(page)
+        content = browsing.extract_page_content(
+            page, scrub=lambda value: _scrub_extracted(value, _credential_values),
+        )
         result = {
             "status": "ok",
-            "session_id": session_id,
             "actions": results,
             **content,
         }
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
+        result = _scrub_extracted(result, _credential_values)
+        result["session_id"] = session_id
         return jsonify(result)
 
     except Exception as e:
@@ -2732,16 +2784,17 @@ def interact():
         # operator reading the log were looking at two different amounts of
         # information -- and the actions list is empty precisely when the raise
         # beat the append, which is the case the message is needed for.
-        log.warning(
-            "Interact failed after %d action(s): %s",
-            len(results), e, exc_info=True,
-        )
-        return jsonify({
-            "status": "error",
-            "session_id": session_id,
-            "actions": results,
-            "error": str(e),
-        }), 500
+        if any(action.get("credential") for action in actions):
+            log.warning("Credential interaction failed after %d action(s): %s",
+                        len(results), type(e).__name__)
+        else:
+            log.warning("Interact failed after %d action(s): %s",
+                        len(results), e, exc_info=True)
+        result = _scrub_extracted({
+            "status": "error", "actions": results, "error": str(e),
+        }, _credential_values)
+        result["session_id"] = session_id
+        return jsonify(result), 500
 
 
 @app.route("/evaluate", methods=["POST"])
@@ -3039,6 +3092,7 @@ def health():
         "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
         "credential_origin_check": True,
+        "card_fill": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,
         "cdp_consecutive_failures": sum(cdp["consecutive_failures"] for cdp in records),

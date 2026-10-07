@@ -2,7 +2,14 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { page } from '$app/state';
-  import { getProfile, getModules, updateProfile, type UserProfile } from '$lib/api';
+  import {
+    getProfile,
+    getModules,
+    getWallet,
+    AuthError,
+    updateProfile,
+    type UserProfile,
+  } from '$lib/api';
   import { changedProfileFields } from '$lib/profilePatch';
   import { AppShell, ShellHeader, Sidebar, SidebarToggle } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
@@ -15,6 +22,7 @@
   let { children } = $props();
 
   let sidebarOpen = $state(false);
+  let walletEnabled = $state(false);
 
   // The profile is held here rather than by a section because three sections
   // edit it (Account, Preferences, Delivery) and one save covers all of them.
@@ -172,6 +180,13 @@
   onMount(() => {
     reportGoogleOutcome();
     void reload();
+    void Promise.resolve(getWallet())
+      .then((wallet) => {
+        walletEnabled = wallet?.enabled ?? false;
+      })
+      .catch((e) => {
+        if (e instanceof AuthError) identity.expireSession();
+      });
   });
 
   const settingsBase = $derived(`${base}/settings`);
@@ -207,7 +222,7 @@
   {#snippet sidebar()}
     <Sidebar title="Settings" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
       <nav class="views" aria-label="Settings sections">
-        {#each USER_SETTINGS_SECTIONS as section (section.href)}
+        {#each USER_SETTINGS_SECTIONS.filter((section) => section.href !== '/wallet' || walletEnabled) as section (section.href)}
           {@const Icon = section.icon}
           {@const active = sectionActive(section.href)}
           <a

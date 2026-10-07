@@ -55,6 +55,7 @@ _BODY_CHARS = 400
 
 # The stored title and body of a held room post (a `room post` or a guest
 # proposal), which is what a push carries: fixed words, never the preview.
+PURCHASE_TITLE = "Purchase waiting for approval"
 ROOM_POST_TITLE = "Room post awaiting approval"
 ROOM_POST_BODY = "Open your private chat with the bot to review and approve it."
 # The same, for an owner with no private chat: the bell is the preview (#633).
@@ -231,6 +232,8 @@ def _relay_held_view(conn, row: "NotificationRow", task) -> "NotificationView":
     label = confirmations.flatten(
         str(confirmations.held_destination(request).get("label") or ""),
     ) or "a room"
+    if request is not None and request["kind"] == "purchase":
+        label = "this purchase"
     preview = task.confirmation_prompt or ""
     lines = [line for line in preview.splitlines() if line.strip()]
     actions = []

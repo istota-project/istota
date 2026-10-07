@@ -33,13 +33,14 @@ class AuthError extends Error {
  * leaves the old message in place. The read is bounded by the caller's own
  * timeout because it happens inside the same `try`.
  */
-async function errorMessage(resp: Response): Promise<string> {
+async function errorMessage(resp: Response, body?: unknown): Promise<string> {
   const fallback = `API error: ${resp.status}`;
-  let body: unknown;
-  try {
-    body = await resp.json();
-  } catch {
-    return fallback;
+  if (body === undefined) {
+    try {
+      body = await resp.json();
+    } catch {
+      return fallback;
+    }
   }
   const raw = (body as { detail?: unknown; error?: unknown } | null) ?? null;
   const detail = raw?.detail;
@@ -94,7 +95,13 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
     // Reported before the status branches, since a status is an answer.
     noteTransport(true);
     if (resp.status === 401) throw new AuthError();
-    if (!resp.ok) throw Object.assign(new Error(await errorMessage(resp)), { status: resp.status });
+    if (!resp.ok) {
+      const detail = await resp.json().catch(() => null);
+      throw Object.assign(new Error(await errorMessage(resp, detail)), {
+        status: resp.status,
+        field: typeof detail?.field === 'string' ? detail.field : null,
+      });
+    }
     try {
       // **Awaited**, so the read happens inside this `try` and ahead of the
       // `finally` below. `return resp.json()` cleared the timer on the headers
@@ -3597,7 +3604,13 @@ export async function removeRoomMember(id: number, userId: string): Promise<void
     method: 'DELETE',
     credentials: 'same-origin',
   });
-  if (!resp.ok) throw Object.assign(new Error(await errorMessage(resp)), { status: resp.status });
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => null);
+    throw Object.assign(new Error(await errorMessage(resp, detail)), {
+      status: resp.status,
+      field: typeof detail?.field === 'string' ? detail.field : null,
+    });
+  }
 }
 
 export interface DirectoryUser {
@@ -4934,4 +4947,102 @@ export function deleteCredential(name: string): Promise<{ ok: boolean; deleted: 
 }
 export function grantExistingCredentials(): Promise<{ ok: boolean; count: number }> {
   return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });
+}
+
+export interface WalletBilling {
+  line1: string;
+  line2: string;
+  city: string;
+  region: string;
+  postcode: string;
+  country: string;
+}
+export interface WalletCard {
+  id: number;
+  label: string;
+  brand: string;
+  last_four: string;
+  exp_month: number;
+  exp_year: number;
+  name: string;
+  billing: WalletBilling;
+  state: 'active' | 'paused';
+  issuer: string;
+}
+export type WalletCardDetails = Pick<
+  WalletCard,
+  'label' | 'exp_month' | 'exp_year' | 'name' | 'billing'
+>;
+export interface WalletPolicy {
+  currency: string;
+  auto_limit_cents: number;
+  auto_budget_cents: number;
+  ceiling_cents: number | null;
+  allow_scheduled: boolean;
+}
+export interface WalletPurchase {
+  id: number;
+  task_id: number;
+  room_token: string | null;
+  card_id: number | null;
+  card_label: string;
+  merchant_host: string;
+  amount_cents: number;
+  currency: string;
+  approval: 'auto' | 'user' | null;
+  state:
+    | 'refused'
+    | 'held'
+    | 'authorized'
+    | 'filled'
+    | 'completed'
+    | 'failed'
+    | 'expired'
+    | 'unreported'
+    | 'declined'
+    | 'cancelled';
+  created_at: string;
+}
+export interface WalletSettings {
+  currency_precision: { default: number; exceptions: Record<string, number> };
+  enabled: boolean;
+  refusal: string | null;
+  cards: WalletCard[];
+  policy: WalletPolicy;
+  purchases: WalletPurchase[];
+}
+export function getWallet(): Promise<WalletSettings> {
+  return apiFetch('/settings/wallet');
+}
+export function addWalletCard(
+  card: WalletCardDetails & { number: string; cvc: string },
+): Promise<{ id: number }> {
+  return apiFetch('/settings/wallet/cards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(card),
+  });
+}
+export function updateWalletCard(
+  id: number,
+  card: Partial<WalletCardDetails> & { state?: WalletCard['state'] },
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/settings/wallet/cards/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(card),
+  });
+}
+export function removeWalletCard(id: number): Promise<{ ok: boolean; cancelled: number }> {
+  return apiFetch(`/settings/wallet/cards/${id}`, { method: 'DELETE' });
+}
+export function saveWalletPolicy(policy: WalletPolicy): Promise<{ ok: boolean }> {
+  return apiFetch('/settings/wallet/policy', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(policy),
+  });
+}
+export function cancelWalletPurchase(id: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/settings/wallet/purchases/${id}/cancel`, { method: 'POST' });
 }

@@ -46,6 +46,7 @@ const sidebars: SidebarsConfig = {
         'features/heartbeat',
         'features/feeds',
         'features/money',
+        'features/wallet',
         'features/location',
         'features/health',
         'features/nextcloud',

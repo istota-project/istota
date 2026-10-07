@@ -325,3 +325,24 @@ describe('workspace file preview', () => {
     });
   });
 });
+
+it('preserves a wallet validation field without losing the server message', async () => {
+  fetchMock.mockResolvedValue(
+    jsonResponse(400, { detail: 'That card number is not valid', field: 'number' }),
+  );
+  await expect(
+    api.addWalletCard({
+      label: 'Everyday',
+      number: 'invalid',
+      cvc: '123',
+      exp_month: 12,
+      exp_year: 2099,
+      name: '',
+      billing: { line1: '', line2: '', city: '', region: '', postcode: '', country: '' },
+    }),
+  ).rejects.toMatchObject({
+    message: 'That card number is not valid',
+    field: 'number',
+    status: 400,
+  });
+});

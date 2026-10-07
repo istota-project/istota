@@ -269,6 +269,27 @@ def fetch_entry(
     return fields, hosts
 
 
+def fetch_card(purchase_id: int, *, credential_fd: str | None) -> tuple[dict[str, str], list[str]]:
+    """Claim one purchase fill over the host-side invocation's private channel."""
+    if credential_fd is None:
+        raise ProxyError("wallet_channel_unavailable")
+    try:
+        reply = _request({"type": "wallet_card", "purchase_id": purchase_id}, credential_fd=credential_fd)
+    except ProxyError:
+        raise ProxyError("wallet_channel_unavailable") from None
+    if reply.get("ok") is False:
+        reason = reply.get("reason")
+        allowed = {"purchase_not_found", "purchase_not_authorized", "purchase_expired",
+                   "purchase_fill_limit", "wallet_unavailable", "wallet_error", "wallet_channel_unavailable"}
+        raise ProxyError(reason if isinstance(reason, str) and reason in allowed else "wallet_error")
+    fields, hosts = reply.get("fields"), reply.get("bound_hosts")
+    if (not isinstance(fields, dict) or set(fields) != {"number", "cvc", "exp_month", "exp_year", "name"}
+            or not all(isinstance(value, str) for value in fields.values())
+            or not isinstance(hosts, list) or not hosts or not all(isinstance(host, str) for host in hosts)):
+        raise ProxyError("wallet_error")
+    return fields, hosts
+
+
 def list_entries() -> list[str]:
     """The vault entry names this task can read, with no values. Not charged.
 

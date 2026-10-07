@@ -1983,7 +1983,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -1996,7 +1996,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     preview_digest TEXT,
     provider TEXT NOT NULL,
     binding_fingerprint TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','sent','uncertain','failed','cancelled','expired')),
+    state TEXT NOT NULL CHECK (state IN ('held','approved','queued','sending','sent','uncertain','failed','cancelled','expired')),
     approved_at TEXT,
     approved_digest TEXT,
     queue_deadline TEXT,
@@ -2198,3 +2198,63 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     policy_revision INTEGER NOT NULL,
     PRIMARY KEY (task_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS wallet_cards (
+    id            INTEGER PRIMARY KEY,
+    user_id       TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    brand         TEXT NOT NULL,
+    last_four     TEXT NOT NULL,
+    exp_month     INTEGER NOT NULL,
+    exp_year      INTEGER NOT NULL,
+    holder_name   TEXT NOT NULL DEFAULT '',
+    billing       TEXT NOT NULL DEFAULT '{}',   -- JSON: line1, line2, city, region, postcode, country
+    state         TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'paused')),
+    issuer        TEXT NOT NULL DEFAULT 'manual',
+    issuer_ref    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS wallet_policies (
+    user_id            TEXT PRIMARY KEY,
+    currency           TEXT NOT NULL DEFAULT 'USD',
+    auto_limit_cents   INTEGER NOT NULL DEFAULT 0,
+    auto_budget_cents  INTEGER NOT NULL DEFAULT 0,
+    ceiling_cents      INTEGER,
+    allow_scheduled    INTEGER NOT NULL DEFAULT 0,
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS wallet_purchases (
+    id             INTEGER PRIMARY KEY,
+    user_id        TEXT NOT NULL,
+    task_id        INTEGER NOT NULL,
+    card_id        INTEGER,                 -- NULL after the card is removed
+    card_label     TEXT NOT NULL,           -- kept for history
+    card_last_four TEXT NOT NULL,
+    merchant_host  TEXT NOT NULL,
+    extra_hosts    TEXT NOT NULL DEFAULT '[]',
+    amount_cents   INTEGER NOT NULL CHECK (amount_cents > 0),
+    currency       TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',
+    request_key    TEXT,
+    state          TEXT NOT NULL CHECK (state IN ('refused','held','authorized','filled',
+                     'completed','failed','expired','unreported','declined','cancelled')),
+    approval       TEXT CHECK (approval IN ('auto','user')),
+    reason         TEXT,
+    request_id     INTEGER,                 -- whatsapp_skill_requests.id when held
+    approved_digest TEXT,
+    authorized_at  TEXT,
+    expires_at     TEXT,
+    fill_count     INTEGER NOT NULL DEFAULT 0,
+    last_filled_at TEXT,
+    order_ref      TEXT,
+    reported_amount_cents INTEGER,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, task_id, request_key)
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_purchases_user ON wallet_purchases(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_wallet_purchases_open ON wallet_purchases(state, expires_at);

@@ -532,6 +532,10 @@ class SkillProxy:
             # Route by request type: "credential" for lookups, default for skill calls
             req_type = request.get("type")
 
+            if req_type == "wallet_card":
+                self._send_response(conn, {"ok": False, "reason": "wallet_channel_unavailable"})
+                return
+
             if req_type == "credential":
                 name = request.get("name", "")
                 # Scope check: if allowed_credentials is set, only return
@@ -777,13 +781,15 @@ class SkillProxy:
                     except (ValueError, UnicodeError):
                         return
                     req_type = request.get("type") if isinstance(request, dict) else None
-                    if req_type not in ("vault_credential", "vault_entry"):
+                    if req_type not in ("vault_credential", "vault_entry", "wallet_card"):
                         self._send_response(conn, {
                             "error": "Private channel accepts credential reads only",
                             "reason": "invalid_credential_request",
                         })
                         return
-                    if req_type == "vault_entry":
+                    if req_type == "wallet_card":
+                        self._serve_wallet_card(conn, request)
+                    elif req_type == "vault_entry":
                         self._serve_vault_entry(conn, request, trusted_skill=True)
                     else:
                         self._serve_vault_credential(conn, request, trusted_skill=True)
@@ -797,6 +803,31 @@ class SkillProxy:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+
+    def _serve_wallet_card(self, conn: socket.socket, request: dict) -> None:
+        from istota import db
+        from istota.wallet.purchases import WalletRefusal, claim_fill
+
+        purchase_id = request.get("purchase_id")
+        if type(purchase_id) is not int or not 0 < purchase_id <= 2**63 - 1:
+            self._send_response(conn, {"ok": False, "reason": "purchase_not_found"})
+            return
+        try:
+            if self.config is None or not self.user_id or self.task_id is None:
+                raise WalletRefusal("wallet_unavailable")
+            with db.get_db(self.config.db_path) as database:
+                grant = claim_fill(database, self.config, user_id=self.user_id,
+                                   task_id=self.task_id, purchase_id=purchase_id)
+        except WalletRefusal as exc:
+            logger.info("wallet fill refused purchase_id=%s reason=%s", purchase_id, exc.reason)
+            self._send_response(conn, {"ok": False, "reason": exc.reason})
+            return
+        except Exception as exc:
+            logger.error("wallet fill failed purchase_id=%s exception=%s", purchase_id, type(exc).__name__)
+            self._send_response(conn, {"ok": False, "reason": "wallet_error"})
+            return
+        # Commit before sending: a disconnected reader still spends this fill.
+        self._send_response(conn, {"fields": grant.fields, "bound_hosts": grant.bound_hosts})
 
     def _spend_vault_fetch(self) -> tuple[int, bool]:
         """Charge one fetch to this attempt's budget. ``(count, within)``.

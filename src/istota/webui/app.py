@@ -13335,6 +13335,170 @@ async def settings_credential_update(
     return await _write_local_credential(request, user["username"], name)
 
 
+_WALLET_CARD_FIELDS = {"label": str, "number": str, "cvc": str, "exp_month": int,
+                       "exp_year": int, "name": str, "billing": dict, "state": str}
+_WALLET_POLICY_FIELDS = {"currency": str, "auto_limit_cents": int, "auto_budget_cents": int,
+                         "ceiling_cents": int, "allow_scheduled": bool}
+
+
+async def _read_wallet_body(request: Request, operation: str) -> dict:
+    from .avatars import AvatarError
+    from istota.wallet.cards import Billing, CardError
+
+    try:
+        raw = await _read_bounded_body(request, 64 * 1024)
+    except AvatarError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from None
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise CardError("", "The request body is not JSON") from None
+    fields = dict(_WALLET_POLICY_FIELDS if operation == "policy" else _WALLET_CARD_FIELDS)
+    required = ()
+    if operation == "create":
+        fields.pop("state")
+        required = ("label", "number", "cvc", "exp_month", "exp_year")
+    elif operation == "update":
+        fields.pop("number")
+        fields.pop("cvc")
+    else:
+        required = tuple(fields)
+    if not isinstance(body, dict):
+        raise CardError("", "The request body must be an object")
+    if body.keys() - fields.keys():
+        raise CardError("", "Unknown field")
+    for key in required:
+        if key not in body:
+            raise CardError(key, "This field is required")
+    for key, value in body.items():
+        if key == "ceiling_cents" and value is None:
+            continue
+        if type(value) is not fields[key]:
+            raise CardError(key, "Invalid field type")
+    if "billing" in body:
+        billing = body["billing"]
+        if billing.keys() - Billing.__dataclass_fields__.keys():
+            raise CardError("billing", "Unknown billing field")
+        body["billing"] = Billing(**billing)
+    return body
+
+
+def _wallet_settings(user_id: str) -> dict:
+    from dataclasses import asdict
+    from istota import db
+    from istota.credentials.vault import vault_isolation_refusal
+    from istota.wallet import cards, policy, purchases
+    from istota.rooms.scopes import canonical_token
+    from istota.wallet.money import CURRENCY_EXPONENTS
+
+    with db.get_db(_config.db_path) as conn:
+        recent = purchases.list_purchases(conn, user_id, limit=50)
+        for purchase in recent:
+            task = db.get_task(conn, purchase["task_id"])
+            purchase["room_token"] = canonical_token(conn, task.conversation_token) if task and task.user_id == user_id else None
+            purchase["extra_hosts"] = json.loads(purchase["extra_hosts"])
+        return {"currency_precision": {"default": 2, "exceptions": CURRENCY_EXPONENTS},
+                "enabled": "wallet" in _config.experimental.features,
+                "refusal": vault_isolation_refusal(_config, user_id),
+                "cards": [asdict(card) for card in cards.list_cards(conn, user_id)],
+                "policy": asdict(policy.get_policy(conn, user_id)), "purchases": recent}
+
+
+def _mutate_wallet(user_id: str, operation: str, ident: int | None, fields: dict) -> dict:
+    from istota import db
+    from istota.wallet import cards, policy, purchases
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if operation == "create":
+            return {"id": cards.add_card(conn, user_id, cards.CardInput(**fields))}
+        if operation in ("update", "delete"):
+            if cards.get_card(conn, user_id, ident) is None:
+                raise HTTPException(status_code=404, detail="Card not found")
+            if operation == "delete":
+                return {"ok": True, "cancelled": cards.remove_card(conn, user_id, ident)}
+            cards.update_card(conn, user_id, ident, **fields)
+        elif operation == "policy":
+            try:
+                policy.put_policy(conn, user_id, policy.Policy(**fields))
+            except ValueError:
+                raise cards.CardError("", "Invalid spending policy") from None
+        elif operation == "cancel":
+            purchases.cancel(conn, user_id=user_id, purchase_id=ident)
+        return {"ok": True}
+
+
+async def _write_wallet(request: Request, user_id: str, operation: str, ident: str | None = None):
+    from istota.credentials.vault import vault_isolation_refusal
+    from istota.wallet.cards import CardError
+    from istota.wallet.purchases import WalletRefusal
+
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="Config not loaded")
+    if "wallet" not in _config.experimental.features:
+        raise HTTPException(status_code=404, detail="Wallet unavailable")
+    refusal = await asyncio.to_thread(vault_isolation_refusal, _config, user_id)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    # Parse ids here too: framework validation errors can echo arbitrary input.
+    if ident is not None and (not ident.isascii() or not ident.isdigit() or len(ident) > 18):
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        fields = await _read_wallet_body(request, operation) if operation in ("create", "update", "policy") else {}
+        return await asyncio.to_thread(_mutate_wallet, user_id, operation, int(ident) if ident else None, fields)
+    except CardError as exc:
+        status = 409 if str(exc) == "A card with that label already exists" else 400
+        return JSONResponse({"detail": str(exc), "field": exc.field or None}, status_code=status)
+    except WalletRefusal as exc:
+        status = 404 if exc.reason == "purchase_not_found" else 400
+        return JSONResponse({"detail": "Purchase not found" if status == 404 else "Purchase is not open",
+                             "field": None}, status_code=status)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("wallet settings write failed: %s", type(exc).__name__)
+        return JSONResponse({"detail": "The wallet could not be updated"}, status_code=500)
+
+
+@api_router.get("/settings/wallet")
+async def settings_wallet(user: dict = Depends(_require_api_auth)):
+    try:
+        return await asyncio.to_thread(_wallet_settings, user["username"])
+    except Exception as exc:
+        logger.error("wallet settings read failed: %s", type(exc).__name__)
+        return JSONResponse({"detail": "The wallet could not be loaded"}, status_code=500)
+
+
+@api_router.post("/settings/wallet/cards")
+async def settings_wallet_card_create(request: Request, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    return await _write_wallet(request, user["username"], "create")
+
+
+@api_router.patch("/settings/wallet/cards/{ident}")
+async def settings_wallet_card_update(ident: str, request: Request, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    return await _write_wallet(request, user["username"], "update", ident)
+
+
+@api_router.delete("/settings/wallet/cards/{ident}")
+async def settings_wallet_card_delete(ident: str, request: Request, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    return await _write_wallet(request, user["username"], "delete", ident)
+
+
+@api_router.put("/settings/wallet/policy")
+async def settings_wallet_policy(request: Request, user: dict = Depends(_require_api_auth),
+                                  _csrf: None = Depends(_verify_origin)):
+    return await _write_wallet(request, user["username"], "policy")
+
+
+@api_router.post("/settings/wallet/purchases/{ident}/cancel")
+async def settings_wallet_purchase_cancel(ident: str, request: Request, user: dict = Depends(_require_api_auth),
+                                          _csrf: None = Depends(_verify_origin)):
+    return await _write_wallet(request, user["username"], "cancel", ident)
+
+
 @api_router.get("/settings/credentials")
 async def settings_credentials(user: dict = Depends(_require_api_auth)) -> dict:
     return await asyncio.to_thread(_credential_settings, user["username"])

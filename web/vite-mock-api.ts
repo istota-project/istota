@@ -4409,7 +4409,151 @@ const adminUsersHandler: MockHandler = ({ url, method, body }) => {
   return { __status: 404, detail: 'Unknown user action.' };
 };
 
+function mockWalletCurrencyPrecision() {
+  const exceptions: Record<string, number> = {};
+  // Include legacy codes too, just as the daemon's currency parser does.
+  for (let a = 65; a <= 90; a++) {
+    for (let b = 65; b <= 90; b++) {
+      for (let c = 65; c <= 90; c++) {
+        const currency = String.fromCharCode(a, b, c);
+        const digits =
+          new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions()
+            .maximumFractionDigits ?? 2;
+        if (digits !== 2) exceptions[currency] = digits;
+      }
+    }
+  }
+  return { default: 2, exceptions };
+}
+
+const mockWallet = {
+  currency_precision: mockWalletCurrencyPrecision(),
+  enabled: true,
+  refusal: null as string | null,
+  cards: [
+    {
+      id: 1,
+      label: 'Everyday',
+      brand: 'visa',
+      last_four: '4242',
+      exp_month: 12,
+      exp_year: 2099,
+      name: 'Alice',
+      billing: { line1: '', line2: '', city: '', region: '', postcode: '', country: '' },
+      state: 'active',
+      issuer: 'manual',
+    },
+  ],
+  policy: {
+    currency: 'USD',
+    auto_limit_cents: 0,
+    auto_budget_cents: 0,
+    ceiling_cents: null as number | null,
+    allow_scheduled: false,
+  },
+  purchases: [
+    {
+      id: 1,
+      task_id: 1,
+      room_token: null,
+      card_id: 1 as number | null,
+      card_label: 'Everyday',
+      merchant_host: 'shop.example',
+      amount_cents: 2499,
+      currency: 'USD',
+      approval: null,
+      state: 'held',
+      created_at: '2026-10-06 12:00:00',
+    },
+  ],
+};
+let nextWalletCard = 2;
+function mockWalletRoutes(url: string, method: string, body: any): unknown | undefined {
+  const root = '/istota/api/settings/wallet';
+  if (url === root && method === 'GET') return mockWallet;
+  if (!url.startsWith(root + '/')) return undefined;
+  if (!mockWallet.enabled) return { __status: 404, detail: 'Wallet unavailable' };
+  if (mockWallet.refusal) return { __status: 403, detail: mockWallet.refusal };
+  const card = url.match(/^\/istota\/api\/settings\/wallet\/cards\/(\d+)$/);
+  if (url === root + '/cards' && method === 'POST') {
+    if (
+      !body ||
+      typeof body.number !== 'string' ||
+      !/^\d{12,19}$/.test(body.number.replace(/[ -]/g, ''))
+    )
+      return { __status: 400, field: 'number', detail: 'That card number is not valid' };
+    if (mockWallet.cards.some((c) => c.label === body.label))
+      return { __status: 409, field: 'label', detail: 'A card with that label already exists' };
+    const id = nextWalletCard++;
+    // Only display metadata survives this request. Never retain number or CVC.
+    mockWallet.cards.push({
+      id,
+      label: body.label,
+      brand: 'visa',
+      last_four: body.number.replace(/[ -]/g, '').slice(-4),
+      exp_month: body.exp_month,
+      exp_year: body.exp_year,
+      name: body.name ?? '',
+      billing: {
+        line1: '',
+        line2: '',
+        city: '',
+        region: '',
+        postcode: '',
+        country: '',
+        ...body.billing,
+      },
+      state: 'active',
+      issuer: 'manual',
+    });
+    return { id };
+  }
+  if (card) {
+    const id = Number(card[1]);
+    const row = mockWallet.cards.find((c) => c.id === id);
+    if (!row) return { __status: 404, detail: 'Card not found' };
+    if (method === 'PATCH') {
+      for (const field of Object.keys(body ?? {})) {
+        if (!['label', 'name', 'billing', 'exp_month', 'exp_year', 'state'].includes(field))
+          return { __status: 400, detail: 'Unknown field', field: null };
+      }
+      if (body.label && mockWallet.cards.some((c) => c.id !== id && c.label === body.label))
+        return { __status: 409, detail: 'A card with that label already exists', field: 'label' };
+      Object.assign(row, body);
+      return { ok: true };
+    }
+    if (method === 'DELETE') {
+      let cancelled = 0;
+      for (const purchase of mockWallet.purchases) {
+        if (purchase.card_id !== id) continue;
+        if (['held', 'authorized', 'filled'].includes(purchase.state)) {
+          purchase.state = 'cancelled';
+          cancelled++;
+        }
+        purchase.card_id = null;
+      }
+      mockWallet.cards = mockWallet.cards.filter((c) => c.id !== id);
+      return { ok: true, cancelled };
+    }
+  }
+  if (url === root + '/policy' && method === 'PUT') {
+    Object.assign(mockWallet.policy, body);
+    return { ok: true };
+  }
+  const cancel = url.match(/^\/istota\/api\/settings\/wallet\/purchases\/(\d+)\/cancel$/);
+  if (cancel && method === 'POST') {
+    const purchase = mockWallet.purchases.find((p) => p.id === Number(cancel[1]));
+    if (!purchase) return { __status: 404, detail: 'Purchase not found' };
+    if (!['held', 'authorized', 'filled'].includes(purchase.state))
+      return { __status: 400, detail: 'Purchase is not open' };
+    purchase.state = 'cancelled';
+    return { ok: true };
+  }
+  return undefined;
+}
+
 const handlers: MockHandler[] = [
+  ({ url, method, body }) => mockWalletRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   avatarsHandler,
   chatFilePreviewHandler,

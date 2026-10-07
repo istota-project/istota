@@ -1552,6 +1552,9 @@ class SecurityConfig:
     # This is a capability gate: 0 disables model-requested vault writes.
     # Unlike the fetch limit above, it never means unlimited.
     vault_writes_per_task: int = 3
+    wallet_requests_per_task: int = 3
+    wallet_fills_per_purchase: int = 3
+    wallet_authorization_minutes: int = 30
     # Accept same-uid cross-task exposure of vaults without a working sandbox.
     allow_unsandboxed_multi_user_vaults: bool = False
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
@@ -3946,6 +3949,17 @@ def _advisor_model(raw: object, key: str) -> object:
     return _KEEP
 
 
+def _wallet_authorization_minutes(raw, key):
+    try:
+        if isinstance(raw, bool):
+            raise ValueError
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("%s must be an integer; keeping the default", key)
+        return _KEEP
+    return max(5, min(240, value))
+
+
 def _non_negative_int(raw: object, key: str) -> object:
     """A count where zero is meaningful and a negative value is a typo."""
     value = coerce_int(raw, key)
@@ -4148,6 +4162,9 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # fetches rather than tighten it. `_non_negative_int` keeps the shipped 10.
     "security.vault_fetch_limit_per_task": _non_negative_int,
     "security.vault_writes_per_task": _non_negative_int,
+    "security.wallet_requests_per_task": _non_negative_int,
+    "security.wallet_fills_per_purchase": _non_negative_int,
+    "security.wallet_authorization_minutes": _wallet_authorization_minutes,
     # A brain name is compared literally downstream, so surrounding whitespace
     # in a rendered config is a name that matches nothing.
     "brain.fallback": lambda raw, key: (

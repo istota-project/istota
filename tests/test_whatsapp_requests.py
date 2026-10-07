@@ -408,3 +408,23 @@ class TestTheRoomKindsMigration:
             b.execute("DELETE FROM tasks WHERE id=1")
             assert b.execute(
                 "SELECT origin_task_id FROM whatsapp_skill_requests WHERE id='r1'").fetchone()[0] is None
+
+
+def test_purchase_kind_upgrade_preserves_references(tmp_path, path):
+    old = tmp_path / "pre-wallet.db"
+    schema = (Path(__file__).parents[1] / "schema.sql").read_text()
+    schema = schema.replace(", 'purchase'", "").replace("'held','approved','queued'", "'held','queued'")
+    with sqlite3.connect(old) as conn:
+        conn.executescript(schema)
+        conn.execute("INSERT INTO tasks (id,user_id,source_type,prompt) VALUES (1,'alice','web','x')")
+        conn.execute("INSERT INTO whatsapp_skill_requests (id,requester_user_id,origin_task_id,request_key,kind,recipient_user_id,content_hash,service_hash,provider,binding_fingerprint,state) VALUES ('r','alice',1,'k','room_post','alice','h','s','room','fp','held')")
+        conn.execute("INSERT INTO message_relays (id,asker_user_id,recipient_user_id,request_id,provider,binding_fingerprint,state) VALUES ('relay','alice','bob','r','room','fp','held')")
+    db.init_db(old)
+    db.init_db(old)
+    with db.get_db(path) as fresh, db.get_db(old) as upgraded:
+        assert _request_shape(fresh) == _request_shape(upgraded)
+        upgraded.execute("UPDATE whatsapp_skill_requests SET kind='purchase',state='approved' WHERE id='r'")
+        assert upgraded.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert upgraded.execute("SELECT request_id FROM message_relays").fetchone()[0] == 'r'
+        upgraded.execute("DELETE FROM tasks WHERE id=1")
+        assert upgraded.execute("SELECT origin_task_id FROM whatsapp_skill_requests").fetchone()[0] is None

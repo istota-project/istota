@@ -977,3 +977,34 @@ class TestThrottleNotices:
 
         assert senders[0] == "zzz-loudest@example.com"
         assert len(senders) == task_alert.MAX_PARAM_ENTRIES
+
+
+class TestWalletAutoPush:
+    def test_request_keeps_purchase_details_in_bell(self, config, monkeypatch):
+        from istota.wallet import cards, policy, purchases
+        from .support.wallet import CARD
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+        config.experimental.features = ["wallet"]
+        with db.get_db(config.db_path) as conn:
+            card = cards.add_card(conn, "alice", CARD)
+            task = db.create_task(conn, user_id="alice", source_type="web")
+            policy.put_policy(conn, "alice", policy.Policy(auto_limit_cents=5000, auto_budget_cents=20000))
+        with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
+            with db.get_db(config.db_path) as conn:
+                result = purchases.request(conn, config, user_id="alice", task_id=task, card=card,
+                                           merchant="shop.example", amount_cents=2499, currency="USD", request_key="one")
+                assert send.call_count == 0
+                row = conn.execute("SELECT * FROM notifications WHERE source='task_alert'").fetchone()
+                assert row["dedup_key"] == f"wallet-purchase:{result.purchase_id}"
+                assert "24.99 USD at shop.example" in row["body"]
+                assert "4242" in row["body"]
+            store.deliver_pending(config, [result.notification])
+            assert send.call_count == 1
+            pushed = str(send.call_args)
+            assert task_alert.WALLET_AUTO_PUSH in pushed
+            assert "24.99" not in pushed and "shop.example" not in pushed and "4242" not in pushed
+            with db.get_db(config.db_path) as conn:
+                replay = purchases.request(conn, config, user_id="alice", task_id=task, card=card,
+                                           merchant="shop.example", amount_cents=2499, currency="USD", request_key="one")
+                assert replay.notification is None

@@ -3766,3 +3766,113 @@ def test_forget_refusal_preserves_session_evidence(monkeypatch, capsys):
             main(["forget", "--all", "--profile"])
     assert exc.value.code == 1
     assert json.loads(capsys.readouterr().out) == body
+
+
+class TestCardFill:
+    @staticmethod
+    def card():
+        from istota.skills._credref import CardSecret, SecretValue
+        fields = {"number": "4242" * 4, "cvc": "817", "exp_month": "7",
+                  "exp_year": "2029", "name": "Alice Example"}
+        return CardSecret(17, {k: SecretValue(k, v) for k, v in fields.items()},
+                          ("shop.example", "frames.example"))
+
+    @pytest.mark.parametrize("field, expected", [
+        ("number", "4242" * 4), ("cvc", "817"), ("name", "Alice Example"),
+        ("exp", "07/29"), ("exp:MM/YYYY", "07/2029"), ("exp:MMYY", "0729"),
+        ("exp_month", "07"), ("exp_month:M", "7"),
+        ("exp_year", "2029"), ("exp_year:YY", "29"),
+    ])
+    def test_formats_and_action_order(self, field, expected):
+        args = build_parser().parse_args([
+            "interact", "s1", "--click", "#open", "--purchase", "17",
+            "--fill-card", field + "=input[name=card]", "--click", "#submit",
+        ])
+        args.purchase = self.card()
+        actions = _interact_actions(args)
+        assert [a["type"] for a in actions] == ["click", "fill", "click"]
+        assert actions[1] == {
+            "type": "fill", "selector": "input[name=card]", "value": expected,
+            "credential": True, "card_field": field.split(":")[0],
+            "bound_hosts": ["shop.example", "frames.example"],
+        }
+
+    @pytest.mark.parametrize("spec", ["pin=#x", "exp:YY=#x", "number:MM=#x", "number=", "number"])
+    def test_bad_field_is_parse_error(self, spec):
+        with pytest.raises(SystemExit) as exc:
+            build_parser().parse_args(["interact", "s1", "--fill-card", spec])
+        assert exc.value.code == 2
+
+    def test_purchase_required(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["interact", "s1", "--fill-card", "number=#number"])
+        assert exc.value.code == 2
+        assert "--purchase" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("supported", [False, True])
+    def test_preflight_and_scrubbing(self, supported):
+        args = build_parser().parse_args([
+            "interact", "s1", "--purchase", "17", "--fill-card", "exp=#exp",
+        ])
+        args.purchase = self.card()
+        health = {"per_user_profiles": True, "credential_origin_check": True}
+        if supported:
+            health["card_fill"] = True
+        body = {"status": "ok", "user_scope": "alice", "actions": [{"ok": True}],
+                "text": "4242" * 4 + " 817 07/29"}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=health)), patch(
+            "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)
+        ) as post:
+            result = cmd_interact(args)
+        assert post.called is supported
+        if supported:
+            assert "4242" not in str(result)
+            assert "817" not in str(result)
+            assert "07/29" not in str(result)
+        else:
+            assert result["status"] == "error"
+
+
+@pytest.mark.parametrize("error", [None, httpx.ReadError, httpx.ConnectTimeout])
+def test_card_resolves_once_and_scrubs_cli_failures(monkeypatch, capsys, error):
+    monkeypatch.setenv("ISTOTA_CRED_FD", "9")
+    fields = {k: v.reveal() for k, v in TestCardFill.card().fields.items()}
+    with patch("istota.skills._credref.fetch_card", return_value=(fields, ("shop.example",))) as fetch, patch(
+        "istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={
+            "per_user_profiles": True, "credential_origin_check": True, "card_fill": True,
+        })
+    ), patch("istota.skills.browse.httpx.post") as post:
+        if error:
+            post.side_effect = error(fields["number"] + " 07/29 " + fields["cvc"])
+        else:
+            post.return_value = httpx.Response(200, json={
+                "status": "ok", "user_scope": "alice", "actions": [{"ok": True}],
+            })
+        if error:
+            with pytest.raises(SystemExit) as exc:
+                main(["interact", "s1", "--purchase", "17", "--fill-card", "exp=#expiry"])
+            assert exc.value.code == 1
+        else:
+            main(["interact", "s1", "--purchase", "17", "--fill-card", "exp=#expiry"])
+    fetch.assert_called_once_with(17, credential_fd="9")
+    out = capsys.readouterr()
+    assert fields["number"] not in out.out + out.err
+    assert fields["cvc"] not in out.out + out.err
+    assert "07/29" not in out.out + out.err
+
+
+def test_card_scrub_preserves_confirmed_protocol_identifiers(monkeypatch):
+    monkeypatch.setenv("ISTOTA_USER_ID", "user7")
+    args = build_parser().parse_args([
+        "interact", "abc7d07e", "--purchase", "17", "--fill-card", "exp_month=#month",
+    ])
+    args.purchase = TestCardFill.card()
+    body = {"status": "ok", "session_id": args.session_id, "user_scope": "user7",
+            "actions": [{"ok": True}], "text": "7 07"}
+    with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={
+        "per_user_profiles": True, "credential_origin_check": True, "card_fill": True,
+    })), patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
+        result = cmd_interact(args)
+    assert result["session_id"] == "abc7d07e"
+    assert result["user_scope"] == "user7"
+    assert "7" not in result["text"]

@@ -608,7 +608,7 @@ def _article_markdown(html, soup, base_url, notes):
 
 
 def to_markdown(html, base_url="", mode="full", max_chars=DEFAULT_MAX_CHARS,
-                frames=None, include_frames=False, frames_capped=False, offset=0):
+                frames=None, include_frames=False, frames_capped=False, offset=0, scrub=None):
     """Convert rendered HTML to markdown.
 
     Returns a dict with `markdown`, the `mode` actually used (which may differ
@@ -672,6 +672,8 @@ def to_markdown(html, base_url="", mode="full", max_chars=DEFAULT_MAX_CHARS,
         markdown = _converter(strip_images=True).convert_soup(body)
 
     markdown = _postprocess(markdown)
+    if scrub is not None:
+        markdown = scrub(markdown)
     frame_spans = _frame_spans(markdown) if placed else []
     markdown, text_metadata = text_window(
         markdown, max_chars if max_chars > 0 else max(1, len(markdown)), offset,
