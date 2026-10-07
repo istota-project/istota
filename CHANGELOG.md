@@ -117,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Add credential dialog labels the secret field Secret rather than Value, marks Username and Site optional, and requires Name and Secret before it submits. The secret input is now as wide as the fields around it: a settings field that can never clear a stored value no longer reserves space for the clear button.
 - `istota-skill memory --channel` accepts an older name for the task's own room, its Talk token or a pre-migration alias, and reads the room's current file. A scheduled prompt written before the room refactor named its room by the Talk token and was refused with "channel token mismatch" every run. Another room's name is still refused.
 
 - On an iPhone, picking an option from a dropdown no longer also taps whatever sat behind it. In Money, choosing Reports, Portfolio, Taxes or Business from the section menu on the Accounts page used to open Transactions for the account row under your finger (#677).

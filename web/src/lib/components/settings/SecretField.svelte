@@ -13,6 +13,7 @@
     disabled?: boolean;
     /** A refusal about this value, rendered under the field. */
     error?: string;
+    required?: boolean;
     onValueChange: (next: string) => void;
     onRequestClear?: () => void;
   }
@@ -25,6 +26,7 @@
     value,
     disabled = false,
     error,
+    required = false,
     onValueChange,
     onRequestClear,
   }: Props = $props();
@@ -52,6 +54,7 @@
       {type}
       {value}
       {disabled}
+      {required}
       invalid={!!error}
       autocomplete="new-password"
       placeholder={configured ? '•••• stored — enter to replace' : 'Enter value'}
@@ -66,7 +69,7 @@
         {disabled}
         onclick={onRequestClear}>×</IconButton
       >
-    {:else}
+    {:else if onRequestClear}
       <!--
         The button's slot is held open when there is nothing stored to clear.
         Both rows end at 24rem either way, so without this the *input* absorbed
@@ -74,7 +77,8 @@
         than a configured one in the same card — which is how the ntfy card
         read, its unset access token stretching past every field above it.
         A mirror of the glyph rather than a measured width, so it cannot drift
-        from what IconButton actually renders.
+        from what IconButton actually renders. A caller that can never clear
+        (the credential dialog) reserves nothing, so its input gets the row.
       -->
       <span class="clear-placeholder" aria-hidden="true">×</span>
     {/if}

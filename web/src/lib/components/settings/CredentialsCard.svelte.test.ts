@@ -454,13 +454,13 @@ describe('the credential form', () => {
     render(CredentialsCard);
     await screen.findByText('portal.example');
     await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
-    const value = screen.getByLabelText(/^Value/) as HTMLInputElement;
+    const value = screen.getByLabelText(/^Secret/) as HTMLInputElement;
     await fireEvent.input(value, { target: { value: 'sk-or-secret' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
-    expect((screen.getByLabelText(/^Value/) as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText(/^Secret/) as HTMLInputElement).value).toBe('');
     expect(document.body.textContent).not.toContain('sk-or-secret');
   });
 
@@ -470,6 +470,8 @@ describe('the credential form', () => {
     await screen.findByText('openrouter.ai');
     await chooseAction('openrouter_key', 'Edit');
     const dialog = screen.getByRole('dialog', { name: 'Edit openrouter_key' });
-    expect((within(dialog).getByLabelText('Site') as HTMLInputElement).value).toBe('openrouter.ai');
+    expect((within(dialog).getByLabelText('Site (optional)') as HTMLInputElement).value).toBe(
+      'openrouter.ai',
+    );
   });
 });
