@@ -65,15 +65,15 @@ istota_advisor_model: ""
 istota_models_aliases:
   fast:
     anthropic:
-      model: "claude-haiku-4-5"
-      effort: ""
+      model: "claude-haiku-5-5"
+      effort: "low"
     openai_compat:
       model: "{{ istota_brain_native_model }}"
       effort: "low"
   general:
     anthropic:
-      model: "claude-sonnet-5"
-      effort: ""
+      model: "claude-sonnet-5-5"
+      effort: "medium"
     openai_compat:
       model: "{{ istota_brain_native_model }}"
       effort: "medium"
