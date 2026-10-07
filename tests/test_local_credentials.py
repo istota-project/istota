@@ -107,7 +107,7 @@ class TestCreate:
             "openrouter_key", "openrouter_key_url", "openrouter_key_username",
         ]
         assert entry == {"hosts": ["api.openrouter.ai", "openrouter.ai"],
-                         "headers": ["x-api-key"], "revealable": True, "source": "local"}
+                         "headers": ["x-api-key"], "revealable": True, "source": "local", "kind": "value"}
 
     def test_http_site_is_kept_with_its_scheme(self, db_path):
         _create(db_path, LocalCredential(name="lan", value=VALUE, url="http://192.0.2.10:8080"))
@@ -272,7 +272,7 @@ class TestUpdate:
         for field in ("api_key", "api_key_username", "api_key_url"):
             assert _binding(db_path, field) == {
                 "hosts": ["new.example.com", "other.example.com"],
-                "headers": ["x-api-key"], "revealable": True, "source": "local",
+                "headers": ["x-api-key"], "revealable": True, "source": "local", "kind": "value",
             }
         assert _entry(db_path, "api_key_url") == "new.example.com"
 

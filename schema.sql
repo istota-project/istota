@@ -2177,6 +2177,7 @@ CREATE TABLE IF NOT EXISTS credential_bindings (
     headers TEXT NOT NULL,
     revealable INTEGER NOT NULL DEFAULT 0,
     source TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'value',
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, name)
 );

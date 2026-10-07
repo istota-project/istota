@@ -3538,7 +3538,7 @@ def _vault_contents_result(config, secrets_vault, name: str, users) -> CheckResu
         scope = "" if report.scoped else ", whole file shared (no istota group)"
         counts.append(
             f"{label}: {len(report.names)} credential(s), "
-            f"{report.generated_count} in generated/{scope}"
+            f"{report.generated_count} in generated/, {report.otp_count} OTP{scope}"
         )
 
     if failures:

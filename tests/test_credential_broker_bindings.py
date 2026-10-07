@@ -175,7 +175,7 @@ def test_proxy_resolves_live_value_and_hosts_together(tmp_path, monkeypatch):
             assert secret.bound_hosts == ("portal.example",)
             reply = request(socket, {"type": "vault_list"})
             assert reply["credentials"] == [{"name": "portal", "bound_hosts": ["portal.example"],
-                                              "revealable": True, "grant": "ungranted"}]
+                                              "revealable": True, "grant": "ungranted", "kind": "value"}]
             secrets_store.delete_secret(database, "alice", "vault_entries", "portal")
             secret, error = _resolve_name("portal", "test")
             assert secret is None
@@ -274,7 +274,7 @@ def test_list_columns_include_unbound_and_forge(tmp_path, monkeypatch, capsys):
                         user_id="alice", vault_credentials={"portal": "fixture-password"}):
             assert credential_shim._cmd_list() == 0
     output = capsys.readouterr().out
-    assert "NAME\tBOUND HOSTS\tREVEALABLE\tGRANT" in output
+    assert "NAME\tBOUND HOSTS\tREVEALABLE\tGRANT\tOTP" in output
     assert "portal\tunbound\tno\tungranted" in output
     assert "forge.github\tapi.github.com,github.com" in output
     assert "fixture-password" not in output
@@ -334,3 +334,42 @@ def test_removing_custom_field_preserves_entry_grant(tmp_path, monkeypatch):
     secrets_vault.apply_vault(database, "alice", read)
     with db.get_db(database) as conn:
         assert grants.get_grant(conn, "alice", "portal") is None
+
+
+@pytest.mark.parametrize("kind,expected", [("value", False), ("totp", True), ("future", True)])
+def test_binding_kind_roundtrip(tmp_path, kind, expected):
+    from istota.credentials.broker.bindings import get_binding, is_otp_seed, parse_binding, put_binding
+    database = tmp_path / "data.db"
+    db.init_db(database)
+    with db.get_db(database) as conn:
+        binding = parse_binding("https://acme.example", {}, [])
+        put_binding(conn, "alice", "field", {**binding, "kind": kind})
+        assert get_binding(conn, "alice", "field")["kind"] == kind
+        assert is_otp_seed(conn, "alice", "field") is expected
+        assert not is_otp_seed(conn, "bob", "field")
+        put_binding(conn, "alice", "field", binding)
+        assert get_binding(conn, "alice", "field")["kind"] == "value"
+        assert not is_otp_seed(conn, "alice", "field")
+
+
+def test_otp_kind_read_error_fails_closed():
+    import sqlite3
+    from unittest.mock import Mock
+    from istota.credentials.broker.bindings import is_otp_seed
+    conn = Mock()
+    conn.execute.side_effect = sqlite3.OperationalError("unavailable")
+    assert is_otp_seed(conn, "alice", "field")
+
+
+def test_upgrade_adds_kind_to_existing_bindings(tmp_path):
+    from istota.credentials.broker.bindings import get_binding, parse_binding, put_binding
+    database = tmp_path / "data.db"
+    db.init_db(database)
+    with db.get_db(database) as conn:
+        put_binding(conn, "alice", "acme", parse_binding("https://acme.example", {}, []))
+        conn.execute("ALTER TABLE credential_bindings DROP COLUMN kind")
+    db.init_db(database)
+    db.init_db(database)
+    with db.get_db(database) as conn:
+        assert get_binding(conn, "alice", "acme")["kind"] == "value"
+        assert get_binding(conn, "alice", "acme")["hosts"] == ["acme.example"]

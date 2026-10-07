@@ -12,8 +12,9 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from time import sleep, time
 
 from istota import skill_client
 from istota.sandbox import peer_process
@@ -38,6 +39,7 @@ logger = logging.getLogger("istota.sandbox.skill_proxy")
 #: ``read`` are the shim's ``run`` and ``get``.
 VAULT_MODES = frozenset({"skill", "inject", "read"})
 VAULT_MODE_DEFAULT = "read"
+OTP_MIN_REMAINING_SECONDS = 10
 
 
 def entry_fields(entry: str, values: dict[str, str]) -> dict[str, str]:
@@ -608,10 +610,18 @@ class SkillProxy:
                     reply["credentials"] = [
                         {"name": name, "bound_hosts": (binding or {}).get("hosts", []),
                          "revealable": (binding or {}).get("revealable", False),
+                         "kind": (binding or {}).get("kind", "value"),
                          "grant": "granted" if name in granted else "ungranted"}
                         for name, binding in sorted(metadata.items())
                     ]
                 self._send_response(conn, reply)
+                return
+
+            if req_type == "vault_otp":
+                self._send_response(conn, {
+                    "error": "OTP reads require the private credential channel",
+                    "reason": "invalid_credential_request",
+                })
                 return
 
             if req_type == "vault_credential":
@@ -620,6 +630,10 @@ class SkillProxy:
 
             if req_type == "vault_entry":
                 self._serve_vault_entry(conn, request)
+                return
+
+            if req_type == "vault_otp_set":
+                self._serve_vault_otp_set(conn, request)
                 return
 
             if req_type == "vault_create":
@@ -781,7 +795,7 @@ class SkillProxy:
                     except (ValueError, UnicodeError):
                         return
                     req_type = request.get("type") if isinstance(request, dict) else None
-                    if req_type not in ("vault_credential", "vault_entry", "wallet_card"):
+                    if req_type not in ("vault_credential", "vault_entry", "vault_otp", "wallet_card"):
                         self._send_response(conn, {
                             "error": "Private channel accepts credential reads only",
                             "reason": "invalid_credential_request",
@@ -789,6 +803,8 @@ class SkillProxy:
                         return
                     if req_type == "wallet_card":
                         self._serve_wallet_card(conn, request)
+                    elif req_type == "vault_otp":
+                        self._serve_vault_otp(conn, request)
                     elif req_type == "vault_entry":
                         self._serve_vault_entry(conn, request, trusted_skill=True)
                     else:
@@ -1035,6 +1051,91 @@ class SkillProxy:
             "confirmation_readable": confirmation_readable,
         })
 
+    def _serve_vault_otp_set(self, conn: socket.socket, request: dict) -> None:
+        from istota import db, storage
+        from istota.credentials import vault
+        from istota.lib import totp
+        from istota.notifications.resolvers import task_alert
+        from istota.notifications.store import deliver_pending
+
+        def refuse(reason, message):
+            self._send_response(conn, {"error": message, "reason": reason})
+
+        with self._vault_write_lock:
+            self._vault_writes += 1
+            count = self._vault_writes
+        if self.vault_write_limit <= 0 or count > self.vault_write_limit:
+            refuse("vault_write_limit", "Vault write limit reached or writes disabled")
+            return
+        config, user_id = self.config, self.user_id
+        if config is None or not user_id or not vault._vault_is_enabled(config, user_id):
+            refuse("vault_not_configured", "No credential vault is configured")
+            return
+        refusal = vault.vault_isolation_refusal(config, user_id)
+        if refusal:
+            refuse("vault_isolation_required", refusal)
+            return
+        name, otp = request.get("name"), request.get("otp")
+        if not isinstance(name, str) or not name or not isinstance(otp, str):
+            refuse("invalid_otp", "An entry name and OTP text are required")
+            return
+        try:
+            canonical = totp.to_uri(totp.parse_user_input(otp))
+            resolution = storage.vault_location_for(config, user_id)
+            location = resolution.location
+            if location is None:
+                refuse("vault_not_configured", "Credential vault cannot be opened")
+                return
+            try:
+                passphrase = vault._resolve_passphrase(config.db_path, user_id)
+                for attempt in range(2):
+                    _, digest = vault.read_vault_bytes(location.path, dir_fd=location.dir_fd)
+                    try:
+                        write = vault.set_entry_otp(
+                            location, passphrase, name=name, uri=canonical,
+                            expected_digest=digest, lock_root=config.db_path.parent,
+                            db_path=config.db_path, user_id=user_id,
+                        )
+                        break
+                    except vault.VaultChanged:
+                        if attempt:
+                            raise
+            finally:
+                if location.dir_fd is not None:
+                    import os
+                    os.close(location.dir_fd)
+        except totp.TotpError as exc:
+            refuse("invalid_otp", f"Invalid OTP ({exc.code})")
+            return
+        except vault.VaultWriteRefused as exc:
+            reason = str(exc) if str(exc) in {"otp_set_not_generated", "otp_already_set"} else "vault_write_refused"
+            refuse(reason, str(exc))
+            return
+        except vault.VaultError as exc:
+            refuse(type(exc).__name__, str(exc))
+            return
+
+        seed_name = write.name + "_totp"
+        self.vault_credentials[seed_name] = canonical
+        # Enrollment does not grant an existing credential to this task.
+        if write.name in self._created_names:
+            self._created_names.add(seed_name)
+        try:
+            with db.get_db(config.db_path) as db_conn:
+                raised = task_alert.write(
+                    db_conn, user_id,
+                    dedup_key=f"vault-otp-set:{task_alert._slug(write.name, limit=64)}",
+                    title=f"Istota added two-factor to {write.name}",
+                    body="Two-factor enrollment was saved under generated/ in your vault.",
+                    severity="warning", actionable=True,
+                    params={"task_id": self.task_id, "status": "vault_otp_set"},
+                )
+            if raised is not None:
+                deliver_pending(config, [raised])
+        except Exception:
+            logger.warning("vault_otp_set task_id=%s: notice could not be sent", self.task_id)
+        self._send_response(conn, {"name": write.name, "otp": True})
+
     def _skill_grant_refusal(self, name: str) -> str | None:
         """Live grant check for the private skill channel; fails closed."""
         if not self.user_id or not self.task_id:
@@ -1114,80 +1215,140 @@ class SkillProxy:
             })
             return
 
-        live_reply = None
-        if (trusted_skill and self.config is not None
-                and self.config.security.credential_broker.enabled
-                and name not in self._created_names):
-            # With the broker on, the private skill channel honours the task's
-            # grant as interception does, or a skill fill would skip room scope
-            # and allow_scheduled. Public reads are governed by reveal policy.
-            reason = self._skill_grant_refusal(name)
-            if reason:
-                logger.warning(
-                    "proxy_rejected task_id=%s type=vault_credential name=%s "
-                    "mode=%s reason=%s", self.task_id, label, mode, reason,
-                )
-                self._send_response(conn, {
-                    "error": f"Credential {label!r} is not granted to this task ({reason})",
-                    "reason": reason, "name": label,
-                })
-                return
-        if not trusted_skill:
-            revealable = False
-            if self.config is not None and self.user_id:
-                from istota import db
-                from istota.credentials import store as secrets_store
-                from istota.credentials.broker.bindings import get_binding
-                enforce = self.config.security.credential_broker.reveal_enforced
-                with db.get_db(self.config.db_path) as database:
-                    if enforce:
-                        # Permission must describe the value returned by this
-                        # read, including during a concurrent vault rotation.
-                        database.execute("BEGIN IMMEDIATE")
-                    metadata = get_binding(database, self.user_id, name)
-                    revealable = bool(metadata and metadata["revealable"])
-                    if enforce and revealable:
-                        live_reply = secrets_store.get_secret(
-                            self.config.db_path, self.user_id, "vault_entries", name,
-                            binding=True, connection=database,
-                        )
-                        if live_reply is None:
-                            self._send_response(conn, {
-                                "error": "Credential no longer available",
-                                "reason": "vault_credential_not_present",
-                            })
-                            return
-            if not revealable and self._refuse_brokered_credential(
-                conn, name, "vault_credential", mode,
-            ):
-                return
+        from istota import db
+        from istota.credentials import store as secrets_store
+        from istota.credentials.broker.bindings import get_binding, is_otp_seed
 
-        # The audit trail, and the only new observability this adds. INFO where
-        # the value is being handed to something other than the model —
-        # a skill CLI resolving a stamped argument, or the shim injecting into a
-        # child — and WARNING where the caller asked for it back, because that
-        # is the one shape that puts a credential into the task's own context.
+        live = self.config is not None and bool(self.user_id)
+        with db.get_db(self.config.db_path) if live else nullcontext(None) as database:
+            if live:
+                # The kind must describe the value returned, including across a
+                # concurrent rotation from a plain field to a seed.
+                database.execute("BEGIN IMMEDIATE")
+                if is_otp_seed(database, self.user_id, name):
+                    self._send_response(conn, {
+                        "error": "Credential is an OTP seed; use browse --fill-otp (credential_is_otp_seed)",
+                        "reason": "credential_is_otp_seed", "name": label,
+                    })
+                    return
+            if (trusted_skill and self.config is not None
+                    and self.config.security.credential_broker.enabled
+                    and name not in self._created_names):
+                reason = self._skill_grant_refusal(name)
+                if reason:
+                    logger.warning(
+                        "proxy_rejected task_id=%s type=vault_credential name=%s "
+                        "mode=%s reason=%s", self.task_id, label, mode, reason,
+                    )
+                    self._send_response(conn, {
+                        "error": f"Credential {label!r} is not granted to this task ({reason})",
+                        "reason": reason, "name": label,
+                    })
+                    return
+            if not trusted_skill:
+                metadata = get_binding(database, self.user_id, name) if live else None
+                if not (metadata or {}).get("revealable") and self._refuse_brokered_credential(
+                    conn, name, "vault_credential", mode,
+                ):
+                    return
+
+            reply = {"value": self.vault_credentials[name], "bound_hosts": []}
+            if live:
+                reply = secrets_store.get_secret(
+                    self.config.db_path, self.user_id, "vault_entries", name,
+                    binding=True, connection=database,
+                )
+                if reply is None:
+                    self._send_response(conn, {"error": "Credential no longer available",
+                                               "reason": "vault_credential_not_present"})
+                    return
+
         logger.log(
             logging.INFO if mode in ("skill", "inject") else logging.WARNING,
             "vault_credential task_id=%s name=%s mode=%s count=%d",
             self.task_id, label, mode, count,
         )
-        reply = live_reply if live_reply is not None else {"value": self.vault_credentials[name]}
-        if request.get("binding") is True and live_reply is None:
-            reply["bound_hosts"] = []
-            if self.config is not None and self.user_id:
-                from istota.credentials import store as secrets_store
-                live = secrets_store.get_secret(
-                    self.config.db_path, self.user_id, "vault_entries", name, binding=True,
-                )
-                if live is None:
-                    self._send_response(conn, {"error": "Credential no longer available",
-                                               "reason": "vault_credential_not_present"})
-                    return
-                reply = live
         if request.get("binding") is not True:
             reply.pop("bound_hosts", None)
         self._send_response(conn, reply)
+
+    def _serve_vault_otp(self, conn: socket.socket, request: dict) -> None:
+        """Compute a bound code for a private skill read; never return the seed."""
+        count, within = self._spend_vault_fetch()
+        if not within:
+            self._refuse_fetch_limit(conn, "vault_otp", count)
+            return
+        name = str(request.get("name", ""))
+        label = label_for_display(name)
+
+        def refuse(reason: str) -> None:
+            logger.warning(
+                "proxy_rejected task_id=%s type=vault_otp name=%s reason=%s",
+                self.task_id, label, reason,
+            )
+            self._send_response(conn, {"error": f"OTP credential refused ({reason})",
+                                       "reason": reason})
+
+        if not name or self.config is None or not self.user_id:
+            refuse("credential_has_no_otp")
+            return
+        from istota import db
+        from istota.credentials import store as secrets_store
+        from istota.credentials.broker.bindings import (
+            credential_groups, credential_name, get_binding, is_otp_seed,
+        )
+        from istota.lib.totp import TotpError, code_at, parse_otpauth, window
+
+        with db.get_db(self.config.db_path) as database:
+            # Membership, kind and the live value must describe the same seed.
+            database.execute("BEGIN IMMEDIATE")
+            if name in self.vault_credentials and is_otp_seed(database, self.user_id, name):
+                seed_name = name
+            else:
+                seeds = [member for member in credential_groups(database, self.user_id).get(name, [])
+                         if member in self.vault_credentials
+                         and (get_binding(database, self.user_id, member) or {}).get("kind") == "totp"]
+                if len(seeds) != 1:
+                    refuse("credential_has_no_otp")
+                    return
+                seed_name = seeds[0]
+            owner = credential_name(database, self.user_id, seed_name)
+            if (self.config.security.credential_broker.enabled
+                    and seed_name not in self._created_names):
+                reason = self._skill_grant_refusal(seed_name)
+                if reason:
+                    refuse(reason)
+                    return
+            if (get_binding(database, self.user_id, seed_name) or {}).get("kind") != "totp":
+                refuse("credential_otp_unusable")
+                return
+            seed = secrets_store.get_secret(
+                self.config.db_path, self.user_id, "vault_entries", seed_name,
+                binding=True, connection=database,
+            )
+            if seed is None:
+                refuse("credential_has_no_otp")
+                return
+            hosts = seed["bound_hosts"]
+            if not hosts:
+                refuse("credential_unbound")
+                return
+            try:
+                params = parse_otpauth(seed["value"])
+            except TotpError as exc:
+                logger.warning("credential_otp_unusable code=%s", exc.code)
+                refuse("credential_otp_unusable")
+                return
+
+        now = time()
+        _, end = window(params, now)
+        if end - now < OTP_MIN_REMAINING_SECONDS:
+            sleep(end - now)
+            now = time()
+            _, end = window(params, now)
+        code = code_at(params, now)
+        logger.info("credential_otp name=%s", label_for_display(owner))
+        self._send_response(conn, {"code": code, "expires_at": end, "bound_hosts": hosts})
 
     def _serve_vault_entry(
         self, conn: socket.socket, request: dict, *, trusted_skill: bool = False,
@@ -1234,7 +1395,7 @@ class SkillProxy:
             return
         from istota import db
         from istota.credentials import store as secrets_store
-        from istota.credentials.broker.bindings import credential_groups, get_binding, get_entry_binding
+        from istota.credentials.broker.bindings import credential_groups, get_binding, get_entry_binding, is_otp_seed
 
         with db.get_db(self.config.db_path) as database:
             members = [m for m in credential_groups(database, self.user_id).get(name, [])
@@ -1243,20 +1404,19 @@ class SkillProxy:
             not_present()
             return
 
-        if (trusted_skill and self.config.security.credential_broker.enabled):
-            for member in members:
-                if member in self._created_names:
-                    continue
-                reason = self._skill_grant_refusal(member)
-                if reason:
-                    refuse(reason, f"Credential {label!r} is not granted to this task ({reason})")
-                    return
-
         with db.get_db(self.config.db_path) as database:
-            # Permission, values and hosts from one view, so a rotation or a
-            # reveal change mid-read cannot pair one field's policy with
-            # another's value.
+            # Kind, permission, values and hosts come from one view.
             database.execute("BEGIN IMMEDIATE")
+            seeds = {m for m in members if is_otp_seed(database, self.user_id, m)}
+            members = [m for m in members if m not in seeds]
+            if trusted_skill and self.config.security.credential_broker.enabled:
+                for member in members:
+                    if member in self._created_names:
+                        continue
+                    reason = self._skill_grant_refusal(member)
+                    if reason:
+                        refuse(reason, f"Credential {label!r} is not granted to this task ({reason})")
+                        return
             if not trusted_skill:
                 hidden = [m for m in members
                           if not (get_binding(database, self.user_id, m) or {}).get("revealable")]
@@ -1280,7 +1440,10 @@ class SkillProxy:
             "vault_entry task_id=%s name=%s mode=%s fields=%d count=%d",
             self.task_id, label, mode, len(values), count,
         )
-        self._send_response(conn, {"fields": entry_fields(name, values), "bound_hosts": hosts})
+        reply = {"fields": entry_fields(name, values), "bound_hosts": hosts}
+        if seeds:
+            reply["otp"] = True
+        self._send_response(conn, reply)
 
     @staticmethod
     def _recv_all(conn: socket.socket) -> str:

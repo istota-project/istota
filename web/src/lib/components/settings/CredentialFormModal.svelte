@@ -58,6 +58,8 @@
   let value = $state('');
   let username = $state('');
   let removeUsername = $state(false);
+  let otp = $state('');
+  let removeOtp = $state(false);
   let site = $state(initialUrl);
   let extraHosts = $state(initialExtraHosts);
   let headers = $state(editing ? (start?.headers ?? []).join(', ') : '');
@@ -73,7 +75,7 @@
   let hasSite = $derived(site.trim() !== '');
   let shownFields = $derived(
     new Set(
-      ['name', 'value', 'username', 'url', 'extra_hosts', 'headers'].concat(
+      ['name', 'value', 'username', 'otp', 'url', 'extra_hosts', 'headers'].concat(
         !editing && hasSite ? ['access'] : [],
       ),
     ),
@@ -82,6 +84,7 @@
   function clearSecret() {
     value = '';
     username = '';
+    otp = '';
   }
 
   onDestroy(clearSecret);
@@ -108,6 +111,7 @@
         await updateLocalCredential(name, {
           value: value === '' ? null : value,
           username: removeUsername ? '' : username === '' ? null : username,
+          ...(removeOtp ? { otp: '' } : otp !== '' ? { otp } : {}),
           url: site,
           extra_hosts: extraHosts,
           headers,
@@ -118,6 +122,7 @@
           name,
           value,
           username,
+          ...(otp !== '' ? { otp } : {}),
           url: site,
           extra_hosts: extraHosts,
           headers,
@@ -207,6 +212,25 @@
         <p class="caption">Leave empty to keep it.</p>
         <Field label="Remove username" checkbox>
           <input type="checkbox" bind:checked={removeUsername} />
+        </Field>
+      {/if}
+    </div>
+    <div class="cred-field">
+      <Field label="Two-factor (TOTP, optional)" error={errors.otp}>
+        <Input
+          type="password"
+          bind:value={otp}
+          placeholder="otpauth://totp/... or base32 secret"
+          autocomplete="off"
+          spellcheck="false"
+          disabled={removeOtp}
+          invalid={!!errors.otp}
+        />
+      </Field>
+      {#if editing && start?.otp_set}
+        <p class="caption">Leave empty to keep two-factor.</p>
+        <Field label="Remove two-factor" checkbox>
+          <input type="checkbox" bind:checked={removeOtp} />
         </Field>
       {/if}
     </div>

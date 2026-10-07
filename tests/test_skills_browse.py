@@ -3876,3 +3876,78 @@ def test_card_scrub_preserves_confirmed_protocol_identifiers(monkeypatch):
     assert result["session_id"] == "abc7d07e"
     assert result["user_scope"] == "user7"
     assert "7" not in result["text"]
+
+
+class TestFillOtp:
+    proxy = TestFillCredential.proxy
+    VAULT = {}
+
+    @pytest.fixture
+    def otp_proxy(self, proxy, tmp_path, monkeypatch):
+        import base64
+        from istota import db
+        from istota.config import Config
+        from istota.credentials import store
+        from istota.credentials.broker.bindings import parse_binding
+        from istota.lib import totp
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+        config = Config(db_path=tmp_path / "otp.db")
+        db.init_db(config.db_path)
+        params = totp.parse_user_input(base64.b32encode(b"01234567890123456789").decode())
+        uri = totp.to_uri(params)
+        binding = parse_binding("https://acme.example", {}, [])
+        binding.update(credential="acme", kind="totp")
+        store.upsert_secret(config.db_path, "alice", "vault_entries", "acme_totp", uri,
+                            binding=binding)
+        monkeypatch.setattr("istota.sandbox.skill_proxy.time", lambda: 60.0)
+        server = proxy(config=config, user_id="alice", vault_credentials={"acme_totp": uri})
+        with server._credential_channel(10) as fd:
+            monkeypatch.setenv("ISTOTA_CRED_FD", str(fd))
+            yield server, totp.code_at(params, 60), uri
+
+    def test_ordered_fills_use_private_channel_and_scrub_codes(self, otp_proxy, capsys):
+        server, code, seed = otp_proxy
+        health = {"per_user_profiles": True, "credential_origin_check": True, "otp_expiry_check": True}
+        response = {"status": "ok", "user_scope": "alice", "text": f"Code: {code}",
+                    "actions": [{"action": "fill", "ok": True}], "url": f"https://acme.example/{code}"}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=health)), patch(
+            "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=response),
+        ) as post:
+            main(["interact", "s1", "--click", "#login", "--fill-otp", "input[type=text]=acme",
+                  "--click", "#verify", "--fill-otp", "#next=acme_totp"])
+        actions = post.call_args.kwargs["json"]["actions"]
+        fill = {"type": "fill", "selector": "input[type=text]", "value": code,
+                "credential": True, "bound_hosts": ["acme.example"], "expires_at": 90}
+        assert actions == [{"type": "click", "selector": "#login"}, fill,
+                           {"type": "click", "selector": "#verify"}, {**fill, "selector": "#next"}]
+        assert server._vault_fetches == 2
+        output = capsys.readouterr().out
+        assert code not in output and seed not in output
+        assert output.count("[credential]") == 2
+
+    @pytest.mark.parametrize("capability", [None, False, "true", 1])
+    def test_old_image_refuses_before_sending_code(self, otp_proxy, capsys, capability):
+        server, code, seed = otp_proxy
+        health = {"per_user_profiles": True, "credential_origin_check": True}
+        if capability is not None:
+            health["otp_expiry_check"] = capability
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=health)), patch(
+            "istota.skills.browse.httpx.post",
+        ) as post, pytest.raises(SystemExit) as exc:
+            main(["interact", "s1", "--fill-otp", "#code=acme"])
+        assert exc.value.code == 1
+        post.assert_not_called()
+        assert server._vault_fetches == 1
+        output = capsys.readouterr().out
+        assert "expiry" in output
+        assert code not in output and seed not in output
+
+    def test_static_fill_of_seed_points_to_otp_flag(self, otp_proxy, capsys):
+        with patch("istota.skills.browse.httpx.post") as post, pytest.raises(SystemExit) as exc:
+            main(["interact", "s1", "--fill-credential", "#code=acme_totp"])
+        assert exc.value.code == 1
+        post.assert_not_called()
+        output = capsys.readouterr().out
+        assert "--fill-otp" in output
+        assert "credential_is_otp_seed" in output

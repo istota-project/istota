@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Browser tasks can fill two-factor codes from KeePass and local credentials without showing the code or seed in their output. Tasks can save a new enrollment once on a credential they created under `generated/`, and the settings list marks credentials with two-factor enabled.
+
+  **Upgrade note:** Update the browser image with the daemon. The first vault sync removes the old raw OTP field names; change any prompt using `--fill-credential` with `<entry>_totp_seed` to `--fill-otp` with `<entry>`. The old form typed the seed, which was never a valid second-factor code.
+
 - Wallet settings let you add a payment card, set automatic purchase limits and approve purchases that need your decision. Tasks can fill an authorized checkout without receiving the card number or security code in their output; the purchase list records their declared amounts and reported outcomes. With a static card these limits govern permission to fill, not what a merchant charges, so use a card with its own issuer-side limit.
 
   **Upgrade note:** Wallet is available by default. Update the browser image with the daemon before using it; the approval-request table gains a purchase kind by migration.

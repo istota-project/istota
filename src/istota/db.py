@@ -1252,6 +1252,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
             PRIMARY KEY (user_id, name)
         );
     """)
+    _add_columns(conn, "credential_bindings", {"kind": "TEXT NOT NULL DEFAULT 'value'"})
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS signup_tags (
             tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT NOT NULL,
