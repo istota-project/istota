@@ -102,6 +102,10 @@ Env `ISTOTA_USER_ID`, `ISTOTA_DEVBOX_CONTAINER`, `ISTOTA_DEVBOX_DOCKER_CLI`, `IS
 - **`--value-file` is scoped** because the CLI is host-side and `kv get` returns the bytes. Roots mirror the user's binds: deferred dir, `Users/{uid}`, the task's `Channels/{token}`, `Talk` read-only; never the workspace root. Deliberately wider than `scheduler_deferred._source_path_allowed` (deferred dir and user workspace), whose content outlives the task; unifying them would widen a boundary. Use the **resolved** path; check destinations before `mkdir`. Rule in `sandbox/host_paths.py`.
 - `set-contains` with two or more members returns a map, with one the scalar; every response has `"batched"`. `list` truncates values at 2048 chars (`truncated`, `value_chars`, `truncated_count`); `get` and `set-members` never do. Operator `istota kv` shows whole values and has an unscoped `--value-file`.
 
+### `usage/` - token and cost usage
+
+Available to every user, with `--days` or `--since` / `--until`, and `--by model|origin|source|brain|user`. JSON always includes `cost_by_basis` and `unmeasured_tasks`. Members read their own rows; admins read the fleet and may narrow with `--user`. Members passing `--user` or `--by user` are refused. Uses the skill loader's context and reach gates, refuses any withheld scope, and declares `shared_room: private`. The operator CLI and skill share `usage/window.py`; both query `db.usage_summary` and `db.unmeasured_task_count`. Subscription cost is a list-price equivalent, never a bill.
+
 ### `tasks/` - task state read surface
 `status <id>`, `recent [--since] [--parent] [--status] [--source-type] [--limit]`, `transcript <id> [--attempt N] [--turns|--turn N|--tools|--grep TEXT] [--thinking]`. Env `ISTOTA_DB_PATH`, `ISTOTA_USER_ID`, `ISTOTA_TASK_ID`, `ISTOTA_TASK_ATTEMPT` (in `executor._EXECUTOR_PROXY_ONLY_VARS`), `ISTOTA_SESSION_LOG_DIR` (`proxy_only`, from this skill's `setup_env` via `session_log.resolve_session_log_dir`).
 

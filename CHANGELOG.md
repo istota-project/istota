@@ -121,6 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Questions about token usage and API list-price equivalents can now be answered directly in chat. Members can read their own usage; admins can compare all users, with missing usage records reported beside the totals.
+
 - The Add credential dialog labels the secret field Secret rather than Value, marks Username and Site optional, and requires Name and Secret before it submits. The secret input is now as wide as the fields around it: a settings field that can never clear a stored value no longer reserves space for the clear button.
 - `istota-skill memory --channel` accepts an older name for the task's own room, its Talk token or a pre-migration alias, and reads the room's current file. A scheduled prompt written before the room refactor named its room by the Talk token and was refused with "channel token mismatch" every run. Another room's name is still refused.
 
