@@ -19,7 +19,7 @@ Subcommands:
 
 Each write subcommand can target the channel memory file by passing
 `--channel TOKEN`. The TOKEN is validated against `ISTOTA_CONVERSATION_TOKEN`
-when set, to refuse cross-channel writes from a runtime task that's
+(or one of that room's older names, which resolve to it) when set, to refuse cross-channel writes from a runtime task that's
 been scoped to a different conversation.
 
 `--group ID` targets `{mount}/Groups/{ID}/GROUP.md` instead. There is no
@@ -233,6 +233,29 @@ def _user_md_path() -> Path:
     return resolved / "USER.md"
 
 
+def _own_room_names(env_token: str) -> list[str]:
+    """Every other name the task's own room answers to.
+
+    A prompt written before the room refactor names a room by its Talk token
+    or a migrated alias, while the task runs under the canonical token and the
+    directory moved with it. Only names of this room are returned, so the
+    cross-channel refusal still holds; an unreadable registry returns none.
+    """
+    from istota import db
+
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path or not Path(db_path).is_file():
+        return []
+    try:
+        with db.get_db(Path(db_path)) as conn:
+            if db.get_room(conn, env_token) is None:
+                return []
+            return db.room_ref_tokens(conn, env_token)
+    except Exception as exc:  # noqa: BLE001 — an unreadable registry refuses
+        logger.warning("memory: room name lookup failed: %s", exc)
+        return []
+
+
 def _channel_md_path(token: str) -> Path:
     if not token or "/" in token or "\\" in token or token.startswith("."):
         _err("invalid channel token", token=token)
@@ -245,11 +268,13 @@ def _channel_md_path(token: str) -> Path:
         )
         sys.exit(1)
     if env_token != token:
-        _err(
-            "channel token mismatch — refusing cross-channel write",
-            given=token, expected=env_token,
-        )
-        sys.exit(1)
+        if token not in _own_room_names(env_token):
+            _err(
+                "channel token mismatch — refusing cross-channel write",
+                given=token, expected=env_token,
+            )
+            sys.exit(1)
+        token = env_token
     # The token checks above bound the *name*; they say nothing about where the
     # directory it names resolves to, and `{mount}/Channels/{token}` is bound
     # read-write into the sandbox of every task in that room. So containment is
