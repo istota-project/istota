@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from istota import skill_client
@@ -608,6 +608,7 @@ class SkillProxy:
                     reply["credentials"] = [
                         {"name": name, "bound_hosts": (binding or {}).get("hosts", []),
                          "revealable": (binding or {}).get("revealable", False),
+                         "kind": (binding or {}).get("kind", "value"),
                          "grant": "granted" if name in granted else "ungranted"}
                         for name, binding in sorted(metadata.items())
                     ]
@@ -1114,77 +1115,59 @@ class SkillProxy:
             })
             return
 
-        live_reply = None
-        if (trusted_skill and self.config is not None
-                and self.config.security.credential_broker.enabled
-                and name not in self._created_names):
-            # With the broker on, the private skill channel honours the task's
-            # grant as interception does, or a skill fill would skip room scope
-            # and allow_scheduled. Public reads are governed by reveal policy.
-            reason = self._skill_grant_refusal(name)
-            if reason:
-                logger.warning(
-                    "proxy_rejected task_id=%s type=vault_credential name=%s "
-                    "mode=%s reason=%s", self.task_id, label, mode, reason,
-                )
-                self._send_response(conn, {
-                    "error": f"Credential {label!r} is not granted to this task ({reason})",
-                    "reason": reason, "name": label,
-                })
-                return
-        if not trusted_skill:
-            revealable = False
-            if self.config is not None and self.user_id:
-                from istota import db
-                from istota.credentials import store as secrets_store
-                from istota.credentials.broker.bindings import get_binding
-                enforce = self.config.security.credential_broker.reveal_enforced
-                with db.get_db(self.config.db_path) as database:
-                    if enforce:
-                        # Permission must describe the value returned by this
-                        # read, including during a concurrent vault rotation.
-                        database.execute("BEGIN IMMEDIATE")
-                    metadata = get_binding(database, self.user_id, name)
-                    revealable = bool(metadata and metadata["revealable"])
-                    if enforce and revealable:
-                        live_reply = secrets_store.get_secret(
-                            self.config.db_path, self.user_id, "vault_entries", name,
-                            binding=True, connection=database,
-                        )
-                        if live_reply is None:
-                            self._send_response(conn, {
-                                "error": "Credential no longer available",
-                                "reason": "vault_credential_not_present",
-                            })
-                            return
-            if not revealable and self._refuse_brokered_credential(
-                conn, name, "vault_credential", mode,
-            ):
-                return
+        from istota import db
+        from istota.credentials import store as secrets_store
+        from istota.credentials.broker.bindings import get_binding, is_otp_seed
 
-        # The audit trail, and the only new observability this adds. INFO where
-        # the value is being handed to something other than the model —
-        # a skill CLI resolving a stamped argument, or the shim injecting into a
-        # child — and WARNING where the caller asked for it back, because that
-        # is the one shape that puts a credential into the task's own context.
+        live = self.config is not None and bool(self.user_id)
+        with db.get_db(self.config.db_path) if live else nullcontext(None) as database:
+            if live:
+                # The kind must describe the value returned, including across a
+                # concurrent rotation from a plain field to a seed.
+                database.execute("BEGIN IMMEDIATE")
+                if is_otp_seed(database, self.user_id, name):
+                    self._send_response(conn, {
+                        "error": "Credential is an OTP seed; use browse --fill-otp (credential_is_otp_seed)",
+                        "reason": "credential_is_otp_seed", "name": label,
+                    })
+                    return
+            if (trusted_skill and self.config is not None
+                    and self.config.security.credential_broker.enabled
+                    and name not in self._created_names):
+                reason = self._skill_grant_refusal(name)
+                if reason:
+                    logger.warning(
+                        "proxy_rejected task_id=%s type=vault_credential name=%s "
+                        "mode=%s reason=%s", self.task_id, label, mode, reason,
+                    )
+                    self._send_response(conn, {
+                        "error": f"Credential {label!r} is not granted to this task ({reason})",
+                        "reason": reason, "name": label,
+                    })
+                    return
+            if not trusted_skill:
+                metadata = get_binding(database, self.user_id, name) if live else None
+                if not (metadata or {}).get("revealable") and self._refuse_brokered_credential(
+                    conn, name, "vault_credential", mode,
+                ):
+                    return
+
+            reply = {"value": self.vault_credentials[name], "bound_hosts": []}
+            if live:
+                reply = secrets_store.get_secret(
+                    self.config.db_path, self.user_id, "vault_entries", name,
+                    binding=True, connection=database,
+                )
+                if reply is None:
+                    self._send_response(conn, {"error": "Credential no longer available",
+                                               "reason": "vault_credential_not_present"})
+                    return
+
         logger.log(
             logging.INFO if mode in ("skill", "inject") else logging.WARNING,
             "vault_credential task_id=%s name=%s mode=%s count=%d",
             self.task_id, label, mode, count,
         )
-        reply = live_reply if live_reply is not None else {"value": self.vault_credentials[name]}
-        if request.get("binding") is True and live_reply is None:
-            reply["bound_hosts"] = []
-            if self.config is not None and self.user_id:
-                from istota.credentials import store as secrets_store
-                live = secrets_store.get_secret(
-                    self.config.db_path, self.user_id, "vault_entries", name, binding=True,
-                )
-                if live is None:
-                    self._send_response(conn, {"error": "Credential no longer available",
-                                               "reason": "vault_credential_not_present"})
-                    return
-                reply = live
         if request.get("binding") is not True:
             reply.pop("bound_hosts", None)
         self._send_response(conn, reply)
@@ -1234,7 +1217,7 @@ class SkillProxy:
             return
         from istota import db
         from istota.credentials import store as secrets_store
-        from istota.credentials.broker.bindings import credential_groups, get_binding, get_entry_binding
+        from istota.credentials.broker.bindings import credential_groups, get_binding, get_entry_binding, is_otp_seed
 
         with db.get_db(self.config.db_path) as database:
             members = [m for m in credential_groups(database, self.user_id).get(name, [])
@@ -1243,20 +1226,19 @@ class SkillProxy:
             not_present()
             return
 
-        if (trusted_skill and self.config.security.credential_broker.enabled):
-            for member in members:
-                if member in self._created_names:
-                    continue
-                reason = self._skill_grant_refusal(member)
-                if reason:
-                    refuse(reason, f"Credential {label!r} is not granted to this task ({reason})")
-                    return
-
         with db.get_db(self.config.db_path) as database:
-            # Permission, values and hosts from one view, so a rotation or a
-            # reveal change mid-read cannot pair one field's policy with
-            # another's value.
+            # Kind, permission, values and hosts come from one view.
             database.execute("BEGIN IMMEDIATE")
+            seeds = {m for m in members if is_otp_seed(database, self.user_id, m)}
+            members = [m for m in members if m not in seeds]
+            if trusted_skill and self.config.security.credential_broker.enabled:
+                for member in members:
+                    if member in self._created_names:
+                        continue
+                    reason = self._skill_grant_refusal(member)
+                    if reason:
+                        refuse(reason, f"Credential {label!r} is not granted to this task ({reason})")
+                        return
             if not trusted_skill:
                 hidden = [m for m in members
                           if not (get_binding(database, self.user_id, m) or {}).get("revealable")]
@@ -1280,7 +1262,10 @@ class SkillProxy:
             "vault_entry task_id=%s name=%s mode=%s fields=%d count=%d",
             self.task_id, label, mode, len(values), count,
         )
-        self._send_response(conn, {"fields": entry_fields(name, values), "bound_hosts": hosts})
+        reply = {"fields": entry_fields(name, values), "bound_hosts": hosts}
+        if seeds:
+            reply["otp"] = True
+        self._send_response(conn, reply)
 
     @staticmethod
     def _recv_all(conn: socket.socket) -> str:

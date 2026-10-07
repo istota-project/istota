@@ -314,10 +314,11 @@ def _cmd_list() -> int:
         raise ProxyError("the credential proxy answered unparseably")
     credentials = reply.get("credentials")
     if isinstance(credentials, list):
-        print("NAME\tBOUND HOSTS\tREVEALABLE\tGRANT")
+        print("NAME\tBOUND HOSTS\tREVEALABLE\tGRANT\tOTP")
         for item in credentials:
             print("\t".join((item["name"], ",".join(item["bound_hosts"]) or "unbound",
-                             "yes" if item["revealable"] else "no", item["grant"])))
+                             "yes" if item["revealable"] else "no", item["grant"],
+                             "yes" if item.get("kind", "value") != "value" else "no")))
     else:
         for name in names:
             print(name)
@@ -333,6 +334,8 @@ def _cmd_placeholder(args: list[str]) -> int:
     reply = _request({"type": "vault_list"})
     for item in reply.get("credentials", []):
         if item.get("name") == name:
+            if item.get("kind", "value") != "value":
+                raise ProxyError("credential_is_otp_seed: use browse --fill-otp")
             hosts = item.get("bound_hosts", [])
             print("Bound hosts: " + (", ".join(hosts) or "unbound"), file=sys.stderr)
             print("{{cred:" + name + "}}", end="")
