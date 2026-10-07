@@ -121,3 +121,91 @@ def test_cleanup_continues_when_wallet_expiry_fails(wallet_env):
     from istota.scheduler import run_cleanup_checks
     with patch("istota.wallet.purchases.expire", side_effect=RuntimeError("expiry unavailable")):
         run_cleanup_checks(config)
+
+
+@pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+def test_phone_purchase_refuses_a_truncated_preview(wallet_env, surface):
+    path, config, _, task_id = wallet_env
+    config.sms.max_segments = 1
+    with db.get_db(path) as conn:
+        conn.execute("UPDATE tasks SET source_type=? WHERE id=?", (surface, task_id))
+        with pytest.raises(RequestError, match="invalid_preview"):
+            request(conn, wallet_env, amount_cents=6000,
+                    extra_hosts=[f"frame{i}.example" for i in range(30)], description="buy this filter " * 25)
+        assert purchases.list_purchases(conn, "alice") == []
+        assert conn.execute("SELECT count(*) FROM whatsapp_skill_requests").fetchone()[0] == 0
+
+
+def test_approval_cannot_expand_the_preview_limits(wallet_env):
+    config = wallet_env[1]
+    config.security.wallet_authorization_minutes = 5
+    config.security.wallet_fills_per_purchase = 1
+    task, purchase = park(wallet_env)
+    config.security.wallet_authorization_minutes = 240
+    config.security.wallet_fills_per_purchase = 3
+    with db.get_db(wallet_env[0]) as conn:
+        confirmations.approve(conn, task, config=config, preview_digest=text_hash(task.confirmation_prompt))
+        updated = purchases.get_purchase(conn, "alice", purchase["id"])
+        assert (datetime.fromisoformat(updated["expires_at"]) - datetime.fromisoformat(updated["authorized_at"])).seconds == 5 * 60
+        purchases.claim_fill(conn, config, user_id="alice", task_id=task.id, purchase_id=purchase["id"])
+        with pytest.raises(purchases.WalletRefusal, match="purchase_fill_limit"):
+            purchases.claim_fill(conn, config, user_id="alice", task_id=task.id, purchase_id=purchase["id"])
+
+
+def test_declined_turn_closes_its_purchase(wallet_env):
+    path, config, _, task_id = wallet_env
+    config.db_path = path
+    config.users = {"alice": UserConfig()}
+    with db.get_db(path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "shared").token
+        db.add_room_member(conn, room, "bob")
+        conn.execute("UPDATE tasks SET status='pending', source_type='web', declinable=1, conversation_token=? WHERE id=?", (room, task_id))
+
+    def execute(*args, **kwargs):
+        with db.get_db(path) as conn:
+            request(conn, wallet_env, amount_cents=6000)
+        return True, "NO_ACTION: This turn is not for me.", None, None
+
+    from istota.scheduler import process_one_task
+    with patch("istota.scheduler.execute_task", side_effect=execute):
+        process_one_task(config)
+    with db.get_db(path) as conn:
+        assert db.get_task(conn, task_id).status == "completed"
+        assert purchases.list_purchases(conn, "alice")[0]["state"] == "cancelled"
+        assert conn.execute("SELECT state FROM whatsapp_skill_requests").fetchone()[0] == "cancelled"
+
+
+@pytest.mark.parametrize("surface", ["sms", "whatsapp"])
+def test_phone_purchase_preview_reaches_delivery_intact(wallet_env, surface):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from istota.scheduler import process_one_task
+    from istota.transport.sms.outbound import render_sms
+    from istota.transport.whatsapp.outbound import render_whatsapp
+
+    path, config, _, task_id = wallet_env
+    config.db_path = path
+    config.sms.enabled = True
+    config.sms.max_segments = 10
+    config.whatsapp.enabled = True
+    config.users = {"alice": UserConfig(sms_phone_number="+15551234567")}
+    with db.get_db(path) as conn:
+        conn.execute("UPDATE tasks SET status='pending', source_type=?, output_target=? WHERE id=?", (surface, surface, task_id))
+
+    def execute(*args, **kwargs):
+        with db.get_db(path) as conn:
+            request(conn, wallet_env, amount_cents=6000)
+        return True, "Waiting for purchase approval.", None, None
+
+    transport = "SmsTransport" if surface == "sms" else "WhatsAppTransport"
+    send = AsyncMock(return_value=SimpleNamespace(status="accepted"))
+    with patch("istota.scheduler.execute_task", side_effect=execute), patch(f"istota.transport.{surface}.{transport}.send_record", send):
+        process_one_task(config)
+    with db.get_db(path) as conn:
+        task = db.get_task(conn, task_id)
+        assert task.status == "pending_confirmation"
+        assert send.call_count == 1
+        body = send.call_args.args[1]
+        assert task.confirmation_prompt in body
+        rendered = render_sms(body, config.sms.max_segments).text if surface == "sms" else render_whatsapp(body)
+        assert rendered == body

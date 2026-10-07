@@ -126,12 +126,17 @@ def request(conn, config, *, user_id, task_id, card, merchant, amount_cents, cur
             from istota.relay.requests import _store_request
 
             preview = compose_preview(purchase, minutes, config.security.wallet_fills_per_purchase)
+            check_preview_delivery(conn, config, task, preview)
             held = _store_request(
                 conn, actor_user_id=user_id, task_id=task_id,
                 request_key=f"wallet-purchase-{purchase['id']}", kind="purchase",
                 recipient_user_id=user_id, text=preview, service_body=preview,
                 template_body=None, provider="wallet", binding_fingerprint="",
-                preview=preview, destination={"kind": "purchase", "purchase_id": purchase["id"]},
+                preview=preview, destination={
+                    "kind": "purchase", "purchase_id": purchase["id"],
+                    "authorization_minutes": minutes,
+                    "fills_per_purchase": config.security.wallet_fills_per_purchase,
+                },
             )
             conn.execute("UPDATE wallet_purchases SET request_id=? WHERE id=?", (held["id"], purchase["id"]))
         elif decision.state == "authorized":
@@ -170,7 +175,12 @@ def claim_fill(conn, config, *, user_id, task_id, purchase_id) -> FillGrant:
             raise WalletRefusal("purchase_not_authorized")
         if not row["expires_at"] or _stamp() >= row["expires_at"]:
             raise WalletRefusal("purchase_expired")
-        if row["fill_count"] >= config.security.wallet_fills_per_purchase:
+        fill_limit = config.security.wallet_fills_per_purchase
+        if row["approval"] == "user":
+            held = conn.execute("SELECT destination FROM whatsapp_skill_requests WHERE id=?", (row["request_id"],)).fetchone()
+            if held is not None:
+                fill_limit = min(fill_limit, json.loads(held["destination"])["fills_per_purchase"])
+        if row["fill_count"] >= fill_limit:
             raise WalletRefusal("purchase_fill_limit")
         card = cards.get_card(conn, user_id, row["card_id"])
         if card is None or card.state != "active" or cards.expired(card):
@@ -265,3 +275,30 @@ def compose_preview(purchase, authorization_minutes=30, fills_per_purchase=3) ->
                 f"up to {max(0, fills_per_purchase)} times within "
                 f"{max(5, min(240, authorization_minutes))} minutes.")
     return preview
+
+
+def check_preview_delivery(conn, config, task, preview):
+    """Refuse a phone preview whose rendered approval terms would differ."""
+    from istota.relay.requests import RequestError, check_preview_fits
+    from istota.rooms import private_replies
+
+    about = private_replies.park_about(conn, task)
+    dest = private_replies.private_room_for(conn, config, task.user_id, about) if about else None
+    surface = dest.surface if dest else (None if about else task.source_type)
+    if surface == "sms":
+        body = f"{preview}\n\nTask #{task.id}. Reply YES or NO."
+        check_preview_fits(config, {"surface": "sms"}, body)
+    elif surface == "whatsapp":
+        from istota.scheduler import _whatsapp_confirmation_body
+        from istota.transport.whatsapp.outbound import confirmation_body_budget, render_whatsapp
+
+        if about:
+            body = private_replies.whatsapp_confirmation_body(preview, task.id)
+            # Private delivery adds a bounded room label before this body.
+            header_size = len(private_replies.HEADER_PREFIX) + private_replies._LABEL_MAX + 2
+            rendered = render_whatsapp(body, limit=max(1, confirmation_body_budget(config) - header_size))
+        else:
+            body = f"{preview}\n\nTask #{task.id}. Reply YES or NO."
+            rendered = _whatsapp_confirmation_body(config, preview, task.id)
+        if not body.startswith(preview) or rendered != body:
+            raise RequestError("invalid_preview")

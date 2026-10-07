@@ -3539,7 +3539,7 @@ def process_one_task(
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
     purchase_question = relay_question if relay_question and relay_question["kind"] == "purchase" else None
-    if purchase_question and not success:
+    if purchase_question and not success and not dry_run:
         from istota.relay.relays import close_task_questions
         with db.get_db(config.db_path) as conn:
             close_task_questions(conn, task_id, reason="attempt_failed")
@@ -3562,6 +3562,9 @@ def process_one_task(
         # in the room after all, so it is dropped rather than replayed.
         _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
         with db.get_db(config.db_path) as conn:
+            if purchase_question:
+                from istota.relay.relays import close_task_questions
+                close_task_questions(conn, task_id, reason="turn_declined")
             db.update_task_status(
                 conn, task_id, "completed", result=None,
                 actions_taken=actions_taken, execution_trace=execution_trace,

@@ -810,7 +810,10 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str, config=
             try:
                 purchases.authorize_held(
                     conn, purchase["id"], preview_digest,
-                    authorization_minutes=config.security.wallet_authorization_minutes if config else 30,
+                    authorization_minutes=min(
+                        destination["authorization_minutes"],
+                        config.security.wallet_authorization_minutes if config else destination["authorization_minutes"],
+                    ),
                 )
             except purchases.WalletRefusal:
                 raise RequestError("confirmation_unavailable") from None
