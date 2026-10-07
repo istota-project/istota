@@ -2720,10 +2720,11 @@ def interact():
             if action_type in _SELECTOR_ACTIONS:
                 results.append(
                     _selector_action(session, page, action, others, owned))
-                if action.get("card_field") and results[-1].get("ok") is False:
+                stop_on_refusal = action.get("card_field") or (action.get("credential") and "expires_at" in action)
+                if stop_on_refusal and results[-1].get("ok") is False:
                     result = _scrub_extracted({
                         "status": "error", "actions": results,
-                        "error": results[-1].get("error", "card_fill_failed"),
+                        "error": results[-1].get("error", "credential_fill_failed"),
                         "actions_not_run": len(actions) - len(results),
                     }, _credential_values)
                     result["session_id"] = session_id

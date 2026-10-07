@@ -613,7 +613,12 @@ def test_card_scrub_preserves_session_identifier(monkeypatch, endpoint):
     assert "07" not in result.get("text", result.get("markdown", ""))
 
 
-def test_failed_card_fill_stops_before_submit(monkeypatch):
+@pytest.mark.parametrize("fill_metadata,error", [
+    ({"card_field": "exp_month"}, "credential_option_missing"),
+    ({"expires_at": 90}, "otp_expired"),
+    ({"expires_at": 90}, "credential_origin_mismatch"),
+])
+def test_failed_sensitive_fill_stops_before_submit(monkeypatch, fill_metadata, error):
     page = mock.Mock()
     monkeypatch.setattr(browse_api, "_credential_values", set())
     monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kw: None)
@@ -621,19 +626,21 @@ def test_failed_card_fill_stops_before_submit(monkeypatch):
     monkeypatch.setattr(browse_api, "_session_page", lambda _: page)
     monkeypatch.setattr(browse_api.chrome, "connect_cdp", lambda _: None)
     monkeypatch.setattr(browse_api, "_foreground_tabs", lambda _: ([], []))
-    selector_action = mock.Mock(return_value={"action": "fill", "ok": False, "error": "credential_option_missing"})
+    selector_action = mock.Mock(return_value={"action": "fill", "ok": False, "error": error})
     monkeypatch.setattr(browse_api, "_selector_action", selector_action)
     monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
     monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(get_json=lambda: {
         "session_id": "s1", "actions": [
-            {"type": "fill", "credential": True, "card_field": "exp_month"},
+            {"type": "fill", "credential": True, **fill_metadata},
             {"type": "click", "selector": "#submit"},
         ],
     }))
+    monkeypatch.setattr(browse_api.browsing, "extract_page_content", lambda *a, **kw: {"text": ""})
+    monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda _: False)
     result = browse_api.interact()
     selector_action.assert_called_once()
     assert result["status"] == "error"
-    assert result["error"] == "credential_option_missing"
+    assert result["error"] == error
     assert result["actions_not_run"] == 1
 
 
@@ -644,7 +651,11 @@ def test_otp_expiry_checked_after_waiting_for_selector(monkeypatch, now, accepte
     handle.owner_frame.return_value.url = "https://acme.example/login"
     handle.evaluate.return_value = {"ok": True}
     clock = [60]
-    page.wait_for_selector.side_effect = lambda *a, **kw: (clock.__setitem__(0, now), handle)[1]
+    def wait_for_selector(*args, **kwargs):
+        clock[0] = now
+        return handle
+
+    page.wait_for_selector.side_effect = wait_for_selector
     monkeypatch.setattr(browse_api.time, "time", lambda: clock[0])
     monkeypatch.setattr(browse_api, "_credential_values", set())
     result = browse_api._selector_action({}, page, {
