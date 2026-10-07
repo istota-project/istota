@@ -5010,7 +5010,6 @@ export interface WalletPurchase {
 }
 export interface WalletSettings {
   currency_precision: { default: number; exceptions: Record<string, number> };
-  enabled: boolean;
   refusal: string | null;
   cards: WalletCard[];
   policy: WalletPolicy;

@@ -90,13 +90,18 @@ it('adds a card, saves policy through the app bar and cancels a purchase through
   );
 });
 
-it.each([
-  [{ enabled: false }, 'The wallet is off on this deployment.'],
-  [{ refusal: 'Isolation refused' }, 'Isolation refused'],
-])('keeps saved cards read-only when unavailable (%j)', async (override, message) => {
-  installMock(override);
+it('lists Wallet in the sidebar without waiting on the wallet fetch', () => {
+  installMock();
   render(Harness);
-  await screen.findByText(message);
+  expect(screen.getByRole('link', { name: 'Wallet' }).getAttribute('href')).toBe(
+    '/settings/wallet',
+  );
+});
+
+it('keeps saved cards read-only under an isolation refusal', async () => {
+  installMock({ refusal: 'Isolation refused' });
+  render(Harness);
+  await screen.findByText('Isolation refused');
   expect((screen.getByRole('button', { name: 'Add card' }) as HTMLButtonElement).disabled).toBe(
     true,
   );
@@ -104,7 +109,6 @@ it.each([
     (screen.getByLabelText('Auto limit per purchase') as HTMLInputElement).disabled ||
       screen.getByLabelText('Auto limit per purchase').closest('fieldset')?.disabled,
   ).toBe(true);
-  if ('enabled' in override) expect(screen.queryByRole('link', { name: 'Wallet' })).toBeNull();
 });
 
 it.each([

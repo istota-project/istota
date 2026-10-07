@@ -4455,7 +4455,6 @@ function mockWalletCurrencyPrecision() {
 
 const mockWallet = {
   currency_precision: mockWalletCurrencyPrecision(),
-  enabled: true,
   refusal: null as string | null,
   cards: [
     {
@@ -4499,7 +4498,6 @@ function mockWalletRoutes(url: string, method: string, body: any): unknown | und
   const root = '/istota/api/settings/wallet';
   if (url === root && method === 'GET') return mockWallet;
   if (!url.startsWith(root + '/')) return undefined;
-  if (!mockWallet.enabled) return { __status: 404, detail: 'Wallet unavailable' };
   if (mockWallet.refusal) return { __status: 403, detail: mockWallet.refusal };
   const card = url.match(/^\/istota\/api\/settings\/wallet\/cards\/(\d+)$/);
   if (url === root + '/cards' && method === 'POST') {
