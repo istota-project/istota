@@ -39,6 +39,8 @@ from istota.skills._credref import (
     ENTRY,
     NAME,
     PAIR,
+    OTP_PAIR,
+    OtpPair,
     STAMP,
     CredentialPair,
     SecretValue,
@@ -580,7 +582,7 @@ class TestTheCoverageWalk:
     def test_every_stamp_declares_a_form_the_resolver_knows(self):
         for skill, parser in _skill_parsers():
             for dotted, dest, form in stamped(parser):
-                assert form in (NAME, PAIR, ENTRY, CARD), f"{skill} {dotted} {dest}: {form!r}"
+                assert form in (NAME, PAIR, OTP_PAIR, ENTRY, CARD), f"{skill} {dotted} {dest}: {form!r}"
 
     def test_the_walk_finds_the_argument_it_is_meant_to_guard(self):
         """The walk's own control: it sees the one stamp in the tree today."""
@@ -650,3 +652,64 @@ def _action_for(parser, dotted, dest):
         if action.dest == dest:
             return action
     raise AssertionError(f"no action {dest!r} under {dotted!r}")
+
+
+class TestOtpPair:
+    def test_resolves_code_box_through_private_channel(self, tmp_path, monkeypatch):
+        from istota import db
+        from istota.config import Config
+        from istota.credentials import store
+        from istota.credentials.broker import bindings
+        from istota.lib import totp
+        from istota.sandbox import skill_proxy
+        from istota.skills._credref import resolve_parsed
+        import base64
+        import pickle
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+        monkeypatch.setattr(skill_proxy, "time", lambda: 60.0)
+        config = Config(db_path=tmp_path / "data.db")
+        db.init_db(config.db_path)
+        params = totp.parse_user_input(base64.b32encode(b"01234567890123456789").decode())
+        uri = totp.to_uri(params)
+        binding = bindings.parse_binding("https://acme.example", {}, [])
+        binding.update(credential="acme", kind="totp")
+        store.upsert_secret(config.db_path, "alice", "vault_entries", "acme_factor", uri, binding=binding)
+        server = SkillProxy(tmp_path / "unused", {}, {}, config=config, user_id="alice",
+                            vault_credentials={"acme_factor": uri})
+        parser = build(form=OTP_PAIR, action="append")
+        args = parser.parse_args(["go", "--secret", "input[type=text]=acme", "--secret", "#otp=acme_factor"])
+        with server._credential_channel(10) as fd:
+            monkeypatch.setenv("ISTOTA_CRED_FD", str(fd))
+            assert resolve_parsed(parser, args) is None
+        pairs = args.secret
+        assert all(isinstance(pair, OtpPair) for pair in pairs)
+        assert [pair.label for pair in pairs] == ["input[type=text]", "#otp"]
+        assert [pair.value.name for pair in pairs] == ["acme", "acme_factor"]
+        for pair in pairs:
+            assert pair.value.reveal() == totp.code_at(params, 60)
+            assert pair.value.bound_hosts == ("acme.example",)
+            assert pair.expires_at == 90
+            assert pair.value.reveal() not in repr(args)
+            assert uri not in repr(args)
+            with pytest.raises(TypeError):
+                pickle.dumps(pair)
+        assert server._vault_fetches == 2
+
+    @pytest.mark.parametrize("raw", ["acme", "=acme", "#otp="])
+    def test_malformed_pair_never_fetches(self, monkeypatch, raw):
+        from istota.skills import _credref
+        monkeypatch.setattr(_credref, "fetch_otp", lambda *a, **kw: pytest.fail("unexpected fetch"))
+        handler = Recorder()
+        with pytest.raises(SystemExit) as exc:
+            drive(build(form=OTP_PAIR), ["go", "--secret", raw], handler)
+        assert exc.value.code == 1
+        assert not handler.calls
+
+    def test_refusal_stops_before_handler(self, monkeypatch):
+        monkeypatch.delenv("ISTOTA_CRED_FD", raising=False)
+        handler = Recorder()
+        with pytest.raises(SystemExit) as exc:
+            drive(build(form=OTP_PAIR), ["go", "--secret", "#otp=acme"], handler)
+        assert exc.value.code == 1
+        assert not handler.calls

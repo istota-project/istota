@@ -1,6 +1,8 @@
 """OTP seeds are daemon-only on every existing credential read seam."""
 
+import base64
 import json
+import logging
 import socket
 from pathlib import Path
 from types import SimpleNamespace
@@ -132,3 +134,152 @@ def test_live_kind_change_cannot_release_snapshot_seed(config, sock_path, privat
         reply = ask(server, sock_path, {"type": "vault_credential", "name": "acme_factor"}, private)
         assert reply["reason"] == "vault_credential_not_present"
         assert SEED not in json.dumps(reply)
+
+
+@pytest.fixture
+def otp(config, monkeypatch):
+    from istota.lib import totp
+    from istota.sandbox import skill_proxy
+    params = totp.parse_user_input(base64.b32encode(b"01234567890123456789").decode())
+    uri = totp.to_uri(params)
+    binding = bindings.parse_binding("https://acme.example", {}, [])
+    binding.update(credential="acme", kind="totp")
+    store.upsert_secret(config.db_path, "alice", "vault_entries", "acme_factor", uri,
+                        binding=binding)
+    monkeypatch.setattr(skill_proxy, "time", lambda: 60.0, raising=False)
+    return params, uri
+
+
+@pytest.mark.parametrize("name", ["acme", "acme_factor"])
+def test_otp_live_seed_and_hosts(config, sock_path, otp, name, caplog):
+    from istota.lib import totp
+    with proxy(config, sock_path) as server, caplog.at_level(logging.INFO):
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": name}, True)
+        assert reply == {"code": totp.code_at(otp[0], 60), "expires_at": 90,
+                         "bound_hosts": ["acme.example"]}
+        assert server._vault_fetches == 1
+    assert "credential_otp" in caplog.text
+    assert reply["code"] not in caplog.text
+    assert otp[1] not in caplog.text
+    assert SEED not in json.dumps(reply)
+
+
+@pytest.mark.parametrize("now,wait", [(79.9, 0), (80.0, 0), (80.25, 9.75), (89.9, 0.1)])
+def test_otp_waits_for_fresh_window_without_holding_database(config, sock_path, otp, monkeypatch, now, wait):
+    from istota.lib import totp
+    from istota.sandbox import skill_proxy
+    clock = [now]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        # The freshness delay must not block other writers.
+        with db.get_db(config.db_path) as conn:
+            conn.execute("PRAGMA busy_timeout=1")
+            conn.execute("BEGIN IMMEDIATE")
+        clock[0] += seconds
+
+    monkeypatch.setattr(skill_proxy, "time", lambda: clock[0])
+    monkeypatch.setattr(skill_proxy, "sleep", sleep)
+    with proxy(config, sock_path) as server:
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+    assert sleeps == pytest.approx([wait] if wait else [])
+    assert reply["code"] == totp.code_at(otp[0], clock[0])
+    assert reply["expires_at"] == (120 if wait else 90)
+
+
+def test_otp_budget_shared_with_value_reads(config, sock_path, otp):
+    with proxy(config, sock_path, vault_fetch_limit=1) as server:
+        missing = ask(server, sock_path, {"type": "vault_otp", "name": "absent"}, True)
+        assert missing["reason"] == "credential_has_no_otp"
+        replies = [ask(server, sock_path, {"type": kind, "name": name}, True)
+                   for kind, name in [("vault_otp", "acme"), ("vault_otp", "absent"),
+                                      ("vault_credential", "acme")]]
+        assert replies[0] == replies[1] == replies[2]
+        assert replies[0]["reason"] == "vault_credential_limit"
+        assert server._vault_fetches == 4
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("no_seed", "credential_has_no_otp"), ("withheld", "credential_has_no_otp"),
+    ("multiple", "credential_has_no_otp"), ("unbound", "credential_unbound"),
+    ("malformed", "credential_otp_unusable"),
+])
+def test_otp_refusals(config, sock_path, otp, case, reason, caplog):
+    with proxy(config, sock_path) as server:
+        if case == "no_seed":
+            store.delete_secret(config.db_path, "alice", "vault_entries", "acme_factor")
+        elif case == "withheld":
+            server.vault_credentials = {}
+        elif case == "multiple":
+            with db.get_db(config.db_path) as conn:
+                conn.execute("UPDATE credential_bindings SET kind='totp' WHERE name='acme_totp'")
+        elif case == "unbound":
+            with db.get_db(config.db_path) as conn:
+                conn.execute("UPDATE credential_bindings SET hosts='[]' WHERE kind='totp'")
+        elif case == "malformed":
+            store.upsert_secret(config.db_path, "alice", "vault_entries", "acme_factor", SEED)
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+        assert reply["reason"] == reason
+        assert server._vault_fetches == 1
+        assert SEED not in json.dumps(reply) + caplog.text
+        assert otp[1] not in json.dumps(reply) + caplog.text
+
+
+def test_otp_owner_grant_and_live_revocation(config, sock_path, otp):
+    from istota.credentials.broker import grants
+    config.security.credential_broker.enabled = True
+    with db.get_db(config.db_path) as conn:
+        grants.put_grant(conn, "alice", "acme")
+        task_id = db.create_task(conn, user_id="alice", prompt="test", source_type="talk",
+                                 conversation_token="room-a")
+    with db.get_db(config.db_path) as conn:
+        grants.ensure_credential_grants(conn, task_id, "alice")
+    with proxy(config, sock_path, task_id=task_id) as server:
+        assert "code" in ask(server, sock_path, {"type": "vault_otp", "name": "acme_factor"}, True)
+        with db.get_db(config.db_path) as conn:
+            grants.put_grant(conn, "alice", "acme", allow_scheduled=True)
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+        assert reply["reason"] == "credential_changed"
+
+
+def test_otp_missing_grant_and_created_name_exemption(config, sock_path, otp):
+    config.security.credential_broker.enabled = True
+    with proxy(config, sock_path) as server:
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+        assert reply["reason"] == "credential_not_granted"
+        server._created_names.add("acme_factor")
+        assert "code" in ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+
+
+def test_otp_public_socket_cannot_claim_private_authority(config, sock_path, otp):
+    with proxy(config, sock_path) as server:
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": "acme", "mode": "skill",
+                                      "trusted_skill": True}, False)
+        assert "error" in reply
+        assert "code" not in reply
+        assert server._vault_fetches == 0
+
+
+def test_fetch_otp_reuses_private_fd(config, sock_path, otp, monkeypatch):
+    from istota.lib import totp
+    monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
+    with proxy(config, sock_path) as server:
+        with server._credential_channel(10) as fd:
+            for name in ("acme", "acme_factor"):
+                assert credential_shim.fetch_otp(name, "skill", credential_fd=str(fd)) == (
+                    totp.code_at(otp[0], 60), 90, ("acme.example",))
+        for fd in (None, "bad-fd", "-1"):
+            with pytest.raises(credential_shim.ProxyError):
+                credential_shim.fetch_otp("acme", "skill", credential_fd=fd)
+        assert server._vault_fetches == 2
+
+
+@pytest.mark.parametrize("field,value", [("code", None), ("expires_at", True),
+                                         ("expires_at", "90"), ("bound_hosts", "acme.example")])
+def test_fetch_otp_validates_reply(monkeypatch, field, value):
+    reply = {"code": "123456", "expires_at": 90, "bound_hosts": ["acme.example"]}
+    reply[field] = value
+    monkeypatch.setattr(credential_shim, "_request", lambda *a, **kw: reply)
+    with pytest.raises(credential_shim.ProxyError, match="unparseably"):
+        credential_shim.fetch_otp("acme", "skill", credential_fd="3")

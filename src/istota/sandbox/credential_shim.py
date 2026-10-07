@@ -249,6 +249,25 @@ def fetch_credential(
     return value
 
 
+def fetch_otp(
+    name: str, mode: str, *, credential_fd: str | None,
+) -> tuple[str, int, tuple[str, ...]]:
+    """A current code and its expiry, available only on the private channel."""
+    if credential_fd is None:
+        raise ProxyError("the private credential channel is unavailable")
+    reply = _request({"type": "vault_otp", "name": name, "mode": mode},
+                     credential_fd=credential_fd)
+    code = reply.get("code")
+    expires_at = reply.get("expires_at")
+    hosts = reply.get("bound_hosts")
+    if (not isinstance(code, str) or not code
+            or type(expires_at) is not int
+            or not isinstance(hosts, list) or not hosts
+            or not all(isinstance(host, str) for host in hosts)):
+        raise ProxyError("the credential proxy answered unparseably")
+    return code, expires_at, tuple(hosts)
+
+
 def fetch_entry(
     name: str, mode: str, *, credential_fd: str | None = None,
 ) -> tuple[dict[str, str], list[str]]:
