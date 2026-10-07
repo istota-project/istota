@@ -378,6 +378,52 @@ class TestChannel:
         out = json.loads(capsys.readouterr().out)
         assert out["error"] == "channel token mismatch — refusing cross-channel write"
 
+    def test_channel_accepts_an_old_name_for_this_room(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        # A prompt written before the room refactor names the room by its Talk
+        # token; the task runs under the canonical one, and the directory
+        # moved with it. The old name reads this room's own file.
+        from tests.support.rooms import promoted_room
+
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            room = promoted_room(conn, "alice", talk_ref="oldtalk1")
+            conn.execute(
+                "INSERT INTO room_token_migration (old_token, new_token, migrated_at) "
+                "VALUES ('legacy-1', ?, '2026-09-01')",
+                (room.canonical,),
+            )
+        ch_md = self._setup(tmp_path, monkeypatch, token=room.canonical)
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", room.canonical)
+        for old in ("oldtalk1", "legacy-1"):
+            memory_main(["show", "--channel", old])
+            assert "Use Postgres" in capsys.readouterr().out
+        memory_main([
+            "append", "--heading", "Decisions",
+            "--line", "Use Redis", "--channel", "oldtalk1",
+        ])
+        assert json.loads(capsys.readouterr().out)["outcome"] == "applied"
+        assert "Use Redis" in ch_md.read_text()
+
+    def test_another_rooms_old_name_is_still_refused(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.support.rooms import promoted_room
+
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            mine = promoted_room(conn, "alice", talk_ref="mytalk01")
+            promoted_room(conn, "alice", talk_ref="victim01")
+        self._setup(tmp_path, monkeypatch, token=mine.canonical)
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", mine.canonical)
+        with pytest.raises(SystemExit):
+            memory_main(["show", "--channel", "victim01"])
+        out = json.loads(capsys.readouterr().out)
+        assert out["error"] == "channel token mismatch — refusing cross-channel write"
+
     def test_channel_refused_when_env_token_unset(self, tmp_path, monkeypatch, capsys):
         # ISSUE-075: empty/unset ISTOTA_CONVERSATION_TOKEN must refuse --channel,
         # not pass through. Otherwise prompt-injected non-Talk tasks (email,
