@@ -585,3 +585,53 @@ def test_card_failure_does_not_log_value(monkeypatch, caplog):
     assert status == 500
     assert secret not in str(result)
     assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("endpoint", ["browse", "render_page", "interact"])
+def test_card_scrub_preserves_session_identifier(monkeypatch, endpoint):
+    page = mock.Mock()
+    page.url = "https://shop.example/"
+    page.title.return_value = "Expiry 07"
+    page.content.return_value = "<p>Expiry 07</p>"
+    page.is_closed.return_value = False
+    monkeypatch.setattr(browse_api, "_credential_values", {"07", "7"})
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kw: None)
+    monkeypatch.setattr(browse_api, "_get_session", lambda _: {"page": page})
+    monkeypatch.setattr(browse_api, "_session_page", lambda _: page)
+    monkeypatch.setattr(browse_api.chrome, "connect_cdp", lambda _: None)
+    monkeypatch.setattr(browse_api, "_foreground_tabs", lambda _: ([], []))
+    monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda _: False)
+    monkeypatch.setattr(browse_api.browsing, "extract_page_content", lambda *a, **kw: {"text": "Expiry 07"})
+    monkeypatch.setattr(browse_api, "_collect_frames", lambda *a: ([], False))
+    monkeypatch.setattr(browse_api.render, "to_markdown", lambda html, **kw: {"markdown": html})
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(get_json=lambda: {
+        "session_id": "abc7d07e", "actions": [],
+    }))
+    result = getattr(browse_api, endpoint)()
+    assert result["session_id"] == "abc7d07e"
+    assert "07" not in result.get("text", result.get("markdown", ""))
+
+
+def test_failed_card_fill_stops_before_submit(monkeypatch):
+    page = mock.Mock()
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kw: None)
+    monkeypatch.setattr(browse_api, "_get_session", lambda _: {"page": page})
+    monkeypatch.setattr(browse_api, "_session_page", lambda _: page)
+    monkeypatch.setattr(browse_api.chrome, "connect_cdp", lambda _: None)
+    monkeypatch.setattr(browse_api, "_foreground_tabs", lambda _: ([], []))
+    selector_action = mock.Mock(return_value={"action": "fill", "ok": False, "error": "credential_option_missing"})
+    monkeypatch.setattr(browse_api, "_selector_action", selector_action)
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(get_json=lambda: {
+        "session_id": "s1", "actions": [
+            {"type": "fill", "credential": True, "card_field": "exp_month"},
+            {"type": "click", "selector": "#submit"},
+        ],
+    }))
+    result = browse_api.interact()
+    selector_action.assert_called_once()
+    assert result["status"] == "error"
+    assert result["error"] == "credential_option_missing"
+    assert result["actions_not_run"] == 1

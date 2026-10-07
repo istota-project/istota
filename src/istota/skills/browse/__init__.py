@@ -936,7 +936,6 @@ def _fill_credential_action(pair):
             "credential": True, "bound_hosts": list(pair.value.bound_hosts)}
 
 
-
 _CARD_FORMATS = {
     "number": (None,), "cvc": (None,), "name": (None,),
     "exp": ("MM/YY", "MM/YYYY", "MMYY"),
@@ -1491,7 +1490,12 @@ def cmd_interact(args):
 
     decoded = _decode(resp)
     scope_confirmed = decoded.get("user_scope") == os.environ.get("ISTOTA_USER_ID")
+    session_confirmed = decoded.get("session_id") == args.session_id
     decoded = _note_stale_container(_scrub(decoded, secrets))
+    if scope_confirmed and isinstance(purchase, CardSecret):
+        decoded["user_scope"] = os.environ.get("ISTOTA_USER_ID")
+    if session_confirmed and isinstance(purchase, CardSecret):
+        decoded["session_id"] = args.session_id
     if credential_fill and not scope_confirmed:
         decoded = {**decoded, "status": "error", "error": (
             "The browser did not confirm the credential interaction ran in your profile. "
@@ -1500,6 +1504,11 @@ def cmd_interact(args):
     if any(isinstance(result, dict) and result.get("ok") is False
            for result in (decoded.get("actions") or [])):
         decoded = {**decoded, "status": "error", "error": decoded.get("error") or "One or more browser actions failed."}
+    if (isinstance(decoded.get("actions_not_run"), int)
+            and decoded["actions_not_run"] == len(actions) - len(decoded.get("actions") or [])
+            and any(isinstance(result, dict) and result.get("ok") is False
+                    for result in decoded.get("actions") or [])):
+        return decoded
     return _note_unreported_actions(decoded, actions)
 
 

@@ -43,6 +43,13 @@ def run(output=None):
         page = context.new_page()
         page.goto("https://shop.example/checkout")
         api._credential_values = set()
+        api._cleanup_expired = lambda **kwargs: None
+        api._get_session = lambda _: {"page": page}
+        api._session_page = lambda _: page
+        api._request_instance = lambda: None
+        api.chrome.connect_cdp = lambda _: None
+        api.browsing.detect_captcha = lambda _: False
+        api._foreground_tabs = lambda _: ([], [])
 
         def fill(field, selector, value, hosts=("shop.example",)):
             return api._selector_action({}, page, {
@@ -87,6 +94,17 @@ def run(output=None):
         page.locator("#number").evaluate("el => el.style.removeProperty('-webkit-text-security')")
         assert masked != page.screenshot()
         assert fill("number", "#number", NUMBER)["ok"]
+        with api.app.test_request_context("/interact", method="POST", json={
+            "session_id": "abc7d07e", "actions": [
+                {"type": "fill", "selector": "#missing", "value": "07", "credential": True,
+                 "card_field": "exp_month", "bound_hosts": ["shop.example"]},
+                {"type": "click", "selector": "#pay"},
+            ],
+        }):
+            refused = api.app.make_response(api.interact()).get_json()
+        assert refused["status"] == "error" and refused["actions_not_run"] == 1
+        assert refused["session_id"] == "abc7d07e"
+        assert page.evaluate("window.submitted === undefined")
         page.locator("#pay").click()
         submitted = page.evaluate("submitted")
         assert submitted["number"] == NUMBER and submitted["cvc"] == CVC
@@ -95,21 +113,22 @@ def run(output=None):
         # Reflect secrets in text, title, links, and a cross-origin frame.
         page.evaluate("a => { document.title=a[0]; document.querySelector('#echo').textContent=a.join(' '); document.querySelector('#link').href='/'+a[0]; }", [NUMBER, CVC])
         hosted.evaluate("(el, value) => {const p=document.createElement('p'); p.textContent=value; document.body.append(p);}", NUMBER)
-        api._cleanup_expired = lambda **kwargs: None
-        api._get_session = lambda _: {"page": page}
-        api._session_page = lambda _: page
-        api._request_instance = lambda: None
-        api.chrome.connect_cdp = lambda _: None
-        api.browsing.detect_captcha = lambda _: False
         for endpoint, path in [(api.browse, "/browse"), (api.render_page, "/render")]:
             for budget in [10000, 8]:
                 with api.app.test_request_context(path, method="POST", json={
-                    "session_id": "test", "max_chars": budget, "include_frames": True,
+                    "session_id": "abc7d07e", "max_chars": budget, "include_frames": True,
                 }):
                     result = api.app.make_response(endpoint()).get_json()
                 assert result["status"] == "ok", result
+                assert result["session_id"] == "abc7d07e"
                 assert NUMBER not in json.dumps(result) and CVC not in json.dumps(result)
                 assert NUMBER[:8] not in json.dumps(result)
+        page.set_content("<p>42424242<span>42424242</span></p>")
+        with api.app.test_request_context("/render", method="POST", json={
+            "session_id": "abc7d07e", "max_chars": 8,
+        }):
+            result = api.app.make_response(api.render_page()).get_json()
+        assert result["markdown"] == "[REDACTE", result
         with api.app.test_request_context("/health"):
             api.request.user_scope = "alice"
             assert api.health().get_json()["card_fill"] is True

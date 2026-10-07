@@ -1274,12 +1274,13 @@ def browse():
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
+        result = _scrub_extracted(result, _credential_values)
         if keep_session or not created_new:
             result["session_id"] = session_id
         else:
             _close_session(session_id)
 
-        return jsonify(_scrub_extracted(result, _credential_values))
+        return jsonify(result)
 
     except Exception as e:
         if created_new and not keep_session:
@@ -1726,6 +1727,7 @@ def render_page():
             html, base_url=page.url, mode=mode, max_chars=max_chars,
             frames=frame_payload, include_frames=include_frames,
             frames_capped=frames_capped, offset=offset,
+            scrub=lambda value: _scrub_extracted(value, _credential_values),
         )
         result = {
             "status": "ok",
@@ -1736,12 +1738,13 @@ def render_page():
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
+        result = _scrub_extracted(result, _credential_values)
         if keep_session or not created_new:
             result["session_id"] = session_id
         else:
             _close_session(session_id)
 
-        return jsonify(_scrub_extracted(result, _credential_values))
+        return jsonify(result)
 
     except Exception as e:
         if created_new and not keep_session:
@@ -2714,6 +2717,14 @@ def interact():
             if action_type in _SELECTOR_ACTIONS:
                 results.append(
                     _selector_action(session, page, action, others, owned))
+                if action.get("card_field") and results[-1].get("ok") is False:
+                    result = _scrub_extracted({
+                        "status": "error", "actions": results,
+                        "error": results[-1].get("error", "card_fill_failed"),
+                        "actions_not_run": len(actions) - len(results),
+                    }, _credential_values)
+                    result["session_id"] = session_id
+                    return jsonify(result)
             elif action_type == "wait":
                 timeout_ms = action.get("timeout", 2000)
                 page.wait_for_timeout(min(timeout_ms, 30000))
@@ -2758,13 +2769,14 @@ def interact():
         )
         result = {
             "status": "ok",
-            "session_id": session_id,
             "actions": results,
             **content,
         }
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
-        return jsonify(_scrub_extracted(result, _credential_values))
+        result = _scrub_extracted(result, _credential_values)
+        result["session_id"] = session_id
+        return jsonify(result)
 
     except Exception as e:
         # Logged, not just returned. A 500 from here used to leave nothing in
@@ -2778,12 +2790,11 @@ def interact():
         else:
             log.warning("Interact failed after %d action(s): %s",
                         len(results), e, exc_info=True)
-        return jsonify(_scrub_extracted({
-            "status": "error",
-            "session_id": session_id,
-            "actions": results,
-            "error": str(e),
-        }, _credential_values)), 500
+        result = _scrub_extracted({
+            "status": "error", "actions": results, "error": str(e),
+        }, _credential_values)
+        result["session_id"] = session_id
+        return jsonify(result), 500
 
 
 @app.route("/evaluate", methods=["POST"])

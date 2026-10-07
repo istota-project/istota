@@ -3859,3 +3859,20 @@ def test_card_resolves_once_and_scrubs_cli_failures(monkeypatch, capsys, error):
     assert fields["number"] not in out.out + out.err
     assert fields["cvc"] not in out.out + out.err
     assert "07/29" not in out.out + out.err
+
+
+def test_card_scrub_preserves_confirmed_protocol_identifiers(monkeypatch):
+    monkeypatch.setenv("ISTOTA_USER_ID", "user7")
+    args = build_parser().parse_args([
+        "interact", "abc7d07e", "--purchase", "17", "--fill-card", "exp_month=#month",
+    ])
+    args.purchase = TestCardFill.card()
+    body = {"status": "ok", "session_id": args.session_id, "user_scope": "user7",
+            "actions": [{"ok": True}], "text": "7 07"}
+    with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={
+        "per_user_profiles": True, "credential_origin_check": True, "card_fill": True,
+    })), patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
+        result = cmd_interact(args)
+    assert result["session_id"] == "abc7d07e"
+    assert result["user_scope"] == "user7"
+    assert "7" not in result["text"]
