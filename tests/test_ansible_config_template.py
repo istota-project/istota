@@ -42,7 +42,6 @@ import yaml
 from jinja2 import Environment, StrictUndefined
 
 from istota import config as config_module
-from istota.brain.claude_code import HAIKU, OPUS, SONNET
 from istota.config import DEFAULT_ACK_REACTIONS, Config, SpeechGateConfig, devbox_container_backend, load_config
 
 
@@ -178,13 +177,17 @@ def parsed(rendered: str) -> dict:
     return tomllib.loads(rendered)
 
 
-def test_shipped_anthropic_aliases_match_brain_defaults(parsed):
+def test_shipped_anthropic_aliases_render_ansible_defaults(parsed):
     aliases = parsed["models"]["aliases"]
     actual = {
-        name: aliases[name]["anthropic"]["model"]
+        name: aliases[name]["anthropic"]
         for name in ("fast", "general", "smart")
     }
-    assert actual == {"fast": HAIKU, "general": SONNET, "smart": OPUS}
+    assert actual == {
+        "fast": {"model": "claude-haiku-5-5", "effort": "low"},
+        "general": {"model": "claude-sonnet-5-5", "effort": "medium"},
+        "smart": {"model": "claude-opus-5-5", "effort": "high"},
+    }
 
 
 class TestItRendersSomethingTheLoaderAccepts:
