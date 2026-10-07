@@ -632,6 +632,10 @@ class SkillProxy:
                 self._serve_vault_entry(conn, request)
                 return
 
+            if req_type == "vault_otp_set":
+                self._serve_vault_otp_set(conn, request)
+                return
+
             if req_type == "vault_create":
                 self._serve_vault_create(conn, request)
                 return
@@ -1046,6 +1050,91 @@ class SkillProxy:
             "url_name": write.url_name, "username": username,
             "confirmation_readable": confirmation_readable,
         })
+
+    def _serve_vault_otp_set(self, conn: socket.socket, request: dict) -> None:
+        from istota import db, storage
+        from istota.credentials import vault
+        from istota.lib import totp
+        from istota.notifications.resolvers import task_alert
+        from istota.notifications.store import deliver_pending
+
+        def refuse(reason, message):
+            self._send_response(conn, {"error": message, "reason": reason})
+
+        with self._vault_write_lock:
+            self._vault_writes += 1
+            count = self._vault_writes
+        if self.vault_write_limit <= 0 or count > self.vault_write_limit:
+            refuse("vault_write_limit", "Vault write limit reached or writes disabled")
+            return
+        config, user_id = self.config, self.user_id
+        if config is None or not user_id or not vault._vault_is_enabled(config, user_id):
+            refuse("vault_not_configured", "No credential vault is configured")
+            return
+        refusal = vault.vault_isolation_refusal(config, user_id)
+        if refusal:
+            refuse("vault_isolation_required", refusal)
+            return
+        name, otp = request.get("name"), request.get("otp")
+        if not isinstance(name, str) or not name or not isinstance(otp, str):
+            refuse("invalid_otp", "An entry name and OTP text are required")
+            return
+        try:
+            canonical = totp.to_uri(totp.parse_user_input(otp))
+            resolution = storage.vault_location_for(config, user_id)
+            location = resolution.location
+            if location is None:
+                refuse("vault_not_configured", "Credential vault cannot be opened")
+                return
+            try:
+                passphrase = vault._resolve_passphrase(config.db_path, user_id)
+                for attempt in range(2):
+                    _, digest = vault.read_vault_bytes(location.path, dir_fd=location.dir_fd)
+                    try:
+                        write = vault.set_entry_otp(
+                            location, passphrase, name=name, uri=canonical,
+                            expected_digest=digest, lock_root=config.db_path.parent,
+                            db_path=config.db_path, user_id=user_id,
+                        )
+                        break
+                    except vault.VaultChanged:
+                        if attempt:
+                            raise
+            finally:
+                if location.dir_fd is not None:
+                    import os
+                    os.close(location.dir_fd)
+        except totp.TotpError as exc:
+            refuse("invalid_otp", f"Invalid OTP ({exc.code})")
+            return
+        except vault.VaultWriteRefused as exc:
+            reason = str(exc) if str(exc) in {"otp_set_not_generated", "otp_already_set"} else "vault_write_refused"
+            refuse(reason, str(exc))
+            return
+        except vault.VaultError as exc:
+            refuse(type(exc).__name__, str(exc))
+            return
+
+        seed_name = write.name + "_totp"
+        self.vault_credentials[seed_name] = canonical
+        # Enrollment does not grant an existing credential to this task.
+        if write.name in self._created_names:
+            self._created_names.add(seed_name)
+        try:
+            with db.get_db(config.db_path) as db_conn:
+                raised = task_alert.write(
+                    db_conn, user_id,
+                    dedup_key=f"vault-otp-set:{task_alert._slug(write.name, limit=64)}",
+                    title=f"Istota added two-factor to {write.name}",
+                    body="Two-factor enrollment was saved under generated/ in your vault.",
+                    severity="warning", actionable=True,
+                    params={"task_id": self.task_id, "status": "vault_otp_set"},
+                )
+            if raised is not None:
+                deliver_pending(config, [raised])
+        except Exception:
+            logger.warning("vault_otp_set task_id=%s: notice could not be sent", self.task_id)
+        self._send_response(conn, {"name": write.name, "otp": True})
 
     def _skill_grant_refusal(self, name: str) -> str | None:
         """Live grant check for the private skill channel; fails closed."""

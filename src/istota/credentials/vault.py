@@ -651,23 +651,12 @@ def create_entry(
     if any(value != value.strip() for value in (password, username, url)):
         raise VaultWriteRefused("credential fields cannot have surrounding whitespace")
 
-    with _vault_file_lock(location, lock_root=lock_root, blocking=False):
-        data, digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
-        if digest != expected_digest:
-            raise VaultChanged("the vault changed since it was read")
-        read = parse_vault(data, passphrase)
-        if read.truncated:
-            raise VaultWriteRefused("the vault read stopped at a cap")
+    def prepare(kp, read):
         produced = set(read.services) | set(read.held) | {name for name, _ in read.skipped}
         collision = next((name for name in names if name in produced), None)
         if collision:
             raise VaultWriteRefused(f"credential name already exists: {_label(collision)}")
-
-        try:
-            from pykeepass import PyKeePass
-        except ImportError as exc:
-            raise VaultLibraryMissing("the 'vault' extra is not installed on this host") from exc
-        kp = PyKeePass(io.BytesIO(data), password=passphrase)
+    
         if len(kp.entries) >= VAULT_MAX_ENTRIES:
             raise VaultWriteRefused("the vault is at its entry cap")
         found, live = _root_groups(kp, _recyclebin_uuid(kp))
@@ -682,6 +671,83 @@ def create_entry(
             raise VaultWriteRefused("the vault has ambiguous generated groups")
         group = groups[0] if groups else kp.add_group(root, VAULT_WRITE_GROUP)
         kp.add_entry(group, slug, username, password, url=url)
+    
+        return names, dict(zip(names, (password, username, url), strict=True))
+
+    return _write_entry(
+        location, passphrase, expected_digest=expected_digest, lock_root=lock_root,
+        db_path=db_path, user_id=user_id, prepare=prepare,
+    )
+
+
+def set_entry_otp(
+    location,
+    passphrase: str,
+    *,
+    name: str,
+    uri: str,
+    expected_digest: str,
+    lock_root: Path,
+    db_path: Path | None = None,
+    user_id: str | None = None,
+) -> VaultWrite:
+    """Attach a factor once, only to an entry in the actual generated group."""
+    canonical = totp.to_uri(totp.parse_user_input(uri))
+
+    def prepare(kp, read):
+        found, live = _root_groups(kp, _recyclebin_uuid(kp))
+        if len(found) > 1 or (found and not live):
+            raise VaultWriteRefused("otp_set_not_generated")
+        root = live[0] if live else kp.root_group
+        groups = [group for group in root.subgroups
+                  if str(group.name or "").strip().casefold() == VAULT_WRITE_GROUP]
+        if len(groups) != 1 or groups[0].uuid == _recyclebin_uuid(kp):
+            raise VaultWriteRefused("otp_set_not_generated")
+        entries = [entry for entry in groups[0].entries
+                   if slug_name((groups[0].name, entry.title or "")) == name]
+        if len(entries) != 1 or read.bindings.get(name, {}).get("credential") != name:
+            raise VaultWriteRefused("otp_set_not_generated")
+        entry = entries[0]
+        if entry.otp or any(
+            str(field).casefold() in {"totp seed", "totp settings"}
+            or str(field).casefold().startswith(("timeotp-", "hmacotp-"))
+            for field in entry.custom_properties
+        ):
+            raise VaultWriteRefused("otp_already_set")
+        seed_name = slug_name((groups[0].name, entry.title, "totp"))
+        if seed_name is None:
+            raise VaultWriteRefused("OTP credential name is too long")
+        if seed_name in (set(read.services) | set(read.held) | {n for n, _ in read.skipped}):
+            raise VaultWriteRefused("OTP credential name already exists")
+        if db_path is not None and user_id is not None:
+            if local_name_conflict(db_path, user_id, (name, seed_name)):
+                raise VaultWriteRefused("OTP credential name already exists")
+        entry.otp = canonical
+        names = (name, slug_name((groups[0].name, entry.title, "username")),
+                 slug_name((groups[0].name, entry.title, "url")))
+        return names, {**read.services, seed_name: canonical}
+
+    return _write_entry(
+        location, passphrase, expected_digest=expected_digest, lock_root=lock_root,
+        db_path=db_path, user_id=user_id, prepare=prepare,
+    )
+
+
+def _write_entry(location, passphrase, *, expected_digest, lock_root, db_path, user_id, prepare):
+    """Lock, mutate in memory, verify a staged vault, then replace and import."""
+    with _vault_file_lock(location, lock_root=lock_root, blocking=False):
+        data, digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
+        if digest != expected_digest:
+            raise VaultChanged("the vault changed since it was read")
+        read = parse_vault(data, passphrase)
+        if read.truncated:
+            raise VaultWriteRefused("the vault read stopped at a cap")
+        try:
+            from pykeepass import PyKeePass
+        except ImportError as exc:
+            raise VaultLibraryMissing("the 'vault' extra is not installed on this host") from exc
+        kp = PyKeePass(io.BytesIO(data), password=passphrase)
+        names, expected_values = prepare(kp, read)
 
         leaf = _vault_leaf(location)
         original = os.stat(leaf, dir_fd=location.dir_fd, follow_symlinks=False)
@@ -703,10 +769,9 @@ def create_entry(
             temp_data, temp_digest = read_vault_bytes(temp_leaf, dir_fd=location.dir_fd)
             verified = parse_vault(temp_data, passphrase)
             checked = set(verified.services) | set(verified.held)
-            expected_values = (password, username, url)
             values_match = all(
                 verified.services.get(name) == value if value.strip() else name in verified.held
-                for name, value in zip(names, expected_values, strict=True)
+                for name, value in expected_values.items()
             )
             if verified.truncated or any(name not in checked for name in names) or not values_match:
                 raise VaultWriteRefused("the saved vault did not verify")
@@ -724,7 +789,7 @@ def create_entry(
                     # this task can use them; the next sync retries the apply.
                     # Never cache the new digest when the apply did not finish.
                     logger.warning(
-                        "vault: %s: apply after create failed (%s); sync will retry",
+                        "vault: %s: apply after write failed (%s); sync will retry",
                         _label(user_id), type(exc).__name__,
                     )
                 else:

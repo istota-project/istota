@@ -151,6 +151,10 @@ The default write budget is three requests per task attempt, including refusals.
 
 What it writes is **[shared credentials](#shared-credentials)**: name-to-value pairs the user chooses, in the same `vault_entries` store as credentials added in Istota, readable by that user's own tasks by name. It does not provision the typed services above — those are edited in the settings page and nothing here overwrites them.
 
+### Saving a new two-factor enrollment
+
+After enrolling an account created under `generated/`, a task can run `istota-credential otp-set generated_acme` with the enrollment URI or base32 secret on stdin. The command returns the entry name and `otp: true`; it never returns the seed. It shares the credential-write budget and raises a notice. It refuses entries outside the actual `generated/` group and any entry that already has an OTP source. Replace or remove an existing factor in your password manager; for local credentials, use the settings form.
+
 ### Turning it on
 
 Two halves, both deliberate, and neither happens by accident.

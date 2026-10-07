@@ -22,7 +22,7 @@ It replaces the socket client ``skills/developer.setup_env`` used to generate.
 With the broker enabled, developer credential helpers use placeholders. The
 legacy ``env`` verb still uses the same public socket and reveal policy.
 
-Seven verbs::
+Eight verbs::
 
     istota-credential list                       # shared credential names
     istota-credential placeholder <name>         # inert auth-header text
@@ -31,6 +31,7 @@ Seven verbs::
     istota-credential get <name>                 # the value on stdout
     istota-credential env <VAR>                  # a manifest-declared var
     istota-credential new <slug> [options]        # create a vault entry
+    istota-credential otp-set <name>              # enrollment seed on stdin
 
 ``placeholder`` is the broker path: the value is added outside the sandbox.
 ``get`` and both forms of ``run`` ask for a value and, under reveal enforcement,
@@ -137,6 +138,7 @@ USAGE = (
     "  istota-credential run VAR=NAME [VAR2=NAME2 ...] [--stdin NAME] -- CMD [ARGS...]\n"
     "  istota-credential get NAME\n"
     "  istota-credential env VAR\n"
+    "  istota-credential otp-set NAME  # read enrollment secret from stdin\n"
     "  istota-credential new SLUG [--username USER] [--url URL] [--length N] [--no-symbols]\n"
 )
 
@@ -406,6 +408,21 @@ def _cmd_new(args: list[str]) -> int:
     return 0
 
 
+def _cmd_otp_set(args: list[str]) -> int:
+    if len(args) != 1:
+        print(USAGE, file=sys.stderr)
+        return EXIT_REFUSED
+    otp = sys.stdin.read(65537).strip()
+    if not otp or len(otp) > 65536:
+        raise ProxyError("invalid_otp: provide an OTP URI or base32 secret on stdin")
+    reply = _request({"type": "vault_otp_set", "name": args[0], "otp": otp},
+                     timeout=CREATE_TIMEOUT_SECONDS)
+    if not isinstance(reply.get("name"), str) or reply.get("otp") is not True:
+        raise ProxyError("the credential proxy answered unparseably")
+    print(json.dumps({"name": reply["name"], "otp": True}))
+    return 0
+
+
 def _cmd_env(args: list[str]) -> int:
     """A manifest-declared variable fetch, refused under reveal enforcement.
 
@@ -539,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
         "get": lambda: _cmd_get(rest),
         "env": lambda: _cmd_env(rest),
         "new": lambda: _cmd_new(rest),
+        "otp-set": lambda: _cmd_otp_set(rest),
     }
     handler = handlers.get(verb)
     if handler is None:
