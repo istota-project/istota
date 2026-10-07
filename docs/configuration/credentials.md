@@ -112,9 +112,10 @@ On a deployment with several configured users and no effective sandbox, the stor
 
 | Field | Rule |
 |---|---|
-| Name | What tasks use, typed exactly; it is never rewritten. Lowercase letters, digits and single underscores, starting with a letter, and short enough that `<name>_username` fits in 64 characters. Names starting with `generated_` (where tasks create credentials) or `forge.` are refused. The name and its `<name>_username` and `<name>_url` must not already be in use by any credential. Read-only once created. |
+| Name | What tasks use, typed exactly; it is never rewritten. Lowercase letters, digits and single underscores, starting with a letter, and short enough that `<name>_username` fits in 64 characters. Names starting with `generated_` (where tasks create credentials) or `forge.` are refused. The name and its `<name>_username`, `<name>_url` and `<name>_totp` must not already be in use by any credential. Read-only once created. |
 | Value | Required. Refused when empty, when it has leading or trailing whitespace (refused rather than trimmed, since trimming changes a credential), or over 8 KiB. |
 | Username | Optional. Same rules as the value. Stored as `<name>_username`. |
+| Two-factor (TOTP) | Optional. Paste an `otpauth://totp/` URI or a base32 secret. Requires a bound site. Istota stores the seed privately and fills current codes with `browse interact --fill-otp`; the seed is never returned to tasks or the settings page. |
 | Site | Optional. A bare `host[:port]` or a URL with nothing after the host. A path, query string, fragment or `user@` part is refused, because the site is shown back on the page and a token pasted into one would come back with it. `http://` is accepted, and the row shows "HTTPS required" until its access allows HTTP. Stored as `<name>_url`, and the credential is bound to that host. |
 | Access | Shown once a site is filled in, defaulting to all rooms, no scheduled use and no HTTP. A credential with no site cannot be granted. |
 
@@ -122,9 +123,9 @@ Under **More options**: "Also used on" takes further comma-separated `host[:port
 
 The value crosses the network once, in the body of an authenticated, origin-checked request, and is never shown again. The write routes read the body themselves rather than through a declared model, so a bad request is a 400 naming the field and never echoing what was sent; a body over 64 KiB, or one with no declared length, is a 413. The log records the verb and the credential name.
 
-**Edit** is offered for Istota credentials only. Leave the value empty to keep it. Leave the username empty to keep it, or tick "Remove username". A site change takes effect on the next request, as a KeePassXC edit does. Clearing the site of a credential that has access is refused: remove its access first, or keep a site.
+**Edit** is offered for Istota credentials only. Leave the value empty to keep it. Leave the username empty to keep it, or tick "Remove username". Leave two-factor empty to keep it, type a new seed to replace it, or tick "Remove two-factor". Credentials with a seed show a "2FA" label. A site change takes effect on the next request, as a KeePassXC edit does. Clearing the site while keeping two-factor is refused. Clearing the site of a credential that has access is refused: remove its access first, or keep a site.
 
-**Delete** removes the value, username, URL, binding and access together. Nothing brings an Istota credential back.
+**Delete** removes the value, username, URL, two-factor seed, bindings and access together. Nothing brings an Istota credential back.
 
 ### When a KeePassXC entry has the same name
 
@@ -149,6 +150,10 @@ When a task needs a new site credential, it can run `istota-credential new acme 
 The default write budget is three requests per task attempt, including refusals. Set `[security] vault_writes_per_task = 0` to disable model-requested writes. Istota sends a notice for each credential it creates. A password manager that already has the database open may overwrite a new entry on its next save; check for the entry in the password manager after a task creates it.
 
 What it writes is **[shared credentials](#shared-credentials)**: name-to-value pairs the user chooses, in the same `vault_entries` store as credentials added in Istota, readable by that user's own tasks by name. It does not provision the typed services above — those are edited in the settings page and nothing here overwrites them.
+
+### Saving a new two-factor enrollment
+
+After enrolling an account created under `generated/`, a task can run `istota-credential otp-set generated_acme` with the enrollment URI or base32 secret on stdin. The command returns the entry name and `otp: true`; it never returns the seed. It shares the credential-write budget and raises a notice. It refuses entries outside the actual `generated/` group and any entry that already has an OTP source. Replace or remove an existing factor in your password manager; for local credentials, use the settings form.
 
 ### Turning it on
 
@@ -248,7 +253,14 @@ Each entry contributes one name per field it has filled:
 | Password | the entry's own name |
 | Username | that name with `_username` |
 | URL | that name with `_url` |
-| Any custom string field | that name with `_<field>` |
+| `otp` (`otpauth://totp/` URI, current KeePassXC) | that name with `_totp` |
+| `TimeOtp-*` (native KeePass secret and settings) | that name with `_totp` |
+| `TOTP Seed` + optional `TOTP Settings` (legacy KeePassXC) | that name with `_totp` |
+| Other custom string fields | that name with `_<field>` |
+
+OTP sources are tried in the table's order: `otp`, then `TimeOtp-*`, then `TOTP Seed`. The first present source decides, even if it is invalid; Istota does not fall back to an older seed. An invalid source is skipped with a fixed error code in `vault-status`, while the entry's other fields still import. HOTP is unsupported. Legacy `TOTP Settings` accepts `period;digits`, `period;digits;algorithm`, or `30;S` for Steam.
+
+The seed is stored as one normalized URI under `_totp` and marked as an OTP seed. It cannot be read as a password or substituted into a broker placeholder, even on a revealable entry. A custom field named `TOTP` is skipped if it collides with that seed. `TOTP Seed`, `TOTP Settings`, every `TimeOtp-*` field and every `HmacOtp-*` field are consumed, including invalid or unused sources; none becomes an ordinary credential. The next complete sync removes their old raw-field names and bindings.
 
 The name itself is the group path below `istota`, plus the entry title, lowercased and joined with underscores. So an entry titled `GitHub PAT` at the top level is `github_pat`, and an entry titled `Token` in a group `Home Assistant` is `home_assistant_token`. Notes are not read: they are free text and frequently hold something other than a credential.
 
@@ -263,7 +275,7 @@ istota/
 
 That last pair is the rule being literal rather than clever: an entry titled `URL` whose KeePass URL field is also filled contributes both.
 
-A name must start with a letter and be at most 64 characters after slugging. Values are stripped of surrounding whitespace and nothing else is normalized. What is skipped, each with a warning naming the entry and never the value: an empty field, a value over 8 KiB, a title that slugs to nothing or to a name already produced by another entry. The walk stops at 8 levels deep, 512 entries or 1024 names, warns, and applies what it read — half a namespace is a user with some credentials working, where a refusal is a user with none. Entries in the recycle bin are not read.
+A name must start with a letter and be at most 64 characters after slugging. Ordinary values are stripped of surrounding whitespace and nothing else is normalized; OTP seeds use the normalized URI described above. What is skipped, each with a warning naming the entry and never the value: an empty field, a value over 8 KiB, a title that slugs to nothing or to a name already produced by another entry. The walk stops at 8 levels deep, 512 entries or 1024 names, warns, and applies what it read — half a namespace is a user with some credentials working, where a refusal is a user with none. Entries in the recycle bin are not read.
 
 ### What a sync does
 

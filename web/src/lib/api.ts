@@ -4821,6 +4821,9 @@ export interface CredentialSummary {
   extra_hosts?: string;
   /** Local credentials only. The username itself is never sent. */
   username_set?: boolean;
+  otp_set?: boolean;
+  /** Whether any field in this credential is a two-factor seed. */
+  otp?: boolean;
 }
 export interface CredentialGrantsSettings {
   credentials: CredentialSummary[];
@@ -4840,6 +4843,7 @@ export interface CredentialAccess {
   allow_http: boolean;
 }
 export interface NewCredential {
+  otp?: string;
   name: string;
   value: string;
   username: string;
@@ -4853,6 +4857,7 @@ export interface NewCredential {
  *  username and `''` removes it. The other four are required: the server reads
  *  an absent `url` as a mistake rather than as "clear the site". */
 export interface CredentialUpdate {
+  otp?: string | null;
   value: string | null;
   username: string | null;
   url: string;

@@ -2549,6 +2549,9 @@ def _selector_action(session, page, action, others=(), owned=()):
                 or origin[len("https://"):] not in hosts):
             return {"action": "fill", "selector": selector, "ok": False,
                     "error": "credential_origin_mismatch"}
+        if "expires_at" in action and time.time() >= action["expires_at"] - 1:
+            return {"action": "fill", "selector": selector, "ok": False,
+                    "error": "otp_expired"}
         value = action.get("value", "")
         if value:
             _credential_values.add(value)
@@ -2717,10 +2720,11 @@ def interact():
             if action_type in _SELECTOR_ACTIONS:
                 results.append(
                     _selector_action(session, page, action, others, owned))
-                if action.get("card_field") and results[-1].get("ok") is False:
+                stop_on_refusal = action.get("card_field") or (action.get("credential") and "expires_at" in action)
+                if stop_on_refusal and results[-1].get("ok") is False:
                     result = _scrub_extracted({
                         "status": "error", "actions": results,
-                        "error": results[-1].get("error", "card_fill_failed"),
+                        "error": results[-1].get("error", "credential_fill_failed"),
                         "actions_not_run": len(actions) - len(results),
                     }, _credential_values)
                     result["session_id"] = session_id
@@ -3092,6 +3096,7 @@ def health():
         "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
         "credential_origin_check": True,
+        "otp_expiry_check": True,
         "card_fill": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,

@@ -25,6 +25,7 @@ from istota.credentials import store as secrets_store
 from istota.credentials import vault as secrets_vault
 from istota.credentials.broker import bindings as _bindings
 from istota.credentials.broker import grants as _grants
+from istota.lib.totp import TotpError, parse_user_input, to_uri
 
 SOURCE = "local"
 
@@ -41,6 +42,7 @@ class LocalCredential:
     extra_hosts: str = ""
     headers: str = ""
     revealable: bool = False
+    otp: str = ""
 
     def __repr__(self) -> str:
         return f"LocalCredential(name={self.name!r}, value=<redacted>)"
@@ -49,19 +51,21 @@ class LocalCredential:
 class LocalCredentialError(ValueError):
     """A refusal about one input. ``field`` names it; the message holds no value."""
 
-    def __init__(self, field: str, message: str):
+    def __init__(self, field: str, message: str, *, code: str | None = None):
         super().__init__(message)
         self.field = field
+        self.code = code
 
 
-def derived_names(name: str) -> tuple[str | None, str | None]:
+def derived_names(name: str) -> tuple[str | None, str | None, str | None]:
     return (
         secrets_vault.slug_name((name, secrets_vault._USERNAME_SEGMENT)),
         secrets_vault.slug_name((name, secrets_vault._URL_SEGMENT)),
+        secrets_vault.slug_name((name, "totp")),
     )
 
 
-def _check_name(name: object) -> tuple[str, str, str]:
+def _check_name(name: object) -> tuple[str, str, str, str]:
     if not isinstance(name, str) or not name:
         raise LocalCredentialError("name", "a name is required")
     if name.startswith(_RESERVED_PREFIXES):
@@ -73,10 +77,10 @@ def _check_name(name: object) -> tuple[str, str, str]:
             "name",
             "use lowercase letters, digits and single underscores, starting with a letter",
         )
-    username_name, url_name = derived_names(name)
-    if username_name is None or url_name is None:
+    username_name, url_name, otp_name = derived_names(name)
+    if username_name is None or url_name is None or otp_name is None:
         raise LocalCredentialError("name", "the name is too long")
-    return name, username_name, url_name
+    return name, username_name, url_name, otp_name
 
 
 def _check_text(field: str, value: object, *, required: bool) -> str:
@@ -95,6 +99,17 @@ def _check_text(field: str, value: object, *, required: bool) -> str:
             field, f"{field} is larger than {secrets_vault.VAULT_MAX_VALUE_BYTES} bytes"
         )
     return value
+
+
+def _check_otp(name: str, otp: str | None) -> str | None:
+    if otp is None or otp == "":
+        return otp
+    try:
+        return to_uri(parse_user_input(otp), label=name)
+    except TotpError as exc:
+        raise LocalCredentialError(
+            "otp", f"invalid two-factor secret ({exc.code})", code="invalid_otp",
+        ) from None
 
 
 def _site_shaped(url: str) -> bool:
@@ -200,7 +215,7 @@ def stored_fields(conn, user_id: str, name: str) -> dict:
     tell `api.example.com:443` from `api.example.com`, and a site host
     misread as an extra host would stay bound after the site changed.
     """
-    username_name, url_name = derived_names(name)
+    username_name, url_name, otp_name = derived_names(name)
     url = ""
     if url_name and _owned_field(conn, user_id, name, url_name):
         stored = secrets_store.get_secret(None, user_id, _SERVICE, url_name, connection=conn)
@@ -212,6 +227,8 @@ def stored_fields(conn, user_id: str, name: str) -> dict:
         "url": url,
         "extra_hosts": ", ".join(extra_hosts),
         "username_set": bool(username_name) and _owned_field(conn, user_id, name, username_name),
+        "otp_set": bool(otp_name) and _owned_field(conn, user_id, name, otp_name)
+        and _bindings.is_otp_seed(conn, user_id, otp_name),
     }
 
 
@@ -224,21 +241,20 @@ def _owned_field(conn, user_id: str, owner: str, field_name: str) -> bool:
     return stored is not None and not _foreign_field(conn, user_id, owner, field_name)
 
 
-def _write_fields(conn, user_id, name, username_name, url_name, *, value, username, url, binding):
-    """Write or remove each field row with the shared binding.
-
-    ``value=None`` and ``username=None`` keep that row, rebinding it.
-    """
-    owned = {**binding, "credential": name}
-    if value is not None:
-        secrets_store.set_secret(None, user_id, _SERVICE, name, value,
-                                 binding=owned, connection=conn)
-    else:
-        _bindings.put_binding(conn, user_id, name, owned)
-    for field_name, field_value in ((username_name, username), (url_name, url)):
+def _write_fields(conn, user_id, name, username_name, url_name, otp_name, *,
+                  value, username, url, otp, binding):
+    """Write or remove fields; an omitted value keeps its row and kind."""
+    for field_name, field_value in ((name, value), (username_name, username),
+                                    (url_name, url), (otp_name, otp)):
+        if field_value is None and not _owned_field(conn, user_id, name, field_name):
+            continue
+        previous = _bindings.get_binding(conn, user_id, field_name)
+        kind = previous["kind"] if previous else "value"
+        if field_name == otp_name and field_value:
+            kind = "totp"
+        owned = {**binding, "credential": name, "kind": kind}
         if field_value is None:
-            if _owned_field(conn, user_id, name, field_name):
-                _bindings.put_binding(conn, user_id, field_name, owned)
+            _bindings.put_binding(conn, user_id, field_name, owned)
         elif field_value:
             secrets_store.set_secret(None, user_id, _SERVICE, field_name, field_value,
                                      binding=owned, connection=conn)
@@ -254,16 +270,16 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
     commits or rolls back the whole of it.
     """
     _begin(conn)
-    name, username_name, url_name = _check_name(cred.name)
+    name, username_name, url_name, otp_name = _check_name(cred.name)
     taken = _taken_names(conn, user_id)
-    for candidate in (name, username_name, url_name):
+    for candidate in (name, username_name, url_name, otp_name):
         if candidate in taken:
             if candidate == name:
                 raise LocalCredentialError("name", f"a credential named {name} already exists")
             raise LocalCredentialError(
                 "name", f"{name} would clash with the existing credential {candidate}"
             )
-    for suffix in ("_" + secrets_vault._USERNAME_SEGMENT, "_" + secrets_vault._URL_SEGMENT):
+    for suffix in ("_" + secrets_vault._USERNAME_SEGMENT, "_" + secrets_vault._URL_SEGMENT, "_totp"):
         owner = name[: -len(suffix)] if name.endswith(suffix) else ""
         if owner and owner in taken:
             raise LocalCredentialError(
@@ -272,6 +288,9 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
     value = _check_text("value", cred.value, required=True)
     username = _check_text("username", cred.username, required=False)
     binding = _build_binding(cred.url, cred.extra_hosts, cred.headers, cred.revealable)
+    otp = _check_otp(name, cred.otp)
+    if otp and not binding["hosts"]:
+        raise LocalCredentialError("otp", "two-factor needs a site", code="otp_needs_site")
     if access is not None:
         if not isinstance(access, dict):
             raise LocalCredentialError("access", "access must be an object")
@@ -280,8 +299,8 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
                 "access", "a credential needs a site before it can be granted"
             )
 
-    _write_fields(conn, user_id, name, username_name, url_name,
-                  value=value, username=username, url=cred.url, binding=binding)
+    _write_fields(conn, user_id, name, username_name, url_name, otp_name,
+                  value=value, username=username, url=cred.url, otp=otp, binding=binding)
     grant = None
     if access is not None:
         try:
@@ -297,7 +316,7 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
 
 
 def update(conn, user_id: str, name: str, *, value: str | None, username: str | None, url: str,
-           extra_hosts: str, headers: str, revealable: bool) -> dict:
+           extra_hosts: str, headers: str, revealable: bool, otp: str | None = None) -> dict:
     """Replace a local credential's metadata, and its value unless ``value`` is ``None``.
 
     ``username=None`` keeps the stored username, which the edit form needs
@@ -313,14 +332,21 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str | 
             "no credential added in Istota has this name; one from KeePassXC "
             "or the deployment is edited there",
         )
-    _, username_name, url_name = _check_name(name)
+    _, username_name, url_name, otp_name = _check_name(name)
     if value is not None:
         value = _check_text("value", value, required=True)
     if username is not None:
         username = _check_text("username", username, required=False)
     binding = _build_binding(url, extra_hosts, headers, revealable)
+    otp = _check_otp(name, otp)
+    has_otp = bool(otp) if otp is not None else (
+        _owned_field(conn, user_id, name, otp_name)
+        and _bindings.is_otp_seed(conn, user_id, otp_name)
+    )
+    if has_otp and not binding["hosts"]:
+        raise LocalCredentialError("otp", "two-factor needs a site", code="otp_needs_site")
     for field, field_name, field_value in (("username", username_name, username),
-                                           ("url", url_name, url)):
+                                           ("url", url_name, url), ("otp", otp_name, otp)):
         if field_value is not None and _foreign_field(conn, user_id, name, field_name):
             raise LocalCredentialError(
                 field, f"{name} would clash with the existing credential {field_name}"
@@ -330,8 +356,8 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str | 
             "url", "this credential has access settings; remove its access first, or keep a site"
         )
 
-    _write_fields(conn, user_id, name, username_name, url_name,
-                  value=value, username=username, url=url, binding=binding)
+    _write_fields(conn, user_id, name, username_name, url_name, otp_name,
+                  value=value, username=username, url=url, otp=otp, binding=binding)
     has_username = (bool(username) if username is not None
                     else _owned_field(conn, user_id, name, username_name))
     return {

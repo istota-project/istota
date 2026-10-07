@@ -99,6 +99,7 @@ def test_header_required_without_shared_fallback(api, monkeypatch, user):
 
 def test_health_and_empty_liveness_need_no_user_or_chrome(api):
     response = api.app.test_client().get("/health")
+    assert response.json["otp_expiry_check"] is True
     assert response.status_code == 200
     assert response.json["per_user_profiles"] is True
     assert response.json["status"] == "ok"

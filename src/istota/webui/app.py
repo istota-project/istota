@@ -13164,7 +13164,8 @@ def _credential_settings(username: str, action="list", name="", payload=None):
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {"ok": True, "grant": grant}
-        names = set(bindings.credential_groups(conn, username))
+        groups = bindings.credential_groups(conn, username)
+        names = set(groups)
         names.update(row[0] for row in conn.execute(
             "SELECT name FROM credential_bindings WHERE user_id=? AND source='config'", (username,)))
         credentials = []
@@ -13172,7 +13173,9 @@ def _credential_settings(username: str, action="list", name="", payload=None):
             binding = bindings.get_entry_binding(conn, username, credential_name) or {
                 "hosts": [], "headers": [], "revealable": False, "source": "vault"}
             row = {"name": credential_name, **binding,
-                   "grant": grants.get_grant(conn, username, credential_name)}
+                   "grant": grants.get_grant(conn, username, credential_name),
+                   "otp": any(bindings.is_otp_seed(conn, username, member)
+                              for member in groups.get(credential_name, []))}
             if binding.get("source") == local_credentials.SOURCE:
                 # The edit form's inputs. Never the value or the username.
                 row.update(local_credentials.stored_fields(conn, username, credential_name))
@@ -13194,10 +13197,10 @@ _CREDENTIAL_STORE_FAILED = "the credential could not be stored; see the daemon l
 _CREDENTIAL_CREATE_FIELDS = {
     "name": ("text", False), "value": ("text", False), "username": ("text", False),
     "url": ("text", False), "extra_hosts": ("text", False), "headers": ("text", False),
-    "revealable": ("bool", False), "access": ("object", True),
+    "revealable": ("bool", False), "access": ("object", True), "otp": ("text", False),
 }
 _CREDENTIAL_UPDATE_FIELDS = {
-    "value": ("text", True), "username": ("text", True),
+    "value": ("text", True), "username": ("text", True), "otp": ("text", True),
     "url": ("text", False), "extra_hosts": ("text", False), "headers": ("text", False),
     "revealable": ("bool", False),
 }
@@ -13267,7 +13270,7 @@ def _create_local_credential(user_id: str, fields: dict) -> dict:
             name=fields["name"], value=fields["value"],
             username=fields.get("username", ""), url=fields.get("url", ""),
             extra_hosts=fields.get("extra_hosts", ""), headers=fields.get("headers", ""),
-            revealable=fields.get("revealable", False),
+            revealable=fields.get("revealable", False), otp=fields.get("otp", ""),
         )
         return local_credentials.create(conn, user_id, cred, access=access)
 
@@ -13281,7 +13284,7 @@ def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
         return local_credentials.update(
             conn, user_id, name, value=fields.get("value"), username=fields.get("username"),
             url=fields["url"], extra_hosts=fields["extra_hosts"], headers=fields["headers"],
-            revealable=fields["revealable"],
+            revealable=fields["revealable"], otp=fields.get("otp"),
         )
 
 
@@ -13308,7 +13311,8 @@ async def _write_local_credential(request: Request, user_id: str, name: str | No
             result = await asyncio.to_thread(_update_local_credential, user_id, name, fields)
             verb = "updated"
     except local_credentials.LocalCredentialError as exc:
-        return JSONResponse({"detail": str(exc), "field": exc.field or None}, status_code=400)
+        return JSONResponse({"detail": str(exc), "field": exc.field or None,
+                             **({"code": exc.code} if exc.code else {})}, status_code=400)
     except HTTPException:
         raise
     except Exception as exc:

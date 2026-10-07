@@ -81,25 +81,35 @@ def put_binding(conn, user_id, name, binding):
         delete_grant(conn, user_id, name)
     db.kv_set(conn, user_id, "_credential_fields", name, owner)
     conn.execute("""
-        INSERT INTO credential_bindings (user_id, name, hosts, headers, revealable, source)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO credential_bindings (user_id, name, hosts, headers, revealable, source, kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, name) DO UPDATE SET
             hosts=excluded.hosts, headers=excluded.headers,
-            revealable=excluded.revealable, source=excluded.source,
+            revealable=excluded.revealable, source=excluded.source, kind=excluded.kind,
             updated_at=datetime('now')
     """, (user_id, name, json.dumps(binding["hosts"]), json.dumps(binding["headers"]),
-          int(binding["revealable"]), binding["source"]))
+          int(binding["revealable"]), binding["source"], binding.get("kind", "value")))
 
 
 def get_binding(conn, user_id, name):
     row = conn.execute("""
-        SELECT hosts, headers, revealable, source FROM credential_bindings
+        SELECT hosts, headers, revealable, source, kind FROM credential_bindings
         WHERE user_id=? AND name=?
     """, (user_id, name)).fetchone()
     if row is None:
         return None
     return {"hosts": json.loads(row[0]), "headers": json.loads(row[1]),
-            "revealable": bool(row[2]), "source": row[3]}
+            "revealable": bool(row[2]), "source": row[3], "kind": row[4]}
+
+
+def is_otp_seed(conn, user_id, name):
+    """Unknown kinds and unreadable metadata must never release a stored value."""
+    try:
+        row = conn.execute("SELECT kind FROM credential_bindings WHERE user_id=? AND name=?",
+                           (user_id, name)).fetchone()
+        return row is not None and row[0] != "value"
+    except Exception:
+        return True
 
 
 def forge_bindings(developer):

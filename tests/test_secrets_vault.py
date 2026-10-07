@@ -1906,7 +1906,7 @@ class TestApply:
             assert API_KEY_VALUE not in message
             assert TOPIC_VALUE not in message
 
-    def test_the_skip_vocabulary_is_exactly_six(self):
+    def test_the_skip_vocabulary_is_exactly_seven(self):
         """The four service-mapping reasons went with the machinery that
         produced them. A reason with no producer reads as a condition the apply
         can still reach. `SKIP_NAME_TAKEN` is produced by the apply when a
@@ -1918,6 +1918,7 @@ class TestApply:
             SKIP_OVERSIZE_VALUE,
             SKIP_UNREADABLE_ROW,
             secrets_vault_module.SKIP_NAME_TAKEN,
+            secrets_vault_module.SKIP_UNUSABLE_OTP,
         })
 
     @pytest.mark.parametrize(

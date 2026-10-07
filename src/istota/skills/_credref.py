@@ -21,12 +21,13 @@ took, which matters here for the same reason it matters there (a dest recurs
 across sibling verbs), and a second copy of that walk is the duplication the
 walk itself was written to avoid.
 
-**Three forms, because the argument's value is not always just a name.**
+**Forms describe what the argument resolves.**
 `NAME` is the whole value; `PAIR` is `LABEL=NAME`, where the label is the
 caller's own (a CSS selector, a header name) and only the right-hand side is
 resolved; `ENTRY` names a whole vault entry and resolves to a `SecretEntry`
 holding every field of it (password, username, URL, custom fields) for one
-fetch. A form that none of them expresses is a missing form rather than a
+fetch. `OTP_PAIR` resolves a selector and entry name to a boxed current code
+and its expiry. A form that none of them expresses is a missing form rather than a
 special case in a handler.
 
 **A resolved value is boxed.** `SecretValue` renders `SecretValue(<name>)` from
@@ -80,7 +81,7 @@ import logging
 import os
 from collections.abc import Sequence
 
-from istota.sandbox.credential_shim import ProxyError, fetch_card, fetch_credential, fetch_entry
+from istota.sandbox.credential_shim import ProxyError, fetch_card, fetch_credential, fetch_entry, fetch_otp
 
 from ._hostpath import actions_on_path, stamped as _stamped_by
 
@@ -90,12 +91,14 @@ log = logging.getLogger(__name__)
 NAME = "name"
 #: `LABEL=NAME`: the label is the caller's, the name is resolved.
 PAIR = "pair"
+#: `SELECTOR=NAME`: resolves a current OTP code and its expiry.
+OTP_PAIR = "otp_pair"
 #: The whole value is a vault entry name, resolved to every field of it.
 ENTRY = "entry"
 
 CARD = "card"
 
-FORMS = (NAME, PAIR, ENTRY, CARD)
+FORMS = (NAME, PAIR, OTP_PAIR, ENTRY, CARD)
 
 #: Attribute set on the argparse action, holding the form. Named rather than
 #: inlined so the coverage walk and this module cannot disagree on the spelling.
@@ -171,6 +174,20 @@ class CredentialPair:
 
     def __repr__(self) -> str:
         return f"CredentialPair({self.label}, {self.value!r})"
+
+
+class OtpPair:
+    """A selector and boxed OTP code, with the time the code expires."""
+
+    __slots__ = ("label", "value", "expires_at")
+
+    def __init__(self, label: str, value: SecretValue, expires_at: int) -> None:
+        self.label = label
+        self.value = value
+        self.expires_at = expires_at
+
+    def __repr__(self) -> str:
+        return f"OtpPair({self.label}, {self.value!r}, expires_at={self.expires_at})"
 
 
 class SecretEntry:
@@ -344,7 +361,7 @@ def _resolve_one(
         return resolve_card(raw), None
     if form == ENTRY:
         return resolve_entry(raw, operation)
-    if form == PAIR:
+    if form in (PAIR, OTP_PAIR):
         # The **last** `=`, not the first. A credential name cannot contain one
         # — `secrets_vault.VAULT_NAME_RE` is `[a-z][a-z0-9_]{0,63}` — while a
         # label routinely does: `input[type=password]=acme_pw` is the ordinary
@@ -360,7 +377,18 @@ def _resolve_one(
             return None, (
                 f"Malformed {operation} value: expected SELECTOR=NAME."
             )
-        resolved, error = _resolve_name(name.strip(), operation)
+        name = name.strip()
+        if form == OTP_PAIR:
+            if not name:
+                return None, f"Empty credential name: {operation} refused."
+            try:
+                code, expires_at, hosts = fetch_otp(
+                    name, MODE, credential_fd=os.environ.get("ISTOTA_CRED_FD"),
+                )
+            except ProxyError as exc:
+                return None, f"{operation} refused: {exc}"
+            return OtpPair(label.strip(), SecretValue(name, code, hosts), expires_at), None
+        resolved, error = _resolve_name(name, operation)
         if error is not None:
             return None, error
         return CredentialPair(label.strip(), resolved), None
@@ -425,6 +453,8 @@ __all__: Sequence[str] = (
     "MODE",
     "NAME",
     "PAIR",
+    "OTP_PAIR",
+    "OtpPair",
     "STAMP",
     "ENTRY",
     "CARD",

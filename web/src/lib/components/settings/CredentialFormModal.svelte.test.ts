@@ -256,3 +256,56 @@ describe('editing', () => {
     );
   });
 });
+
+describe('two-factor', () => {
+  it.each(['keep', 'replace', 'remove'])(
+    'sends the %s edit without reading a seed',
+    async (action) => {
+      vi.mocked(updateLocalCredential).mockResolvedValue({
+        ok: true,
+        name: LOCAL.name,
+        username_name: null,
+        url_name: null,
+        grant: null,
+      });
+      const { onSaved } = mount({
+        mode: 'edit',
+        credential: { ...LOCAL, otp_set: true, otp: true },
+      });
+      const otp = input(/^Two-factor/);
+      expect(otp.type).toBe('password');
+      expect(otp.value).toBe('');
+      if (action === 'replace') await type(/^Two-factor/, 'fixture-otp-input');
+      if (action === 'remove')
+        await fireEvent.click(screen.getByRole('checkbox', { name: 'Remove two-factor' }));
+      await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalled());
+      const payload = vi.mocked(updateLocalCredential).mock.calls[0][1];
+      if (action === 'keep') expect(payload).not.toHaveProperty('otp');
+      else expect(payload.otp).toBe(action === 'remove' ? '' : 'fixture-otp-input');
+      expect(otp.value).toBe('');
+    },
+  );
+
+  it('clears a typed seed on cancel', async () => {
+    mount();
+    await type(/^Two-factor/, 'fixture-otp-input');
+    const otp = input(/^Two-factor/);
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(otp.value).toBe('');
+  });
+});
+
+it('sends a typed seed on add and shows a field refusal', async () => {
+  vi.mocked(createCredential).mockRejectedValue(
+    new CredentialWriteError('invalid two-factor secret', 'otp'),
+  );
+  mount();
+  await type(/^Two-factor/, 'fixture-otp-input');
+  await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
+  expect(await screen.findByText('invalid two-factor secret')).toBeTruthy();
+  expect(createCredential).toHaveBeenCalledWith(
+    expect.objectContaining({ otp: 'fixture-otp-input' }),
+  );
+  expect(input(/^Two-factor/).getAttribute('aria-invalid')).toBe('true');
+});
