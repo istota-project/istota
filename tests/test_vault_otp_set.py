@@ -14,7 +14,7 @@ from istota.sandbox import credential_shim
 from istota.sandbox.skill_proxy import SkillProxy
 from istota.storage import VaultLocation
 from tests.support.kdbx import create_database
-from tests.test_skill_proxy_vault_create import _request, sock  # noqa: F401
+from tests.test_skill_proxy_vault_create import _request, sock as sock
 
 SEED = "JBSWY3DP" * 4
 
