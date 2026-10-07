@@ -55,11 +55,11 @@ it('adds a card, saves policy through the app bar and cancels a purchase through
   render(Harness);
   await screen.findByRole('heading', { name: 'Spending policy' });
   for (const section of USER_SETTINGS_SECTIONS) {
-    expect(
-      screen.getByRole('link', { name: section.label, exact: true }).getAttribute('href'),
-    ).toBe(`/settings${section.href}`);
+    expect(screen.getByRole('link', { name: section.label }).getAttribute('href')).toBe(
+      `/settings${section.href}`,
+    );
   }
-  await fireEvent.click(screen.getByRole('button', { name: 'Add card', exact: true }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Add card' }));
   const dialog = within(screen.getByRole('dialog'));
   await fireEvent.input(dialog.getByLabelText('Label'), { target: { value: 'Travel card' } });
   await fireEvent.input(dialog.getByLabelText('Card number'), {
@@ -104,8 +104,7 @@ it.each([
     (screen.getByLabelText('Auto limit per purchase') as HTMLInputElement).disabled ||
       screen.getByLabelText('Auto limit per purchase').closest('fieldset')?.disabled,
   ).toBe(true);
-  if ('enabled' in override)
-    expect(screen.queryByRole('link', { name: 'Wallet', exact: true })).toBeNull();
+  if ('enabled' in override) expect(screen.queryByRole('link', { name: 'Wallet' })).toBeNull();
 });
 
 it.each([
@@ -152,7 +151,7 @@ it('changes USD defaults to JPY and clears a failed policy save on retry', async
   const trigger = screen.getByRole('button', { name: 'Currency' });
   await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
   await fireEvent.click(trigger);
-  const option = await screen.findByRole('option', { name: 'JPY', exact: true });
+  const option = await screen.findByRole('option', { name: 'JPY' });
   await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
   await fireEvent.click(option);
   await fireEvent.input(screen.getByLabelText('Auto limit per purchase'), {
