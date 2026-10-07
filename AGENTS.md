@@ -25,6 +25,7 @@ Subsystems:
 - `health.md` — health module schema, documents store, OCR/explainer, serialisers, surfaces
 - `location.md` — GPS pings, place detection, visits, Overland/Garmin ingest
 - `feeds.md` — native RSS/Atom/Tumblr/Are.na poller, per-user SQLite, image dedupe
+- `wallet.md` — payment cards, purchase approval, private checkout fills and static-card limits
 - `money.md` — quarterly tax estimator, portfolio snapshots, classifications
 - `memory.md` — USER.md/CHANNEL.md/GROUP.md, per-skill overlays, knowledge graph, playbooks, sleep cycle
 

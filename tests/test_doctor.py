@@ -6549,3 +6549,109 @@ class TestOperatorPersona:
         self._run(config)
         assert sorted(str(p) for p in root.rglob("*")) == before
         assert not (root / "PERSONA.md").exists()
+
+
+class TestWallet:
+    def _config(self, make_config, db_path):
+        config = make_config(db_path=db_path)
+        config.experimental.features = ["wallet"]
+        return config
+
+    def _run(self, config, probe=False):
+        return _by_name(run_checks(config, only=("security.wallet",), probe=probe))
+
+    def test_disabled_skips_without_reading(self, make_config):
+        result = self._run(make_config())["security.wallet"]
+        assert result.status == SKIP
+
+    @pytest.mark.parametrize("effective,opt_in,status", [
+        (False, False, FAIL), (True, False, OK),
+        (False, True, WARN), (None, False, WARN),
+    ])
+    def test_isolation_without_any_vault(self, make_config, db_path, monkeypatch,
+                                         effective, opt_in, status):
+        from istota.config import UserConfig
+
+        config = self._config(make_config, db_path)
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.security.allow_unsandboxed_multi_user_vaults = opt_in
+        monkeypatch.setattr(doctor, "_deployment_sandboxing", lambda c, p: (effective, "not probed"))
+        assert self._run(config)["security.wallet.isolation"].status == status
+
+    @pytest.mark.parametrize("damage,count", [("none", 0), ("key", 1), ("missing", 1), ("ciphertext", 1)])
+    def test_cards_read_only_counts_without_values(self, make_config, db_path, monkeypatch, caplog,
+                                                   damage, count):
+        from istota import db
+        from istota.wallet import cards
+        from .support.wallet import NUMBER, card_input
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+        with db.get_db(db_path) as conn:
+            cards.add_card(conn, "alice", card_input(label="Private card label"))
+            if damage == "missing":
+                conn.execute("DELETE FROM secrets WHERE key LIKE '%:cvc'")
+            if damage == "ciphertext":
+                conn.execute("UPDATE secrets SET encrypted_value=?", (b"broken",))
+            before = [tuple(row) for row in conn.execute("SELECT * FROM secrets")]
+        if damage == "key":
+            monkeypatch.setenv("ISTOTA_SECRET_KEY", "cafebabe" * 8)
+        result = self._run(self._config(make_config, db_path))["security.wallet.cards"]
+        assert result.status == (WARN if count else OK)
+        assert f"{count} of 1 card(s)" in result.detail
+        rendered = repr(result) + caplog.text
+        assert NUMBER not in rendered and "Private card label" not in rendered and "alice" not in rendered
+        with db.get_db(db_path) as conn:
+            assert [tuple(row) for row in conn.execute("SELECT * FROM secrets")] == before
+
+    @pytest.mark.parametrize("health,status", [
+        ({"card_fill": True}, OK), ({"card_fill": False}, WARN), ({}, WARN),
+        ({"card_fill": "true"}, WARN), ([], WARN),
+    ])
+    def test_browser_health(self, make_config, db_path, monkeypatch, health, status):
+        import httpx
+
+        config = self._config(make_config, db_path)
+        config.browser.enabled = True
+        config.browser.api_url = "http://browser.example:9223/"
+        calls = []
+
+        def get(url, **kwargs):
+            calls.append((url, kwargs))
+            return httpx.Response(200, json=health)
+
+        monkeypatch.setattr(httpx, "get", get)
+        assert self._run(config, probe=True)["security.wallet.browser"].status == status
+        assert calls == [("http://browser.example:9223/health", {"timeout": 5.0})]
+
+    def test_probe_false_makes_no_network_or_process_call(self, make_config, db_path, monkeypatch):
+        import httpx
+
+        config = self._config(make_config, db_path)
+        config.browser.enabled = True
+        monkeypatch.setattr(httpx, "get", lambda *a, **kw: pytest.fail("network call"))
+        spawns = _spawn_spy(monkeypatch)
+        result = self._run(config)["security.wallet.browser"]
+        assert result.status == SKIP and not spawns
+
+    def test_browser_failure_does_not_echo_response_or_exception(self, make_config, db_path, monkeypatch, caplog):
+        import httpx
+
+        config = self._config(make_config, db_path)
+        config.browser.enabled = True
+
+        def get(*args, **kwargs):
+            raise httpx.ConnectError("private response sentinel")
+
+        monkeypatch.setattr(httpx, "get", get)
+        result = self._run(config, probe=True)["security.wallet.browser"]
+        assert result.status == WARN
+        assert "private response sentinel" not in repr(result) + caplog.text
+
+    def test_missing_database_is_not_created(self, make_config):
+        config = make_config()
+        config.experimental.features = ["wallet"]
+        config.db_path = config.db_path.with_name("missing-wallet.db")
+        results = self._run(config)
+        assert results["security.wallet.cards"].status == WARN
+        assert results["security.wallet.browser"].status == WARN
+        assert not config.db_path.exists()
