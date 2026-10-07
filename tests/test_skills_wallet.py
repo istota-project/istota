@@ -75,7 +75,9 @@ def test_held_and_pending_refusal(cli, wallet_env):
 
 def test_identity_and_live_availability(cli, wallet_env, monkeypatch):
     _, config, _, _ = wallet_env
-    config.experimental.features = []
+    config.security.sandbox_enabled = False
+    from istota.config import UserConfig
+    config.users = {"alice": UserConfig(), "bob": UserConfig()}
     assert cli("cards", code=1)["reason"] == "wallet_unavailable"
     monkeypatch.setenv("ISTOTA_USER_ID", "bob")
     assert cli("cards", code=1)["reason"] == "task_unavailable"

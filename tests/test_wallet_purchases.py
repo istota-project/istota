@@ -20,7 +20,8 @@ def test_request_key_replay_and_conflict(wallet_env):
         assert request(conn, wallet_env, request_key="filter") == first
         assert request(conn, wallet_env, request_key="filter", amount_cents=2500).reason == "request_key_conflict"
         assert len(purchases.list_purchases(conn, "alice")) == 1
-        wallet_env[1].experimental.features = []
+        wallet_env[1].users = {"alice": UserConfig(), "bob": UserConfig()}
+        wallet_env[1].security.sandbox_enabled = False
         assert request(conn, wallet_env, request_key="filter").reason == "wallet_unavailable"
 
 
@@ -37,7 +38,7 @@ def test_fill_and_complete(wallet_env):
             claim(conn, wallet_env, purchase.purchase_id)
 
 
-@pytest.mark.parametrize("change,reason", [("user","purchase_not_found"),("task","purchase_not_found"),("expired","purchase_expired"),("limit","purchase_fill_limit"),("paused","purchase_not_authorized"),("removed","purchase_not_authorized"),("withheld","wallet_unavailable"),("feature","wallet_unavailable"),("isolation","wallet_unavailable")])
+@pytest.mark.parametrize("change,reason", [("user","purchase_not_found"),("task","purchase_not_found"),("expired","purchase_expired"),("limit","purchase_fill_limit"),("paused","purchase_not_authorized"),("removed","purchase_not_authorized"),("withheld","wallet_unavailable"),("isolation","wallet_unavailable")])
 def test_fill_refusals(wallet_env, change, reason):
     with db.get_db(wallet_env[0]) as conn:
         purchase = request(conn, wallet_env)
@@ -57,8 +58,6 @@ def test_fill_refusals(wallet_env, change, reason):
             cards.remove_card(conn, "alice", wallet_env[2])
         if change == "withheld":
             conn.execute("UPDATE tasks SET guest_participant_id=42 WHERE id=?", (wallet_env[3],))
-        if change == "feature":
-            wallet_env[1].experimental.features = []
         if change == "isolation":
             wallet_env[1].users = {"alice": UserConfig(), "bob": UserConfig()}
             wallet_env[1].security.sandbox_enabled = False

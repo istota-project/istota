@@ -36,7 +36,6 @@ from typing import Callable
 
 
 KNOWN_FEATURES: dict[str, str] = {
-    "wallet": "Payment cards and purchase authorization",
     "money_tax": "Money: tax-lot commands (lots)",
     "money_wash_sales": "Money: IRS wash-sale violation detector",
 }

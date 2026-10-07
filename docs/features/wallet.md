@@ -1,17 +1,14 @@
 # Wallet and purchase approval
 
-Wallet lets a task request permission to use one of your payment cards at a named merchant. Add cards and set your spending policy in Settings → Wallet. The feature is experimental and must be enabled by the operator.
+Wallet lets a task request permission to use one of your payment cards at a named merchant. Add cards and set your spending policy in Settings → Wallet. Wallet is available by default.
 
 The limits control when Istota releases a card for filling a checkout form. They do not cap what a merchant charges a static card after receiving it. Use a card with an issuer-side spending limit. Purchases are the task's declared amounts and reported outcomes, not bank-confirmed charges. Issuer-created cards and charge webhooks are not implemented, and Wallet writes nothing to the Money ledger.
 
-## Enable Wallet
+## Deployment settings
 
-Add `wallet` to the existing experimental feature list:
+These optional settings control request and fill limits:
 
 ```toml
-[experimental]
-features = ["wallet"]
-
 [security]
 wallet_requests_per_task = 3
 wallet_fills_per_purchase = 3
@@ -28,7 +25,7 @@ Add a label, card number, expiry, security code, cardholder name and optional bi
 
 Edit details, pause or resume a card from its menu. To replace its number or security code, remove the card and add it again. Removing a card deletes its secrets and cancels its open purchases. Pausing blocks fills while the card is paused; resuming does not extend an existing authorization window. Expired cards cannot be used.
 
-When the feature is disabled, existing Wallet data remains readable at `/settings/wallet`; the navigation entry is hidden and writes and task use are refused.
+When deployment isolation requirements are not met, existing Wallet data remains readable at `/settings/wallet`; writes and task use are refused.
 
 ## Spending policy
 
@@ -70,4 +67,4 @@ Wallet shows the latest fifty purchases, their declared amounts, states and appr
 
 An unused authorization becomes `expired` when its window ends. A filled purchase with no outcome report becomes `unreported` one hour after its window ends and still counts toward the auto budget. `completed` and `failed` describe what the task reported. Check your issuer or [Money transactions](money.md) for actual charges.
 
-`security.wallet` skips when Wallet is off. When enabled, its isolation result fails if a multi-user deployment is refused, and warns if isolation is unverified or the operator accepted the unsandboxed exposure. Its card result warns with a count of cards whose secrets are missing or cannot be decrypted, without card labels, user IDs or values. Restore the deployment's original secret key or re-add affected cards after a key change. If doctor cannot initialize decryption in its own process, it reports the cards as unchecked instead; a standalone CLI may not have the daemon's secret-key environment. Its browser result warns when the browser is disabled, unreachable or does not advertise `card_fill`; a non-probing check skips the HTTP request.
+`security.wallet` checks readiness on every deployment. Its isolation result fails if a multi-user deployment is refused, and warns if isolation is unverified or the operator accepted the unsandboxed exposure. Its card result warns with a count of cards whose secrets are missing or cannot be decrypted, without card labels, user IDs or values. Restore the deployment's original secret key or re-add affected cards after a key change. If doctor cannot initialize decryption in its own process, it reports the cards as unchecked instead; a standalone CLI may not have the daemon's secret-key environment. Its browser result warns when the browser is disabled, unreachable or does not advertise `card_fill`; a non-probing check skips the HTTP request.

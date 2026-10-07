@@ -3713,8 +3713,6 @@ def check_wallet(config: "Config", probe: bool) -> list[CheckResult]:
     from istota.credentials import store, vault
 
     prefix = "security.wallet"
-    if "wallet" not in config.experimental.features:
-        return [CheckResult(prefix, SKIP, "wallet is disabled")]
     results = []
     if not vault.vault_has_other_users(config):
         results.append(CheckResult(prefix + ".isolation", OK, "single-user wallet deployment"))
@@ -3779,7 +3777,10 @@ def check_wallet(config: "Config", probe: bool) -> list[CheckResult]:
                 remedy="Restore the deployment's secret key or re-add affected cards in Wallet settings." if unreadable else "",
             ))
     except (OSError, sqlite3.Error):
-        results.append(CheckResult(prefix + ".cards", WARN, "card counts unavailable; database not ready"))
+        results.append(CheckResult(
+            prefix + ".cards", WARN, "card counts unavailable; database not ready",
+            remedy="Check database access and run `istota init` to apply schema migrations.",
+        ))
     if not config.browser.enabled:
         results.append(CheckResult(prefix + ".browser", WARN, "browser is disabled; wallet cards cannot be filled",
                                    remedy="Enable the browser and deploy an image with card_fill support."))

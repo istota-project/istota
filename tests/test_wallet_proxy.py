@@ -132,12 +132,14 @@ def test_unexpected_secret_error_rolls_back_and_redacts(wallet_env, tmp_path, mo
         assert conn.execute("SELECT fill_count FROM wallet_purchases").fetchone()[0] == 0
 
 
-def test_live_feature_refusal_reaches_parse_envelope(wallet_env, tmp_path, monkeypatch, capsys):
+def test_live_isolation_refusal_reaches_parse_envelope(wallet_env, tmp_path, monkeypatch, capsys):
     path, config, _, _ = wallet_env
     with db.get_db(path) as conn:
         purchase = request(conn, wallet_env)
     proxy = proxy_for(wallet_env, tmp_path)
-    config.experimental.features = []
+    from istota.config import UserConfig
+    config.users = {"alice": UserConfig(), "bob": UserConfig()}
+    config.security.sandbox_enabled = False
     parser = argparse.ArgumentParser()
     _credref.credential_ref(parser, "--purchase", form=_credref.CARD)
     with proxy._credential_channel(3) as fd:

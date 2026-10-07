@@ -985,7 +985,6 @@ class TestWalletAutoPush:
         from .support.wallet import CARD
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
-        config.experimental.features = ["wallet"]
         with db.get_db(config.db_path) as conn:
             card = cards.add_card(conn, "alice", CARD)
             task = db.create_task(conn, user_id="alice", source_type="web")

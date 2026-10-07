@@ -15,7 +15,6 @@ CARD = cards.CardInput("Everyday", NUMBER, "123", 12, 2099, "Alice", cards.Billi
 def wallet_fixture(db_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     config = Config()
-    config.experimental.features = ["wallet"]
     with db.get_db(db_path) as conn:
         card_id = cards.add_card(conn, "alice", CARD)
         task_id = db.create_task(conn, user_id="alice", source_type="talk")

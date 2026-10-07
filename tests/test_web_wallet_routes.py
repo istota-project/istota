@@ -20,7 +20,6 @@ MARKER = "synthetic-wallet-secret"
 async def signed_client(client, config, monkeypatch):  # noqa: F811
     import istota.webui.app as mod
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-    config.experimental.features = ["wallet"]
     config.security.allow_unsandboxed_multi_user_vaults = True
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
     await client.get("/istota/callback", follow_redirects=False)
@@ -39,6 +38,7 @@ async def add(http):
 
 
 async def test_card_and_policy_round_trip(signed_client, config):  # noqa: F811
+    assert config.experimental.features == []
     ident = await add(signed_client)
     listing = await signed_client.get(BASE)
     data = listing.json()
@@ -100,17 +100,12 @@ async def test_parse_and_store_errors_are_safe(signed_client, monkeypatch, caplo
     assert "RuntimeError" in caplog.text
 
 
-async def test_writes_gate_origin_feature_and_isolation(signed_client, config, monkeypatch):  # noqa: F811
+async def test_writes_gate_origin_and_isolation(signed_client, config, monkeypatch):  # noqa: F811
     from istota.credentials import vault
     writes = [("post", "/cards"), ("patch", "/cards/1"), ("delete", "/cards/1"),
               ("put", "/policy"), ("post", "/purchases/1/cancel")]
     for method, path in writes:
         assert (await signed_client.request(method, BASE + path, json={})).status_code == 403
-    config.experimental.features = []
-    assert (await signed_client.get(BASE)).json()["enabled"] is False
-    for method, path in writes:
-        assert (await signed_client.request(method, BASE + path, json={}, headers=ORIGIN)).status_code == 404
-    config.experimental.features = ["wallet"]
     monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a: "isolation refused")
     assert (await signed_client.get(BASE)).json()["refusal"] == "isolation refused"
     for method, path in writes:

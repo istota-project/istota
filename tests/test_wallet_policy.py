@@ -89,29 +89,27 @@ def test_host_normalization():
 
 def test_security_config_clamps_wallet_window(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text('[experimental]\nfeatures = ["wallet"]\n[security]\nwallet_authorization_minutes = 999\nwallet_requests_per_task = 4\nwallet_fills_per_purchase = 2\n')
+    path.write_text('[security]\nwallet_authorization_minutes = 999\nwallet_requests_per_task = 4\nwallet_fills_per_purchase = 2\n')
     config = load_config(path)
     assert config.security.wallet_authorization_minutes == 240
     assert config.security.wallet_requests_per_task == 4
     assert config.security.wallet_fills_per_purchase == 2
 
 
-@pytest.mark.parametrize("change,reason", [("paused", "card_paused"), ("expired", "card_expired"), ("feature", "wallet_unavailable"), ("withheld", "wallet_unavailable")])
+@pytest.mark.parametrize("change,reason", [("paused", "card_paused"), ("expired", "card_expired"), ("withheld", "wallet_unavailable")])
 def test_request_refusal_order(wallet_env, change, reason):
     with db.get_db(wallet_env[0]) as conn:
         if change == "paused":
             conn.execute("UPDATE wallet_cards SET state='paused'")
         if change == "expired":
             conn.execute("UPDATE wallet_cards SET exp_year=2000")
-        if change == "feature":
-            wallet_env[1].experimental.features = []
         if change == "withheld":
             conn.execute("UPDATE tasks SET guest_participant_id=42 WHERE id=?", (wallet_env[3],))
         result = request(conn, wallet_env, amount_cents=50001)
         assert result.reason == reason
         if reason == "wallet_unavailable":
             row = conn.execute("SELECT reason FROM wallet_purchases WHERE id=?", (result.purchase_id,)).fetchone()
-            assert row[0] in ("feature_disabled", "scopes_withheld")
+            assert row[0] == "scopes_withheld"
 
 
 @pytest.mark.parametrize("field,value", [("auto_limit_cents", None), ("auto_budget_cents", -1), ("ceiling_cents", True), ("allow_scheduled", "false")])

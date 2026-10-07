@@ -6554,15 +6554,16 @@ class TestOperatorPersona:
 class TestWallet:
     def _config(self, make_config, db_path):
         config = make_config(db_path=db_path)
-        config.experimental.features = ["wallet"]
         return config
 
     def _run(self, config, probe=False):
         return _by_name(run_checks(config, only=("security.wallet",), probe=probe))
 
-    def test_disabled_skips_without_reading(self, make_config):
-        result = self._run(make_config())["security.wallet"]
-        assert result.status == SKIP
+    def test_checks_run_by_default(self, make_config, db_path):
+        config = self._config(make_config, db_path)
+        assert config.experimental.features == []
+        results = self._run(config)
+        assert set(results) == {"security.wallet.isolation", "security.wallet.cards", "security.wallet.browser"}
 
     @pytest.mark.parametrize("effective,opt_in,status", [
         (False, False, FAIL), (True, False, OK),
@@ -6649,7 +6650,6 @@ class TestWallet:
 
     def test_missing_database_is_not_created(self, make_config):
         config = make_config()
-        config.experimental.features = ["wallet"]
         config.db_path = config.db_path.with_name("missing-wallet.db")
         results = self._run(config)
         assert results["security.wallet.cards"].status == WARN

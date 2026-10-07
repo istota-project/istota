@@ -68,8 +68,6 @@ def auto_spent_cents(conn, user_id, now=None):
 
 
 def unavailable_reason(conn, config, user_id, task):
-    if "wallet" not in config.experimental.features:
-        return "feature_disabled"
     refusal = vault.vault_isolation_refusal(config, user_id)
     if refusal:
         return refusal
