@@ -295,10 +295,10 @@ Two consequences worth knowing. A scroll that moved the **page** invalidates the
 
 Use the wallet skill to declare a purchase before filling a payment card. A `held` result means stop and wait for approval; a refusal is not permission to pay another way. Resume with the purchase ID from the approval and reuse the request key for retries. Never ask for a card number or CVC, and never put one in `--fill` or `--type`.
 
-Before submitting, compare the checkout's full total and currency, including tax and shipping, with the authorized purchase. If either differs, run `wallet fail ID --reason "Checkout total changed"` and report it instead of paying.
+Open or reuse the checkout session with `render --keep-session`, then pass its returned session ID to `interact`. Before submitting, compare the checkout's full total and currency, including tax and shipping, with the authorized purchase. If either differs, run `wallet fail ID --reason "Checkout total changed"` and report it instead of paying.
 
 ```bash
-istota-skill browse interact https://shop.example/checkout --purchase 17 --fill-card 'number=#cardnumber' --fill-card 'exp:MM/YY=#expiry' --fill-card 'cvc=#cvc' --fill-card 'name=#cardholder' --click '#place-order'
+istota-skill browse interact <session_id> --purchase 17 --fill-card 'number=#cardnumber' --fill-card 'exp:MM/YY=#expiry' --fill-card 'cvc=#cvc' --fill-card 'name=#cardholder' --click '#place-order'
 # Hosted field: declare its host with wallet request --frame-host before approval.
 istota-skill browse interact <session_id> --purchase 17 --fill-card 'number=iframe[title="Card number"]>>>input[name="cardnumber"]'
 ```

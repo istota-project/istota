@@ -6655,3 +6655,23 @@ class TestWallet:
         assert results["security.wallet.cards"].status == WARN
         assert results["security.wallet.browser"].status == WARN
         assert not config.db_path.exists()
+
+
+    def test_standalone_key_absent_from_cli_is_unchecked_not_damaged(self, make_config, db_path, monkeypatch):
+        from istota import db
+        from istota.wallet import cards
+        from .support.wallet import card_input
+
+        key = "deadbeef" * 8
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", key)
+        with db.get_db(db_path) as conn:
+            cards.add_card(conn, "alice", card_input())
+        config = self._config(make_config, db_path)
+        config.config_path = db_path.parent / "config.toml"
+        config.config_path.with_name("istota.env").write_text(f"ISTOTA_SECRET_KEY={key}\n")
+        monkeypatch.delenv("ISTOTA_SECRET_KEY")
+        result = self._run(config)["security.wallet.cards"]
+        assert result.status == WARN
+        assert "not checked" in result.detail
+        assert "undecryptable" not in result.detail and "re-add" not in result.remedy
+        assert key not in repr(result)

@@ -3753,23 +3753,31 @@ def check_wallet(config: "Config", probe: bool) -> list[CheckResult]:
         # get_secret writes last_accessed_at and logs row identities on failure.
         # Doctor needs neither side effect; use the store's cipher on read-only rows.
         unreadable = 0
+        fernet = None
         if rows:
             try:
                 fernet = store._get_fernet()
             except Exception:
-                unreadable = len(rows)
-            else:
-                for values in rows:
-                    try:
-                        if not all(value and fernet.decrypt(value).decode("utf-8") for value in values):
-                            unreadable += 1
-                    except Exception:
+                pass
+        if rows and fernet is None:
+            results.append(CheckResult(
+                prefix + ".cards", WARN,
+                f"{len(rows)} card(s) not checked; this process could not initialize secret decryption",
+                remedy="Run doctor with the daemon's secret-key environment; "
+                "check security.secret_key for deployment key availability.",
+            ))
+        else:
+            for values in rows:
+                try:
+                    if not all(value and fernet.decrypt(value).decode("utf-8") for value in values):
                         unreadable += 1
-        results.append(CheckResult(
-            prefix + ".cards", WARN if unreadable else OK,
-            f"{unreadable} of {len(rows)} card(s) have missing or undecryptable secrets",
-            remedy="Restore the deployment's secret key or re-add affected cards in Wallet settings." if unreadable else "",
-        ))
+                except Exception:
+                    unreadable += 1
+            results.append(CheckResult(
+                prefix + ".cards", WARN if unreadable else OK,
+                f"{unreadable} of {len(rows)} card(s) have missing or undecryptable secrets",
+                remedy="Restore the deployment's secret key or re-add affected cards in Wallet settings." if unreadable else "",
+            ))
     except (OSError, sqlite3.Error):
         results.append(CheckResult(prefix + ".cards", WARN, "card counts unavailable; database not ready"))
     if not config.browser.enabled:
