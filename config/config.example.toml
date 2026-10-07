@@ -445,6 +445,9 @@ features = []
 #   ISTOTA_DEVELOPER_GITLAB_TOKEN, ISTOTA_DEVELOPER_GITHUB_TOKEN
 
 # [security]
+# wallet_requests_per_task = 3    # purchase requests, including refusals
+# wallet_fills_per_purchase = 3   # card fills within one authorization
+# wallet_authorization_minutes = 30 # clamped to 5..240 minutes
 # sandbox_enabled = true           # bwrap filesystem isolation per user (Linux only)
 # skill_proxy_enabled = true       # proxy skill CLI calls via Unix socket (credential isolation).
 #                                  # Required wherever sandbox_enabled is true, for two reasons.
