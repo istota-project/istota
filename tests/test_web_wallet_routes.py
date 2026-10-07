@@ -46,7 +46,7 @@ async def test_card_and_policy_round_trip(signed_client, config):  # noqa: F811
     assert data["currency_precision"]["exceptions"]["KRW"] == 0
     assert data["currency_precision"]["exceptions"]["OMR"] == 3
     assert data["currency_precision"]["exceptions"]["CLF"] == 4
-    assert data["enabled"] is True
+    assert "enabled" not in data
     assert not data["refusal"]
     assert data["cards"][0]["last_four"] == "4242"
     assert "number" not in data["cards"][0] and "cvc" not in data["cards"][0]

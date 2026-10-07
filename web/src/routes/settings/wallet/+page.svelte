@@ -31,8 +31,7 @@
 
 <SettingsLayout description="Cards, spending limits and recent purchases." {loading} {error}>
   {#if data}
-    {@const writable = data.enabled && !data.refusal}
-    {#if !data.enabled}<p class="banner info">The wallet is off on this deployment.</p>{/if}
+    {@const writable = !data.refusal}
     {#if data.refusal}<p class="banner info">{data.refusal}</p>{/if}
     <WalletCardsCard cards={data.cards} {writable} onSaved={refresh} onError={report} />
     <WalletPolicyCard

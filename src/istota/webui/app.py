@@ -13398,7 +13398,6 @@ def _wallet_settings(user_id: str) -> dict:
             purchase["room_token"] = canonical_token(conn, task.conversation_token) if task and task.user_id == user_id else None
             purchase["extra_hosts"] = json.loads(purchase["extra_hosts"])
         return {"currency_precision": {"default": 2, "exceptions": CURRENCY_EXPONENTS},
-                "enabled": True,
                 "refusal": vault_isolation_refusal(_config, user_id),
                 "cards": [asdict(card) for card in cards.list_cards(conn, user_id)],
                 "policy": asdict(policy.get_policy(conn, user_id)), "purchases": recent}
