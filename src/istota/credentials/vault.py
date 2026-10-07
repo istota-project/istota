@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from istota.credentials import store as secrets_store
-from istota.lib import file_lock
+from istota.lib import file_lock, totp
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +208,7 @@ VAULT_ENTRY_SERVICE = "vault_entries"
 SKIP_UNUSABLE_NAME = "the entry name cannot be used"
 SKIP_DUPLICATE_NAME = "two entries produce the same name"
 SKIP_EMPTY_VALUE = "the field is empty"
+SKIP_UNUSABLE_OTP = "the OTP source cannot be used"
 SKIP_OVERSIZE_VALUE = "the value is larger than the limit"
 SKIP_UNREADABLE_ROW = "stored value will not decrypt, so it is not deleted"
 #: A name the file produced that a credential added in Istota already holds.
@@ -229,6 +230,7 @@ SKIP_REASONS = frozenset(
         SKIP_OVERSIZE_VALUE,
         SKIP_UNREADABLE_ROW,
         SKIP_NAME_TAKEN,
+        SKIP_UNUSABLE_OTP,
     }
 )
 
@@ -1278,6 +1280,7 @@ class _Walk:
     bindings: dict[str, dict] = field(default_factory=dict)
     #: Entry names the sync must not grant on its own (ISSUE-590).
     no_auto_grant: set[str] = field(default_factory=set)
+    otp_names: set[str] = field(default_factory=set)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     entries_visited: int = 0
     fields_examined: int = 0
@@ -1523,7 +1526,8 @@ def _map_groups(kp, digest: str) -> VaultRead:
         skipped=tuple(walk.skipped),
         generated_count=generated_count,
         bindings={name: (walk.bindings[name] if len(walk.candidates[name]) == 1
-                         else {"hosts": [], "headers": [], "revealable": False, "source": "vault"})
+                         else {"hosts": [], "headers": [], "revealable": False, "source": "vault",
+                               "kind": "totp" if name in walk.otp_names else "value"})
                   for name in services.keys() | held},
         no_auto_grant=frozenset(walk.no_auto_grant),
     )
@@ -1592,24 +1596,52 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
     if (VAULT_NO_GRANT_TAG in (entry.tags or [])
             or (group_path and str(group_path[0]).strip().casefold() == VAULT_WRITE_GROUP)):
         walk.no_auto_grant.add(slug_name(path))
-    fields: list[tuple[tuple[str, ...], object]] = [
+    fields: list[tuple[tuple[str, ...] | None, object]] = [
         (path, entry.password),
         ((*path, _USERNAME_SEGMENT), entry.username),
         ((*path, _URL_SEGMENT), entry.url),
     ]
-    # `custom_properties` excludes the reserved fields above, so a custom
-    # field named `URL` is the one shape that can collide with a standard one —
-    # which is the collision rule doing its job rather than a case to special
-    # -case here.
-    for field_name, raw in sorted(
-        entry.custom_properties.items(), key=lambda kv: str(kv[0])
-    ):
-        if str(field_name).casefold().startswith("istota_"):
+    otp_fields = {}
+    for field_name, raw in attributes.items():
+        folded = str(field_name).casefold()
+        if folded in {"totp seed", "totp settings"} or folded.startswith(("timeotp-", "hmacotp-")):
+            otp_fields[folded] = raw
+            # Consumed properties still spend the walk's field budget.
+            fields.append((None, None))
+
+    otp_value = None
+    otp_uri = entry.otp
+    try:
+        if otp_uri:
+            params = totp.parse_otpauth(otp_uri)
+        elif any(name.startswith("timeotp-") for name in otp_fields):
+            params = totp.parse_keepass_timeotp(otp_fields)
+        elif "totp seed" in otp_fields:
+            params = totp.parse_keepassxc_legacy(otp_fields["totp seed"], otp_fields.get("totp settings"))
+        elif any(name.startswith("hmacotp-") for name in otp_fields):
+            raise totp.TotpError("hotp_unsupported")
+        else:
+            params = None
+        if params is not None:
+            otp_value = totp.to_uri(params)
+    except totp.TotpError as exc:
+        if otp_uri:
+            fields.append((None, None))
+        label = slug_name((*path, "totp")) or _original(path)
+        walk.skipped.append((label, f"{SKIP_UNUSABLE_OTP}: {exc.code}"))
+        logger.warning("vault: %s OTP source skipped (%s)", _label(label), exc.code)
+
+    otp_index = len(fields)
+    if otp_value is not None:
+        fields.append(((*path, "totp"), otp_value))
+    for field_name, raw in sorted(attributes.items(), key=lambda kv: str(kv[0])):
+        folded = str(field_name).casefold()
+        if folded.startswith("istota_") or folded in otp_fields:
             continue
         fields.append(((*path, field_name), raw))
 
     produced = 0
-    for segments, raw in fields:
+    for index, (segments, raw) in enumerate(fields):
         # Counted **before** the name is derived rather than after: the branch
         # below that produces no name is not free, and a cap only the
         # successful branch pays is not a cap.
@@ -1617,6 +1649,8 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
             walk.stopped = "name"
             return
         walk.fields_examined += 1
+        if segments is None:
+            continue
         value = str(raw or "").strip()
         name = slug_name(segments)
         if name is None:
@@ -1632,8 +1666,15 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
                     _original(segments),
                 )
             continue
+        if otp_value is not None and index > otp_index and name == slug_name((*path, "totp")):
+            walk.skipped.append((name, SKIP_DUPLICATE_NAME))
+            logger.warning("vault: %s custom field duplicates the OTP name, skipped", _label(name))
+            continue
         walk.candidates.setdefault(name, []).append(value)
         walk.bindings[name] = {**binding, "credential": slug_name(path)}
+        if otp_value is not None and index == otp_index:
+            walk.bindings[name]["kind"] = "totp"
+            walk.otp_names.add(name)
         if value:
             produced += 1
 
@@ -2349,6 +2390,7 @@ class VaultStatusReport:
     outcome: str = ""
     reason: str = ""
     names: tuple[str, ...] = ()
+    otp_count: int = 0
     generated_count: int = 0
     #: How many file entries the last applied cycle skipped because a
     #: credential added in Istota holds the name. From the durable record.
@@ -3174,6 +3216,7 @@ def vault_status(
         outcome=OUTCOME_OK,
         parsed=True,
         names=tuple(sorted(read.services)),
+        otp_count=sum(read.bindings[name].get("kind") == "totp" for name in read.services),
         generated_count=read.generated_count,
         skipped=read.skipped,
         scoped=read.scoped,

@@ -248,7 +248,14 @@ Each entry contributes one name per field it has filled:
 | Password | the entry's own name |
 | Username | that name with `_username` |
 | URL | that name with `_url` |
-| Any custom string field | that name with `_<field>` |
+| `otp` (`otpauth://totp/` URI, current KeePassXC) | that name with `_totp` |
+| `TimeOtp-*` (native KeePass secret and settings) | that name with `_totp` |
+| `TOTP Seed` + optional `TOTP Settings` (legacy KeePassXC) | that name with `_totp` |
+| Other custom string fields | that name with `_<field>` |
+
+OTP sources are tried in the table's order: `otp`, then `TimeOtp-*`, then `TOTP Seed`. The first present source decides, even if it is invalid; Istota does not fall back to an older seed. An invalid source is skipped with a fixed error code in `vault-status`, while the entry's other fields still import. HOTP is unsupported. Legacy `TOTP Settings` accepts `period;digits`, `period;digits;algorithm`, or `30;S` for Steam.
+
+The seed is stored as one normalized URI under `_totp` and marked as an OTP seed. It cannot be read as a password or substituted into a broker placeholder, even on a revealable entry. A custom field named `TOTP` is skipped if it collides with that seed. `TOTP Seed`, `TOTP Settings`, every `TimeOtp-*` field and every `HmacOtp-*` field are consumed, including invalid or unused sources; none becomes an ordinary credential. The next complete sync removes their old raw-field names and bindings.
 
 The name itself is the group path below `istota`, plus the entry title, lowercased and joined with underscores. So an entry titled `GitHub PAT` at the top level is `github_pat`, and an entry titled `Token` in a group `Home Assistant` is `home_assistant_token`. Notes are not read: they are free text and frequently hold something other than a credential.
 
@@ -263,7 +270,7 @@ istota/
 
 That last pair is the rule being literal rather than clever: an entry titled `URL` whose KeePass URL field is also filled contributes both.
 
-A name must start with a letter and be at most 64 characters after slugging. Values are stripped of surrounding whitespace and nothing else is normalized. What is skipped, each with a warning naming the entry and never the value: an empty field, a value over 8 KiB, a title that slugs to nothing or to a name already produced by another entry. The walk stops at 8 levels deep, 512 entries or 1024 names, warns, and applies what it read — half a namespace is a user with some credentials working, where a refusal is a user with none. Entries in the recycle bin are not read.
+A name must start with a letter and be at most 64 characters after slugging. Ordinary values are stripped of surrounding whitespace and nothing else is normalized; OTP seeds use the normalized URI described above. What is skipped, each with a warning naming the entry and never the value: an empty field, a value over 8 KiB, a title that slugs to nothing or to a name already produced by another entry. The walk stops at 8 levels deep, 512 entries or 1024 names, warns, and applies what it read — half a namespace is a user with some credentials working, where a refusal is a user with none. Entries in the recycle bin are not read.
 
 ### What a sync does
 
