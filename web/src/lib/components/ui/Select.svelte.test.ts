@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { render, cleanup, screen } from '@testing-library/svelte';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import Select from './Select.svelte';
 
 afterEach(cleanup);
@@ -75,6 +75,26 @@ describe('Select', () => {
       const { container } = render(Select, { value: '2026', options: yearOptions });
       const label = container.querySelector('.ui-select-label') as HTMLElement;
       expect(label.style.width).toBe('');
+    });
+  });
+
+  describe('touch selection off iOS (ISSUE-677)', () => {
+    it('still selects on the click that follows the tap', async () => {
+      // Off iOS, bits-ui waits for the click on the item before it selects, so
+      // the iOS ghost-click guard must not arm here or it would eat the pick.
+      const onValueChange = vi.fn();
+      render(Select, { value: '', options: yearOptions, ariaLabel: 'Year', onValueChange });
+      const trigger = screen.getByRole('button', { name: 'Year' });
+      await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+      await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+      await fireEvent.click(trigger);
+
+      const option = await screen.findByRole('option', { name: '2026' });
+      await fireEvent.pointerUp(option, { pointerType: 'touch' });
+      expect(onValueChange).not.toHaveBeenCalled();
+      await fireEvent.click(option);
+
+      expect(onValueChange).toHaveBeenCalledWith('2026');
     });
   });
 });

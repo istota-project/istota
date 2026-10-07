@@ -82,9 +82,34 @@
       .filter(Boolean)
       .join('; ') || undefined,
   );
+
+  let open = $state(false);
+
+  // iOS: bits-ui selects and closes on a tap's pointerup, so WebKit's click lands
+  // behind the item (#677). Outlives this component, since the pick may navigate.
+  function swallowGhostClick(e: PointerEvent) {
+    if (e.pointerType === 'mouse') return;
+    queueMicrotask(() => {
+      if (open) return;
+      const disarm = () => {
+        clearTimeout(timer);
+        document.removeEventListener('click', swallow, true);
+        document.removeEventListener('pointerdown', disarm, true);
+      };
+      const swallow = (click: MouseEvent) => {
+        click.preventDefault();
+        click.stopPropagation();
+        disarm();
+      };
+      const timer = setTimeout(disarm, 400);
+      document.addEventListener('click', swallow, true);
+      // A real tap starts with its own pointerdown; the ghost click never does.
+      document.addEventListener('pointerdown', disarm, true);
+    });
+  }
 </script>
 
-<BitsSelect.Root type="single" bind:value {onValueChange} {disabled}>
+<BitsSelect.Root type="single" bind:value bind:open {onValueChange} {disabled}>
   <BitsSelect.Trigger
     class="touch-target ui-select-trigger ui-select-trigger--{size}{fullWidth
       ? ' ui-select-trigger--full'
@@ -107,6 +132,7 @@
             label={opt.label}
             disabled={opt.disabled}
             class="ui-select-item"
+            onpointerup={swallowGhostClick}
           >
             {opt.label}
           </BitsSelect.Item>
