@@ -41,8 +41,8 @@ Defaults live in `[brain.claude_code]`, `[brain.tmux]`, `[brain.native]` `model`
 
 ClaudeCodeBrain constants (bare `opus`/`sonnet`/`haiku` always mean these):
 - `OPUS = "claude-opus-5-5"`
-- `SONNET = "claude-sonnet-5"`
-- `HAIKU = "claude-haiku-4-5"`
+- `SONNET = "claude-sonnet-5-5"`
+- `HAIKU = "claude-haiku-5-5"`
 
 Prior versions are canonical id plus modifier (`claude-opus-4-7:high`). The ids are restated here, in `docs/architecture/brain.md` and `config/config.example.toml`; `tests/test_model_id_docs.py` fails until all match (#548).
 

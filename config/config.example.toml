@@ -1350,8 +1350,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # (brain.claude_code.DEFAULT_ALIASES). It holds BOTH the portable tiers and the
 # provider shortcuts, base names only — effort is the orthogonal :effort modifier.
 # Shipped defaults:
-#   fast    → claude-haiku-4-5    (used by: context triage, skill classification)
-#   general → claude-sonnet-5     (used by: sleep cycle extraction + USER.md curation)
+#   fast    → claude-haiku-5-5    (used by: context triage, skill classification)
+#   general → claude-sonnet-5-5   (used by: sleep cycle extraction + USER.md curation)
 #   smart   → claude-opus-5-5     (exists for `!model smart` from Talk + any code
 #                                  path that wants "the best model")
 #   opus / sonnet / haiku         (shortcuts → the current latest of each)
