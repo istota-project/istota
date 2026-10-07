@@ -177,6 +177,7 @@
         <Input
           bind:value={name}
           readonly={editing}
+          required={!editing}
           monospace
           autocomplete="off"
           spellcheck="false"
@@ -189,16 +190,17 @@
     </div>
     <div class="cred-field">
       <SecretField
-        label="Value"
+        label="Secret"
         configured={editing}
+        required={!editing}
         {value}
         error={errors.value}
         onValueChange={(next) => (value = next)}
       />
-      {#if editing}<p class="caption">Leave empty to keep the current value.</p>{/if}
+      {#if editing}<p class="caption">Leave empty to keep the current secret.</p>{/if}
     </div>
     <div class="cred-field">
-      <Field label="Username" error={errors.username}>
+      <Field label="Username (optional)" error={errors.username}>
         <Input
           bind:value={username}
           autocomplete="off"
@@ -214,7 +216,7 @@
       {/if}
     </div>
     <div class="cred-field">
-      <Field label="Two-factor (TOTP)" error={errors.otp}>
+      <Field label="Two-factor (TOTP, optional)" error={errors.otp}>
         <Input
           type="password"
           bind:value={otp}
@@ -233,7 +235,7 @@
       {/if}
     </div>
     <div class="cred-field">
-      <Field label="Site" error={errors.url}>
+      <Field label="Site (optional)" error={errors.url}>
         <Input
           bind:value={site}
           placeholder="api.example.com"
@@ -291,7 +293,7 @@
           </p>
         </div>
         <div class="cred-field">
-          <Field label="Tasks may read the value" checkbox>
+          <Field label="Tasks may read the secret" checkbox>
             <input type="checkbox" bind:checked={revealable} />
           </Field>
           <p class="caption">Otherwise a task can only have Istota send it.</p>

@@ -73,13 +73,13 @@ describe('adding', () => {
     );
     const { onClose } = mount();
     await type(/^Name/, 'openrouter_key');
-    await type(/^Value/, SECRET);
+    await type(/^Secret/, SECRET);
     await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
 
     const name = await screen.findByText('a credential named openrouter_key already exists');
     expect(name.closest('label')?.textContent).toContain('Name');
     expect(input(/^Name/).getAttribute('aria-invalid')).toBe('true');
-    expect(input(/^Value/).value).toBe(SECRET);
+    expect(input(/^Secret/).value).toBe(SECRET);
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -90,12 +90,12 @@ describe('adding', () => {
     );
     mount();
     await type(/^Name/, 'openrouter_key');
-    await type(/^Value/, SECRET);
+    await type(/^Secret/, SECRET);
     await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
 
     const banner = await screen.findByRole('alert');
     expect(banner.textContent).toContain('not a JSON object');
-    expect(input(/^Value/).value).toBe(SECRET);
+    expect(input(/^Secret/).value).toBe(SECRET);
   });
 
   it('sends the access chosen with the site, then clears the value and closes', async () => {
@@ -108,9 +108,9 @@ describe('adding', () => {
     });
     const { onClose, onSaved } = mount();
     await type(/^Name/, 'openrouter_key');
-    await type(/^Value/, SECRET);
+    await type(/^Secret/, SECRET);
     await type(/^Site/, 'openrouter.ai');
-    const value = input(/^Value/);
+    const value = input(/^Secret/);
     await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('openrouter_key'));
@@ -139,7 +139,7 @@ describe('adding', () => {
     });
     const { onSaved } = mount();
     await type(/^Name/, 'device_pin');
-    await type(/^Value/, '4321');
+    await type(/^Secret/, '4321');
     await fireEvent.click(screen.getByRole('button', { name: 'Add credential' }));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     expect(vi.mocked(createCredential).mock.calls[0][0]).not.toHaveProperty('access');
@@ -147,8 +147,8 @@ describe('adding', () => {
 
   it('clears the value on Cancel', async () => {
     const { onClose } = mount();
-    await type(/^Value/, SECRET);
-    const value = input(/^Value/);
+    await type(/^Secret/, SECRET);
+    const value = input(/^Secret/);
     await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalled();
     expect(value.value).toBe('');
@@ -162,8 +162,8 @@ describe('editing', () => {
     expect(screen.getByRole('dialog', { name: 'Edit openrouter_key' })).toBeTruthy();
     expect(input(/^Name/).readOnly).toBe(true);
     expect(input(/^Name/).value).toBe('openrouter_key');
-    expect(input(/^Value/).value).toBe('');
-    expect(screen.getByText('Leave empty to keep the current value.')).toBeTruthy();
+    expect(input(/^Secret/).value).toBe('');
+    expect(screen.getByText('Leave empty to keep the current secret.')).toBeTruthy();
     expect(screen.getByText('Leave empty to keep it.')).toBeTruthy();
     expect(screen.queryByTestId('credential-access')).toBeNull();
   });
@@ -247,13 +247,30 @@ describe('editing', () => {
     });
     const { onSaved } = mount({ mode: 'edit', credential: LOCAL });
     await fireEvent.click(screen.getByRole('checkbox', { name: 'Remove username' }));
-    await type(/^Value/, SECRET);
+    await type(/^Secret/, SECRET);
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     expect(updateLocalCredential).toHaveBeenCalledWith(
       'openrouter_key',
       expect.objectContaining({ value: SECRET, username: '' }),
     );
+  });
+});
+
+describe('required and optional fields', () => {
+  it('requires the name and secret on add and marks the rest optional', () => {
+    mount();
+    expect(input(/^Name/).required).toBe(true);
+    expect(input(/^Secret/).required).toBe(true);
+    expect(input(/^Username \(optional\)/).required).toBe(false);
+    expect(input(/^Site \(optional\)/).required).toBe(false);
+    expect(input(/^Two-factor \(TOTP, optional\)/).required).toBe(false);
+    expect(screen.getByRole('checkbox', { name: 'Tasks may read the secret' })).toBeTruthy();
+  });
+
+  it('does not require the secret on edit, where empty keeps the stored one', () => {
+    mount({ mode: 'edit', credential: LOCAL });
+    expect(input(/^Secret/).required).toBe(false);
   });
 });
 
