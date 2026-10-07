@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { saveWalletPolicy, type WalletPolicy } from '$lib/api';
+  import { AuthError, saveWalletPolicy, type WalletPolicy } from '$lib/api';
   import { Field, Input, Select } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SettingsCard from './SettingsCard.svelte';
@@ -33,16 +33,18 @@
   }
   let initial = $state(snapshot());
   let dirty = $derived(snapshot() !== initial);
-  // The backend's v1 amount parser supports these ISO 4217 exponents.
-  const currencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'CHF', 'JPY', 'KWD', 'BHD'].map(
-    (value) => ({ value, label: value }),
-  );
+  const currencies = [...new Set([start.currency, ...Intl.supportedValuesOf('currency')])]
+    .sort()
+    .map((value) => ({ value, label: value }));
   function minor(text: string) {
     const digits = exponent(currency);
-    if (!/^\d+(\.\d+)?$/.test(text) || (text.split('.')[1]?.length ?? 0) > digits)
+    if (
+      !/^\d+(\.\d+)?$/.test(text) ||
+      (text.split('.')[1]?.replace(/0+$/, '').length ?? 0) > digits
+    )
       throw new Error('Use a non-negative amount with the currency’s number of decimal places.');
     const [whole, fraction = ''] = text.split('.');
-    const value = Number(whole + fraction.padEnd(digits, '0'));
+    const value = Number(whole + fraction.slice(0, digits).padEnd(digits, '0'));
     if (!Number.isSafeInteger(value)) throw new Error('That amount is too large.');
     return value;
   }
@@ -61,7 +63,7 @@
       initial = snapshot();
     } catch (e) {
       error = (e as Error).message;
-      onError(e);
+      if (e instanceof AuthError) onError(e);
     } finally {
       saving = false;
     }

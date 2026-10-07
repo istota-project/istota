@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { Readable } from 'node:stream';
+import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ViteDevServer } from 'vite';
 import { mockApi } from '../../../vite-mock-api';
@@ -134,4 +135,90 @@ it.each([
   expect((await (await fetch('/istota/api/settings/wallet')).json()).policy.auto_limit_cents).toBe(
     expected,
   );
+});
+
+it('changes USD defaults to JPY and clears a failed policy save on retry', async () => {
+  installMock({
+    policy: {
+      currency: 'USD',
+      auto_limit_cents: 0,
+      auto_budget_cents: 0,
+      ceiling_cents: null,
+      allow_scheduled: false,
+    },
+  });
+  render(Harness);
+  await screen.findByRole('heading', { name: 'Spending policy' });
+  const trigger = screen.getByRole('button', { name: 'Currency' });
+  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(trigger);
+  const option = await screen.findByRole('option', { name: 'JPY', exact: true });
+  await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(option);
+  await fireEvent.input(screen.getByLabelText('Auto limit per purchase'), {
+    target: { value: '125.5' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await screen.findAllByText(
+    'Use a non-negative amount with the currency’s number of decimal places.',
+  );
+  await fireEvent.input(screen.getByLabelText('Auto limit per purchase'), {
+    target: { value: '125' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(
+      (screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled,
+    ).toBe(true),
+  );
+  expect(
+    screen.queryAllByText(
+      'Use a non-negative amount with the currency’s number of decimal places.',
+    ),
+  ).toHaveLength(0);
+});
+
+it.each([
+  ['KRW', 25, 25],
+  ['CLP', 25, 25],
+  ['TND', 25125, 25.125],
+  ['OMR', 25125, 25.125],
+  ['CLF', 12345, 1.2345],
+])('renders a %s purchase in its declared units', async (currency, amount_cents, declared) => {
+  installMock({
+    purchases: [
+      {
+        id: 91,
+        task_id: 1,
+        room_token: null,
+        card_id: 1,
+        card_label: 'Everyday',
+        merchant_host: 'shop.example',
+        amount_cents,
+        currency,
+        approval: 'user',
+        state: 'completed',
+        created_at: '2026-10-06 12:00:00',
+      },
+    ],
+  });
+  render(Harness);
+  const formatted = new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(
+    declared,
+  );
+  expect(await screen.findByText(`shop.example · ${formatted.replace(/\s/g, ' ')}`)).toBeTruthy();
+});
+
+it('keeps the daemon amount exponents consistent with the UI currency data', () => {
+  const source = readFileSync('../src/istota/wallet/money.py', 'utf8');
+  const table = source.match(/_EXPONENTS = \{([\s\S]*?)\}/)?.[1] ?? '';
+  const exponents = new Map(
+    [...table.matchAll(/"([A-Z]{3})": (\d)/g)].map((match) => [match[1], Number(match[2])]),
+  );
+  expect(exponents.size).toBeGreaterThan(3);
+  for (const currency of new Set([...Intl.supportedValuesOf('currency'), ...exponents.keys()])) {
+    const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions()
+      .maximumFractionDigits;
+    expect(exponents.get(currency) ?? 2, currency).toBe(digits);
+  }
 });

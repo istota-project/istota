@@ -165,3 +165,21 @@ async def test_invalid_policy(signed_client, policy):
     response = await signed_client.put(BASE + "/policy", json=policy, headers=ORIGIN)
     assert response.status_code == 400
     assert MARKER not in response.text
+
+
+@pytest.mark.parametrize("currency,text,minor", [("KRW", "25", 25), ("CLP", "25", 25),
+                                                ("TND", "25.125", 25125), ("OMR", "25.125", 25125),
+                                                ("CLF", "1.2345", 12345)])
+async def test_declared_currency_amount_reaches_listing(signed_client, config, currency, text, minor):  # noqa: F811
+    from istota.wallet.money import parse_amount
+    ident = await add(signed_client)
+    with db.get_db(config.db_path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "Private")
+        task_id = db.create_task(conn, user_id="alice", prompt="Buy filter", conversation_token=room.token)
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+        purchases.request(conn, config, user_id="alice", task_id=task_id, card=ident,
+                          merchant="shop.example", amount_cents=parse_amount(text, currency),
+                          currency=currency, description="Filter")
+    row = (await signed_client.get(BASE)).json()["purchases"][0]
+    assert row["amount_cents"] == minor
+    assert row["currency"] == currency

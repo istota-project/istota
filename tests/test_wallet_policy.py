@@ -67,7 +67,7 @@ def test_concurrent_requests_reserve_budget(wallet_env):
         assert sorted(pool.map(buy, range(2))) == ["authorized", "held"]
 
 
-@pytest.mark.parametrize("currency,text,minor", [("USD","24.99",2499),("JPY","20",20),("KWD","1.234",1234),("BHD","1.200",1200)])
+@pytest.mark.parametrize("currency,text,minor", [("USD","24.99",2499),("JPY","20",20),("KWD","1.234",1234),("BHD","1.200",1200),("KRW","25",25),("CLP","25",25),("TND","25.125",25125),("OMR","25.125",25125),("CLF","1.2345",12345)])
 def test_amounts(currency, text, minor):
     assert parse_amount(text, currency) == minor
     assert parse_amount(format_amount(minor, currency), currency) == minor
