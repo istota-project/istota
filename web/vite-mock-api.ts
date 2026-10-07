@@ -4409,7 +4409,25 @@ const adminUsersHandler: MockHandler = ({ url, method, body }) => {
   return { __status: 404, detail: 'Unknown user action.' };
 };
 
+function mockWalletCurrencyPrecision() {
+  const exceptions: Record<string, number> = {};
+  // Include legacy codes too, just as the daemon's currency parser does.
+  for (let a = 65; a <= 90; a++) {
+    for (let b = 65; b <= 90; b++) {
+      for (let c = 65; c <= 90; c++) {
+        const currency = String.fromCharCode(a, b, c);
+        const digits =
+          new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions()
+            .maximumFractionDigits ?? 2;
+        if (digits !== 2) exceptions[currency] = digits;
+      }
+    }
+  }
+  return { default: 2, exceptions };
+}
+
 const mockWallet = {
+  currency_precision: mockWalletCurrencyPrecision(),
   enabled: true,
   refusal: null as string | null,
   cards: [

@@ -13389,6 +13389,7 @@ def _wallet_settings(user_id: str) -> dict:
     from istota.credentials.vault import vault_isolation_refusal
     from istota.wallet import cards, policy, purchases
     from istota.rooms.scopes import canonical_token
+    from istota.wallet.money import CURRENCY_EXPONENTS
 
     with db.get_db(_config.db_path) as conn:
         recent = purchases.list_purchases(conn, user_id, limit=50)
@@ -13396,7 +13397,8 @@ def _wallet_settings(user_id: str) -> dict:
             task = db.get_task(conn, purchase["task_id"])
             purchase["room_token"] = canonical_token(conn, task.conversation_token) if task and task.user_id == user_id else None
             purchase["extra_hosts"] = json.loads(purchase["extra_hosts"])
-        return {"enabled": "wallet" in _config.experimental.features,
+        return {"currency_precision": {"default": 2, "exceptions": CURRENCY_EXPONENTS},
+                "enabled": "wallet" in _config.experimental.features,
                 "refusal": vault_isolation_refusal(_config, user_id),
                 "cards": [asdict(card) for card in cards.list_cards(conn, user_id)],
                 "policy": asdict(policy.get_policy(conn, user_id)), "purchases": recent}

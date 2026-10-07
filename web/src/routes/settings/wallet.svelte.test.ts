@@ -211,7 +211,7 @@ it.each([
 
 it('keeps the daemon amount exponents consistent with the UI currency data', () => {
   const source = readFileSync('../src/istota/wallet/money.py', 'utf8');
-  const table = source.match(/_EXPONENTS = \{([\s\S]*?)\}/)?.[1] ?? '';
+  const table = source.match(/CURRENCY_EXPONENTS = \{([\s\S]*?)\}/)?.[1] ?? '';
   const exponents = new Map(
     [...table.matchAll(/"([A-Z]{3})": (\d)/g)].map((match) => [match[1], Number(match[2])]),
   );
@@ -221,4 +221,57 @@ it('keeps the daemon amount exponents consistent with the UI currency data', () 
       .maximumFractionDigits;
     expect(exponents.get(currency) ?? 2, currency).toBe(digits);
   }
+});
+
+it('uses API precision even when browser currency defaults differ', async () => {
+  installMock({
+    currency_precision: { default: 2, exceptions: { USD: 3 } },
+    policy: {
+      currency: 'USD',
+      auto_limit_cents: 25125,
+      auto_budget_cents: 0,
+      ceiling_cents: null,
+      allow_scheduled: false,
+    },
+    purchases: [
+      {
+        id: 92,
+        task_id: 1,
+        room_token: null,
+        card_id: 1,
+        card_label: 'Everyday',
+        merchant_host: 'shop.example',
+        amount_cents: 25125,
+        currency: 'USD',
+        approval: 'user',
+        state: 'completed',
+        created_at: '2026-10-06 12:00:00',
+      },
+    ],
+  });
+  render(Harness);
+  const formatted = new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 3,
+  }).format(25.125);
+  expect(await screen.findByText(`shop.example · ${formatted.replace(/\s/g, ' ')}`)).toBeTruthy();
+  expect((screen.getByLabelText('Auto limit per purchase') as HTMLInputElement).value).toBe(
+    '25.125',
+  );
+  await fireEvent.input(screen.getByLabelText('Auto limit per purchase'), {
+    target: { value: '25.250' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(
+      (screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement).disabled,
+    ).toBe(true),
+  );
+  vi.unstubAllGlobals();
+  installMock();
+  expect((await (await fetch('/istota/api/settings/wallet')).json()).policy.auto_limit_cents).toBe(
+    25250,
+  );
 });

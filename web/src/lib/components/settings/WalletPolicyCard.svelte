@@ -1,20 +1,23 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { AuthError, saveWalletPolicy, type WalletPolicy } from '$lib/api';
+  import { AuthError, saveWalletPolicy, type WalletPolicy, type WalletSettings } from '$lib/api';
   import { Field, Input, Select } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SettingsCard from './SettingsCard.svelte';
   let {
     policy,
+    precision,
     writable,
     onError,
-  }: { policy: WalletPolicy; writable: boolean; onError: (e: unknown) => void } = $props();
+  }: {
+    policy: WalletPolicy;
+    precision: WalletSettings['currency_precision'];
+    writable: boolean;
+    onError: (e: unknown) => void;
+  } = $props();
   const start = untrack(() => policy);
   function exponent(code: string) {
-    return (
-      new Intl.NumberFormat('en', { style: 'currency', currency: code }).resolvedOptions()
-        .maximumFractionDigits ?? 2
-    );
+    return precision.exceptions[code] ?? precision.default;
   }
   function amount(value: number | null) {
     return value === null

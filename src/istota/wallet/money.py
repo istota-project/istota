@@ -4,8 +4,8 @@ import re
 from decimal import Decimal
 
 MAX_MINOR_UNITS = 2**63 - 1
-# Match the Intl currency precision used by the Wallet page, including legacy codes.
-_EXPONENTS = {
+# Server-owned currency precision, seeded from Intl data including legacy codes.
+CURRENCY_EXPONENTS = {
     "ADP": 0, "AFN": 0, "ALL": 0, "BHD": 3, "BIF": 0, "BYR": 0,
     "CLF": 4, "CLP": 0, "COP": 0, "DJF": 0, "ESP": 0, "GNF": 0,
     "HUF": 0, "IDR": 0, "IQD": 0, "IRR": 0, "ISK": 0, "ITL": 0,
@@ -25,7 +25,7 @@ def currency_code(currency: str) -> str:
 
 
 def parse_amount(text: str, currency: str) -> int:
-    exponent = _EXPONENTS.get(currency_code(currency), 2)
+    exponent = CURRENCY_EXPONENTS.get(currency_code(currency), 2)
     if (not isinstance(text, str) or len(text) > 24
             or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", text)):
         raise ValueError("invalid amount")
@@ -36,7 +36,7 @@ def parse_amount(text: str, currency: str) -> int:
 
 
 def format_amount(cents: int, currency: str) -> str:
-    exponent = _EXPONENTS.get(currency_code(currency), 2)
+    exponent = CURRENCY_EXPONENTS.get(currency_code(currency), 2)
     if type(cents) is not int:
         raise ValueError("amount must use integer minor units")
     return f"{Decimal(cents) / 10**exponent:.{exponent}f}"

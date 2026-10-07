@@ -42,6 +42,10 @@ async def test_card_and_policy_round_trip(signed_client, config):  # noqa: F811
     ident = await add(signed_client)
     listing = await signed_client.get(BASE)
     data = listing.json()
+    assert data["currency_precision"]["default"] == 2
+    assert data["currency_precision"]["exceptions"]["KRW"] == 0
+    assert data["currency_precision"]["exceptions"]["OMR"] == 3
+    assert data["currency_precision"]["exceptions"]["CLF"] == 4
     assert data["enabled"] is True
     assert not data["refusal"]
     assert data["cards"][0]["last_four"] == "4242"

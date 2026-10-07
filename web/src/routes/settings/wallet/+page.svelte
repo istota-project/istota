@@ -35,9 +35,15 @@
     {#if !data.enabled}<p class="banner info">The wallet is off on this deployment.</p>{/if}
     {#if data.refusal}<p class="banner info">{data.refusal}</p>{/if}
     <WalletCardsCard cards={data.cards} {writable} onSaved={refresh} onError={report} />
-    <WalletPolicyCard policy={data.policy} {writable} onError={report} />
+    <WalletPolicyCard
+      policy={data.policy}
+      precision={data.currency_precision}
+      {writable}
+      onError={report}
+    />
     <WalletPurchasesCard
       purchases={data.purchases}
+      precision={data.currency_precision}
       {writable}
       moneyEnabled={identity.user.features.money}
       onSaved={refresh}

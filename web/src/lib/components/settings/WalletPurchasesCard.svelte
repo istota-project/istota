@@ -1,16 +1,18 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { cancelWalletPurchase, type WalletPurchase } from '$lib/api';
+  import { cancelWalletPurchase, type WalletPurchase, type WalletSettings } from '$lib/api';
   import { Badge, Button } from '$lib/components/ui';
   import SettingsCard from './SettingsCard.svelte';
   let {
     purchases,
+    precision,
     writable,
     moneyEnabled,
     onSaved,
     onError,
   }: {
     purchases: WalletPurchase[];
+    precision: WalletSettings['currency_precision'];
     writable: boolean;
     moneyEnabled: boolean;
     onSaved: () => void;
@@ -18,13 +20,14 @@
   } = $props();
   let busy = $state(false);
   function amount(purchase: WalletPurchase) {
+    const digits = precision.exceptions[purchase.currency] ?? precision.default;
     const format = new Intl.NumberFormat(undefined, {
       style: 'currency',
       currency: purchase.currency,
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
     });
-    return format.format(
-      purchase.amount_cents / 10 ** (format.resolvedOptions().maximumFractionDigits ?? 2),
-    );
+    return format.format(purchase.amount_cents / 10 ** digits);
   }
   async function cancel(id: number) {
     if (busy || !writable) return;
