@@ -3507,17 +3507,7 @@ def _admin_unmeasured_by_user(
     `'T'`, so a task stamped `2026-08-19 12:30:00` fails `>= '2026-08-19T…'` —
     and reports a plausible smaller number rather than raising.
     """
-    rows = conn.execute(
-        """
-        SELECT t.user_id, COUNT(*) AS n
-        FROM tasks t
-        WHERE t.created_at >= ?
-          AND NOT EXISTS (SELECT 1 FROM task_usage u WHERE u.task_id = t.id)
-        GROUP BY t.user_id
-        """,
-        (cutoff_sql,),
-    ).fetchall()
-    return {r["user_id"]: int(r["n"]) for r in rows}
+    return _db.unmeasured_task_counts_by_user(conn, since=cutoff_sql)
 
 
 def _admin_usage_section(conn: sqlite3.Connection, now: datetime) -> dict:

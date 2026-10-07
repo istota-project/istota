@@ -5,7 +5,7 @@ import argparse
 from istota import db
 from istota.skills._cli import fail, parse_and_resolve, run_skill_cli
 from istota.skills.skills import _guard_skill, _load_context
-from istota.usage.window import usage_window
+from istota.usage.window import unmeasured_window, usage_window
 
 _NO_SUCH_USER = "\x00"
 
@@ -34,12 +34,17 @@ def cmd_usage(args):
         else:
             groups = [db.usage_summary(conn, since=since, until=until, user_id=scope)]
             groups[0]["key"] = "all"
-        unmeasured = db.unmeasured_task_count(
-            conn, since=since_sql, until=until_sql, user_id=scope,
+        unmeasured_sql, unmeasured_since, covered = unmeasured_window(
+            since, since_sql, until_sql,
+            ctx["config"].scheduler.task_retention_days,
         )
+        unmeasured = db.unmeasured_task_count(
+            conn, since=unmeasured_sql, until=until_sql, user_id=scope,
+        ) if covered else None
     return {
         "status": "ok", "since": since, "until": until, "user_id": scope,
-        "group_by": args.by, "unmeasured_tasks": unmeasured, "groups": groups,
+        "group_by": args.by, "unmeasured_tasks": unmeasured,
+        "unmeasured_since": unmeasured_since, "groups": groups,
     }
 
 

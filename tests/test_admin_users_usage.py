@@ -238,6 +238,17 @@ class TestEmptyUser:
 
         assert row["usage_unmeasured_24h"] == 1
 
+    def test_the_unmeasured_counter_skips_command_and_skill_tasks(self, conn):
+        """ISSUE-680: neither kind calls a model, so neither is a gap."""
+        for kw in ({"command": "true"}, {"skill": "feeds"}):
+            tid = db.create_task(conn, prompt="", user_id="alice", source_type="scheduled", **kw)
+            conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?",
+                         (_sql(NOW - timedelta(hours=2)), tid))
+        conn.commit()
+
+        assert _row(conn, "alice")["usage_unmeasured_24h"] == 0
+        assert web_app._admin_usage_section(conn, NOW)["unmeasured_tasks_24h"] == 0
+
     def test_the_unmeasured_counter_uses_the_space_separated_bound(self, conn):
         """The per-user counter reads `tasks`, so it needs the other format.
 

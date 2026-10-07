@@ -343,6 +343,8 @@ class TestFiltersAndWindow:
         ignore `--since` and `--until` and describe the last 30 days while the
         table above it described something else.
         """
+        # Wider than any window below, so the retention clamp stays out of it.
+        seeded.scheduler.task_retention_days = 36500
         with db.get_db(seeded.db_path) as conn:
             old_task = db.create_task(conn, prompt="p", user_id="alice")
             new_task = db.create_task(conn, prompt="p", user_id="alice")
@@ -369,6 +371,75 @@ class TestFiltersAndWindow:
             until=(NOW - timedelta(days=30)).strftime("%Y-%m-%d"), json=True,
         )
         assert json.loads(out)["unmeasured_tasks"] == 1
+
+    def test_a_window_past_task_retention_reports_the_clamped_start(
+        self, seeded, capsys
+    ):
+        """ISSUE-680: tasks are deleted at `task_retention_days`, usage rows
+        are kept far longer. A 30-day table beside an unmeasured count that
+        can only see 7 days read as a regression on the retention date."""
+        seeded.scheduler.task_retention_days = 7
+        with db.get_db(seeded.db_path) as conn:
+            db.create_task(conn, prompt="p", user_id="alice")
+
+        _, out = _run(capsys, json=True)
+        payload = json.loads(out)
+        # Read the clock after the run: `NOW` is fixed at import, and the
+        # floor date would differ across a midnight between the two.
+        floor = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        assert payload["unmeasured_tasks"] == 1
+        assert payload["unmeasured_since"][:10] == floor
+        assert payload["unmeasured_since"] > payload["since"]
+
+        _, out = _run(capsys)
+        assert f"since {payload['unmeasured_since'][:10]}" in out
+        assert "task-retention cutoff" in out
+
+    def test_a_negative_retention_has_no_floor(self, seeded, capsys):
+        """`cleanup_old_tasks` deletes nothing for a negative value, so the
+        counter must not clamp to now and report a retained task as absent."""
+        seeded.scheduler.task_retention_days = -1
+        with db.get_db(seeded.db_path) as conn:
+            tid = db.create_task(conn, prompt="p", user_id="alice")
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ((NOW - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S"), tid),
+            )
+
+        _, out = _run(capsys, json=True)
+        payload = json.loads(out)
+        assert payload["unmeasured_tasks"] == 1
+        assert payload["unmeasured_since"] == payload["since"]
+
+    def test_the_trailer_survives_a_window_with_no_usage_rows(
+        self, seeded, capsys
+    ):
+        """An all-tmux window has no usage rows, which is exactly when the
+        unmeasured count matters; the early return used to skip it."""
+        with db.get_db(seeded.db_path) as conn:
+            db.create_task(conn, prompt="p", user_id="dave")
+
+        _, out = _run(capsys, user="dave", days=3)
+        assert "No usage recorded in this window." in out
+        assert "1 prompt task(s) in this window recorded no usage" in out
+
+    def test_a_window_inside_retention_is_not_clamped(self, seeded, capsys):
+        seeded.scheduler.task_retention_days = 7
+        _, out = _run(capsys, days=3, json=True)
+        payload = json.loads(out)
+        assert payload["unmeasured_since"] == payload["since"]
+
+    def test_a_window_wholly_before_retention_reports_no_count(
+        self, seeded, capsys
+    ):
+        """No retained task can answer for it, so the count is unknown rather
+        than zero."""
+        seeded.scheduler.task_retention_days = 7
+        _, out = _run(
+            capsys, since=(NOW - timedelta(days=40)).strftime("%Y-%m-%d"),
+            until=(NOW - timedelta(days=20)).strftime("%Y-%m-%d"), json=True,
+        )
+        assert json.loads(out)["unmeasured_tasks"] is None
 
     @pytest.mark.parametrize(
         "flag,value,expected",
