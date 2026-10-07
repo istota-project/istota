@@ -230,8 +230,9 @@ export async function getInheritedBrain(): Promise<SelectableBrain | null> {
 }
 
 /** Base model choices for the room-default picker: one `{value: canonical id,
- *  label: alias}` per distinct model, effort-suffixed aliases excluded (effort
- *  is a separate control). When several aliases map to one model, a provider
+ *  label: alias}` per distinct model. An alias's `effort` is its default effort,
+ *  not a variant, so it does not hide the alias: effort is the picker's own
+ *  control. When several aliases map to one model, a provider
  *  alias (its name appears in the canonical id, e.g. `opus` in `claude-opus-4-8`)
  *  is preferred over a role alias like `smart`, so the label reads naturally.
  *  The room header badge and the settings dropdown both consume this, so they
@@ -252,7 +253,7 @@ export async function getBaseModelChoices(
     roomId === undefined ? await loadCatalogue() : await loadRoomCatalogue(roomId, brain);
   const labelByTarget = new Map<string, string>();
   for (const a of catalogue.model_aliases ?? []) {
-    if (!a.target || a.effort !== null) continue;
+    if (!a.target) continue;
     const cur = labelByTarget.get(a.target);
     if (cur === undefined) labelByTarget.set(a.target, a.alias);
     else if (!a.target.includes(cur) && a.target.includes(a.alias)) {

@@ -15,7 +15,7 @@ from istota.config import (
     Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig,
 )
 from istota.transport.ingest import record_inbound
-from istota.brain.claude_code import OPUS
+from istota.brain.claude_code import OPUS, SONNET
 
 
 @pytest.fixture
@@ -538,5 +538,5 @@ class TestRoomCommand:
                 _ctx(config, conn, "model sonnet", surface="web")
             )
             room = db.get_room(conn, "room1")
-        assert room.model == "claude-sonnet-5"
+        assert room.model == SONNET
         assert isinstance(out, str)

@@ -1079,8 +1079,8 @@ def build_claude_cli_flags(
 # ---------------------------------------------------------------------------
 
 OPUS: str = "claude-opus-5-5"
-SONNET: str = "claude-sonnet-5"
-HAIKU: str = "claude-haiku-4-5"
+SONNET: str = "claude-sonnet-5-5"
+HAIKU: str = "claude-haiku-5-5"
 
 # The unified alias registry for *this brain* — the code-shipped floor. Maps a
 # base alias name → ``(model_id, default_effort)`` in the Anthropic namespace.

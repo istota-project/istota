@@ -121,6 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The model picker in room settings lists every configured model again. An alias given a default effort, such as an operator's `general` at medium effort, was left out, so the picker offered only the older models behind the built-in `sonnet` and `haiku` shortcuts. Those shortcuts now point at Sonnet 5.5 and Haiku 5.5 as well.
 - Questions about token usage and API list-price equivalents can now be answered directly in chat. Members can read their own usage; admins can compare all users, with missing usage records reported beside the totals.
 
 - The Add credential dialog labels the secret field Secret rather than Value, marks Username and Site optional, and requires Name and Secret before it submits. The secret input is now as wide as the fields around it: a settings field that can never clear a stored value no longer reserves space for the clear button.

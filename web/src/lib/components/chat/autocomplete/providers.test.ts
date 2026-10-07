@@ -166,6 +166,22 @@ describe('getBaseModelChoices', () => {
     expect(fetchChatCommands).toHaveBeenCalledWith();
   });
 
+  it('lists an alias that carries a default effort', async () => {
+    // An operator override such as `general = { model, effort = "medium" }`
+    // is the only alias naming its model; dropping it hid the model entirely.
+    (fetchChatCommands as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...CATALOGUE,
+      model_aliases: [
+        { alias: 'general', target: 'claude-sonnet-5-5', effort: 'medium' },
+        { alias: 'sonnet', target: 'claude-sonnet-5', effort: null },
+      ],
+    });
+    expect(await getBaseModelChoices()).toEqual([
+      { value: 'claude-sonnet-5-5', label: 'general' },
+      { value: 'claude-sonnet-5', label: 'sonnet' },
+    ]);
+  });
+
   it('asks for one room at a time and caches per room', async () => {
     // D5 Rule 2: the picker offers the aliases of the brain that would have to
     // run them, and the catalogue has no room of its own.
