@@ -2549,6 +2549,9 @@ def _selector_action(session, page, action, others=(), owned=()):
                 or origin[len("https://"):] not in hosts):
             return {"action": "fill", "selector": selector, "ok": False,
                     "error": "credential_origin_mismatch"}
+        if "expires_at" in action and time.time() >= action["expires_at"] - 1:
+            return {"action": "fill", "selector": selector, "ok": False,
+                    "error": "otp_expired"}
         value = action.get("value", "")
         if value:
             _credential_values.add(value)
@@ -3092,6 +3095,7 @@ def health():
         "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
         "credential_origin_check": True,
+        "otp_expiry_check": True,
         "card_fill": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,

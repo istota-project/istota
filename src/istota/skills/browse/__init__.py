@@ -38,7 +38,7 @@ from istota.sandbox.host_paths import (
     write_resolved,
 )
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
-from istota.skills._credref import CARD, PAIR, CardSecret, CredentialPair, credential_ref
+from istota.skills._credref import CARD, OTP_PAIR, PAIR, CardSecret, CredentialPair, OtpPair, credential_ref
 from istota.skills._hostpath import WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
 
@@ -157,18 +157,18 @@ def _profile_result(data, scope):
     return {**data, "shared_profile": True}
 
 
-def _credential_preflight(url, *, card_fill=False):
+def _credential_preflight(url, *, card_fill=False, otp_fill=False):
     """Refuse the whole action list before a credential can reach an old image."""
     headers = browser_headers()
     try:
         resp = browser_request("get", f"{url}/health", headers=headers, timeout=REQUEST_TIMEOUT)
         data = resp.json()
-        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True):
+        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True) and (not otp_fill or data.get("otp_expiry_check") is True):
             return None
     except (httpx.HTTPError, BrowserQueueTimeout, ValueError):
         pass
     return error_envelope(
-        "Credential fill refused: browser profile isolation, credential origin checks or card fill support were not confirmed. "
+        "Credential fill refused: browser profile isolation, credential origin checks, OTP expiry checks or card fill support were not confirmed. "
         "Run the full Ansible play to rebuild the browser image with credential origin checks. "
         "No interaction actions were sent."
     )
@@ -936,6 +936,14 @@ def _fill_credential_action(pair):
             "credential": True, "bound_hosts": list(pair.value.bound_hosts)}
 
 
+def _fill_otp_action(pair):
+    if not isinstance(pair, OtpPair):
+        raise ValueError("--fill-otp was not resolved; the OTP lookup did not run for this call")
+    action = _fill_credential_action(CredentialPair(pair.label, pair.value))
+    action["expires_at"] = pair.expires_at
+    return action
+
+
 _CARD_FORMATS = {
     "number": (None,), "cvc": (None,), "name": (None,),
     "exp": ("MM/YY", "MM/YYYY", "MMYY"),
@@ -1054,6 +1062,7 @@ ACTION_EMITTERS = {
     "click": _click_action,
     "fill": _fill_action,
     "fill_credential": _fill_credential_action,
+    "fill_otp": _fill_otp_action,
     "fill_card": _fill_card_action,
     "click_at": _click_at_action,
     "hover_at": _hover_at_action,
@@ -1445,7 +1454,10 @@ def cmd_interact(args):
     actions = _interact_actions(args)
     credential_fill = any(action.get("credential") for action in actions)
     if credential_fill:
-        refusal = _credential_preflight(url, card_fill=any(a.get("card_field") for a in actions))
+        refusal = _credential_preflight(
+            url, card_fill=any(a.get("card_field") for a in actions),
+            otp_fill=any("expires_at" in a for a in actions),
+        )
         if refusal:
             return refusal
 
@@ -1469,8 +1481,9 @@ def cmd_interact(args):
 
     secrets = [
         pair.value.reveal()
-        for pair in (getattr(args, "fill_credential", None) or [])
-        if isinstance(pair, CredentialPair)
+        for dest in ("fill_credential", "fill_otp")
+        for pair in (getattr(args, dest, None) or [])
+        if isinstance(pair, (CredentialPair, OtpPair))
     ]
     purchase = getattr(args, "purchase", None)
     if isinstance(purchase, CardSecret):
@@ -1786,6 +1799,11 @@ def build_parser():
             "up outside the sandbox and never enters your command line or "
             "your argv. `istota-credential list` names what is available."
         ),
+    )
+    credential_ref(
+        p_int, "--fill-otp", form=OTP_PAIR, action=OrderedAppend,
+        metavar="SELECTOR=NAME",
+        help="Fill a current two-factor code from a shared credential without displaying it",
     )
     credential_ref(p_int, "--purchase", form=CARD, metavar="ID",
                    help="Authorized purchase whose card fields may be filled")

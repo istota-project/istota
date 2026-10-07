@@ -592,6 +592,7 @@ class TestTheCoverageWalk:
             for dotted, dest, form in stamped(parser)
         }
         assert ("browse", "interact", "fill_credential", PAIR) in found
+        assert ("browse", "interact", "fill_otp", OTP_PAIR) in found
         assert ("browse", "interact", "purchase", CARD) in found
 
     def test_no_argument_carries_both_stamps(self):

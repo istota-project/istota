@@ -635,3 +635,28 @@ def test_failed_card_fill_stops_before_submit(monkeypatch):
     assert result["status"] == "error"
     assert result["error"] == "credential_option_missing"
     assert result["actions_not_run"] == 1
+
+
+@pytest.mark.parametrize("now,accepted", [(88.99, True), (89, False), (90, False)])
+def test_otp_expiry_checked_after_waiting_for_selector(monkeypatch, now, accepted):
+    page = mock.MagicMock()
+    handle = page.wait_for_selector.return_value
+    handle.owner_frame.return_value.url = "https://acme.example/login"
+    handle.evaluate.return_value = {"ok": True}
+    clock = [60]
+    page.wait_for_selector.side_effect = lambda *a, **kw: (clock.__setitem__(0, now), handle)[1]
+    monkeypatch.setattr(browse_api.time, "time", lambda: clock[0])
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result = browse_api._selector_action({}, page, {
+        "type": "fill", "selector": "#code", "value": "123456",
+        "credential": True, "bound_hosts": ["acme.example"], "expires_at": 90,
+    })
+    assert result["ok"] is accepted
+    if accepted:
+        handle.evaluate.assert_called_once()
+        assert "123456" in browse_api._credential_values
+    else:
+        assert result["error"] == "otp_expired"
+        handle.evaluate.assert_not_called()
+        assert not browse_api._credential_values
+    page.fill.assert_not_called()
