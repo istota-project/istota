@@ -149,3 +149,24 @@ def test_preview_states_configured_fill_allowance(wallet_env):
         preview = purchases.compose_preview(row, authorization_minutes=45, fills_per_purchase=2)
         assert "up to 2 times within 45 minutes" in preview
         assert "once" not in preview
+
+
+@pytest.mark.parametrize("remove", [False, True])
+def test_cancel_parked_purchase_closes_approval(wallet_env, remove):
+    from istota.relay.requests import associate_confirmation, held_question
+    path, _, card_id, task_id = wallet_env
+    with db.get_db(path) as conn:
+        purchase = request(conn, wallet_env, amount_cents=6000)
+        held = held_question(conn, task_id)
+        db.set_task_confirmation(conn, task_id, held["preview"])
+        associate_confirmation(conn, actor_user_id="alice", task_id=task_id,
+                               request_id=held["id"], preview_digest=held["preview_digest"])
+        if remove:
+            cards.remove_card(conn, "alice", card_id)
+        else:
+            purchases.cancel(conn, user_id="alice", purchase_id=purchase.purchase_id)
+        assert purchases.get_purchase(conn, "alice", purchase.purchase_id)["state"] == "cancelled"
+        assert held_question(conn, task_id) is None
+        task = db.get_task(conn, task_id)
+        assert task.status == "cancelled"
+        assert task.whatsapp_confirmation_request_id is None

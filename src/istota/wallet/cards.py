@@ -178,9 +178,15 @@ def remove_card(conn, user_id, card_id) -> int:
     _begin(conn)
     if get_card(conn, user_id, card_id) is None:
         return 0
-    count = conn.execute("UPDATE wallet_purchases SET state='cancelled', updated_at=datetime('now') "
-                         "WHERE user_id=? AND card_id=? AND state IN ('held','authorized','filled')",
-                         (user_id, card_id)).rowcount
+    from istota.wallet.purchases import OPEN_STATES, cancel
+
+    open_purchases = conn.execute("SELECT id, state FROM wallet_purchases WHERE user_id=? AND card_id=?",
+                                  (user_id, card_id)).fetchall()
+    count = 0
+    for purchase in open_purchases:
+        if purchase["state"] in OPEN_STATES:
+            cancel(conn, user_id=user_id, purchase_id=purchase["id"])
+            count += 1
     conn.execute("UPDATE wallet_purchases SET card_id=NULL WHERE user_id=? AND card_id=?", (user_id, card_id))
     for key in ("number", "cvc"):
         store.delete_secret(None, user_id, "wallet", f"card:{card_id}:{key}", connection=conn)

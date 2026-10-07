@@ -237,7 +237,13 @@ def fail(conn, *, user_id, task_id, purchase_id, reason=None):
 
 def cancel(conn, *, user_id, purchase_id, task_id=None):
     with _atomic(conn):
-        _owned_open(conn, user_id, purchase_id, task_id, OPEN_STATES)
+        row = _owned_open(conn, user_id, purchase_id, task_id, OPEN_STATES)
+        if row["state"] == "held":
+            from istota.relay.relays import close_task_questions
+            from istota.notifications.resolvers.confirmation import resolve_for_task
+
+            close_task_questions(conn, row["task_id"])
+            resolve_for_task(conn, user_id, row["task_id"], by="system")
         conn.execute("UPDATE wallet_purchases SET state='cancelled', updated_at=? WHERE id=?", (_stamp(), purchase_id))
 
 

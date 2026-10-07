@@ -124,3 +124,28 @@ def test_stopped_task_cannot_request(cli, wallet_env):
     with db.get_db(path) as conn:
         conn.execute("UPDATE tasks SET status='cancelled' WHERE id=?", (task_id,))
     assert buy(cli, code=1)["reason"] == "task_unavailable"
+
+
+def test_wallet_separator_hides_description_and_invocation():
+    from istota.agent.events import _describe_tool_use, _tool_invocation, PRIVATE_RELAY_TOOL_DESCRIPTION
+    args = ["--", "request", "--card", "Everyday", "--merchant", "shop.example",
+            "--amount", "250", "--currency", "USD", "--description", "Treatment"]
+    assert wallet.build_parser().parse_args(args).command == "request"
+    data = {"command": "istota-skill wallet " + " ".join(args), "description": "Buying Treatment for 250 USD"}
+    assert _describe_tool_use("Bash", data) == PRIVATE_RELAY_TOOL_DESCRIPTION
+    assert _tool_invocation("Bash", data) is None
+
+
+def test_cancel_held_allows_a_new_purchase(cli, wallet_env):
+    from istota.relay.requests import held_question
+    path, _, _, task_id = wallet_env
+    with db.get_db(path) as conn:
+        conn.execute("DELETE FROM wallet_policies")
+    pid = str(buy(cli)["purchase_id"])
+    cli("cancel", pid)
+    with db.get_db(path) as conn:
+        assert held_question(conn, task_id) is None
+        assert db.get_task(conn, task_id).status == "running"
+    result = cli("request", "--card", "Everyday", "--merchant", "shop.example", "--amount", "25",
+                 "--currency", "USD", "--description", "Replacement item", "--request-key", "replacement")
+    assert result["status"] == "held"
