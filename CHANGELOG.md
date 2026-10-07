@@ -113,6 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On an iPhone, picking an option from a dropdown no longer also taps whatever sat behind it. In Money, choosing Reports, Portfolio, Taxes or Business from the section menu on the Accounts page used to open Transactions for the account row under your finger (#677).
+
 - Web chat uploads refuse symlinks in their destination directories, so a task cannot redirect the next upload into another user’s or a shared folder. Sending an attachment through a symlink is also refused (#674).
 
 - Small location, chat, health and help controls are easier to tap on phones. Category collapse buttons have enough room beside their labels to avoid selecting the category by mistake.
