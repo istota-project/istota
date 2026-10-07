@@ -117,3 +117,15 @@ def test_policy_rejects_bad_values(wallet_env, field, value):
     with db.get_db(wallet_env[0]) as conn:
         with pytest.raises(ValueError):
             policy.put_policy(conn, "alice", policy.Policy(**{field: value}))
+
+
+@pytest.mark.parametrize("old_currency,new_currency", [("USD", "JPY"), ("JPY", "KWD")])
+def test_currency_change_holds_until_old_spending_leaves_window(wallet_env, old_currency, new_currency):
+    with db.get_db(wallet_env[0]) as conn:
+        policy.put_policy(conn, "alice", policy.Policy(currency=old_currency, auto_limit_cents=5000, auto_budget_cents=20000))
+        first = request(conn, wallet_env, currency=old_currency, amount_cents=1)
+        assert first.status == "authorized"
+        policy.put_policy(conn, "alice", policy.Policy(currency=new_currency, auto_limit_cents=5000, auto_budget_cents=20000))
+        assert request(conn, wallet_env, currency=new_currency).status == "held"
+        conn.execute("UPDATE wallet_purchases SET created_at=datetime('now','-31 days') WHERE id=?", (first.purchase_id,))
+        assert request(conn, wallet_env, currency=new_currency).status == "authorized"

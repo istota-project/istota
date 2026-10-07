@@ -221,7 +221,7 @@ def expire(conn, now=None) -> int:
         return expired + unreported
 
 
-def compose_preview(purchase, authorization_minutes=30) -> str:
+def compose_preview(purchase, authorization_minutes=30, fills_per_purchase=3) -> str:
     from istota.executor import _one_line
     from istota.lib.untrusted import frame_untrusted
 
@@ -233,6 +233,7 @@ def compose_preview(purchase, authorization_minutes=30) -> str:
     if hosts:
         preview += "\nAlso fills card fields on: " + ", ".join(_one_line(host)[:300] for host in hosts)
     preview += "\n" + frame_untrusted(_one_line(purchase["description"])[:500], "purchase description")
-    preview += (f"\nPurchase #{purchase['id']}. Approving lets this task fill the card once "
-                f"within {max(5, min(240, authorization_minutes))} minutes.")
+    preview += (f"\nPurchase #{purchase['id']}. Approving lets this task fill the card "
+                f"up to {max(0, fills_per_purchase)} times within "
+                f"{max(5, min(240, authorization_minutes))} minutes.")
     return preview

@@ -137,3 +137,12 @@ def test_cancel_task_only_closes_held(wallet_env):
         assert purchases.close_for_task(conn, wallet_env[3], "cancelled") == 1
         assert purchases.get_purchase(conn, "alice", authorized.purchase_id)["state"] == "authorized"
         assert purchases.get_purchase(conn, "alice", held.purchase_id)["state"] == "cancelled"
+
+
+def test_preview_states_configured_fill_allowance(wallet_env):
+    with db.get_db(wallet_env[0]) as conn:
+        purchase = request(conn, wallet_env, amount_cents=6000)
+        row = purchases.get_purchase(conn, "alice", purchase.purchase_id)
+        preview = purchases.compose_preview(row, authorization_minutes=45, fills_per_purchase=2)
+        assert "up to 2 times within 45 minutes" in preview
+        assert "once" not in preview

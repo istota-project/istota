@@ -52,15 +52,19 @@ def put_policy(conn, user_id, policy: Policy):
                   policy.ceiling_cents, policy.allow_scheduled))
 
 
-def auto_spent_cents(conn, user_id, now=None):
+def _auto_purchases(conn, user_id, now=None):
     now = now or datetime.now(timezone.utc)
     start = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-    # Sum in Python so multiple individually valid SQLite integers cannot overflow SUM.
-    return sum(row[0] for row in conn.execute(
-        "SELECT amount_cents FROM wallet_purchases WHERE user_id=? AND approval='auto' "
+    return conn.execute(
+        "SELECT amount_cents, currency FROM wallet_purchases WHERE user_id=? AND approval='auto' "
         "AND state IN ('authorized','filled','completed','unreported') AND created_at>=?",
         (user_id, start),
-    ))
+    ).fetchall()
+
+
+def auto_spent_cents(conn, user_id, now=None):
+    # Sum in Python so multiple individually valid SQLite integers cannot overflow SUM.
+    return sum(row["amount_cents"] for row in _auto_purchases(conn, user_id, now))
 
 
 def unavailable_reason(conn, config, user_id, task):
@@ -95,8 +99,13 @@ def decide(conn, config, *, user_id, task, card, amount_cents, currency, merchan
     _, scheduled = _task_context(conn, task.id, user_id)
     room = canonical_token(conn, task.conversation_token)
     shared = task.is_group_chat or bool(room and db.room_was_ever_shared(conn, room))
-    if (currency == policy.currency and amount_cents <= policy.auto_limit_cents
-            and auto_spent_cents(conn, user_id) + amount_cents <= policy.auto_budget_cents
+    history = _auto_purchases(conn, user_id)
+    spent = sum(row["amount_cents"] for row in history)
+    # A policy currency change cannot turn old minor units into new ones.
+    # Hold until that spending leaves the window, rather than invent a rate.
+    mixed_currency = any(row["currency"] != currency for row in history)
+    if (currency == policy.currency and not mixed_currency and amount_cents <= policy.auto_limit_cents
+            and spent + amount_cents <= policy.auto_budget_cents
             and (not scheduled or policy.allow_scheduled) and not shared
             and set(extra_hosts) <= PAYMENT_FRAME_HOSTS):
         return Decision("authorized", "auto")
