@@ -172,7 +172,12 @@ def parse_and_resolve(
     # own fetch budget (`[security] vault_fetch_limit_per_task`). Resolving
     # credentials first would charge that budget for a call the path check was
     # about to refuse anyway.
-    credential_refusal = resolve_credentials(parser, args)
+    from ._credref import CardRefusal
+
+    try:
+        credential_refusal = resolve_credentials(parser, args)
+    except CardRefusal as exc:
+        fail("Card fill refused", reason=str(exc))
     if credential_refusal is not None:
         fail(credential_refusal, reason="vault_credential_refused")
         # The same rule as above: `fail` exits, and the raise is what makes

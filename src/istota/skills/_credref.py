@@ -44,7 +44,7 @@ not an argparse `type=` callable is the same one: `parser.error()` is usage text
 on stderr and exit 2, which the model reads as a malformed call rather than as
 a boundary.
 
-**Every request spends from the task attempt's fetch budget**, which
+**Vault requests spend from the task attempt's fetch budget**, which
 `SkillProxy` owns (`[security] vault_fetch_limit_per_task`). An `ENTRY` is one
 request however many fields the entry has (ISSUE-583). Nothing here
 caches or de-duplicates: three `--fill-credential` flags are three requests, by
@@ -68,6 +68,9 @@ leaf (it is copied verbatim into the task's own shim directory and runs with no
 istota package on its path), and `._hostpath`, itself a leaf over
 `istota.sandbox.host_paths` — so a skill subprocess pays nothing for this beyond
 what `istota.skills.__init__` already costs.
+
+`CARD` resolves a purchase id to boxed card fields. It uses only the private
+channel and spends the purchase fill limit, never the vault fetch budget.
 """
 
 from __future__ import annotations
@@ -77,7 +80,7 @@ import logging
 import os
 from collections.abc import Sequence
 
-from istota.sandbox.credential_shim import ProxyError, fetch_credential, fetch_entry
+from istota.sandbox.credential_shim import ProxyError, fetch_card, fetch_credential, fetch_entry
 
 from ._hostpath import actions_on_path, stamped as _stamped_by
 
@@ -90,7 +93,9 @@ PAIR = "pair"
 #: The whole value is a vault entry name, resolved to every field of it.
 ENTRY = "entry"
 
-FORMS = (NAME, PAIR, ENTRY)
+CARD = "card"
+
+FORMS = (NAME, PAIR, ENTRY, CARD)
 
 #: Attribute set on the argparse action, holding the form. Named rather than
 #: inlined so the coverage walk and this module cannot disagree on the spelling.
@@ -208,6 +213,42 @@ class SecretEntry:
         raise TypeError("a SecretEntry may not be serialized")
 
 
+class CardRefusal(ProxyError):
+    """A fixed wallet refusal code for the CLI envelope."""
+
+
+class CardSecret:
+    __slots__ = ("purchase_id", "fields", "bound_hosts")
+
+    def __init__(self, purchase_id: int, fields: dict[str, SecretValue], bound_hosts=()):
+        self.purchase_id = purchase_id
+        self.fields = dict(fields)
+        self.bound_hosts = tuple(bound_hosts)
+
+    def __repr__(self):
+        return f"CardSecret(purchase_id={self.purchase_id})"
+
+    __str__ = __repr__
+
+    def __format__(self, spec):
+        return format(repr(self), spec)
+
+    def __reduce__(self):
+        raise TypeError("a CardSecret may not be serialized")
+
+
+def resolve_card(raw: str) -> CardSecret:
+    if not raw.isascii() or not raw.isdecimal() or len(raw) > 19 or not 0 < int(raw) <= 2**63 - 1:
+        raise CardRefusal("purchase_not_found")
+    purchase_id = int(raw)
+    try:
+        fields, hosts = fetch_card(purchase_id, credential_fd=os.environ.get("ISTOTA_CRED_FD"))
+    except ProxyError as exc:
+        raise CardRefusal(str(exc)) from None
+    boxed = {key: SecretValue(f"purchase:{purchase_id}.{key}", value) for key, value in fields.items()}
+    return CardSecret(purchase_id, boxed, hosts)
+
+
 def credential_ref(
     parser: argparse.ArgumentParser, *names: str, form: str = NAME, **kwargs,
 ) -> argparse.Action:
@@ -299,6 +340,8 @@ def _resolve_one(
 ) -> tuple[object | None, str | None]:
     """One stamped element under one form."""
     raw = "" if value is None else str(value).strip()
+    if form == CARD:
+        return resolve_card(raw), None
     if form == ENTRY:
         return resolve_entry(raw, operation)
     if form == PAIR:
@@ -384,6 +427,10 @@ __all__: Sequence[str] = (
     "PAIR",
     "STAMP",
     "ENTRY",
+    "CARD",
+    "CardSecret",
+    "CardRefusal",
+    "resolve_card",
     "CredentialPair",
     "SecretEntry",
     "SecretValue",
