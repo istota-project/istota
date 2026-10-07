@@ -35,6 +35,8 @@ from istota.sandbox.skill_proxy import SkillProxy
 from istota.skills import _cli
 from istota.skills._credref import (
     MODE,
+    CARD,
+    ENTRY,
     NAME,
     PAIR,
     STAMP,
@@ -578,7 +580,7 @@ class TestTheCoverageWalk:
     def test_every_stamp_declares_a_form_the_resolver_knows(self):
         for skill, parser in _skill_parsers():
             for dotted, dest, form in stamped(parser):
-                assert form in (NAME, PAIR), f"{skill} {dotted} {dest}: {form!r}"
+                assert form in (NAME, PAIR, ENTRY, CARD), f"{skill} {dotted} {dest}: {form!r}"
 
     def test_the_walk_finds_the_argument_it_is_meant_to_guard(self):
         """The walk's own control: it sees the one stamp in the tree today."""
@@ -588,6 +590,7 @@ class TestTheCoverageWalk:
             for dotted, dest, form in stamped(parser)
         }
         assert ("browse", "interact", "fill_credential", PAIR) in found
+        assert ("browse", "interact", "purchase", CARD) in found
 
     def test_no_argument_carries_both_stamps(self):
         """A host path and a credential are different authorities on one value.
