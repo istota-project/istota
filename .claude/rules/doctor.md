@@ -1,3 +1,10 @@
+---
+paths:
+  - "src/istota/doctor.py"
+  - "tests/test_doctor.py"
+  - "tests/test_cli_doctor.py"
+---
+
 # doctor.py — runtime self-check
 
 ## doctor.py

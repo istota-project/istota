@@ -1,3 +1,8 @@
+---
+paths:
+  - "src/istota/transport/sms/**"
+---
+
 # SMS
 
 SMS is one provider-neutral, user-routable push surface with Twilio and Telnyx adapters. It owns one private room per user and is never a view of it: the first accepted inbound turn mints the room, and the stable `sms-<user hash>` token becomes the room's binding ref and a permanent alias for history from before the mint. A bare `sms` destination resolves the user's current binding immediately before send. A descriptor carrying a phone number is never sent to — the binding wins and the number is ignored with a warning — so the route grammar cannot become a way to send to an arbitrary number. A destination whose user has no binding is kept rather than dropped, and records `unconfigured` with a task alert: dropping it empties the plan, which discards the answer and makes an SMS-origin confirmation complete instead of parking.

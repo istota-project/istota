@@ -1,3 +1,9 @@
+---
+paths:
+  - "src/istota/setup_wizard.py"
+  - "src/istota/updater.py"
+---
+
 # The standalone install
 
 The local single-user shape: what the wizard writes and what the updater does with it.

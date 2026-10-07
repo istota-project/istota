@@ -1,3 +1,13 @@
+---
+paths:
+  - "src/istota/relay/**"
+  - "src/istota/skills/relay/**"
+  - "src/istota/skills/room/**"
+  - "src/istota/rooms/private_replies.py"
+  - "src/istota/notifications/resolvers/relay_question.py"
+  - "src/istota/notifications/resolvers/message_relay.py"
+---
+
 # Relay questions between users
 
 A task asks another user of the same installation a question; the recipient's explicit reply returns unchanged to the asker's private conversation. The question travels to a room (web plus its Talk mirror), WhatsApp or SMS; the answer returns to a web, Talk, WhatsApp or SMS origin. The operator-facing version is `docs/features/relay.md`. WhatsApp self-sends share the request table and are in `.claude/rules/whatsapp.md`.

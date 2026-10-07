@@ -1,3 +1,8 @@
+---
+paths:
+  - "src/istota/notifications/**"
+---
+
 # Notifications: the inbox behind the bell
 
 `notifications/delivery.py` is delivery (Talk / email / ntfy). The three below are the durable open set of what is waiting on a user.

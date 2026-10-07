@@ -1,3 +1,10 @@
+---
+paths:
+  - "scripts/release.sh"
+  - "CHANGELOG.md"
+  - ".github/workflows/release.yml"
+---
+
 # Cutting a release, and the announcement that opens one
 
 `scripts/release.sh 0.41.0` does the mechanics: moves `## [Unreleased]` to `## [0.41.0] - DATE`, opens a fresh empty `[Unreleased]`, bumps `pyproject.toml`, reconciles `uv.lock` and `web/vite-mock-api.ts`, commits, tags with `--cleanup=verbatim` so the `###` headings survive, and pushes with `--follow-tags` to both remotes. `.github/workflows/release.yml` then builds the GitHub Release from `CHANGELOG.md` in the checked-out tag — never from the tag annotation, which `actions/checkout` does not reliably fetch as an object. Neither the annotation nor the release body is the chronological file: both extractors consolidate duplicate `### Added` / `### Changed` / … sections into one of each in Keep-a-Changelog order, while `CHANGELOG.md` itself stays as merged.

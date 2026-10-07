@@ -1,3 +1,13 @@
+---
+paths:
+  - "tests/**"
+  - "scripts/qt"
+  - "scripts/qtest"
+  - "scripts/test-*.sh"
+  - "docker/test/**"
+  - "pyproject.toml"
+---
+
 # Verification: the long form
 
 The short form — the commands themselves and which half to run — is in `AGENTS.md`. This is the reasoning behind each rule, kept out of the always-loaded file. The developer-facing version is `docs/development/testing.md`.

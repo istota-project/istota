@@ -1,3 +1,12 @@
+---
+paths:
+  - "src/istota/executor.py"
+  - "src/istota/prompts/**"
+  - "config/*.md"
+  - "tests/golden/prompts/**"
+  - "tests/test_prompt_golden.py"
+---
+
 # Prompt assembly: the two halves and the control directory
 
 The layer order lives in `AGENTS.md`; the split by authority and its handoff live here. `executor.md` owns the rest of `execute_task()`.

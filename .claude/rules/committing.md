@@ -1,3 +1,12 @@
+---
+paths:
+  - ".githooks/**"
+  - "scripts/check-private-data.sh"
+  - ".gitleaks.toml"
+  - ".private-data-patterns"
+  - "tests/test_private_data_scan.py"
+---
+
 # Committing: the pre-commit scans
 
 The rule in `AGENTS.md` is that both scans must run. This is what they are and how they fail. Full reference in `docs/development/secret-scanning.md`.

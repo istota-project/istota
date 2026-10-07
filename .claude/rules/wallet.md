@@ -1,3 +1,10 @@
+---
+paths:
+  - "src/istota/wallet/**"
+  - "src/istota/skills/wallet/**"
+  - "web/src/routes/settings/wallet/**"
+---
+
 # Wallet: cards and purchase authorization
 
 `wallet/` owns manual cards, policy decisions and purchase records in the framework DB. It is available by default in settings and has no module database. `wallet/cards.py`, `policy.py`, `purchases.py`, `hosts.py` and `money.py` separate storage, admission, lifecycle, host normalization and amount units. User-facing documentation is `docs/features/wallet.md`.

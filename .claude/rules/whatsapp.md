@@ -1,3 +1,10 @@
+---
+paths:
+  - "src/istota/transport/whatsapp/**"
+  - "src/istota/skills/whatsapp/**"
+  - "docker/whatsapp-baileys/**"
+---
+
 # WhatsApp
 
 One WhatsApp number through one of two adapters behind a provider seam that mirrors SMS. `baileys` (default): a paired WhatsApp Web session held by a Node sidecar, unmetered, no window, no templates. `whatsapp_cloud`: Meta's Cloud API, direct, metered, window-bound. `config.whatsapp.provider` picks one; no failover.

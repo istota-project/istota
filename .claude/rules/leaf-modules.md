@@ -1,3 +1,17 @@
+---
+paths:
+  - "src/istota/lib/**"
+  - "src/istota/config_mapper.py"
+  - "src/istota/executor_stream.py"
+  - "src/istota/rooms/surfaces.py"
+  - "src/istota/rooms/provision.py"
+  - "src/istota/webui/shutdown.py"
+  - "src/istota/webui/router_stubs.py"
+  - "src/istota/webui/map_basemap.py"
+  - "src/istota/usage/**"
+  - "src/istota/sandbox/net_guard.py"
+---
+
 # Leaf modules
 
 Single-purpose modules whose reasoning does not fit anywhere else. Each is a leaf: paths and policy are parameters, most import nothing from the package, and most never raise.

@@ -1,3 +1,10 @@
+---
+paths:
+  - "src/istota/maintenance/**"
+  - "src/istota/session/session_log.py"
+  - "src/istota/session/session_log_read.py"
+---
+
 # Maintenance: backups, migrators, sweepers, host instrumentation
 
 The scheduled and one-shot jobs that keep a deployment's disk and databases in shape, plus the native brain's session transcripts and their retention sweep.

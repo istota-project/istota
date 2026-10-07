@@ -1,3 +1,14 @@
+---
+paths:
+  - "src/istota/sandbox/**"
+  - "src/istota/credentials/**"
+  - "src/istota/executor.py"
+  - "src/istota/rooms/scopes.py"
+  - "src/istota/skills/_hostpath.py"
+  - "src/istota/skills/_cli.py"
+  - "src/istota/skills/_credref.py"
+---
+
 # Sandbox, task runtime and process boundaries
 
 The boundaries a task runs inside and the modules that build them. `executor.md` owns `execute_task()`; this file owns the environment it hands over. The devbox bullet is in `devbox.md`.

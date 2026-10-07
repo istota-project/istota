@@ -1,3 +1,11 @@
+---
+paths:
+  - "src/istota/devbox/**"
+  - "docker/devbox/**"
+  - "scripts/sync-devbox-lib.sh"
+  - "src/istota/skills/developer/**"
+---
+
 # The development container
 
 ## What it is

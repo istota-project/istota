@@ -1,3 +1,15 @@
+---
+paths:
+  - "testbed/**"
+  - "tests/smoke/**"
+  - "tests/full/**"
+  - "tests/testbed/**"
+  - "tests/support/**"
+  - "tests/test_prompt_golden.py"
+  - "docker/docker-compose*.yml"
+  - "docker/istota/render-config.sh"
+---
+
 # Testbed
 
 `testbed/` is the staging environment the deployment tiers run against: two compose shapes, the services the daemon believes are real, a session-scoped stack pool, and a probe that reads a running stack's database. It is a package beside `src/` rather than inside `tests/`, with its own `pyproject.toml`, because it is not part of the shipped application and two rigs outside this one (istota-demo, istota-redteam) are meant to consume it rather than copy it. They do not yet; see "Still open". It imports no pytest, so a failure surfaces as a raised `StackError`.
