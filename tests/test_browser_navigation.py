@@ -523,3 +523,65 @@ def test_credential_fill_never_dispatches_to_current_focus(monkeypatch):
     page.fill.assert_not_called()
     handle.evaluate.assert_called_once_with(browse_api._CREDENTIAL_FILL_JS,
                                            {"value": "fixture-password", "origin": "https://portal.example"})
+
+
+@pytest.mark.parametrize("endpoint", ["browse", "render_page"])
+def test_page_reads_scrub_registered_card_values(monkeypatch, endpoint):
+    page = mock.Mock()
+    page.url = "https://shop.example/"
+    page.is_closed.return_value = False
+    page.content.return_value = "<p>4242424242424242</p>"
+    page.title.return_value = "817"
+    monkeypatch.setattr(browse_api, "_credential_values", {"4242" * 4, "817"})
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kwargs: None)
+    monkeypatch.setattr(browse_api, "_get_session", lambda _: {"page": page})
+    monkeypatch.setattr(browse_api.chrome, "connect_cdp", lambda inst: None)
+    monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda page: None)
+    monkeypatch.setattr(browse_api.browsing, "extract_page_content", lambda *a, **kw: {
+        "text": "4242" * 4, "links": [{"href": "https://shop.example/817"}]})
+    monkeypatch.setattr(browse_api, "_collect_frames", lambda *a: ([], False))
+    monkeypatch.setattr(browse_api.render, "to_markdown", lambda html, **kw: {"markdown": html})
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(
+        get_json=lambda: {"session_id": "s1"}))
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    result = getattr(browse_api, endpoint)()
+    assert result["status"] == "ok"
+    assert "4242" not in str(result)
+    assert "817" not in str(result)
+
+
+def test_browse_scrubs_before_text_and_link_windows():
+    page = mock.Mock()
+    page.title.return_value = "Checkout"
+    page.url = "https://shop.example"
+    secret = "4242" * 4
+    page.inner_text.return_value = secret
+    link = mock.Mock()
+    link.inner_text.return_value = "x" * 95 + secret
+    link.get_attribute.return_value = "/receipt"
+    page.query_selector_all.return_value = [link]
+    result = browse_api.browsing.extract_page_content(
+        page, max_chars=8, scrub=lambda value: browse_api._scrub_extracted(value, {secret}),
+    )
+    assert result["text"] == "[REDACTE"
+    assert "4242" not in str(result)
+
+
+def test_card_failure_does_not_log_value(monkeypatch, caplog):
+    page = mock.Mock()
+    secret = "4242" * 4
+    monkeypatch.setattr(browse_api, "_credential_values", {secret})
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kw: None)
+    monkeypatch.setattr(browse_api, "_get_session", lambda _: {"page": page})
+    monkeypatch.setattr(browse_api, "_session_page", lambda _: page)
+    monkeypatch.setattr(browse_api.chrome, "connect_cdp", lambda _: None)
+    monkeypatch.setattr(browse_api, "_foreground_tabs", lambda _: ([], []))
+    monkeypatch.setattr(browse_api, "_selector_action", mock.Mock(side_effect=RuntimeError(secret)))
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(get_json=lambda: {
+        "session_id": "s1", "actions": [{"type": "fill", "credential": True, "card_field": "number"}],
+    }))
+    result, status = browse_api.interact()
+    assert status == 500
+    assert secret not in str(result)
+    assert secret not in caplog.text

@@ -38,7 +38,7 @@ from istota.sandbox.host_paths import (
     write_resolved,
 )
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
-from istota.skills._credref import PAIR, CredentialPair, credential_ref
+from istota.skills._credref import CARD, PAIR, CardSecret, CredentialPair, credential_ref
 from istota.skills._hostpath import WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
 
@@ -157,18 +157,18 @@ def _profile_result(data, scope):
     return {**data, "shared_profile": True}
 
 
-def _credential_preflight(url):
+def _credential_preflight(url, *, card_fill=False):
     """Refuse the whole action list before a credential can reach an old image."""
     headers = browser_headers()
     try:
         resp = browser_request("get", f"{url}/health", headers=headers, timeout=REQUEST_TIMEOUT)
         data = resp.json()
-        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True:
+        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True):
             return None
     except (httpx.HTTPError, BrowserQueueTimeout, ValueError):
         pass
     return error_envelope(
-        "Credential fill refused: browser profile isolation and credential origin checks were not confirmed. "
+        "Credential fill refused: browser profile isolation, credential origin checks or card fill support were not confirmed. "
         "Run the full Ansible play to rebuild the browser image with credential origin checks. "
         "No interaction actions were sent."
     )
@@ -936,6 +936,42 @@ def _fill_credential_action(pair):
             "credential": True, "bound_hosts": list(pair.value.bound_hosts)}
 
 
+
+_CARD_FORMATS = {
+    "number": (None,), "cvc": (None,), "name": (None,),
+    "exp": ("MM/YY", "MM/YYYY", "MMYY"),
+    "exp_month": ("MM", "M"), "exp_year": ("YYYY", "YY"),
+}
+
+
+def _card_field(spec):
+    field_format, sep, selector = spec.partition("=")
+    field, colon, fmt = field_format.partition(":")
+    if not sep or not selector.strip() or field not in _CARD_FORMATS:
+        raise argparse.ArgumentTypeError("--fill-card requires FIELD=SELECTOR")
+    fmt = fmt if colon else _CARD_FORMATS[field][0]
+    if fmt not in _CARD_FORMATS[field]:
+        raise argparse.ArgumentTypeError("unsupported --fill-card format")
+    return field, fmt, selector
+
+
+def _fill_card_action(spec, purchase):
+    if not isinstance(purchase, CardSecret):
+        raise ValueError("--fill-card requires a resolved --purchase")
+    field, fmt, selector = spec
+    if field in {"exp", "exp_month", "exp_year"}:
+        month = str(int(purchase.fields["exp_month"].reveal())).zfill(2)
+        year = purchase.fields["exp_year"].reveal()
+        value = {"MM/YY": month + "/" + year[-2:], "MM/YYYY": month + "/" + year,
+                 "MMYY": month + year[-2:], "MM": month, "M": str(int(month)),
+                 "YYYY": year, "YY": year[-2:]}[fmt]
+    else:
+        value = purchase.fields[field].reveal()
+    return {"type": "fill", "selector": selector, "value": value,
+            "credential": True, "card_field": field,
+            "bound_hosts": list(purchase.bound_hosts)}
+
+
 def _point(spec, flag):
     """`X,Y` in the delivered picture's pixel space → `(x, y)`.
 
@@ -1019,6 +1055,7 @@ ACTION_EMITTERS = {
     "click": _click_action,
     "fill": _fill_action,
     "fill_credential": _fill_credential_action,
+    "fill_card": _fill_card_action,
     "click_at": _click_at_action,
     "hover_at": _hover_at_action,
     "drag_at": _drag_at_action,
@@ -1100,7 +1137,10 @@ def _interact_actions(args):
             raise ValueError(
                 f"the {dest} order record does not match the values parsed"
             )
-        actions.append(ACTION_EMITTERS[dest](source[index]))
+        if dest == "fill_card":
+            actions.append(ACTION_EMITTERS[dest](source[index], getattr(args, "purchase", None)))
+        else:
+            actions.append(ACTION_EMITTERS[dest](source[index]))
     _apply_scroll_settings(args, actions)
     return actions
 
@@ -1406,7 +1446,7 @@ def cmd_interact(args):
     actions = _interact_actions(args)
     credential_fill = any(action.get("credential") for action in actions)
     if credential_fill:
-        refusal = _credential_preflight(url)
+        refusal = _credential_preflight(url, card_fill=any(a.get("card_field") for a in actions))
         if refusal:
             return refusal
 
@@ -1428,6 +1468,16 @@ def cmd_interact(args):
         "actions": actions,
     }
 
+    secrets = [
+        pair.value.reveal()
+        for pair in (getattr(args, "fill_credential", None) or [])
+        if isinstance(pair, CredentialPair)
+    ]
+    purchase = getattr(args, "purchase", None)
+    if isinstance(purchase, CardSecret):
+        secrets.extend(value.reveal() for value in purchase.fields.values())
+        secrets.extend(a["value"] for a in actions if a.get("card_field"))
+
     # Only the POST is wrapped. `_session_capture`'s GET above runs before any
     # action is sent, so a failure there is provably pre-send and must keep
     # propagating — cautioning about it would claim actions may have run
@@ -1437,13 +1487,8 @@ def cmd_interact(args):
     except PRE_SEND_TRANSPORT_ERRORS:
         raise
     except httpx.TransportError as exc:
-        return _note_unanswered_interaction(url, args.command, actions, exc)
+        return _scrub(_note_unanswered_interaction(url, args.command, actions, exc), secrets)
 
-    secrets = [
-        pair.value.reveal()
-        for pair in (getattr(args, "fill_credential", None) or [])
-        if isinstance(pair, CredentialPair)
-    ]
     decoded = _decode(resp)
     scope_confirmed = decoded.get("user_scope") == os.environ.get("ISTOTA_USER_ID")
     decoded = _note_stale_container(_scrub(decoded, secrets))
@@ -1733,6 +1778,13 @@ def build_parser():
             "your argv. `istota-credential list` names what is available."
         ),
     )
+    credential_ref(p_int, "--purchase", form=CARD, metavar="ID",
+                   help="Authorized purchase whose card fields may be filled")
+    p_int.add_argument(
+        "--fill-card", action=OrderedAppend, type=_card_field,
+        metavar="FIELD=SELECTOR",
+        help="Card field and optional expiry format; use FRAME>>>SELECTOR for a hosted field",
+    )
     p_int.add_argument(
         "--click-at", action=OrderedAppend, metavar="X,Y",
         help=(
@@ -1860,6 +1912,8 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
+    if getattr(args, "fill_card", None) and not getattr(args, "purchase", None):
+        parser.error("--fill-card requires --purchase")
 
     commands = {
         "get": cmd_get,
@@ -1888,6 +1942,12 @@ def main(argv=None):
         # That is reachable on the ordinary path, since REQUEST_TIMEOUT sits
         # above the container's own 90s watchdog.
         detail = str(exc).strip()
+        purchase = getattr(args, "purchase", None)
+        if isinstance(purchase, CardSecret):
+            secrets = [value.reveal() for value in purchase.fields.values()]
+            secrets.extend(_fill_card_action(spec, purchase)["value"]
+                           for spec in (getattr(args, "fill_card", None) or []))
+            detail = _scrub(detail, secrets)
         return error_envelope(
             f"browse {args.command} against {get_api_url()} failed: "
             f"{type(exc).__name__}{': ' + detail if detail else ''}"

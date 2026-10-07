@@ -901,7 +901,7 @@ LINKS_BOUND_BY_BUDGET = "max_links"
 LINKS_BOUND_BY_CEILING = "scan_ceiling"
 
 
-def extract_page_content(page, max_chars=None, max_links=None, offset=0):
+def extract_page_content(page, max_chars=None, max_links=None, offset=0, scrub=None):
     """Extract text content, title, and links from a page.
 
     Both budgets are caller-overridable within the ceilings above. The defaults
@@ -970,6 +970,8 @@ def extract_page_content(page, max_chars=None, max_links=None, offset=0):
     except Exception:
         text = ""
 
+    if scrub is not None:
+        text = scrub(text)
     text, text_metadata = text_window(text, max_chars, offset)
 
     links = []
@@ -1008,6 +1010,8 @@ def extract_page_content(page, max_chars=None, max_links=None, offset=0):
             scanned += 1
             href = a.get_attribute("href")
             link_text = a.inner_text().strip()
+            if scrub is not None:
+                link_text = scrub(link_text)
             if href and not href.startswith(("javascript:", "#", "mailto:")):
                 links.append({"text": link_text[:100], "href": href})
     except Exception:
