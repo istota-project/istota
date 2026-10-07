@@ -48,3 +48,29 @@ def usage_window(args):
         _sql(since_dt),
         _sql(until_dt) if until_dt else None,
     )
+
+
+def unmeasured_window(since_iso, since_sql, until_sql, retention_days, now=None):
+    """The part of a window the unmeasured-task counter can actually see.
+
+    Returns `(since_sql, since_iso, covered)`. The counter reads `tasks`, which
+    `cleanup_old_tasks` empties after `task_retention_days`, while the usage
+    table beside it keeps 180 days; a bound older than the retention floor is
+    raised to it (ISSUE-680). `covered` is False when the whole window ends
+    before the floor, where no retained task can answer and the count is
+    unknown rather than zero.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if retention_days < 0:
+        # `cleanup_old_tasks` builds `'--N days'`, which SQLite reads as NULL,
+        # so a negative value deletes nothing and there is no floor.
+        return since_sql, since_iso, True
+    now = now or datetime.now(timezone.utc)
+    floor = (now - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+    if since_sql >= floor:
+        effective, effective_iso = since_sql, since_iso
+    else:
+        effective, effective_iso = floor, floor.replace(" ", "T") + ".000Z"
+    covered = until_sql is None or effective < until_sql
+    return effective, effective_iso, covered

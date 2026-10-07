@@ -17,6 +17,8 @@ from istota.usage.telemetry import BrainUsage, ModelUsage
 @pytest.fixture
 def usage_env(tmp_path, monkeypatch):
     config = Config(db_path=tmp_path / "istota.db", admin_users={"admin"})
+    # The fixture dates are fixed; keep them inside task retention.
+    config.scheduler.task_retention_days = 36500
     db.init_db(config.db_path)
     monkeypatch.setattr("istota.config.load_config", lambda: config)
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
@@ -55,6 +57,7 @@ def test_member_reads_own_model_cost_and_unmeasured_tasks(usage_env):
     assert code == 0
     assert result["unmeasured_tasks"] == 1
     assert result["since"] == "2026-08-20T00:00:00.000Z"
+    assert result["unmeasured_since"] == "2026-08-20T00:00:00.000Z"
     assert result["until"] == "2026-08-21T00:00:00.000Z"
     assert len(result["groups"]) == 1
     group = result["groups"][0]
@@ -148,7 +151,10 @@ def test_usage_is_discoverable_for_members(usage_env):
 
 def test_console_entrypoint_reads_through_real_config(usage_env, tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text(f'db_path = "{usage_env.db_path}"\n')
+    config_path.write_text(
+        f'db_path = "{usage_env.db_path}"\n'
+        "[scheduler]\ntask_retention_days = 36500\n"
+    )
     admins = tmp_path / "admins"
     admins.write_text("admin\n")
     env = dict(os.environ, ISTOTA_CONFIG_PATH=str(config_path), ISTOTA_ADMINS_FILE=str(admins))
@@ -171,3 +177,13 @@ def test_days_must_be_positive(usage_env):
     result = run_skill_main(main, ["--days", "0"])
     assert result.exit_code == 1
     assert result.envelope["error"] == "--days must be at least 1"
+
+
+def test_unmeasured_tasks_are_clamped_to_task_retention(usage_env):
+    """ISSUE-680: the August fixture tasks are older than a 7-day retention,
+    so no retained task answers for that window and the count is unknown."""
+    usage_env.scheduler.task_retention_days = 7
+    code, result = _run("--json")
+    assert code == 0
+    assert result["unmeasured_tasks"] is None
+    assert result["unmeasured_since"] > result["until"]

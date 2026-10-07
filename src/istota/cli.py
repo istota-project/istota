@@ -39,7 +39,7 @@ from .tasks_file_poller import (
     discover_tasks_files,
     poll_user_tasks_file,
 )
-from istota.usage.window import usage_window
+from istota.usage.window import unmeasured_window, usage_window
 from istota.usage.render import (
     COST_PLACEHOLDER,
     fmt_context,
@@ -441,6 +441,25 @@ def cmd_run(args):
     reset_async_runtime()
 
 
+def _print_unmeasured(unmeasured, unmeasured_since, since):
+    """The `istota usage` trailer for prompt tasks that recorded no usage."""
+    if unmeasured:
+        where = (
+            f"since {unmeasured_since[:10]}, the task-retention cutoff,"
+            if unmeasured_since != since else "in this window"
+        )
+        print(
+            f"\n{unmeasured} prompt task(s) {where} recorded no usage "
+            "(a tmux-brain run reports none; a synthetic zero would drag every "
+            "average)."
+        )
+    elif unmeasured is None:
+        print(
+            "\nUnmeasured tasks unknown: the window ends before the "
+            f"task-retention cutoff ({unmeasured_since[:10]})."
+        )
+
+
 def cmd_usage(args):
     """Report token and cost usage. Operator-facing; run from the shell."""
     import json as _json
@@ -466,11 +485,15 @@ def cmd_usage(args):
                 groups = [db.usage_summary(conn, **filters)]
                 groups[0]["key"] = "all"
             # The same window the table above describes, in the format `tasks`
-            # stores. Deriving it separately is how the trailer came to say
+            # stores, raised to the task-retention floor where it reaches
+            # past it. Deriving it separately is how the trailer came to say
             # "in this window" about a different one.
-            unmeasured = db.unmeasured_task_count(
-                conn, since=since_sql, until=until_sql, user_id=args.user,
+            unmeasured_sql, unmeasured_since, covered = unmeasured_window(
+                since, since_sql, until_sql, config.scheduler.task_retention_days,
             )
+            unmeasured = db.unmeasured_task_count(
+                conn, since=unmeasured_sql, until=until_sql, user_id=args.user,
+            ) if covered else None
     except db.sqlite3.OperationalError as e:
         if "no such table" in str(e):
             print(
@@ -488,12 +511,13 @@ def cmd_usage(args):
         print(_json.dumps({
             "since": since, "until": until,
             "group_by": args.by, "unmeasured_tasks": unmeasured,
-            "groups": groups,
+            "unmeasured_since": unmeasured_since, "groups": groups,
         }, indent=2, default=str))
         return 0
 
     if not any(g["rows"] for g in groups):
         print("No usage recorded in this window.")
+        _print_unmeasured(unmeasured, unmeasured_since, since)
         return 0
 
     label = {"day": "Day", "user": "User", "model": "Model", "source": "Source",
@@ -546,12 +570,7 @@ def cmd_usage(args):
             f"{fmt_context(peak):>13} {pct:>18}"
         )
 
-    if unmeasured:
-        print(
-            f"\n{unmeasured} task(s) in this window recorded no usage "
-            "(a tmux-brain run reports none; a synthetic zero would drag every "
-            "average)."
-        )
+    _print_unmeasured(unmeasured, unmeasured_since, since)
     return 0
 
 

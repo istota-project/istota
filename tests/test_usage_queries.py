@@ -760,6 +760,20 @@ class TestUnmeasuredTaskCount:
             == 0
         )
 
+    def test_command_and_skill_tasks_are_not_counted(self, db_conn):
+        """ISSUE-680: a feed poll is a `_module.feeds` skill task and a cron
+        `command:` row is a shell command; neither calls a model, so neither
+        can have a usage row. Counting them buried the one gap the counter
+        exists to show under ~288 polls per user per day."""
+        db.create_task(db_conn, prompt="", command="true", user_id="alice")
+        db.create_task(db_conn, prompt="", skill="feeds", user_id="alice")
+        db.create_task(db_conn, prompt="p", user_id="alice")
+        db_conn.commit()
+
+        since = _sql_datetime(NOW - timedelta(days=7))
+        assert db.unmeasured_task_count(db_conn, since=since) == 1
+        assert db.unmeasured_task_counts_by_user(db_conn, since=since) == {"alice": 1}
+
     def test_scopes_by_user(self, db_conn):
         db.create_task(db_conn, prompt="p", user_id="alice")
         db.create_task(db_conn, prompt="p", user_id="bob")

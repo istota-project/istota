@@ -13080,6 +13080,15 @@ def _usage_summary_by_model(
     return groups
 
 
+# Only a prompt task runs a brain. A `command` task is a shell command and a
+# `skill` task (every `_module.*` job, the feed poller among them) a skill CLI;
+# neither can have a usage row, and counting them buried the gap (ISSUE-680).
+_UNMEASURED_TASK_WHERE = """
+    t.command IS NULL AND t.skill IS NULL
+    AND NOT EXISTS (SELECT 1 FROM task_usage u WHERE u.task_id = t.id)
+"""
+
+
 def unmeasured_task_count(
     conn: sqlite3.Connection,
     *,
@@ -13087,11 +13096,15 @@ def unmeasured_task_count(
     until: str | None = None,
     user_id: str | None = None,
 ) -> int:
-    """Tasks in the window with no `task_usage` row at all.
+    """Prompt tasks in the window with no `task_usage` row at all.
 
     An honesty counter: `TmuxClaudeBrain` spends real tokens and writes no row,
     and recording a synthetic zero for it would drag every average down while
-    making the dashboard look complete.
+    making the dashboard look complete. Command and skill tasks call no model
+    and are not counted.
+
+    It reads `tasks`, so it sees only `task_retention_days` back whatever
+    `since` says; `usage.window.unmeasured_window` clamps a caller's bound.
 
     **`since` and `until` are in `tasks.created_at`'s format**
     (`2026-08-20 09:00:00`), not the ISO-Z format every other function in this
@@ -13110,12 +13123,26 @@ def unmeasured_task_count(
     row = conn.execute(
         f"""
         SELECT COUNT(*) FROM tasks t
-        WHERE {" AND ".join(clauses)}
-          AND NOT EXISTS (SELECT 1 FROM task_usage u WHERE u.task_id = t.id)
+        WHERE {" AND ".join(clauses)} AND {_UNMEASURED_TASK_WHERE}
         """,
         params,
     ).fetchone()
     return int(row[0])
+
+
+def unmeasured_task_counts_by_user(
+    conn: sqlite3.Connection, *, since: str,
+) -> dict[str, int]:
+    """`unmeasured_task_count` per user, same rule and same bound format."""
+    rows = conn.execute(
+        f"""
+        SELECT t.user_id, COUNT(*) AS n FROM tasks t
+        WHERE t.created_at >= ? AND {_UNMEASURED_TASK_WHERE}
+        GROUP BY t.user_id
+        """,
+        (since,),
+    ).fetchall()
+    return {r[0]: int(r[1]) for r in rows}
 
 
 def prune_old_usage(conn: sqlite3.Connection, retention_days: int) -> int:
