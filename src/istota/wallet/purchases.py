@@ -5,14 +5,18 @@ and fill take an immediate write lock before reading policy or authorization.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import json
+from typing import TYPE_CHECKING
 
 from istota import db
 from istota.wallet import cards, policy
 from istota.wallet.hosts import normalize_merchant
 from istota.wallet.money import MAX_MINOR_UNITS, currency_code, format_amount
+
+if TYPE_CHECKING:
+    from istota.notifications.store import RaiseResult
 
 OPEN_STATES = ("held", "authorized", "filled")
 _PUBLIC_REASONS = frozenset({"card_not_found", "card_paused", "card_expired", "wallet_request_limit", "over_ceiling"})
@@ -31,6 +35,7 @@ class PurchaseResult:
     approval: str | None = None
     reason: str | None = None
     expires_at: str | None = None
+    notification: "RaiseResult | None" = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, repr=False)
@@ -115,7 +120,30 @@ def request(conn, config, *, user_id, task_id, card, merchant, amount_cents, cur
              card_view.last_four if card_view else "", merchant_host, json.dumps(hosts), amount_cents, currency,
              description, request_key, decision.state, decision.approval, decision.reason, authorized_at, expires_at),
         )
-        return _result(get_purchase(conn, user_id, cur.lastrowid))
+        purchase = get_purchase(conn, user_id, cur.lastrowid)
+        notification = None
+        if decision.state == "held":
+            from istota.relay.requests import _store_request
+
+            preview = compose_preview(purchase, minutes, config.security.wallet_fills_per_purchase)
+            held = _store_request(
+                conn, actor_user_id=user_id, task_id=task_id,
+                request_key=f"wallet-purchase-{purchase['id']}", kind="purchase",
+                recipient_user_id=user_id, text=preview, service_body=preview,
+                template_body=None, provider="wallet", binding_fingerprint="",
+                preview=preview, destination={"kind": "purchase", "purchase_id": purchase["id"]},
+            )
+            conn.execute("UPDATE wallet_purchases SET request_id=? WHERE id=?", (held["id"], purchase["id"]))
+        elif decision.state == "authorized":
+            from istota.notifications.resolvers import _common, task_alert
+
+            body = (f"{format_amount(amount_cents, currency)} {currency} at {merchant_host} "
+                    f'on "{purchase["card_label"]}" ending {purchase["card_last_four"]}')
+            notification = _common.pushing_only(task_alert.write(
+                conn, user_id, dedup_key=f"wallet-purchase:{purchase['id']}",
+                title="Purchase authorized automatically", body=body,
+            ), task_alert.WALLET_AUTO_PUSH)
+        return replace(_result(purchase), notification=notification)
 
 
 def authorize_held(conn, purchase_id, digest, *, authorization_minutes=30):

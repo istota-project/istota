@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SOURCE = "task_alert"
+WALLET_AUTO_PUSH = "A purchase was authorized automatically. Details are in your notifications."
 
 # The three alert types `_process_deferred_user_alerts` distinguishes. The model
 # writes this field, so anything else collapses onto one of them: honouring an

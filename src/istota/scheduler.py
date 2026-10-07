@@ -3538,7 +3538,12 @@ def process_one_task(
     from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
-    if relay_question and not dry_run:
+    purchase_question = relay_question if relay_question and relay_question["kind"] == "purchase" else None
+    if purchase_question and not success:
+        from istota.relay.relays import close_task_questions
+        with db.get_db(config.db_path) as conn:
+            close_task_questions(conn, task_id, reason="attempt_failed")
+    if relay_question and purchase_question is None and not dry_run:
         if run_coro(present_question(config, task=task, success=success)):
             if event_writer is not None:
                 event_writer.finish()
@@ -3642,6 +3647,10 @@ def process_one_task(
         and not is_no_final_answer(result)
         and asks_for_confirmation(result)
     )
+
+    if purchase_question and success and not dry_run:
+        result = purchase_question["preview"]
+        is_confirmation_request = True
 
     # The room was switched off while this task ran (multiplayer D12): its
     # answer is not recorded there and does not reach it. Progress it posted
@@ -3753,6 +3762,12 @@ def process_one_task(
                         task.execution_trace, attempt_trace, prompt=result,
                     ),
                 )
+                if purchase_question:
+                    from istota.relay.requests import associate_confirmation
+                    associate_confirmation(
+                        conn, actor_user_id=task.user_id, task_id=task_id,
+                        request_id=purchase_question["id"], preview_digest=purchase_question["preview_digest"],
+                    )
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
                 # Talk confirmations post the prompt to the room; web/stream
                 # confirmations surface it via the `confirmation` task event
@@ -3887,7 +3902,11 @@ def process_one_task(
                 # the bell renders the question from the live task, and a guest
                 # proposal's preview only in the authenticated bell.
                 bell_only = private_park is not None and private_park.dest is None
-                if guest_route is not None:
+                if purchase_question is not None:
+                    _park_title = confirmation_source.PURCHASE_TITLE
+                    _park_body = (confirmation_source.PARK_BELL_BODY if bell_only
+                                  else confirmation_source.PARK_BODY)
+                elif guest_route is not None:
                     _park_title = confirmation_source.ROOM_POST_TITLE
                     _park_body = (confirmation_source.ROOM_POST_BELL_BODY if bell_only
                                   else confirmation_source.ROOM_POST_BODY)
@@ -7834,6 +7853,13 @@ def run_cleanup_checks(config: Config) -> None:
     filesystem cleanup that must NOT run on the persistent asyncio loop.
     """
     sched = config.scheduler
+
+    try:
+        from istota.wallet.purchases import expire
+        with db.get_db(config.db_path) as conn:
+            expire(conn)
+    except Exception:
+        logger.exception("Wallet purchase expiry failed")
 
     # Composed inside the transaction below, delivered after it closes. The
     # notice routes by purpose now, so it can land on the web surface, whose

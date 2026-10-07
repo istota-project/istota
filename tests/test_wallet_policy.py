@@ -29,6 +29,7 @@ def test_scheduled_ancestor_holds_until_allowed(wallet_env, source):
     with db.get_db(wallet_env[0]) as conn:
         parent = db.create_task(conn, user_id="alice", source_type=source)
         child = db.create_task(conn, user_id="alice", parent_task_id=parent)
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (child,))
         assert request(conn, wallet_env, task_id=child).status == "held"
         policy.put_policy(conn, "alice", policy.Policy(auto_limit_cents=5000, auto_budget_cents=20000, allow_scheduled=True))
         assert request(conn, wallet_env, task_id=child).status == "authorized"
@@ -37,6 +38,7 @@ def test_scheduled_ancestor_holds_until_allowed(wallet_env, source):
 def test_member_shared_room_holds_and_unasked_refuses(wallet_env):
     with db.get_db(wallet_env[0]) as conn:
         member = db.create_task(conn, user_id="alice", source_type="talk", conversation_token="room", is_group_chat=True)
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (member,))
         assert request(conn, wallet_env, task_id=member).status == "held"
         unasked = db.create_task(conn, user_id="alice", conversation_token="room", is_group_chat=True)
         assert request(conn, wallet_env, task_id=unasked).reason == "wallet_unavailable"

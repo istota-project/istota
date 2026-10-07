@@ -329,6 +329,8 @@ def close_task_questions(conn, task_id: int, *, reason: str = "cancelled") -> No
             (task_id,),
         ).fetchall()
         state = "expired" if reason == "confirmation_expired" else "cancelled"
+        from istota.wallet.purchases import close_for_task
+        close_for_task(conn, task_id, "declined" if reason == "declined" else state)
         for row in rows:
             if row["relay_id"]:
                 _close_relay(conn, row["relay_id"], state=state, reason=reason)

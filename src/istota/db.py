@@ -1290,6 +1290,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # The request table the relays point at, for the same reason and in the
     # same way: a CHECK cannot be altered, so it is rebuilt.
     _migrate_skill_request_room_kinds(conn)
+    _migrate_skill_request_purchase_kind(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -7729,7 +7730,7 @@ _SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -7742,7 +7743,7 @@ _SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
     preview_digest TEXT,
     provider TEXT NOT NULL,
     binding_fingerprint TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','sent','uncertain','failed','cancelled','expired')),
+    state TEXT NOT NULL CHECK (state IN ('held','approved','queued','sending','sent','uncertain','failed','cancelled','expired')),
     approved_at TEXT,
     approved_digest TEXT,
     queue_deadline TEXT,
@@ -7780,11 +7781,20 @@ def _migrate_skill_request_room_kinds(conn: sqlite3.Connection) -> None:
     CHECK still standing. Idempotent on the table's own SQL.
     """
     _add_columns(conn, "whatsapp_skill_requests", {"origin": "TEXT", "destination": "TEXT"})
+    _rebuild_skill_request_kinds(conn, "room_post")
+
+
+def _migrate_skill_request_purchase_kind(conn: sqlite3.Connection) -> None:
+    """Admit purchase holds and their terminal approved state."""
+    _rebuild_skill_request_kinds(conn, "purchase")
+
+
+def _rebuild_skill_request_kinds(conn: sqlite3.Connection, kind: str) -> None:
     try:
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='whatsapp_skill_requests'"
         ).fetchone()
-        if row is None or "room_post" in (row[0] or ""):
+        if row is None or kind in (row[0] or ""):
             return
         cols = [r[1] for r in conn.execute("PRAGMA table_info(whatsapp_skill_requests)")]
         conn.commit()

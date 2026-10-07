@@ -25,10 +25,10 @@ REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 #: room writing to its principal privately (the name predates ISSUE-608 and is
 #: kept to avoid a CHECK rebuild), `room_post` a private-room task's post into
 #: a shared room, held for the member's approval.
-KINDS = ("self_send", "relay_question", "side_whisper", "room_post")
+KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase")
 ROOM_KINDS = ("side_whisper", "room_post")
-_SELF_KINDS = ("self_send", "side_whisper", "room_post")
-_HELD_KINDS = ("relay_question", "room_post")
+_SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase")
+_HELD_KINDS = ("relay_question", "room_post", "purchase")
 
 
 class RequestError(ValueError):
@@ -224,7 +224,7 @@ def cleanup_content(conn: sqlite3.Connection, *, limit: int = 100) -> int:
         requests = conn.execute(
             """SELECT id FROM whatsapp_skill_requests WHERE content_cleared_at IS NULL
                AND closed_at <= datetime('now', ?)
-               AND state IN ('sent','failed','cancelled','expired','uncertain')
+               AND state IN ('approved','sent','failed','cancelled','expired','uncertain')
                AND NOT EXISTS (SELECT 1 FROM message_relays r WHERE r.request_id=whatsapp_skill_requests.id
                                AND r.content_cleared_at IS NULL)
                ORDER BY closed_at,id LIMIT ?""",
@@ -783,7 +783,7 @@ def park_question(conn, config, *, task) -> dict | None:
         return dict(row)
 
 
-def approve_request(conn, *, task, request_id: str, preview_digest: str) -> None:
+def approve_request(conn, *, task, request_id: str, preview_digest: str, config=None) -> None:
     """Only the currently displayed immutable request receives authority."""
     from istota.relay import relays as message_relays
     with write_transaction(conn):
@@ -799,8 +799,29 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str) -> None
         if row["relay_id"] and message_relays.is_blocked(
                 conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
             raise RequestError("recipient_unavailable")
-        _queue_question(conn, request_id=request_id, relay_id=row["relay_id"],
-                        digest=preview_digest, approval="user")
+        if row["kind"] == "purchase":
+            from istota.wallet import purchases
+
+            destination = json.loads(row["destination"] or "{}")
+            purchase = purchases.get_purchase(conn, task.user_id, destination.get("purchase_id"))
+            if (purchase is None or purchase["task_id"] != task.id
+                    or purchase["request_id"] != request_id):
+                raise RequestError("confirmation_unavailable")
+            try:
+                purchases.authorize_held(
+                    conn, purchase["id"], preview_digest,
+                    authorization_minutes=config.security.wallet_authorization_minutes if config else 30,
+                )
+            except purchases.WalletRefusal:
+                raise RequestError("confirmation_unavailable") from None
+            conn.execute(
+                "UPDATE whatsapp_skill_requests SET state='approved', approved_digest=?, "
+                "approved_at=datetime('now'), closed_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
+                (preview_digest, request_id),
+            )
+        else:
+            _queue_question(conn, request_id=request_id, relay_id=row["relay_id"],
+                            digest=preview_digest, approval="user")
         conn.execute("UPDATE tasks SET whatsapp_confirmation_request_id=NULL WHERE id=?", (task.id,))
 
 

@@ -78,6 +78,9 @@ def test_authorize_expire_and_close_for_task(wallet_env):
     with db.get_db(wallet_env[0]) as conn:
         held = request(conn, wallet_env, amount_cents=6000)
         purchases.authorize_held(conn, held.purchase_id, "digest")
+        # This store-level test authorizes directly; settle its associated hold.
+        from istota.relay.relays import close_task_questions
+        close_task_questions(conn, wallet_env[3])
         assert purchases.list_purchases(conn, "alice")[0]["approval"] == "user"
         filled = request(conn, wallet_env)
         claim(conn, wallet_env, filled.purchase_id)

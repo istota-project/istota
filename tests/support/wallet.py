@@ -19,6 +19,7 @@ def wallet_fixture(db_path, monkeypatch):
     with db.get_db(db_path) as conn:
         card_id = cards.add_card(conn, "alice", CARD)
         task_id = db.create_task(conn, user_id="alice", source_type="talk")
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
         policy.put_policy(conn, "alice", policy.Policy(auto_limit_cents=5000, auto_budget_cents=20000, ceiling_cents=50000))
     return db_path, config, card_id, task_id
 
