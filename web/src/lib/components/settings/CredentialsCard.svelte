@@ -209,6 +209,7 @@
               {/if}
             </div>
             <div class="cred-badges">
+              {#if credential.otp}<Badge size="sm">2FA</Badge>{/if}
               <span class="cred-source cred-source-{credential.source}">
                 <Badge size="sm">{SOURCE_LABEL[credential.source] ?? credential.source}</Badge>
               </span>

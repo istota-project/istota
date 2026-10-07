@@ -473,3 +473,13 @@ describe('the credential form', () => {
     expect((within(dialog).getByLabelText('Site') as HTMLInputElement).value).toBe('openrouter.ai');
   });
 });
+
+it('labels local and vault credentials with two-factor', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue(
+    settings({
+      credentials: [portal({ otp: true }), local({ otp: true, otp_set: true })],
+    }),
+  );
+  render(CredentialsCard);
+  await waitFor(() => expect(screen.getAllByText('2FA')).toHaveLength(2));
+});

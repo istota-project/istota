@@ -61,6 +61,8 @@ type MockCredential = {
   url?: string;
   extra_hosts?: string;
   username_set?: boolean;
+  otp_set?: boolean;
+  otp: boolean;
 };
 // The server's `bindings.DEFAULT_HEADERS`, applied when no headers are named.
 const MOCK_DEFAULT_HEADERS = ['authorization', 'private-token', 'x-api-key', 'x-auth-token'];
@@ -70,6 +72,8 @@ const mockCredentials: MockCredential[] = [
   {
     name: 'openrouter_key',
     source: 'local',
+    otp: false,
+    otp_set: false,
     hosts: ['openrouter.ai'],
     headers: MOCK_DEFAULT_HEADERS,
     revealable: false,
@@ -81,6 +85,7 @@ const mockCredentials: MockCredential[] = [
   {
     name: 'portal',
     source: 'vault',
+    otp: true,
     hosts: ['portal.example.com'],
     headers: MOCK_DEFAULT_HEADERS,
     revealable: false,
@@ -89,6 +94,7 @@ const mockCredentials: MockCredential[] = [
   {
     name: 'forge.github',
     source: 'config',
+    otp: false,
     hosts: ['github.com', 'api.github.com'],
     headers: MOCK_DEFAULT_HEADERS,
     revealable: false,
@@ -146,6 +152,14 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
       };
     }
     const hosts = mockCredentialHosts(b.url ?? '', b.extra_hosts ?? '');
+    if (b.otp && hosts.length === 0) {
+      return {
+        __status: 400,
+        detail: 'two-factor needs a site',
+        field: 'otp',
+        code: 'otp_needs_site',
+      };
+    }
     if (b.access && hosts.length === 0) {
       return {
         __status: 400,
@@ -171,6 +185,8 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
       url: b.url ?? '',
       extra_hosts: b.extra_hosts ?? '',
       username_set: !!b.username,
+      otp: !!b.otp,
+      otp_set: !!b.otp,
     });
     mockCredentials.sort((a, c) => a.name.localeCompare(c.name));
     return {
@@ -194,6 +210,15 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
     }
     const b = (body ?? {}) as Record<string, any>;
     const hosts = mockCredentialHosts(b.url ?? '', b.extra_hosts ?? '');
+    const otpSet = b.otp == null ? !!row.otp_set : b.otp !== '';
+    if (otpSet && !hosts.length) {
+      return {
+        __status: 400,
+        detail: 'two-factor needs a site',
+        field: 'otp',
+        code: 'otp_needs_site',
+      };
+    }
     if (!hosts.length && row.grant) {
       return {
         __status: 400,
@@ -201,6 +226,8 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
         field: 'url',
       };
     }
+    row.otp_set = otpSet;
+    row.otp = otpSet;
     row.hosts = hosts;
     row.url = b.url ?? '';
     row.extra_hosts = b.extra_hosts ?? '';

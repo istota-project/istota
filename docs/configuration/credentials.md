@@ -112,9 +112,10 @@ On a deployment with several configured users and no effective sandbox, the stor
 
 | Field | Rule |
 |---|---|
-| Name | What tasks use, typed exactly; it is never rewritten. Lowercase letters, digits and single underscores, starting with a letter, and short enough that `<name>_username` fits in 64 characters. Names starting with `generated_` (where tasks create credentials) or `forge.` are refused. The name and its `<name>_username` and `<name>_url` must not already be in use by any credential. Read-only once created. |
+| Name | What tasks use, typed exactly; it is never rewritten. Lowercase letters, digits and single underscores, starting with a letter, and short enough that `<name>_username` fits in 64 characters. Names starting with `generated_` (where tasks create credentials) or `forge.` are refused. The name and its `<name>_username`, `<name>_url` and `<name>_totp` must not already be in use by any credential. Read-only once created. |
 | Value | Required. Refused when empty, when it has leading or trailing whitespace (refused rather than trimmed, since trimming changes a credential), or over 8 KiB. |
 | Username | Optional. Same rules as the value. Stored as `<name>_username`. |
+| Two-factor (TOTP) | Optional. Paste an `otpauth://totp/` URI or a base32 secret. Requires a bound site. Istota stores the seed privately and fills current codes with `browse interact --fill-otp`; the seed is never returned to tasks or the settings page. |
 | Site | Optional. A bare `host[:port]` or a URL with nothing after the host. A path, query string, fragment or `user@` part is refused, because the site is shown back on the page and a token pasted into one would come back with it. `http://` is accepted, and the row shows "HTTPS required" until its access allows HTTP. Stored as `<name>_url`, and the credential is bound to that host. |
 | Access | Shown once a site is filled in, defaulting to all rooms, no scheduled use and no HTTP. A credential with no site cannot be granted. |
 
@@ -122,9 +123,9 @@ Under **More options**: "Also used on" takes further comma-separated `host[:port
 
 The value crosses the network once, in the body of an authenticated, origin-checked request, and is never shown again. The write routes read the body themselves rather than through a declared model, so a bad request is a 400 naming the field and never echoing what was sent; a body over 64 KiB, or one with no declared length, is a 413. The log records the verb and the credential name.
 
-**Edit** is offered for Istota credentials only. Leave the value empty to keep it. Leave the username empty to keep it, or tick "Remove username". A site change takes effect on the next request, as a KeePassXC edit does. Clearing the site of a credential that has access is refused: remove its access first, or keep a site.
+**Edit** is offered for Istota credentials only. Leave the value empty to keep it. Leave the username empty to keep it, or tick "Remove username". Leave two-factor empty to keep it, type a new seed to replace it, or tick "Remove two-factor". Credentials with a seed show a "2FA" label. A site change takes effect on the next request, as a KeePassXC edit does. Clearing the site while keeping two-factor is refused. Clearing the site of a credential that has access is refused: remove its access first, or keep a site.
 
-**Delete** removes the value, username, URL, binding and access together. Nothing brings an Istota credential back.
+**Delete** removes the value, username, URL, two-factor seed, bindings and access together. Nothing brings an Istota credential back.
 
 ### When a KeePassXC entry has the same name
 
