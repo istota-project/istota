@@ -14,7 +14,12 @@ from istota.sandbox import credential_shim
 from istota.sandbox.skill_proxy import SkillProxy
 from istota.storage import VaultLocation
 from tests.support.kdbx import create_database
-from tests.test_skill_proxy_vault_create import _request, sock as sock
+from tests import test_skill_proxy_vault_create as _vault_create
+from tests.test_skill_proxy_vault_create import _request
+
+# Bound by assignment, not import: ruff reads a test parameter named after an
+# imported fixture as a redefinition (F811), and pytest finds either.
+sock = _vault_create.sock
 
 SEED = "JBSWY3DP" * 4
 
