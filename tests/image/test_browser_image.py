@@ -38,5 +38,7 @@ with browse_api.app.test_client() as client:
     response = client.get('/health')
     assert response.status_code == 200
     assert response.get_json()['secret_capture'] is True
+    assert response.get_json()['secret_capture_download'] is True
+    assert response.get_json()['secret_discovery'] is True
 """], entrypoint="python", timeout=60)
     assert_ok(result, "browser secret capture capability")

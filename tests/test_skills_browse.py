@@ -4075,11 +4075,12 @@ class TestSaveRecovery:
 class TestSecretCapture:
     proxy = TestSaveRecovery.proxy
     recovery_proxy = TestSaveRecovery.recovery_proxy
-    HEALTH = TestSaveRecovery.HEALTH
+    HEALTH = {**TestSaveRecovery.HEALTH, "secret_capture_download": True, "secret_discovery": True}
     VAULT = {}
     @pytest.mark.parametrize("flag,kind,text", [
         ("--capture-otp", "otp", "Your secret key is JBSW Y3DP EHPK 3PXP"),
         ("--capture-codes", "codes", "Your scratch token is a1b2c3d4e5"),
+        ("--capture-codes-download", "codes", "Your scratch token is a1b2c3d4e5"),
         ("--capture-phrase", "phrase", "apple " * 12),
     ])
     def test_capture_shape_and_audit(self, recovery_proxy, capsys, caplog, flag, kind, text):
@@ -4102,5 +4103,35 @@ class TestSecretCapture:
         assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme" + member)
         with db.get_db(config.db_path) as conn:
             row = conn.execute("SELECT detail_json FROM credential_audit WHERE action='capture'").fetchone()
-            assert json.loads(row[0]) == {"kind": kind, "count": 1, "source": "page", "replaced": False}
+            assert json.loads(row[0]) == {"kind": kind, "count": 1, "source": "download" if flag.endswith("-download") else "page", "replaced": False}
             assert text.strip() not in "\n".join(conn.iterdump())
+
+
+@pytest.mark.parametrize("argv", [
+    ["get", "https://acme.example", "--mask-secrets"],
+    ["render", "https://acme.example", "--mask-secrets"],
+    ["extract", "https://acme.example", "-s", "input", "--mask-secrets"],
+    ["interact", "s1", "--mask-secrets", "--find-secrets"],
+])
+@pytest.mark.parametrize("capable", [True, False])
+def test_secret_discovery_cli_preflight_and_payload(argv, capable, capsys):
+    health = {**TestSaveRecovery.HEALTH, "secret_discovery": capable}
+    with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=health)), patch(
+        "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json={"status": "ok"}),
+    ) as post:
+        if capable:
+            main(argv)
+            assert post.call_args.kwargs["json"]["mask_secrets"] is True
+            if argv[0] == "interact":
+                assert post.call_args.kwargs["json"]["actions"] == [{"type": "find_secrets"}]
+        else:
+            with pytest.raises(SystemExit):
+                main(argv)
+            post.assert_not_called()
+    capsys.readouterr()
+
+
+def test_download_requires_its_own_capability():
+    from istota.skills.browse import _credential_preflight
+    with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=TestSaveRecovery.HEALTH)):
+        assert _credential_preflight("http://browser", recovery_save=True, recovery_download=True)["status"] == "error"

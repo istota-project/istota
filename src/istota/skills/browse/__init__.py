@@ -160,18 +160,18 @@ def _profile_result(data, scope):
     return {**data, "shared_profile": True}
 
 
-def _credential_preflight(url, *, card_fill=False, otp_fill=False, recovery_save=False):
+def _credential_preflight(url, *, card_fill=False, otp_fill=False, recovery_save=False, recovery_download=False, discovery=False):
     """Refuse the whole action list before a credential can reach an old image."""
     headers = browser_headers()
     try:
         resp = browser_request("get", f"{url}/health", headers=headers, timeout=REQUEST_TIMEOUT)
         data = resp.json()
-        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True) and (not otp_fill or data.get("otp_expiry_check") is True) and (not recovery_save or data.get("secret_capture") is True):
+        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True) and (not otp_fill or data.get("otp_expiry_check") is True) and (not recovery_save or data.get("secret_capture") is True) and (not recovery_download or data.get("secret_capture_download") is True) and (not discovery or data.get("secret_discovery") is True):
             return None
     except (httpx.HTTPError, BrowserQueueTimeout, ValueError):
         pass
     return error_envelope(
-        "Credential fill refused: browser profile isolation, credential origin checks, OTP expiry checks, recovery code saving or card fill support were not confirmed. "
+        "Credential fill refused: browser profile isolation, credential origin checks, OTP expiry checks, recovery code saving, secret masking, discovery, downloads or card fill support were not confirmed. "
         "Run the full Ansible play to rebuild the browser image with credential origin checks. "
         "No interaction actions were sent."
     )
@@ -276,6 +276,10 @@ def _decode(resp):
 def cmd_get(args):
     """Browse a URL and return page content."""
     url = get_api_url()
+    if getattr(args, "mask_secrets", False):
+        refusal = _credential_preflight(url, discovery=True)
+        if refusal:
+            return refusal
     if not args.url and not args.session:
         return {"status": "error", "error": "get needs a URL or --session <id>"}
     payload = {
@@ -296,6 +300,9 @@ def cmd_get(args):
     if args.max_links:
         payload["max_links"] = args.max_links
 
+    if getattr(args, "mask_secrets", False):
+        payload["mask_secrets"] = True
+
     resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     return _decode(resp)
 
@@ -308,6 +315,10 @@ def cmd_render(args):
     silence (ISSUE-516). `--include-frames` is what splices that content in.
     """
     url = get_api_url()
+    if getattr(args, "mask_secrets", False):
+        refusal = _credential_preflight(url, discovery=True)
+        if refusal:
+            return refusal
     if not args.url and not args.session:
         return {
             "status": "error",
@@ -333,6 +344,9 @@ def cmd_render(args):
         payload["include_frames"] = True
     if args.skip_behavior:
         payload["skip_behavior"] = True
+
+    if getattr(args, "mask_secrets", False):
+        payload["mask_secrets"] = True
 
     resp = browser_request("post", f"{url}/render", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     if resp.status_code == 404:
@@ -843,6 +857,10 @@ def cmd_screenshot(args):
 def cmd_extract(args):
     """Extract content by CSS selector."""
     url = get_api_url()
+    if getattr(args, "mask_secrets", False):
+        refusal = _credential_preflight(url, discovery=True)
+        if refusal:
+            return refusal
     payload = {
         "selector": args.selector,
         "timeout": args.timeout,
@@ -855,6 +873,9 @@ def cmd_extract(args):
         payload["max_chars"] = args.max_chars
     if args.limit:
         payload["limit"] = args.limit
+
+    if getattr(args, "mask_secrets", False):
+        payload["mask_secrets"] = True
 
     resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     return _decode(resp)
@@ -947,11 +968,11 @@ def _fill_otp_action(pair):
     return action
 
 
-def _save_recovery_action(target, kind="codes"):
+def _save_recovery_action(target, kind="codes", *, download=False):
     if not isinstance(target, RecoveryTarget):
         raise ValueError("--save-recovery was not resolved; the credential lookup did not run for this call")
     # `credential` puts it under the same preflight and profile check as a fill.
-    return {"type": "read_secret", "kind": kind, "selector": target.label, "credential": True,
+    return {"type": "read_secret_download" if download else "read_secret", "kind": kind, "selector": target.label, "credential": True,
             "bound_hosts": list(target.bound_hosts), "credential_name": target.name}
 
 
@@ -1076,6 +1097,8 @@ ACTION_EMITTERS = {
     "fill_otp": _fill_otp_action,
     "save_recovery": _save_recovery_action,
     "capture_codes": _save_recovery_action,
+    "capture_codes_download": lambda target: _save_recovery_action(target, download=True),
+    "find_secrets": lambda marker: {"type": "find_secrets"},
     "capture_otp": lambda target: _save_recovery_action(target, "otp"),
     "capture_phrase": lambda target: _save_recovery_action(target, "phrase"),
     "fill_card": _fill_card_action,
@@ -1488,7 +1511,7 @@ def _save_recovered(decoded, actions, *, store=True):
     saved = []
     for index, result in enumerate(results):
         action = actions[index] if index < len(actions) else {}
-        if action.get("type") not in ("read_secret", "read_recovery") or not isinstance(result, dict):
+        if action.get("type") not in ("read_secret", "read_recovery", "read_secret_download") or not isinstance(result, dict):
             saved.append(result)
             continue
         entry = {"action": "capture_" + action.get("kind", "codes"), "selector": action.get("selector", ""),
@@ -1496,6 +1519,8 @@ def _save_recovered(decoded, actions, *, store=True):
         slot = result.get("recovery")
         if result.get("ok") is not True:
             entry.update(ok=False, error=result.get("error") or "recovery_read_failed")
+            if isinstance(result.get("candidates"), list):
+                entry["candidates"] = result["candidates"]
         elif type(slot) is not int or not 0 <= slot < len(texts) or not isinstance(texts[slot], str):
             entry.update(ok=False, error="recovery_not_returned")
         elif not store:
@@ -1503,6 +1528,7 @@ def _save_recovered(decoded, actions, *, store=True):
         else:
             try:
                 entry = capture_secret(entry["name"], action.get("kind", "codes"), texts[slot],
+                                       source="download" if action.get("type") == "read_secret_download" else "page",
                                        credential_fd=os.environ.get("ISTOTA_CRED_FD"))
             except CredentialProxyError as exc:
                 entry.update(ok=False, error=str(exc))
@@ -1515,11 +1541,15 @@ def cmd_interact(args):
     url = get_api_url()
     actions = _interact_actions(args)
     credential_fill = any(action.get("credential") for action in actions)
-    if credential_fill:
+    discovery = (getattr(args, "mask_secrets", False) or
+                 any(a.get("type") == "find_secrets" or a.get("selector") == "auto" for a in actions))
+    if credential_fill or discovery:
         refusal = _credential_preflight(
             url, card_fill=any(a.get("card_field") for a in actions),
             otp_fill=any("expires_at" in a for a in actions),
-            recovery_save=any(a.get("type") in ("read_secret", "read_recovery") for a in actions),
+            recovery_save=any(a.get("type") in ("read_secret", "read_recovery", "read_secret_download") for a in actions),
+            recovery_download=any(a.get("type") == "read_secret_download" for a in actions),
+            discovery=discovery,
         )
         if refusal:
             return refusal
@@ -1541,6 +1571,8 @@ def cmd_interact(args):
         "session_id": args.session_id,
         "actions": actions,
     }
+    if discovery:
+        payload["mask_secrets"] = True
 
     secrets = [
         pair.value.reveal()
@@ -1870,7 +1902,7 @@ def build_parser():
         metavar="SELECTOR=NAME",
         help="Fill a current two-factor code from a shared credential without displaying it",
     )
-    for flag in ("--capture-otp", "--capture-codes", "--capture-phrase", "--save-recovery"):
+    for flag in ("--capture-otp", "--capture-codes", "--capture-phrase", "--capture-codes-download", "--save-recovery"):
         credential_ref(p_int, flag, form=RECOVERY_PAIR, action=OrderedAppend,
                        metavar="SELECTOR=NAME", help=argparse.SUPPRESS if flag == "--save-recovery" else
                        "Capture a secret from the generated credential's site without displaying it")
@@ -1962,6 +1994,10 @@ def build_parser():
     p_int.add_argument(
         "--scroll-amount", type=int, default=None, help=argparse.SUPPRESS,
     )
+
+    p_int.add_argument("--find-secrets", action=OrderedFlag, help="Find secret shapes and selectors without returning their values")
+    for secret_parser in (p_get, p_render, p_ext, p_int):
+        secret_parser.add_argument("--mask-secrets", action="store_true", help="Mask possible secrets before returning page text")
 
     # links
     p_links = sub.add_parser("links", help="Fetch a page and return only links")

@@ -51,6 +51,8 @@ _DAEMON_ONLY_MESSAGES = {
     "codes_inconsistent": "The recovery codes do not have a consistent shape.",
     "codes_too_many": "The selected text contains too many recovery codes.",
     "phrase_word_count": "A recovery phrase must have 12, 15, 18, 21 or 24 words.",
+    "capture_auto_ambiguous": "Choose one secret candidate before capturing it.",
+    "capture_download_not_text": "Recovery downloads must be UTF-8 text files without NUL bytes.",
     "capture_source_invalid": "The secret capture source is invalid.",
     "recovery_format": "Choose codes, phrase or block as the recovery format.",
     "credential_is_otp_seed": "Credential is an OTP seed; use browse --fill-otp",
