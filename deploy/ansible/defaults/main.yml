@@ -812,6 +812,11 @@ istota_whatsapp_provider: ""
 # paired session carries its own.
 istota_whatsapp_business_phone_number: ""  # exact E.164
 
+# In a group, how long a member's photo or GIF with no caption waits for the
+# same member's next message, which is then read as its caption so the pair
+# gets one answer. 0 answers the file at once.
+istota_whatsapp_group_bare_file_hold_seconds: 30
+
 # Baileys adapter. The systemd sidecar restarts after logout; a daemon-spawned
 # sidecar_command is an alternative. Setting both is refused because two clients
 # can corrupt one paired session. Enabling the unit needs a full play to install

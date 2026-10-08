@@ -2497,3 +2497,23 @@ class TestTheSpeechGateDefaultsLiveInTheDataclass:
         assert gate.timeout_seconds == 30.0
         assert gate.decision_retention_days == 0
 
+
+
+class TestTheGroupBareFileHold:
+    """The role's default is the dataclass default, and a set value reaches the
+    loaded config: the 2-minute cron ships the reader without re-rendering the
+    file, so the two defaults disagreeing would change behaviour on a deploy."""
+
+    def test_the_default_matches_the_dataclass(self, parsed):
+        from istota.config import WhatsAppConfig
+
+        assert (
+            parsed["whatsapp"]["group_bare_file_hold_seconds"]
+            == WhatsAppConfig().group_bare_file_hold_seconds
+        )
+
+    def test_a_configured_value_reaches_the_loaded_config(self):
+        config = load_config_from(
+            render(istota_whatsapp_group_bare_file_hold_seconds=0)
+        )
+        assert config.whatsapp.group_bare_file_hold_seconds == 0

@@ -95,10 +95,6 @@ QUOTE_WINDOW_SECONDS = 24 * 3600
 #: wait plus its 10-second lock wait, rounded up), so a claim that was in its
 #: window when asked is not refused for the fetch's own duration.
 CLAIM_SLACK_SECONDS = 120
-#: How long a member's opened photo or GIF with no caption waits before its
-#: task runs, so the words people send a few seconds after the file reach the
-#: same answer (`_held_bare_file`). Observed gaps were 9 and 13 seconds.
-BARE_FILE_HOLD_SECONDS = 30
 #: The kinds a bare file is held for. A voice note is not: it carries words.
 _HELD_KINDS = frozenset({"image", "gif"})
 
@@ -1076,7 +1072,13 @@ def handle_group_message(
         return done(WhatsAppEventResult(
             f"group_{outcome.outcome}", user_id=user_id,
         ))
-    bare = attached and not text and event.message_type in _HELD_KINDS
+    # `[whatsapp] group_bare_file_hold_seconds`: how long the file waits for
+    # the words people send a few seconds after it (`_held_bare_file`).
+    hold_seconds = max(0, config.whatsapp.group_bare_file_hold_seconds)
+    bare = (
+        hold_seconds > 0 and attached and not text
+        and event.message_type in _HELD_KINDS
+    )
     outcome = record_inbound(
         conn, config,
         surface=SURFACE, surface_ref=group_jid, user_id=user_id or "",
@@ -1097,7 +1099,7 @@ def handle_group_message(
         conn.execute(
             "UPDATE tasks SET scheduled_for = ? "
             "WHERE id = ? AND status = 'pending' AND attempt_count = 0",
-            (ack_reaction.hold_until(seconds=BARE_FILE_HOLD_SECONDS), outcome.task_id),
+            (ack_reaction.hold_until(seconds=hold_seconds), outcome.task_id),
         )
     if claimed is not None and outcome.task_id is not None:
         attached = True

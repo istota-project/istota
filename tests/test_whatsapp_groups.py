@@ -1570,7 +1570,7 @@ class TestANamelessGuestAfterTheHostsAnswer:
 
 class TestABareFileWaitsForTheNextWords:
     """A member's captionless photo or GIF the gate answers is held for
-    `BARE_FILE_HOLD_SECONDS`; the same member's next text turn inside the hold
+    `[whatsapp] group_bare_file_hold_seconds`; the same member's next text turn inside the hold
     becomes the file's words, so the pair gets one answer, not two."""
 
     @staticmethod
@@ -1680,6 +1680,25 @@ class TestABareFileWaitsForTheNextWords:
         ))
 
         assert self._held(group, result.task_id)["held"] is None
+
+    def test_the_hold_follows_the_config(self, group):
+        group.whatsapp.group_bare_file_hold_seconds = 120
+        result = self._bare(group)
+
+        (row,) = _rows(
+            group,
+            "SELECT scheduled_for > datetime('now', '+90 seconds') AS long_hold "
+            "FROM tasks WHERE id = ?", (result.task_id,),
+        )
+        assert row["long_hold"] == 1
+
+    def test_zero_answers_the_file_at_once(self, group):
+        group.whatsapp.group_bare_file_hold_seconds = 0
+        result = self._bare(group)
+
+        assert self._held(group, result.task_id)["held"] is None
+        (follow_up,) = _apply(group, _message("good book?", message_id="T1"))
+        assert follow_up.task_id != result.task_id
 
     def test_a_command_is_not_folded(self, group):
         held = self._bare(group)
