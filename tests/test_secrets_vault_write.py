@@ -1,4 +1,4 @@
-"""Create-only vault writes against real KDBX files."""
+"""Mirror writes of generated credentials against real KDBX files (ISSUE-686)."""
 
 import dataclasses
 import fcntl
@@ -19,8 +19,8 @@ from istota.credentials.vault import (
     PasswordPolicy,
     VaultChanged,
     VaultWriteRefused,
-    create_entry,
     generate_password,
+    mirror_entry,
     parse_vault,
     read_vault_bytes,
 )
@@ -32,10 +32,10 @@ def _create(path, slug="example", *, username="bot@example.com", url="https://ex
         _, digest = read_vault_bytes(path)
     lock_root = lock_root or path.parent / "daemon-state"
     lock_root.mkdir(exist_ok=True)
-    return create_entry(
-        VaultLocation(path=path, dir_fd=None), "test-passphrase", slug=slug,
-        username=username, password="new-value", url=url, expected_digest=digest,
-        lock_root=lock_root,
+    return mirror_entry(
+        VaultLocation(path=path, dir_fd=None), "test-passphrase", name=f"generated_{slug}",
+        values={"password": "new-value", "username": username, "url": url, "otp": ""},
+        expected_digest=digest, lock_root=lock_root,
     )
 
 
@@ -53,9 +53,10 @@ def test_create_preserves_unscoped_names(tmp_path):
     read = parse_vault(after, "test-passphrase")
     assert read.scoped is False
     assert read.services["old"] == old.services["old"]
-    assert read.services["generated_example"] == "new-value"
-    assert read.services["generated_example_username"] == "bot@example.com"
-    assert read.services["generated_example_url"] == "https://example.com"
+    assert read.generated["generated_example"] == {
+        "password": "new-value", "username": "bot@example.com",
+        "url": "https://example.com", "otp": ""}
+    assert "generated_example" not in read.services
 
 
 def test_scoped_write_uses_existing_casefolded_generated_group(tmp_path):
@@ -76,34 +77,26 @@ def test_scoped_write_uses_existing_casefolded_generated_group(tmp_path):
     assert len(reopened.find_groups(name=" Generated ", first=False)) == 1
 
 
-def test_collision_with_held_name_refuses_without_changing_bytes(tmp_path):
+def test_an_existing_copy_is_overwritten_in_place(tmp_path):
+    """The mirror is one way: the table's values replace whatever the copy held."""
+    from pykeepass import PyKeePass
+
     path = tmp_path / "vault.kdbx"
     kp = create_database(str(path), password="test-passphrase")
     generated = kp.add_group(kp.root_group, "generated")
-    kp.add_entry(generated, "example", "", "")
+    entry = kp.add_entry(generated, "example", "", "edited-in-keepassxc")
+    entry.otp = "otpauth://totp/x?secret=JBSWY3DPJBSWY3DP"
     kp.save()
-    before = path.read_bytes()
 
-    with pytest.raises(VaultWriteRefused, match="already exists"):
-        _create(path)
-    assert path.read_bytes() == before
+    _create(path)
 
-
-def test_collision_with_skipped_name_refuses(tmp_path, monkeypatch):
-    path = tmp_path / "vault.kdbx"
-    create_database(str(path), password="test-passphrase")
-    original = secrets_vault.parse_vault
-
-    def skipped(data, password):
-        read = original(data, password)
-        return dataclasses.replace(read, skipped=(("generated_example", "duplicate_name"),))
-
-    monkeypatch.setattr(secrets_vault, "parse_vault", skipped)
-    with pytest.raises(VaultWriteRefused, match="already exists"):
-        _create(path)
+    reopened = PyKeePass(str(path), password="test-passphrase")
+    assert len(reopened.find_entries(title="example", first=False)) == 1
+    copy = parse_vault(path.read_bytes(), "test-passphrase").generated["generated_example"]
+    assert copy["password"] == "new-value" and copy["otp"] == ""
 
 
-def test_collision_with_duplicate_name_refuses(tmp_path):
+def test_duplicate_copies_refuse(tmp_path):
     path = tmp_path / "vault.kdbx"
     kp = create_database(str(path), password="test-passphrase")
     generated = kp.add_group(kp.root_group, "generated")
@@ -111,7 +104,7 @@ def test_collision_with_duplicate_name_refuses(tmp_path):
     kp.add_entry(generated, "example", "", "two", force_creation=True)
     kp.save()
     before = path.read_bytes()
-    with pytest.raises(VaultWriteRefused, match="already exists"):
+    with pytest.raises(VaultWriteRefused, match="more than one copy"):
         _create(path)
     assert path.read_bytes() == before
 
@@ -127,11 +120,11 @@ def test_truncated_read_and_uncanonical_slug_refuse(tmp_path, monkeypatch):
     monkeypatch.setattr(secrets_vault, "parse_vault", truncated)
     with pytest.raises(VaultWriteRefused, match="cap"):
         _create(path)
-    with pytest.raises(VaultWriteRefused, match="slug"):
+    with pytest.raises(VaultWriteRefused, match="generated credential name"):
         _create(path, "example__other")
 
 
-def test_entry_cap_and_unencodable_field_refuse(tmp_path, monkeypatch):
+def test_entry_cap_refuses(tmp_path, monkeypatch):
     path = tmp_path / "vault.kdbx"
     kp = create_database(str(path), password="test-passphrase")
     kp.add_entry(kp.root_group, "old", "", "old-value")
@@ -140,17 +133,6 @@ def test_entry_cap_and_unencodable_field_refuse(tmp_path, monkeypatch):
     monkeypatch.setattr(secrets_vault, "VAULT_MAX_ENTRIES", 1)
     with pytest.raises(VaultWriteRefused, match="entry cap"):
         _create(path)
-    with pytest.raises(VaultWriteRefused, match="UTF-8"):
-        _create(path, username="\ud800")
-    assert path.read_bytes() == before
-
-
-def test_surrounding_whitespace_refuses_before_writing(tmp_path):
-    path = tmp_path / "vault.kdbx"
-    create_database(str(path), password="test-passphrase")
-    before = path.read_bytes()
-    with pytest.raises(VaultWriteRefused, match="whitespace"):
-        _create(path, username=" alice ")
     assert path.read_bytes() == before
 
 
@@ -243,9 +225,8 @@ def test_password_policy_and_redacted_result(tmp_path):
 
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    result = _create(path)
-    assert "new-value" not in repr(result)
-    assert result.digest == read_vault_bytes(path)[1]
+    digest = _create(path)
+    assert digest == read_vault_bytes(path)[1]
 
 
 def test_password_is_never_logged(tmp_path, caplog):
@@ -254,18 +235,16 @@ def test_password_is_never_logged(tmp_path, caplog):
     with caplog.at_level("DEBUG"):
         _create(path)
         with pytest.raises(VaultWriteRefused):
-            _create(path)
+            _create(path, "example__other")
     assert all("new-value" not in record.getMessage() for record in caplog.records)
 
 
-def test_empty_optional_fields_are_held_in_the_new_entry(tmp_path):
+def test_empty_optional_fields_stay_empty_in_the_copy(tmp_path):
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    result = _create(path, username="", url="")
-    read = parse_vault(path.read_bytes(), "test-passphrase")
-    assert read.services[result.name] == "new-value"
-    assert result.username_name in read.held
-    assert result.url_name in read.held
+    _create(path, username="", url="")
+    copy = parse_vault(path.read_bytes(), "test-passphrase").generated["generated_example"]
+    assert copy == {"password": "new-value", "username": "", "url": "", "otp": ""}
 
 
 def test_two_creates_can_retry_after_contention(tmp_path):
@@ -289,8 +268,8 @@ def test_two_creates_can_retry_after_contention(tmp_path):
         thread.join()
     assert not errors
     read = parse_vault(read_vault_bytes(path)[0], "test-passphrase")
-    assert "generated_one" in read.services
-    assert "generated_two" in read.services
+    assert "generated_one" in read.generated
+    assert "generated_two" in read.generated
 
 
 def test_duplicate_scoped_roots_refuse(tmp_path):
@@ -318,19 +297,20 @@ def test_dir_fd_selects_the_vault_parent(tmp_path):
     fd = os.open(real, os.O_RDONLY)
     try:
         _, digest = read_vault_bytes(real_path)
-        create_entry(
+        mirror_entry(
             VaultLocation(path=wrong_path, dir_fd=fd), "test-passphrase",
-            slug="example", username="bot@example.com", password="new-value",
-            url="https://example.com", expected_digest=digest,
-            lock_root=tmp_path,
+            name="generated_example",
+            values={"password": "new-value", "username": "bot@example.com",
+                    "url": "https://example.com", "otp": ""},
+            expected_digest=digest, lock_root=tmp_path,
         )
     finally:
         os.close(fd)
     assert wrong_path.read_bytes() == wrong_before
-    assert "generated_example" in parse_vault(real_path.read_bytes(), "test-passphrase").services
+    assert "generated_example" in parse_vault(real_path.read_bytes(), "test-passphrase").generated
 
 
-def test_operator_cli_creates_and_applies_without_printing_password(tmp_path, monkeypatch, capsys):
+def test_operator_cli_stores_and_mirrors_without_printing_password(tmp_path, monkeypatch, capsys):
     from istota.cli import main
 
     path = tmp_path / "vault.kdbx"
@@ -354,11 +334,12 @@ def test_operator_cli_creates_and_applies_without_printing_password(tmp_path, mo
     printed = capsys.readouterr()
     output = printed.out
     assert "generated_example" in output
-    assert "may overwrite the new entry" in printed.err
-    read = parse_vault(path.read_bytes(), "test-passphrase")
-    assert read.services["generated_example_username"] == "alice@example.com"
-    assert read.services["generated_example"] not in output
-    assert secrets_store.get_secret(db_path, "alice", "vault_entries", "generated_example") == read.services["generated_example"]
+    assert "KeePass copy: mirrored" in output
+    assert "may overwrite the copy" in printed.err
+    copy = parse_vault(path.read_bytes(), "test-passphrase").generated["generated_example"]
+    assert copy["username"] == "alice@example.com"
+    assert copy["password"] not in output
+    assert secrets_store.get_secret(db_path, "alice", "vault_entries", "generated_example") == copy["password"]
 
 
 def test_sync_holds_same_lock_as_create(tmp_path, monkeypatch):
@@ -391,13 +372,8 @@ def test_sync_holds_same_lock_as_create(tmp_path, monkeypatch):
     finally:
         release.set()
         thread.join()
-    _, digest = read_vault_bytes(path)
-    result = create_entry(
-        VaultLocation(path=path, dir_fd=None), "test-passphrase", slug="example",
-        username="bot@example.com", password="new-value", url="https://example.com",
-        expected_digest=digest, lock_root=db_path.parent, db_path=db_path, user_id="alice",
-    )
-    assert secrets_store.get_secret(db_path, "alice", "vault_entries", result.name) == "new-value"
+    _create(path, lock_root=db_path.parent)
+    assert "generated_example" in parse_vault(path.read_bytes(), "test-passphrase").generated
 
 
 def test_sync_returns_busy_without_applying_when_lock_is_held(tmp_path, monkeypatch):

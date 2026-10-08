@@ -65,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Credentials Istota generates now live in Istota, not only in your KeePass file** (#686). `istota-credential new` and `otp-set` store the password and the two-factor seed in Istota and work without a vault, and the KeePass `generated/` entry becomes an optional one-way copy you turn on or off in Settings, Credentials. A sync never deletes or changes a generated credential from the file: a missing or edited copy is reported, with "Write KeePass copy now" to restore it, and retiring a credential (Settings, or `istota secret retire`) is the only way to delete one. **Upgrade note:** the first sync after upgrading takes over credentials already in `generated/`; deleting such an entry in your password manager no longer removes it from Istota.
+
 - **In a friendly room the bot now decides whether an unaddressed turn was for it** (#675). The classifier only filters out people clearly talking among themselves; a turn it lets through can be declined by the bot, which then posts nothing, shows no progress and pushes nothing. A member's uncaptioned photo or GIF in a friendly WhatsApp group is now put to the classifier and, on a yes, opened for the bot. Reserved rooms are unchanged. **Upgrade note:** expect more classifier yeses in friendly rooms. Each declined turn costs a task run and is logged in `speech_gate_decisions` as `agent_declined`. The new `tasks.declinable` column is added on startup.
 
 - In a friendly room, the person the bot just answered no longer gets an answer to every next message. The classifier's verdict now decides their follow-up like any other turn, so turning to greet someone else stays unanswered. A follow-up still reaches the bot when the classifier call fails.
@@ -120,6 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- A two-factor seed saved with `otp-set` could vanish when an older copy of the KeePass file was saved over Istota's write, locking the account; the seed is now kept in Istota (#685, see the generated credentials entry above). A task whose credential has a seed it was not granted now gets `credential_otp_not_granted` from `--fill-otp`, rather than being told the entry has no two-factor field.
 
 - A credential a task creates with `istota-credential new` is now usable by later tasks in the same conversation, so a signup finished after a CAPTCHA, a confirmation mail, two-factor enrollment and later logins no longer fail with `credential_not_granted`. The grant covers that conversation only, with scheduled use off; widen or revoke it in Settings → Credentials, and a change you make there survives later syncs.
 - `browse interact --fill-otp` with a name that is not shared with the task now says so (`No shared credential named ...`), as `--fill-credential` does, instead of reporting `credential_has_no_otp`. An entry with more than one OTP field is refused as `credential_otp_ambiguous`, with a pointer to pass the OTP field name. A mistyped name no longer reads as an entry that needs a factor enrolled.

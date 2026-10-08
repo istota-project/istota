@@ -1304,7 +1304,7 @@ class TestTheSyncLeavesLocalCredentialsAlone:
         with db.get_db(db_path) as conn:
             assert bindings.get_binding(conn, "alice", "openrouter_key") == {
                 "hosts": ["api.example.com"], "headers": bindings.DEFAULT_HEADERS,
-                "revealable": False, "source": "local",
+                "revealable": False, "source": "local", "kind": "value",
             }
 
     def test_an_older_sync_record_reads_as_no_conflicts(self):

@@ -879,14 +879,8 @@ class SkillProxy:
             "reason": "vault_credential_limit",
         })
 
-    def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
-        """Create one entry from a host-only passphrase and return names only."""
-        from istota import db, storage
-        from istota.mail import support as email_support
-        from istota.credentials import vault as secrets_vault
-        from istota.notifications.resolvers import task_alert
-        from istota.notifications.store import deliver_pending
-
+    def _spend_vault_write(self, conn: socket.socket) -> bool:
+        """Charge one write to this attempt's budget; refuse past it. Refusals count."""
         with self._vault_write_lock:
             self._vault_writes += 1
             count = self._vault_writes
@@ -895,14 +889,55 @@ class SkillProxy:
                 "error": "Vault write limit reached or writes disabled",
                 "reason": "vault_write_limit",
             })
+            return False
+        return True
+
+    def _mirror_generated(self, name: str) -> str:
+        """Write a new generated credential to the user's KeePass file, if mirrored.
+
+        A write that does not land leaves the credential stored and the mirror
+        pending; the sync retries it. Never turns a stored credential into a
+        refusal that would invite the model to create a second one.
+        """
+        from istota.credentials import vault as secrets_vault
+        try:
+            return secrets_vault.mirror_generated(self.config, self.user_id, name)
+        except Exception:
+            logger.exception("vault mirror task_id=%s: write failed", self.task_id)
+            return "pending"
+
+    @staticmethod
+    def _mirror_sentence(state: str) -> str:
+        if state == "mirrored":
+            return " A copy is in your KeePass file under generated/."
+        if state == "pending":
+            return (" The copy in your KeePass file has not been written yet; Istota "
+                    "retries on its next vault sync.")
+        return ""
+
+    def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
+        """Generate and store one credential host-side; return names only (ISSUE-686).
+
+        The credential lives in the secrets table as ``source="generated"``;
+        the user's KeePass file, when there is one and mirroring is on, gets a
+        one-way copy. No vault is needed.
+        """
+        from istota import db
+        from istota.mail import support as email_support
+        from istota.credentials import generated
+        from istota.credentials import vault as secrets_vault
+        from istota.notifications.resolvers import task_alert
+        from istota.notifications.store import deliver_pending
+
+        if not self._spend_vault_write(conn):
             return
 
         def refuse(reason: str, message: str) -> None:
             self._send_response(conn, {"error": message, "reason": reason})
 
         config, user_id = self.config, self.user_id
-        if config is None or not user_id or not secrets_vault._vault_is_enabled(config, user_id):
-            refuse("vault_not_configured", "No credential vault is configured")
+        if config is None or not user_id:
+            refuse("vault_not_configured", "No credential store is available to this task")
             return
         refusal = secrets_vault.vault_isolation_refusal(config, user_id)
         if refusal:
@@ -915,6 +950,17 @@ class SkillProxy:
         symbols = request.get("symbols", True)
         if not isinstance(slug, str) or not slug or not isinstance(url, str):
             refuse("vault_write_refused", "A slug and string URL are required")
+            return
+        names = secrets_vault.generated_entry_names(slug)
+        if (secrets_vault.slug_name((slug,)) != slug or any(name is None for name in names)
+                or secrets_vault.slug_name((secrets_vault.VAULT_WRITE_GROUP, slug, "totp")) is None):
+            refuse("vault_write_refused",
+                   "The slug must be lowercase letters, digits and underscores, and short enough "
+                   "for its field names")
+            return
+        name = names[0]
+        if any(value != value.strip() for value in (url, username or "")):
+            refuse("vault_write_refused", "Credential fields cannot have surrounding whitespace")
             return
         signup_address = None
         if username is None and config.email.enabled and config.email.bot_email:
@@ -936,81 +982,48 @@ class SkillProxy:
         if isinstance(length, bool) or not isinstance(length, int) or not isinstance(symbols, bool):
             refuse("vault_write_refused", "Invalid password policy")
             return
-        reserved_tag = False
         try:
             password = secrets_vault.generate_password(secrets_vault.PasswordPolicy(
                 length=length, require_symbols=symbols, allow_symbols=symbols,
             ))
-            resolution = storage.vault_location_for(config, user_id)
-            location = resolution.location
-            if location is None:
-                refuse("vault_not_configured", "Credential vault cannot be opened")
-                return
-            try:
-                taken = secrets_vault.local_name_conflict(
-                    config.db_path, user_id, secrets_vault.generated_entry_names(slug),
-                )
-                if taken:
-                    raise secrets_vault.VaultWriteRefused(
-                        f"credential name already exists: {secrets_vault._label(taken)}"
-                    )
-                passphrase = secrets_vault._resolve_passphrase(config.db_path, user_id)
-                for attempt in range(2):
-                    data, digest = secrets_vault.read_vault_bytes(
-                        location.path, dir_fd=location.dir_fd,
-                    )
-                    read = secrets_vault.parse_vault(data, passphrase)
-                    if read.truncated:
-                        raise secrets_vault.VaultWriteRefused("the vault read stopped at a cap")
-                    if signup_address and not reserved_tag:
-                        with db.get_db(config.db_path) as db_conn:
-                            reserved_tag = db.reserve_signup_tag(db_conn, user_id, slug)
-                        if not reserved_tag:
-                            # A killed task can leave the pre-write reservation
-                            # pending. After five minutes, inspect the vault
-                            # under the same lock as a write before reclaiming
-                            # it. A live writer still holding the lock is busy.
-                            with secrets_vault._vault_file_lock(
-                                location, lock_root=config.db_path.parent, blocking=False,
-                            ):
-                                current, _ = secrets_vault.read_vault_bytes(
-                                    location.path, dir_fd=location.dir_fd,
-                                )
-                                current_read = secrets_vault.parse_vault(current, passphrase)
-                                if current_read.truncated:
-                                    raise secrets_vault.VaultWriteRefused(
-                                        "the vault read stopped at a cap"
-                                    )
-                                present = f"generated_{slug}" in (
-                                    set(current_read.services) | current_read.held
-                                    | {name for name, _ in current_read.skipped}
-                                )
-                                with db.get_db(config.db_path) as db_conn:
-                                    reserved_tag = db.reconcile_stale_signup_tag(
-                                        db_conn, user_id, slug, present_in_vault=present,
-                                    )
-                            if not reserved_tag:
-                                raise secrets_vault.VaultWriteRefused("signup address already used")
-                    try:
-                        write = secrets_vault.create_entry(
-                            location, passphrase, slug=slug, username=username,
-                            password=password, url=url, expected_digest=digest,
-                            lock_root=config.db_path.parent, db_path=config.db_path,
-                            user_id=user_id,
-                        )
-                        break
-                    except secrets_vault.VaultChanged:
-                        if attempt:
-                            raise
-            finally:
-                if location.dir_fd is not None:
-                    import os
-                    os.close(location.dir_fd)
         except secrets_vault.VaultError as exc:
+            refuse(type(exc).__name__, str(exc))
+            return
+        for value in (password, username, url):
+            if len(value.encode("utf-8", "surrogatepass")) > secrets_vault.VAULT_MAX_VALUE_BYTES:
+                refuse("vault_write_refused", "A credential field is too large")
+                return
+
+        reserved_tag = False
+        try:
+            if signup_address:
+                with db.get_db(config.db_path) as db_conn:
+                    reserved_tag = db.reserve_signup_tag(db_conn, user_id, slug)
+                if not reserved_tag:
+                    # A killed task can leave the reservation pending. After five
+                    # minutes it is reclaimed unless the credential was stored.
+                    with db.get_db(config.db_path) as db_conn:
+                        present = db_conn.execute(
+                            "SELECT 1 FROM secrets WHERE user_id=? AND service=? AND key=?",
+                            (user_id, secrets_vault.VAULT_ENTRY_SERVICE, name),
+                        ).fetchone() is not None
+                        reserved_tag = db.reconcile_stale_signup_tag(
+                            db_conn, user_id, slug, present_in_vault=present,
+                        )
+                    if not reserved_tag:
+                        raise generated.GeneratedCredentialError(
+                            "VaultWriteRefused", "signup address already used")
+            with db.get_db(config.db_path) as db_conn:
+                db_conn.execute("BEGIN IMMEDIATE")
+                mirror = (generated.default_mirror(db_conn, user_id)
+                          and secrets_vault._vault_is_enabled(config, user_id))
+                generated.create(db_conn, user_id, name=name, username=username,
+                                 password=password, url=url, mirror=mirror)
+        except generated.GeneratedCredentialError as exc:
             if reserved_tag:
                 with db.get_db(config.db_path) as db_conn:
                     db.cancel_signup_tag(db_conn, user_id, slug)
-            refuse(type(exc).__name__, str(exc))
+            refuse("VaultWriteRefused", str(exc))
             return
         except Exception:
             if reserved_tag:
@@ -1018,20 +1031,21 @@ class SkillProxy:
                     db.cancel_signup_tag(db_conn, user_id, slug)
             raise
 
-        # A successful replace already wrote the vault. Notification failure
-        # cannot turn it into a refusal inviting the model to retry the create.
-        self.vault_credentials.update({
-            write.name: password, write.username_name: username, write.url_name: url,
-        })
-        self._created_names.update((write.name, write.username_name, write.url_name))
+        # Stored. Nothing below may turn this into a refusal inviting a retry.
+        username_name, url_name = names[1], names[2]
+        self.vault_credentials.update({name: password, username_name: username})
+        if url:
+            self.vault_credentials[url_name] = url
+        self._created_names.update((name, username_name, url_name))
         granted = None
         if self.task_id:
             from istota.credentials.broker.grants import grant_created_entry
             try:
                 with db.get_db(config.db_path) as db_conn:
-                    granted = grant_created_entry(db_conn, user_id, write.name, int(self.task_id))
+                    granted = grant_created_entry(db_conn, user_id, name, int(self.task_id))
             except Exception:
                 logger.exception("vault_create task_id=%s: conversation grant failed", self.task_id)
+        mirrored = self._mirror_generated(name) if mirror else "off"
         confirmation_readable = False
         if signup_address:
             try:
@@ -1043,17 +1057,17 @@ class SkillProxy:
             with db.get_db(config.db_path) as db_conn:
                 raised = task_alert.write(
                     db_conn, user_id,
-                    dedup_key=f"vault-created:{task_alert._slug(write.name, limit=64)}",
-                    title=f"Istota created {write.name}",
-                    body="A credential was added under generated/ in your vault. " + (
-                        "Only the task that created it can use it until you grant it "
+                    dedup_key=f"vault-created:{task_alert._slug(name, limit=64)}",
+                    title=f"Istota created {name}",
+                    body="A credential was generated and stored in Istota." + (
+                        " Only the task that created it can use it until you grant it "
                         "in Settings, Credentials." if granted is None else
-                        "Interactive turns in the conversation that created it can use it, "
+                        " Interactive turns in the conversation that created it can use it, "
                         "but scheduled runs, including the job that created it, cannot "
                         "until you widen it in Settings, Credentials." if granted[1] else
-                        "Later tasks in the conversation that created it can use it; "
+                        " Later tasks in the conversation that created it can use it; "
                         "widen or revoke that in Settings, Credentials."
-                    ),
+                    ) + self._mirror_sentence(mirrored),
                     severity="warning", actionable=True,
                     params={"task_id": self.task_id, "status": "vault_created"},
                 )
@@ -1062,13 +1076,15 @@ class SkillProxy:
         except Exception:
             logger.warning("vault_create task_id=%s: notice could not be sent", self.task_id)
         self._send_response(conn, {
-            "name": write.name, "username_name": write.username_name,
-            "url_name": write.url_name, "username": username,
+            "name": name, "username_name": username_name,
+            "url_name": url_name, "username": username,
             "confirmation_readable": confirmation_readable,
         })
 
     def _serve_vault_otp_set(self, conn: socket.socket, request: dict) -> None:
-        from istota import db, storage
+        """Attach a factor once to a generated credential, in the table (ISSUE-686)."""
+        from istota import db
+        from istota.credentials import generated
         from istota.credentials import vault
         from istota.lib import totp
         from istota.notifications.resolvers import task_alert
@@ -1077,15 +1093,11 @@ class SkillProxy:
         def refuse(reason, message):
             self._send_response(conn, {"error": message, "reason": reason})
 
-        with self._vault_write_lock:
-            self._vault_writes += 1
-            count = self._vault_writes
-        if self.vault_write_limit <= 0 or count > self.vault_write_limit:
-            refuse("vault_write_limit", "Vault write limit reached or writes disabled")
+        if not self._spend_vault_write(conn):
             return
         config, user_id = self.config, self.user_id
-        if config is None or not user_id or not vault._vault_is_enabled(config, user_id):
-            refuse("vault_not_configured", "No credential vault is configured")
+        if config is None or not user_id:
+            refuse("vault_not_configured", "No credential store is available to this task")
             return
         refusal = vault.vault_isolation_refusal(config, user_id)
         if refusal:
@@ -1097,52 +1109,30 @@ class SkillProxy:
             return
         try:
             canonical = totp.to_uri(totp.parse_user_input(otp))
-            resolution = storage.vault_location_for(config, user_id)
-            location = resolution.location
-            if location is None:
-                refuse("vault_not_configured", "Credential vault cannot be opened")
-                return
-            try:
-                passphrase = vault._resolve_passphrase(config.db_path, user_id)
-                for attempt in range(2):
-                    _, digest = vault.read_vault_bytes(location.path, dir_fd=location.dir_fd)
-                    try:
-                        write = vault.set_entry_otp(
-                            location, passphrase, name=name, uri=canonical,
-                            expected_digest=digest, lock_root=config.db_path.parent,
-                            db_path=config.db_path, user_id=user_id,
-                        )
-                        break
-                    except vault.VaultChanged:
-                        if attempt:
-                            raise
-            finally:
-                if location.dir_fd is not None:
-                    import os
-                    os.close(location.dir_fd)
         except totp.TotpError as exc:
             refuse("invalid_otp", f"Invalid OTP ({exc.code})")
             return
-        except vault.VaultWriteRefused as exc:
-            reason = str(exc) if str(exc) in {"otp_set_not_generated", "otp_already_set"} else "vault_write_refused"
-            refuse(reason, str(exc))
-            return
-        except vault.VaultError as exc:
-            refuse(type(exc).__name__, str(exc))
+        try:
+            with db.get_db(config.db_path) as db_conn:
+                db_conn.execute("BEGIN IMMEDIATE")
+                seed_name = generated.set_otp(db_conn, user_id, name, canonical)
+                mirror = generated.mirror_state(db_conn, user_id, name)["mirror"]
+        except generated.GeneratedCredentialError as exc:
+            refuse(exc.reason, str(exc))
             return
 
-        seed_name = write.name + "_totp"
         self.vault_credentials[seed_name] = canonical
         # Enrollment does not grant an existing credential to this task.
-        if write.name in self._created_names:
+        if name in self._created_names:
             self._created_names.add(seed_name)
+        mirrored = self._mirror_generated(name) if mirror else "off"
         try:
             with db.get_db(config.db_path) as db_conn:
                 raised = task_alert.write(
                     db_conn, user_id,
-                    dedup_key=f"vault-otp-set:{task_alert._slug(write.name, limit=64)}",
-                    title=f"Istota added two-factor to {write.name}",
-                    body="Two-factor enrollment was saved under generated/ in your vault.",
+                    dedup_key=f"vault-otp-set:{task_alert._slug(name, limit=64)}",
+                    title=f"Istota added two-factor to {name}",
+                    body="Two-factor enrollment was saved in Istota." + self._mirror_sentence(mirrored),
                     severity="warning", actionable=True,
                     params={"task_id": self.task_id, "status": "vault_otp_set"},
                 )
@@ -1150,7 +1140,7 @@ class SkillProxy:
                 deliver_pending(config, [raised])
         except Exception:
             logger.warning("vault_otp_set task_id=%s: notice could not be sent", self.task_id)
-        self._send_response(conn, {"name": write.name, "otp": True})
+        self._send_response(conn, {"name": name, "otp": True})
 
     def _skill_grant_refusal(self, name: str) -> str | None:
         """Live grant check for the private skill channel; fails closed."""
@@ -1327,17 +1317,27 @@ class SkillProxy:
             if name in self.vault_credentials and is_otp_seed(database, self.user_id, name):
                 seed_name = name
             else:
-                members = [member for member in credential_groups(database, self.user_id).get(name, [])
-                           if member in self.vault_credentials]
+                group = credential_groups(database, self.user_id).get(name, [])
+                members = [member for member in group if member in self.vault_credentials]
                 # The snapshot can outlive the row: a sync mid-attempt deletes it.
                 if not members and (name not in self.vault_credentials
                                     or get_binding(database, self.user_id, name) is None):
                     not_present()
                     return
-                seeds = [member for member in members
+                seeds = [member for member in group
                          if (get_binding(database, self.user_id, member) or {}).get("kind") == "totp"]
                 if not seeds:
                     refuse("credential_has_no_otp")
+                    return
+                # A seed this task's snapshot lacks is not the entry having no
+                # OTP, which invites a second enrollment (ISSUE-685). The entry
+                # is already shared, and `list` shows the member and its grant.
+                seeds = [member for member in seeds if member in self.vault_credentials]
+                if not seeds:
+                    refuse("credential_otp_not_granted",
+                           f"Credential {label!r} has a two-factor field that is not shared "
+                           "with this task; the user can grant it in Settings, Credentials "
+                           "(credential_otp_not_granted)")
                     return
                 if len(seeds) > 1:
                     refuse("credential_otp_ambiguous",
