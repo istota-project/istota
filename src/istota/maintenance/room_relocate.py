@@ -188,7 +188,18 @@ def load_vector_extension(conn: sqlite3.Connection) -> None:
         conn.enable_load_extension(False)
 
 
-def _preflight(conn: sqlite3.Connection) -> None:
+def _preflight(conn: sqlite3.Connection, *, guard_tasks: bool = True) -> None:
+    if guard_tasks:
+        _refuse_live_tasks(conn)
+    check_inventory(conn)
+    ambiguous = conn.execute(
+        "SELECT surface,surface_ref FROM room_bindings GROUP BY surface,surface_ref HAVING count(*)>1 LIMIT 1",
+    ).fetchone()
+    if ambiguous:
+        raise MigrationRefusal(f"ambiguous_binding: {ambiguous[0]}:{ambiguous[1]}")
+
+
+def _refuse_live_tasks(conn: sqlite3.Connection) -> None:
     try:
         live = db.get_users_with_live_tasks(conn)
         active = conn.execute(
@@ -199,12 +210,6 @@ def _preflight(conn: sqlite3.Connection) -> None:
     if live or active:
         reason = "pending_confirmation" if active and active[0] == "pending_confirmation" else "live_tasks"
         raise MigrationRefusal(reason)
-    check_inventory(conn)
-    ambiguous = conn.execute(
-        "SELECT surface,surface_ref FROM room_bindings GROUP BY surface,surface_ref HAVING count(*)>1 LIMIT 1",
-    ).fetchone()
-    if ambiguous:
-        raise MigrationRefusal(f"ambiguous_binding: {ambiguous[0]}:{ambiguous[1]}")
 
 
 def _descriptor(value: str, old: str, new: str) -> str:
@@ -410,9 +415,11 @@ def migrate_database(
         load_vector_extension(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN" if dry_run or list_only else "BEGIN IMMEDIATE")
-        _preflight(conn)
         rooms = [row[0] for row in conn.execute("SELECT token FROM rooms ORDER BY token")]
         legacy = [token for token in rooms if not db.is_canonical_room_token(token)]
+        # The repos_relocate rule: the task table is consulted only when a
+        # room is pending, so a busy deploy with nothing to move goes ahead.
+        _preflight(conn, guard_tasks=bool(legacy))
         if list_only or dry_run:
             for token in rooms:
                 status = "pending" if token in legacy else "already-migrated"

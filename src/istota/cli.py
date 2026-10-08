@@ -77,6 +77,13 @@ def cmd_init(args):
     _init_retire_user_personas(config)
     if getattr(args, "relocate_rooms", False):
         from istota.maintenance.room_relocate import migrate_database, reconcile_mount, record_outcome
+        if getattr(args, "scheduler_stopped", False):
+            # The pool's shutdown leaves an in-flight task `running`; with the
+            # scheduler stopped it is an orphan, not a live task (ISSUE-690).
+            from istota.scheduler import recover_orphaned_tasks_on_startup
+            released = recover_orphaned_tasks_on_startup(config)
+            if released:
+                print(f"Recovered {released} task(s) the stopped scheduler left in flight")
         problems: list[str] = []
         result = migrate_database(config.db_path, problems=problems)
         if result == 0:
@@ -4903,6 +4910,12 @@ def main():
     init_parser.add_argument(
         "--relocate-rooms", action="store_true",
         help="Migrate room identities and reconcile workspace files; stop all writers first",
+    )
+    init_parser.add_argument(
+        "--scheduler-stopped", action="store_true",
+        help="With --relocate-rooms: no task is executing (scheduler stopped, no "
+             "`istota task -x` or `istota run`), so recover the task rows left in flight, "
+             "as the scheduler's next start would",
     )
 
     # doctor

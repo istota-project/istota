@@ -131,6 +131,64 @@ def test_offline_init_refusal_does_not_move_workspace(tmp_path, monkeypatch, sta
         assert conn.execute('SELECT token FROM rooms').fetchone()[0] == 'old-talk'
 
 
+def _migrated_with_orphan(tmp_path, status):
+    config = Config(db_path=tmp_path / 'state.db', workspace_path=tmp_path / 'workspace')
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, 'old-talk', 'alice', origin='talk')
+    (config.workspace_path / 'Channels').mkdir(parents=True)
+    from istota.maintenance import room_relocate
+    assert room_relocate.migrate_database(config.db_path) == 0
+    with db.get_db(config.db_path) as conn:
+        token = conn.execute('SELECT token FROM rooms').fetchone()[0]
+        task = db.create_task(conn, user_id='alice', source_type='talk', prompt='Wait', conversation_token=token)
+        conn.execute('UPDATE tasks SET status=? WHERE id=?', (status, task))
+    late = config.workspace_path / 'Channels' / 'old-talk'
+    late.mkdir()
+    (late / 'CHANNEL.md').write_text('a late write')
+    return config, task, token
+
+
+@pytest.mark.parametrize('status', ['running', 'locked'])
+def test_a_stopped_scheduler_s_orphan_does_not_defer_the_sweep(tmp_path, monkeypatch, capsys, status):
+    """What the pool's shutdown left running is released, as the next start would (ISSUE-690)."""
+    config, task, token = _migrated_with_orphan(tmp_path, status)
+    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    args = SimpleNamespace(config=None, relocate_rooms=True, scheduler_stopped=True)
+    assert cli.cmd_init(args) == 0
+    assert 'refusal:' not in capsys.readouterr().err
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute('SELECT status FROM tasks WHERE id=?', (task,)).fetchone()[0] == 'pending'
+    channels = config.workspace_path / 'Channels'
+    assert (channels / token / 'CHANNEL.md').read_text() == 'a late write'
+    assert not (channels / 'old-talk').exists()
+
+
+def test_without_the_flag_a_running_row_still_defers_the_sweep(tmp_path, monkeypatch, capsys):
+    config, task, _ = _migrated_with_orphan(tmp_path, 'running')
+    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 1
+    assert 'refusal: live_tasks' in capsys.readouterr().err
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute('SELECT status FROM tasks WHERE id=?', (task,)).fetchone()[0] == 'running'
+    assert (config.workspace_path / 'Channels' / 'old-talk').is_dir()
+
+
+def test_a_parked_question_is_not_an_orphan(tmp_path, monkeypatch, capsys):
+    config, task, _ = _migrated_with_orphan(tmp_path, 'pending_confirmation')
+    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    args = SimpleNamespace(config=None, relocate_rooms=True, scheduler_stopped=True)
+    assert cli.cmd_init(args) == 1
+    assert 'refusal: pending_confirmation' in capsys.readouterr().err
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute('SELECT status FROM tasks WHERE id=?', (task,)).fetchone()[0] == 'pending_confirmation'
+
+
+def test_the_offline_window_says_the_scheduler_is_stopped():
+    script = (REPO / 'scripts/relocate-rooms.sh').read_text()
+    assert 'init --relocate-rooms --scheduler-stopped' in script
+
+
 def test_partial_sweep_raises_an_admin_alert_and_a_clean_one_closes_it(tmp_path, monkeypatch):
     from istota.config import UserConfig
     config = Config(db_path=tmp_path / 'state.db', workspace_path=tmp_path / 'mount',

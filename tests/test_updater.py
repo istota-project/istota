@@ -369,6 +369,8 @@ class TestCheckoutFlow:
         assert init_cmds[0][0] == "istota"
         assert "-c" in init_cmds[0]  # config path threaded through
         assert "--relocate-rooms" in init_cmds[0]
+        # The updater refuses while the daemon holds its lock (ISSUE-690).
+        assert "--scheduler-stopped" in init_cmds[0]
 
     def test_daemon_running_refuses_before_changing_checkout(self, tmp_path):
         cfg = _standalone_config(tmp_path)

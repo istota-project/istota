@@ -62,11 +62,11 @@ When upgrading a volume with legacy room identities, build the new image, then s
 ```bash
 docker compose build istota
 docker compose stop istota web webhooks
-docker compose run --rm --no-deps --entrypoint /app/.venv/bin/istota istota -c /data/config/config.toml init --relocate-rooms
+docker compose run --rm --no-deps --entrypoint /app/.venv/bin/istota istota -c /data/config/config.toml init --relocate-rooms --scheduler-stopped
 docker compose up -d istota web webhooks
 ```
 
-Inspect the migration result before the final command. Exit 1 is a refusal, and exit 2 means partial work needs attention; follow the [refusal and retry procedure](ansible.md#room-identity-migration). The command is safe to rerun while the application services remain stopped. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the scheduler entrypoint cannot stop sibling web and webhook containers, and its config-ready flag is published before schema initialization.
+Inspect the migration result before the final command. Exit 1 is a refusal, and exit 2 means partial work needs attention; follow the [refusal and retry procedure](ansible.md#room-identity-migration). The command is safe to rerun while the application services remain stopped. `--scheduler-stopped` recovers the task rows a stopped scheduler left in flight, which would otherwise refuse as `live_tasks` on every rerun; leave it off if anything else is executing a task. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the scheduler entrypoint cannot stop sibling web and webhook containers, and its config-ready flag is published before schema initialization.
 
 
 One thing this stack does is first-install only: `provision-nc.sh` is a Nextcloud post-installation hook, so it runs against a fresh instance and never again. A release whose fix is a new `occ` call therefore lands on new installs and needs a hand patch on old ones. The CHANGELOG says so where it applies.
