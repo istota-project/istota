@@ -1,8 +1,9 @@
 """ISSUE-590: a KeePass entry the sync sees for the first time is granted.
 
 The grant is made once per entry. A grant the user narrows or deletes stays
-as they left it, an entry tagged ``istota:nogrant`` or created by a task under
-``generated/`` is never granted, and an entry stored before auto-grant existed
+as they left it, an entry tagged ``istota:nogrant`` or found under
+``generated/`` is never granted by the sync (a task's ``vault_create`` grants
+its own entry to its conversation, ISSUE-684), and an entry stored before auto-grant existed
 is left with whatever grant it had. Nothing is granted from a file with no
 ``istota`` group, and an entry deleted and restored keeps the decision made
 the first time.
@@ -97,7 +98,7 @@ def test_a_nogrant_tag_keeps_the_entry_ungranted_until_it_is_removed(tmp_path, d
     assert _grant(database, "nebula") is not None
 
 
-def test_an_entry_a_task_created_under_generated_is_not_granted(tmp_path, database):
+def test_an_entry_the_sync_finds_under_generated_is_not_granted(tmp_path, database):
     kp, path, group = _vault(tmp_path)
     generated = kp.add_group(group, "Generated")
     kp.add_entry(generated, "signup", "alice", "fixture-password", url="https://signup.example")

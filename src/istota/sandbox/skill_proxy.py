@@ -1024,6 +1024,14 @@ class SkillProxy:
             write.name: password, write.username_name: username, write.url_name: url,
         })
         self._created_names.update((write.name, write.username_name, write.url_name))
+        granted = None
+        if self.task_id:
+            from istota.credentials.broker.grants import grant_created_entry
+            try:
+                with db.get_db(config.db_path) as db_conn:
+                    granted = grant_created_entry(db_conn, user_id, write.name, int(self.task_id))
+            except Exception:
+                logger.exception("vault_create task_id=%s: conversation grant failed", self.task_id)
         confirmation_readable = False
         if signup_address:
             try:
@@ -1037,7 +1045,15 @@ class SkillProxy:
                     db_conn, user_id,
                     dedup_key=f"vault-created:{task_alert._slug(write.name, limit=64)}",
                     title=f"Istota created {write.name}",
-                    body="A credential was added under generated/ in your vault.",
+                    body="A credential was added under generated/ in your vault. " + (
+                        "Only the task that created it can use it until you grant it "
+                        "in Settings, Credentials." if granted is None else
+                        "Interactive turns in the conversation that created it can use it, "
+                        "but scheduled runs, including the job that created it, cannot "
+                        "until you widen it in Settings, Credentials." if granted[1] else
+                        "Later tasks in the conversation that created it can use it; "
+                        "widen or revoke that in Settings, Credentials."
+                    ),
                     severity="warning", actionable=True,
                     params={"task_id": self.task_id, "status": "vault_created"},
                 )

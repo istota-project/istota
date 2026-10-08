@@ -151,6 +151,39 @@ def auto_grant_vault_entries(conn, user_id, owners, *, declined, scoped):
     return count
 
 
+def grant_created_entry(conn, user_id, owner, task_id):
+    """Grant an entry a task just created to that task's conversation (ISSUE-684).
+
+    Rooms scope, scheduled use off, no HTTP: later turns in the conversation
+    that made the account can sign in with it, and widening it is the user's.
+    The marker is set to ``granted`` so the sync's ``generated/`` decline
+    never touches it again, and a grant the user narrows or revokes stays so.
+    The creating task's own snapshot gains the grant when it is in scope, so a
+    retry of an interrupted signup can still use the entry it made.
+    No conversation, no host binding (an apply that failed, or no URL) or a
+    grant already present: nothing changes. Returns ``(room, scheduled)``,
+    where ``scheduled`` says the creator itself is outside the grant, or None.
+    Caller owns commit.
+    """
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    if conn.execute("SELECT 1 FROM tasks WHERE id=? AND user_id=?", (task_id, user_id)).fetchone() is None:
+        return None
+    task, scheduled = _task_context(conn, task_id, user_id)
+    room = task["conversation_token"]
+    if not room:
+        return None
+    binding = get_entry_binding(conn, user_id, owner)
+    if not binding or not binding["hosts"] or get_grant(conn, user_id, owner) is not None:
+        return None
+    grant = put_grant(conn, user_id, owner, scope_mode="rooms", rooms=[room], allow_scheduled=False)
+    db.kv_set(conn, user_id, NAMESPACE, AUTO_GRANT_PREFIX + grant["name"], AUTO_GRANT_DONE)
+    if _in_scope(grant, task, scheduled):
+        conn.execute("INSERT OR REPLACE INTO credential_task_grants VALUES (?, ?, ?, ?)",
+                     (task_id, user_id, grant["name"], grant["policy_revision"]))
+    return room, scheduled
+
+
 def _task_context(conn, task_id, user_id):
     row = conn.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (task_id, user_id)).fetchone()
     if row is None:
