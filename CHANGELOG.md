@@ -73,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Credentials now live in Istota's encrypted store. Import selected entries from KeePass, download a fresh password-protected copy, or register an age recipient for scheduled backups. Replaced and deleted values have bounded history, and sensitive actions require an emailed confirmation code.
+- Credentials now live in Istota's encrypted store. Import selected entries from KeePass, download a fresh password-protected copy, or register an age recipient for scheduled backups. Replaced and deleted values have bounded history, and sensitive actions require an emailed confirmation code. Imported entries remain editable even without a password, and their custom fields follow the entry’s access rules.
 - Live KeePass sync and generated-credential copies are retired. Upgrade attempts one final import without deleting credentials, leaves the original file untouched, and tells each affected user what happened.
 
 

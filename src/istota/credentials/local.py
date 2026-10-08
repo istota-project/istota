@@ -187,13 +187,9 @@ def is_local(conn, user_id: str, name: str) -> bool:
     """
     if _bindings.credential_name(conn, user_id, name) != name:
         return False
-    row = conn.execute(
-        "SELECT b.source FROM secrets s JOIN credential_bindings b "
-        "ON b.user_id = s.user_id AND b.name = s.key "
-        "WHERE s.user_id=? AND s.service=? AND s.key=?",
-        (user_id, _SERVICE, name),
-    ).fetchone()
-    return row is not None and _bindings.effective_source(row[0]) == SOURCE
+    groups = _bindings.credential_groups(conn, user_id)
+    members = groups.get(name, [])
+    return bool(members) and all(_owned_field(conn, user_id, name, member) for member in members)
 
 
 def stored_fields(conn, user_id: str, name: str) -> dict:
@@ -211,7 +207,7 @@ def stored_fields(conn, user_id: str, name: str) -> dict:
     if url_name and _owned_field(conn, user_id, name, url_name):
         stored = secrets_store.get_secret(None, user_id, _SERVICE, url_name, connection=conn)
         url = stored if isinstance(stored, str) else ""
-    binding = _bindings.get_binding(conn, user_id, name) or {"hosts": []}
+    binding = _bindings.get_entry_binding(conn, user_id, name) or {"hosts": []}
     site_hosts = set(_bindings.parse_binding(url, {}, [], source=SOURCE)["hosts"]) if url else set()
     extra_hosts = [host for host in binding["hosts"] if host not in site_hosts]
     return {
@@ -235,8 +231,10 @@ def _owned_field(conn, user_id: str, owner: str, field_name: str) -> bool:
 def _write_fields(conn, user_id, name, username_name, url_name, otp_name, *,
                   value, username, url, otp, binding, actor):
     """Write or remove fields; an omitted value keeps its row and kind."""
-    for field_name, field_value in ((name, value), (username_name, username),
-                                    (url_name, url), (otp_name, otp)):
+    fields = {name: value, username_name: username, url_name: url, otp_name: otp}
+    for member in _bindings.credential_groups(conn, user_id).get(name, []):
+        fields.setdefault(member, None)
+    for field_name, field_value in fields.items():
         if field_value is None and not _owned_field(conn, user_id, name, field_name):
             continue
         previous = _bindings.get_binding(conn, user_id, field_name)
@@ -366,11 +364,8 @@ def delete(db_path: Path, user_id: str, name: str) -> bool:
     """
     with db.get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        exists = conn.execute(
-            "SELECT 1 FROM secrets WHERE user_id=? AND service=? AND key=?",
-            (user_id, _SERVICE, name),
-        ).fetchone()
-        if exists is None:
+        groups = _bindings.credential_groups(conn, user_id)
+        if name not in groups and not any(name in members for members in groups.values()):
             return False
         if not is_local(conn, user_id, name):
             raise LocalCredentialError(

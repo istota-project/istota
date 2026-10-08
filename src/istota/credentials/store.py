@@ -376,7 +376,7 @@ def list_deleted(db_path, user_id) -> list[dict]:
 
 
 def restore_history(db_path, user_id, history_id, *, actor, connection=None) -> list[str]:
-    from istota.credentials.broker.bindings import get_binding, credential_name
+    from istota.credentials.broker.bindings import get_binding, credential_name, effective_source
     with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -390,17 +390,26 @@ def restore_history(db_path, user_id, history_id, *, actor, connection=None) -> 
         restored = []
         for key, ciphertext, raw_binding in rows:
             binding = json.loads(raw_binding) if raw_binding else {}
+            if binding.get("source") == "vault":
+                binding["source"] = "local"
             owner = binding.get("credential", key)
             for candidate in {key, owner}:
                 current = get_binding(conn, user_id, candidate)
-                if current and (current.get("source") != binding.get("source")
+                if current and (effective_source(current.get("source")) != effective_source(binding.get("source"))
                                 or credential_name(conn, user_id, candidate) != owner):
                     raise ValueError("history_name_taken")
             restored.append((key, _get_fernet().decrypt(ciphertext).decode("utf-8"), binding))
         for key, value, binding in restored:
+            reset_recovery = (binding.get("kind") == "recovery"
+                              and get_secret(db_path, user_id, "vault_entries", key, connection=conn) != value)
             before = conn.execute("SELECT max(id) FROM secrets_history").fetchone()[0] or 0
             set_secret(db_path, user_id, "vault_entries", key, value, connection=conn,
                        binding=binding if "hosts" in binding else None, actor=actor)
+            if reset_recovery:
+                # Historical ciphertext has no matching spent-code snapshot.
+                # Falling back to a block prevents automatic code reuse.
+                conn.execute("DELETE FROM recovery_code_state WHERE user_id=? AND name=?",
+                             (user_id, binding.get("credential", key)))
             conn.execute("UPDATE secrets_history SET op='restore' WHERE id>? AND user_id=?", (before, user_id))
         return [key for key, _, _ in restored]
 

@@ -22,6 +22,7 @@ _SERVICE = "vault_entries"
 KIND_RECOVERY = "recovery"
 # The KeePass custom field the export writes the codes to, protected.
 RECOVERY_FIELD = "Recovery codes"
+RECOVERY_FORMAT_FIELD = "istota_recovery_format"
 RECOVERY_MAX_BYTES = 8192
 RECOVERY_MAX_LINES = 64
 _KINDS = {"otp": "totp", "recovery": KIND_RECOVERY}

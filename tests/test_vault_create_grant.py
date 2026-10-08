@@ -124,7 +124,7 @@ def test_otp_set_in_one_task_then_fill_otp_in_the_next(configured, sock):
     config, _ = configured
     _create(config, sock, _task(config, "room-a"))
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", task_id=_task(config, "room-a"),
-                    vault_write_limit=1):
+                    vault_credentials=_namespace(config), vault_write_limit=1):
         assert _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED}) == {
             "name": "generated_acme", "otp": True,
         }

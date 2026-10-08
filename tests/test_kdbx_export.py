@@ -46,6 +46,9 @@ def test_round_trip_header_and_exclusions(database, cheap, tmp_path, monkeypatch
     seed(database, "portal_username", "alice", owner="portal", url="https://portal.example/login")
     seed(database, "portal_url", "https://portal.example/login", owner="portal", url="https://portal.example/login")
     seed(database, "portal_totp", OTP, owner="portal", url="https://portal.example/login")
+    with db.get_db(database) as conn:
+        binding = bindings.get_binding(conn, "alice", "portal_totp")
+        bindings.put_binding(conn, "alice", "portal_totp", {**binding, "credential": "portal", "kind": "totp"})
     seed(database, "operator", "config-only", source="config")
     store.set_secret(database, "alice", "wallet", "number", "wallet-only")
     seed(database, "other", "another-value")

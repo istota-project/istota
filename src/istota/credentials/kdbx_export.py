@@ -77,6 +77,7 @@ def _write_generated_entry(entry, values: dict[str, str]) -> None:
             entry.delete_custom_property(field_name)
     if values.get("recovery"):
         entry.set_custom_property(generated.RECOVERY_FIELD, values["recovery"], protect=True)
+        entry.set_custom_property(generated.RECOVERY_FORMAT_FIELD, values["recovery_format"])
 
 
 def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
@@ -100,6 +101,7 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
                 continue
             binding = binding or bindings.parse_binding("", {}, [], source="local")
             members = {}
+            kinds = {}
             for name in names:
                 member_binding = bindings.get_binding(conn, user_id, name)
                 if member_binding and member_binding["source"] == "config":
@@ -108,17 +110,19 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
                 if value is None:
                     raise ValueError("export_value_unavailable")
                 members[name] = value
+                kinds[name] = (member_binding or {}).get("kind", "value")
             if members:
                 declined = grants.auto_grant_marker(conn, user_id, owner) == grants.AUTO_GRANT_DECLINED
                 state = conn.execute("SELECT format, spent FROM recovery_code_state WHERE user_id=? AND name=?",
                                      (user_id, owner)).fetchone()
-                if state and state[0] == "codes" and owner + "_recovery" in members:
+                recovery_format = state[0] if state else "block"
+                if recovery_format == "codes" and kinds.get(owner + "_recovery") == "recovery":
                     import json
                     spent = set(json.loads(state[1]))
                     members[owner + "_recovery"] = "\n".join(
                         ("(used) " if index in spent else "") + line
                         for index, line in enumerate(members[owner + "_recovery"].splitlines()))
-                entries.append((owner, members, binding, declined))
+                entries.append((owner, members, kinds, binding, declined, recovery_format))
     if not entries:
         raise ValueError("export_empty")
     kp = pykeepass.create_database(io.BytesIO(), password=password,
@@ -131,8 +135,17 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
     root = kp.add_group(kp.root_group, kdbx_import.VAULT_ROOT_GROUP)
     generated_group = None
     generated_count = otp_count = recovery_count = 0
-    for owner, members, binding, declined in entries:
-        values = {field: members.get(name, "") for field, name in generated.entry_names(owner).items()}
+    for owner, members, kinds, binding, declined, recovery_format in entries:
+        values = {}
+        known = set()
+        for field, name in generated.entry_names(owner).items():
+            expected_kind = {"otp": "totp", "recovery": "recovery"}.get(field)
+            if expected_kind and kinds.get(name) != expected_kind:
+                values[field] = ""
+                continue
+            values[field] = members.get(name, "")
+            known.add(name)
+        values["recovery_format"] = recovery_format
         url, attributes, tags = bindings.binding_entry_fields(binding)
         # Preserve the user's complete URL, including its path, when present.
         values["url"] = values["url"] or url
@@ -153,7 +166,6 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
         if declined:
             tags.append(kdbx_import.VAULT_NO_GRANT_TAG)
         entry.tags = tags
-        known = set(generated.entry_names(owner).values())
         for name, value in members.items():
             if name not in known:
                 entry.set_custom_property(name.removeprefix(owner + "_"), value, protect=True)

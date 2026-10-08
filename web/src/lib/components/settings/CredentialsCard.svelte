@@ -53,6 +53,13 @@
   let deletedOpen = $state(false);
   let reveal: { name: string; codes: string[]; spent: number[] } | null = $state(null);
   let revealName: string | null = $state(null);
+  const recoveryText = $derived.by(() => {
+    const current = reveal;
+    if (!current) return '';
+    return current.codes
+      .map((code, index) => `${current.spent.includes(index) ? '(used) ' : ''}${code}`)
+      .join('\n');
+  });
 
   function openReveal(name: string) {
     revealName = name;
@@ -325,21 +332,12 @@
     <p class="caption reveal-note">
       Keep these codes somewhere only you can reach, and close this when you are done.
     </p>
-    <pre class="recovery-codes" data-testid="recovery-codes">{reveal.codes
-        .map((code, index) => `${reveal.spent.includes(index) ? '(used) ' : ''}${code}`)
-        .join('\n')}</pre>
+    <pre class="recovery-codes" data-testid="recovery-codes">{recoveryText}</pre>
   {/if}
   {#snippet footer()}
     <Button
       variant="secondary"
-      onclick={() =>
-        reveal &&
-        copyText(
-          reveal.codes
-            .map((code, index) => `${reveal.spent.includes(index) ? '(used) ' : ''}${code}`)
-            .join('\n'),
-          { label: 'Recovery codes' },
-        )}>Copy</Button
+      onclick={() => reveal && copyText(recoveryText, { label: 'Recovery codes' })}>Copy</Button
     >
     <Button variant="primary" onclick={() => (reveal = null)}>Done</Button>
   {/snippet}

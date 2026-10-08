@@ -131,6 +131,8 @@ Register an X25519 age public recipient (`age1…`) under Scheduled backup. Chan
 
 OTP enrollment is set once with `istota-credential otp-set NAME` on stdin; a task can fill current codes with `browse interact --fill-otp`. Recovery codes can be saved through `browse interact --save-recovery SELECTOR=NAME` without returning them to the task. Settings reveals recovery codes only after an emailed confirmation. `istota secret retire --user alice --name generated_acme --yes` removes a generated credential and its grant; exported files remain untouched.
 
+A restored historical recovery set has no spent-code snapshot, so it becomes a plain text block and cannot be filled automatically. Restoring the same value leaves its existing spent-code state intact. KeePass exports preserve the recovery format and mark spent codes, and importing that export restores both. Older files without format metadata are treated as blocks unless they contain spent-code markers.
+
 ### Upgrading an existing vault
 
 The daemon attempts one final non-deleting import for each configured legacy file, then removes the stored passphrase and sync state and sends one notice. Missing or unreadable files are retried for up to seven days. A wrong passphrase, corrupt file, refused path or missing library ends the automatic attempt; import the file manually when the problem is fixed. Your `.kdbx` bytes remain untouched. Legacy `vault_path` is used only by this migration; `vault_sync_interval` is ignored. Configuration loading warns about both retired settings.

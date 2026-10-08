@@ -54,6 +54,19 @@ def _field(owner, name):
     return "otp" if suffix == "totp" else suffix
 
 
+def _recovery_copy(copy):
+    text = generated.normalize_recovery(copy["recovery"])
+    lines = text.splitlines()
+    fmt = copy.get("recovery_format")
+    if fmt not in ("codes", "phrase", "block"):
+        fmt = "codes" if any(line.startswith("(used) ") for line in lines) else "block"
+    spent = []
+    if fmt == "codes":
+        spent = [index for index, line in enumerate(lines) if line.startswith("(used) ")]
+        text = "\n".join(line.removeprefix("(used) ") for line in lines)
+    return text, fmt, spent
+
+
 def _entries(read):
     entries = {}
     for name, value in read.services.items():
@@ -64,6 +77,8 @@ def _entries(read):
         members = {}
         for field, name in generated.entry_names(owner).items():
             if value := copy.get(field):
+                if field == "recovery":
+                    value, _, _ = _recovery_copy(copy)
                 kind = {"otp": "totp", "recovery": "recovery"}.get(field, "value")
                 binding = read.generated_bindings.get(owner) or bindings.parse_binding(copy.get("url", ""), {}, [], source="generated")
                 members[name] = (value, {**binding, "credential": owner, "kind": kind})
@@ -115,6 +130,11 @@ def _preview(conn, user_id, read, entries):
             if stored != value or any(old_binding.get(k, "value" if k == "kind" else None)
                                       != binding.get(k, "value" if k == "kind" else None) for k in metadata):
                 changed.add(_field(owner, name))
+        if origin == "generated" and read.generated[owner].get("recovery"):
+            _, fmt, spent = _recovery_copy(read.generated[owner])
+            state = generated.recovery_state(conn, user_id, owner)
+            if state is None or state["format"] != fmt or state["spent"] != spent:
+                changed.add("recovery")
         if owner in collided:
             status, reason = "skipped", SKIP_DUPLICATE_NAME
         elif reason:
@@ -193,15 +213,12 @@ def apply(db_path, user_id, data: bytes, passphrase: str, *, selected: Sequence[
                                      actor=actor)
                 else:
                     generated._write_rows(conn, user_id, owner, {
-                        k: v for k, v in copy.items() if k not in ("otp", "recovery")}, actor=actor)
+                        k: v for k, v in copy.items() if k in ("password", "username", "url")}, actor=actor)
                 if copy.get("otp"):
                     generated.set_otp(conn, user_id, owner, copy["otp"], replace=True, actor=actor)
                 if copy.get("recovery"):
-                    lines = copy["recovery"].splitlines()
-                    spent = [index for index, line in enumerate(lines) if line.startswith("(used) ")]
-                    text = "\n".join(line.removeprefix("(used) ") for line in lines)
-                    generated.set_recovery(conn, user_id, owner, text,
-                                           fmt="codes" if spent else "block", actor=actor)
+                    text, fmt, spent = _recovery_copy(copy)
+                    generated.set_recovery(conn, user_id, owner, text, fmt=fmt, actor=actor)
                     if spent:
                         import json
                         conn.execute("UPDATE recovery_code_state SET spent=? WHERE user_id=? AND name=?",
@@ -712,7 +729,7 @@ def _take_generated_copy(walk: _Walk, name: str, entry, otp_value: str | None) -
         walk.generated_duplicates.add(name)
         walk.skipped.append((name, SKIP_DUPLICATE_NAME))
         return
-    from istota.credentials.generated import RECOVERY_FIELD
+    from istota.credentials.generated import RECOVERY_FIELD, RECOVERY_FORMAT_FIELD
     recovery = next((str(raw or "").strip() for field_name, raw in entry.custom_properties.items()
                      if str(field_name).casefold() == RECOVERY_FIELD.casefold()), "")
     from istota.credentials.broker.bindings import parse_binding
@@ -723,6 +740,7 @@ def _take_generated_copy(walk: _Walk, name: str, entry, otp_value: str | None) -
         "url": str(entry.url or "").strip(),
         "otp": otp_value or "",
         "recovery": recovery,
+        "recovery_format": entry.custom_properties.get(RECOVERY_FORMAT_FIELD, ""),
     }
 
 
