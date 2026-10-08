@@ -1190,6 +1190,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # long as that failure persists. Attributing a row that a later re-run then
     # deletes costs nothing.
     _migrate_messages_author(conn)
+    _migrate_messages_fts(conn)
     # After the author backfill, which is what it reads.
     _migrate_room_participants(conn)
     _migrate_drop_room_data_grants(conn)
@@ -1349,6 +1350,49 @@ def _migrate_room_binding_uniqueness(conn: sqlite3.Connection) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_room_bindings_unique_ref "
             "ON room_bindings (surface, surface_ref)"
         )
+
+
+_MESSAGES_FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    body, title,
+    content='messages', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, body, title) VALUES (new.id, new.body, new.title);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, body, title) VALUES ('delete', old.id, old.body, old.title);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF body, title ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, body, title) VALUES ('delete', old.id, old.body, old.title);
+    INSERT INTO messages_fts(rowid, body, title) VALUES (new.id, new.body, new.title);
+END;
+"""
+
+
+def _migrate_messages_fts(conn: sqlite3.Connection) -> None:
+    """Build the transcript index once, atomically with its write triggers."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='messages'").fetchone():
+        return
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone():
+        return
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Recheck under the writer lock if two processes initialized together.
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone():
+            statement = ""
+            for line in _MESSAGES_FTS_DDL.splitlines(keepends=True):
+                statement += line
+                if sqlite3.complete_statement(statement):
+                    conn.execute(statement)
+                    statement = ""
+            conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def init_db(db_path: Path) -> None:
@@ -7166,6 +7210,47 @@ def list_messages_across_rooms(
         "before_id": before_id,
         "exclude": json.dumps(sorted(exclude_tokens)),
     }).fetchall()
+
+
+def search_messages(
+    conn: sqlite3.Connection,
+    user_id: str,
+    match: str,
+    *,
+    limit: int,
+    offset: int,
+    exclude_tokens: set[str] | frozenset[str],
+) -> list[dict]:
+    """Ranked transcript matches in the same room scope as the All pane."""
+    from istota.lib.text_match import MARK_OPEN, markers_to_offsets
+
+    sql = (
+        _CROSS_ROOM_COLUMNS
+        + ", snippet(messages_fts, 0, char(57344), char(57345), '…', 24) AS body_snippet "
+        + ", snippet(messages_fts, 1, char(57344), char(57345), '…', 24) AS title_snippet "
+        + ", (SELECT count(*) > 1 FROM room_members members "
+        + "   WHERE members.room_token = m.room_token) AS shared "
+        + _CROSS_ROOM_FROM
+        + "JOIN messages_fts ON messages_fts.rowid = m.id "
+        + _CROSS_ROOM_WHERE
+        + "AND messages_fts MATCH :match "
+    )
+    if exclude_tokens:
+        sql += "AND m.room_token NOT IN (SELECT value FROM json_each(:exclude)) "
+    sql += "ORDER BY bm25(messages_fts, 1.0, 0.5), m.created_at DESC, m.id DESC LIMIT :limit OFFSET :offset"
+    rows = conn.execute(sql, {
+        "user": user_id, "match": match, "limit": limit, "offset": offset,
+        "exclude": json.dumps(sorted(exclude_tokens)),
+    }).fetchall()
+    results = []
+    for row in rows:
+        hit = dict(row)
+        body = hit.pop("body_snippet") or ""
+        title = hit.pop("title_snippet") or ""
+        marked = body if MARK_OPEN in body else title if MARK_OPEN in title else body
+        hit["snippet"], hit["highlights"] = markers_to_offsets(marked)
+        results.append(hit)
+    return results
 
 
 def mark_all_rooms_read(conn: sqlite3.Connection, user_id: str) -> int:
