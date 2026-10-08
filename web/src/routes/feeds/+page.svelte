@@ -146,7 +146,7 @@
     params: ['entry'],
     // Entry is an event target, not a filter to reconcile while it loads.
     compareKeys: [],
-    encode: ({ id }) => (id === null ? {} : { entry: String(id) }),
+    encode: ({ id }): Record<string, string> => (id === null ? {} : { entry: String(id) }),
     decode: ({ entry }) => {
       if (!entry) return { id: null };
       const id = Number(entry);
