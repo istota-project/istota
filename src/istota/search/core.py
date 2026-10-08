@@ -36,6 +36,7 @@ class SearchHit:
     date: str | None
     link: dict | None
     badges: list[str]
+    cursor: dict | None = None
 
 
 @dataclass

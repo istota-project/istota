@@ -6395,29 +6395,39 @@ def task_shown_in_room(
 
 def list_system_messages(
     conn: sqlite3.Connection, room_token: str, limit: int = 50,
+    *, before: tuple[str, int] | None = None,
 ) -> list[Message]:
     """The most recent bot-delivered system messages for a room (role='system',
     task_id NULL) — alerts / verbose log / web-routed notifications. Oldest-first.
     Replaces the legacy web_chat_messages read path."""
+    cursor_sql = "AND (created_at, id) < (?, ?) " if before is not None else ""
     rows = conn.execute(
         "SELECT * FROM messages WHERE room_token = ? AND role = 'system' "
-        "ORDER BY id DESC LIMIT ?",
-        (room_token, limit),
+        + cursor_sql + "ORDER BY created_at DESC, id DESC LIMIT ?",
+        (room_token, *(before or ()), limit),
     ).fetchall()
     return [_row_to_message(r) for r in reversed(rows)]
 
 
 def list_system_messages_in_band(
     conn: sqlite3.Connection, room_token: str, *, lo_ts: str, hi_ts: str,
+    lo_id: int | None = None, hi_id: int | None = None,
 ) -> list[Message]:
     """System messages within the half-open band ``lo_ts <= created_at < hi_ts``
     (the web-chat older-page path — ISSUE-131). Oldest-first. ``lo_ts`` / ``hi_ts``
     are *raw* stored `created_at` strings (`YYYY-MM-DD HH:MM:SS`), the same format
-    the keyset cursor travels in — not the `_iso_utc` display value."""
+    the keyset cursor travels in — not the `_iso_utc` display value. Supplying
+    both ids uses tuple bounds, so a search jump can resolve a timestamp tie."""
+    if lo_id is not None and hi_id is not None:
+        band = "(created_at, id) >= (?, ?) AND (created_at, id) < (?, ?)"
+        params = (lo_ts, lo_id, hi_ts, hi_id)
+    else:
+        band = "created_at >= ? AND created_at < ?"
+        params = (lo_ts, hi_ts)
     rows = conn.execute(
         "SELECT * FROM messages WHERE room_token = ? AND role = 'system' "
-        "AND created_at >= ? AND created_at < ? ORDER BY id DESC",
-        (room_token, lo_ts, hi_ts),
+        f"AND {band} ORDER BY created_at DESC, id DESC",
+        (room_token, *params),
     ).fetchall()
     return [_row_to_message(r) for r in reversed(rows)]
 

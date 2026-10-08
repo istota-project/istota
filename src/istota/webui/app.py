@@ -8232,11 +8232,15 @@ def _display_name_for(user_id: str) -> str:
     return user_id
 
 
+JUMP_MAX_ROWS = 2000
+
+
 def _chat_room_messages(
     username: str,
     token: str,
     limit: int,
     before: tuple[str, int] | None = None,
+    until: tuple[str, int] | None = None,
 ) -> dict:
     """A page of a room's transcript plus (on first load) its active tasks.
 
@@ -8260,6 +8264,10 @@ def _chat_room_messages(
     that band so the timeline tiles with no gap and no overlap. `active_tasks`
     is returned only on the first load — an older page never carries an in-flight
     slot.
+
+    `until` expands one older page to the inclusive target cursor, capped at
+    JUMP_MAX_ROWS durable rows. System rows share this cap and cursor, while
+    their rendering still goes through the notes path below.
 
     The aux fill bands on `_AUX_TURN_TS`, not on the `tasks` row's own
     `created_at`: the two are written by separate statements against a
@@ -8291,7 +8299,17 @@ def _chat_room_messages(
         # 1. Spine: durable turns, keyset-paginated. limit*2 because a turn is
         #    two rows (user + assistant); scheduled posts contribute one, so this
         #    over-fetches a little for scheduled-heavy rooms, which is harmless.
-        if before is None:
+        truncated = False
+        if until is not None:
+            msg_rows = conn.execute(
+                _SPINE_COLUMNS + f"WHERE m.room_token = ? AND ({_SPINE_SURFACE} OR m.role = 'system') "
+                "AND (m.created_at, m.id) >= (?, ?) AND (m.created_at, m.id) < (?, ?) "
+                "ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
+                (username, token, *until, *before, JUMP_MAX_ROWS + 1),
+            ).fetchall()
+            truncated = len(msg_rows) > JUMP_MAX_ROWS
+            msg_rows = msg_rows[:JUMP_MAX_ROWS]
+        elif before is None:
             msg_rows = conn.execute(
                 _SPINE_COLUMNS + f"WHERE m.room_token = ? AND {_SPINE_SURFACE} "
                 "ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
@@ -8339,14 +8357,14 @@ def _chat_room_messages(
                 ).fetchall()
         else:
             before_ts, before_id = before
-            if msg_rows:
+            if msg_rows or until is not None:
                 # Older page with a spine: failed/cancelled tasks banded to the
                 # page's [page_lo, before) window. Failed/cancelled only — a
                 # completed turn lives wholly in the spine, so reading it here
                 # would re-render a turn whose spine rows the LIMIT split across
                 # this page's boundary. An older page never carries an in-flight
                 # slot.
-                page_lo = msg_rows[-1]["created_at"]
+                page_lo = until[0] if until is not None and not truncated else msg_rows[-1]["created_at"]
                 task_rows = conn.execute(
                     _AUX_COLUMNS
                     + "WHERE " + _AUX_ROOM_SCOPE + " AND user_id = ? "
@@ -8375,6 +8393,13 @@ def _chat_room_messages(
         #    [page_lo, before) so they ride along with their turns.
         if before is None:
             notes = db.list_system_messages(conn, token, limit)
+        elif until is not None:
+            floor = (msg_rows[-1]["created_at"], msg_rows[-1]["msg_id"]) if truncated else until
+            notes = db.list_system_messages_in_band(
+                conn, token, lo_ts=floor[0], lo_id=floor[1], hi_ts=before[0], hi_id=before[1],
+            )
+        elif not msg_rows and not task_rows:
+            notes = db.list_system_messages(conn, token, limit, before=before)
         else:
             # `turn_ts` on the aux fallback, matching the cursor this page hands
             # back: band the notes on a *lower* floor than the cursor and the
@@ -8449,11 +8474,23 @@ def _chat_room_messages(
                 (token, token, username, page_lo_ts, page_lo_ts, page_lo_id),
             ).fetchone() is not None
 
+        if not msg_rows and not task_rows and notes:
+            oldest = min(notes, key=lambda n: (n.created_at, n.id))
+            oldest_cursor = {"ts": oldest.created_at, "id": oldest.id}
+        if oldest_cursor is not None:
+            has_more = has_more or conn.execute(
+                "SELECT 1 FROM messages WHERE room_token=? AND role='system' "
+                "AND (created_at, id) < (?, ?) LIMIT 1",
+                (token, oldest_cursor["ts"], oldest_cursor["id"]),
+            ).fetchone() is not None
+
     messages: list[dict] = []
     seen: set[tuple[str, object]] = set()  # (role, task_id) already rendered
 
     # 1. Durable store turns (authoritative).
     for r in reversed(msg_rows):  # oldest-first
+        if r["role"] == "system":
+            continue  # Rendered by the notes path with its cards and references.
         tid = r["task_id"]
         if r["role"] == "user":
             d = {
@@ -8572,6 +8609,7 @@ def _chat_room_messages(
         # stored created_at + id — NOT the normalized display value).
         "has_more": has_more,
         "oldest_cursor": oldest_cursor,
+        "truncated": truncated,
     }
 
 
@@ -10121,6 +10159,8 @@ async def chat_room_messages(
     limit: int = 50,
     before_ts: str | None = None,
     before_id: int | None = None,
+    until_ts: str | None = None,
+    until_id: int | None = None,
     user: dict = Depends(_require_api_auth),
 ):
     room = await asyncio.to_thread(_chat_owned_room, user["username"], room_id)
@@ -10135,9 +10175,14 @@ async def chat_room_messages(
             status_code=400,
         )
     before = (before_ts, before_id) if before_ts is not None else None
+    if (until_ts is None) != (until_id is None):
+        return JSONResponse({"error": "until_ts and until_id must be supplied together"}, status_code=400)
+    until = (until_ts, until_id) if until_ts is not None else None
+    if until is not None and before is None:
+        return JSONResponse({"error": "until requires a before cursor"}, status_code=400)
     limit = max(1, min(limit, 200))
     return await asyncio.to_thread(
-        _chat_room_messages, user["username"], room.token, limit, before,
+        _chat_room_messages, user["username"], room.token, limit, before, until,
     )
 
 

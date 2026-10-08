@@ -330,6 +330,19 @@ describe('chat jump history', () => {
     expect(currentUrl()).toBe(initial);
   });
 
+  it('restores a search cursor from the URL verbatim', async () => {
+    __history.reset('/istota/chat/?room=room-b&msg=22&ts=2026-01-01+12%3A00%3A00');
+    session.jumpToMsgId = vi.fn(async (token: string) => session.selectRoomByToken(token));
+    renderPage();
+    await waitFor(() =>
+      expect(session.jumpToMsgId).toHaveBeenCalledWith('room-b', 22, {
+        ts: '2026-01-01 12:00:00',
+        id: 22,
+      }),
+    );
+    expect(currentUrl()).toContain('ts=2026-01-01+12%3A00%3A00');
+  });
+
   it('restores a citation jump from the initial URL', async () => {
     __history.reset('/istota/chat/?room=room-b&msg=22');
     session.jumpToMsgId = vi.fn(async (token: string) => session.selectRoomByToken(token));

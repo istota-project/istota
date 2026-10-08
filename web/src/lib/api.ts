@@ -3111,6 +3111,7 @@ export interface ChatHistory {
   // Older history exists below this page (ISSUE-131). Absent on a pre-paging
   // backend, so the client treats `undefined` as "no more".
   has_more?: boolean;
+  truncated?: boolean;
   // Pass back as before_ts/before_id to fetch the next older page. `ts` is the
   // RAW stored created_at (`YYYY-MM-DD HH:MM:SS`), never the display value —
   // the keyset breaks if it's round-tripped through a normalized timestamp.
@@ -3599,7 +3600,12 @@ async function saveRoomFile(
 
 export function getRoomMessages(
   id: number,
-  opts: { limit?: number; before?: { ts: string; id: number } | null; timeoutMs?: number } = {},
+  opts: {
+    limit?: number;
+    before?: { ts: string; id: number } | null;
+    until?: { ts: string; id: number };
+    timeoutMs?: number;
+  } = {},
 ): Promise<ChatHistory> {
   const limit = opts.limit ?? 50;
   const params = new URLSearchParams({ limit: String(limit) });
@@ -3608,6 +3614,10 @@ export function getRoomMessages(
   if (opts.before) {
     params.set('before_ts', opts.before.ts);
     params.set('before_id', String(opts.before.id));
+  }
+  if (opts.until) {
+    params.set('until_ts', opts.until.ts);
+    params.set('until_id', String(opts.until.id));
   }
   return apiFetch<ChatHistory>(
     `/chat/rooms/${id}/messages?${params.toString()}`,
@@ -5075,6 +5085,7 @@ export function setCredentialBackup(
 export type SearchLink =
   { type: 'route'; path: string; params: Record<string, string> } | { type: 'file'; path: string };
 export interface SearchHit {
+  cursor?: { ts: string; id: number } | null;
   id: string;
   kind: string;
   title: string;

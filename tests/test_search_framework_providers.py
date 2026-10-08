@@ -94,6 +94,10 @@ def test_chats_badges_author_label_and_paging(ctx):
     assert result.hits[0].subtitle == "Guest"
     assert result.hits[0].badges == ["shared", "starred"]
     assert result.hits[0].link["params"]["msg"] == str(first)
+    with db.get_db(ctx.config.db_path) as conn:
+        stamp = conn.execute("SELECT created_at FROM messages WHERE id=?", (first,)).fetchone()[0]
+    assert result.hits[0].cursor == {"ts": stamp, "id": first}
+    assert result.hits[0].link["params"]["ts"] == stamp
 
 
 def test_hidden_archived_dismissed_rooms_exclude_channel_memory(ctx):

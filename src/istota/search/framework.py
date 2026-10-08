@@ -44,8 +44,9 @@ def chats(ctx, terms, mode, limit, offset):
             hits.append(SearchHit(
                 f"chats:{row['msg_id']}", "message", " ".join((row["room_name"] or "").split()),
                 " ".join((author or "").split()), row["snippet"], row["highlights"], iso_utc(row["created_at"]),
-                route("/chat/", room=row["room_token"], msg=row["msg_id"]),
+                route("/chat/", room=row["room_token"], msg=row["msg_id"], ts=row["created_at"]),
                 [badge for badge in ("shared", "starred") if row[badge]],
+                cursor={"ts": row["created_at"], "id": row["msg_id"]},
             ))
         return ProviderResult(hits, len(rows) > limit)
 
