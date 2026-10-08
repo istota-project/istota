@@ -16,7 +16,6 @@ import ipaddress
 import secrets
 from collections import OrderedDict, deque
 import contextlib
-import importlib
 import json
 import logging
 import math
@@ -40,6 +39,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
 from authlib.integrations.starlette_client import OAuth
+from istota.modules import module_loader as _module_loader
+from istota.lib.date_parse import iso_utc as _iso_utc
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -1827,6 +1829,21 @@ async def google_callback(request: Request):
 api_router = APIRouter(prefix="/istota/api")
 
 
+@api_router.get("/search")
+async def search_all(
+    request: Request,
+    q: str = Query(default="", max_length=200),
+    sources: str | None = None,
+    limit: int = Query(default=5, ge=1, le=25),
+    offset: int = Query(default=0, ge=0, le=500),
+):
+    from istota.search.core import run_search
+
+    user = _require_api_auth(request)
+    selected = [source.strip() for source in sources.split(",")] if sources is not None else None
+    return await run_search(_config, user["username"], q, sources=selected, limit=limit, offset=offset)
+
+
 def _user_has_feeds(username: str) -> bool:
     """True if the feeds module is enabled for the user (default-on)."""
     if not _config:
@@ -2609,30 +2626,6 @@ def _iso_z(dt: datetime) -> str:
     boundary day. Both report a plausible number.
     """
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-def _iso_utc(ts: str | None) -> str | None:
-    """Normalize a heterogeneous timestamp string to ISO 8601 UTC.
-
-    Inputs come from three writers with different conventions:
-    - SQLite ``datetime('now')`` and ``strftime`` — naive, space-separated,
-      documented to be UTC.
-    - Python ``datetime.now(timezone.utc).isoformat()`` — offset-aware,
-      ``T`` separator, ``+00:00`` suffix.
-    - Python ``datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")`` — naive.
-
-    Naive timestamps are treated as UTC. Output is always ``YYYY-MM-DDTHH:MM:SSZ``
-    so the frontend can pass it straight to ``new Date()``.
-    """
-    if not ts:
-        return None
-    try:
-        dt = datetime.fromisoformat(ts.replace(" ", "T"))
-    except (ValueError, TypeError):
-        return ts
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _gather_admin_stats() -> dict:
@@ -3925,21 +3918,6 @@ _MODULE_DB_STATS: tuple[_ModuleDbStats, ...] = (
         timestamp_queries=("SELECT MAX(generated_at) AS ts FROM briefing_archive",),
     ),
 )
-
-
-def _module_loader(name: str):
-    """Resolve a module's loader protocol via lazy import.
-
-    Returns ``(list_users, resolve_for_user, connect, UserNotFoundError)``.
-    ``connect`` lives on the package for most modules but on the ``.db``
-    submodule for briefings — one fallback handles that without a per-module
-    special case. Lazy so importing ``web_app`` doesn't pull every module in.
-    """
-    mod = importlib.import_module(f"istota.{name}")
-    connect = getattr(mod, "connect", None)
-    if connect is None:
-        connect = importlib.import_module(f"istota.{name}.db").connect
-    return mod.list_users, mod.resolve_for_user, connect, mod.UserNotFoundError
 
 
 def _aggregate_module_db(spec: _ModuleDbStats) -> dict | None:

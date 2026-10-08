@@ -1247,10 +1247,12 @@ def search(
     match_mode: str = "and",
     allow_or_fallback: bool = False,
     prefix: bool = False,
+    *,
+    vector: bool = True,
 ) -> list[SearchResult]:
     """Hybrid search: BM25 + vector with RRF fusion.
 
-    Falls back to BM25-only if vector search is unavailable.
+    Falls back to BM25-only if vector search is unavailable or ``vector=False``.
 
     Args:
         include_user_ids: Additional user_ids to include in search (e.g., channel IDs).
@@ -1297,7 +1299,7 @@ def search(
                                      match_mode="or", prefix=prefix)
     vec_results = _search_vec(conn, user_id, query, fetch_limit, source_types,
                                include_user_ids, since=since, topics=topics, entities=entities,
-                               now=now, include_expired=include_expired)
+                               now=now, include_expired=include_expired) if vector else []
 
     if vec_results:
         fused = _rrf_fusion(bm25_results, vec_results, k=rrf_k)
