@@ -245,7 +245,7 @@ def istota_briefing_shared_blocks_toml(shared_blocks) -> str:
 
 
 def istota_vault_users_toml(users) -> str:
-    """Render ``[users.<uid>]`` blocks carrying the credential vault's path.
+    """Render the retired vault path for one release so migration can find it.
 
     Returns "" when no user declares one, so a deployment where every vault is
     a file in the user's own folder renders no ``[users.<uid>]`` section at

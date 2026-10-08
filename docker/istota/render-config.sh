@@ -734,8 +734,6 @@ cron_max_staleness_minutes = ${ISTOTA_SCHEDULER_CRON_MAX_STALENESS_MINUTES:-60}
 max_subtasks_per_task = ${ISTOTA_SCHEDULER_MAX_SUBTASKS_PER_TASK:-10}
 max_subtask_depth = ${ISTOTA_SCHEDULER_MAX_SUBTASK_DEPTH:-3}
 max_subtask_prompt_chars = ${ISTOTA_SCHEDULER_MAX_SUBTASK_PROMPT_CHARS:-8000}
-# KDBX credential-vault sync (0 disables); inert unless a user has a vault_path.
-vault_sync_interval = ${ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL:-300}
 talk_cache_max_per_conversation = ${ISTOTA_SCHEDULER_TALK_CACHE_MAX_PER_CONVERSATION:-200}
 temp_file_retention_days = ${ISTOTA_SCHEDULER_TEMP_FILE_RETENTION_DAYS:-7}
 location_ping_retention_days = ${ISTOTA_SCHEDULER_LOCATION_PING_RETENTION_DAYS:-365}

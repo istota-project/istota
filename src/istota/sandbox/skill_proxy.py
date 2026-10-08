@@ -908,35 +908,11 @@ class SkillProxy:
             return False
         return True
 
-    def _mirror_generated(self, name: str) -> str:
-        """Write a new generated credential to the user's KeePass file, if mirrored.
-
-        A write that does not land leaves the credential stored and the mirror
-        pending; the sync retries it. Never turns a stored credential into a
-        refusal that would invite the model to create a second one.
-        """
-        from istota.credentials import vault as secrets_vault
-        try:
-            return secrets_vault.mirror_generated(self.config, self.user_id, name)
-        except Exception:
-            logger.exception("vault mirror task_id=%s: write failed", self.task_id)
-            return "pending"
-
-    @staticmethod
-    def _mirror_sentence(state: str) -> str:
-        if state == "mirrored":
-            return " A copy is in your KeePass file under generated/."
-        if state == "pending":
-            return (" The copy in your KeePass file has not been written yet; Istota "
-                    "retries on its next vault sync.")
-        return ""
-
     def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
         """Generate and store one credential host-side; return names only (ISSUE-686).
 
         The credential lives in the secrets table as ``source="generated"``;
-        the user's KeePass file, when there is one and mirroring is on, gets a
-        one-way copy. No vault is needed.
+        no shared file is written.
         """
         from istota import db
         from istota.mail import support as email_support
@@ -1031,10 +1007,8 @@ class SkillProxy:
                             "VaultWriteRefused", "signup address already used")
             with db.get_db(config.db_path) as db_conn:
                 db_conn.execute("BEGIN IMMEDIATE")
-                mirror = (generated.default_mirror(db_conn, user_id)
-                          and secrets_vault._vault_is_enabled(config, user_id))
                 generated.create(db_conn, user_id, name=name, username=username,
-                                 password=password, url=url, mirror=mirror, actor=f"task:{self.task_id}")
+                                 password=password, url=url, actor=f"task:{self.task_id}")
         except generated.GeneratedCredentialError as exc:
             if reserved_tag:
                 with db.get_db(config.db_path) as db_conn:
@@ -1061,7 +1035,6 @@ class SkillProxy:
                     granted = grant_created_entry(db_conn, user_id, name, int(self.task_id))
             except Exception:
                 logger.exception("vault_create task_id=%s: conversation grant failed", self.task_id)
-        mirrored = self._mirror_generated(name) if mirror else "off"
         confirmation_readable = False
         if signup_address:
             try:
@@ -1083,7 +1056,7 @@ class SkillProxy:
                         "until you widen it in Settings, Credentials." if granted[1] else
                         " Later tasks in the conversation that created it can use it; "
                         "widen or revoke that in Settings, Credentials."
-                    ) + self._mirror_sentence(mirrored),
+                    ),
                     severity="warning", actionable=True,
                     params={"task_id": self.task_id, "status": "vault_created"},
                 )
@@ -1132,7 +1105,6 @@ class SkillProxy:
             with db.get_db(config.db_path) as db_conn:
                 db_conn.execute("BEGIN IMMEDIATE")
                 seed_name = generated.set_otp(db_conn, user_id, name, canonical, actor=f"task:{self.task_id}")
-                mirror = generated.mirror_state(db_conn, user_id, name)["mirror"]
         except generated.GeneratedCredentialError as exc:
             refuse(exc.reason, str(exc))
             return
@@ -1141,14 +1113,13 @@ class SkillProxy:
         # Enrollment does not grant an existing credential to this task.
         if name in self._created_names:
             self._created_names.add(seed_name)
-        mirrored = self._mirror_generated(name) if mirror else "off"
         try:
             with db.get_db(config.db_path) as db_conn:
                 raised = task_alert.write(
                     db_conn, user_id,
                     dedup_key=f"vault-otp-set:{task_alert._slug(name, limit=64)}",
                     title=f"Istota added two-factor to {name}",
-                    body="Two-factor enrollment was saved in Istota." + self._mirror_sentence(mirrored),
+                    body="Two-factor enrollment was saved in Istota.",
                     severity="warning", actionable=True,
                     params={"task_id": self.task_id, "status": "vault_otp_set"},
                 )
@@ -1218,7 +1189,7 @@ class SkillProxy:
         """Store or replace a generated credential's recovery codes (ISSUE-688).
 
         The reply carries a line count and whether an earlier set was replaced;
-        the codes go to the table and the mirror, never back to the caller and
+        the codes go to the table, never back to the caller and
         never into this task's credential snapshot.
         """
         from istota import db
@@ -1252,7 +1223,6 @@ class SkillProxy:
             with db.get_db(config.db_path) as db_conn:
                 db_conn.execute("BEGIN IMMEDIATE")
                 _, count, replaced = generated.set_recovery(db_conn, user_id, name, text, actor=f"task:{self.task_id}")
-                mirror = generated.mirror_state(db_conn, user_id, name)["mirror"]
         except generated.GeneratedCredentialError as exc:
             refuse(exc.reason, {
                 "recovery_set_not_generated":
@@ -1263,7 +1233,6 @@ class SkillProxy:
             }.get(exc.reason, "Recovery codes could not be saved"))
             return
 
-        mirrored = self._mirror_generated(name) if mirror else "off"
         logger.info("vault_recovery_set task_id=%s name=%s count=%d replaced=%s",
                     self.task_id, label_for_display(name), count, replaced)
         try:
@@ -1278,7 +1247,7 @@ class SkillProxy:
                            "no longer accepts." if replaced else
                            "The site's recovery codes were saved in Istota.")
                           + " Only you can read them, in Settings, Credentials."
-                          + self._mirror_sentence(mirrored)),
+                         ),
                     severity="warning", actionable=True,
                     params={"task_id": self.task_id, "status": "vault_recovery_set"},
                 )

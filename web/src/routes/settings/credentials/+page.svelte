@@ -4,7 +4,7 @@
   import KeepassImportCard from '$lib/components/settings/KeepassImportCard.svelte';
   import CredentialActivity from '$lib/components/settings/CredentialActivity.svelte';
   import { getCurrentUser } from '$lib/userContext';
-  import { SettingsLayout, VaultCard, CredentialsCard } from '$lib/components/settings';
+  import { SettingsLayout, CredentialsCard } from '$lib/components/settings';
 
   let refresh = $state(0);
   const identity = getCurrentUser();
@@ -15,6 +15,5 @@
   <KeepassImportCard onImported={() => (refresh += 1)} />
   <KeepassExportCard onExported={() => (refresh += 1)} />
   <CredentialBackupCard />
-  <VaultCard />
   {#key refresh}<CredentialActivity />{/key}
 </SettingsLayout>

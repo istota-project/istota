@@ -899,7 +899,7 @@ def test_retire_needs_yes_and_removes_only_a_generated_credential(env, monkeypat
     cfg, db_path, _ = _with_vault(env)
     with db.get_db(db_path) as conn:
         generated.create(conn, "alice", name="generated_example", username="alice",
-                         password="fixture-password", url="", mirror=False)
+                         password="fixture-password", url="")
     secrets_store.set_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "github", "typed",
                              binding=parse_binding("github.com", {}, [], source="local"))
 

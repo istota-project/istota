@@ -1194,24 +1194,14 @@ def _cmd_secret_vault_new(config, args) -> None:
     try:
         with db.get_db(config.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            mirror = (generated.default_mirror(conn, args.user)
-                      and secrets_vault._vault_is_enabled(config, args.user))
             generated.create(conn, args.user, name=names[0], username=username,
-                             password=password, url=args.url or "", mirror=mirror)
+                             password=password, url=args.url or "")
     except generated.GeneratedCredentialError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-    state = secrets_vault.mirror_generated(config, args.user, names[0]) if mirror else "off"
     print(f"Created credential: {names[0]}")
     print(f"Username name: {names[1]}")
     print(f"URL name: {names[2]}")
-    print(f"KeePass copy: {state}")
-    if state == "mirrored":
-        print(
-            "Warning: a password manager that already has this vault open may "
-            "overwrite the copy on its next save; Istota keeps its own.",
-            file=sys.stderr,
-        )
 
 
 def _cmd_secret_retire(config, args) -> None:

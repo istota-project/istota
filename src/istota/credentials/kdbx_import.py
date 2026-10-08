@@ -1,5 +1,6 @@
 """Stateless, selected imports from a KeePass file into the credential store."""
 
+from contextlib import nullcontext
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -142,7 +143,8 @@ def preview(db_path, user_id, data: bytes, passphrase: str, *, keyfile: bytes | 
 
 
 def apply(db_path, user_id, data: bytes, passphrase: str, *, selected: Sequence[str],
-          expected_digest: str, actor: str, keyfile: bytes | None = None) -> ImportResult:
+          expected_digest: str, actor: str, keyfile: bytes | None = None,
+          migration: bool = False, connection=None) -> ImportResult:
     if not store.secret_key_available():
         raise store.SecretKeyMissingError("The credential store is not configured")
     if not selected:
@@ -152,8 +154,9 @@ def apply(db_path, user_id, data: bytes, passphrase: str, *, selected: Sequence[
     read = vault.parse_vault(data, passphrase, keyfile=keyfile)
     entries = _entries(read)
     imported, not_imported = [], {}
-    with db.get_db(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
+    with (nullcontext(connection) if connection is not None else db.get_db(db_path)) as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         items = {item.name: item for item in _preview(conn, user_id, read, entries).items}
         groups = bindings.credential_groups(conn, user_id)
         grants.baseline_auto_grants(conn, user_id, groups)
@@ -165,12 +168,22 @@ def apply(db_path, user_id, data: bytes, passphrase: str, *, selected: Sequence[
                 not_imported[owner] = item.status if item else "not_found"
                 continue
             members = entries[owner]
+            if migration:
+                # The final automatic import cannot replace a user-owned value.
+                occupied = set(groups.get(owner, [])) | set(members) | {owner}
+                if item.origin == "generated" and item.status != "new":
+                    continue
+                if item.origin == "entry" and any(
+                    (bindings.get_binding(conn, user_id, name) or {}).get("source")
+                    in ("local", "generated", "config") for name in occupied
+                ):
+                    continue
             if item.origin == "generated":
                 copy = read.generated[owner]
                 if item.status == "new":
                     generated.create(conn, user_id, name=owner, username=copy.get("username", ""),
                                      password=copy["password"], url=copy.get("url", ""),
-                                     mirror=False, actor=actor)
+                                     actor=actor)
                 else:
                     generated._write_rows(conn, user_id, owner, {
                         k: v for k, v in copy.items() if k not in ("otp", "recovery")}, actor=actor)
@@ -185,7 +198,7 @@ def apply(db_path, user_id, data: bytes, passphrase: str, *, selected: Sequence[
                     store.set_secret(None, user_id, _SERVICE, name, value,
                                      binding=binding, connection=conn, actor=actor)
                 owners.append(owner)
-            for name in set(groups.get(owner, [])) - set(members):
+            for name in (() if migration else set(groups.get(owner, [])) - set(members)):
                 store.delete_secret(None, user_id, _SERVICE, name, connection=conn, actor=actor)
             imported.append(owner)
             changed += item.status == "changed"

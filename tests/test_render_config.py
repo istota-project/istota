@@ -2830,20 +2830,9 @@ class TestTheCredentialVault:
         assert "[[users.testuser.resources]]" in text, "the control did not render"
         assert text.index("vault_path =") < text.index("[[users.testuser.resources]]")
 
-    def test_the_sync_interval_renders(self, tmp_path):
-        config = load_config(
-            render(tmp_path, **REQUIRED, ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL="900")
-        )
-        assert config.scheduler.vault_sync_interval == 900
-
-    def test_the_sync_interval_default_matches_the_dataclass(self, tmp_path):
-        from istota.config import SchedulerConfig
-
-        config = load_config(render(tmp_path, **REQUIRED))
-        assert (
-            config.scheduler.vault_sync_interval
-            == SchedulerConfig().vault_sync_interval
-        )
+    def test_the_retired_sync_interval_is_not_rendered(self, tmp_path):
+        path = render(tmp_path, **REQUIRED, ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL="900")
+        assert "vault_sync_interval" not in path.read_text()
 
 
 @pytest.mark.parametrize("allowed", [False, True])

@@ -2969,6 +2969,8 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         user_data.get("sms_phone_number", ""), allow_empty=True,
     )
 
+    if "vault_path" in user_data:
+        logger.warning("[users.%s] vault_path is retired; it is read only for credential migration", user_id)
     return UserConfig(
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
@@ -4234,6 +4236,9 @@ def load_config(config_path: Path | None = None) -> Config:
 
     with open(config_path, "rb") as f:
         data = tomli.load(f)
+
+    if isinstance(data.get("scheduler"), dict) and "vault_sync_interval" in data["scheduler"]:
+        logger.warning("[scheduler] vault_sync_interval is retired and ignored")
 
     config = Config()
     config.config_path = config_path

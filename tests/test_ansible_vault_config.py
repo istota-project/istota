@@ -227,26 +227,8 @@ class TestTheFilterIsTotal:
         assert vault_filter()({"alice": {"vault_path": 7}}) == ""
 
 
-class TestTheSyncInterval:
-    def test_it_renders_from_inventory(self):
-        config = load_config_from(render(istota_scheduler_vault_sync_interval=900))
-        assert config.scheduler.vault_sync_interval == 900
-
-    def test_the_default_matches_the_dataclass(self):
-        # The `config_mapper` defect class: a role default that disagrees with
-        # the dataclass is a setting whose value depends on which shape you
-        # deployed.
-        from istota.config import SchedulerConfig
-
-        config = load_config_from(render())
-        assert (
-            config.scheduler.vault_sync_interval
-            == SchedulerConfig().vault_sync_interval
-        )
-
-    def test_zero_turns_the_gate_off(self):
-        config = load_config_from(render(istota_scheduler_vault_sync_interval=0))
-        assert config.scheduler.vault_sync_interval == 0
+def test_retired_sync_interval_is_not_rendered():
+    assert "vault_sync_interval" not in render(istota_scheduler_vault_sync_interval=900)
 
 
 def test_the_filter_is_registered():
@@ -311,7 +293,7 @@ class TestTheInstallerPathReachesBothSettings:
         )
         config = load_config_from(render(**variables))
         assert config.users["alice"].vault_path == ALICE["vault_path"]
-        assert config.scheduler.vault_sync_interval == 900
+        assert "vault_sync_interval" not in render(**variables)
 
 
 @pytest.mark.parametrize("allowed", [False, True])

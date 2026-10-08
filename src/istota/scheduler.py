@@ -9357,33 +9357,9 @@ class IntervalGate:
         return self.fixed_interval
 
 
-def vault_sync_enabled(config: Config) -> bool:
-    """Whether this deployment runs the KDBX credential vault sync at all.
-
-    **Read by the gate's ``enabled`` and by the startup call, which is the
-    point.** The gate carried the `bool(interval)` term the `IntervalGate`
-    contract requires while the startup `sync_all` was unconditional — so an
-    operator who set `vault_sync_interval = 0` to switch the feature off still
-    got one full apply on every daemon restart, deletions included. A switch
-    that leaves a destructive pass running is worse than no switch.
-
-    `> 0` rather than `bool()`: a negative interval is truthy, and
-    `_tick_interval_gates` bypasses the clock for any non-positive one — that
-    branch exists for `backup-stale-alert`'s deliberate every-tick shape, so a
-    negative value here would spawn a background sync roughly twice a second.
-    """
-    from istota.credentials import vault as secrets_vault  # noqa: PLC0415 - keeps `config` load-time light
-
-    # The interval half is `secrets_vault.sync_is_scheduled`, not a second copy:
-    # the notification resolver needs the same rule and cannot import this
-    # module, so the predicate lives beside the thing it governs.
-    # `any_vault_configured` rather than a loop over `vault_path_for`, so a user
-    # who configured their vault in the browser turns the gate on **and** this
-    # stays one read. `_tick_interval_gates` asks on every dispatch tick, and
-    # `any()` over a per-user accessor short-circuits only when somebody *has* a
-    # vault — so the per-user database opens would land on exactly the
-    # deployments that have none, which is all of them by default.
-    return secrets_vault.sync_is_scheduled(config) and config.any_vault_configured()
+def vault_retire_enabled(config: Config) -> bool:
+    from istota.credentials.vault_retire import pending_users
+    return bool(pending_users(config))
 
 
 def _db_backup_last_time(config: Config) -> float:
@@ -9577,10 +9553,9 @@ def build_interval_gates(
             now=now,
         )
 
-    def _vault_sync(now: float) -> None:
-        from istota.credentials import vault as secrets_vault
-
-        secrets_vault.sync_all(config)
+    def _vault_retire(now: float) -> None:
+        from istota.credentials.vault_retire import retire_all
+        retire_all(config)
 
     def _credential_backup(now: float) -> None:
         from istota.credentials.backup_export import run_all
@@ -9866,33 +9841,16 @@ def build_interval_gates(
             ),
             background=True,
         ),
-        # The KDBX credential vault. Startup alone is not enough — a user edits
-        # their file at 3pm and nothing would happen until the next restart — and
-        # five minutes is chosen against the rclone dir-cache lag, which adds its
-        # own delay on top. Off the loop thread because a cycle touches a FUSE
-        # mount, runs Argon2id and may deliver a notification, none of which
-        # belongs on the dispatch thread. A cycle whose digest has not moved
-        # stops at the hash and costs none of that — with one deliberate
-        # exception: `VaultLocked` and the other remedied-elsewhere classes
-        # cache no digest, so a user whose stored passphrase is wrong spends a
-        # full key derivation every interval until somebody re-provisions it.
-        # That is the trade for the remedy working at all.
         IntervalGate(
-            name="vault-sync",
-            run=_vault_sync,
-            field="vault_sync_interval",
-            enabled=vault_sync_enabled,
-            # Seeded to *now*, unlike the sweeps above. `run_daemon` has already
-            # run one `sync_all` synchronously by the time the loop starts, so
-            # the epoch seed made the first tick a second pass ~0.5s later — free
-            # for a user whose digest is cached, and a second Argon2id derivation
-            # for one whose vault is locked, since that class is deliberately
-            # uncached.
+            name="vault-retire",
+            run=_vault_retire,
+            fixed_interval=3600,
+            enabled=vault_retire_enabled,
             seed=lambda c: time.time(),
             background=True,
             one_shot=True,
-            on_error="Vault sync failed: %s",
-            one_shot_on_error="Vault sync failed: %s",
+            on_error="Vault retirement failed: %s",
+            one_shot_on_error="Vault retirement failed: %s",
         ),
         IntervalGate(
             name="credential-backup",
@@ -10564,30 +10522,11 @@ def run_daemon(
     except Exception as e:  # noqa: BLE001
         logger.warning("Secrets import skipped: %s", e)
 
-    # The KDBX credential vault, immediately after the TOML importer above and
-    # deliberately not before it: the vault is the live authority for the
-    # services it owns, so a vault-owned row has to win over a TOML-seeded one
-    # on the same start. Startup alone is not enough — a user edits their file
-    # at 3pm — so the `vault-sync` interval gate carries it from here on.
-    # `sync_all` contains one user's failure rather than costing the rest.
-    # Gated on the same predicate as the interval gate: the pass deletes rows,
-    # so `vault_sync_interval = 0` has to mean off here too.
-    #
-    # It delivers, and on a fresh failure that means boot blocks on a Talk and
-    # ntfy fan-out. `deliver=False` was considered and is wrong: the dedup bump
-    # does not redeliver, so a row this pass wrote without delivering would be
-    # bumped in silence by every later cycle and the push would never happen at
-    # all — the notification would be lost rather than deferred. The cost is
-    # bounded in a way that is easy to misread as unbounded: only a *transition*
-    # raises, and a restart over an already-open row bumps, so this is one
-    # delivery at the first failure rather than one per boot.
     try:
-        from istota.credentials import vault as secrets_vault  # noqa: PLC0415
-
-        if vault_sync_enabled(config):
-            secrets_vault.sync_all(config)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Vault sync skipped: %s", e)
+        from istota.credentials.vault_retire import retire_all
+        retire_all(config)
+    except Exception as exc:
+        logger.warning("Vault retirement skipped: %s", type(exc).__name__)
 
     # Phase 6: migrate per-user TOML profile fields into the user_profiles
     # table on first run. Idempotent — only writes rows that don't exist.

@@ -16,47 +16,25 @@ PASSWORD = "fixture-generated-password"
 def stored(config):  # noqa: F811
     with db.get_db(config.db_path) as conn:
         generated.create(conn, "alice", name="generated_acme", username="alice@example.com",
-                         password=PASSWORD, url="https://acme.example", mirror=False)
+                         password=PASSWORD, url="https://acme.example")
 
 
-async def test_the_list_carries_mirror_state_and_never_the_value(signed_client, stored):  # noqa: F811
+async def test_the_list_has_no_mirror_state_or_value(signed_client, stored):  # noqa: F811
     response = await signed_client.get(BASE)
     data = response.json()
     row = next(c for c in data["credentials"] if c["name"] == "generated_acme")
     assert row["source"] == "generated"
-    assert row["generated"] == {"mirror": False, "state": "off", "divergence": []}
-    assert data["generated_default_mirror"] is True
-    assert data["vault_enabled"] is False
+    assert "generated" not in row
+    assert "generated_default_mirror" not in data
+    assert "vault_enabled" not in data
     assert PASSWORD not in response.text
 
 
-async def test_the_default_and_per_credential_toggles(signed_client, stored, config):  # noqa: F811
-    response = await signed_client.put(f"{BASE}/generated/default", json={"mirror": False},
-                                       headers=ORIGIN)
-    assert response.status_code == 200, response.text
-    with db.get_db(config.db_path) as conn:
-        assert generated.default_mirror(conn, "alice") is False
-
-    response = await signed_client.put(f"{BASE}/generated_acme/mirror", json={"mirror": True},
-                                       headers=ORIGIN)
-    assert response.status_code == 200, response.text
-    with db.get_db(config.db_path) as conn:
-        assert generated.mirror_state(conn, "alice", "generated_acme")["mirror"] is True
-
-    assert (await signed_client.put(f"{BASE}/generated_acme/mirror", json={"mirror": "yes"},
-                                    headers=ORIGIN)).status_code == 400
-    assert (await signed_client.put(f"{BASE}/generated_acme/mirror", json={"mirror": True})
-            ).status_code == 403
-
-
-async def test_a_toggle_on_a_credential_istota_did_not_generate_is_refused(signed_client, config):  # noqa: F811
-    from istota.credentials.broker.bindings import parse_binding
-    secrets_store.set_secret(config.db_path, "alice", "vault_entries", "github", "token",
-                             binding=parse_binding("github.com", {}, [], source="local"))
-    response = await signed_client.put(f"{BASE}/github/mirror", json={"mirror": True}, headers=ORIGIN)
-    assert response.status_code == 400
-    response = await signed_client.post(f"{BASE}/github/remirror", headers=ORIGIN)
-    assert response.status_code == 400
+@pytest.mark.parametrize("method,path", [("put", "generated/default"),
+    ("put", "generated_acme/mirror"), ("post", "generated_acme/remirror")])
+async def test_mirror_routes_are_removed(signed_client, stored, method, path):  # noqa: F811
+    response = await getattr(signed_client, method)(f"{BASE}/{path}", json={"mirror": True}, headers=ORIGIN)
+    assert response.status_code in (404, 405)
 
 
 async def test_delete_retires_a_generated_credential(signed_client, stored, config):  # noqa: F811
