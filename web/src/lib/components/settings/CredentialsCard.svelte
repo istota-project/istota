@@ -10,6 +10,7 @@
     remirrorGenerated,
     setGeneratedDefaultMirror,
     setGeneratedMirror,
+    showRecoveryCodes,
     type CredentialGrant,
     type CredentialGrantsSettings,
     type CredentialSummary,
@@ -20,9 +21,12 @@
     Chip,
     ConfirmDialog,
     CountPill,
+    Field,
+    Input,
     KebabMenu,
     Modal,
   } from '$lib/components/ui';
+  import { copyText } from '$lib/clipboard';
   import type { KebabItem } from '$lib/components/ui/KebabMenu.svelte';
   import SettingsCard from './SettingsCard.svelte';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
@@ -44,6 +48,44 @@
   let confirmDelete: CredentialSummary | null = $state(null);
   // Mounted per open, so the form's fields start empty every time.
   let form: { mode: 'add' | 'edit'; credential: CredentialSummary | null } | null = $state(null);
+  // A generated credential's recovery codes, fetched only on an explicit
+  // confirm and dropped when the dialog closes. The password field appears
+  // when the server asks for it (an email-password session).
+  let reveal: {
+    name: string;
+    codes: string;
+    needsPassword: boolean;
+    password: string;
+    error: string;
+    busy: boolean;
+  } | null = $state(null);
+
+  function openReveal(name: string) {
+    reveal = { name, codes: '', needsPassword: false, password: '', error: '', busy: false };
+  }
+
+  async function showCodes() {
+    if (!reveal || reveal.busy) return;
+    const current = reveal;
+    current.busy = true;
+    current.error = '';
+    try {
+      const result = await showRecoveryCodes(current.name, current.password || undefined);
+      current.codes = result.codes;
+      current.password = '';
+    } catch (e) {
+      if (e instanceof AuthError) {
+        reveal = null;
+        onSignedOut();
+        return;
+      }
+      const err = e as Error & { field?: string | null };
+      if (err.field === 'password') current.needsPassword = true;
+      current.error = err.message || 'The codes could not be shown.';
+    } finally {
+      current.busy = false;
+    }
+  }
 
   const SOURCE_LABEL: Record<string, string> = {
     local: 'Istota',
@@ -164,6 +206,12 @@
         disabled: busy,
         onSelect: () => (confirmRevoke = c.name),
       });
+    if (c.source === 'generated' && c.recovery)
+      items.push({
+        label: 'Show recovery codes',
+        disabled: busy,
+        onSelect: () => openReveal(c.name),
+      });
     if (c.source === 'generated' && c.generated && data?.vault_enabled) {
       const on = c.generated.mirror;
       items.push({
@@ -266,6 +314,7 @@
             </div>
             <div class="cred-badges">
               {#if credential.otp}<Badge size="sm">2FA</Badge>{/if}
+              {#if credential.recovery}<Badge size="sm">Recovery codes</Badge>{/if}
               <span class="cred-source cred-source-{credential.source}">
                 <Badge size="sm">{SOURCE_LABEL[credential.source] ?? credential.source}</Badge>
               </span>
@@ -310,6 +359,57 @@
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (editorOpen = false)} disabled={busy}>Cancel</Button>
     <Button variant="primary" onclick={save} loading={busy}>Save access</Button>
+  {/snippet}
+</Modal>
+<Modal
+  open={reveal !== null}
+  title="Recovery codes for {reveal?.name ?? ''}"
+  onOpenChange={(open) => {
+    if (!open) reveal = null;
+  }}
+>
+  {#if reveal}
+    {#if reveal.codes}
+      <p class="caption reveal-note">
+        Each code signs in once. Keep them somewhere only you can reach, and close this when you are
+        done.
+      </p>
+      <pre class="recovery-codes" data-testid="recovery-codes">{reveal.codes}</pre>
+    {:else}
+      <p class="reveal-note">
+        These codes get you into {reveal.name} if its two-factor stops working. Anyone who sees them can
+        sign in with them. Istota saved them for you and no task can read them.
+      </p>
+      {#if reveal.needsPassword}
+        <Field label="Account password">
+          <Input type="password" autocomplete="current-password" bind:value={reveal.password} />
+        </Field>
+      {/if}
+      {#if reveal.error}<p class="form-error" role="alert">{reveal.error}</p>{/if}
+    {/if}
+  {/if}
+  {#snippet footer()}
+    {#if reveal?.codes}
+      <Button
+        variant="secondary"
+        onclick={() => reveal && copyText(reveal.codes, { label: 'Recovery codes' })}
+      >
+        Copy
+      </Button>
+      <Button variant="primary" onclick={() => (reveal = null)}>Done</Button>
+    {:else}
+      <Button variant="ghost" onclick={() => (reveal = null)} disabled={reveal?.busy}>Cancel</Button
+      >
+      <Button
+        variant="primary"
+        onclick={showCodes}
+        loading={reveal?.busy}
+        loadingLabel="Checking…"
+        disabled={reveal?.needsPassword && !reveal.password}
+      >
+        Show codes
+      </Button>
+    {/if}
   {/snippet}
 </Modal>
 <ConfirmDialog
@@ -446,6 +546,22 @@
 
   .add-blocked {
     margin: 0 0 var(--space-2);
+  }
+
+  .reveal-note {
+    margin: 0 0 var(--space-2);
+  }
+
+  .recovery-codes {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    background: var(--surface-raised);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: all;
   }
 
   .mirror-default {

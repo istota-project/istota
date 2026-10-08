@@ -791,3 +791,26 @@ async def test_google_callback_rechecks_after_token_exchange(client, configured,
     response = await client.get("/istota/google/callback")
     assert response.status_code == 302 and response.headers["location"] == "/istota/login"
     write.assert_not_called()
+
+
+async def test_recovery_codes_need_the_password_again_on_an_email_session(client, configured, monkeypatch):
+    """ISSUE-688: the one web path that returns a stored value asks for the password."""
+    from istota.credentials import generated
+
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+    path = configured._config.db_path
+    with db.get_db(path) as conn:
+        generated.create(conn, "alice", name="generated_acme", username="alice@example.com",
+                         password="fixture-password", url="https://acme.example", mirror=False)
+        generated.set_recovery(conn, "alice", "generated_acme", "fixture-rc-1111-aaaa")
+    assert (await sign_in(client)).status_code == 302
+    url = "/istota/api/settings/credentials/generated_acme/recovery"
+    origin = {"Origin": "https://example.com"}
+    for body in ({"confirm": True}, {"confirm": True, "password": "wrong password"}):
+        refused = await client.post(url, json=body, headers=origin)
+        assert refused.status_code == 403
+        assert refused.json()["field"] == "password"
+        assert "fixture-rc" not in refused.text
+    response = await client.post(url, json={"confirm": True, "password": PASSWORD}, headers=origin)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"codes": "fixture-rc-1111-aaaa"}

@@ -11,7 +11,9 @@ the KDBX ``generated/`` group is an optional one-way mirror of it.
 
 The rows have the shape every other source has (value, ``_username``,
 ``_url``, ``_totp``, each bound with ``credential: <name>``), so readers do not
-branch on the source. What differs:
+branch on the source. ``_recovery`` (ISSUE-688) is the one field only a
+generated credential has: the site's single-use recovery codes, bound with
+``kind = 'recovery'``, which no task read path returns. What differs:
 
 - **The sync never writes, rebinds or deletes a generated row.** A file copy
   that differs is reported as divergence on the settings card and in a notice,
@@ -60,8 +62,16 @@ STATE_RETIRED = "retired"
 DIVERGED_MISSING = "missing"
 DIVERGED_MISSING_OTP = "missing_otp"
 DIVERGED_CHANGED = "changed"
+DIVERGED_MISSING_RECOVERY = "missing_recovery"
 
-_FIELDS = ("password", "username", "url", "otp")
+KIND_RECOVERY = "recovery"
+# The KeePass custom field the mirror writes the codes to, protected.
+RECOVERY_FIELD = "Recovery codes"
+RECOVERY_MAX_BYTES = 8192
+RECOVERY_MAX_LINES = 64
+_KINDS = {"otp": "totp", "recovery": KIND_RECOVERY}
+
+_FIELDS = ("password", "username", "url", "otp", "recovery")
 
 
 class GeneratedCredentialError(ValueError):
@@ -75,7 +85,7 @@ class GeneratedCredentialError(ValueError):
 def entry_names(name: str) -> dict[str, str]:
     """Field -> row name for the generated credential ``name``."""
     return {"password": name, "username": name + "_username",
-            "url": name + "_url", "otp": name + "_totp"}
+            "url": name + "_url", "otp": name + "_totp", "recovery": name + "_recovery"}
 
 
 def _begin(conn) -> None:
@@ -161,7 +171,7 @@ def _write_rows(conn, user_id: str, name: str, values: dict) -> None:
         value = values.get(field_name) or ""
         if not value:
             continue
-        kind = "totp" if field_name == "otp" else "value"
+        kind = _KINDS.get(field_name, "value")
         secrets_store.set_secret(None, user_id, _SERVICE, row, value,
                                  binding=_binding(url, owner=name, kind=kind), connection=conn)
 
@@ -205,6 +215,78 @@ def set_otp(conn, user_id: str, name: str, uri: str) -> str:
     return seed_name
 
 
+def normalize_recovery(text: str) -> str:
+    """The stored form of a block of recovery codes: one trimmed line each.
+
+    Kept as text rather than parsed into codes, since sites format them every
+    way there is; blank lines and surrounding space are all that is dropped.
+    """
+    if not isinstance(text, str):
+        raise GeneratedCredentialError("recovery_empty", "recovery_empty")
+    lines = [line.strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        raise GeneratedCredentialError("recovery_empty", "recovery_empty")
+    # KeePass's XML cannot hold these, and the mirror writes the entry whole.
+    if any(ord(c) < 32 and c != "\t" or ord(c) == 127 for line in lines for c in line):
+        raise GeneratedCredentialError("recovery_unusable", "recovery_unusable")
+    normalized = "\n".join(lines)
+    if (len(lines) > RECOVERY_MAX_LINES
+            or len(normalized.encode("utf-8", "surrogatepass")) > RECOVERY_MAX_BYTES):
+        raise GeneratedCredentialError("recovery_too_large", "recovery_too_large")
+    return normalized
+
+
+def set_recovery(conn, user_id: str, name: str, text: str) -> tuple[str, int, bool]:
+    """Store, or replace, a generated credential's recovery codes (ISSUE-688).
+
+    Returns ``(row name, line count, replaced)``. Replacing rather than
+    refusing like :func:`set_otp`, because a site that regenerates its codes
+    invalidates the old set. The row takes the entry's hosts and
+    ``credential: <name>`` like the seed, with ``kind = 'recovery'``.
+    """
+    from istota.credentials.vault import VAULT_NAME_RE
+
+    _begin(conn)
+    if not is_generated(conn, user_id, name):
+        raise GeneratedCredentialError("recovery_set_not_generated", "recovery_set_not_generated")
+    row_name = entry_names(name)["recovery"]
+    if not VAULT_NAME_RE.match(row_name):
+        raise GeneratedCredentialError("recovery_name_too_long", "recovery_name_too_long")
+    normalized = normalize_recovery(text)
+    existing = _bindings.get_binding(conn, user_id, row_name)
+    if existing is not None and (existing["source"] != SOURCE
+                                 or _bindings.credential_name(conn, user_id, row_name) != name):
+        raise GeneratedCredentialError("name_taken", f"credential name already exists: {row_name}")
+    replaced = conn.execute(
+        "SELECT 1 FROM secrets WHERE user_id=? AND service=? AND key=?",
+        (user_id, _SERVICE, row_name),
+    ).fetchone() is not None
+    url = secrets_store.get_secret(None, user_id, _SERVICE, entry_names(name)["url"], connection=conn)
+    secrets_store.set_secret(None, user_id, _SERVICE, row_name, normalized,
+                             binding=_binding(url or "", owner=name, kind=KIND_RECOVERY),
+                             connection=conn)
+    if mirror_state(conn, user_id, name)["mirror"]:
+        _put_meta(conn, user_id, name, mirror=True, state=STATE_PENDING)
+    return row_name, len(normalized.splitlines()), replaced
+
+
+def read_recovery(conn, user_id: str, name: str) -> str | None:
+    """The stored codes, for the user's own view in Settings. Never a task's."""
+    if not is_generated(conn, user_id, name):
+        return None
+    value = secrets_store.get_secret(None, user_id, _SERVICE, entry_names(name)["recovery"],
+                                     connection=conn)
+    return value if isinstance(value, str) and value else None
+
+
+def has_recovery(conn, user_id: str, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM credential_bindings WHERE user_id=? AND name=? AND kind=?",
+        (user_id, entry_names(name)["recovery"], KIND_RECOVERY),
+    ).fetchone() is not None
+
+
 def stored_values(conn, user_id: str, name: str) -> dict[str, str]:
     """The table's copy, field -> value ("" for an absent row). Daemon-only."""
     values = {}
@@ -232,12 +314,20 @@ def divergence(stored: dict[str, str], copy: dict[str, str] | None) -> list[str]
         found.append(DIVERGED_MISSING_OTP)
     elif not _same_otp(stored.get("otp", ""), copy.get("otp", "")):
         found.append(DIVERGED_CHANGED)
+    if stored.get("recovery") and not copy.get("recovery"):
+        found.append(DIVERGED_MISSING_RECOVERY)
+    elif DIVERGED_CHANGED not in found and _recovery_lines(stored) != _recovery_lines(copy):
+        found.append(DIVERGED_CHANGED)
     if DIVERGED_CHANGED not in found and any(
         (stored.get(field_name) or "") != (copy.get(field_name) or "")
         for field_name in ("password", "username", "url")
     ):
         found.append(DIVERGED_CHANGED)
     return found
+
+
+def _recovery_lines(values: dict[str, str]) -> list[str]:
+    return [line.strip() for line in (values.get("recovery") or "").splitlines() if line.strip()]
 
 
 def record_mirror_result(conn, user_id: str, name: str, written: dict[str, str],
@@ -399,6 +489,7 @@ _DIVERGENCE_TEXT = {
     DIVERGED_MISSING: "The KeePass copy of {name} is missing.",
     DIVERGED_MISSING_OTP: "The KeePass copy of {name} is missing its two-factor seed.",
     DIVERGED_CHANGED: "The KeePass copy of {name} was changed outside Istota.",
+    DIVERGED_MISSING_RECOVERY: "The KeePass copy of {name} is missing its recovery codes.",
 }
 
 

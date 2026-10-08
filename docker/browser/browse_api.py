@@ -2516,6 +2516,79 @@ _CREDENTIAL_FILL_JS = """(el, {value, origin, card_field}) => {
 }"""
 
 
+_RECOVERY_READ_JS = """(el, {origin}) => {
+    if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
+        return {ok: false, error: "credential_origin_mismatch"};
+    const text = (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
+        ? el.value : (el.innerText || el.textContent || "");
+    return {ok: true, text: text};
+}"""
+
+# The store's line cap (generated.RECOVERY_MAX_LINES), so an over-broad
+# selector is refused before its lines join the redaction set; the character
+# cap leaves room for the indentation the store strips.
+RECOVERY_MAX_CHARS = 16384
+RECOVERY_MAX_LINES = 64
+
+
+def _recovery_redactions(text):
+    """The parts of a block of recovery codes to redact from later readback.
+
+    The whole block, each code-shaped line, and each code-shaped token, so a
+    page that later joins or splits the codes differently still matches.
+    Code-shaped is six characters or more with a digit or a hyphen in it:
+    these join the user's redaction set for good, so a plain word like
+    "Recovery" there would vanish from every later page.
+    """
+    def code_shaped(part):
+        return len(part) >= 6 and any(c.isdigit() or c == "-" for c in part)
+
+    lines = [line.strip() for line in text.splitlines()]
+    tokens = [token for line in lines for token in line.split()]
+    return {text.strip()} | {part for part in lines + tokens if code_shaped(part)}
+
+
+def _read_recovery_action(page, action):
+    """Read a page's recovery codes for the caller to store (ISSUE-688).
+
+    Returns ``(result, text)``. The same origin rule as a credential fill, and
+    the read happens in one evaluation with the origin re-checked inside it.
+    The text never goes in ``result``: the route returns it beside the
+    scrubbed response, and its lines join the redaction set first.
+    """
+    selector = action.get("selector") or ""
+    if not selector:
+        return {"action": "read_recovery", "ok": False, "error": "selector is required"}, ""
+    handle = page.wait_for_selector(selector, state="visible", timeout=SELECTOR_TIMEOUT_MS)
+    frame = handle.owner_frame()
+    try:
+        parsed = urlsplit(frame.url if frame else "")
+        origin, _ = _forget_origin(f"{parsed.scheme}://{parsed.netloc}")
+    except ValueError:
+        origin = ""
+    hosts = action.get("bound_hosts", [])
+    if (not isinstance(hosts, list) or not origin.startswith("https://")
+            or origin[len("https://"):] not in hosts):
+        return {"action": "read_recovery", "selector": selector, "ok": False,
+                "error": "credential_origin_mismatch"}, ""
+    read = handle.evaluate(_RECOVERY_READ_JS, {"origin": origin})
+    if not isinstance(read, dict) or read.get("ok") is not True:
+        error = read.get("error") if isinstance(read, dict) else None
+        return {"action": "read_recovery", "selector": selector, "ok": False,
+                "error": error or "recovery_read_failed"}, ""
+    text = read.get("text") if isinstance(read.get("text"), str) else ""
+    if not text.strip():
+        return {"action": "read_recovery", "selector": selector, "ok": False,
+                "error": "recovery_empty"}, ""
+    if (len(text) > RECOVERY_MAX_CHARS
+            or sum(1 for line in text.splitlines() if line.strip()) > RECOVERY_MAX_LINES):
+        return {"action": "read_recovery", "selector": selector, "ok": False,
+                "error": "recovery_too_large"}, ""
+    _credential_values.update(_recovery_redactions(text))
+    return {"action": "read_recovery", "selector": selector, "ok": True, "path": "cdp",
+            "path_reason": "credential origin checked"}, text
+
+
 def _selector_action(session, page, action, others=(), owned=()):
     """Run one selector action, through the pointer and the keyboard.
 
@@ -2712,12 +2785,30 @@ def interact():
     others, owned = _foreground_tabs(page)
 
     results = []
+    # Read recovery codes, returned beside the scrubbed response and never in
+    # it: the caller stores them and replaces each with a count (ISSUE-688).
+    recovered = []
     try:
         for action in actions:
             action_type = action.get("type")
             selector = action.get("selector", "")
 
-            if action_type in _SELECTOR_ACTIONS:
+            if action_type == "read_recovery":
+                read, text = _read_recovery_action(page, action)
+                if text:
+                    recovered.append(text)
+                    read["recovery"] = len(recovered) - 1
+                results.append(read)
+                if read.get("ok") is False:
+                    result = _scrub_extracted({
+                        "status": "error", "actions": results,
+                        "error": read.get("error", "recovery_read_failed"),
+                        "actions_not_run": len(actions) - len(results),
+                    }, _credential_values)
+                    result["session_id"] = session_id
+                    result["recovery"] = recovered
+                    return jsonify(result)
+            elif action_type in _SELECTOR_ACTIONS:
                 results.append(
                     _selector_action(session, page, action, others, owned))
                 stop_on_refusal = action.get("card_field") or (action.get("credential") and "expires_at" in action)
@@ -2728,6 +2819,7 @@ def interact():
                         "actions_not_run": len(actions) - len(results),
                     }, _credential_values)
                     result["session_id"] = session_id
+                    result["recovery"] = recovered
                     return jsonify(result)
             elif action_type == "wait":
                 timeout_ms = action.get("timeout", 2000)
@@ -2763,10 +2855,11 @@ def interact():
             # action pressed nothing and does not count.
             if any(r.get("action") in ("click_challenge", "click_at") and r.get("ok")
                    for r in results):
-                return _captcha_response(session_id, actions=results)
+                return _captcha_response(session_id, actions=results, recovery=recovered)
             solved = _solve_challenge(session_id, page)
             if solved != CHALLENGE_CLEARED:
-                return _captcha_response(session_id, actions=results, challenge_press=solved)
+                return _captcha_response(session_id, actions=results, challenge_press=solved,
+                                         recovery=recovered)
 
         content = browsing.extract_page_content(
             page, scrub=lambda value: _scrub_extracted(value, _credential_values),
@@ -2780,6 +2873,7 @@ def interact():
             result["challenge_solved"] = True
         result = _scrub_extracted(result, _credential_values)
         result["session_id"] = session_id
+        result["recovery"] = recovered
         return jsonify(result)
 
     except Exception as e:
@@ -2798,6 +2892,7 @@ def interact():
             "status": "error", "actions": results, "error": str(e),
         }, _credential_values)
         result["session_id"] = session_id
+        result["recovery"] = recovered
         return jsonify(result), 500
 
 
@@ -3097,6 +3192,7 @@ def health():
         "per_user_profiles": True,
         "credential_origin_check": True,
         "otp_expiry_check": True,
+        "recovery_save": True,
         "card_fill": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,

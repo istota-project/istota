@@ -27,7 +27,8 @@ caller's own (a CSS selector, a header name) and only the right-hand side is
 resolved; `ENTRY` names a whole vault entry and resolves to a `SecretEntry`
 holding every field of it (password, username, URL, custom fields) for one
 fetch. `OTP_PAIR` resolves a selector and entry name to a boxed current code
-and its expiry. A form that none of them expresses is a missing form rather than a
+and its expiry. `RECOVERY_PAIR` resolves a selector and a generated
+credential to the hosts its recovery codes may be read on, and no value. A form that none of them expresses is a missing form rather than a
 special case in a handler.
 
 **A resolved value is boxed.** `SecretValue` renders `SecretValue(<name>)` from
@@ -81,7 +82,9 @@ import logging
 import os
 from collections.abc import Sequence
 
-from istota.sandbox.credential_shim import ProxyError, fetch_card, fetch_credential, fetch_entry, fetch_otp
+from istota.sandbox.credential_shim import (
+    ProxyError, fetch_card, fetch_credential, fetch_entry, fetch_otp, fetch_recovery_target,
+)
 
 from ._hostpath import actions_on_path, stamped as _stamped_by
 
@@ -97,8 +100,11 @@ OTP_PAIR = "otp_pair"
 ENTRY = "entry"
 
 CARD = "card"
+#: `SELECTOR=NAME`: where a generated credential's recovery codes may be read
+#: from, for saving. Resolves hosts, never a value (ISSUE-688).
+RECOVERY_PAIR = "recovery_pair"
 
-FORMS = (NAME, PAIR, OTP_PAIR, ENTRY, CARD)
+FORMS = (NAME, PAIR, OTP_PAIR, ENTRY, CARD, RECOVERY_PAIR)
 
 #: Attribute set on the argparse action, holding the form. Named rather than
 #: inlined so the coverage walk and this module cannot disagree on the spelling.
@@ -228,6 +234,20 @@ class SecretEntry:
 
     def __reduce__(self):
         raise TypeError("a SecretEntry may not be serialized")
+
+
+class RecoveryTarget:
+    """A selector and the generated credential whose codes it shows. No value."""
+
+    __slots__ = ("label", "name", "bound_hosts")
+
+    def __init__(self, label: str, name: str, bound_hosts=()) -> None:
+        self.label = label
+        self.name = name
+        self.bound_hosts = tuple(bound_hosts)
+
+    def __repr__(self) -> str:
+        return f"RecoveryTarget({self.label}, {self.name})"
 
 
 class CardRefusal(ProxyError):
@@ -361,7 +381,7 @@ def _resolve_one(
         return resolve_card(raw), None
     if form == ENTRY:
         return resolve_entry(raw, operation)
-    if form in (PAIR, OTP_PAIR):
+    if form in (PAIR, OTP_PAIR, RECOVERY_PAIR):
         # The **last** `=`, not the first. A credential name cannot contain one
         # — `secrets_vault.VAULT_NAME_RE` is `[a-z][a-z0-9_]{0,63}` — while a
         # label routinely does: `input[type=password]=acme_pw` is the ordinary
@@ -378,6 +398,14 @@ def _resolve_one(
                 f"Malformed {operation} value: expected SELECTOR=NAME."
             )
         name = name.strip()
+        if form == RECOVERY_PAIR:
+            if not name:
+                return None, f"Empty credential name: {operation} refused."
+            try:
+                hosts = fetch_recovery_target(name, credential_fd=os.environ.get("ISTOTA_CRED_FD"))
+            except ProxyError as exc:
+                return None, f"{operation} refused: {exc}"
+            return RecoveryTarget(label.strip(), name, hosts), None
         if form == OTP_PAIR:
             if not name:
                 return None, f"Empty credential name: {operation} refused."
@@ -455,6 +483,8 @@ __all__: Sequence[str] = (
     "PAIR",
     "OTP_PAIR",
     "OtpPair",
+    "RECOVERY_PAIR",
+    "RecoveryTarget",
     "STAMP",
     "ENTRY",
     "CARD",

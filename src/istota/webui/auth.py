@@ -276,6 +276,16 @@ def set_password(db_path: Path, user_id: str, password: str) -> int:
     return _change_credential(db_path, user_id, password_hash=hash_password(password))
 
 
+def confirm_password(
+    db_path: Path, policy: Policy, identity: Identity, password: str, *, ip: str | None,
+) -> bool:
+    """Whether a signed-in user re-entered their own password, under the login throttle."""
+    if not check_and_record(db_path, policy, email=identity.email, ip=ip):
+        return False
+    ok, _ = verify_password(password, identity.password_hash or DUMMY_HASH)
+    return ok and bool(identity.password_hash) and not identity.disabled
+
+
 def change_password(
     db_path: Path, policy: Policy, identity: Identity,
     current_password: str, new_password: str, *, ip: str | None,
@@ -284,10 +294,7 @@ def change_password(
     error = password_policy_error(new_password, policy, email=identity.email, user_id=identity.user_id)
     if error:
         raise ValueError(error)
-    if not check_and_record(db_path, policy, email=identity.email, ip=ip):
-        return False
-    ok, _ = verify_password(current_password, identity.password_hash or DUMMY_HASH)
-    if not ok or not identity.password_hash or identity.disabled:
+    if not confirm_password(db_path, policy, identity, current_password, ip=ip):
         return False
     encoded = hash_password(new_password)
     with get_db(db_path) as conn:

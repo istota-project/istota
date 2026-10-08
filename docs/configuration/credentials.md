@@ -167,7 +167,18 @@ What it writes is **[shared credentials](#shared-credentials)**: name-to-value p
 
 After enrolling an account created with `new`, a task can run `istota-credential otp-set generated_acme` with the enrollment URI or base32 secret on stdin. The seed is stored with the credential, bound to the same site and covered by the same grant, so later tasks in the creating conversation can `--fill-otp` by the entry name or the `_totp` name. The command returns the entry name and `otp: true`; it never returns the seed. It shares the credential-write budget and raises a notice, and the KeePass copy gets the seed when mirroring is on. It refuses any credential Istota did not generate and any that already has a seed. For local credentials, use the settings form.
 
-A task whose snapshot lacks a credential's seed gets `credential_otp_not_granted` from `--fill-otp`, not `credential_has_no_otp`, so it does not mistake a seed it cannot use for a missing one. Recovery codes a site shows after enrollment are not saved.
+A task whose snapshot lacks a credential's seed gets `credential_otp_not_granted` from `--fill-otp`, not `credential_has_no_otp`, so it does not mistake a seed it cannot use for a missing one.
+
+### Saving recovery codes
+
+Recovery codes are the user's way back into an account when its two-factor seed is lost, so Istota stores them for the user and never hands them back to a task. A task saves them for a generated credential in one of two ways:
+
+- `browse interact --save-recovery "SELECTOR=generated_acme"` has the browser read the element's text, only on the credential's own HTTPS site, and store it directly. The task gets back a line count and whether an earlier set was replaced, never the codes, and the browser redacts them from page text it returns afterwards. This keeps the save out of the model's context; a page read the task made before it, to find the selector, may already have shown the codes, and a screenshot cannot be redacted. This needs a browser image that reports `recovery_save` on `/health`; an older image refuses the call before reading anything.
+- `istota-credential recovery-set generated_acme` reads the codes on stdin, for a site that shows them as an image or behind a click a selector cannot reach. The codes then do pass through the model's context.
+
+Both are refused for a credential Istota did not generate, and for one the task could not read: it must be shared with the task and, with the broker on, granted to it, unless the task created it. Both spend the credential-write budget. Saving again replaces the stored set, since a site that regenerates codes invalidates the old ones; the notice says whether it was a first save or a replacement. The codes are stored as text, one line each, as `<name>_recovery` with kind `recovery`. No task can read them: `get`, `run` and placeholders refuse with `credential_is_recovery`, whole-entry reads leave them out, and OTP reads compute nothing from them. With mirroring on, the KeePass copy holds them in a protected custom field named `Recovery codes`, and a copy missing them is reported as divergence. Retiring the credential deletes them.
+
+To read them, open Settings → Credentials and choose **Show recovery codes** on the credential. The list never carries the codes; they are fetched when you confirm, after you enter your account password again if you signed in with one. Each view is logged by credential name.
 
 ### Turning it on
 

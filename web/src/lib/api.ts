@@ -4835,6 +4835,9 @@ export interface CredentialSummary {
   otp?: boolean;
   /** Generated credentials only. */
   generated?: GeneratedMirror;
+  /** Generated credentials only: whether recovery codes are stored. The codes
+   *  are fetched on demand with `showRecoveryCodes`, never listed. */
+  recovery?: boolean;
 }
 export interface CredentialGrantsSettings {
   credentials: CredentialSummary[];
@@ -4983,6 +4986,15 @@ export function remirrorGenerated(
 ): Promise<{ ok: boolean; state: GeneratedMirror['state'] }> {
   return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/remirror`, {
     method: 'POST',
+  });
+}
+/** A generated credential's recovery codes. `password` is required when the
+ *  session signed in with an email password. */
+export function showRecoveryCodes(name: string, password?: string): Promise<{ codes: string }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/recovery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(password ? { confirm: true, password } : { confirm: true }),
   });
 }
 export function setGeneratedDefaultMirror(mirror: boolean): Promise<{ ok: boolean }> {

@@ -644,6 +644,90 @@ def test_failed_sensitive_fill_stops_before_submit(monkeypatch, fill_metadata, e
     assert result["actions_not_run"] == 1
 
 
+@pytest.mark.parametrize("origin,hosts", [
+    ("https://evil.example", ["acme.example"]),
+    ("http://acme.example", ["acme.example"]),
+    ("https://acme.example", []),
+])
+def test_recovery_read_refused_off_the_bound_origin(monkeypatch, origin, hosts):
+    page = mock.Mock()
+    handle = page.wait_for_selector.return_value
+    handle.owner_frame.return_value.url = origin + "/settings"
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result, text = browse_api._read_recovery_action(page, {
+        "type": "read_recovery", "selector": "#codes", "bound_hosts": hosts})
+    assert result["error"] == "credential_origin_mismatch"
+    assert text == ""
+    handle.evaluate.assert_not_called()
+
+
+def test_recovery_read_registers_codes_for_redaction_but_not_headings(monkeypatch):
+    page = mock.Mock()
+    handle = page.wait_for_selector.return_value
+    handle.owner_frame.return_value.url = "https://acme.example/settings"
+    codes = "Recovery codes\n1111-aaaa-2222\n3333-bbbb-4444\n"
+    handle.evaluate.return_value = {"ok": True, "text": codes}
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result, text = browse_api._read_recovery_action(page, {
+        "type": "read_recovery", "selector": "#codes", "bound_hosts": ["acme.example"]})
+    assert result["ok"] is True and text == codes
+    assert "1111-aaaa-2222" not in str(result)
+    handle.evaluate.assert_called_once_with(browse_api._RECOVERY_READ_JS,
+                                           {"origin": "https://acme.example"})
+    assert {"1111-aaaa-2222", "3333-bbbb-4444"} <= browse_api._credential_values
+    assert "Recovery codes" not in browse_api._credential_values
+
+
+def test_recovery_redactions_take_each_code_token_but_not_plain_words():
+    found = browse_api._recovery_redactions(
+        "Your codes\nabcd-efgh-ijkl  mnop-qrst-uvwx\n12345678 87654321\nDownload")
+    assert {"abcd-efgh-ijkl", "mnop-qrst-uvwx", "12345678", "87654321"} <= found
+    assert not {"Your", "codes", "Download"} & found
+
+
+def test_an_over_broad_recovery_read_registers_nothing(monkeypatch):
+    page = mock.Mock()
+    handle = page.wait_for_selector.return_value
+    handle.owner_frame.return_value.url = "https://acme.example/settings"
+    handle.evaluate.return_value = {"ok": True, "text": "\n".join(f"line-{n:04d}" for n in range(65))}
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result, text = browse_api._read_recovery_action(page, {
+        "type": "read_recovery", "selector": "body", "bound_hosts": ["acme.example"]})
+    assert result["error"] == "recovery_too_large" and text == ""
+    assert not browse_api._credential_values
+
+
+def test_interact_returns_codes_beside_a_scrubbed_response(monkeypatch):
+    page = mock.Mock()
+    codes = "1111-aaaa-2222\n3333-bbbb-4444"
+
+    def read(_page, action):
+        browse_api._credential_values.update(browse_api._recovery_redactions(codes))
+        return {"action": "read_recovery", "selector": "#codes", "ok": True}, codes
+
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    monkeypatch.setattr(browse_api, "_read_recovery_action", read)
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kw: None)
+    monkeypatch.setattr(browse_api, "_get_session", lambda _: {"page": page})
+    monkeypatch.setattr(browse_api, "_session_page", lambda _: page)
+    monkeypatch.setattr(browse_api.chrome, "connect_cdp", lambda _: None)
+    monkeypatch.setattr(browse_api, "_foreground_tabs", lambda _: ([], []))
+    monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda _: False)
+    monkeypatch.setattr(browse_api.browsing, "extract_page_content",
+                        lambda *a, **kw: {"text": "Save these: " + codes})
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(get_json=lambda: {
+        "session_id": "s1", "actions": [{"type": "read_recovery", "selector": "#codes",
+                                         "bound_hosts": ["acme.example"], "credential": True}],
+    }))
+    result = browse_api.interact()
+    assert result["recovery"] == [codes]
+    assert result["actions"][0]["recovery"] == 0
+    without = {key: value for key, value in result.items() if key != "recovery"}
+    assert "1111-aaaa-2222" not in str(without)
+    assert "3333-bbbb-4444" not in str(without)
+
+
 @pytest.mark.parametrize("now,accepted", [(88.99, True), (89, False), (90, False)])
 def test_otp_expiry_checked_after_waiting_for_selector(monkeypatch, now, accepted):
     page = mock.MagicMock()

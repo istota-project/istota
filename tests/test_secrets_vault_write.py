@@ -55,7 +55,7 @@ def test_create_preserves_unscoped_names(tmp_path):
     assert read.services["old"] == old.services["old"]
     assert read.generated["generated_example"] == {
         "password": "new-value", "username": "bot@example.com",
-        "url": "https://example.com", "otp": ""}
+        "url": "https://example.com", "otp": "", "recovery": ""}
     assert "generated_example" not in read.services
 
 
@@ -244,7 +244,7 @@ def test_empty_optional_fields_stay_empty_in_the_copy(tmp_path):
     create_database(str(path), password="test-passphrase")
     _create(path, username="", url="")
     copy = parse_vault(path.read_bytes(), "test-passphrase").generated["generated_example"]
-    assert copy == {"password": "new-value", "username": "", "url": "", "otp": ""}
+    assert copy == {"password": "new-value", "username": "", "url": "", "otp": "", "recovery": ""}
 
 
 def test_two_creates_can_retry_after_contention(tmp_path):

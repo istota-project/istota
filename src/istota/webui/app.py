@@ -13165,13 +13165,15 @@ def _credential_settings(username: str, action="list", name="", payload=None):
                 "hosts": [], "headers": [], "revealable": False, "source": "vault"}
             row = {"name": credential_name, **binding,
                    "grant": grants.get_grant(conn, username, credential_name),
-                   "otp": any(bindings.is_otp_seed(conn, username, member)
+                   "otp": any((bindings.get_binding(conn, username, member) or {}).get("kind") == "totp"
                               for member in groups.get(credential_name, []))}
             if binding.get("source") == local_credentials.SOURCE:
                 # The edit form's inputs. Never the value or the username.
                 row.update(local_credentials.stored_fields(conn, username, credential_name))
             if binding.get("source") == generated.SOURCE:
                 row["generated"] = generated.mirror_state(conn, username, credential_name)
+                # Whether there are codes to show; the codes are fetched on demand.
+                row["recovery"] = generated.has_recovery(conn, username, credential_name)
             credentials.append(row)
         existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
         default_mirror = generated.default_mirror(conn, username)
@@ -13575,6 +13577,67 @@ async def settings_generated_remirror(
     _csrf: None = Depends(_verify_origin),
 ):
     return await _generated_mirror_request(request, user["username"], "remirror", name)
+
+
+@api_router.post("/settings/credentials/{name}/recovery")
+async def settings_generated_recovery(
+    name: str, request: Request, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """A generated credential's recovery codes, for the user to read (ISSUE-688).
+
+    The one web path that hands a stored value back, so it asks more than the
+    rest: an explicit ``{"confirm": true}``, the account password again on a
+    session that signed in with one, and a log line naming the credential.
+    The list payload says only whether codes exist.
+    """
+    from istota import db
+    from istota.credentials import generated
+    from istota.credentials import vault as secrets_vault
+    from istota.credentials.local import LocalCredentialError
+
+    username = user["username"]
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, username)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    try:
+        body = await _read_credential_body(request)
+    except LocalCredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if (not isinstance(body, dict) or body.get("confirm") is not True
+            or not set(body) <= {"confirm", "password"}
+            or not isinstance(body.get("password", ""), str)):
+        raise HTTPException(status_code=400, detail='expected {"confirm": true}')
+    identity = getattr(request.state, "web_auth_identity", None)
+    if (request.session.get("auth", {}).get("method") == "email"
+            and identity is not None and identity.password_hash):
+        policy = web_auth.policy_from_config(_config)
+        started = time.monotonic()
+        ip = _client_ip(request)
+        accepted = False
+        if body.get("password") and _admit_password_request(identity.email, ip, policy):
+            accepted = await _run_password_work(
+                web_auth.confirm_password, _config.db_path, policy, identity,
+                body["password"], ip=ip,
+            )
+        if not accepted:
+            await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
+            # `field` tells the card to ask for the password, apart from any other 403.
+            return JSONResponse(status_code=403, content={
+                "detail": "Enter your account password to show the codes.", "field": "password"})
+
+    def read() -> str | None:
+        with db.get_db(_config.db_path) as conn:
+            return generated.read_recovery(conn, username, name)
+
+    codes = await asyncio.to_thread(read)
+    if codes is None:
+        raise HTTPException(status_code=404, detail="no recovery codes are stored for that credential")
+    logger.info("recovery codes viewed via settings: %s by %s",
+                secrets_vault._label(name), secrets_vault._label(username))
+    return JSONResponse({"codes": codes}, headers={"Cache-Control": "no-store"})
 
 
 @api_router.put("/settings/credentials/{name}")

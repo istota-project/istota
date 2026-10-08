@@ -3963,3 +3963,110 @@ class TestFillOtp:
         assert "No shared credential named 'no_such_entry'" in envelope["error"]
         assert "credential_has_no_otp" not in envelope["error"]
         assert server._vault_fetches == 1
+
+
+class TestSaveRecovery:
+    """`--save-recovery` stores what the page shows and the model gets a count (ISSUE-688)."""
+
+    proxy = TestFillCredential.proxy
+    VAULT = {}
+    CODES = "fixture-rc-1111-aaaa\nfixture-rc-2222-bbbb"
+    HEALTH = {"per_user_profiles": True, "credential_origin_check": True, "recovery_save": True}
+
+    @pytest.fixture
+    def recovery_proxy(self, proxy, tmp_path, monkeypatch):
+        from istota import db
+        from istota.config import Config
+        from istota.credentials import generated
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+        monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
+        config = Config(db_path=tmp_path / "recovery.db")
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            generated.create(conn, "alice", name="generated_acme", username="alice@example.com",
+                             password="fixture-password", url="https://acme.example", mirror=False)
+        server = proxy(config=config, user_id="alice", vault_write_limit=2,
+                       vault_credentials={"generated_acme": "fixture-password"})
+        with server._credential_channel(10) as fd:
+            monkeypatch.setenv("ISTOTA_CRED_FD", str(fd))
+            yield server, config
+
+    def test_codes_are_stored_and_only_a_count_comes_back(self, recovery_proxy, capsys):
+        from istota.credentials import store
+        server, config = recovery_proxy
+        response = {"status": "ok", "user_scope": "alice", "session_id": "s1",
+                    "text": "Your codes: fixture-rc-1111-aaaa",
+                    "actions": [{"action": "click", "ok": True},
+                                {"action": "read_recovery", "ok": True, "recovery": 0}],
+                    "recovery": [self.CODES]}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=self.HEALTH)), patch(
+            "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=response),
+        ) as post:
+            main(["interact", "s1", "--click", "#show", "--save-recovery", "#codes=generated_acme"])
+        sent = post.call_args.kwargs["json"]["actions"]
+        assert sent[1] == {"type": "read_recovery", "selector": "#codes", "credential": True,
+                           "bound_hosts": ["acme.example"], "credential_name": "generated_acme"}
+        output = capsys.readouterr().out
+        assert "fixture-rc" not in output
+        result = json.loads(output)
+        assert result["actions"][1] == {"action": "save_recovery", "selector": "#codes",
+                                        "name": "generated_acme", "ok": True, "saved": 2,
+                                        "replaced": False}
+        assert "recovery" not in result
+        assert store.get_secret(config.db_path, "alice", "vault_entries",
+                                "generated_acme_recovery") == self.CODES
+        assert server._vault_fetches == 0
+
+    def test_an_old_image_is_refused_before_anything_is_read(self, recovery_proxy, capsys):
+        health = {"per_user_profiles": True, "credential_origin_check": True}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=health)), patch(
+            "istota.skills.browse.httpx.post",
+        ) as post, pytest.raises(SystemExit) as exc:
+            main(["interact", "s1", "--save-recovery", "#codes=generated_acme"])
+        assert exc.value.code == 1
+        post.assert_not_called()
+        assert "recovery code saving" in capsys.readouterr().out
+
+    def test_a_credential_outside_the_task_is_refused_at_the_parse(self, recovery_proxy, capsys):
+        with patch("istota.skills.browse.httpx.post") as post, pytest.raises(SystemExit) as exc:
+            main(["interact", "s1", "--save-recovery", "#codes=not_generated"])
+        assert exc.value.code == 1
+        post.assert_not_called()
+        envelope = json.loads(capsys.readouterr().out.strip())
+        assert envelope["reason"] == "vault_credential_refused"
+        assert "No shared credential named 'not_generated'" in envelope["error"]
+
+    def test_an_unconfirmed_profile_stores_nothing(self, recovery_proxy, capsys):
+        from istota.credentials import store
+        server, config = recovery_proxy
+        response = {"status": "ok", "user_scope": "someone-else", "session_id": "s1",
+                    "actions": [{"action": "read_recovery", "ok": True, "recovery": 0}],
+                    "recovery": [self.CODES]}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=self.HEALTH)), patch(
+            "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=response),
+        ), pytest.raises(SystemExit):
+            main(["interact", "s1", "--save-recovery", "#codes=generated_acme"])
+        output = capsys.readouterr().out
+        assert "fixture-rc" not in output
+        assert json.loads(output)["actions"][0]["error"] == "profile_not_confirmed"
+        assert store.get_secret(config.db_path, "alice", "vault_entries",
+                                "generated_acme_recovery") is None
+
+    def test_a_refused_read_saves_nothing(self, recovery_proxy, capsys):
+        from istota.credentials import store
+        server, config = recovery_proxy
+        response = {"status": "error", "user_scope": "alice", "session_id": "s1",
+                    "error": "credential_origin_mismatch", "actions_not_run": 0,
+                    "actions": [{"action": "read_recovery", "ok": False,
+                                 "error": "credential_origin_mismatch"}],
+                    "recovery": []}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=self.HEALTH)), patch(
+            "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=response),
+        ), pytest.raises(SystemExit):
+            main(["interact", "s1", "--save-recovery", "#codes=generated_acme"])
+        result = json.loads(capsys.readouterr().out)
+        assert result["actions"][0]["ok"] is False
+        assert result["actions"][0]["error"] == "credential_origin_mismatch"
+        assert store.get_secret(config.db_path, "alice", "vault_entries",
+                                "generated_acme_recovery") is None
