@@ -74,3 +74,25 @@ def test_credential_write_refuses_a_replaced_document(credential_page):
                              {"value": "fixture-password", "origin": "https://portal.example"})
     assert result == {"ok": False, "error": "credential_origin_mismatch"}
     assert page.locator("#password").input_value() == ""
+
+
+@pytest.mark.parametrize("shadow", [False, True])
+def test_capture_from_frame_and_open_shadow(credential_page, monkeypatch, shadow):
+    from tests.test_browser_navigation import browse_api
+    page = credential_page
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    if shadow:
+        page.evaluate("""() => {
+            const host = document.createElement('div'); document.body.append(host);
+            host.attachShadow({mode: 'open'}).innerHTML = '<input id="seed" value="JBSWY3DPEHPK3PXP">';
+        }""")
+        selector, hosts = "#seed::value", ["portal.example"]
+    else:
+        page.frame(url="https://other.example/").locator("#other").fill("JBSWY3DPEHPK3PXP")
+        selector, hosts = "iframe>>>#other::value", ["other.example"]
+    result, text = browse_api._read_secret_action(page, {"selector": selector, "kind": "otp", "bound_hosts": hosts})
+    assert result["ok"] and text == "JBSWY3DPEHPK3PXP"
+    assert text in browse_api._credential_values
+    if not shadow:
+        result, text = browse_api._read_secret_action(page, {"selector": selector, "kind": "otp", "bound_hosts": ["portal.example"]})
+        assert result["error"] == "credential_origin_mismatch" and not text

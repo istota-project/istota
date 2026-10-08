@@ -110,6 +110,14 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
                 members[name] = value
             if members:
                 declined = grants.auto_grant_marker(conn, user_id, owner) == grants.AUTO_GRANT_DECLINED
+                state = conn.execute("SELECT format, spent FROM recovery_code_state WHERE user_id=? AND name=?",
+                                     (user_id, owner)).fetchone()
+                if state and state[0] == "codes" and owner + "_recovery" in members:
+                    import json
+                    spent = set(json.loads(state[1]))
+                    members[owner + "_recovery"] = "\n".join(
+                        ("(used) " if index in spent else "") + line
+                        for index, line in enumerate(members[owner + "_recovery"].splitlines()))
                 entries.append((owner, members, binding, declined))
     if not entries:
         raise ValueError("export_empty")

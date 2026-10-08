@@ -261,3 +261,49 @@ def test_retire_removes_the_codes(tmp_path, monkeypatch, sock):
         _request(sock, {"type": "vault_recovery_set", "name": "generated_acme", "text": CODES})
     assert generated.retire(config, "alice", "generated_acme") is True
     assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme_recovery") is None
+
+
+def test_recovery_format_state_reset_and_retire(tmp_path, monkeypatch):
+    config, _ = _config(tmp_path, monkeypatch, with_vault=False)
+    with db.get_db(config.db_path) as conn:
+        generated.create(conn, "alice", name="generated_acme", username="alice", password="fixture", url="https://acme.example")
+        generated.set_recovery(conn, "alice", "generated_acme", CODES, fmt="codes")
+        assert generated.recovery_state(conn, "alice", "generated_acme") == {"format": "codes", "total": 3, "spent": [], "remaining": 3}
+        conn.execute("UPDATE recovery_code_state SET spent='[0]' WHERE name='generated_acme'")
+        assert generated.recovery_state(conn, "alice", "generated_acme")["remaining"] == 2
+        generated.set_recovery(conn, "alice", "generated_acme", "apple " * 12, fmt="phrase")
+        assert generated.recovery_state(conn, "alice", "generated_acme")["spent"] == []
+    generated.retire(config, "alice", "generated_acme")
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT * FROM recovery_code_state").fetchall() == []
+
+
+@pytest.mark.parametrize("fmt,text,total", [("codes", "1. abcd1234\n2. efgh5678", 2), ("phrase", "apple " * 12, 1), ("block", "arbitrary saved block", 1)])
+def test_recovery_set_cli_format(tmp_path, monkeypatch, sock, capsys, fmt, text, total):
+    config, _ = _config(tmp_path, monkeypatch, with_vault=False)
+    monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock))
+    monkeypatch.setattr("sys.stdin", io.StringIO(text))
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=2):
+        _create(sock)
+        assert credential_shim.main(["recovery-set", "generated_acme", "--format", fmt]) == 0
+    with db.get_db(config.db_path) as conn:
+        state = generated.recovery_state(conn, "alice", "generated_acme")
+        assert state["format"] == fmt and state["total"] == total
+    assert text.strip() not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("case,reason", [("snapshot", "vault_credential_not_present"), ("grant", "credential_not_granted"), ("local", "recovery_set_not_generated")])
+def test_capture_refuses_unreachable_or_local_credentials(tmp_path, monkeypatch, sock, case, reason):
+    config, _ = _config(tmp_path, monkeypatch, with_vault=False)
+    _stored_with_codes(config)
+    config.security.credential_broker.enabled = case == "grant"
+    if case == "local":
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE credential_bindings SET source='local'")
+    snapshot = {} if case == "snapshot" else {"generated_acme": "fixture-password"}
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", task_id="1", vault_write_limit=1,
+                    vault_credentials=snapshot) as server:
+        reply = ask(server, sock, {"type": "vault_secret_capture", "name": "generated_acme", "kind": "codes",
+                                  "text": "abcd1234", "source": "page"}, True)
+    assert reply["reason"] == reason
+    assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme_recovery") == CODES

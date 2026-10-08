@@ -2516,10 +2516,11 @@ _CREDENTIAL_FILL_JS = """(el, {value, origin, card_field}) => {
 }"""
 
 
-_RECOVERY_READ_JS = """(el, {origin}) => {
+_RECOVERY_READ_JS = """(el, {origin, source = "text", attr = null}) => {
     if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
         return {ok: false, error: "credential_origin_mismatch"};
-    const text = (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
+    const text = source === "attr" ? el.getAttribute(attr) :
+        (source === "value" || el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
         ? el.value : (el.innerText || el.textContent || "");
     return {ok: true, text: text};
 }"""
@@ -2536,30 +2537,46 @@ def _recovery_redactions(text):
 
     The whole block, each code-shaped line, and each code-shaped token, so a
     page that later joins or splits the codes differently still matches.
-    Code-shaped is six characters or more with a digit or a hyphen in it:
+    Code-shaped is four characters or more with a digit or a hyphen in it:
     these join the user's redaction set for good, so a plain word like
     "Recovery" there would vanish from every later page.
     """
     def code_shaped(part):
-        return len(part) >= 6 and any(c.isdigit() or c == "-" for c in part)
+        return len(part) >= 4 and any(c.isdigit() or c == "-" for c in part)
 
     lines = [line.strip() for line in text.splitlines()]
     tokens = [token for line in lines for token in line.split()]
     return {text.strip()} | {part for part in lines + tokens if code_shaped(part)}
 
 
-def _read_recovery_action(page, action):
-    """Read a page's recovery codes for the caller to store (ISSUE-688).
+def _locate(page, selector):
+    if ">>>" in selector:
+        frame, inner = selector.split(">>>", 1)
+        locator = page.frame_locator(frame.strip()).locator(inner.strip())
+        locator.wait_for(state="visible", timeout=SELECTOR_TIMEOUT_MS)
+        return locator.element_handle(timeout=SELECTOR_TIMEOUT_MS)
+    return page.wait_for_selector(selector, state="visible", timeout=SELECTOR_TIMEOUT_MS)
 
-    Returns ``(result, text)``. The same origin rule as a credential fill, and
-    the read happens in one evaluation with the origin re-checked inside it.
-    The text never goes in ``result``: the route returns it beside the
-    scrubbed response, and its lines join the redaction set first.
-    """
+
+def _read_recovery_action(page, action):
+    return _read_secret_action(page, action)
+
+
+def _read_secret_action(page, action):
+    """Read from the element's bound frame and register redactions before returning."""
     selector = action.get("selector") or ""
     if not selector:
-        return {"action": "read_recovery", "ok": False, "error": "selector is required"}, ""
-    handle = page.wait_for_selector(selector, state="visible", timeout=SELECTOR_TIMEOUT_MS)
+        return {"action": action.get("type", "read_secret"), "ok": False, "error": "selector is required"}, ""
+    source, attr = action.get("source", "text"), action.get("attr")
+    suffix = re.search(r"::(value|attr\(([A-Za-z0-9_:-]{1,64})\))$", selector)
+    if suffix:
+        source = "value" if suffix.group(1) == "value" else "attr"
+        attr = suffix.group(2)
+        selector = selector[:suffix.start()]
+    if source not in ("text", "value", "attr") or (source == "attr" and (
+            not isinstance(attr, str) or not re.fullmatch(r"[A-Za-z0-9_:-]{1,64}", attr))):
+        return {"action": "read_secret", "ok": False, "error": "capture_source_invalid"}, ""
+    handle = _locate(page, selector)
     frame = handle.owner_frame()
     try:
         parsed = urlsplit(frame.url if frame else "")
@@ -2569,23 +2586,35 @@ def _read_recovery_action(page, action):
     hosts = action.get("bound_hosts", [])
     if (not isinstance(hosts, list) or not origin.startswith("https://")
             or origin[len("https://"):] not in hosts):
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": "credential_origin_mismatch"}, ""
-    read = handle.evaluate(_RECOVERY_READ_JS, {"origin": origin})
+    args = {"origin": origin}
+    if action.get("type") != "read_recovery":
+        args.update(source=source, attr=attr)
+    read = handle.evaluate(_RECOVERY_READ_JS, args)
     if not isinstance(read, dict) or read.get("ok") is not True:
         error = read.get("error") if isinstance(read, dict) else None
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": error or "recovery_read_failed"}, ""
     text = read.get("text") if isinstance(read.get("text"), str) else ""
     if not text.strip():
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": "recovery_empty"}, ""
     if (len(text) > RECOVERY_MAX_CHARS
             or sum(1 for line in text.splitlines() if line.strip()) > RECOVERY_MAX_LINES):
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": "recovery_too_large"}, ""
     _credential_values.update(_recovery_redactions(text))
-    return {"action": "read_recovery", "selector": selector, "ok": True, "path": "cdp",
+    if action.get("kind") == "phrase":
+        _credential_values.update(line.strip() for line in text.splitlines() if line.strip())
+        _credential_values.add(" ".join(text.split()))
+    if action.get("kind") == "otp":
+        for match in re.finditer(r"(?<![A-Z0-9])[A-Z2-7]{4,}(?:[ -][A-Z2-7]{4,})*(?![A-Z0-9])", text.upper()):
+            grouped = match.group()
+            bare = grouped.replace(" ", "").replace("-", "")
+            if len(bare) >= 16:
+                _credential_values.update((grouped, bare, text[match.start():match.end()]))
+    return {"action": action.get("type", "read_secret"), "selector": selector, "ok": True, "path": "cdp",
             "path_reason": "credential origin checked"}, text
 
 
@@ -2600,15 +2629,7 @@ def _selector_action(session, page, action, others=(), owned=()):
     action_type = action["type"]
     selector = action.get("selector") or ""
     if selector and action_type == "fill" and action.get("credential"):
-        if action.get("card_field") and ">>>" in selector:
-            frame_selector, inner_selector = selector.split(">>>", 1)
-            locator = page.frame_locator(frame_selector.strip()).locator(inner_selector.strip())
-            locator.wait_for(state="visible", timeout=SELECTOR_TIMEOUT_MS)
-            handle = locator.element_handle(timeout=SELECTOR_TIMEOUT_MS)
-        else:
-            handle = page.wait_for_selector(
-                selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
-            )
+        handle = _locate(page, selector)
         # Read the field's own document, including a selector into a frame.
         # Filling that handle cannot re-resolve the selector after navigation.
         frame = handle.owner_frame()
@@ -2793,8 +2814,8 @@ def interact():
             action_type = action.get("type")
             selector = action.get("selector", "")
 
-            if action_type == "read_recovery":
-                read, text = _read_recovery_action(page, action)
+            if action_type in ("read_recovery", "read_secret"):
+                read, text = (_read_recovery_action if action_type == "read_recovery" else _read_secret_action)(page, action)
                 if text:
                     recovered.append(text)
                     read["recovery"] = len(recovered) - 1
@@ -3193,6 +3214,7 @@ def health():
         "credential_origin_check": True,
         "otp_expiry_check": True,
         "recovery_save": True,
+        "secret_capture": True,
         "card_fill": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,

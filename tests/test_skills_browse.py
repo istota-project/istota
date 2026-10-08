@@ -3971,7 +3971,7 @@ class TestSaveRecovery:
     proxy = TestFillCredential.proxy
     VAULT = {}
     CODES = "fixture-rc-1111-aaaa\nfixture-rc-2222-bbbb"
-    HEALTH = {"per_user_profiles": True, "credential_origin_check": True, "recovery_save": True}
+    HEALTH = {"per_user_profiles": True, "credential_origin_check": True, "recovery_save": True, "secret_capture": True}
 
     @pytest.fixture
     def recovery_proxy(self, proxy, tmp_path, monkeypatch):
@@ -4005,13 +4005,13 @@ class TestSaveRecovery:
         ) as post:
             main(["interact", "s1", "--click", "#show", "--save-recovery", "#codes=generated_acme"])
         sent = post.call_args.kwargs["json"]["actions"]
-        assert sent[1] == {"type": "read_recovery", "selector": "#codes", "credential": True,
+        assert sent[1] == {"type": "read_secret", "kind": "codes", "selector": "#codes", "credential": True,
                            "bound_hosts": ["acme.example"], "credential_name": "generated_acme"}
         output = capsys.readouterr().out
         assert "fixture-rc" not in output
         result = json.loads(output)
-        assert result["actions"][1] == {"action": "save_recovery", "selector": "#codes",
-                                        "name": "generated_acme", "ok": True, "saved": 2,
+        assert result["actions"][1] == {"name": "generated_acme", "kind": "codes",
+                                        "shape": {"count": 2, "length": 20, "charset": "[a-z0-9-]"},
                                         "replaced": False}
         assert "recovery" not in result
         assert store.get_secret(config.db_path, "alice", "vault_entries",
@@ -4070,3 +4070,37 @@ class TestSaveRecovery:
         assert result["actions"][0]["error"] == "credential_origin_mismatch"
         assert store.get_secret(config.db_path, "alice", "vault_entries",
                                 "generated_acme_recovery") is None
+
+
+class TestSecretCapture:
+    proxy = TestSaveRecovery.proxy
+    recovery_proxy = TestSaveRecovery.recovery_proxy
+    HEALTH = TestSaveRecovery.HEALTH
+    VAULT = {}
+    @pytest.mark.parametrize("flag,kind,text", [
+        ("--capture-otp", "otp", "Your secret key is JBSW Y3DP EHPK 3PXP"),
+        ("--capture-codes", "codes", "Your scratch token is a1b2c3d4e5"),
+        ("--capture-phrase", "phrase", "apple " * 12),
+    ])
+    def test_capture_shape_and_audit(self, recovery_proxy, capsys, caplog, flag, kind, text):
+        from istota import db
+        from istota.credentials import store
+        server, config = recovery_proxy
+        response = {"status": "ok", "user_scope": "alice", "session_id": "s1",
+                    "actions": [{"action": "read_secret", "ok": True, "recovery": 0}],
+                    "recovery": [text]}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=self.HEALTH)), patch(
+            "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=response)):
+            main(["interact", "s1", flag, "#secret=generated_acme"])
+        output = capsys.readouterr().out
+        result = json.loads(output)
+        assert result["status"] == "ok"
+        assert result["actions"][0]["kind"] == kind
+        assert result["actions"][0]["shape"]["count"] == 1
+        assert text.strip() not in output + caplog.text
+        member = "_totp" if kind == "otp" else "_recovery"
+        assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme" + member)
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute("SELECT detail_json FROM credential_audit WHERE action='capture'").fetchone()
+            assert json.loads(row[0]) == {"kind": kind, "count": 1, "source": "page", "replaced": False}
+            assert text.strip() not in "\n".join(conn.iterdump())

@@ -2300,3 +2300,15 @@ CREATE TABLE IF NOT EXISTS web_auth_step_ups (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_web_auth_step_ups_user ON web_auth_step_ups(user_id, used_at);
+
+
+CREATE TABLE IF NOT EXISTS recovery_code_state (
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    format TEXT NOT NULL CHECK (format IN ('codes', 'phrase', 'block')),
+    total INTEGER NOT NULL,
+    spent TEXT NOT NULL DEFAULT '[]',
+    captured_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);

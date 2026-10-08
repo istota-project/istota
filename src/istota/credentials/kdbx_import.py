@@ -197,7 +197,15 @@ def apply(db_path, user_id, data: bytes, passphrase: str, *, selected: Sequence[
                 if copy.get("otp"):
                     generated.set_otp(conn, user_id, owner, copy["otp"], replace=True, actor=actor)
                 if copy.get("recovery"):
-                    generated.set_recovery(conn, user_id, owner, copy["recovery"], actor=actor)
+                    lines = copy["recovery"].splitlines()
+                    spent = [index for index, line in enumerate(lines) if line.startswith("(used) ")]
+                    text = "\n".join(line.removeprefix("(used) ") for line in lines)
+                    generated.set_recovery(conn, user_id, owner, text,
+                                           fmt="codes" if spent else "block", actor=actor)
+                    if spent:
+                        import json
+                        conn.execute("UPDATE recovery_code_state SET spent=? WHERE user_id=? AND name=?",
+                                     (json.dumps(spent), user_id, owner))
                 for name, (_, binding) in members.items():
                     bindings.put_binding(conn, user_id, name, binding)
             else:

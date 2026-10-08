@@ -134,3 +134,20 @@ def test_export_import_preserves_generated_binding_and_custom_fields(database, c
     with db.get_db(target) as conn:
         assert bindings.get_binding(conn, "alice", "generated_account") == {**binding, "kind": "value"}
     assert store.get_secret(target, "alice", "vault_entries", "portal_extra") == "custom-value"
+
+
+def test_spent_markers_export_and_import(database, cheap, tmp_path):  # noqa: F811
+    from istota.credentials import kdbx_import
+    with db.get_db(database) as conn:
+        generated.create(conn, "alice", name="generated_account", username="alice", password="fixture", url="https://account.example")
+        generated.set_recovery(conn, "alice", "generated_account", "abcd1234\nefgh5678", fmt="codes")
+        conn.execute("UPDATE recovery_code_state SET spent='[0]'")
+    data, _ = cheap.build_kdbx(database, "alice", password=PASSWORD, keyfile=None, options=cheap.INTERACTIVE)
+    assert kdbx_import.parse_vault(data, PASSWORD).generated["generated_account"]["recovery"] == "(used) abcd1234\nefgh5678"
+    target = tmp_path / "restore.db"
+    db.init_db(target)
+    preview = kdbx_import.preview(target, "alice", data, PASSWORD)
+    kdbx_import.apply(target, "alice", data, PASSWORD, selected=["generated_account"], expected_digest=preview.digest, actor="import")
+    with db.get_db(target) as conn:
+        assert generated.read_recovery(conn, "alice", "generated_account") == "abcd1234\nefgh5678"
+        assert generated.recovery_state(conn, "alice", "generated_account") == {"format": "codes", "spent": [0], "total": 2, "remaining": 1}

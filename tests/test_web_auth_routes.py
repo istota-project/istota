@@ -817,4 +817,4 @@ async def test_recovery_codes_need_step_up_on_an_email_session(client, configure
     code = re.search(r"[0-9]{6}", sent[-1][2])[0]
     response = await client.post(url, json={"step_up": {"request_id": request.json()["request_id"], "code": code}}, headers=origin)
     assert response.status_code == 200, response.text
-    assert response.json() == {"codes": "fixture-rc-1111-aaaa"}
+    assert response.json() == {"codes": ["fixture-rc-1111-aaaa"], "spent": [], "format": "block"}

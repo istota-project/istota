@@ -140,7 +140,7 @@ USAGE = (
     "  istota-credential get NAME\n"
     "  istota-credential env VAR\n"
     "  istota-credential otp-set NAME  # read enrollment secret from stdin\n"
-    "  istota-credential recovery-set NAME  # read recovery codes from stdin\n"
+    "  istota-credential recovery-set NAME [--format codes|phrase|block]  # read stdin\n"
     "  istota-credential new SLUG [--username USER] [--url URL] [--length N] [--no-symbols]\n"
 )
 
@@ -427,18 +427,22 @@ def _cmd_otp_set(args: list[str]) -> int:
     return 0
 
 
-def store_recovery(name: str, text: str, *, credential_fd: str | None = None) -> tuple[int, bool]:
-    """Save a generated credential's recovery codes: ``(line count, replaced)``.
-
-    The codes go one way, to the daemon; the reply carries neither them nor
-    anything derived from them beyond the count.
-    """
-    reply = _request({"type": "vault_recovery_set", "name": name, "text": text},
+def capture_secret(name: str, kind: str, text: str, *, source="page", credential_fd=None) -> dict:
+    reply = _request({"type": "vault_secret_capture", "name": name, "kind": kind,
+                      "text": text, "source": source},
                      timeout=CREATE_TIMEOUT_SECONDS, credential_fd=credential_fd)
-    count, replaced = reply.get("count"), reply.get("replaced")
-    if type(count) is not int or type(replaced) is not bool:
+    shape = reply.get("shape")
+    if (reply.get("name") != name or reply.get("kind") != kind or not isinstance(shape, dict)
+            or type(shape.get("count")) is not int or type(shape.get("length")) is not int
+            or shape.get("charset") not in ("base32", "[a-z0-9]", "[a-z0-9-]", "[A-Z0-9]", "[A-Za-z0-9-]", "words")
+            or type(reply.get("replaced")) is not bool):
         raise ProxyError("the credential proxy answered unparseably")
-    return count, replaced
+    return {"name": name, "kind": kind, "shape": shape, "replaced": reply["replaced"]}
+
+
+def store_recovery(name: str, text: str, *, credential_fd: str | None = None, fmt="codes") -> tuple[int, bool]:
+    reply = capture_secret(name, fmt, text, source="stdin", credential_fd=credential_fd)
+    return reply["shape"]["count"], reply["replaced"]
 
 
 def fetch_recovery_target(name: str, *, credential_fd: str | None) -> tuple[str, ...]:
@@ -454,13 +458,21 @@ def fetch_recovery_target(name: str, *, credential_fd: str | None) -> tuple[str,
 
 
 def _cmd_recovery_set(args: list[str]) -> int:
+    fmt = "codes"
+    if "--format" in args:
+        args = list(args)
+        index = args.index("--format")
+        if index + 1 >= len(args) or args[index + 1] not in ("codes", "phrase", "block"):
+            raise ProxyError("recovery_format: choose codes, phrase or block")
+        fmt = args.pop(index + 1)
+        args.pop(index)
     if len(args) != 1:
         print(USAGE, file=sys.stderr)
         return EXIT_REFUSED
     text = sys.stdin.read(65537)
     if not text.strip() or len(text) > 65536:
         raise ProxyError("recovery_empty: provide the recovery codes on stdin")
-    count, replaced = store_recovery(args[0], text)
+    count, replaced = store_recovery(args[0], text, fmt=fmt)
     print(json.dumps({"name": args[0], "saved": count, "replaced": replaced}))
     return 0
 

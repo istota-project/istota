@@ -4686,6 +4686,7 @@ export interface CredentialSummary {
   /** Generated credentials only: whether recovery codes are stored. The codes
    *  are fetched on demand with `showRecoveryCodes`, never listed. */
   recovery?: boolean;
+  recovery_remaining?: number | null;
 }
 export interface CredentialGrantsSettings {
   credentials: CredentialSummary[];
@@ -4857,7 +4858,10 @@ export function startStepUp(
 ): Promise<{ request_id: string; expires_at: string; email_hint: string }> {
   return credentialWrite('', 'POST', { action, name }, '/settings/step-up');
 }
-export function showRecoveryCodes(name: string, step_up: StepUpProof): Promise<{ codes: string }> {
+export function showRecoveryCodes(
+  name: string,
+  step_up: StepUpProof,
+): Promise<{ codes: string[]; spent: number[]; format: string }> {
   return credentialWrite(`/${encodeURIComponent(name)}/recovery`, 'POST', { step_up });
 }
 export function getCredentialHistory(name: string): Promise<CredentialHistory[]> {

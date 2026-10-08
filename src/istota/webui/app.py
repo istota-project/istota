@@ -13233,6 +13233,8 @@ def _credential_settings(username: str, action="list", name="", payload=None):
             if binding.get("source") == generated.SOURCE:
                 # Whether there are codes to show; the codes are fetched on demand.
                 row["recovery"] = generated.has_recovery(conn, username, credential_name)
+                state = generated.recovery_state(conn, username, credential_name)
+                row["recovery_remaining"] = state["remaining"] if state else None
             credentials.append(row)
         existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
     refusal = secrets_vault.vault_isolation_refusal(_config, username) or ""
@@ -13976,12 +13978,13 @@ async def settings_generated_recovery(name: str, request: Request, user: dict = 
             codes = generated.read_recovery(conn, username, name)
             if codes is not None:
                 audit.record(conn, username, action="reveal", actor=f"web:{username}", name=name)
-            return codes
-    codes = await asyncio.to_thread(read)
+            return codes, generated.recovery_state(conn, username, name)
+    codes, state = await asyncio.to_thread(read)
     if codes is None:
         raise HTTPException(status_code=404, detail="no recovery codes are stored for that credential")
     logger.info("recovery codes viewed via settings: %s by %s", secrets_vault._label(name), secrets_vault._label(username))
-    return JSONResponse({"codes": codes}, headers={"Cache-Control": "no-store"})
+    return JSONResponse({"codes": codes.splitlines(), "spent": state["spent"], "format": state["format"]},
+                        headers={"Cache-Control": "no-store"})
 
 
 @api_router.put("/settings/credentials/{name}")

@@ -74,7 +74,7 @@ async def test_showing_the_codes_needs_step_up_and_is_logged_by_name(
     with caplog.at_level("INFO", logger="istota.webui.app"):
         response = await signed_client.post(url, json=await step_up(signed_client, mail, "recovery_reveal"), headers=ORIGIN)
     assert response.status_code == 200, response.text
-    assert response.json() == {"codes": CODES}
+    assert response.json() == {"codes": CODES.splitlines(), "spent": [], "format": "block"}
     assert response.headers["cache-control"] == "no-store"
     assert "recovery codes viewed via settings" in caplog.text
     assert "fixture-rc" not in caplog.text
@@ -89,3 +89,16 @@ async def test_no_codes_or_not_generated_is_a_404(signed_client, stored, config,
                                             headers=ORIGIN)
         assert response.status_code == 404
         assert "token" not in response.text
+
+
+async def test_reveal_reports_spent_codes(signed_client, with_codes, config, mail):  # noqa: F811
+    with db.get_db(config.db_path) as conn:
+        generated.set_recovery(conn, "alice", "generated_acme", CODES, fmt="codes")
+        conn.execute("UPDATE recovery_code_state SET spent='[0]'")
+    response = await signed_client.post(f"{BASE}/generated_acme/recovery",
+        json=await step_up(signed_client, mail, "recovery_reveal"), headers=ORIGIN)
+    assert response.status_code == 200
+    assert response.json() == {"codes": CODES.splitlines(), "spent": [0], "format": "codes"}
+    listing = (await signed_client.get(BASE)).json()
+    row = next(row for row in listing["credentials"] if row["name"] == "generated_acme")
+    assert row["recovery_remaining"] == len(CODES.splitlines()) - 1

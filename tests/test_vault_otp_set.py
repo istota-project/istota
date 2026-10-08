@@ -43,7 +43,7 @@ def configured(tmp_path, monkeypatch):
 
 def test_set_stores_the_seed_and_leaves_the_file(configured, sock):
     config, path = configured
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials=store.get_service_secrets(config.db_path, "alice", "vault_entries"), vault_write_limit=1):
         assert _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED}) == {
             "name": "generated_acme", "otp": True}
     stored = store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme_totp")
@@ -54,7 +54,7 @@ def test_set_stores_the_seed_and_leaves_the_file(configured, sock):
 
 def test_a_second_enrollment_is_refused_and_writes_nothing(configured, sock):
     config, path = configured
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=2):
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials=store.get_service_secrets(config.db_path, "alice", "vault_entries"), vault_write_limit=2):
         _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED})
         before = path.read_bytes()
         reply = _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": "JBSWY3DP" * 2})
@@ -73,7 +73,7 @@ def test_a_credential_istota_did_not_generate_is_refused(configured, sock, sourc
     store.upsert_secret(config.db_path, "alice", "vault_entries", "generated_mine", "value",
                         binding=parse_binding("acme.example", {}, [], source=source))
     before = path.read_bytes()
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials=store.get_service_secrets(config.db_path, "alice", "vault_entries"), vault_write_limit=1):
         reply = _request(sock, {"type": "vault_otp_set", "name": "generated_mine", "otp": SEED})
     assert reply["reason"] == "otp_set_not_generated"
     assert path.read_bytes() == before
@@ -82,7 +82,7 @@ def test_a_credential_istota_did_not_generate_is_refused(configured, sock, sourc
 
 def test_public_write_notice_and_shared_budget(configured, sock, caplog):
     config, path = configured
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=2) as proxy:
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials=store.get_service_secrets(config.db_path, "alice", "vault_entries"), vault_write_limit=2) as proxy:
         reply = _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED})
         assert reply == {"name": "generated_acme", "otp": True}
         assert "generated_acme_totp" in proxy.vault_credentials
@@ -100,11 +100,11 @@ def test_public_write_notice_and_shared_budget(configured, sock, caplog):
 def test_zero_budget_and_invalid_input_leave_the_file(configured, sock):
     config, path = configured
     before = path.read_bytes()
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=0):
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials=store.get_service_secrets(config.db_path, "alice", "vault_entries"), vault_write_limit=0):
         assert _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED})["reason"] == "vault_write_limit"
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials=store.get_service_secrets(config.db_path, "alice", "vault_entries"), vault_write_limit=1):
         reply = _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": "invalid seed!"})
-    assert reply["reason"] == "invalid_otp"
+    assert reply["reason"] == "otp_not_found"
     assert "invalid seed!" not in json.dumps(reply)
     assert path.read_bytes() == before
 
@@ -128,7 +128,7 @@ def test_shim_reads_only_stdin(monkeypatch, capsys):
 
 def test_create_then_enroll_keeps_same_task_access(configured, sock):
     config, path = configured
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=2) as proxy:
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_credentials=store.get_service_secrets(config.db_path, "alice", "vault_entries"), vault_write_limit=2) as proxy:
         created = _request(sock, {"type": "vault_create", "slug": "other", "username": "alice", "url": "https://acme.example"})
         reply = _request(sock, {"type": "vault_otp_set", "name": created["name"], "otp": SEED})
         assert reply == {"name": "generated_other", "otp": True}

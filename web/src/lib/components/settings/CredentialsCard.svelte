@@ -51,7 +51,7 @@
   let historyName: string | null = $state(null);
   let deleted: CredentialHistory[] = $state([]);
   let deletedOpen = $state(false);
-  let reveal: { name: string; codes: string } | null = $state(null);
+  let reveal: { name: string; codes: string[]; spent: number[] } | null = $state(null);
   let revealName: string | null = $state(null);
 
   function openReveal(name: string) {
@@ -61,7 +61,7 @@
     const name = revealName;
     if (!name) return;
     const result = await showRecoveryCodes(name, proof);
-    if (revealName === name) reveal = { name, codes: result.codes };
+    if (revealName === name) reveal = { name, codes: result.codes, spent: result.spent };
   }
   async function showDeleted() {
     try {
@@ -325,12 +325,21 @@
     <p class="caption reveal-note">
       Keep these codes somewhere only you can reach, and close this when you are done.
     </p>
-    <pre class="recovery-codes" data-testid="recovery-codes">{reveal.codes}</pre>
+    <pre class="recovery-codes" data-testid="recovery-codes">{reveal.codes
+        .map((code, index) => `${reveal.spent.includes(index) ? '(used) ' : ''}${code}`)
+        .join('\n')}</pre>
   {/if}
   {#snippet footer()}
     <Button
       variant="secondary"
-      onclick={() => reveal && copyText(reveal.codes, { label: 'Recovery codes' })}>Copy</Button
+      onclick={() =>
+        reveal &&
+        copyText(
+          reveal.codes
+            .map((code, index) => `${reveal.spent.includes(index) ? '(used) ' : ''}${code}`)
+            .join('\n'),
+          { label: 'Recovery codes' },
+        )}>Copy</Button
     >
     <Button variant="primary" onclick={() => (reveal = null)}>Done</Button>
   {/snippet}

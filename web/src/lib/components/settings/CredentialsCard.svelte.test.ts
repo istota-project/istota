@@ -525,7 +525,11 @@ describe('generated credentials', () => {
       expires_at: 'later',
       email_hint: 'a•••@example.com',
     });
-    vi.mocked(showRecoveryCodes).mockResolvedValue({ codes: 'fixture-rc-1111' });
+    vi.mocked(showRecoveryCodes).mockResolvedValue({
+      codes: ['fixture-rc-1111', 'fixture-rc-2222'],
+      spent: [0],
+      format: 'codes',
+    });
     render(CredentialsCard);
     await screen.findByText('acme.example');
     await chooseAction('generated_acme', 'Show recovery codes');
@@ -535,7 +539,9 @@ describe('generated credentials', () => {
       target: { value: '123456' },
     });
     await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    expect((await screen.findByTestId('recovery-codes')).textContent).toBe('fixture-rc-1111');
+    expect((await screen.findByTestId('recovery-codes')).textContent).toBe(
+      '(used) fixture-rc-1111\nfixture-rc-2222',
+    );
     expect(showRecoveryCodes).toHaveBeenCalledWith('generated_acme', {
       request_id: 'r',
       code: '123456',
