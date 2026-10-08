@@ -11,7 +11,7 @@ import pytest
 from istota import db
 from istota.config import Config, UserConfig
 from istota.credentials import store, vault
-from istota.credentials.broker import grants
+from istota.credentials.broker import bindings, grants
 from istota.sandbox.skill_proxy import SkillProxy
 from tests.support.kdbx import create_database
 from tests import test_skill_proxy_vault_create as _vault_create
@@ -139,8 +139,9 @@ def test_an_entry_written_under_generated_by_hand_is_still_declined(configured, 
     kp.save()
     _sync(config, path)
     with db.get_db(config.db_path) as conn:
+        # Imported as a generated credential (ISSUE-686), and never granted by the sync.
+        assert bindings.get_binding(conn, "alice", "generated_handmade")["source"] == "generated"
         assert grants.get_grant(conn, "alice", "generated_handmade") is None
-        assert grants.auto_grant_marker(conn, "alice", "generated_handmade") == grants.AUTO_GRANT_DECLINED
         assert grants.get_grant(conn, "alice", "generated_acme")["rooms"] == ["room-a"]
 
 

@@ -30,7 +30,7 @@ Eight verbs::
     istota-credential run --stdin name -- cmd    # value on the child's stdin
     istota-credential get <name>                 # the value on stdout
     istota-credential env <VAR>                  # a manifest-declared var
-    istota-credential new <slug> [options]        # create a vault entry
+    istota-credential new <slug> [options]        # generate and store a credential
     istota-credential otp-set <name>              # enrollment seed on stdin
 
 ``placeholder`` is the broker path: the value is added outside the sandbox.
@@ -74,8 +74,8 @@ SHIM_PROGRAM_NAME = "istota-credential"
 #: about other local users rather than about the task.
 SHIM_MODE = 0o700
 
-#: Fetches answer from the proxy's memory. A create unlocks and saves a KDBX
-#: file, so it gets its own longer socket wait below.
+#: Fetches answer from the proxy's memory. A create may also write the KeePass
+#: copy, which unlocks and saves a KDBX file, so it gets a longer wait below.
 SOCKET_TIMEOUT_SECONDS = 30
 CREATE_TIMEOUT_SECONDS = 120
 

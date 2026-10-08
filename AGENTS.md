@@ -122,7 +122,8 @@ src/istota/
 │   └── net_guard.py      # Whether an address is public: the SSRF rule shared by WebFetch and the wordpress skill → leaf-modules.md
 ├── credentials/          # Secrets and the credential vault
 │   ├── store.py          # Encrypted credential store (Fernet via scrypt-derived key)
-│   ├── vault.py          # A user's KDBX credential vault: read, mapped, and applied to the secrets table; never written
+│   ├── vault.py          # A user's KDBX credential vault: read, mapped, and applied to the secrets table; written only to mirror generated credentials
+│   ├── generated.py      # Credentials Istota generates: stored in the table, mirrored one way to KeePass, retired only by the user → sandbox.md
 │   ├── schema.py         # Shared service/key schema for `istota secret` CLI + web UI
 │   ├── google_scopes.py  # The Google service ↔ OAuth scope table, bounded by the operator's configured ceiling
 │   └── broker/           # Credential grants, the broker CA and the intercepting proxy → sandbox.md

@@ -67,7 +67,10 @@ def test_create_is_available_in_the_same_task_and_never_returns_password(tmp_pat
         assert proxy.vault_credentials[reply["name"]] not in json.dumps(reply)
         assert proxy.vault_credentials[reply["name"]] not in caplog.text
         read = secrets_vault.parse_vault(path.read_bytes(), "test-passphrase")
-        assert read.services[reply["name"]] == proxy.vault_credentials[reply["name"]]
+        assert read.generated[reply["name"]]["password"] == proxy.vault_credentials[reply["name"]]
+        assert secrets_store.get_secret(
+            config.db_path, "alice", "vault_entries", reply["name"],
+        ) == proxy.vault_credentials[reply["name"]]
         assert secrets_vault.vault_status(config, "alice").generated_count == 1
         assert secrets_vault.vault_status(config, "alice", parse=False).generated_count == 1
         report = doctor._vault_contents_result(config, secrets_vault, "security.vault_contents", ["alice"])
@@ -111,36 +114,37 @@ def test_signup_address_must_not_name_another_user(tmp_path, monkeypatch, sock):
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
         reply = _request(sock, {"type": "vault_create", "slug": "team"})
     assert reply["reason"] == "vault_write_refused"
-    assert "generated_team" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services
+    assert "generated_team" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated
+    assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "generated_team") is None
 
 
-@pytest.mark.parametrize("vault_has_entry", [False, True])
-def test_stale_pending_signup_tag_recovers_from_the_vault(
-    tmp_path, monkeypatch, sock, vault_has_entry,
+@pytest.mark.parametrize("stored", [False, True])
+def test_stale_pending_signup_tag_recovers_from_the_store(
+    tmp_path, monkeypatch, sock, stored,
 ):
+    """A reservation a killed task left pending is reclaimed after five
+    minutes, unless the credential it was for was stored."""
+    from istota.credentials import generated
+
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
-    path = tmp_path / "vault.kdbx"
-    kp = create_database(str(path), password="test-passphrase")
-    if vault_has_entry:
-        group = kp.add_group(kp.root_group, "generated")
-        kp.add_entry(group, "acme", "bot+alice+acme@example.com", "saved-password")
-        kp.save()
     config = Config(
         db_path=tmp_path / "daemon" / "test.db",
         workspace_path=tmp_path / "workspace",
-        users={"alice": UserConfig(vault_path=str(path))},
+        users={"alice": UserConfig()},
     )
     config.email.enabled = True
     config.email.bot_email = "bot@example.com"
     config.db_path.parent.mkdir()
     db.init_db(config.db_path)
-    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
     with db.get_db(config.db_path) as conn:
         assert db.reserve_signup_tag(conn, "alice", "acme")
         conn.execute(
             "UPDATE signup_tags SET reserved_at = datetime('now', '-10 minutes') WHERE tag = ?",
             ("alice+acme",),
         )
+        if stored:
+            generated.create(conn, "alice", name="generated_acme", username="bot+alice+acme@example.com",
+                             password="saved-password", url="", mirror=False)
 
     monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
@@ -148,8 +152,8 @@ def test_stale_pending_signup_tag_recovers_from_the_vault(
     with db.get_db(config.db_path) as conn:
         tag = db.signup_tag(conn, "alice+acme")
     assert tag is not None
-    assert ("name" in reply) is (not vault_has_entry)
-    assert "generated_acme" in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services
+    assert ("name" in reply) is (not stored)
+    assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme")
 
 
 def test_recent_pending_signup_tag_remains_busy(tmp_path, monkeypatch, sock):
@@ -176,7 +180,8 @@ def test_recent_pending_signup_tag_remains_busy(tmp_path, monkeypatch, sock):
         assert conn.execute(
             "SELECT opened_at FROM signup_tags WHERE tag = ?", ("alice+acme",),
         ).fetchone()[0] is None
-    assert "generated_acme" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services
+    assert "generated_acme" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated
+    assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme") is None
 
 
 def test_shim_new_sends_only_policy_and_names(monkeypatch, capsys):
@@ -196,9 +201,11 @@ def test_shim_new_sends_only_policy_and_names(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["name"] == "generated_acme"
 
 
-def test_a_failed_apply_after_replace_still_returns_the_committed_entry(
+def test_a_failed_apply_after_the_mirror_still_returns_the_stored_credential(
     tmp_path, monkeypatch, sock,
 ):
+    """The table is written before the file, so an apply that fails after
+    the mirror's replace costs nothing but a sync retry."""
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
@@ -221,16 +228,13 @@ def test_a_failed_apply_after_replace_still_returns_the_committed_entry(
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1) as proxy:
         reply = _request(sock, {"type": "vault_create", "slug": "acme"})
         assert reply["name"] == "generated_acme"
-        assert proxy.vault_credentials[reply["name"]]
-        assert secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services[
-            reply["name"]
-        ] == proxy.vault_credentials[reply["name"]]
+        password = proxy.vault_credentials[reply["name"]]
+        assert secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated[
+            reply["name"]]["password"] == password
         assert "alice" not in secrets_vault._SYNC_STATE
     monkeypatch.setattr(secrets_vault, "apply_vault", original_apply)
     secrets_vault.sync_user(config, "alice", deliver=False)
-    assert secrets_store.get_secret(
-        config.db_path, "alice", "vault_entries", "generated_acme",
-    ) == proxy.vault_credentials["generated_acme"]
+    assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme") == password
 
 
 def test_generated_count_comes_from_the_group_not_a_flat_name(tmp_path, monkeypatch):
@@ -272,12 +276,10 @@ def test_multi_user_vault_create_requires_opt_in(tmp_path, monkeypatch, sock):
     assert "allow_unsandboxed_multi_user_vaults" in reply["error"]
 
 
+@pytest.mark.parametrize("source", ["local", "vault"])
 @pytest.mark.parametrize("taken", ["generated_acme", "generated_acme_url"])
-def test_a_name_held_by_a_local_credential_is_refused_before_the_file(
-    tmp_path, monkeypatch, sock, taken,
-):
-    """`create_entry`'s collision check reads the file; a local credential
-    lives only in the store, so the proxy asks the store first."""
+def test_a_name_held_by_any_stored_row_is_refused(tmp_path, monkeypatch, sock, taken, source):
+    """A generated name never shares a row with another credential, whoever wrote it."""
     from istota.credentials.broker.bindings import parse_binding
 
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
@@ -294,7 +296,7 @@ def test_a_name_held_by_a_local_credential_is_refused_before_the_file(
     secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
     secrets_store.set_secret(
         config.db_path, "alice", secrets_vault.VAULT_ENTRY_SERVICE, taken, "typed-in-istota",
-        binding=parse_binding("acme.example", {}, [], source="local"),
+        binding=parse_binding("acme.example", {}, [], source=source),
     )
 
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
@@ -306,28 +308,3 @@ def test_a_name_held_by_a_local_credential_is_refused_before_the_file(
     assert secrets_store.get_secret(
         config.db_path, "alice", secrets_vault.VAULT_ENTRY_SERVICE, taken,
     ) == "typed-in-istota"
-
-
-def test_a_vault_sourced_name_is_left_to_the_files_own_check(tmp_path, monkeypatch, sock):
-    """The store-side check is about `local` rows only: a stored `vault` row
-    the file no longer holds is the sweep's to remove, not a reason to refuse."""
-    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
-    path = tmp_path / "vault.kdbx"
-    create_database(str(path), password="test-passphrase")
-    config = Config(
-        db_path=tmp_path / "daemon" / "test.db",
-        workspace_path=tmp_path / "workspace",
-        users={"alice": UserConfig(vault_path=str(path), email_addresses=["alice@example.com"])},
-    )
-    config.db_path.parent.mkdir()
-    db.init_db(config.db_path)
-    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
-    secrets_store.set_secret(
-        config.db_path, "alice", secrets_vault.VAULT_ENTRY_SERVICE, "generated_acme", "stale",
-    )
-    monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
-
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
-        reply = _request(sock, {"type": "vault_create", "slug": "acme"})
-
-    assert reply.get("name") == "generated_acme"

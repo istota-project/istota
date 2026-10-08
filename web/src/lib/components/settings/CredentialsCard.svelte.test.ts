@@ -12,6 +12,9 @@ vi.mock('$lib/api', async (importOriginal) => ({
   deleteCredential: vi.fn(),
   createCredential: vi.fn(),
   updateLocalCredential: vi.fn(),
+  setGeneratedMirror: vi.fn(),
+  remirrorGenerated: vi.fn(),
+  setGeneratedDefaultMirror: vi.fn(),
 }));
 import {
   getCredentialGrants,
@@ -19,6 +22,9 @@ import {
   grantExistingCredentials,
   revokeCredentialGrant,
   deleteCredential,
+  remirrorGenerated,
+  setGeneratedDefaultMirror,
+  setGeneratedMirror,
 } from '$lib/api';
 afterEach(() => {
   cleanup();
@@ -484,4 +490,89 @@ it('labels local and vault credentials with two-factor', async () => {
   );
   render(CredentialsCard);
   await waitFor(() => expect(screen.getAllByText('2FA')).toHaveLength(2));
+});
+
+function made(over: Partial<CredentialSummary> = {}): CredentialSummary {
+  return portal({
+    name: 'generated_acme',
+    source: 'generated',
+    hosts: ['acme.example'],
+    otp: true,
+    generated: { mirror: true, state: 'mirrored', divergence: [] },
+    ...over,
+  });
+}
+
+describe('generated credentials', () => {
+  it('names a KeePass copy that lost its two-factor seed', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(
+      settings({
+        vault_enabled: true,
+        credentials: [
+          made(),
+          made({
+            name: 'generated_other',
+            generated: { mirror: true, state: 'diverged', divergence: ['missing_otp'] },
+          }),
+        ],
+      }),
+    );
+    render(CredentialsCard);
+    await screen.findAllByText('acme.example');
+    expect(within(row('generated_acme')).getByText('Generated')).toBeTruthy();
+    expect(within(row('generated_acme')).queryByText(/KeePass copy/)).toBeNull();
+    expect(within(row('generated_other')).getByText('KeePass copy missing 2FA')).toBeTruthy();
+  });
+
+  it('turns the copy off, rewrites it, and offers no copy without a vault', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(
+      settings({
+        vault_enabled: true,
+        credentials: [made({ generated: { mirror: true, state: 'pending', divergence: [] } })],
+      }),
+    );
+    vi.mocked(remirrorGenerated).mockResolvedValue({ ok: true, state: 'mirrored' });
+    vi.mocked(setGeneratedMirror).mockResolvedValue({ ok: true, state: 'off' });
+    render(CredentialsCard);
+    await screen.findByText('acme.example');
+    expect(within(row('generated_acme')).getByText('KeePass copy behind')).toBeTruthy();
+    expect(await menuLabels('generated_acme')).toEqual(
+      expect.arrayContaining(['Stop KeePass copy', 'Write KeePass copy now', 'Retire']),
+    );
+    await fireEvent.click(await screen.findByText('Write KeePass copy now'));
+    await waitFor(() => expect(remirrorGenerated).toHaveBeenCalledWith('generated_acme'));
+    await chooseAction('generated_acme', 'Stop KeePass copy');
+    await waitFor(() => expect(setGeneratedMirror).toHaveBeenCalledWith('generated_acme', false));
+
+    cleanup();
+    vi.mocked(getCredentialGrants).mockResolvedValue(
+      settings({ vault_enabled: false, credentials: [made()] }),
+    );
+    render(CredentialsCard);
+    await screen.findByText('acme.example');
+    expect(await menuLabels('generated_acme')).not.toContain('Stop KeePass copy');
+    expect(screen.queryByText('Copy new generated credentials to KeePass')).toBeNull();
+  });
+
+  it('flips the default for new generated credentials', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(
+      settings({ vault_enabled: true, generated_default_mirror: true, credentials: [made()] }),
+    );
+    vi.mocked(setGeneratedDefaultMirror).mockResolvedValue({ ok: true });
+    render(CredentialsCard);
+    await fireEvent.click(await screen.findByText('Copy new generated credentials to KeePass'));
+    await waitFor(() => expect(setGeneratedDefaultMirror).toHaveBeenCalledWith(false));
+  });
+
+  it('retires after a confirmation that says the copy goes too', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(settings({ credentials: [made()] }));
+    vi.mocked(deleteCredential).mockResolvedValue({ ok: true, deleted: true });
+    render(CredentialsCard);
+    await screen.findByText('acme.example');
+    await chooseAction('generated_acme', 'Retire');
+    const dialog = screen.getByRole('dialog', { name: 'Retire credential' });
+    expect(words(dialog)).toContain('its KeePass copy is removed, and it cannot be recovered');
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Retire' }));
+    await waitFor(() => expect(deleteCredential).toHaveBeenCalledWith('generated_acme'));
+  });
 });

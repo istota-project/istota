@@ -203,7 +203,7 @@ def test_otp_budget_shared_with_value_reads(config, sock_path, otp):
 @pytest.mark.parametrize("case,reason", [
     ("no_seed", "credential_has_no_otp"), ("withheld", "vault_credential_not_present"),
     ("unknown", "vault_credential_not_present"), ("vanished", "vault_credential_not_present"),
-    ("multiple", "credential_otp_ambiguous"),
+    ("multiple", "credential_otp_ambiguous"), ("seed_withheld", "credential_otp_not_granted"),
     ("unbound", "credential_unbound"), ("malformed", "credential_otp_unusable"),
 ])
 def test_otp_refusals(config, sock_path, otp, case, reason, caplog):
@@ -213,6 +213,8 @@ def test_otp_refusals(config, sock_path, otp, case, reason, caplog):
             store.delete_secret(config.db_path, "alice", "vault_entries", "acme_factor")
         elif case == "withheld":
             server.vault_credentials = {}
+        elif case == "seed_withheld":
+            server.vault_credentials = {k: v for k, v in VALUES.items() if k != "acme_factor"}
         elif case == "multiple":
             with db.get_db(config.db_path) as conn:
                 conn.execute("UPDATE credential_bindings SET kind='totp' WHERE name='acme_totp'")

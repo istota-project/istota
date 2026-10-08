@@ -853,8 +853,8 @@ def test_multi_user_vault_needs_isolation_or_opt_in(
 
 
 def test_vault_new_refuses_a_name_a_local_credential_holds(env, monkeypatch, capsys):
-    """`create_entry` checks the file; a local credential is only in the store,
-    so `vault-new` asks the store before it writes the file."""
+    """A generated name never shares a row with a stored credential, and the
+    refusal comes before the file is touched."""
     import sys
 
     from tests.support.kdbx import create_database
@@ -885,3 +885,39 @@ def test_vault_new_refuses_a_name_a_local_credential_holds(env, monkeypatch, cap
     err = capsys.readouterr().err
     assert "already exists" in err and "generated_example_username" in err
     assert path.read_bytes() == before
+
+
+def test_retire_needs_yes_and_removes_only_a_generated_credential(env, monkeypatch, capsys):
+    import sys
+
+    from istota import db
+    from istota.cli import main
+    from istota.credentials import generated
+    from istota.credentials.broker.bindings import parse_binding
+    from istota.credentials.vault import VAULT_ENTRY_SERVICE
+
+    cfg, db_path, _ = _with_vault(env)
+    with db.get_db(db_path) as conn:
+        generated.create(conn, "alice", name="generated_example", username="alice",
+                         password="fixture-password", url="", mirror=False)
+    secrets_store.set_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "github", "typed",
+                             binding=parse_binding("github.com", {}, [], source="local"))
+
+    def run(*extra):
+        monkeypatch.setattr(sys, "argv", ["istota", "-c", str(cfg), "secret", "retire",
+                                          "--user", "alice", *extra])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        return exc.value.code
+
+    assert run("--name", "generated_example") == 1
+    assert "--yes" in capsys.readouterr().err
+    assert secrets_store.get_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "generated_example")
+    assert run("--name", "github", "--yes") == 1
+    assert secrets_store.get_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "github") == "typed"
+
+    monkeypatch.setattr(sys, "argv", ["istota", "-c", str(cfg), "secret", "retire", "--user", "alice",
+                                      "--name", "generated_example", "--yes"])
+    main()
+    assert "Retired credential: generated_example" in capsys.readouterr().out
+    assert secrets_store.get_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "generated_example") is None

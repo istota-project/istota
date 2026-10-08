@@ -4805,8 +4805,17 @@ export interface CredentialGrant {
   policy_revision?: number;
 }
 /** `local` was added in Istota, `vault` came from the KeePassXC sync, `config`
- *  from the deployment. Only a `local` credential is edited on the page. */
-export type CredentialSource = 'local' | 'vault' | 'config';
+ *  from the deployment, `generated` was created by a task's `istota-credential
+ *  new`. Only a `local` credential is edited on the page. */
+export type CredentialSource = 'local' | 'vault' | 'config' | 'generated';
+/** A generated credential's KeePass copy. `pending` is a write that has not
+ *  landed yet and is retried each sync; `diverged` is a copy that was written
+ *  and later changed or lost in the file, which a re-mirror fixes. */
+export interface GeneratedMirror {
+  mirror: boolean;
+  state: 'off' | 'pending' | 'mirrored' | 'diverged';
+  divergence: ('missing' | 'missing_otp' | 'changed')[];
+}
 export interface CredentialSummary {
   name: string;
   source: CredentialSource;
@@ -4824,6 +4833,8 @@ export interface CredentialSummary {
   otp_set?: boolean;
   /** Whether any field in this credential is a two-factor seed. */
   otp?: boolean;
+  /** Generated credentials only. */
+  generated?: GeneratedMirror;
 }
 export interface CredentialGrantsSettings {
   credentials: CredentialSummary[];
@@ -4835,6 +4846,10 @@ export interface CredentialGrantsSettings {
   can_add: boolean;
   add_blocked_reason: string;
   broker_enabled: boolean;
+  /** Whether the user has a KeePass file a generated credential can be copied to. */
+  vault_enabled?: boolean;
+  /** Whether a new generated credential starts with its KeePass copy on. */
+  generated_default_mirror?: boolean;
 }
 export interface CredentialAccess {
   scope_mode: 'all' | 'rooms';
@@ -4952,6 +4967,30 @@ export function deleteCredential(name: string): Promise<{ ok: boolean; deleted: 
 }
 export function grantExistingCredentials(): Promise<{ ok: boolean; count: number }> {
   return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });
+}
+export function setGeneratedMirror(
+  name: string,
+  mirror: boolean,
+): Promise<{ ok: boolean; state: GeneratedMirror['state'] }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/mirror`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mirror }),
+  });
+}
+export function remirrorGenerated(
+  name: string,
+): Promise<{ ok: boolean; state: GeneratedMirror['state'] }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/remirror`, {
+    method: 'POST',
+  });
+}
+export function setGeneratedDefaultMirror(mirror: boolean): Promise<{ ok: boolean }> {
+  return apiFetch('/settings/credentials/generated/default', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mirror }),
+  });
 }
 
 export interface WalletBilling {

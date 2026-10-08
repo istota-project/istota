@@ -1,4 +1,4 @@
-"""Set-once enrollment through the real vault and task proxy."""
+"""Set-once enrollment of a generated credential through the task proxy (ISSUE-686)."""
 
 import io
 import json
@@ -12,7 +12,6 @@ from istota.credentials import store, vault
 from istota.lib import totp
 from istota.sandbox import credential_shim
 from istota.sandbox.skill_proxy import SkillProxy
-from istota.storage import VaultLocation
 from tests.support.kdbx import create_database
 from tests import test_skill_proxy_vault_create as _vault_create
 from tests.test_skill_proxy_vault_create import _request
@@ -40,48 +39,43 @@ def configured(tmp_path, monkeypatch):
     return config, path
 
 
-def test_set_writes_a_password_manager_otp_and_imports_it(configured):
+def test_set_stores_the_seed_and_mirrors_it(configured, sock):
     config, path = configured
-    write = vault.set_entry_otp(
-        VaultLocation(path=path, dir_fd=None), "test-passphrase", name="generated_acme",
-        uri=SEED, expected_digest=vault.read_vault_bytes(path)[1],
-        lock_root=path.parent, db_path=config.db_path, user_id="alice",
-    )
-    assert write.name == "generated_acme"
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+        assert _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED}) == {
+            "name": "generated_acme", "otp": True}
+    stored = store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme_totp")
+    assert totp.parse_otpauth(stored) == totp.parse_user_input(SEED)
     entry = PyKeePass(str(path), password="test-passphrase").find_entries(title="acme", first=True)
     assert totp.parse_otpauth(entry.otp) == totp.parse_user_input(SEED)
-    assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme_totp") == entry.otp
 
 
-@pytest.mark.parametrize("existing", ["otp", "TOTP Seed", "TimeOtp-Secret-Hex", "HmacOtp-Secret", "TOTP Settings"])
-def test_any_existing_otp_source_is_set_once(configured, sock, existing):
+def test_a_second_enrollment_is_refused_and_writes_nothing(configured, sock):
     config, path = configured
-    kp = PyKeePass(str(path), password="test-passphrase")
-    entry = kp.find_entries(title="acme", first=True)
-    if existing == "otp":
-        entry.otp = "malformed"
-    else:
-        entry.set_custom_property(existing, "")
-    kp.save()
-    before = path.read_bytes()
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
-        reply = _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED})
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=2):
+        _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED})
+        before = path.read_bytes()
+        reply = _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": "JBSWY3DP" * 2})
     assert reply["reason"] == "otp_already_set"
     assert path.read_bytes() == before
+    stored = store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme_totp")
+    assert totp.parse_otpauth(stored) == totp.parse_user_input(SEED)
 
 
-def test_flat_generated_prefix_does_not_authorize_a_write(configured, sock):
+@pytest.mark.parametrize("source", ["vault", "local"])
+def test_a_credential_istota_did_not_generate_is_refused(configured, sock, source):
+    """The table's source decides, never the name: a KeePass entry the user
+    made, even one titled `generated_x`, is theirs to enroll."""
+    from istota.credentials.broker.bindings import parse_binding
     config, path = configured
-    kp = PyKeePass(str(path), password="test-passphrase")
-    entry = kp.find_entries(title="acme", first=True)
-    kp.move_entry(entry, kp.root_group)
-    entry.title = "generated_acme"
-    kp.save()
+    store.upsert_secret(config.db_path, "alice", "vault_entries", "generated_mine", "value",
+                        binding=parse_binding("acme.example", {}, [], source=source))
     before = path.read_bytes()
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
-        reply = _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED})
+        reply = _request(sock, {"type": "vault_otp_set", "name": "generated_mine", "otp": SEED})
     assert reply["reason"] == "otp_set_not_generated"
     assert path.read_bytes() == before
+    assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_mine_totp") is None
 
 
 def test_public_write_notice_and_shared_budget(configured, sock, caplog):
@@ -115,7 +109,7 @@ def test_zero_budget_and_invalid_input_leave_the_file(configured, sock):
 
 def test_changed_file_retries_once(configured, sock, monkeypatch):
     config, path = configured
-    original = vault.set_entry_otp
+    original = vault.mirror_entry
     calls = []
 
     def changed_once(*args, **kwargs):
@@ -124,10 +118,12 @@ def test_changed_file_retries_once(configured, sock, monkeypatch):
             raise vault.VaultChanged("changed")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(vault, "set_entry_otp", changed_once)
+    monkeypatch.setattr(vault, "mirror_entry", changed_once)
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
         assert _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED})["otp"] is True
     assert len(calls) == 2
+    entry = PyKeePass(str(path), password="test-passphrase").find_entries(title="acme", first=True)
+    assert totp.parse_otpauth(entry.otp) == totp.parse_user_input(SEED)
 
 
 def test_shim_reads_only_stdin(monkeypatch, capsys):
