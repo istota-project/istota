@@ -1466,6 +1466,9 @@ class WhatsAppConfig:
     enabled: bool = False
     provider: str = "baileys"
     business_phone_number: str = ""
+    # Seconds a member's captionless photo or GIF in a group waits for the
+    # sender's next words before it is answered alone; 0 answers it at once.
+    group_bare_file_hold_seconds: int = 30
     cloud: WhatsAppCloudConfig = field(default_factory=WhatsAppCloudConfig)
     baileys: WhatsAppBaileysConfig = field(default_factory=WhatsAppBaileysConfig)
 

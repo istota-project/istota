@@ -445,6 +445,7 @@ enabled = {{ istota_whatsapp_enabled | lower }}
 provider = "{{ istota_whatsapp_provider | istota_toml_escape }}"
 {% endif %}
 business_phone_number = "{{ istota_whatsapp_business_phone_number | istota_toml_escape }}"
+group_bare_file_hold_seconds = {{ istota_whatsapp_group_bare_file_hold_seconds | int }}
 
 [whatsapp.cloud]
 waba_id = "{{ istota_whatsapp_waba_id | istota_toml_escape }}"

@@ -829,6 +829,10 @@ enabled = false
 # Cloud API — sanctioned, metered, and configured in [whatsapp.cloud] below.
 provider = "baileys"
 business_phone_number = ""      # exact E.164, e.g. "+15551234567"
+# In a group, a member's photo or GIF with no caption waits this long for the
+# same member's next message, which is then read as its caption so the two get
+# one answer. 0 answers the file at once.
+group_bare_file_hold_seconds = 30
 
 # The Meta Cloud API adapter. Read only under provider = "whatsapp_cloud", and
 # every value here is refused at load only under that provider — a Baileys

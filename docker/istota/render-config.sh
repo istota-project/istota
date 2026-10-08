@@ -521,6 +521,7 @@ TOML
 [whatsapp]
 enabled = ${ISTOTA_WHATSAPP_ENABLED:-false}
 business_phone_number = "${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER}"
+group_bare_file_hold_seconds = ${ISTOTA_WHATSAPP_GROUP_BARE_FILE_HOLD_SECONDS:-30}
 TOML
 
     # `provider` is rendered only when the operator names one, and an empty
