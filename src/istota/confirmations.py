@@ -173,6 +173,8 @@ def describe(conn, task: db.Task) -> str:
     """
     if task.whatsapp_confirmation_request_id:
         row = held_request(conn, task)
+        if row is not None and row["kind"] == "recovery_fill":
+            return "a recovery code awaiting approval"
         if row is not None and row["kind"] == "purchase":
             return "a purchase awaiting approval"
         if row is not None and row["kind"] == "room_post":
@@ -216,6 +218,9 @@ def describe_title(conn, task: db.Task) -> str:
     row = held_request(conn, task)
     if row is None:
         return describe(conn, task)
+    if row["kind"] == "recovery_fill":
+        from istota.notifications.resolvers.confirmation import RECOVERY_FILL_TITLE
+        return RECOVERY_FILL_TITLE
     if row["kind"] == "purchase":
         from istota.notifications.resolvers.confirmation import PURCHASE_TITLE
         return PURCHASE_TITLE
@@ -382,7 +387,8 @@ def approve(
             request_id = current.whatsapp_confirmation_request_id
             approve_request(conn, task=current, request_id=request_id,
                             preview_digest=preview_digest
-                            or text_hash(current.confirmation_prompt or ""), config=config)
+                            or text_hash(current.confirmation_prompt or ""), config=config,
+                            actor=f"{by}:{task.user_id}")
             if current.guest_participant_id is not None:
                 # Only the proposal the scheduler made of the guest's answer;
                 # a room post the task asked for itself re-runs as any does.

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Recovery-code sign-in can fill one saved code after your approval, without displaying it in chat. Used codes stay marked in Settings, and a notice asks you to regenerate a nearly exhausted set; enrollment can confirm one freshly captured code without a separate approval.
+
 - Browser enrollment can capture two-factor seeds, recovery codes and recovery phrases directly from the page without showing them in chat. Masked page reads and secret discovery let tasks choose a capture selector without reading the value, including codes in text downloads. Recovery sets record used codes, and credential exports preserve those markers.
 
 - Istota now saves the recovery codes a site shows after two-factor enrollment on an account it created (#688). `browse interact --save-recovery` reads them from the page and stores them without the task seeing them, and no task can read them back; you can view them in Settings → Credentials after an emailed confirmation. Exports and age backups include them as protected fields.

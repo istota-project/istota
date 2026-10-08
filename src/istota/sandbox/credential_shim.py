@@ -427,9 +427,9 @@ def _cmd_otp_set(args: list[str]) -> int:
     return 0
 
 
-def capture_secret(name: str, kind: str, text: str, *, source="page", credential_fd=None) -> dict:
+def capture_secret(name: str, kind: str, text: str, *, source="page", host=None, credential_fd=None) -> dict:
     reply = _request({"type": "vault_secret_capture", "name": name, "kind": kind,
-                      "text": text, "source": source},
+                      "text": text, "source": source, "host": host},
                      timeout=CREATE_TIMEOUT_SECONDS, credential_fd=credential_fd)
     shape = reply.get("shape")
     if (reply.get("name") != name or reply.get("kind") != kind or not isinstance(shape, dict)
@@ -438,6 +438,19 @@ def capture_secret(name: str, kind: str, text: str, *, source="page", credential
             or type(reply.get("replaced")) is not bool):
         raise ProxyError("the credential proxy answered unparseably")
     return {"name": name, "kind": kind, "shape": shape, "replaced": reply["replaced"]}
+
+
+def recovery_fill(name: str, host: str, *, credential_fd=None) -> dict:
+    if credential_fd is None:
+        raise ProxyError("the private credential channel is unavailable")
+    reply = _request({"type": "vault_recovery_fill", "name": name, "host": host}, credential_fd=credential_fd)
+    if reply.get("held") is True:
+        return {"held": True}
+    if (not isinstance(reply.get("code"), str) or not reply["code"]
+            or not isinstance(reply.get("bound_hosts"), list) or host not in reply["bound_hosts"]
+            or type(reply.get("remaining")) is not int):
+        raise ProxyError("the credential proxy answered unparseably")
+    return reply
 
 
 def store_recovery(name: str, text: str, *, credential_fd: str | None = None, fmt="codes") -> tuple[int, bool]:

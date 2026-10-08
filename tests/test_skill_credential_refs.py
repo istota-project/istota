@@ -41,6 +41,7 @@ from istota.skills._credref import (
     PAIR,
     OTP_PAIR,
     RECOVERY_PAIR,
+    RECOVERY_FILL,
     OtpPair,
     STAMP,
     CredentialPair,
@@ -583,7 +584,7 @@ class TestTheCoverageWalk:
     def test_every_stamp_declares_a_form_the_resolver_knows(self):
         for skill, parser in _skill_parsers():
             for dotted, dest, form in stamped(parser):
-                assert form in (NAME, PAIR, OTP_PAIR, ENTRY, CARD, RECOVERY_PAIR), f"{skill} {dotted} {dest}: {form!r}"
+                assert form in (NAME, PAIR, OTP_PAIR, ENTRY, CARD, RECOVERY_PAIR, RECOVERY_FILL), f"{skill} {dotted} {dest}: {form!r}"
 
     def test_the_walk_finds_the_argument_it_is_meant_to_guard(self):
         """The walk's own control: it sees the one stamp in the tree today."""
@@ -595,6 +596,7 @@ class TestTheCoverageWalk:
         assert ("browse", "interact", "fill_credential", PAIR) in found
         assert ("browse", "interact", "fill_otp", OTP_PAIR) in found
         assert ("browse", "interact", "save_recovery", RECOVERY_PAIR) in found
+        assert ("browse", "interact", "fill_recovery", RECOVERY_FILL) in found
         assert ("browse", "interact", "purchase", CARD) in found
 
     def test_no_argument_carries_both_stamps(self):

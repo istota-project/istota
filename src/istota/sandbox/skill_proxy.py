@@ -54,6 +54,10 @@ _DAEMON_ONLY_MESSAGES = {
     "capture_auto_ambiguous": "Choose one secret candidate before capturing it.",
     "capture_download_not_text": "Recovery downloads must be UTF-8 text files without NUL bytes.",
     "capture_source_invalid": "The secret capture source is invalid.",
+    "recovery_fill_not_interactive": "Recovery codes can only be used during an interactive conversation.",
+    "recovery_fill_format": "Only individually stored recovery codes can be filled.",
+    "recovery_none_left": "No unused recovery codes remain; regenerate them on the site.",
+    "credential_origin_mismatch": "This site is not bound to the credential.",
     "recovery_format": "Choose codes, phrase or block as the recovery format.",
     "credential_is_otp_seed": "Credential is an OTP seed; use browse --fill-otp",
     "credential_is_recovery": ("Credential holds recovery codes, which only the user can read, "
@@ -408,6 +412,9 @@ class SkillProxy:
         # design (later tasks start narrow), but the task that made one may
         # fill it, which is the documented create-then-sign-up flow.
         self._created_names: set[str] = set()
+        self._captured_codes_this_attempt: dict[str, str] = {}
+        self._enrollment_filled = False
+        self._recovery_fill_lock = threading.Lock()
         self._vault_fetch_lock = threading.Lock()
         # The processes whose descendants this proxy serves (ISSUE-550): the
         # brain's child, reported through `on_pid`, and each skill subprocess
@@ -636,9 +643,9 @@ class SkillProxy:
                 self._send_response(conn, reply)
                 return
 
-            if req_type == "vault_otp":
+            if req_type in ("vault_otp", "vault_recovery_fill"):
                 self._send_response(conn, {
-                    "error": "OTP reads require the private credential channel",
+                    "error": "Code fills require the private credential channel",
                     "reason": "invalid_credential_request",
                 })
                 return
@@ -827,13 +834,15 @@ class SkillProxy:
                         return
                     req_type = request.get("type") if isinstance(request, dict) else None
                     if req_type not in ("vault_credential", "vault_entry", "vault_otp", "wallet_card",
-                                        "vault_recovery_target", "vault_recovery_set", "vault_secret_capture"):
+                                        "vault_recovery_target", "vault_recovery_set", "vault_secret_capture", "vault_recovery_fill"):
                         self._send_response(conn, {
                             "error": "Private channel accepts credential reads only",
                             "reason": "invalid_credential_request",
                         })
                         return
-                    if req_type == "vault_recovery_target":
+                    if req_type == "vault_recovery_fill":
+                        self._serve_vault_recovery_fill(conn, request)
+                    elif req_type == "vault_recovery_target":
                         self._serve_vault_recovery_target(conn, request)
                     elif req_type == "vault_secret_capture":
                         self._store_captured_secret(conn, request)
@@ -1152,11 +1161,49 @@ class SkillProxy:
             return
         self._send_response(conn, {"name": name, "bound_hosts": hosts})
 
+    def _serve_vault_recovery_fill(self, conn, request):
+        from istota import db
+        from istota.credentials import generated, names, recovery_fill
+        from istota.relay.requests import RequestError
+
+        name, host = request.get("name"), request.get("host")
+        try:
+            if self.config is None or not self.user_id:
+                raise recovery_fill.RecoveryFillError("vault_not_configured")
+            if names.vault_isolation_refusal(self.config, self.user_id):
+                raise recovery_fill.RecoveryFillError("vault_isolation_required")
+            if not isinstance(name, str) or not name:
+                raise recovery_fill.RecoveryFillError("recovery_set_not_generated")
+            reach = self._recovery_reach_refusal(name)
+            if reach:
+                raise recovery_fill.RecoveryFillError(reach[0])
+            with self._recovery_fill_lock, db.get_db(self.config.db_path) as database:
+                enrollment = (not self._enrollment_filled and
+                              self._captured_codes_this_attempt.get(name) == host and isinstance(host, str))
+                code = recovery_fill.claim(database, user_id=self.user_id, task_id=self.task_id,
+                                           name=name, host=host, enrollment=enrollment)
+                if code is None:
+                    recovery_fill.request(database, user_id=self.user_id, task_id=self.task_id, name=name, host=host)
+                    reply = {"held": True}
+                else:
+                    if enrollment:
+                        self._enrollment_filled = True
+                    reply = {"code": code, "bound_hosts": [host],
+                             "remaining": generated.recovery_state(database, self.user_id, name)["remaining"]}
+            self._send_response(conn, reply)
+        except (recovery_fill.RecoveryFillError, RequestError) as exc:
+            reason = str(exc)
+            self._send_response(conn, {"reason": reason, "error": _DAEMON_ONLY_MESSAGES.get(reason, reason)})
+
     def _serve_vault_recovery_set(self, conn: socket.socket, request: dict) -> None:
         self._store_captured_secret(conn, {**request, "kind": request.get("format", "block"),
                                            "source": "stdin"}, legacy="recovery")
 
     def _store_captured_secret(self, conn: socket.socket, request: dict, *, legacy=None) -> None:
+        with self._recovery_fill_lock:
+            self._store_captured_secret_locked(conn, request, legacy=legacy)
+
+    def _store_captured_secret_locked(self, conn: socket.socket, request: dict, *, legacy=None) -> None:
         from istota import db
         from istota.credentials import audit, generated, names
         from istota.lib import secret_shapes, totp
@@ -1218,6 +1265,15 @@ class SkillProxy:
         except (generated.GeneratedCredentialError, secret_shapes.ShapeError) as exc:
             refuse(exc.reason)
             return
+        if kind != "otp":
+            self._captured_codes_this_attempt.pop(name, None)
+        if kind == "codes" and source in ("page", "download"):
+            from istota.credentials.broker.bindings import get_binding
+            host = request.get("host")
+            with db.get_db(config.db_path) as database:
+                hosts = (get_binding(database, user_id, name) or {}).get("hosts", [])
+            if isinstance(host, str) and host in hosts:
+                self._captured_codes_this_attempt[name] = host
         if kind == "otp":
             self.vault_credentials[seed_name] = value
             if name in self._created_names:

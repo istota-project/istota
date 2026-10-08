@@ -766,6 +766,7 @@ def test_secret_capture_frame_and_sources(monkeypatch, suffix, source, attr):
     monkeypatch.setattr(browse_api, "_credential_values", set())
     result, text = browse_api._read_secret_action(page, {"selector": "iframe>>>#seed" + suffix, "kind": "otp", "bound_hosts": ["acme.example"]})
     assert result["ok"] and text
+    assert result["host"] == "acme.example"
     assert handle.evaluate.call_args.args[1] == {"origin": "https://acme.example", "source": source, "attr": attr}
     assert "JBSWY3DPEHPK3PXP" in browse_api._credential_values
     handle.owner_frame.return_value.url = "https://unbound.example"

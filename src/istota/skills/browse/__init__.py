@@ -25,6 +25,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from istota.browser.owner import browser_headers, with_browser_owner
 from istota.browser.admission import BrowserQueueTimeout, browser_request
@@ -37,10 +38,10 @@ from istota.sandbox.host_paths import (
     user_workspace_root,
     write_resolved,
 )
-from istota.sandbox.credential_shim import ProxyError as CredentialProxyError, capture_secret
+from istota.sandbox.credential_shim import ProxyError as CredentialProxyError, capture_secret, recovery_fill
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._credref import (
-    CARD, OTP_PAIR, PAIR, RECOVERY_PAIR, CardSecret, CredentialPair, OtpPair, RecoveryTarget, credential_ref,
+    CARD, OTP_PAIR, PAIR, RECOVERY_PAIR, RECOVERY_FILL, CardSecret, CredentialPair, OtpPair, RecoveryTarget, credential_ref,
 )
 from istota.skills._hostpath import WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
@@ -968,6 +969,13 @@ def _fill_otp_action(pair):
     return action
 
 
+def _fill_recovery_action(target):
+    if not isinstance(target, RecoveryTarget):
+        raise ValueError("--fill-recovery was not resolved")
+    return {"type": "recovery_fill", "selector": target.label, "credential": True,
+            "credential_name": target.name, "bound_hosts": list(target.bound_hosts)}
+
+
 def _save_recovery_action(target, kind="codes", *, download=False):
     if not isinstance(target, RecoveryTarget):
         raise ValueError("--save-recovery was not resolved; the credential lookup did not run for this call")
@@ -1095,6 +1103,7 @@ ACTION_EMITTERS = {
     "fill": _fill_action,
     "fill_credential": _fill_credential_action,
     "fill_otp": _fill_otp_action,
+    "fill_recovery": _fill_recovery_action,
     "save_recovery": _save_recovery_action,
     "capture_codes": _save_recovery_action,
     "capture_codes_download": lambda target: _save_recovery_action(target, download=True),
@@ -1529,6 +1538,7 @@ def _save_recovered(decoded, actions, *, store=True):
             try:
                 entry = capture_secret(entry["name"], action.get("kind", "codes"), texts[slot],
                                        source="download" if action.get("type") == "read_secret_download" else "page",
+                                       host=result.get("host"),
                                        credential_fd=os.environ.get("ISTOTA_CRED_FD"))
             except CredentialProxyError as exc:
                 entry.update(ok=False, error=str(exc))
@@ -1554,6 +1564,33 @@ def cmd_interact(args):
         if refusal:
             return refusal
 
+    recovery_secrets = []
+    if any(action["type"] == "recovery_fill" for action in actions):
+        response = browser_request("get", f"{url}/sessions/{args.session_id}",
+                                   timeout=REQUEST_TIMEOUT, headers=browser_headers())
+        session = _decode(response)
+        parsed = urlsplit(session.get("url", ""))
+        host = parsed.netloc.lower()
+        if host.endswith(":443"):
+            host = host[:-4]
+        if (session.get("session_id") != args.session_id or parsed.scheme != "https"
+                or not host or parsed.username is not None):
+            return {"status": "error", "error": "Recovery fill requires a live HTTPS session."}
+        for action in actions:
+            if action["type"] != "recovery_fill":
+                continue
+            try:
+                reply = recovery_fill(action["credential_name"], host,
+                                      credential_fd=os.environ.get("ISTOTA_CRED_FD"))
+            except CredentialProxyError as exc:
+                return {"status": "error", "error": str(exc)}
+            if reply.get("held"):
+                return {"status": "held", "held": True}
+            recovery_secrets.append(reply["code"])
+            selector = action["selector"]
+            action.clear()
+            action.update(type="fill", selector=selector, value=reply["code"],
+                          credential=True, bound_hosts=reply["bound_hosts"])
     # A point is read off the delivered picture, so the container is told what
     # that picture measured and converts from it. The size is recomputed from
     # the record rather than remembered, which is the same arithmetic
@@ -1580,6 +1617,7 @@ def cmd_interact(args):
         for pair in (getattr(args, dest, None) or [])
         if isinstance(pair, (CredentialPair, OtpPair))
     ]
+    secrets.extend(recovery_secrets)
     purchase = getattr(args, "purchase", None)
     if isinstance(purchase, CardSecret):
         secrets.extend(value.reveal() for value in purchase.fields.values())
@@ -1902,6 +1940,8 @@ def build_parser():
         metavar="SELECTOR=NAME",
         help="Fill a current two-factor code from a shared credential without displaying it",
     )
+    credential_ref(p_int, "--fill-recovery", form=RECOVERY_FILL, action=OrderedAppend,
+                   metavar="SELECTOR=NAME", help="Fill one recovery code with approval for this use")
     for flag in ("--capture-otp", "--capture-codes", "--capture-phrase", "--capture-codes-download", "--save-recovery"):
         credential_ref(p_int, flag, form=RECOVERY_PAIR, action=OrderedAppend,
                        metavar="SELECTOR=NAME", help=argparse.SUPPRESS if flag == "--save-recovery" else

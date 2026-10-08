@@ -73,6 +73,7 @@ def test_download_deleted_and_redacted(monkeypatch, tmp_path, filename, data, er
         assert result["error"] == error and not text
     else:
         assert result["ok"] and text == data.decode()
+        assert result["host"] == "acme.example"
         assert {"abcd-1234", "efgh-5678"} <= browse_api._credential_values
 
 

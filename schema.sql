@@ -1983,7 +1983,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -2312,3 +2312,19 @@ CREATE TABLE IF NOT EXISTS recovery_code_state (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, name)
 );
+
+-- One explicit approval spends one recovery code.
+CREATE TABLE IF NOT EXISTS recovery_fill_authorizations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    task_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    host TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','authorized','used','expired','declined','cancelled')),
+    request_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    authorized_at TEXT,
+    expires_at TEXT,
+    used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_fill_task ON recovery_fill_authorizations(task_id, name);

@@ -4088,7 +4088,7 @@ class TestSecretCapture:
         from istota.credentials import store
         server, config = recovery_proxy
         response = {"status": "ok", "user_scope": "alice", "session_id": "s1",
-                    "actions": [{"action": "read_secret", "ok": True, "recovery": 0}],
+                    "actions": [{"action": "read_secret", "ok": True, "recovery": 0, "host": "acme.example"}],
                     "recovery": [text]}
         with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=self.HEALTH)), patch(
             "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=response)):
@@ -4099,6 +4099,7 @@ class TestSecretCapture:
         assert result["actions"][0]["kind"] == kind
         assert result["actions"][0]["shape"]["count"] == 1
         assert text.strip() not in output + caplog.text
+        assert server._captured_codes_this_attempt == ({"generated_acme": "acme.example"} if kind == "codes" else {})
         member = "_totp" if kind == "otp" else "_recovery"
         assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme" + member)
         with db.get_db(config.db_path) as conn:

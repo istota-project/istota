@@ -2862,7 +2862,7 @@ def _read_secret_action(page, action):
             if len(bare) >= 16:
                 _credential_values.update((grouped, bare, text[match.start():match.end()]))
     return {"action": action.get("type", "read_secret"), "selector": selector, "ok": True, "path": "cdp",
-            "path_reason": "credential origin checked"}, text
+            "path_reason": "credential origin checked", "host": origin[len("https://"):]}, text
 
 
 def _selector_action(session, page, action, others=(), owned=()):
