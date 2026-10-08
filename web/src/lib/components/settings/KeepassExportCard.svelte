@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import { exportKeepass, type StepUpProof } from '$lib/api';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
-  import { Button, Modal } from '$lib/components/ui';
+  import { Button, Field, Modal } from '$lib/components/ui';
   import SettingsCard from './SettingsCard.svelte';
   import StepUpDialog from './StepUpDialog.svelte';
 
@@ -86,18 +86,27 @@
   title="Export credentials"
   description="Download a fresh KeePass file containing your credentials, OTP seeds and recovery codes."
 >
-  <label class="checkbox-label"
-    ><input type="checkbox" bind:checked={useKeyfile} disabled={busy || confirming || !!password} /> Also
-    require a key file</label
+  <Field
+    label="Also require a key file"
+    checkbox
+    hint="Adds a separate file that must be present to unlock the export, along with its password."
   >
+    <input type="checkbox" bind:checked={useKeyfile} disabled={busy || confirming || !!password} />
+  </Field>
   {#if useKeyfile}<p class="hint">
       Save the key file when it downloads. You will need both it and the export password to open the
       KeePass file.
     </p>{/if}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  <Button variant="primary" loading={busy} disabled={confirming || !!password} onclick={start}
-    >Export credentials</Button
-  >
+  <div class="row">
+    <Button
+      variant="primary"
+      size="sm"
+      loading={busy}
+      disabled={confirming || !!password}
+      onclick={start}>Export credentials</Button
+    >
+  </div>
 </SettingsCard>
 
 {#if confirming}

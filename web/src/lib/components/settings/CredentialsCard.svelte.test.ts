@@ -289,9 +289,14 @@ describe('access', () => {
     await screen.findByText('portal.example');
     await chooseAction('portal', 'Edit access');
     expect(screen.getByRole('dialog', { name: 'Access for portal' })).toBeTruthy();
-    expect((screen.getByLabelText('Allow scheduled tasks') as HTMLInputElement).checked).toBe(
-      false,
-    );
+    expect(
+      (
+        screen.getByLabelText('Allow scheduled tasks', {
+          exact: false,
+          selector: 'input',
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
     await fireEvent.click(screen.getByRole('button', { name: 'Save access' }));
     await waitFor(() =>
       expect(saveCredentialGrant).toHaveBeenCalledWith('portal', {
@@ -309,12 +314,12 @@ describe('access', () => {
     await screen.findByText('portal.example');
     await chooseAction('portal', 'Edit access');
     const dialog = screen.getByRole('dialog', { name: 'Access for portal' });
-    await fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Allow scheduled tasks' }));
+    await fireEvent.click(within(dialog).getByRole('checkbox', { name: /^Allow scheduled tasks/ }));
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(saveCredentialGrant).not.toHaveBeenCalled();
     await chooseAction('portal', 'Edit access');
-    expect(screen.getByRole('checkbox', { name: 'Allow scheduled tasks' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /^Allow scheduled tasks/ })).not.toBeChecked();
   });
 
   it('asks before revoking access', async () => {

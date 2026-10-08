@@ -284,6 +284,9 @@
       </ul>
     {/if}
   {/if}
+  <div class="row">
+    <Button variant="ghost" size="sm" onclick={showDeleted}>Recently deleted credentials</Button>
+  </div>
 </SettingsCard>
 
 {#if form}
@@ -342,7 +345,6 @@
     <Button variant="primary" onclick={() => (reveal = null)}>Done</Button>
   {/snippet}
 </Modal>
-<Button variant="ghost" onclick={showDeleted}>Recently deleted credentials</Button>
 <Modal
   open={deletedOpen}
   title="Recently deleted credentials"

@@ -53,13 +53,22 @@ async function preview() {
   });
   const file = new File(['fixture'], 'fixture.kdbx');
   const keyfile = new File(['key'], 'fixture.key');
-  await fireEvent.change(screen.getByLabelText('KeePass file'), { target: { files: [file] } });
-  await fireEvent.change(screen.getByLabelText('Source key file (optional)'), {
-    target: { files: [keyfile] },
-  });
-  await fireEvent.input(screen.getByLabelText('File passphrase'), {
-    target: { value: 'fixture-passphrase' },
-  });
+  await fireEvent.change(
+    screen.getByLabelText('KeePass file', { exact: false, selector: 'input' }),
+    { target: { files: [file] } },
+  );
+  await fireEvent.change(
+    screen.getByLabelText('Source key file (optional)', { exact: false, selector: 'input' }),
+    {
+      target: { files: [keyfile] },
+    },
+  );
+  await fireEvent.input(
+    screen.getByLabelText('File passphrase', { exact: false, selector: 'input' }),
+    {
+      target: { value: 'fixture-passphrase' },
+    },
+  );
   await fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
   await screen.findByText('Changed');
   return { file, keyfile };
@@ -90,14 +99,28 @@ it('renders groups with only new entries selected and sends the source key file'
     ),
   );
   await screen.findByText('Imported 1 credential.');
-  expect((screen.getByLabelText('File passphrase') as HTMLInputElement).value).toBe('');
+  expect(
+    (
+      screen.getByLabelText('File passphrase', {
+        exact: false,
+        selector: 'input',
+      }) as HTMLInputElement
+    ).value,
+  ).toBe('');
   expect(screen.queryByLabelText('new')).toBeNull();
 });
 it('clears the file, key file and passphrase on cancel', async () => {
   render(KeepassImportCard);
   await preview();
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-  expect((screen.getByLabelText('File passphrase') as HTMLInputElement).value).toBe('');
+  expect(
+    (
+      screen.getByLabelText('File passphrase', {
+        exact: false,
+        selector: 'input',
+      }) as HTMLInputElement
+    ).value,
+  ).toBe('');
   expect((screen.getByRole('button', { name: 'Preview' }) as HTMLButtonElement).disabled).toBe(
     true,
   );
@@ -113,12 +136,18 @@ it('aborts a pending preview on navigation and ignores its late result', async (
       }),
   );
   const component = render(KeepassImportCard);
-  await fireEvent.change(screen.getByLabelText('KeePass file'), {
-    target: { files: [new File(['x'], 'test.kdbx')] },
-  });
-  await fireEvent.input(screen.getByLabelText('File passphrase'), {
-    target: { value: 'fixture-passphrase' },
-  });
+  await fireEvent.change(
+    screen.getByLabelText('KeePass file', { exact: false, selector: 'input' }),
+    {
+      target: { files: [new File(['x'], 'test.kdbx')] },
+    },
+  );
+  await fireEvent.input(
+    screen.getByLabelText('File passphrase', { exact: false, selector: 'input' }),
+    {
+      target: { value: 'fixture-passphrase' },
+    },
+  );
   await fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
   const signal = vi.mocked(previewKeepassImport).mock.calls[0][3]!;
   component.unmount();

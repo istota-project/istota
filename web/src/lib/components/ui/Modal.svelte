@@ -236,6 +236,7 @@
   /* min-height: 0 or the body refuses to shrink below its content and the
      panel overflows its own max-height instead of scrolling here. */
   :global(.ui-modal-body) {
+    font-size: var(--text-sm);
     min-height: 0;
     overflow: auto;
     /* A scroll container clips at its padding box, and rings are drawn outside

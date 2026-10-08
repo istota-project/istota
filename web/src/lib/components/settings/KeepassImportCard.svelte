@@ -87,7 +87,10 @@
   description="Choose entries from a KeePass file to copy into your credentials."
 >
   {#key pickerVersion}
-    <Field label="KeePass file">
+    <Field
+      label="KeePass file"
+      hint="Choose a .kdbx file. Preview lets you select entries before anything is imported."
+    >
       <input
         type="file"
         accept=".kdbx"
@@ -97,7 +100,10 @@
         }}
       />
     </Field>
-    <Field label="Source key file (optional)">
+    <Field
+      label="Source key file (optional)"
+      hint="Only needed if the source KeePass file requires a key file as well as its passphrase."
+    >
       <input
         type="file"
         disabled={busy || !!preview}
@@ -107,7 +113,10 @@
       />
     </Field>
   {/key}
-  <Field label="File passphrase">
+  <Field
+    label="File passphrase"
+    hint="The passphrase that unlocks this KeePass file. It is not saved with your credentials."
+  >
     <Input
       type="password"
       bind:value={passphrase}
@@ -129,7 +138,7 @@
           <legend>{group.label}</legend>
           {#each items as item}
             <div>
-              <label>
+              <Field label={item.name} checkbox>
                 <input
                   type="checkbox"
                   value={item.name}
@@ -137,8 +146,7 @@
                   aria-label={item.name}
                   disabled={busy || !['new', 'changed'].includes(item.status)}
                 />
-                {item.name}
-              </label>
+              </Field>
               {#if item.changed_fields.length}<p class="caption">
                   Changed since last import: {item.changed_fields.join(', ')}
                 </p>{/if}
@@ -149,15 +157,46 @@
         </fieldset>
       {/if}
     {/each}
-    <Button disabled={busy || !selected.length} onclick={() => run(true)}>Import selected</Button>
-  {:else}
-    <Button disabled={busy || !file} onclick={() => run(false)}>Preview</Button>
   {/if}
-  <Button
-    variant="ghost"
-    onclick={() => {
-      clear();
-      error = result = '';
-    }}>Cancel</Button
-  >
+  <div class="row">
+    {#if preview}
+      <Button
+        variant="primary"
+        size="sm"
+        disabled={busy || !selected.length}
+        onclick={() => run(true)}>Import selected</Button
+      >
+    {:else}
+      <Button variant="primary" size="sm" disabled={busy || !file} onclick={() => run(false)}
+        >Preview</Button
+      >
+    {/if}
+    <Button
+      variant="ghost"
+      size="sm"
+      onclick={() => {
+        clear();
+        error = result = '';
+      }}>Cancel</Button
+    >
+  </div>
 </SettingsCard>
+
+<style>
+  fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    display: grid;
+    gap: var(--space-2);
+    overflow-wrap: anywhere;
+  }
+
+  legend {
+    padding: 0;
+    margin-bottom: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+</style>

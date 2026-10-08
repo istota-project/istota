@@ -29,7 +29,11 @@
 </script>
 
 <div class="access-fields">
-  <Field label="Room scope" labelled={false}>
+  <Field
+    label="Room scope"
+    labelled={false}
+    hint="Choose which rooms may use this credential. Scheduled tasks are controlled separately below."
+  >
     <Select
       bind:value={scope}
       ariaLabel="Room scope"
@@ -56,7 +60,11 @@
       {#if !rooms.length}<p class="caption">No rooms available, so no task can use it.</p>{/if}
     </fieldset>
   {/if}
-  <Field label="Allow scheduled tasks" checkbox>
+  <Field
+    label="Allow scheduled tasks"
+    checkbox
+    hint="Allow background jobs to use this credential without a message from you in a room."
+  >
     <input type="checkbox" bind:checked={scheduled} />
   </Field>
   <Field label="Allow HTTP (override HTTPS requirement)" checkbox>

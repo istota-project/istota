@@ -30,9 +30,12 @@ afterEach(() => {
 it('sets and clears a recipient only after step-up confirmation', async () => {
   render(CredentialBackupCard);
   await screen.findByText(/Add an age public key/);
-  await fireEvent.input(screen.getByLabelText('Age public key'), {
-    target: { value: 'age1fixture' },
-  });
+  await fireEvent.input(
+    screen.getByLabelText('Age public key', { exact: false, selector: 'input' }),
+    {
+      target: { value: 'age1fixture' },
+    },
+  );
   await fireEvent.click(screen.getByRole('button', { name: 'Save backup key' }));
   await screen.findByText(/a•••@example.com/);
   expect(setCredentialBackup).not.toHaveBeenCalled();
@@ -47,7 +50,14 @@ it('sets and clears a recipient only after step-up confirmation', async () => {
     }),
   );
   await screen.findByText(/abcdefgh/);
-  expect((screen.getByLabelText('Age public key') as HTMLInputElement).value).toBe('');
+  expect(
+    (
+      screen.getByLabelText('Age public key', {
+        exact: false,
+        selector: 'input',
+      }) as HTMLInputElement
+    ).value,
+  ).toBe('');
   vi.mocked(setCredentialBackup).mockResolvedValue({ recipient_suffix: null });
   await fireEvent.click(screen.getByRole('button', { name: 'Turn off backups' }));
   await screen.findByText(/a•••@example.com/);
