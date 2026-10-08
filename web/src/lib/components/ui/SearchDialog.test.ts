@@ -1,6 +1,6 @@
 import { base } from '$app/paths';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { SearchGroup, SearchHit, SearchResponse } from '$lib/api';
 import moneyResponses from '$lib/test/fixtures/money-search.json';
@@ -54,6 +54,15 @@ async function open(groups: SearchGroup[]) {
   await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'hello' } });
   await waitFor(() => expect(screen.getAllByRole('option').length).toBeGreaterThan(0));
 }
+async function chooseSource(label: string) {
+  const trigger = screen.getByRole('button', { name: 'Search sources' });
+  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(trigger);
+  const option = await screen.findByRole('option', { name: label });
+  await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(option);
+}
 it('renders ordered groups, partial matches, source errors and escaped highlights', async () => {
   await open([
     group('chats', [hit('1')]),
@@ -89,7 +98,7 @@ it('filters, appends a second page, and explicitly requests transactions', async
     query: 'hello',
     groups: [group('chats', [hit('2')], { has_more: true })],
   });
-  await fireEvent.click(screen.getByRole('button', { name: 'chats' }));
+  await chooseSource('chats');
   await waitFor(() =>
     expect(api.search).toHaveBeenLastCalledWith(
       'hello',
@@ -104,7 +113,7 @@ it('filters, appends a second page, and explicitly requests transactions', async
     'hello',
     expect.objectContaining({ sources: ['chats'], offset: 20 }),
   );
-  await fireEvent.click(screen.getByRole('button', { name: 'All' }));
+  await chooseSource('All');
   await screen.findByRole('button', { name: 'Search Transactions' });
   await fireEvent.click(screen.getByRole('button', { name: 'Search Transactions' }));
   await waitFor(() =>
@@ -162,4 +171,19 @@ it('opens an on-demand transaction from the authenticated ledger response', asyn
       `${base}/money/transactions/?account=Expenses%3AFood%3ACoffee&year=2024`,
     ),
   );
+});
+
+it('places the source dropdown beside the query and the close icon in the header', async () => {
+  render(SearchDialog, { open: true, controller });
+  const input = screen.getByRole('combobox', { name: 'Search everything' });
+  const source = screen.getByRole('button', { name: 'Search sources' });
+  expect(input.parentElement).toContainElement(source);
+  expect(source).toHaveTextContent('All');
+  const title = screen.getByRole('heading', { name: 'Search' });
+  const close = within(title.parentElement!).getByRole('button', { name: 'Close' });
+  expect(close.querySelector('svg')).not.toBeNull();
+  expect(input.parentElement).not.toContainElement(close);
+  await waitFor(() => expect(input).toHaveFocus());
+  await fireEvent.click(close);
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 });

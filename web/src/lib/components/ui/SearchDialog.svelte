@@ -7,7 +7,7 @@
   import { viewer } from '$lib/fileViewer/store.svelte';
   import Modal from './Modal.svelte';
   import Input from './Input.svelte';
-  import Chip from './Chip.svelte';
+  import Select from './Select.svelte';
   import Button from './Button.svelte';
   import SearchResultRow from './SearchResultRow.svelte';
 
@@ -73,8 +73,16 @@
   }
 </script>
 
-<Modal bind:open title="Search" variant="palette">
-  <div class="search-input-row">
+<Modal
+  bind:open
+  title="Search"
+  variant="palette"
+  onOpenAutoFocus={(event) => {
+    event.preventDefault();
+    document.getElementById(inputId)?.focus();
+  }}
+>
+  <div class="search-input-row control-row">
     <Input
       id={inputId}
       role="combobox"
@@ -90,26 +98,17 @@
       oninput={(event) => controller.setQuery(event.currentTarget.value)}
       onkeydown={handleKeydown}
     />
-    <Button
-      variant="ghost"
-      onclick={() => {
-        open = false;
-      }}>Close</Button
-    >
-  </div>
-  <div class="search-chips" aria-label="Search sources">
-    <Chip
-      checked={!$controller.selectedSource}
-      aria-pressed={!$controller.selectedSource}
-      onclick={() => void selectSource(null)}>All</Chip
-    >
-    {#each $controller.sources as source}
-      <Chip
-        checked={$controller.selectedSource === source.source}
-        aria-pressed={$controller.selectedSource === source.source}
-        onclick={() => void selectSource(source.source)}>{source.label}</Chip
-      >
-    {/each}
+    <Select
+      value={$controller.selectedSource ?? ''}
+      options={[
+        { value: '', label: 'All' },
+        ...$controller.sources.map((source) => ({ value: source.source, label: source.label })),
+      ]}
+      ariaLabel="Search sources"
+      widthChars={12}
+      align="end"
+      onValueChange={(value) => void selectSource(value || null)}
+    />
   </div>
   <div class="search-results">
     {#if !$controller.query.trim()}
@@ -172,15 +171,11 @@
 
 <style>
   .search-input-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: var(--space-2);
-  }
-  .search-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-    margin-block: var(--space-3);
+    margin-bottom: var(--space-3);
   }
   .search-results {
     max-height: 60dvh;

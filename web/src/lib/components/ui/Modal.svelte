@@ -27,6 +27,7 @@
     title: string;
     description?: string;
     onOpenChange?: (open: boolean) => void;
+    onOpenAutoFocus?: (event: Event) => void;
     children: Snippet;
     footer?: Snippet;
     width?: string;
@@ -44,6 +45,7 @@
     title,
     description,
     onOpenChange,
+    onOpenAutoFocus,
     children,
     footer,
     width,
@@ -75,7 +77,7 @@
 
   function handleKeydown(event: KeyboardEvent) {
     if (variant === 'palette') {
-      // Chips can hold focus too; page shortcuts must stay behind the palette.
+      // Controls can hold focus too; page shortcuts must stay behind the palette.
       if (event.key !== 'Escape') event.stopPropagation();
       return;
     }
@@ -159,6 +161,7 @@
           : 'ui-modal-content'}
       style="--modal-width: {width ?? (viewer ? '720px' : '420px')}; --modal-height: {height}"
       onkeydown={handleKeydown}
+      {onOpenAutoFocus}
       escapeKeydownBehavior={dismissible ? 'close' : 'ignore'}
       interactOutsideBehavior={dismissible ? 'close' : 'ignore'}
     >
@@ -191,7 +194,22 @@
         </div>
         {#if navigation}<div class="ui-viewer-next">{@render next()}</div>{/if}
       {:else}
-        <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+        {#if variant === 'palette'}
+          <header class="ui-palette-header">
+            <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+            {#if dismissible}
+              <IconButton
+                label="Close"
+                onclick={() => {
+                  open = false;
+                  onOpenChange?.(false);
+                }}><X size={20} /></IconButton
+              >
+            {/if}
+          </header>
+        {:else}
+          <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+        {/if}
         {#if description}<Dialog.Description class="ui-modal-description"
             >{description}</Dialog.Description
           >{/if}
@@ -268,6 +286,16 @@
     padding-top: var(--space-3);
     border-top: 1px solid var(--border-subtle);
     flex-shrink: 0;
+  }
+  .ui-palette-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .ui-palette-header :global(.ui-modal-title) {
+    margin: 0;
   }
   :global(.ui-palette-overlay) {
     z-index: var(--z-palette);

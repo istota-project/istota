@@ -40,7 +40,7 @@ Feeds fetch a result outside the loaded list through `GET /feeds/entries/{id}` a
 
 ## Dialog and verification
 
-`SearchDialog` uses `Modal variant="palette"`, above the viewer and lightbox via `--z-palette` and `--z-palette-panel`. It fills the screen at phone widths. Modal stops page shortcuts even when focus moves from the query to a chip. The store debounces for 200ms, aborts stale requests, checks response query identity and saves only opened queries in browser-local recents.
+`SearchDialog` uses `Modal variant="palette"`, above the viewer and lightbox via `--z-palette` and `--z-palette-panel`. It fills the screen at phone widths. Modal stops page shortcuts even when focus moves from the query to the source dropdown. The store debounces for 200ms, aborts stale requests, checks response query identity and saves only opened queries in browser-local recents.
 
 Provider tests use real stores and the authenticated route for scope. `tests/test_money_search.py` checks shared-query/route parity and the on-demand response against `web/src/lib/test/fixtures/money-search.json`; the dialog consumes that same fixture. To regenerate after an intentional contract change, run that test with `UPDATE_MONEY_SEARCH_FIXTURE=1`, then format the fixture and run the dialog test. Only `elapsed_ms` is normalized. Timeout cleanup uses a real child process and asserts that it was reaped.
 

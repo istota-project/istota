@@ -353,9 +353,8 @@
   color: #c0271d;
 }
 
-@media (max-width: 640px) {
-  /* Both blocks re-state the safe-area longhands: the padding shorthand below
-     resets them, and these rules win on source order. */
+/* Restate the safe-area longhands after each padding shorthand. */
+@media (max-width: 800px) {
   .app-nav {
     padding: 0.5rem 0.75rem;
     padding-top: max(0.5rem, var(--safe-top));
@@ -366,6 +365,9 @@
   .app-nav .nav-links {
     display: none;
   }
+}
+
+@media (max-width: 640px) {
   .app-content {
     padding: 1rem 0.75rem;
     padding-bottom: max(1rem, var(--safe-bottom));
