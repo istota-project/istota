@@ -8,6 +8,7 @@
    see settingsControls.test.ts for why. */
 
 .settings {
+  font-size: var(--text-sm);
   width: 100%;
   max-width: 980px;
   margin: 0 auto;
@@ -73,6 +74,15 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+/* Cards own their vertical spacing; browser paragraph margins double it. */
+.settings .card :where(p, ul, ol) {
+  margin-block: 0;
+}
+
+.settings .card > .btn {
+  align-self: flex-start;
 }
 
 .settings .card h2 {
@@ -152,6 +162,7 @@
 
 .settings .row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
 }

@@ -23,7 +23,8 @@
 </script>
 
 <SettingsCard title="Activity" description="Recent credential actions.">
-  {#snippet actions()}<Button variant="ghost" disabled={busy} onclick={load}>Refresh</Button
+  {#snippet actions()}<Button variant="ghost" size="sm" disabled={busy} onclick={load}
+      >Refresh</Button
     >{/snippet}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
   {#if busy && !rows.length}<p>Loading activity…</p>
@@ -39,3 +40,16 @@
     </ul>
   {/if}
 </SettingsCard>
+
+<style>
+  ul {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    gap: var(--space-2);
+  }
+
+  li {
+    overflow-wrap: anywhere;
+  }
+</style>

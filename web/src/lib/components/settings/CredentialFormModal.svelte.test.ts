@@ -63,7 +63,7 @@ describe('adding', () => {
 
     expect(within(access).getByText('Room scope')).toBeTruthy();
     expect(
-      within(access).getByRole('checkbox', { name: 'Allow scheduled tasks' }),
+      within(access).getByRole('checkbox', { name: /^Allow scheduled tasks/ }),
     ).not.toBeChecked();
   });
 

@@ -178,3 +178,26 @@ describe('SecretField composes rather than forks', () => {
     }
   });
 });
+
+describe('settings card defaults', () => {
+  const css = read(join(SRC, 'lib/styles/settings.css'));
+  const rule = (selector: string) => {
+    const start = css.indexOf(`${selector} {`);
+    return start < 0 ? '' : css.slice(start, css.indexOf('}', start));
+  };
+
+  it('gives unstyled paragraphs, list items and labels the settings text size', () => {
+    expect(rule('.settings')).toContain('font-size: var(--text-sm)');
+  });
+
+  it('keeps direct card buttons compact and action rows able to wrap', () => {
+    expect(rule('.settings .card > .btn')).toContain('align-self: flex-start');
+    expect(rule('.settings .row')).toContain('flex-wrap: wrap');
+  });
+});
+
+it('uses the settings text size in portalled dialog bodies', () => {
+  const modal = read(join(SRC, 'lib/components/ui/Modal.svelte'));
+  const body = rules(modal).find((rule) => rule.selector === ':global(.ui-modal-body)');
+  expect(body?.body).toContain('font-size: var(--text-sm)');
+});

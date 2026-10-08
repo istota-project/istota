@@ -135,6 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Credentials settings now use the same compact buttons, checkbox labels and text sizes as other settings pages. Import, export, backup and access fields have help popovers, and settings cards and dialogs use consistent text sizes.
+
 - A deploy that lands while a task is running no longer defers the room migration and logs a failure in the journal (#690). The offline window now tells `istota init --relocate-rooms` that the scheduler is stopped (`--scheduler-stopped`), so the task rows it left in flight are recovered the way its next start would recover them, and the mount sweep runs. The database step also skips its task check once no legacy room is left.
 
 - A photo or GIF with no caption in a WhatsApp group, followed a few seconds later by a comment from the same person, no longer gets two answers. The file's answer now waits 30 seconds; a text from the same member in that time becomes the file's caption, and the pair gets one reply. A bare file with nothing after it is answered when the wait ends. The wait is `group_bare_file_hold_seconds` under `[whatsapp]` (Ansible `istota_whatsapp_group_bare_file_hold_seconds`), and `0` turns it off.

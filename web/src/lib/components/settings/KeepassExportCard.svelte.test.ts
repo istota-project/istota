@@ -70,7 +70,9 @@ async function confirm() {
 }
 it('downloads the key first and requires saved acknowledgement before clearing the password', async () => {
   render(KeepassExportCard);
-  await fireEvent.click(screen.getByLabelText('Also require a key file'));
+  await fireEvent.click(
+    screen.getByLabelText('Also require a key file', { exact: false, selector: 'input' }),
+  );
   await fireEvent.click(screen.getByRole('button', { name: 'Export credentials' }));
   await screen.findByText(/a•••@example.com/);
   expect(downloads[0]).toMatch(/istota-export-.*\.keyx$/);
@@ -94,11 +96,15 @@ it('downloads the key first and requires saved acknowledgement before clearing t
 });
 it('clears the key file on cancel and ignores a late export after navigation', async () => {
   const component = render(KeepassExportCard);
-  await fireEvent.click(screen.getByLabelText('Also require a key file'));
+  await fireEvent.click(
+    screen.getByLabelText('Also require a key file', { exact: false, selector: 'input' }),
+  );
   await fireEvent.click(screen.getByRole('button', { name: 'Export credentials' }));
   await screen.findByText(/a•••@example.com/);
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-  await fireEvent.click(screen.getByLabelText('Also require a key file'));
+  await fireEvent.click(
+    screen.getByLabelText('Also require a key file', { exact: false, selector: 'input' }),
+  );
   let resolve!: (value: Awaited<ReturnType<typeof exportKeepass>>) => void;
   vi.mocked(exportKeepass).mockImplementation(
     () =>

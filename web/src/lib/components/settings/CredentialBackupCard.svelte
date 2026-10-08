@@ -68,7 +68,10 @@
           : ''}
       </p>
     {/if}
-    <Field label="Age public key">
+    <Field
+      label="Age public key"
+      hint="Paste the public recipient key that begins with age1. Keep the matching private key somewhere safe; you need it to decrypt a backup."
+    >
       <Input
         id="credential-backup-key"
         bind:value={recipient}
@@ -76,16 +79,19 @@
         disabled={confirming || !settings.available}
       />
     </Field>
-    <Button
-      variant="primary"
-      disabled={!settings.available || !recipient.trim() || confirming}
-      onclick={() => start(recipient.trim())}>Save backup key</Button
-    >
-    {#if settings.recipient_suffix}
-      <Button variant="secondary" disabled={confirming} onclick={() => start(null)}
-        >Turn off backups</Button
+    <div class="row">
+      <Button
+        variant="primary"
+        size="sm"
+        disabled={!settings.available || !recipient.trim() || confirming}
+        onclick={() => start(recipient.trim())}>Save backup key</Button
       >
-    {/if}
+      {#if settings.recipient_suffix}
+        <Button variant="secondary" size="sm" disabled={confirming} onclick={() => start(null)}
+          >Turn off backups</Button
+        >
+      {/if}
+    </div>
   {/if}
 </SettingsCard>
 {#if confirming}
