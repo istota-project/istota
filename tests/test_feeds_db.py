@@ -1498,7 +1498,7 @@ class TestSchemaV8Migration:
             "idx_entries_feed_fetched_unstarred",
         ):
             assert "starred = 0" in indexes[name]
-        assert version == "8"
+        assert version == str(feeds_db.SCHEMA_VERSION)
 
     def test_migration_stamps_one_observation_time(self, tmp_path):
         path, _ = self._v7_db_with_history(tmp_path)
@@ -1660,7 +1660,7 @@ class TestSchemaV8Migration:
                 "SELECT guid, status, last_seen_at FROM feed_entries"
             ).fetchone()
             keys = {r["key"] for r in conn.execute("SELECT key FROM schema_meta")}
-        assert version == "8"
+        assert version == str(feeds_db.SCHEMA_VERSION)
         # The row survived every step, keeping its user state.
         assert row["guid"] == "ancient"
         assert row["status"] == "read"

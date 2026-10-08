@@ -5543,9 +5543,10 @@ const handlers: MockHandler[] = [
   // Reader mutations — accept and acknowledge.
   ({ url, method, body }) => {
     const m = url.match(/^\/istota\/api\/feeds\/entries\/(\d+)$/);
-    if (!m || method !== 'PUT') return undefined;
+    if (!m || (method !== 'PUT' && method !== 'GET')) return undefined;
     const id = Number(m[1]);
     const entry = mockReaderEntries.find((e) => e.id === id);
+    if (method === 'GET') return entry ?? { __status: 404, error: 'Entry not found' };
     if (entry && body && typeof body === 'object') {
       if (typeof body.starred === 'boolean') {
         entry.starred = body.starred;

@@ -968,6 +968,10 @@ export async function getFeeds(params?: Record<string, string>): Promise<FeedsRe
   return apiFetch<FeedsResponse>(`/feeds${qs}`);
 }
 
+export async function getFeedEntry(id: number): Promise<FeedEntry> {
+  return apiFetch<FeedEntry>(`/feeds/entries/${id}`);
+}
+
 export async function updateEntryStatus(id: number, status: string): Promise<void> {
   await apiFetch(`/feeds/entries/${id}`, {
     method: 'PUT',

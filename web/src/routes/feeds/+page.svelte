@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
+    getFeedEntry,
     markAsRead,
     updateEntriesStatus,
     updateEntryStarred,
@@ -23,6 +24,7 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { notifyError } from '$lib/stores/notices';
+  import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
 
   const getScrollRoot = getShellScrollRoot();
 
@@ -116,6 +118,52 @@
   // Reader overlay — index into entries of the open post (null = closed).
   let readerIndex = $state<number | null>(null);
 
+  // An older search hit stays outside the paged list and its filters.
+  let detachedEntry: FeedEntry | null = $state(null);
+  let entryReady = $state(false);
+  let entryGeneration = 0;
+  let destroyed = false;
+  type EntrySelection = { id: number | null };
+  async function applyEntry({ id }: EntrySelection) {
+    const generation = ++entryGeneration;
+    detachedEntry = null;
+    readerIndex = null;
+    if (id === null) return;
+    const index = entries.findIndex((entry) => entry.id === id);
+    if (index >= 0) {
+      readerIndex = index;
+      return;
+    }
+    try {
+      const entry = await getFeedEntry(id);
+      if (generation === entryGeneration) detachedEntry = entry;
+    } catch {
+      if (generation === entryGeneration) notifyError("Couldn't open that feed entry.");
+    }
+  }
+  const entrySel = createUrlSelection<EntrySelection>({
+    key: 'feedEntry',
+    params: ['entry'],
+    // Entry is an event target, not a filter to reconcile while it loads.
+    compareKeys: [],
+    encode: ({ id }) => (id === null ? {} : { entry: String(id) }),
+    decode: ({ entry }) => {
+      if (!entry) return { id: null };
+      const id = Number(entry);
+      return Number.isSafeInteger(id) && id > 0 ? { id } : null;
+    },
+    read: () =>
+      entryReady
+        ? {
+            id:
+              detachedEntry?.id ??
+              (readerIndex === null ? null : (entries[readerIndex]?.id ?? null)),
+          }
+        : null,
+    apply: applyEntry,
+  });
+  entrySel.start();
+
   // Batch read queue
   const pendingReadIds = new Set<number>();
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -137,7 +185,7 @@
   }
 
   function handleViewed(id: number) {
-    const entry = entries.find((e) => e.id === id);
+    const entry = detachedEntry?.id === id ? detachedEntry : entries.find((e) => e.id === id);
     if (entry && entry.status !== 'read') {
       entry.status = 'read';
     }
@@ -265,7 +313,13 @@
     prevScope = { feed, cat };
   });
 
-  onMount(() => loadEntries($selectedFeedId));
+  onMount(async () => {
+    await loadEntries($selectedFeedId);
+    if (destroyed) return;
+    entryReady = true;
+    const target = entrySel.current();
+    if (target) void applyEntry(target);
+  });
 
   $effect(() => {
     if (!sentinel) return;
@@ -281,7 +335,9 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     loadGeneration++;
+    entryGeneration++;
     if (flushTimer) clearTimeout(flushTimer);
     if (flushMaxTimer) clearTimeout(flushMaxTimer);
     flushPending();
@@ -293,6 +349,7 @@
   });
 
   function handleStarToggle(id: number, starred: boolean) {
+    if (detachedEntry?.id === id) detachedEntry = { ...detachedEntry, starred };
     const idx = entries.findIndex((e) => e.id === id);
     if (idx >= 0) {
       entries[idx] = { ...entries[idx], starred };
@@ -366,7 +423,7 @@
       class:hide-images={!$showImages}
       class:hide-text={!$showText}
     >
-      {#each entries as entry, i (entry.id)}
+      {#each entries as entry (entry.id)}
         <div
           class="card-slot"
           data-entry-id={entry.id}
@@ -382,7 +439,7 @@
             }}
             onViewed={handleViewed}
             onStarToggle={handleStarToggle}
-            onOpen={() => (readerIndex = i)}
+            onOpen={() => entrySel.push({ id: entry.id })}
           />
         </div>
       {/each}
@@ -401,10 +458,10 @@
 {/if}
 
 <FeedReader
-  {entries}
-  index={readerIndex}
-  {hasMore}
-  onClose={() => (readerIndex = null)}
+  entries={detachedEntry ? [detachedEntry] : entries}
+  index={detachedEntry ? 0 : readerIndex}
+  hasMore={detachedEntry ? false : hasMore}
+  onClose={() => entrySel.push({ id: null })}
   onView={handleViewed}
   onStarToggle={handleStarToggle}
   onNeedMore={loadMore}

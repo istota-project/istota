@@ -7,12 +7,15 @@ import { selectedFeedId } from '$lib/stores/feeds';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { clearNotices, currentNotice } from '$lib/stores/notices';
 import Page from './+page.svelte';
+import { __history } from '../../../vitest-stubs/app-navigation';
+import { page } from '../../../vitest-stubs/app-state.svelte';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __history.reset('/istota/feeds/');
   selectedFeedId.set(0);
   clearNotices();
   vi.stubGlobal(
@@ -140,4 +143,56 @@ it('keeps search typing and chip shortcuts away from the feeds listener', async 
   await fireEvent.keyDown(chip, { key: 'A', shiftKey: true });
   expect(api.updateEntriesStatus).not.toHaveBeenCalled();
   expect(api.updateEntryStarred).not.toHaveBeenCalled();
+});
+
+it('opens a loaded entry from its URL without fetching it again', async () => {
+  __history.reset('/istota/feeds/?entry=1');
+  render(Page);
+  const reader = await screen.findByRole('dialog', { name: 'Example feed' });
+  expect(within(reader).getByRole('heading', { name: 'A gallery' })).toBeTruthy();
+  await fireEvent.keyDown(reader, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(window.location.search).toBe('');
+});
+
+it('fetches an older search hit on same-route navigation without adding it to the list', async () => {
+  render(Page);
+  await screen.findByText('Gallery body');
+  const first = (await api.getFeeds.mock.results[0].value).entries[0];
+  api.getFeedEntry = vi
+    .fn()
+    .mockResolvedValue({ ...first, id: 90, title: 'Older article', content: '<p>Old body</p>' });
+  window.history.replaceState(null, '', '/istota/feeds/?entry=90');
+  page.url = new URL(window.location.href);
+  page.state = {};
+  const reader = await screen.findByRole('dialog', { name: 'Example feed' });
+  expect(within(reader).getByRole('heading', { name: 'Older article' })).toBeTruthy();
+  expect(api.getFeedEntry).toHaveBeenCalledWith(90);
+  expect(document.querySelectorAll('.card-slot')).toHaveLength(1);
+  expect(within(reader).getAllByRole('button', { name: 'Next post' })[0]).toBeDisabled();
+});
+
+it('ignores an older entry response after the URL target changes', async () => {
+  render(Page);
+  await screen.findByText('Gallery body');
+  const first = (await api.getFeeds.mock.results[0].value).entries[0];
+  let finish!: (entry: typeof first) => void;
+  api.getFeedEntry = vi.fn().mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  window.history.replaceState(null, '', '/istota/feeds/?entry=90');
+  page.url = new URL(window.location.href);
+  page.state = {};
+  await waitFor(() => expect(api.getFeedEntry).toHaveBeenCalledWith(90));
+  window.history.replaceState(null, '', '/istota/feeds/?entry=1');
+  page.url = new URL(window.location.href);
+  await screen.findByRole('dialog', { name: 'Example feed' });
+  finish({ ...first, id: 90, title: 'Stale article' });
+  await tick();
+  await tick();
+  expect(screen.queryByRole('heading', { name: 'Stale article' })).toBeNull();
+  expect(screen.getByRole('heading', { name: 'A gallery' })).toBeTruthy();
 });
