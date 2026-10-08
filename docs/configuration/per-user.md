@@ -67,13 +67,7 @@ disabled_modules = ["money"]
 # Default delivery surface for results/notifications when nothing else applies
 default_destination = "talk"   # talk | email | sms | ntfy | web | surface:channel | comma list
 
-# A KeePass (KDBX) file this user maintains, which Istota reads and never
-# writes. Set it only to name a file somewhere other than their own
-# `istota/vault/` folder, which is the ordinary route and needs no line here.
-# Relative resolves under their own workspace directory, so they can edit it
-# from a phone; absolute is a host path and must resolve outside every tree a
-# task sandbox can write. Empty (the default) = the folder decides.
-vault_path = "istota/vault/credentials.kdbx"
+
 
 # Purpose-keyed routing table — overrides default_destination per purpose.
 # Purposes: reply, alert, log, briefing, notification
@@ -84,15 +78,7 @@ log = "web:<room-token>"       # verbose execution log streamed to a web chat ro
 
 > ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings/connections` → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
 
-`vault_path` is **not in `user_profiles`**, and that is a security control rather than an omission. Every other per-user scalar above is overlaid from that table, which the settings UI writes; this one decides which file the daemon decrypts with a key it holds, so it may not be settable by anything downstream of a task.
-
-What a *user* sets is not a path at all. Their vault is a `.kdbx` in their own `istota/vault/` folder, and the settings card asks for a filename out of the listing it just produced — set membership rather than a parse, so there is nothing to traverse and nowhere else to point. That choice is stored in a reserved KV namespace no task may write.
-
-The TOML line **outranks the folder**, so a vault an operator set is not selectable from the UI at all; the card says so rather than offering a choice the line would override. `istota user ensure --clear-vault-config --user alice` forgets a filename the user chose and returns them to the folder's own rules.
-
-The absolute form — a host path outside every tree a sandbox can write — is operator-only for the same reason it is checked at all: it is judged against the trees a sandbox binds rather than against one user's own directory, which is the right question for a path an operator wrote and not a line to let a user answer for themselves.
-
-Setting the path from TOML does not mean hand-editing it: both shipped deployment shapes regenerate `config.toml`, so it goes in `istota_users` under Ansible and in `USER_VAULT_PATH` under Docker. See [credentials](credentials.md#credential-vault) for those forms, the file layout, what a task can read out of it, and why the passphrase should be generated.
+Credentials are managed in Settings → Credentials. KeePass files are imported on request, and exports create fresh files. The retired `vault_path` setting is read only for the one-time migration; do not add it for new users. See [import and export](credentials.md#import-and-export).
 
 The SMS number is an identity binding, not a delivery address alone. A message from it can create tasks and answer pending SMS confirmations as this user. Set or clear it with `istota user ensure --name alice --sms-number +15551234567` or `--clear-sms-number`; assignments must be exact E.164 numbers and unique across users. See [SMS](../features/sms.md).
 

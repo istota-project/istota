@@ -5,6 +5,7 @@ Run as: uvicorn istota.webui.app:app --host 127.0.0.1 --port 8766
 Email and Nextcloud authentication with signed, revocable sessions.
 SvelteKit frontend served as static files, Python handles auth and API.
 """
+from istota.credentials import kdbx_import as credential_read
 
 import asyncio
 import codecs
@@ -13088,7 +13089,6 @@ def _service_status(schema: dict, configured_keys: set[str]) -> str:
     return "missing"
 
 
-
 def _build_service_card(
     service: str,
     schema: dict,
@@ -13186,7 +13186,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
     from istota import db
     from istota.credentials import generated
     from istota.credentials import local as local_credentials
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
     from istota.credentials.broker import bindings, grants
     from istota.executor import effective_sandboxing
 
@@ -13222,7 +13222,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
         credentials = []
         for credential_name in sorted(names):
             binding = bindings.get_entry_binding(conn, username, credential_name) or {
-                "hosts": [], "headers": [], "revealable": False, "source": "vault"}
+                "hosts": [], "headers": [], "revealable": False, "source": "local"}
             row = {"name": credential_name, **binding,
                    "grant": grants.get_grant(conn, username, credential_name),
                    "otp": any((bindings.get_binding(conn, username, member) or {}).get("kind") == "totp"
@@ -13345,7 +13345,7 @@ def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
 async def _write_local_credential(request: Request, user_id: str, name: str | None):
     """Create (``name is None``) or update a credential added in Istota."""
     from istota.credentials import local as local_credentials
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -13379,7 +13379,7 @@ async def _write_local_credential(request: Request, user_id: str, name: str | No
 
 async def _import_credentials(request: Request, user_id: str, *, preview_only: bool):
     from dataclasses import asdict
-    from istota.credentials import kdbx_import, store, vault
+    from istota.credentials import kdbx_import, store, names as vault
     from .avatars import AvatarError
 
     if _config is None:
@@ -13392,7 +13392,7 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
     try:
         required = {"passphrase"} if preview_only else {"passphrase", "selected", "digest"}
         data, keyfile, fields = await _secret_multipart(
-            request, limit=vault.VAULT_READ_CAP_BYTES, fields=required)
+            request, limit=credential_read.VAULT_READ_CAP_BYTES, fields=required)
         if preview_only:
             result = await asyncio.to_thread(kdbx_import.preview, _config.db_path, user_id,
                                              data, fields["passphrase"], keyfile=keyfile)
@@ -13401,7 +13401,7 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
                 selected = json.loads(fields["selected"])
             except (ValueError, RecursionError):
                 raise AvatarError(400, "Selected credentials must be a list of names.") from None
-            if (not isinstance(selected, list) or len(selected) > vault.VAULT_MAX_NAMES
+            if (not isinstance(selected, list) or len(selected) > credential_read.VAULT_MAX_NAMES
                     or any(not isinstance(name, str) or not vault.VAULT_NAME_RE.fullmatch(name)
                            for name in selected)):
                 raise AvatarError(400, "Selected credentials must be a list of names.")
@@ -13409,12 +13409,12 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
                 kdbx_import.apply, _config.db_path, user_id, data, fields["passphrase"],
                 keyfile=keyfile, selected=selected, expected_digest=fields["digest"], actor="import")
         return JSONResponse(asdict(result), headers=headers)
-    except vault.VaultLocked:
+    except credential_read.VaultLocked:
         return JSONResponse({"detail": "Wrong passphrase or key file.", "field": "passphrase"},
                              status_code=400, headers=headers)
-    except vault.VaultCorrupt:
+    except credential_read.VaultCorrupt:
         return JSONResponse({"detail": "Not a KeePass file Istota can read."}, status_code=400, headers=headers)
-    except vault.VaultLibraryMissing:
+    except credential_read.VaultLibraryMissing:
         return JSONResponse({"detail": "Install the vault extra to import KeePass files."},
                              status_code=503, headers=headers)
     except store.SecretKeyMissingError:
@@ -13505,7 +13505,7 @@ async def settings_credentials_backup(user: dict = Depends(_require_api_auth),
 async def settings_credentials_backup_update(request: Request, user: dict = Depends(_require_api_auth),
                                               _csrf: None = Depends(_verify_origin)):
     from istota import db
-    from istota.credentials import backup_export, vault
+    from istota.credentials import backup_export
     await _credential_isolation(user["username"])
     body = await _credential_json(request)
     headers = {"Cache-Control": "no-store"}
@@ -13524,14 +13524,14 @@ async def settings_credentials_backup_update(request: Request, user: dict = Depe
         return JSONResponse(await asyncio.to_thread(update), headers=headers)
     except backup_export.BackupRecipientError:
         return JSONResponse({"detail": "backup_recipient_unsupported", "field": "recipient"}, status_code=400, headers=headers)
-    except vault.VaultLibraryMissing:
+    except credential_read.VaultLibraryMissing:
         return JSONResponse({"detail": "Install the vault extra to enable backups."}, status_code=503, headers=headers)
 
 
 @api_router.post("/settings/credentials/export")
 async def settings_credentials_export(request: Request, user: dict = Depends(_require_api_auth),
                                       _csrf: None = Depends(_verify_origin)):
-    from istota.credentials import kdbx_export, store, vault
+    from istota.credentials import kdbx_export, store
     await _credential_isolation(user["username"])
     headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
     body = await _credential_json(request)
@@ -13546,7 +13546,7 @@ async def settings_credentials_export(request: Request, user: dict = Depends(_re
             invalid_keyfile = kdbx_export.keyfile_refusal(keyfile)
         except UnicodeEncodeError:
             invalid_keyfile = True
-        except vault.VaultLibraryMissing:
+        except credential_read.VaultLibraryMissing:
             return JSONResponse({"detail": "Install the vault extra to export KeePass files."}, status_code=503, headers=headers)
         if invalid_keyfile:
             return JSONResponse({"detail": "keyfile_invalid", "field": "keyfile"}, status_code=400, headers=headers)
@@ -13560,7 +13560,7 @@ async def settings_credentials_export(request: Request, user: dict = Depends(_re
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail}
         return JSONResponse(detail, status_code=exc.status_code, headers=headers)
-    except vault.VaultLibraryMissing:
+    except credential_read.VaultLibraryMissing:
         return JSONResponse({"detail": "Install the vault extra to export KeePass files."}, status_code=503, headers=headers)
     except store.SecretKeyMissingError:
         return JSONResponse({"detail": "The credential store is not configured."}, status_code=503, headers=headers)
@@ -13660,7 +13660,7 @@ async def _read_wallet_body(request: Request, operation: str) -> dict:
 def _wallet_settings(user_id: str) -> dict:
     from dataclasses import asdict
     from istota import db
-    from istota.credentials.vault import vault_isolation_refusal
+    from istota.credentials.names import vault_isolation_refusal
     from istota.wallet import cards, policy, purchases
     from istota.rooms.scopes import canonical_token
     from istota.wallet.money import CURRENCY_EXPONENTS
@@ -13702,7 +13702,7 @@ def _mutate_wallet(user_id: str, operation: str, ident: int | None, fields: dict
 
 
 async def _write_wallet(request: Request, user_id: str, operation: str, ident: str | None = None):
-    from istota.credentials.vault import vault_isolation_refusal
+    from istota.credentials.names import vault_isolation_refusal
     from istota.wallet.cards import CardError
     from istota.wallet.purchases import WalletRefusal
 
@@ -13799,7 +13799,7 @@ def _step_up_session(request: Request) -> str:
 
 
 async def _credential_isolation(user_id: str):
-    from istota.credentials import vault
+    from istota.credentials import names as vault
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
     refusal = await asyncio.to_thread(vault.vault_isolation_refusal, _config, user_id)
@@ -13963,7 +13963,7 @@ async def settings_generated_recovery(name: str, request: Request, user: dict = 
                                        _csrf: None = Depends(_verify_origin)):
     from istota import db
     from istota.credentials import audit, generated
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
     username = user["username"]
     await _credential_isolation(username)
     body = await _credential_json(request)
@@ -14013,7 +14013,7 @@ async def settings_credential_delete(
     from istota import db
     from istota.credentials import generated
     from istota.credentials import store as secrets_store
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -14048,515 +14048,11 @@ async def settings_credential_delete(
     return {"ok": True, "deleted": deleted}
 
 
-def _vault_settings_payload(username: str) -> dict:
-    """The credential vault's status and the folder's listing, for the card.
-
-    **The only thing this surface writes is a filename**, and that is what the
-    `files` / `vault_file` pair is for: the card offers the `.kdbx` files in
-    the user's vault folder and the user picks one of them. A filename is not a
-    path — it is validated by being one of the entries this listing returned,
-    which is set membership rather than a parse — so nothing here has a
-    traversal, an absolute form or a resolved-path preview to answer.
-
-    The listing rides on the status payload rather than getting an endpoint of
-    its own: there is one card, it already fetches its status on render, and a
-    second round trip would buy nothing.
-
-    **It does not open the vault.** `vault_status(parse=False)` is why: an
-    Argon2id unlock is tuned to about a second, and none of what §9's heading
-    shows needs one. What the parse would add — the groups found in the file and
-    their key counts — is a diagnostic for whoever is debugging a mapping, which
-    is `istota secret vault-status` on a host shell.
-
-    Values never appear, and neither does the passphrase: `passphrase_present`
-    is a boolean, and `reason` is the `NOTIFICATION_REASONS` sentence rather
-    than an exception's text, so nothing interpolated into an error message can
-    reach a browser through here. **`refusal` is the one exception to that** and
-    is safe for a different reason: it is one of `storage`'s own `VAULT_PATH_*`
-    constants, a fixed word with nothing interpolated into it, chosen from a
-    code-owned table. It is in the payload because it names *which* refusal,
-    which is what an operator reading a browser console needs and what the
-    prose sentence beside it deliberately does not carry.
-
-    `problem` is computed here rather than in the browser, and that is the point
-    of it: the precedence between a live finding and a recorded one is a rule,
-    and a rule stated in TypeScript is a second copy — the first version
-    compared `last_outcome !== 'ok'` in the template, which hardcodes
-    `OUTCOME_OK`'s value in another language with nothing holding the two in
-    step. Empty means working.
-
-    `last_success_at` is the field to render as a sync time. `last_sync_at`
-    moves on a failed cycle too.
-    """
-    from istota import storage
-    from istota.credentials import vault as secrets_vault
-
-    report = secrets_vault.vault_status(_config, username, parse=False)
-    files = storage.list_vault_files(_config, username) if _config else []
-    # The form's own fields, present whatever the status. They have to be: the
-    # user this page most needs to serve is the one with no vault yet, and a
-    # payload that carried the listing only once a vault existed would make the
-    # feature unreachable from the surface that sets it up.
-    form = {
-        # Whether this surface may store a choice at all. False for a user whose
-        # file is named in `config.toml`, because a stored choice that line
-        # outranks is a control that does nothing — precedence, not permission,
-        # which is why the card says so rather than hiding the dropdown.
-        #
-        # **A boolean rather than the three-state `source` it replaces**, and
-        # the third state is what left: a selection stored by the retired web
-        # form was `db`, and that table is gone, so what remains is an
-        # operator's line or nothing.
-        "editable": _vault_is_web_editable(username),
-        # Where the file goes, so the card can name the folder in its
-        # instruction. Not a disclosure: it is this user's own directory.
-        "vault_dir": storage.vault_dir_display(_config, username) if _config else "",
-        # The dropdown's options, and the whole of what a save may name.
-        "files": files,
-        # What resolution settled on, empty when nothing did — the folder is
-        # empty, or it holds several and none is chosen.
-        #
-        # Asked of the resolver rather than read off `report.path`, because the
-        # two answer different questions: the report has a path only for a
-        # vault that is *switched on*, and the dropdown has to show the user
-        # their own selection while they are still setting one up — a file
-        # copied in, no passphrase generated yet.
-        "vault_file": _vault_selected_file(username),
-        # A fact about the user rather than about the file, which is why it is
-        # on this half and why it is asked directly rather than read off the
-        # report: somebody who generated a passphrase a minute ago and has not
-        # yet put a file in the folder has to be told the half they have.
-        # There is no other route that would tell them, because the value is
-        # readable by nothing.
-        "passphrase_present": _vault_passphrase_present(username),
-    }
-    if not report.configured:
-        # The default for every user. The heading renders nothing for this, and
-        # the form renders for it — which is why the two read different keys.
-        return {"configured": False, **form}
-    entries = _vault_entries(username)
-    return {
-        "configured": True,
-        **form,
-        "path": report.path,
-        # What this call found now — a refused path is a fact about the
-        # configuration rather than about a past cycle, so it must not be read
-        # out of the record.
-        "outcome": report.outcome,
-        "reason": report.reason,
-        "refusal": report.refusal,
-        # What the syncing process last settled, which is a different question
-        # and the only one answerable from this process at all.
-        "last_success_at": report.last_success_at,
-        "last_sync_at": report.last_sync_at,
-        "last_outcome": report.recorded_outcome,
-        "last_reason": report.recorded_reason,
-        # §1: the last cycle read the whole file, because it holds no
-        # top-level `istota` group. Read off the durable record rather than
-        # off `report.scoped`, which is this call's own answer and is
-        # meaningless on the `parse=False` arm — the card must never open the
-        # file, so the syncing process is the only thing that can settle this
-        # and the record is how it says so.
-        "unscoped": report.recorded_unscoped,
-        # How many shared credentials istota holds *now*, from the `secrets`
-        # table rather than from the file — no parse, no Argon2id, no
-        # pykeepass in the web process. It is what makes the unscoped line
-        # actionable: "all 412 of them" is a different sentence from "all 3".
-        "entry_count": entries.count,
-        "generated_count": report.generated_count,
-        # File entries the last sync skipped because a credential added in
-        # Istota already holds the name. The card tells the user to rename one.
-        "name_conflicts": report.name_conflicts,
-        # The names themselves, which is the feedback this feature has never
-        # had: after dropping a file in and generating a passphrase, the user
-        # can see which names arrived, and a name they expected and cannot see
-        # is a group they misspelled or an entry the log has a warning about.
-        #
-        # **Showing a user their own labels is deliberately not the rule
-        # `doctor` follows.** `security.vault_contents` reports counts and never
-        # key names, because a `CheckResult` is rendered into the boot log and
-        # into the admin Health pane, where one user's labels are read by every
-        # admin. This is that user's own page, and the read is scoped by
-        # `username`.
-        #
-        # Names, never values: entry grouping decrypts nothing.
-        "entry_names": list(entries.names),
-        # Whether the list above was cut. A card silently showing the first
-        # fifty of four hundred names would answer "did mine arrive" wrongly,
-        # and the count beside it is what makes the cut legible.
-        "entry_names_truncated": entries.truncated,
-        # False here always, and it is not decoration: it is what tells a
-        # renderer that the parse-only fields are empty because nothing
-        # looked, rather than because the file holds nothing. A surface wanting
-        # the name list asks the CLI; this one says it did not ask.
-        "parsed": report.parsed,
-        # The rendered verdict, empty when the vault is working. A live finding
-        # outranks a recorded one: `reason` and `outcome` are what this request
-        # established — a refused path, a folder with no file in it, or a
-        # folder with several and none chosen — which is true *now* and about
-        # the configuration, while `last_outcome` is what some earlier cycle in
-        # another process settled and may predate the operator introducing it.
-        #
-        # `reason` is read ahead of `outcome` and **not gated on it**: the
-        # unchosen folder has a sentence and no outcome at all, because nothing
-        # about it has failed. Gating on the outcome the way this did would
-        # render that case as working.
-        "problem": (
-            (report.reason or report.outcome)
-            or (
-                (report.recorded_reason or report.recorded_outcome)
-                if report.recorded_outcome
-                and report.recorded_outcome != secrets_vault.OUTCOME_OK
-                else ""
-            )
-        ),
-    }
-
-
-def _vault_selected_file(username: str) -> str:
-    """Which file the folder settles on for this user, as a bare name.
-
-    One call into the resolver rather than a second copy of its four rules, so
-    what the dropdown shows selected is what the sync would open. The
-    descriptor it hands back is closed here: this asks a question and opens
-    nothing.
-
-    `""` where nothing settled, and also for a configured *path* — an absolute
-    one has no name in the folder, and a relative one is not a name the
-    dropdown may offer, since selecting it would store a value that line
-    outranks.
-    """
-    if _config is None:
-        return ""
-    from istota import storage
-
-    try:
-        resolution = storage.vault_location_for(_config, username)
-    except Exception:  # pragma: no cover - the resolver's own contract is no raise
-        logger.debug("vault file resolution failed for %r", username)
-        return ""
-    location = resolution.location
-    if location is None:
-        return ""
-    if location.dir_fd is not None:
-        os.close(location.dir_fd)
-    name = location.path.name
-    return name if name in storage.list_vault_files(_config, username) else ""
-
-
-def _vault_passphrase_present(username: str) -> bool:
-    """Whether this user has a stored vault passphrase. Presence, never a value.
-
-    `secret_exists` rather than `get_secret`: the question is whether a row
-    stands, and a read would decrypt a credential to answer it — which also
-    stamps `last_accessed_at` on every settings page load.
-    """
-    if _config is None or not _config.db_path:
-        return False
-    try:
-        from istota.credentials import store as secrets_store
-        from istota.credentials import vault as secrets_vault
-        return secrets_store.secret_exists(
-            _config.db_path, username,
-            secrets_vault.VAULT_PASSPHRASE_SERVICE,
-            secrets_vault.VAULT_PASSPHRASE_KEY,
-        )
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault passphrase presence lookup failed for %r", username)
-        return False
-
-
 #: How many shared-credential names the settings card carries. A cap rather
 #: than the whole list, because the namespace is the user's own to fill and a
 #: card rendering four hundred names is a page nobody can read past. The count
 #: beside it is uncapped, so a cut list still adds up.
 VAULT_ENTRY_NAMES_SHOWN = 50
-
-
-@dataclass(frozen=True)
-class _VaultEntries:
-    """What the card says about the shared namespace: a count and some names."""
-
-    count: int
-    names: tuple[str, ...]
-    truncated: bool
-
-
-def _vault_entries(username: str) -> _VaultEntries:
-    """This user's shared credential names, and how many there are.
-
-    Group stored fields by the parser's entry metadata, as the grants list
-    does. This reads no credential values and does not update last_accessed_at.
-
-    **The count is of the whole namespace and the list is capped**, which is
-    what makes a cut legible: `truncated` says the list is short and `count`
-    says how short. Sorted, so the card's order does not move with the table's.
-
-    Empty on any failure, which is the same direction the sibling helpers
-    degrade in: this is one line on a card whose real content is the status
-    beside it.
-    """
-    if _config is None or not _config.db_path:
-        return _VaultEntries(0, (), False)
-    try:
-        from istota import db
-        from istota.credentials.broker.bindings import credential_groups
-        with db.get_db(_config.db_path) as conn:
-            names = sorted(credential_groups(conn, username))
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault entry listing failed for %r", username)
-        return _VaultEntries(0, (), False)
-    return _VaultEntries(
-        len(names),
-        tuple(names[:VAULT_ENTRY_NAMES_SHOWN]),
-        len(names) > VAULT_ENTRY_NAMES_SHOWN,
-    )
-
-
-def _vault_is_web_editable(username: str) -> bool:
-    """Whether this surface may store this user's choice of file.
-
-    False whenever a `vault_path` in `config.toml` outranks the filename, and
-    that is the substance of the rule — see `_vault_settings_payload` for why it
-    is about precedence rather than about permission.
-
-    It fails **closed**: a question that could not be answered is not one to
-    write over, since the thing it might be is an operator's line. That is why
-    the failure arm returns False rather than letting the exception reach the
-    caller, and why the test is for a value that is *empty* rather than for one
-    that is set.
-
-    **Truthiness, never `.strip()`**, and the difference is a real state rather
-    than a nicety. `resolve_user_vault_path` draws its own line at `not raw`,
-    and refuses a blank-but-present value as a configured path that resolves to
-    nothing (`VAULT_PATH_NOT_A_FILENAME`) — so `vault_path = "  "` returns at
-    rule 1 of `vault_location_for` and the stored filename is never consulted.
-    Stripping here would call that user editable, take their choice, write the
-    KV row, and answer `{"ok": true}` about a control that does nothing, which
-    is the exact state the 409 exists to prevent. `doctor._vault_users` names
-    the same shape as one it expects to meet.
-    """
-    if _config is None:
-        return False
-    try:
-        return not (_config.vault_path_for(username) or "")
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault path lookup failed for %r", username)
-        return False
-
-
-def _select_vault_file(username: str, name: str) -> dict:
-    """Store which file in the vault folder this user's vault is.
-
-    Off the event loop by its caller: the listing reads a directory under the
-    workspace, which is a FUSE mount on the deployment shape this runs on.
-
-    **A filename, validated by membership in a listing taken now.** That is the
-    whole of the path handling, and it is why there is no traversal check, no
-    absolute-path refusal and no containment resolver here: the value is one of
-    the names `list_vault_files` just produced, so it cannot be a path, cannot
-    climb and cannot point anywhere else. A file deleted between the page load
-    and the save is refused rather than stored.
-
-    `""` clears the selection and returns the user to the resolver's rules 3
-    and 4 — the only file if there is one, a question if there are several.
-    """
-    from fastapi import HTTPException
-
-    from istota import storage
-
-    if not _vault_is_web_editable(username):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "this vault's file is set in this deployment's configuration; "
-                "an operator has to change it there"
-            ),
-        )
-    chosen = (name or "").strip()
-    if chosen and chosen not in storage.list_vault_files(_config, username):
-        # Named rather than described: the user picked from a dropdown, so a
-        # name that is not in the folder means the folder moved under them.
-        raise HTTPException(
-            status_code=400,
-            detail="that file is not in your vault folder any more",
-        )
-    storage.store_vault_file(_config, username, chosen)
-    return {"ok": True, "vault_file": chosen}
-
-
-@api_router.put("/settings/vault")
-async def settings_vault_update(
-    payload: dict,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-) -> dict:
-    """Choose which file in this user's vault folder their vault is.
-
-    Body: ``{"vault_file": "personal.kdbx"}`` and nothing else. The name must be
-    one the folder holds, or 400; ``""`` clears the choice. A user whose vault
-    file is set in configuration gets 409, because a stored choice that a
-    configured path outranks is a control that does nothing.
-
-    Unlike its GET sibling this may **not** degrade — a settings read that fails
-    costs a status line, and a settings write that fails quietly leaves the user
-    believing the daemon is about to decrypt a file it has never heard of.
-    """
-    from fastapi import HTTPException
-
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be an object")
-    if _config is None or not _config.db_path:
-        raise HTTPException(status_code=503, detail="config not loaded")
-    name = payload.get("vault_file", "")
-    if not isinstance(name, str):
-        raise HTTPException(status_code=400, detail="vault_file must be a string")
-    return await asyncio.to_thread(_select_vault_file, user["username"], name)
-
-
-@api_router.put("/settings/vault/passphrase")
-async def settings_vault_passphrase(
-    payload: dict,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-) -> dict:
-    """Store this user's vault passphrase. Write-only in the strong sense.
-
-    Body is one of ``{"generate": true}`` or ``{"passphrase": "..."}``.
-
-    **Generate is the path meant to be taken, and the reason is the only
-    boundary in this design that is about an adversary rather than a mistake.**
-    The KDBX file sits in a tree bound read-write into that user's own sandbox,
-    so a prompt-injected task can read its ciphertext and carry it out. Argon2id
-    makes that useless against 256 random bits and does not make it useless
-    against a memorable phrase. `secrets_vault.generate_passphrase` mints it.
-
-    A typed value is accepted at `secrets_vault.passphrase_refusal`'s floor —
-    the same function `istota secret ensure` applies, asked rather than
-    restated, so the rule cannot come to mean two things on two surfaces. That
-    floor is a proxy and says so in its own docstring: it catches the careless
-    case, not the confident one.
-
-    **The generated value is returned exactly once and is readable by nothing
-    afterwards.** The user needs it to open their own KDBX, so there is no shape
-    of this feature where it is never shown; what there is instead is no route
-    that shows it a second time. A typed value is never echoed, nothing here is
-    logged, and no GET payload carries either.
-    """
-    from fastapi import HTTPException
-
-    from istota.credentials import store as secrets_store
-    from istota.credentials import vault as secrets_vault
-
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be an object")
-    if _config is None or not _config.db_path:
-        raise HTTPException(status_code=503, detail="config not loaded")
-
-    refusal = await asyncio.to_thread(
-        secrets_vault.vault_isolation_refusal, _config, user["username"],
-    )
-    if refusal:
-        raise HTTPException(status_code=403, detail=refusal)
-
-    generate = bool(payload.get("generate"))
-    supplied = payload.get("passphrase", "")
-    replace = bool(payload.get("replace"))
-    if generate and not replace and _vault_passphrase_present(user["username"]):
-        # The CLI's `--force` gate, on the same reasoning and not a second one:
-        # minting a second passphrase destroys the only copy this deployment
-        # has of the value the KDBX is already encrypted under, so the vault
-        # fails `VaultLocked` until the user re-keys the file by hand. The CLI
-        # refuses without `--force`; a click that did it silently would be the
-        # one irreversible thing on this page.
-        #
-        # Generate-only, exactly as `--force` is: a *typed* value is one the
-        # user already holds, so re-storing it destroys nothing they cannot
-        # type again.
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "a vault passphrase is already stored, and generating a new one "
-                "will not re-encrypt a file saved under the old one; pass "
-                "replace to overwrite it"
-            ),
-        )
-    if generate and supplied:
-        # Refused rather than resolved one way. Both fields set is a client
-        # asking for two different things, and picking either silently discards
-        # a credential the user may believe they set.
-        raise HTTPException(
-            status_code=400, detail="pass either generate or passphrase, not both"
-        )
-    if generate:
-        value = secrets_vault.generate_passphrase()
-    else:
-        if not isinstance(supplied, str):
-            raise HTTPException(status_code=400, detail="passphrase must be a string")
-        refusal = secrets_vault.passphrase_refusal(supplied)
-        if refusal:
-            raise HTTPException(status_code=400, detail=refusal)
-        value = supplied
-
-    def _store() -> None:
-        secrets_store.set_secret(
-            _config.db_path, user["username"],
-            secrets_vault.VAULT_PASSPHRASE_SERVICE,
-            secrets_vault.VAULT_PASSPHRASE_KEY,
-            value,
-        )
-
-    try:
-        await asyncio.to_thread(_store)
-    except Exception as e:
-        # The store's own message names the master key's *length* on its
-        # too-weak arm, which is a deployment-level fact on a per-user surface.
-        # The daemon log is where that detail belongs.
-        logger.warning(
-            "could not store the vault passphrase for %r: %s", user["username"], e,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="the passphrase could not be stored; see the daemon log",
-        )
-    # No user id and no length: this line is the one place a value could leak
-    # through a mistake in a later edit, so it carries nothing but the fact.
-    logger.info("vault passphrase stored")
-    # `generated` only on the generate path. A typed value is never echoed — the
-    # client already has it, and putting it in a response body is a copy in a
-    # proxy log for no gain.
-    return {"ok": True, "generated": value if generate else ""}
-
-
-@api_router.get("/settings/vault")
-async def settings_vault(user: dict = Depends(_require_api_auth)) -> dict:
-    """The current user's credential vault status. Read-only; see the builder.
-
-    Degrades to the unconfigured answer rather than raising, matching the
-    sibling helpers: this is a status line on a settings page whose actual
-    content is the cards below it, and an optional feature almost nobody has
-    must not be able to 500 the page that governs them. The frontend catches
-    too, so this only keeps the log honest — but a guard on one side only is
-    the kind that gets removed because it looks redundant.
-
-    Nothing turns on its answer any more, which is a change rather than a
-    property of this function: the vault used to own typed services and a 409
-    refused an edit to one, so there was a sibling read whose failure had to
-    be a refusal. The vault writes only its own `vault_entries` namespace now,
-    so there is no authorization question left here at all.
-    """
-    if not _config:
-        return {"configured": False}
-    try:
-        # Off the event loop: the builder resolves a path under the workspace,
-        # which is a FUSE mount on the deployment shape this runs on.
-        return await asyncio.to_thread(_vault_settings_payload, user["username"])
-    except Exception:
-        logger.warning(
-            "could not build the vault status for %r", user["username"],
-            exc_info=True,
-        )
-        return {"configured": False}
 
 
 def _visible_modules(cfg) -> list[str]:
@@ -14676,10 +14172,6 @@ async def settings_set_secret(
 
     value = (payload.get("value") or "").strip() if isinstance(payload, dict) else ""
 
-    if value and service == "vault" and key == "passphrase":
-        # The generic route must enforce the same policy and passphrase floor.
-        await settings_vault_passphrase({"passphrase": value}, user=user, _csrf=None)
-        return {"ok": True, "service": service, "key": key, "configured": True}
 
     try:
         secrets_store.set_secret(_config.db_path, user["username"], service, key, value)

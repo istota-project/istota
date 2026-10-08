@@ -1,4 +1,5 @@
 """Encrypted downloads round trip through the production KeePass reader."""
+from istota.credentials import kdbx_import as credential_read
 import hashlib
 import io
 import re
@@ -9,7 +10,7 @@ from pykeepass import PyKeePass
 from pykeepass.exceptions import CredentialsError
 
 from istota import db
-from istota.credentials import generated, store, vault
+from istota.credentials import generated, store
 from istota.credentials.broker import bindings, grants
 from tests.test_kdbx_import import database, seed, OTP  # noqa: F401
 
@@ -74,7 +75,7 @@ def test_round_trip_header_and_exclusions(database, cheap, tmp_path, monkeypatch
     params = kp.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
     assert params["$UUID"].value.hex() == "9e298b1956db4773b23dfc3ec6f0a1e6"
     assert (params["M"].value, params["I"].value, params["P"].value) == (65536, 1, 1)
-    read = vault.parse_vault(data, PASSWORD)
+    read = credential_read.parse_vault(data, PASSWORD)
     assert read.services["portal"] == "local-value"
     assert read.services["portal_url"] == "https://portal.example/login"
     assert read.services["portal_username"] == "alice"

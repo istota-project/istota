@@ -36,7 +36,7 @@ import pytest
 
 from istota import executor
 from istota.credentials import store as secrets_store
-from istota.credentials import vault as secrets_vault
+from istota.credentials import names as secrets_vault
 from istota.sandbox import credential_shim
 from istota.sandbox import task_env
 from istota.config import Config, DevboxConfig, SecurityConfig

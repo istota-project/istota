@@ -43,7 +43,7 @@ def https_host(url):
     return credential_host(url)
 
 
-def parse_binding(url, attributes, tags, *, source="vault"):
+def parse_binding(url, attributes, tags, *, source="local"):
     """Invalid host metadata unbinds the entry; it never retains an old host."""
     hosts = set()
     # A value a person typed into a URL field: a KeePass entry, a credential
@@ -74,7 +74,6 @@ def parse_binding(url, attributes, tags, *, source="vault"):
                       and h != "proxy-authorization"})
     return {"hosts": sorted(hosts), "headers": headers,
             "revealable": "istota:reveal" in (tags or []), "source": source}
-
 
 
 def binding_entry_fields(binding):

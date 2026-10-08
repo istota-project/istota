@@ -272,7 +272,7 @@ async def test_writes_need_origin_login_and_a_bounded_body(signed_client, client
 
 
 async def test_isolation_refusal_closes_every_write(signed_client, config, monkeypatch):  # noqa: F811
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
     secrets_store.set_secret(config.db_path, "alice", "vault_entries", "portal", MARKER,
                              binding={**parse_binding("https://portal.example", {}, [],
                                                       source="local"), "credential": "portal"})
@@ -290,17 +290,16 @@ async def test_isolation_refusal_closes_every_write(signed_client, config, monke
     assert data["add_blocked_reason"] == secrets_vault.VAULT_ISOLATION_REASON
 
 
-async def test_patch_refuses_a_keepassxc_credential(signed_client, config):  # noqa: F811
+async def test_patch_accepts_a_legacy_keepassxc_credential(signed_client, config):  # noqa: F811
     secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "portal", MARKER,
-                                binding=parse_binding("https://portal.example", {}, []))
+                                binding=parse_binding("https://portal.example", {}, [], source="vault"))
     response = await signed_client.patch(BASE + "/portal/local", json=_update(), headers=ORIGIN)
-    assert response.status_code == 400
-    assert response.json()["field"] == "name"
+    assert response.status_code == 200
     assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "portal") == MARKER
     row = (await signed_client.get(BASE)).json()["credentials"][0]
-    assert row["source"] == "vault"
-    assert "url" not in row
-    assert "username_set" not in row
+    assert row["source"] == "local"
+    assert row["url"] == "openrouter.ai"
+    assert row["username_set"] is False
 
 
 async def test_patch_requires_the_metadata_fields(signed_client):

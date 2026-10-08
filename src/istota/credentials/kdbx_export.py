@@ -1,4 +1,5 @@
 """Fresh KeePass exports built entirely in memory from the credential store."""
+from istota.credentials import kdbx_import as kdbx_import
 
 from dataclasses import dataclass
 import hashlib
@@ -6,7 +7,7 @@ import io
 import threading
 
 from istota import db
-from istota.credentials import generated, store, vault
+from istota.credentials import generated, store, names as vault
 from istota.credentials.broker import bindings, grants
 from istota.lib import totp
 
@@ -42,7 +43,7 @@ def keyfile_refusal(keyfile: bytes) -> str | None:
     try:
         from lxml import etree
     except ImportError:
-        raise vault.VaultLibraryMissing("Install the vault extra") from None
+        raise kdbx_import.VaultLibraryMissing("Install the vault extra") from None
     try:
         root = etree.fromstring(keyfile, etree.XMLParser(resolve_entities=False, no_network=True))
         if root.getroottree().docinfo.doctype or root.tag != "KeyFile" or root.findtext("Meta/Version") != "2.0":
@@ -59,13 +60,13 @@ def keyfile_refusal(keyfile: bytes) -> str | None:
 
 
 def _write_generated_entry(entry, values: dict[str, str]) -> None:
-    """The fields shared by exports and the temporary legacy mirror writer."""
+    """Write generated fields to a new export entry."""
     entry.password = values.get("password") or ""
     entry.username = values.get("username") or ""
     entry.url = values.get("url") or ""
     for field_name in list(entry.custom_properties):
         folded = str(field_name).casefold()
-        if folded in vault._LEGACY_OTP_FIELDS or folded.startswith(("timeotp-", "hmacotp-")):
+        if folded in ("totp seed", "totp settings") or folded.startswith(("timeotp-", "hmacotp-")):
             entry.delete_custom_property(field_name)
     if values.get("otp"):
         entry.otp = values["otp"]
@@ -83,7 +84,7 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
     try:
         import pykeepass
     except ImportError:
-        raise vault.VaultLibraryMissing("Install the vault extra") from None
+        raise kdbx_import.VaultLibraryMissing("Install the vault extra") from None
     if keyfile is not None and keyfile_refusal(keyfile):
         raise ValueError("keyfile_invalid")
     if not store.secret_key_available():
@@ -119,7 +120,7 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
     params["M"].value = options.argon2_memory_kib * 1024
     params["I"].value = options.argon2_iterations
     params["P"].value = options.argon2_parallelism
-    root = kp.add_group(kp.root_group, vault.VAULT_ROOT_GROUP)
+    root = kp.add_group(kp.root_group, kdbx_import.VAULT_ROOT_GROUP)
     generated_group = None
     generated_count = otp_count = recovery_count = 0
     for owner, members, binding, declined in entries:
@@ -129,8 +130,8 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
         values["url"] = values["url"] or url
         if binding["source"] == "generated":
             if generated_group is None:
-                generated_group = kp.add_group(root, vault.VAULT_WRITE_GROUP)
-            entry = kp.add_entry(generated_group, owner.removeprefix(vault.VAULT_WRITE_GROUP + "_"), "", "")
+                generated_group = kp.add_group(root, kdbx_import.VAULT_WRITE_GROUP)
+            entry = kp.add_entry(generated_group, owner.removeprefix(kdbx_import.VAULT_WRITE_GROUP + "_"), "", "")
             generated_count += 1
         else:
             entry = kp.add_entry(root, owner, "", "")
@@ -142,7 +143,7 @@ def build_kdbx(db_path, user_id, *, password: str, keyfile: bytes | None,
         for key, value in attributes.items():
             entry.set_custom_property(key, value)
         if declined:
-            tags.append(vault.VAULT_NO_GRANT_TAG)
+            tags.append(kdbx_import.VAULT_NO_GRANT_TAG)
         entry.tags = tags
         known = set(generated.entry_names(owner).values())
         for name, value in members.items():

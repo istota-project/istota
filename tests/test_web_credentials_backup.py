@@ -27,7 +27,7 @@ async def test_recipient_set_clear_and_step_up(signed_client, config, mail):
     assert (await signed_client.put(BASE, json={"recipient": recipient})).status_code == 403
 
 async def test_invalid_recipient_and_isolation(signed_client, config, mail, monkeypatch):
-    from istota.credentials import vault
+    from istota.credentials import names as vault
     response = await signed_client.put(BASE, json={"recipient": "ssh-key", **await step_up(signed_client, mail, "backup_recipient")}, headers=ORIGIN)
     assert response.status_code == 400
     assert response.json()["field"] == "recipient"

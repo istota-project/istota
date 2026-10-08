@@ -9,7 +9,12 @@ import os
 import time
 
 from istota import db, storage
-from istota.credentials import audit, kdbx_import, store, vault
+from istota.credentials import audit, kdbx_import, store, names as vault
+from istota.credentials import store as secrets_store
+from istota.credentials.names import VaultError
+from istota.credentials.kdbx_import import VaultCorrupt, VAULT_READ_CAP_BYTES
+from pathlib import Path
+import hashlib
 from istota.notifications.resolvers import connected_service, task_alert
 from istota.notifications.store import deliver_pending
 
@@ -47,6 +52,8 @@ def pending_users(config) -> list[str]:
             "SELECT user_id FROM istota_kv WHERE namespace=? AND key=?", (NAMESPACE, MARKER))}
         configured = {row[0] for row in conn.execute(
             "SELECT user_id FROM secrets WHERE service='vault' AND key='passphrase'")}
+        configured.update(row[0] for row in conn.execute(
+            "SELECT DISTINCT user_id FROM credential_bindings WHERE source='vault'"))
     return [user_id for user_id in config.users if user_id not in retired
             and (user_id in configured or config.vault_path_for(user_id))]
 
@@ -65,21 +72,21 @@ def retire_user(config, user_id, *, now: float | None = None) -> RetireResult:
         refusal = vault.vault_isolation_refusal(config, user_id)
         if refusal:
             raise vault.VaultIsolationRequired("isolation required")
+        passphrase = _resolve_passphrase(config.db_path, user_id)
         resolution = storage.vault_location_for(config, user_id)
         if resolution.location is None:
             if resolution.refusal in (storage.VAULT_DIR_EMPTY, storage.VAULT_PATH_NO_SUCH_DIRECTORY):
-                raise vault.VaultMissing("file unavailable")
-            raise vault.VaultPathRefused("file selection unavailable")
+                raise VaultMissing("file unavailable")
+            raise VaultPathRefused("file selection unavailable")
         location = resolution.location
         filename = vault.label_for_display(location.path.name)
         try:
-            data, _ = vault.read_vault_bytes(location.path, dir_fd=location.dir_fd)
+            data, _ = read_vault_bytes(location.path, dir_fd=location.dir_fd)
         finally:
             if location.dir_fd is not None:
                 os.close(location.dir_fd)
-        passphrase = vault._resolve_passphrase(config.db_path, user_id)
         preview = kdbx_import.preview(config.db_path, user_id, data, passphrase)
-    except (vault.VaultMissing, vault.VaultUnreadable, OSError) as exc:
+    except (VaultMissing, VaultUnreadable, OSError) as exc:
         reason = type(exc).__name__
         with db.get_db(config.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -90,8 +97,8 @@ def retire_user(config, user_id, *, now: float | None = None) -> RetireResult:
         if now - float(first["value"]) < RETRY_SECONDS:
             logger.warning("Credential migration for %s will retry: %s", vault._label(user_id), reason)
             return RetireResult(user_id, "retry", reason)
-    except (vault.VaultLocked, vault.VaultCorrupt, vault.VaultPassphraseMissing,
-            vault.VaultKeyUnusable, vault.VaultPathRefused, vault.VaultLibraryMissing,
+    except (kdbx_import.VaultLocked, kdbx_import.VaultCorrupt, VaultPassphraseMissing,
+            VaultKeyUnusable, VaultPathRefused, kdbx_import.VaultLibraryMissing,
             vault.VaultIsolationRequired) as exc:
         reason = type(exc).__name__
 
@@ -156,3 +163,93 @@ def retire_all(config) -> list[RetireResult]:
             logger.warning("Credential migration for %s failed: %s", vault._label(user_id), reason)
             results.append(RetireResult(user_id, "retry", reason))
     return results
+
+
+VAULT_PASSPHRASE_SERVICE = "vault"
+
+
+VAULT_PASSPHRASE_KEY = "passphrase"
+
+
+class VaultMissing(VaultError):
+    """No file at the path. The path is wrong, or nothing has been put there."""
+
+
+class VaultUnreadable(VaultError):
+    """The read was refused: a symlink, a FIFO, an oversize or unreadable file."""
+
+
+class VaultPathRefused(VaultError):
+    """The configured ``vault_path`` is one the resolver may not open."""
+
+
+class VaultPassphraseMissing(VaultError):
+    """No ``vault/passphrase`` row for this user, so nothing can be opened."""
+
+
+class VaultKeyUnusable(VaultError):
+    """``ISTOTA_SECRET_KEY`` cannot read this deployment's stored passphrase."""
+
+
+def read_vault_bytes(path: Path, *, dir_fd: int | None = None) -> tuple[bytes, str]:
+    """The file's bytes and their SHA-256, or a mapped ``VaultError``."""
+    from istota.skills._loader import OVERLAY_UNREADABLE, read_overlay_bytes
+
+    try:
+        data, refusal, size = read_overlay_bytes(
+            path, max_bytes=VAULT_READ_CAP_BYTES, dir_fd=dir_fd
+        )
+    except (ValueError, NotImplementedError) as exc:
+        raise VaultUnreadable(OVERLAY_UNREADABLE) from exc
+    if refusal is not None:
+        raise VaultUnreadable(refusal)
+    if size is None:
+        raise VaultMissing("no file at the configured vault path")
+    if not data:
+        raise VaultCorrupt("the vault file is empty")
+    return data, hashlib.sha256(data).hexdigest()
+
+
+def _resolve_passphrase(db_path, user_id: str) -> str:
+    """The stored passphrase, or the class that says why there is not one."""
+    try:
+        # The store's own validator, so the message matches the condition — the
+        # The key itself is not bound.
+        secrets_store._validated_key()
+    except (
+        secrets_store.SecretKeyMissingError,
+        secrets_store.SecretKeyTooWeakError,
+    ) as exc:
+        # The store's own message is logged and does not become the `reason`.
+        # It names the key's *length* on the too-weak arm, and `reason` is
+        # notification row — so a deployment-level fact about the master key
+        # would be published on a per-user surface. §3's rule is about values
+        # and this is adjacent to it rather than a breach of it; the daemon log
+        # is the right place for the detail.
+        logger.warning("vault: the master key is unusable: %s", exc)
+        raise VaultKeyUnusable(
+            "this deployment's ISTOTA_SECRET_KEY cannot read stored "
+            "credentials; see the daemon log"
+        ) from exc
+
+    value = secrets_store.get_secret(
+        db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+    )
+    if value is not None:
+        # `is not None` rather than truthiness. An empty string cannot be
+        # written through `upsert_secret` — `set_secret` reads it as a deletion —
+        # but a hand-edited row can hold one, and passing it through gets
+        # `VaultLocked` from the parse, which is the right remedy. Falling
+        # through instead would report a wrong master key for a row the master
+        # key had just decrypted perfectly.
+        return value
+    if secrets_store.secret_exists(
+        db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+    ):
+        raise VaultKeyUnusable(
+            "a vault passphrase is stored but will not decrypt; "
+            "check ISTOTA_SECRET_KEY"
+        )
+    raise VaultPassphraseMissing(
+        "no vault passphrase is provisioned for this user"
+    )

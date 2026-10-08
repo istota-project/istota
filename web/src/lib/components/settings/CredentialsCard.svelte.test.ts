@@ -12,9 +12,6 @@ vi.mock('$lib/api', async (importOriginal) => ({
   deleteCredential: vi.fn(),
   createCredential: vi.fn(),
   updateLocalCredential: vi.fn(),
-  setGeneratedMirror: vi.fn(),
-  remirrorGenerated: vi.fn(),
-  setGeneratedDefaultMirror: vi.fn(),
   showRecoveryCodes: vi.fn(),
   startStepUp: vi.fn(),
 }));
@@ -26,9 +23,6 @@ import {
   grantExistingCredentials,
   revokeCredentialGrant,
   deleteCredential,
-  remirrorGenerated,
-  setGeneratedDefaultMirror,
-  setGeneratedMirror,
 } from '$lib/api';
 afterEach(() => {
   cleanup();
@@ -38,7 +32,7 @@ afterEach(() => {
 function portal(over: Partial<CredentialSummary> = {}): CredentialSummary {
   return {
     name: 'portal',
-    source: 'vault',
+    source: 'local',
     hosts: ['portal.example'],
     headers: ['authorization'],
     revealable: false,
@@ -138,7 +132,7 @@ describe('the list', () => {
 
     const expected: Record<string, string> = {
       openrouter_key: 'Istota',
-      portal: 'KeePassXC',
+      portal: 'Istota',
       'forge.github': 'Deployment',
     };
     for (const [name, label] of Object.entries(expected)) {
@@ -165,7 +159,7 @@ describe('the list', () => {
 
     const sources: Record<string, string> = {
       openrouter_key: 'local',
-      portal: 'vault',
+      portal: 'local',
       'forge.github': 'config',
     };
     for (const [name, source] of Object.entries(sources)) {
@@ -185,7 +179,7 @@ describe('the list', () => {
     await waitFor(() => expect(row('portal')).toBeTruthy());
 
     expect(words(row('openrouter_key'))).toContain('No site. Edit it to add one.');
-    expect(words(row('portal'))).toContain('No site. Add a URL to this entry in KeePassXC.');
+    expect(words(row('portal'))).toContain('No site. Edit it to add one.');
     expect(document.body.textContent).not.toContain('Unbound');
     expect(document.body.textContent).not.toContain('istota_hosts');
   });
@@ -259,11 +253,11 @@ describe('the row menu', () => {
     ]);
   });
 
-  it('offers only removal of the stored copy for a KeePassXC credential', async () => {
+  it('offers only removal of the stored copy for a imported credential', async () => {
     vi.mocked(getCredentialGrants).mockResolvedValue(settings());
     render(CredentialsCard);
     await screen.findByText('portal.example');
-    expect(await menuLabels('portal')).toEqual(['Edit access', 'History', 'Remove stored copy']);
+    expect(await menuLabels('portal')).toEqual(['Edit', 'Edit access', 'History', 'Delete']);
   });
 
   it('offers only access for a deployment credential', async () => {
@@ -410,21 +404,21 @@ describe('access', () => {
 });
 
 describe('deletion', () => {
-  it('removes the stored copy of a KeePassXC credential after confirming', async () => {
+  it('removes the stored copy of a imported credential after confirming', async () => {
     vi.mocked(getCredentialGrants).mockResolvedValue(settings());
     vi.mocked(deleteCredential).mockResolvedValue({ ok: true, deleted: true });
     render(CredentialsCard);
     await screen.findByText('portal.example');
-    await chooseAction('portal', 'Remove stored copy');
-    const dialog = screen.getByRole('dialog', { name: 'Remove stored copy' });
-    expect(words(dialog)).toContain('the next sync brings it back without its access settings');
+    await chooseAction('portal', 'Delete');
+    const dialog = screen.getByRole('dialog', { name: 'Delete credential' });
+    expect(words(dialog)).toContain('You can restore it from history');
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(deleteCredential).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    await chooseAction('portal', 'Remove stored copy');
+    await chooseAction('portal', 'Delete');
     vi.mocked(getCredentialGrants).mockResolvedValue(settings({ credentials: [] }));
     await fireEvent.click(
-      within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove' }),
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }),
     );
     await waitFor(() => expect(deleteCredential).toHaveBeenCalledWith('portal'));
     await screen.findByText('No credentials yet.');
@@ -450,9 +444,9 @@ describe('deletion', () => {
     vi.mocked(deleteCredential).mockRejectedValueOnce(new Error('Could not delete credential'));
     render(CredentialsCard);
     await screen.findByText('portal.example');
-    await chooseAction('portal', 'Remove stored copy');
+    await chooseAction('portal', 'Delete');
     await fireEvent.click(
-      within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove' }),
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }),
     );
     await screen.findByRole('alert');
     expect(row('portal')).toBeTruthy();
@@ -503,80 +497,21 @@ function made(over: Partial<CredentialSummary> = {}): CredentialSummary {
     source: 'generated',
     hosts: ['acme.example'],
     otp: true,
-    generated: { mirror: true, state: 'mirrored', divergence: [] },
     ...over,
   });
 }
 
 describe('generated credentials', () => {
-  it('names a KeePass copy that lost its two-factor seed', async () => {
-    vi.mocked(getCredentialGrants).mockResolvedValue(
-      settings({
-        vault_enabled: true,
-        credentials: [
-          made(),
-          made({
-            name: 'generated_other',
-            generated: { mirror: true, state: 'diverged', divergence: ['missing_otp'] },
-          }),
-        ],
-      }),
-    );
-    render(CredentialsCard);
-    await screen.findAllByText('acme.example');
-    expect(within(row('generated_acme')).getByText('Generated')).toBeTruthy();
-    expect(within(row('generated_acme')).queryByText(/KeePass copy/)).toBeNull();
-    expect(within(row('generated_other')).getByText('KeePass copy missing 2FA')).toBeTruthy();
-  });
-
-  it('turns the copy off, rewrites it, and offers no copy without a vault', async () => {
-    vi.mocked(getCredentialGrants).mockResolvedValue(
-      settings({
-        vault_enabled: true,
-        credentials: [made({ generated: { mirror: true, state: 'pending', divergence: [] } })],
-      }),
-    );
-    vi.mocked(remirrorGenerated).mockResolvedValue({ ok: true, state: 'mirrored' });
-    vi.mocked(setGeneratedMirror).mockResolvedValue({ ok: true, state: 'off' });
-    render(CredentialsCard);
-    await screen.findByText('acme.example');
-    expect(within(row('generated_acme')).getByText('KeePass copy behind')).toBeTruthy();
-    expect(await menuLabels('generated_acme')).toEqual(
-      expect.arrayContaining(['Stop KeePass copy', 'Write KeePass copy now', 'Retire']),
-    );
-    await fireEvent.click(await screen.findByText('Write KeePass copy now'));
-    await waitFor(() => expect(remirrorGenerated).toHaveBeenCalledWith('generated_acme'));
-    await chooseAction('generated_acme', 'Stop KeePass copy');
-    await waitFor(() => expect(setGeneratedMirror).toHaveBeenCalledWith('generated_acme', false));
-
-    cleanup();
-    vi.mocked(getCredentialGrants).mockResolvedValue(
-      settings({ vault_enabled: false, credentials: [made()] }),
-    );
-    render(CredentialsCard);
-    await screen.findByText('acme.example');
-    expect(await menuLabels('generated_acme')).not.toContain('Stop KeePass copy');
-    expect(screen.queryByText('Copy new generated credentials to KeePass')).toBeNull();
-  });
-
-  it('flips the default for new generated credentials', async () => {
-    vi.mocked(getCredentialGrants).mockResolvedValue(
-      settings({ vault_enabled: true, generated_default_mirror: true, credentials: [made()] }),
-    );
-    vi.mocked(setGeneratedDefaultMirror).mockResolvedValue({ ok: true });
-    render(CredentialsCard);
-    await fireEvent.click(await screen.findByText('Copy new generated credentials to KeePass'));
-    await waitFor(() => expect(setGeneratedDefaultMirror).toHaveBeenCalledWith(false));
-  });
-
-  it('retires after a confirmation that says the copy goes too', async () => {
+  it('retires after confirmation and keeps exported copies', async () => {
     vi.mocked(getCredentialGrants).mockResolvedValue(settings({ credentials: [made()] }));
     vi.mocked(deleteCredential).mockResolvedValue({ ok: true, deleted: true });
     render(CredentialsCard);
     await screen.findByText('acme.example');
     await chooseAction('generated_acme', 'Retire');
     const dialog = screen.getByRole('dialog', { name: 'Retire credential' });
-    expect(words(dialog)).toContain('its KeePass copy is removed. You can restore it from history');
+    expect(words(dialog)).toContain(
+      'exported copies stay as they are. You can restore it from history',
+    );
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Retire' }));
     await waitFor(() => expect(deleteCredential).toHaveBeenCalledWith('generated_acme'));
   });

@@ -48,7 +48,7 @@ GROUP_BASE = "/Groups"
 #: the instruction the settings card gives is "put the file in this folder",
 #: and a folder that has to be created first is an instruction with a step
 #: missing.
-BOT_SUBDIRS = ("config", "exports", "scripts", "notes", "vault")
+BOT_SUBDIRS = ("config", "exports", "scripts", "notes")
 
 #: The one folder a user's vault file may be chosen from.
 VAULT_DIR_NAME = "vault"
@@ -237,8 +237,6 @@ def _build_heartbeat_seed(config: "Config", user_id: str) -> str:
     return HEARTBEAT_TEMPLATE.format(conversation_token=token, user_id=user_id)
 
 
-
-
 # Template for initial TASKS.md file
 TASKS_FILE_TEMPLATE = """\
 # Tasks
@@ -312,7 +310,6 @@ def get_user_config_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_bot_path(user_id, bot_dir)}/config"
 
 
-
 def get_user_tasks_file_path(user_id: str, bot_dir: str) -> str:
     """Get the path to a user's TASKS.md file."""
     return f"{get_user_config_path(user_id, bot_dir)}/TASKS.md"
@@ -348,12 +345,9 @@ def get_user_heartbeat_path(user_id: str, bot_dir: str) -> str:
     return f"{get_user_config_path(user_id, bot_dir)}/HEARTBEAT.md"
 
 
-
-
 def get_user_cron_path(user_id: str, bot_dir: str) -> str:
     """Get the path to a user's CRON.md file."""
     return f"{get_user_config_path(user_id, bot_dir)}/CRON.md"
-
 
 
 def get_user_skill_overlays_path(user_id: str, bot_dir: str) -> str:
@@ -532,7 +526,7 @@ class VaultResolution:
     against, in the one place in this design that is about an attack rather than
     a mistake: the cross-user typo — ``[users.alice]`` naming
     ``{mount}/Users/bob/config/vault.kdbx`` — is refused here and the operator
-    had no surface that said so. ``secrets_vault.sync_user`` turns the id into
+    had no surface that said so. the retirement reader turns the id into
     its own outcome class so a notification can carry it.
 
     The id is a **stable word, not a sentence**: it is grepped in the log, keyed
@@ -855,7 +849,7 @@ def _refuse_vault_path(
     line per sync interval — which is the cost of a *configured* path that is
     actively refused, and is the direction to be wrong in for a value deciding
     which file the daemon decrypts with a key it holds. The **notification** side
-    is deduplicated instead, by ``secrets_vault.sync_user``'s transition rule:
+    is deduplicated instead, by the retirement reader's transition rule:
     the log is the sequence and the panel row is the state.
 
     Both interpolated values are bounded and flattened. Self-inflicted rather
@@ -1054,30 +1048,6 @@ def stored_vault_file(config: "Config", user_id: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def store_vault_file(config: "Config", user_id: str, name: str) -> None:
-    """Remember ``name`` as this user's choice, or forget it when it is empty.
-
-    Deleted rather than blanked, so "nothing chosen" is one state rather than
-    two: the resolver's rules 3 and 4 then apply as they do for a user who has
-    never chosen.
-
-    **Raises what the database raises**, and the two callers want that
-    differently. `web_app._select_vault_file` must not report a save it did not
-    make, so the raise becomes a 500 rather than an `{"ok": true}`.
-    `cli.cmd_user_ensure`'s `--clear-vault-config` does not wrap it either, so a
-    database failure there is a traceback rather than the "cleared" line — which
-    is the right direction for an operator at a terminal, since the alternative
-    is telling them a selection is gone when it is not.
-    """
-    from . import db  # noqa: PLC0415 - see `stored_vault_file`
-
-    with db.get_db(config.db_path) as conn:
-        if name:
-            db.kv_set(conn, user_id, VAULT_FILE_NAMESPACE, VAULT_FILE_KEY, name)
-        else:
-            db.kv_delete(conn, user_id, VAULT_FILE_NAMESPACE, VAULT_FILE_KEY)
-
-
 def vault_location_for(config: "Config", user_id: str) -> VaultResolution:
     """Which KDBX file this user's vault is, by the folder convention.
 
@@ -1144,26 +1114,6 @@ def vault_location_for(config: "Config", user_id: str) -> VaultResolution:
         ),
         refusal=None,
     )
-
-
-def vault_dir_display(config: "Config", user_id: str) -> str:
-    """Where the folder is, for the card's instruction. Display only.
-
-    The daemon-side path, composed rather than resolved — the same string the
-    form's ``vault_root`` carried before it, and the same one the refusal log
-    lines name, so an operator reading a support question sees what the user
-    was shown. It is **not** the path the user navigates to: they reach these
-    files through their own file client, where the deployment's mount point is
-    not a thing they can type.
-
-    ``""`` without a workspace, where the folder cannot exist at all.
-    """
-    if not config.has_workspace or not is_scopable_user_id(user_id):
-        return ""
-    user_root = config.workspace_root(user_id)
-    if user_root is None:
-        return ""
-    return str(user_root / config.bot_dir_name / VAULT_DIR_NAME)
 
 
 #: Ceiling on any single file read out of a user's ``config/`` directory.
@@ -1809,7 +1759,6 @@ def _build_cron_seed(config: "Config", user_id: str) -> str:
                 token = b.conversation_token
                 break
     return CRON_TEMPLATE.format(conversation_token=token)
-
 
 
 # The rclone API lives in `istota.lib.rclone_client`, a stdlib-only leaf, because

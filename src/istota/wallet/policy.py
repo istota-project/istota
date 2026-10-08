@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from istota import db
-from istota.credentials import vault
+from istota.credentials import names as vault
 from istota.credentials.broker.grants import _task_context
 from istota.rooms.scopes import canonical_token, withheld_for_task
 from istota.wallet import cards

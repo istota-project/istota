@@ -1,39 +1,7 @@
-"""Credentials Istota generates: the one writer of ``source="generated"`` rows.
-
-``istota-credential new`` and ``otp-set`` used to write the user's KeePass file
-and reach the ``secrets`` table only through the sync, which treats the file as
-authoritative, deletions included. For a credential the user created that is
-the right rule; for one Istota created it made the file the only copy, and an
-older copy of the file saved over Istota's write deleted the row (ISSUE-686: a
-TOTP seed lost that way locked the account). So ownership follows whoever
-created the credential: a generated credential lives here, in the table, and
-the KDBX ``generated/`` group is an optional one-way mirror of it.
-
-The rows have the shape every other source has (value, ``_username``,
-``_url``, ``_totp``, each bound with ``credential: <name>``), so readers do not
-branch on the source. ``_recovery`` (ISSUE-688) is the one field only a
-generated credential has: the site's single-use recovery codes, bound with
-``kind = 'recovery'``, which no task read path returns. What differs:
-
-- **The sync never writes, rebinds or deletes a generated row.** A file copy
-  that differs is reported as divergence on the settings card and in a notice,
-  never applied. :func:`reconcile` is the sync's whole involvement.
-- **The mirror state is per credential**, in the reserved KV namespace
-  :data:`NAMESPACE`: ``mirror`` (the toggle), ``state`` (``off``, ``pending``,
-  ``mirrored``, ``diverged``) and ``divergence`` (``missing``,
-  ``missing_otp``, ``changed``). ``pending`` is a write that has not landed yet
-  and is retried each sync cycle; ``diverged`` is a copy that was written and
-  later changed, which waits for the user's re-mirror.
-- **Retiring is the only deletion**, and it is a user action (settings and
-  ``istota secret retire``). Nothing a task can send reaches :func:`retire`.
-
-**No value leaves this module** except to the mirror writer and the sync's
-comparison, both in the daemon. Errors carry names and a fixed reason.
-"""
+"""Generated credentials stored in the encrypted table and retired by the user."""
 
 from __future__ import annotations
 
-import json
 import logging
 
 from istota import db
@@ -44,28 +12,14 @@ from istota.lib import totp
 logger = logging.getLogger(__name__)
 
 SOURCE = "generated"
-NAMESPACE = "_generated_credentials"
 PREFIX = "generated_"
 _SERVICE = "vault_entries"
 # Cannot collide with a credential name, which always starts with PREFIX.
-_DEFAULT_KEY = "default_mirror"
 # Set once the first complete read after ISSUE-686 has adopted legacy rows.
-_LEGACY_KEY = "legacy_adopted"
-_RESERVED_KEYS = (_DEFAULT_KEY, _LEGACY_KEY)
 
-STATE_OFF = "off"
-STATE_PENDING = "pending"
-STATE_MIRRORED = "mirrored"
-STATE_DIVERGED = "diverged"
-STATE_RETIRED = "retired"
-
-DIVERGED_MISSING = "missing"
-DIVERGED_MISSING_OTP = "missing_otp"
-DIVERGED_CHANGED = "changed"
-DIVERGED_MISSING_RECOVERY = "missing_recovery"
 
 KIND_RECOVERY = "recovery"
-# The KeePass custom field the mirror writes the codes to, protected.
+# The KeePass custom field the export writes the codes to, protected.
 RECOVERY_FIELD = "Recovery codes"
 RECOVERY_MAX_BYTES = 8192
 RECOVERY_MAX_LINES = 64
@@ -93,33 +47,6 @@ def _begin(conn) -> None:
         conn.execute("BEGIN IMMEDIATE")
 
 
-def _get_meta(conn, user_id: str, name: str) -> dict | None:
-    row = db.kv_get(conn, user_id, NAMESPACE, name)
-    if row is None:
-        return None
-    try:
-        meta = json.loads(row["value"])
-    except (TypeError, ValueError):
-        return None
-    return meta if isinstance(meta, dict) else None
-
-
-def _put_meta(conn, user_id: str, name: str, *, mirror: bool, state: str,
-              divergence: list[str] | None = None, **extra) -> None:
-    db.kv_set(conn, user_id, NAMESPACE, name, json.dumps(
-        {"mirror": mirror, "state": state, "divergence": divergence or [], **extra}))
-
-
-def default_mirror(conn, user_id: str) -> bool:
-    """Whether a new generated credential is mirrored to KeePass. On unless set off."""
-    row = db.kv_get(conn, user_id, NAMESPACE, _DEFAULT_KEY)
-    return row is None or row["value"] != "0"
-
-
-def set_default_mirror(conn, user_id: str, on: bool) -> None:
-    db.kv_set(conn, user_id, NAMESPACE, _DEFAULT_KEY, "1" if on else "0")
-
-
 def is_generated(conn, user_id: str, name: str) -> bool:
     """Whether ``name`` is a generated credential, by its own name (not a field)."""
     if not isinstance(name, str) or not name.startswith(PREFIX):
@@ -137,15 +64,6 @@ def generated_names(conn, user_id: str) -> list[str]:
     ).fetchall()
     return sorted({row[0] for row in rows
                    if _bindings.credential_name(conn, user_id, row[0]) == row[0]})
-
-
-def mirror_state(conn, user_id: str, name: str) -> dict:
-    """``{"mirror", "state", "divergence"}`` for the settings card and tests."""
-    meta = _get_meta(conn, user_id, name) or {"mirror": False, "state": STATE_OFF}
-    mirror = bool(meta.get("mirror"))
-    state = meta.get("state") if mirror else STATE_OFF
-    divergence = list(meta.get("divergence") or []) if state == STATE_DIVERGED else []
-    return {"mirror": mirror, "state": state or STATE_PENDING, "divergence": divergence}
 
 
 def _binding(url: str, *, owner: str, kind: str = "value") -> dict:
@@ -229,7 +147,7 @@ def normalize_recovery(text: str) -> str:
     lines = [line for line in lines if line]
     if not lines:
         raise GeneratedCredentialError("recovery_empty", "recovery_empty")
-    # KeePass's XML cannot hold these, and the mirror writes the entry whole.
+    # KeePass's XML cannot hold these, and the export writes the entry whole.
     if any(ord(c) < 32 and c != "\t" or ord(c) == 127 for line in lines for c in line):
         raise GeneratedCredentialError("recovery_unusable", "recovery_unusable")
     normalized = "\n".join(lines)
@@ -247,7 +165,7 @@ def set_recovery(conn, user_id: str, name: str, text: str, *, actor: str = "syst
     invalidates the old set. The row takes the entry's hosts and
     ``credential: <name>`` like the seed, with ``kind = 'recovery'``.
     """
-    from istota.credentials.vault import VAULT_NAME_RE
+    from istota.credentials.names import VAULT_NAME_RE
 
     _begin(conn)
     if not is_generated(conn, user_id, name):
@@ -296,220 +214,6 @@ def stored_values(conn, user_id: str, name: str) -> dict[str, str]:
     return values
 
 
-def _same_otp(left: str, right: str) -> bool:
-    if not left or not right:
-        return left == right
-    try:
-        return totp.parse_otpauth(left) == totp.parse_otpauth(right)
-    except totp.TotpError:
-        return False
-
-
-def divergence(stored: dict[str, str], copy: dict[str, str] | None) -> list[str]:
-    """How the file's copy differs from the table. Empty means it matches."""
-    if copy is None:
-        return [DIVERGED_MISSING]
-    found = []
-    if stored.get("otp") and not copy.get("otp"):
-        found.append(DIVERGED_MISSING_OTP)
-    elif not _same_otp(stored.get("otp", ""), copy.get("otp", "")):
-        found.append(DIVERGED_CHANGED)
-    if stored.get("recovery") and not copy.get("recovery"):
-        found.append(DIVERGED_MISSING_RECOVERY)
-    elif DIVERGED_CHANGED not in found and _recovery_lines(stored) != _recovery_lines(copy):
-        found.append(DIVERGED_CHANGED)
-    if DIVERGED_CHANGED not in found and any(
-        (stored.get(field_name) or "") != (copy.get(field_name) or "")
-        for field_name in ("password", "username", "url")
-    ):
-        found.append(DIVERGED_CHANGED)
-    return found
-
-
-def _recovery_lines(values: dict[str, str]) -> list[str]:
-    return [line.strip() for line in (values.get("recovery") or "").splitlines() if line.strip()]
-
-
-def record_mirror_result(conn, user_id: str, name: str, written: dict[str, str],
-                         landed: bool) -> str:
-    """Record a mirror write against the state as it is now, not as it was read.
-
-    The write ran outside any transaction, so the credential may have been
-    retired, its mirror switched off, or its values changed (an ``otp-set``)
-    meanwhile. Only a write of the current values to a mirror still on counts
-    as ``mirrored``; a copy written after a retire queues its removal again.
-    """
-    _begin(conn)
-    meta = _get_meta(conn, user_id, name)
-    if meta is None:
-        return STATE_OFF
-    if meta.get("state") == STATE_RETIRED:
-        if landed:
-            _put_meta(conn, user_id, name, mirror=bool(meta.get("mirror")), state=STATE_RETIRED,
-                      copy_removed=False)
-        return STATE_RETIRED
-    if not meta.get("mirror") or meta.get("state") == STATE_OFF:
-        return STATE_OFF
-    if landed and stored_values(conn, user_id, name) == written:
-        _put_meta(conn, user_id, name, mirror=True, state=STATE_MIRRORED)
-        return STATE_MIRRORED
-    _put_meta(conn, user_id, name, mirror=True, state=STATE_PENDING)
-    return STATE_PENDING
-
-
-def record_copy_removed(conn, user_id: str, name: str) -> None:
-    """A retired credential's KeePass copy is gone; the tombstone itself stays."""
-    _begin(conn)
-    meta = _get_meta(conn, user_id, name)
-    if meta is not None and meta.get("state") == STATE_RETIRED:
-        _put_meta(conn, user_id, name, mirror=bool(meta.get("mirror")), state=STATE_RETIRED,
-                  copy_removed=True)
-
-
-def set_mirror(conn, user_id: str, name: str, on: bool) -> None:
-    """The per-credential toggle. Turning it on queues a write; off leaves the copy."""
-    _begin(conn)
-    if not is_generated(conn, user_id, name):
-        raise GeneratedCredentialError("not_generated", f"{name} was not generated by Istota")
-    current = mirror_state(conn, user_id, name)
-    if on and current["mirror"]:
-        return
-    _put_meta(conn, user_id, name, mirror=on, state=STATE_PENDING if on else STATE_OFF)
-
-
-def pending_names(conn, user_id: str) -> tuple[list[str], list[str]]:
-    """``(to_write, to_remove)``: mirror writes not yet landed, and retired copies."""
-    to_write, to_remove = [], []
-    for row in db.kv_list(conn, user_id, NAMESPACE):
-        key = row["key"]
-        if key in _RESERVED_KEYS:
-            continue
-        meta = _get_meta(conn, user_id, key)
-        if meta is None:
-            continue
-        if meta.get("state") == STATE_RETIRED:
-            if meta.get("mirror") and not meta.get("copy_removed"):
-                to_remove.append(key)
-        elif meta.get("mirror") and meta.get("state") == STATE_PENDING:
-            to_write.append(key)
-    return sorted(to_write), sorted(to_remove)
-
-
-def _adopt_legacy(conn, user_id: str, read) -> list[str]:
-    """Take over ``vault`` rows the sync imported from ``generated/`` before ISSUE-686.
-
-    Once, on the first complete read after the upgrade (:data:`_LEGACY_KEY`):
-    a name rule applied every pass would also take over a user's own entry
-    under a group like ``Generated Passwords`` the moment they deleted it.
-    On that one pass a ``generated_`` owner the read no longer produces as an
-    ordinary name is a former ``generated/`` entry; a user's own entry with
-    such a name is still in ``read.services`` and stays theirs.
-    """
-    if db.kv_get(conn, user_id, NAMESPACE, _LEGACY_KEY) is not None:
-        return []
-    db.kv_set(conn, user_id, NAMESPACE, _LEGACY_KEY, "1")
-    produced = set(read.services) | set(read.held)
-    adopted: dict[str, list[str]] = {}
-    rows = conn.execute(
-        "SELECT s.key, b.source FROM secrets s LEFT JOIN credential_bindings b "
-        "ON b.user_id = s.user_id AND b.name = s.key WHERE s.user_id=? AND s.service=?",
-        (user_id, _SERVICE),
-    ).fetchall()
-    for key, source in rows:
-        if (source or "vault") != "vault" or key in produced:
-            continue
-        owner = _bindings.credential_name(conn, user_id, key)
-        if owner.startswith(PREFIX) and owner not in produced:
-            adopted.setdefault(owner, []).append(key)
-    for owner, members in adopted.items():
-        for member in members:
-            binding = _bindings.get_binding(conn, user_id, member) or _binding("", owner=owner)
-            _bindings.put_binding(conn, user_id, member, {
-                **binding, "source": SOURCE, "credential": owner,
-                "kind": binding.get("kind") or "value"})
-        if _get_meta(conn, user_id, owner) is None:
-            _put_meta(conn, user_id, owner, mirror=True, state=STATE_MIRRORED)
-        logger.warning("generated: %s: adopted %s from the vault's generated group",
-                       _label(user_id), _label(owner))
-    return sorted(adopted)
-
-
-def reconcile(conn, user_id: str, read) -> list[tuple[str, list[str]]]:
-    """The sync's whole involvement with generated credentials. Caller commits.
-
-    1. Adopt legacy ``vault`` rows from ``generated/`` (complete reads only).
-    2. Import a ``generated/`` copy the table has no row for, as generated and
-       mirrored. Never over an existing row of any source, and never one the
-       user retired.
-    3. Compare every mirrored credential with its copy and record divergence.
-
-    Returns ``(name, divergence)`` for each credential that newly diverged, for
-    the notice. Nothing here deletes or overwrites a row.
-    """
-    _begin(conn)
-    complete = not read.truncated
-    if complete:
-        _adopt_legacy(conn, user_id, read)
-    copies = getattr(read, "generated", {}) or {}
-    for name, copy in sorted(copies.items()):
-        meta = _get_meta(conn, user_id, name)
-        if meta is not None and meta.get("state") == STATE_RETIRED:
-            continue
-        if _taken(conn, user_id, entry_names(name).values()) is not None:
-            continue
-        if not copy.get("password"):
-            continue
-        _write_rows(conn, user_id, name, copy)
-        _put_meta(conn, user_id, name, mirror=True, state=STATE_MIRRORED)
-        logger.info("generated: %s: imported %s from the vault's generated group",
-                    _label(user_id), _label(name))
-
-    newly: list[tuple[str, list[str]]] = []
-    if not complete:
-        return newly
-    for name in generated_names(conn, user_id):
-        meta = _get_meta(conn, user_id, name) or {"mirror": True, "state": STATE_MIRRORED}
-        if not meta.get("mirror") or meta.get("state") in (STATE_OFF, STATE_RETIRED):
-            continue
-        found = divergence(stored_values(conn, user_id, name), copies.get(name))
-        if meta.get("state") == STATE_PENDING:
-            if not found:
-                _put_meta(conn, user_id, name, mirror=True, state=STATE_MIRRORED)
-            continue
-        if not found:
-            _put_meta(conn, user_id, name, mirror=True, state=STATE_MIRRORED)
-            continue
-        if meta.get("state") != STATE_DIVERGED or meta.get("divergence") != found:
-            newly.append((name, found))
-        _put_meta(conn, user_id, name, mirror=True, state=STATE_DIVERGED, divergence=found)
-    return newly
-
-
-_DIVERGENCE_TEXT = {
-    DIVERGED_MISSING: "The KeePass copy of {name} is missing.",
-    DIVERGED_MISSING_OTP: "The KeePass copy of {name} is missing its two-factor seed.",
-    DIVERGED_CHANGED: "The KeePass copy of {name} was changed outside Istota.",
-    DIVERGED_MISSING_RECOVERY: "The KeePass copy of {name} is missing its recovery codes.",
-}
-
-
-def raise_divergence_notice(conn, user_id: str, name: str, found: list[str]):
-    """One actionable notice per credential and divergence. Returns the raise result."""
-    from istota.notifications.resolvers import task_alert
-
-    sentences = " ".join(_DIVERGENCE_TEXT[code].format(name=name) for code in found)
-    return task_alert.write(
-        conn, user_id,
-        dedup_key=f"generated-diverged:{task_alert._slug(name, limit=64)}",
-        title=f"KeePass copy of {name} differs",
-        body=(f"{sentences} Istota still holds the credential and keeps using its own copy; "
-              "nothing was changed or deleted. Re-mirror it from Settings, Credentials to "
-              "write Istota's copy back to the file."),
-        severity="warning", actionable=True,
-        params={"status": "generated_diverged", "name": name},
-    )
-
-
 def retire(config, user_id: str, name: str, *, actor: str = "system") -> bool:
     """Delete a generated credential and its grant, leaving exported files alone."""
     with db.get_db(config.db_path) as conn:
@@ -529,5 +233,5 @@ def retire(config, user_id: str, name: str, *, actor: str = "system") -> bool:
 
 
 def _label(value: str) -> str:
-    from istota.credentials.vault import _label as label
+    from istota.credentials.names import _label as label
     return label(value)

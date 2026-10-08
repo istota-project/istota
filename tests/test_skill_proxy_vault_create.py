@@ -1,4 +1,5 @@
 """Create a vault credential through the task's real proxy socket."""
+from istota.credentials import kdbx_import as credential_read
 
 import json
 import socket
@@ -11,7 +12,7 @@ from tests.support.kdbx import create_database
 
 from istota import db
 from istota.credentials import store as secrets_store
-from istota.credentials import vault as secrets_vault
+from istota.credentials import names as secrets_vault
 from istota.sandbox import credential_shim
 from istota.config import Config, UserConfig
 from istota.sandbox.skill_proxy import SkillProxy
@@ -65,7 +66,7 @@ def test_create_is_available_in_the_same_task_and_never_returns_password(tmp_pat
         assert _request(sock, {"type": "vault_credential", "name": reply["name"]})["value"] == proxy.vault_credentials[reply["name"]]
         assert proxy.vault_credentials[reply["name"]] not in json.dumps(reply)
         assert proxy.vault_credentials[reply["name"]] not in caplog.text
-        read = secrets_vault.parse_vault(path.read_bytes(), "test-passphrase")
+        read = credential_read.parse_vault(path.read_bytes(), "test-passphrase")
         assert reply["name"] not in read.generated
         assert secrets_store.get_secret(
             config.db_path, "alice", "vault_entries", reply["name"],
@@ -109,7 +110,7 @@ def test_signup_address_must_not_name_another_user(tmp_path, monkeypatch, sock):
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
         reply = _request(sock, {"type": "vault_create", "slug": "team"})
     assert reply["reason"] == "vault_write_refused"
-    assert "generated_team" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated
+    assert "generated_team" not in credential_read.parse_vault(path.read_bytes(), "test-passphrase").generated
     assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "generated_team") is None
 
 
@@ -175,7 +176,7 @@ def test_recent_pending_signup_tag_remains_busy(tmp_path, monkeypatch, sock):
         assert conn.execute(
             "SELECT opened_at FROM signup_tags WHERE tag = ?", ("alice+acme",),
         ).fetchone()[0] is None
-    assert "generated_acme" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated
+    assert "generated_acme" not in credential_read.parse_vault(path.read_bytes(), "test-passphrase").generated
     assert secrets_store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme") is None
 
 
@@ -221,7 +222,7 @@ def test_generated_count_comes_from_the_group_not_a_flat_name(tmp_path, monkeypa
     kp = create_database(str(path), password="test-passphrase")
     kp.add_entry(kp.root_group, "generated_acme", "alice@example.com", "old-value")
     kp.save()
-    read = secrets_vault.parse_vault(path.read_bytes(), "test-passphrase")
+    read = credential_read.parse_vault(path.read_bytes(), "test-passphrase")
     assert read.generated_count == 0
     config = Config(
         db_path=tmp_path / "daemon" / "test.db",
@@ -231,15 +232,11 @@ def test_generated_count_comes_from_the_group_not_a_flat_name(tmp_path, monkeypa
     config.db_path.parent.mkdir()
     db.init_db(config.db_path)
     secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
-    secrets_vault.sync_user(config, "alice", force=True, deliver=False)
-    assert secrets_vault.vault_status(config, "alice", parse=False).generated_count == 0
 
     group = kp.add_group(kp.root_group, "generated")
     kp.add_entry(group, "other", "alice@example.com", "new-value")
     kp.save()
-    assert secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated_count == 1
-    secrets_vault.sync_user(config, "alice", force=True, deliver=False)
-    assert secrets_vault.vault_status(config, "alice", parse=False).generated_count == 1
+    assert credential_read.parse_vault(path.read_bytes(), "test-passphrase").generated_count == 1
 
 
 def test_multi_user_vault_create_requires_opt_in(tmp_path, monkeypatch, sock):

@@ -1,11 +1,12 @@
 """Downloads require a fresh code and announce every successful export."""
+from istota.credentials import kdbx_import as credential_read
 import base64
 import io
 import json
 
 from pykeepass import PyKeePass
 from istota import db
-from istota.credentials import store, vault
+from istota.credentials import store, names as vault
 from tests.test_kdbx_export import cheap, keyfile, PASSWORD  # noqa: F401
 from tests.test_web_credentials_local import app, client, config, signed_client, ORIGIN  # noqa: F401
 from tests.test_web_credentials_history import mail, step_up  # noqa: F401
@@ -82,7 +83,7 @@ async def test_invalid_unicode_keyfile_is_safe(signed_client, mail, cheap):
 
 async def test_library_missing_with_keyfile_is_unavailable(signed_client, mail, cheap, monkeypatch):
     def missing(value):
-        raise vault.VaultLibraryMissing("missing")
+        raise credential_read.VaultLibraryMissing("missing")
     monkeypatch.setattr(cheap, "keyfile_refusal", missing)
     response = await signed_client.post(BASE, json={"keyfile": "fixture"}, headers=ORIGIN)
     assert response.status_code == 503

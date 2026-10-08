@@ -1,9 +1,10 @@
+from istota.credentials import kdbx_import as credential_read
 import json
 
 import pytest
 
 from istota import db
-from istota.credentials import store, vault
+from istota.credentials import store, names as vault
 from tests.test_kdbx_import import PASSPHRASE, kdbx
 from tests.test_web_credentials_local import app, client, config, signed_client  # noqa: F401
 
@@ -48,7 +49,7 @@ async def test_auth_origin_isolation_and_bounds(signed_client, config, monkeypat
     r = await signed_client.post(BASE + suffix, files=upload(data), data=fields, headers=ORIGIN)
     assert r.status_code == 403
     monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a: None)
-    r = await signed_client.post(BASE + suffix, files=upload(b"x" * (vault.VAULT_READ_CAP_BYTES + 1)),
+    r = await signed_client.post(BASE + suffix, files=upload(b"x" * (credential_read.VAULT_READ_CAP_BYTES + 1)),
                                  data=fields, headers=ORIGIN)
     assert r.status_code == 413
     signed_client.cookies.clear()

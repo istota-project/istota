@@ -1,4 +1,5 @@
 """Dated credential backups encrypted to a user's age public key."""
+from istota.credentials import kdbx_import as credential_read
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, timezone
 import importlib.util
@@ -12,7 +13,7 @@ import stat
 import tarfile
 
 from istota import db
-from istota.credentials import audit, kdbx_export, vault
+from istota.credentials import audit, kdbx_export
 from istota.notifications.resolvers import task_alert
 from istota.notifications.store import resolve_notification
 from istota.skills._loader import open_overlay_dir
@@ -42,7 +43,7 @@ def parse_recipient(text: str) -> str:
         from pyrage import RecipientError
         from pyrage.x25519 import Recipient
     except ImportError:
-        raise vault.VaultLibraryMissing("Install the vault extra") from None
+        raise credential_read.VaultLibraryMissing("Install the vault extra") from None
     try:
         return str(Recipient.from_str(text.strip()))
     except (RecipientError, ValueError, TypeError, AttributeError):
@@ -184,7 +185,7 @@ def run_backup(config, user_id, *, today: date | None = None) -> BackupResult:
                               "export_empty" if str(exc) == "export_empty" else "export_refused")
     except OSError:
         result = BackupResult(user_id, "error", "destination_unavailable")
-    except (ImportError, vault.VaultLibraryMissing):
+    except (ImportError, credential_read.VaultLibraryMissing):
         result = BackupResult(user_id, "error", "library_missing")
     except Exception:
         result = BackupResult(user_id, "error", "export_failed")

@@ -10,7 +10,6 @@ from istota.config import Config, EmailConfig, UserConfig
 from istota.skills.email import Email, EmailEnvelope
 from istota.skills.email import cmd_signup_inbox
 from istota.scheduler import process_one_task
-from istota.credentials.vault import VaultRead, apply_vault
 from istota.transport.email.inbound import poll_emails
 
 
@@ -358,23 +357,3 @@ def test_signup_task_delivers_only_daemon_authored_status(tmp_path):
         assert notice is not None
         assert sensitive not in notice["title"] + notice["body"]
         assert "Signup follow-up finished" in notice["title"]
-
-
-def test_vault_sweep_closes_tag_only_after_a_complete_read(tmp_path, monkeypatch):
-    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
-    path = tmp_path / "bot.db"
-    db.init_db(path)
-    with db.get_db(path) as conn:
-        _open_tag(conn, "alice", "acme")
-    partial = VaultRead(
-        digest="0" * 64, services={}, held=frozenset(), truncated="entry cap", scoped=True,
-    )
-    apply_vault(path, "alice", partial)
-    with db.get_db(path) as conn:
-        assert db.signup_tag(conn, "alice+acme") is not None
-    complete = VaultRead(
-        digest="1" * 64, services={}, held=frozenset(), truncated="", scoped=True,
-    )
-    apply_vault(path, "alice", complete)
-    with db.get_db(path) as conn:
-        assert db.signup_tag(conn, "alice+acme") is None

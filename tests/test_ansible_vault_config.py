@@ -237,14 +237,11 @@ def test_the_filter_is_registered():
     assert "istota_vault_users_toml" in _custom_filters()
 
 
-def test_the_docs_document_the_key():
-    """`istota_users` is documented by an example, not a schema.
-
-    The role defaults point at `docs/deployment/ansible.md` for the per-user
-    keys, so a key that page does not show is a key no operator finds.
-    """
+def test_the_docs_document_credential_backups():
     text = (ANSIBLE.parent.parent / "docs" / "deployment" / "ansible.md").read_text()
-    assert "vault_path:" in text
+    assert "istota_scheduler_credential_backup_interval" in text
+    assert "age public recipient" in text
+    assert "vault_path:" not in text
     assert "docs/deployment/ansible.md" in (ANSIBLE / "defaults" / "main.yml").read_text()
 
 

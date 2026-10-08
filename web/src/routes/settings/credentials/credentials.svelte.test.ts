@@ -21,9 +21,7 @@ vi.mock('$lib/api', async (original) => ({
     available: true,
   })),
   getCredentialActivity: vi.fn(async () => []),
-  getVaultStatus: vi.fn(),
 }));
-import { getVaultStatus } from '$lib/api';
 
 afterEach(cleanup);
 it('shows import and export without loading the retired shared-file card', async () => {
@@ -32,5 +30,4 @@ it('shows import and export without loading the retired shared-file card', async
   expect(screen.getByRole('heading', { name: 'Import from KeePass' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Export credentials' })).toBeTruthy();
   expect(screen.queryByTestId('vault-status')).toBeNull();
-  expect(getVaultStatus).not.toHaveBeenCalled();
 });

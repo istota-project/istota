@@ -13,19 +13,11 @@ wrote down for `doctor`'s socket-free `web.avatar_import` check to read, and
 `_session_log_sweep`, the same shape for the native-brain transcript sweep —
 what the scheduler's cleanup tick reclaimed, so `runtime.session_log_dir` can
 say whether the size ceiling rather than `retention_days` is the retention in
-force — and `_vault_sync`, what the credential-vault pass last settled for one
-user, which the web process reads to render the settings heading and to decide
-whether a vault notification is still live, neither of those being a question
-the syncing process's own in-memory state can answer from another unit — and
-`_room_backfill`, the scheduler's per-user marker that a minted SMS or
+force — and `_room_backfill`, the scheduler's per-user marker that a minted SMS or
 WhatsApp room's pre-room history has been copied in, and
 `_credential_backup`, the recipient and backup status (a task that could write
 its recipient could redirect backups to a key it holds), and
 `_credential_migration`, the one-time retirement marker and retry clock, and
-`_vault_file`, the filename that user chose out of their vault folder, which is
-reserved for the same reason `_provisioned_rooms` is: it selects which file the
-daemon decrypts with a key it holds, and the folder it names is bound
-read-write into that user's own sandbox — and
 `_operator_persona`, the operator persona sync's state (`prompts/persona.py`):
 the shipped digest it last saw and the last good copy of `{root}/PERSONA.md`,
 which every task's prompt falls back to while the mount is unreadable, so a
@@ -37,9 +29,7 @@ Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
 before it dispatches a verb, so `--shared` — which reads and writes the
 deployment-wide `shared_kv` — is covered by the same line. `_avatar_import`,
 `_session_log_sweep` and `_operator_persona` are `shared_kv` namespaces and
-would otherwise be reachable; `_vault_sync` and `_vault_file` are per-user
-ones, because a vault belongs to one user and that table's key already carries
-a user id.
+would otherwise be reachable; `_credential_backup` and `_credential_migration` are per-user namespaces.
 
 The rule is a name prefix rather than a list, so a further reserved namespace
 costs nothing here or at either enforcement point. Both of those are needed

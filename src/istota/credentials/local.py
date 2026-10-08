@@ -1,20 +1,11 @@
-"""Credentials added in Istota: the one writer of ``source="local"`` rows.
+"""User-owned credentials, created in Settings or imported from a file.
 
-A local credential has the shape a KeePassXC entry produces in the
-``vault_entries`` namespace — a value row, optional ``<name>_username`` and
-``<name>_url`` rows, one binding per row carrying ``credential: <name>`` — so a
-task cannot tell the two apart and nothing that reads the store changes. What
-differs is the binding's ``source``, which is what keeps the KeePassXC sync's
-sweep off these rows (``secrets_vault.apply_vault``).
-
-Nothing here touches a file, pykeepass or a passphrase, which is why it sits
-beside ``secrets_vault`` rather than inside it.
-
-**No value leaves this module.** Refusal messages are fixed text plus the
-credential *name*; return values carry names and the grant, never a value.
+Writes return names and grants, never secret values. Imported credentials use
+this same source and edit path.
 """
 
 from __future__ import annotations
+from istota.credentials import kdbx_import as credential_read
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +13,7 @@ from urllib.parse import urlsplit
 
 from istota import db
 from istota.credentials import store as secrets_store
-from istota.credentials import vault as secrets_vault
+from istota.credentials import names as secrets_vault
 from istota.credentials.broker import bindings as _bindings
 from istota.credentials.broker import grants as _grants
 from istota.lib.totp import TotpError, parse_user_input, to_uri
@@ -59,8 +50,8 @@ class LocalCredentialError(ValueError):
 
 def derived_names(name: str) -> tuple[str | None, str | None, str | None]:
     return (
-        secrets_vault.slug_name((name, secrets_vault._USERNAME_SEGMENT)),
-        secrets_vault.slug_name((name, secrets_vault._URL_SEGMENT)),
+        secrets_vault.slug_name((name, credential_read._USERNAME_SEGMENT)),
+        secrets_vault.slug_name((name, credential_read._URL_SEGMENT)),
         secrets_vault.slug_name((name, "totp")),
     )
 
@@ -180,7 +171,7 @@ def _foreign_field(conn, user_id: str, owner: str, field_name: str) -> bool:
         return False
     binding = _bindings.get_binding(conn, user_id, field_name)
     return (_bindings.credential_name(conn, user_id, field_name) != owner
-            or binding is None or binding["source"] != SOURCE)
+            or binding is None or _bindings.effective_source(binding["source"]) != SOURCE)
 
 
 def _begin(conn) -> None:
@@ -202,7 +193,7 @@ def is_local(conn, user_id: str, name: str) -> bool:
         "WHERE s.user_id=? AND s.service=? AND s.key=?",
         (user_id, _SERVICE, name),
     ).fetchone()
-    return row is not None and row[0] == SOURCE
+    return row is not None and _bindings.effective_source(row[0]) == SOURCE
 
 
 def stored_fields(conn, user_id: str, name: str) -> dict:
@@ -279,7 +270,7 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
             raise LocalCredentialError(
                 "name", f"{name} would clash with the existing credential {candidate}"
             )
-    for suffix in ("_" + secrets_vault._USERNAME_SEGMENT, "_" + secrets_vault._URL_SEGMENT, "_totp"):
+    for suffix in ("_" + credential_read._USERNAME_SEGMENT, "_" + credential_read._URL_SEGMENT, "_totp"):
         owner = name[: -len(suffix)] if name.endswith(suffix) else ""
         if owner and owner in taken:
             raise LocalCredentialError(
@@ -323,14 +314,13 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str | 
     because it can never read it back. An empty username or URL deletes that
     row. Every field's binding is
     rewritten from the new inputs; a host change takes effect on the next
-    request, as a KeePassXC edit does.
+    request.
     """
     _begin(conn)
     if not isinstance(name, str) or not is_local(conn, user_id, name):
         raise LocalCredentialError(
             "name",
-            "no credential added in Istota has this name; one from KeePassXC "
-            "or the deployment is edited there",
+            "no editable credential has this name",
         )
     _, username_name, url_name, otp_name = _check_name(name)
     if value is not None:

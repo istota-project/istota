@@ -65,17 +65,16 @@ async def test_credentials_require_login(client):  # noqa: F811 -- imported fixt
 
 
 async def test_vault_bare_domain_sync_delete_and_resync(signed_client, config, tmp_path):  # noqa: F811
-    from istota.credentials import vault as secrets_vault
     from istota.credentials.broker.bindings import get_binding
     from istota.credentials.broker.grants import get_grant
-    from tests.test_secrets_vault import _new_db, _read
+    from tests.test_kdbx_import_read import _new_db, _read
 
     kp, path = _new_db(tmp_path)
     kp.add_entry(kp.root_group, "portal", "alice", "fixture-password", url="portal.example.com")
     kp.save()
     read, _ = _read(path)
-    secrets_vault.apply_vault(config.db_path, "alice", read)
-    secrets_vault.apply_vault(config.db_path, "bob", read)
+    _import_file(config.db_path, "alice", path)
+    _import_file(config.db_path, "bob", path)
     base = "/istota/api/settings/credentials"
     origin = {"Origin": "https://example.com"}
     entries = (await signed_client.get(base)).json()["credentials"]
@@ -95,7 +94,7 @@ async def test_vault_bare_domain_sync_delete_and_resync(signed_client, config, t
     entries = (await signed_client.get(base)).json()["credentials"]
     assert {entry["name"] for entry in entries} == set()
 
-    secrets_vault.apply_vault(config.db_path, "alice", read)
+    _import_file(config.db_path, "alice", path)
     entries = (await signed_client.get(base)).json()["credentials"]
     restored = next(entry for entry in entries if entry["name"] == "portal")
     assert restored["hosts"] == ["portal.example.com"]
@@ -166,15 +165,14 @@ async def test_deleted_room_can_be_removed_from_grant(signed_client, config):  #
 
 
 async def test_entry_fields_share_grant_and_http_override(signed_client, config, tmp_path):  # noqa: F811
-    from istota.credentials import vault as secrets_vault
     from istota.credentials.broker import grants
-    from tests.test_secrets_vault import _new_db, _read
+    from tests.test_kdbx_import_read import _new_db, _read
     kp, path = _new_db(tmp_path)
     kp.add_entry(kp.root_group, "portal", "alice", "fixture-password",
                  url="http://192.0.2.10:8080/login")
     kp.save()
     read, _ = _read(path)
-    secrets_vault.apply_vault(config.db_path, "alice", read)
+    _import_file(config.db_path, "alice", path)
     base = "/istota/api/settings/credentials"
     origin = {"Origin": "https://example.com"}
     entries = (await signed_client.get(base)).json()["credentials"]
@@ -206,50 +204,23 @@ async def test_entry_fields_share_grant_and_http_override(signed_client, config,
 
 
 async def test_grouping_uses_entry_identity_with_custom_fields_and_no_password(signed_client, config, tmp_path):  # noqa: F811
-    from istota.credentials import vault as secrets_vault
-    from tests.test_secrets_vault import _new_db, _read
+    from tests.test_kdbx_import_read import _new_db, _read
     kp, path = _new_db(tmp_path)
     entry = kp.add_entry(kp.root_group, "service", "alice", "", url="https://service.example")
     entry.set_custom_property("api_token", "fixture-token")
     kp.add_entry(kp.root_group, "other_username", "", "fixture-other", url="https://other.example")
     kp.save()
     read, _ = _read(path)
-    secrets_vault.apply_vault(config.db_path, "alice", read)
+    _import_file(config.db_path, "alice", path)
     base = "/istota/api/settings/credentials"
     entries = (await signed_client.get(base)).json()["credentials"]
-    assert {entry["name"] for entry in entries} == {"service", "other_username"}
+    assert {entry["name"] for entry in entries} == {"portal", "service", "other_username"}
     response = await signed_client.put(base + "/service", json={}, headers={"Origin": "https://example.com"})
     assert response.status_code == 200
     response = await signed_client.delete(base + "/service/value", headers={"Origin": "https://example.com"})
     assert response.json()["deleted"] is True
     assert not secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "service_api_token")
     assert secrets_store.secret_exists(config.db_path, "alice", "vault_entries", "other_username")
-
-
-async def test_vault_status_counts_entries_instead_of_fields(signed_client, config, tmp_path):  # noqa: F811
-    from istota.credentials import vault as secrets_vault
-    from istota.config import UserConfig
-    from tests.test_secrets_vault import _new_db, _read
-
-    config.users["alice"] = UserConfig(vault_path="config/vault.kdbx")
-    secrets_store.set_secret(config.db_path, "alice", "vault", "passphrase", "fixture-passphrase")
-    kp, path = _new_db(tmp_path)
-    kp.add_entry(kp.root_group, "portal", "alice", "fixture-password", url="https://portal.example")
-    entry = kp.add_entry(kp.root_group, "service", "alice", "", url="https://service.example")
-    entry.set_custom_property("api_token", "fixture-token")
-    kp.add_entry(kp.root_group, "other_username", "", "fixture-other")
-    kp.save()
-    read, _ = _read(path)
-    secrets_vault.apply_vault(config.db_path, "alice", read)
-    secrets_store.set_secret(config.db_path, "bob", "vault_entries", "private", "fixture-private")
-
-    response = await signed_client.get("/istota/api/settings/vault")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["entry_count"] == 3
-    assert body["entry_names"] == ["other_username", "portal", "service"]
-    assert body["entry_names_truncated"] is False
-    assert "fixture-password" not in response.text
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -259,7 +230,7 @@ async def test_list_reports_broker_and_add_availability(signed_client, config, e
     assert body["broker_enabled"] is enabled
     assert body["can_add"] is True
     assert body["add_blocked_reason"] == ""
-    assert body["credentials"][0]["source"] == "vault"
+    assert body["credentials"][0]["source"] == "local"
 
 
 async def test_grant_save_refuses_through_the_shared_validator(signed_client):
@@ -273,15 +244,12 @@ async def test_grant_save_refuses_through_the_shared_validator(signed_client):
     assert response.json()["detail"] == "room is not available to this user"
 
 
-async def test_vault_payload_carries_name_conflicts(signed_client, config):  # noqa: F811
-    from istota.credentials import vault as secrets_vault
-    from istota.config import UserConfig
-
-    config.users["alice"] = UserConfig(vault_path="config/vault.kdbx")
-    secrets_store.set_secret(config.db_path, "alice", "vault", "passphrase", "fixture-passphrase")
-    response = await signed_client.get("/istota/api/settings/vault")
-    assert response.json()["name_conflicts"] == 0
-    secrets_vault._record_sync_state(config.db_path, "alice", secrets_vault.OUTCOME_OK, "",
-                                     name_conflicts=2)
-    response = await signed_client.get("/istota/api/settings/vault")
-    assert response.json()["name_conflicts"] == 2
+def _import_file(database, user, path):
+    from istota.credentials import kdbx_import
+    from tests.test_kdbx_import_read import PASSPHRASE
+    data = path.read_bytes()
+    preview = kdbx_import.preview(database, user, data, PASSPHRASE)
+    selected = [i.name for i in preview.items if i.status in ("new", "changed")]
+    if selected:
+        kdbx_import.apply(database, user, data, PASSPHRASE, selected=selected,
+                          expected_digest=preview.digest, actor="import")

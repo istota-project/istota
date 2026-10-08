@@ -1,10 +1,12 @@
 """The last automatic import must never delete credentials or alter the file."""
+from istota.credentials import kdbx_import as credential_read
+from istota.credentials import vault_retire as credential_migration
 import hashlib
 import json
 import pytest
 from istota import db
 from istota.config import Config, UserConfig, load_config
-from istota.credentials import store, vault
+from istota.credentials import store
 from istota.credentials.broker import bindings
 from tests.test_kdbx_import import kdbx, seed, PASSPHRASE
 
@@ -58,14 +60,14 @@ def test_last_import_keeps_missing_rows_and_local_values(configured, caplog):
     assert not vault_retire.pending_users(config)
 
 
-@pytest.mark.parametrize("failure", [vault.VaultLocked, vault.VaultCorrupt,
-    vault.VaultPassphraseMissing, vault.VaultKeyUnusable, vault.VaultPathRefused, vault.VaultLibraryMissing])
+@pytest.mark.parametrize("failure", [credential_read.VaultLocked, credential_read.VaultCorrupt,
+    credential_migration.VaultPassphraseMissing, credential_migration.VaultKeyUnusable, credential_migration.VaultPathRefused, credential_read.VaultLibraryMissing])
 def test_permanent_failures_retire_without_exception_text(configured, monkeypatch, failure, caplog):
     from istota.credentials import vault_retire
     config, _ = configured
     def fail(*args, **kwargs):
         raise failure(PASSPHRASE)
-    monkeypatch.setattr(vault, "read_vault_bytes", fail)
+    monkeypatch.setattr(credential_migration, "read_vault_bytes", fail)
     result = vault_retire.retire_user(config, "alice", now=1000)
     assert result.outcome == "skipped"
     assert result.reason == failure.__name__
@@ -75,13 +77,13 @@ def test_permanent_failures_retire_without_exception_text(configured, monkeypatc
     assert PASSPHRASE not in caplog.text
 
 
-@pytest.mark.parametrize("failure", [vault.VaultMissing, vault.VaultUnreadable, OSError])
+@pytest.mark.parametrize("failure", [credential_migration.VaultMissing, credential_migration.VaultUnreadable, OSError])
 def test_transient_failures_retry_for_seven_days(configured, monkeypatch, failure):
     from istota.credentials import vault_retire
     config, _ = configured
     def fail(*args, **kwargs):
         raise failure("unavailable")
-    monkeypatch.setattr(vault, "read_vault_bytes", fail)
+    monkeypatch.setattr(credential_migration, "read_vault_bytes", fail)
     assert vault_retire.retire_user(config, "alice", now=1000).outcome == "retry"
     assert vault_retire.retire_user(config, "alice", now=1000 + 7*86400 - 1).outcome == "retry"
     assert store.secret_exists(config.db_path, "alice", "vault", "passphrase")

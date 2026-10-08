@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import h11
 import pytest
-from pykeepass import PyKeePass
 
 from istota import db
 from istota.config import Config
@@ -17,7 +16,7 @@ from istota.sandbox import credential_shim
 from istota.sandbox.skill_proxy import SkillProxy
 from tests import test_skill_proxy_vault_create as _vault_create
 from tests import test_vault_credential_fetch as vault_fetch
-from tests.test_generated_credentials import PASSPHRASE, _config, _file_entries, _state, _sync
+from tests.test_generated_credentials import _config
 from tests.test_skill_proxy_otp import ask
 from tests.test_skill_proxy_vault_create import _request
 
@@ -253,29 +252,6 @@ def test_a_generated_credential_with_no_site_has_no_target(tmp_path, monkeypatch
         _create(sock, url="")
         reply = ask(server, sock, {"type": "vault_recovery_target", "name": "generated_acme"}, True)
     assert reply["reason"] == "credential_unbound"
-
-
-def test_the_mirror_carries_the_codes_as_a_protected_field(tmp_path, monkeypatch, sock):
-    config, path = _config(tmp_path, monkeypatch, with_vault=True)
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=2):
-        _create(sock)
-        _request(sock, {"type": "vault_recovery_set", "name": "generated_acme", "text": CODES})
-    assert _file_entries(path)["generated_acme"]["recovery"] == CODES
-    entry = PyKeePass(str(path), password=PASSPHRASE).find_entries(title="acme", first=True)
-    assert entry.is_custom_property_protected(generated.RECOVERY_FIELD)
-    assert _state(config, "generated_acme") == {"mirror": True, "state": "mirrored", "divergence": []}
-
-
-def test_a_copy_missing_the_codes_is_divergence_and_nothing_is_deleted(tmp_path, monkeypatch, sock):
-    config, path = _config(tmp_path, monkeypatch, with_vault=True)
-    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=2):
-        _create(sock)
-        before_codes = path.read_bytes()
-        _request(sock, {"type": "vault_recovery_set", "name": "generated_acme", "text": CODES})
-    path.write_bytes(before_codes)
-    _sync(config)
-    assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme_recovery") == CODES
-    assert _state(config, "generated_acme")["divergence"] == ["missing_recovery"]
 
 
 def test_retire_removes_the_codes(tmp_path, monkeypatch, sock):

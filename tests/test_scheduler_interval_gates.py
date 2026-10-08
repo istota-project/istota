@@ -395,7 +395,7 @@ class TestTheEnablingConditions:
         path = tmp_path / "test.db"
         db.init_db(path)
         config = Config(db_path=path, users={"alice": UserConfig(vault_path="v.kdbx")},
-                        scheduler=SchedulerConfig(vault_sync_interval=0))
+                        scheduler=SchedulerConfig())
         gate = _by_name(config)["vault-retire"]
         assert "vault-sync" not in _by_name(config)
         assert gate.enabled(config)

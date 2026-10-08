@@ -93,7 +93,7 @@ def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
         return {}
     try:
         from istota.credentials import store as secrets_store
-        from istota.credentials.vault import VAULT_ENTRY_SERVICE, vault_isolation_refusal
+        from istota.credentials.names import VAULT_ENTRY_SERVICE, vault_isolation_refusal
 
         if vault_isolation_refusal(config, user_id):
             return {}

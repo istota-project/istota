@@ -575,7 +575,7 @@ class TestTheReturnedPathIsDisplayOnly:
     #: those files get their containment from `storage.resolve_user_config_dir`
     #: instead. Reusing the reader is the point; the exemption is from *this*
     #: rule, not from containment.
-    #: `credentials/vault.py` was a third entry for one stage of the KDBX vault
+    #: `credentials/vault_retire.py` was a third entry for one stage of the KDBX vault
     #: spec, written as provisional, and it is **settled by removal** rather
     #: than by a decision to keep it. `[users.<id>] vault_path` has two forms:
     #: the absolute one is refused if it resolves under any tree the sandbox

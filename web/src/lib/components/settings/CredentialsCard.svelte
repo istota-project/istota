@@ -7,9 +7,6 @@
     revokeCredentialGrant,
     deleteCredential,
     grantExistingCredentials,
-    remirrorGenerated,
-    setGeneratedDefaultMirror,
-    setGeneratedMirror,
     showRecoveryCodes,
     getDeletedCredentials,
     type CredentialHistory,
@@ -77,21 +74,9 @@
 
   const SOURCE_LABEL: Record<string, string> = {
     local: 'Istota',
-    vault: 'KeePassXC',
     config: 'Deployment',
     generated: 'Generated',
   };
-
-  /** What is wrong with a generated credential's KeePass copy, or '' when nothing is. */
-  function mirrorProblem(c: CredentialSummary): string {
-    const m = c.generated;
-    if (!m || !m.mirror) return '';
-    if (m.state === 'pending') return 'KeePass copy behind';
-    if (m.state !== 'diverged') return '';
-    if (m.divergence.includes('missing')) return 'KeePass copy missing';
-    if (m.divergence.includes('missing_otp')) return 'KeePass copy missing 2FA';
-    return 'KeePass copy changed';
-  }
 
   function report(e: unknown) {
     if (e instanceof AuthError) onSignedOut();
@@ -167,7 +152,6 @@
   /** What to do about a missing site, which depends on where the credential is edited. */
   function noSiteLine(c: CredentialSummary): string {
     if (c.source === 'local') return 'No site. Edit it to add one.';
-    if (c.source === 'vault') return 'No site. Add a URL to this entry in KeePassXC.';
     if (c.source === 'generated') return 'No site';
     return 'No site';
   }
@@ -202,21 +186,7 @@
         disabled: busy,
         onSelect: () => openReveal(c.name),
       });
-    if (c.source === 'generated' && c.generated && data?.vault_enabled) {
-      const on = c.generated.mirror;
-      items.push({
-        label: on ? 'Stop KeePass copy' : 'Keep a KeePass copy',
-        disabled: busy,
-        onSelect: () => mutate(() => setGeneratedMirror(c.name, !on)),
-      });
-      if (on && c.generated.state !== 'mirrored')
-        items.push({
-          label: 'Write KeePass copy now',
-          disabled: busy,
-          onSelect: () => mutate(() => remirrorGenerated(c.name)),
-        });
-    }
-    if (c.source === 'local' || c.source === 'vault' || c.source === 'generated')
+    if (c.source === 'local' || c.source === 'generated')
       items.push({
         label:
           c.source === 'local'
@@ -270,19 +240,6 @@
         Tasks on this deployment run without a sandbox, so credential values are not contained.
       </p>
     {/if}
-    {#if data.vault_enabled}
-      <p class="caption mirror-default">
-        <Chip
-          checked={data.generated_default_mirror ?? true}
-          disabled={busy}
-          onclick={() =>
-            mutate(() => setGeneratedDefaultMirror(!(data?.generated_default_mirror ?? true)))}
-        >
-          Copy new generated credentials to KeePass
-        </Chip>
-        Istota keeps generated credentials itself; the copy is for you to see and back up.
-      </p>
-    {/if}
     {#if data.credentials.length === 0}
       <p class="empty">No credentials yet.</p>
     {:else}
@@ -313,9 +270,6 @@
               {/if}
               {#if credential.revealable}<Badge size="sm" variant="info">Readable by tasks</Badge
                 >{/if}
-              {#if mirrorProblem(credential)}
-                <Badge size="sm" variant="warn">{mirrorProblem(credential)}</Badge>
-              {/if}
             </div>
             <KebabMenu items={menu(credential)} ariaLabel="Actions for {credential.name}" />
           </li>
@@ -418,8 +372,8 @@
   message={confirmDelete?.source === 'local'
     ? `Delete ${confirmDelete?.name}? Tasks lose it now. You can restore it from history until its saved versions expire.`
     : confirmDelete?.source === 'generated'
-      ? `Retire ${confirmDelete?.name}? Tasks lose it now, its KeePass copy is removed. You can restore it from history until its saved versions expire. If the account still needs this password or its two-factor code, change them on the site first.`
-      : `Remove the stored copy of ${confirmDelete?.name}? Tasks lose it now. If the entry is still in your KeePassXC file, the next sync brings it back without its access settings.`}
+      ? `Retire ${confirmDelete?.name}? Tasks lose it now, exported copies stay as they are. You can restore it from history until its saved versions expire. If the account still needs this password or its two-factor code, change them on the site first.`
+      : `Remove the stored copy of ${confirmDelete?.name}? Tasks lose it now. You can restore it from history until its saved versions expire.`}
   confirmLabel={confirmDelete?.source === 'local'
     ? 'Delete'
     : confirmDelete?.source === 'generated'
@@ -524,11 +478,6 @@
     --badge-fg: var(--accent-amber);
   }
 
-  .cred-source-vault {
-    --badge-bg: var(--status-success-bg);
-    --badge-fg: var(--status-success-fg);
-  }
-
   .cred-source-config {
     --badge-bg: var(--status-partial-bg);
     --badge-fg: var(--status-partial-fg);
@@ -558,14 +507,6 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     user-select: all;
-  }
-
-  .mirror-default {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
-    margin: 0 0 var(--space-2);
   }
 
   /* On a phone the name and the menu share the first line and the rest wraps

@@ -4,6 +4,7 @@ Runs skill CLI commands with credentials injected server-side, so the
 Claude subprocess never sees secret env vars. The protocol is one JSON
 request/response per connection, newline-terminated.
 """
+from istota.credentials import kdbx_import as credential_read
 
 import json
 import logging
@@ -18,7 +19,7 @@ from time import sleep, time
 
 from istota import skill_client
 from istota.sandbox import peer_process
-from istota.credentials.vault import label_for_display
+from istota.credentials.names import label_for_display
 from istota.sandbox.unix_server import UnixSocketServer
 
 logger = logging.getLogger("istota.sandbox.skill_proxy")
@@ -917,7 +918,7 @@ class SkillProxy:
         from istota import db
         from istota.mail import support as email_support
         from istota.credentials import generated
-        from istota.credentials import vault as secrets_vault
+        from istota.credentials import names as secrets_vault
         from istota.notifications.resolvers import task_alert
         from istota.notifications.store import deliver_pending
 
@@ -945,7 +946,7 @@ class SkillProxy:
             return
         names = secrets_vault.generated_entry_names(slug)
         if (secrets_vault.slug_name((slug,)) != slug or any(name is None for name in names)
-                or secrets_vault.slug_name((secrets_vault.VAULT_WRITE_GROUP, slug, "totp")) is None):
+                or secrets_vault.slug_name((credential_read.VAULT_WRITE_GROUP, slug, "totp")) is None):
             refuse("vault_write_refused",
                    "The slug must be lowercase letters, digits and underscores, and short enough "
                    "for its field names")
@@ -1074,7 +1075,7 @@ class SkillProxy:
         """Attach a factor once to a generated credential, in the table (ISSUE-686)."""
         from istota import db
         from istota.credentials import generated
-        from istota.credentials import vault
+        from istota.credentials import names as vault
         from istota.lib import totp
         from istota.notifications.resolvers import task_alert
         from istota.notifications.store import deliver_pending
@@ -1154,7 +1155,7 @@ class SkillProxy:
         """
         from istota import db
         from istota.credentials import generated
-        from istota.credentials import vault
+        from istota.credentials import names as vault
         from istota.credentials.broker.bindings import get_binding
 
         def refuse(reason, message):
@@ -1194,7 +1195,7 @@ class SkillProxy:
         """
         from istota import db
         from istota.credentials import generated
-        from istota.credentials import vault
+        from istota.credentials import names as vault
         from istota.notifications.resolvers import task_alert
         from istota.notifications.store import deliver_pending
 

@@ -1371,146 +1371,6 @@ export async function getSettingsServices(): Promise<ServicesResponse> {
   return apiFetch<ServicesResponse>('/settings/services');
 }
 
-// --- Credential vault ---
-//
-// There is one place a vault file goes — a `vault/` folder inside the user's
-// own bot directory — and the only thing this surface writes is **a filename
-// out of that folder**. No path is typed and none is stored: the card offers
-// the `.kdbx` files the server found, one of them is selected on sight, and
-// what a user with several picks is a name.
-//
-// Two rules the client has to respect rather than re-derive:
-//
-// **A filename is not a path.** It is validated by being one of the entries
-// `files` just carried, which is set membership rather than a parse — so there
-// is nothing to traverse, nothing to make absolute and nowhere else to point.
-// A name the server does not list is a 400.
-//
-// **`editable: false` is about precedence, not permission.** A vault whose file
-// is set in the deployment's configuration is not selectable from here, because
-// a stored choice that line outranks is a control that does nothing.
-//
-// The passphrase is write-only. `passphrase_present` is a boolean and there is
-// no route that reads the value back, so a generated one is shown exactly once,
-// in the response that mints it.
-
-export interface VaultStatus {
-  /** False for every user who has not been given a vault, which is the default.
-   *  The settings heading renders nothing at all in that case. */
-  configured: boolean;
-  path?: string;
-  passphrase_present?: boolean;
-  /** What the request itself found. Empty unless the configured path is one the
-   *  daemon may not open — the endpoint does not unlock the file. */
-  outcome?: string;
-  reason?: string;
-  refusal?: string;
-  /** When the vault was last successfully applied. `last_sync_at` moves on a
-   *  failed cycle too, so this is the one to render. ISO-8601 UTC off the wire:
-   *  render it through a local-time conversion, not raw. */
-  last_success_at?: string;
-  last_sync_at?: string;
-  last_outcome?: string;
-  last_reason?: string;
-  /** False here always — the endpoint does not unlock the file, so the group
-   *  listing a parse would produce is absent because nothing looked. */
-  parsed?: boolean;
-  /** The rendered verdict, empty when the vault is working. Computed by the
-   *  server so the precedence between a live finding and a recorded one is
-   *  stated once, in the language that owns the outcome constants. */
-  problem?: string;
-  /** The last sync read the whole file, because it has no top-level `istota`
-   *  group. Off the durable sync record rather than off this request, which
-   *  never opens the file — so it is absent until a cycle has run. */
-  unscoped?: boolean;
-  /** How many shared credentials istota holds for this user, right now, from
-   *  the `secrets` table rather than from the file. */
-  entry_count?: number;
-  /** Credentials in the vault's generated/ group. */
-  generated_count?: number;
-  /** File entries the last sync that read the file skipped because a credential
-   *  added in Istota already has the name. Counts entries, not field names. */
-  name_conflicts?: number;
-  /** Their names, sorted, capped by the server. Names only — no value reaches
-   *  this payload — and this user's own, which is why the card may show them
-   *  where `doctor` reports counts to every admin. */
-  entry_names?: string[];
-  /** The list above was cut. `entry_count` is uncapped, so a cut list still
-   *  adds up rather than answering "did mine arrive" wrongly. */
-  entry_names_truncated?: boolean;
-
-  // --- the form's own half, present whatever `configured` says --------------
-  //
-  // Present even for a user with no vault, because that user is the one the
-  // form exists for.
-
-  /** Whether this surface may store the choice. False when a `vault_path` in
-   *  the deployment's configuration outranks it — see the note above:
-   *  precedence, not permission. */
-  editable?: boolean;
-  /** The vault folder, for the card's instruction. Where the user puts the
-   *  file, in the words of their own file tree. */
-  vault_dir?: string;
-  /** The `.kdbx` files in that folder, sorted. The dropdown's options, and the
-   *  whole of what a save may name. */
-  files?: string[];
-  /** Which of them resolution settled on — the stored choice, or the only file
-   *  there. Empty when the folder is empty, or holds several and none is
-   *  chosen. */
-  vault_file?: string;
-}
-
-export interface VaultPassphraseResponse {
-  ok: boolean;
-  /** The minted value, on the generate path only and exactly once — nothing
-   *  reads it back. Empty for a typed passphrase, which the client already has. */
-  generated: string;
-}
-
-export async function getVaultStatus(): Promise<VaultStatus> {
-  return apiFetch<VaultStatus>('/settings/vault');
-}
-
-/**
- * Choose which file in the vault folder this user's vault is.
- *
- * `name` must be one of the entries `VaultStatus.files` carried, or the server
- * answers 400 — the listing is taken again at request time, so a file deleted
- * between the page load and the save is refused rather than stored. `''`
- * clears the choice and returns the user to "the only file, or a question".
- */
-export async function selectVaultFile(name: string): Promise<void> {
-  await apiFetch('/settings/vault', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ vault_file: name }),
-  });
-}
-
-/**
- * Store the vault passphrase.
- *
- * Exactly one of the two shapes. `generate` is the path meant to be taken:
- * the KDBX sits in a tree bound read-write into that user's own sandbox, so a
- * task that reads its ciphertext is defeated by 256 random bits and is not
- * defeated by a memorable phrase. A typed value is accepted at the same floor
- * the CLI applies.
- *
- * `replace` is the CLI's `--force`, and it is generate-only for the same
- * reason: minting a second passphrase destroys the only copy of the one the
- * KDBX is encrypted under, so the server answers 409 without it. Re-storing a
- * value the user typed destroys nothing they cannot type again.
- */
-export async function setVaultPassphrase(
-  opts: { generate: true; replace?: boolean } | { passphrase: string },
-): Promise<VaultPassphraseResponse> {
-  return apiFetch<VaultPassphraseResponse>('/settings/vault/passphrase', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(opts),
-  });
-}
-
 // --- Google Workspace (ISSUE-240) ---
 //
 // The instance scope list is a ceiling, not a request: it names what the
@@ -4804,18 +4664,8 @@ export interface CredentialGrant {
   allow_http?: boolean;
   policy_revision?: number;
 }
-/** `local` was added in Istota, `vault` came from the KeePassXC sync, `config`
- *  from the deployment, `generated` was created by a task's `istota-credential
- *  new`. Only a `local` credential is edited on the page. */
-export type CredentialSource = 'local' | 'vault' | 'config' | 'generated';
-/** A generated credential's KeePass copy. `pending` is a write that has not
- *  landed yet and is retried each sync; `diverged` is a copy that was written
- *  and later changed or lost in the file, which a re-mirror fixes. */
-export interface GeneratedMirror {
-  mirror: boolean;
-  state: 'off' | 'pending' | 'mirrored' | 'diverged';
-  divergence: ('missing' | 'missing_otp' | 'changed')[];
-}
+/** Credentials belong to the user, the deployment, or a generated account. */
+export type CredentialSource = 'local' | 'config' | 'generated';
 export interface CredentialSummary {
   name: string;
   source: CredentialSource;
@@ -4833,8 +4683,6 @@ export interface CredentialSummary {
   otp_set?: boolean;
   /** Whether any field in this credential is a two-factor seed. */
   otp?: boolean;
-  /** Generated credentials only. */
-  generated?: GeneratedMirror;
   /** Generated credentials only: whether recovery codes are stored. The codes
    *  are fetched on demand with `showRecoveryCodes`, never listed. */
   recovery?: boolean;
@@ -4849,10 +4697,6 @@ export interface CredentialGrantsSettings {
   can_add: boolean;
   add_blocked_reason: string;
   broker_enabled: boolean;
-  /** Whether the user has a KeePass file a generated credential can be copied to. */
-  vault_enabled?: boolean;
-  /** Whether a new generated credential starts with its KeePass copy on. */
-  generated_default_mirror?: boolean;
 }
 export interface CredentialAccess {
   scope_mode: 'all' | 'rooms';
@@ -4984,23 +4828,6 @@ export function deleteCredential(name: string): Promise<{ ok: boolean; deleted: 
 export function grantExistingCredentials(): Promise<{ ok: boolean; count: number }> {
   return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });
 }
-export function setGeneratedMirror(
-  name: string,
-  mirror: boolean,
-): Promise<{ ok: boolean; state: GeneratedMirror['state'] }> {
-  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/mirror`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mirror }),
-  });
-}
-export function remirrorGenerated(
-  name: string,
-): Promise<{ ok: boolean; state: GeneratedMirror['state'] }> {
-  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/remirror`, {
-    method: 'POST',
-  });
-}
 export type StepUpAction =
   'export' | 'recovery_reveal' | 'backup_recipient' | 'history_restore' | 'history_purge';
 export interface StepUpProof {
@@ -5053,13 +4880,6 @@ export function purgeCredentialHistory(
   step_up: StepUpProof,
 ): Promise<{ purged: number }> {
   return credentialWrite(`/${encodeURIComponent(name)}/history`, 'DELETE', { step_up });
-}
-export function setGeneratedDefaultMirror(mirror: boolean): Promise<{ ok: boolean }> {
-  return apiFetch('/settings/credentials/generated/default', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mirror }),
-  });
 }
 
 export interface WalletBilling {

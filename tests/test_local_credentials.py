@@ -18,7 +18,7 @@ from istota.credentials import local as local_credentials
 from istota.credentials import store as secrets_store
 from istota.credentials.broker import bindings, grants
 from istota.credentials.local import LocalCredential, LocalCredentialError
-from istota.credentials.vault import VAULT_ENTRY_SERVICE, VAULT_MAX_VALUE_BYTES
+from istota.credentials.names import VAULT_ENTRY_SERVICE, VAULT_MAX_VALUE_BYTES
 
 VALUE = "lc-fixture-value-not-real"
 NEW_VALUE = "lc-fixture-value-rotated"
@@ -151,7 +151,7 @@ class TestCreate:
     def test_a_name_already_used_by_any_source_is_refused(self, db_path):
         secrets_store.set_secret(
             db_path, "alice", VAULT_ENTRY_SERVICE, "api_key", "from-the-file",
-            binding=bindings.parse_binding("api.example.com", {}, []),
+            binding=bindings.parse_binding("api.example.com", {}, [], source="vault"),
         )
         with pytest.raises(LocalCredentialError, match="already exists") as exc:
             _create(db_path, LocalCredential(name="api_key", value=VALUE))
@@ -283,15 +283,16 @@ class TestUpdate:
         with db.get_db(db_path) as conn:
             assert bindings.credential_name(conn, "alice", "api_key_username") == "api_key"
 
-    def test_a_vault_sourced_name_is_refused(self, db_path):
+    def test_a_legacy_vault_sourced_name_is_editable(self, db_path):
         secrets_store.set_secret(
             db_path, "alice", VAULT_ENTRY_SERVICE, "file_key", "from-the-file",
-            binding=bindings.parse_binding("api.example.com", {}, []),
+            binding=bindings.parse_binding("api.example.com", {}, [], source="vault"),
         )
-        with pytest.raises(LocalCredentialError, match="KeePassXC") as exc:
-            _update(db_path, "file_key", value=NEW_VALUE)
-        assert exc.value.field == "name"
-        assert _entry(db_path, "file_key") == "from-the-file"
+        _update(db_path, "file_key", value=NEW_VALUE)
+        assert _entry(db_path, "file_key") == NEW_VALUE
+        with db.get_db(db_path) as conn:
+            assert bindings.get_binding(conn, "alice", "file_key")["source"] == "local"
+
 
     def test_an_unknown_name_is_refused(self, db_path):
         with pytest.raises(LocalCredentialError) as exc:
@@ -339,7 +340,7 @@ class TestUpdate:
         assert _entry(db_path, "foo_url") == "from-the-file"
         with db.get_db(db_path) as conn:
             assert bindings.credential_name(conn, "alice", "foo_url") == "foo_url"
-            assert bindings.get_binding(conn, "alice", "foo_url")["source"] == "vault"
+            assert bindings.get_binding(conn, "alice", "foo_url")["source"] == "local"
 
     def test_update_refuses_a_username_row_owned_by_another_credential(self, db_path):
         _create(db_path, LocalCredential(name="foo", value=VALUE))
@@ -377,14 +378,13 @@ class TestDelete:
                 "SELECT COUNT(*) FROM istota_kv WHERE namespace='_credential_fields'"
             ).fetchone()[0] == 0
 
-    def test_delete_refuses_a_vault_sourced_name(self, db_path):
+    def test_delete_accepts_a_legacy_vault_sourced_name(self, db_path):
         secrets_store.set_secret(
             db_path, "alice", VAULT_ENTRY_SERVICE, "file_key", "from-the-file",
-            binding=bindings.parse_binding("api.example.com", {}, []),
+            binding=bindings.parse_binding("api.example.com", {}, [], source="vault"),
         )
-        with pytest.raises(LocalCredentialError):
-            local_credentials.delete(db_path, "alice", "file_key")
-        assert _entry(db_path, "file_key") == "from-the-file"
+        assert local_credentials.delete(db_path, "alice", "file_key")
+        assert _entry(db_path, "file_key") is None
 
     def test_delete_of_a_missing_name_is_false(self, db_path):
         assert local_credentials.delete(db_path, "alice", "nothing_here") is False
@@ -405,7 +405,7 @@ class TestIsLocal:
         )
         with db.get_db(db_path) as conn:
             assert local_credentials.is_local(conn, "alice", "api_key") is True
-            assert local_credentials.is_local(conn, "alice", "file_key") is False
+            assert local_credentials.is_local(conn, "alice", "file_key") is True
             assert local_credentials.is_local(conn, "alice", "missing") is False
             assert local_credentials.is_local(conn, "bob", "api_key") is False
 

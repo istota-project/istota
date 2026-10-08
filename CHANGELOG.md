@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Istota now saves the recovery codes a site shows after two-factor enrollment on an account it created (#688). `browse interact --save-recovery` reads them from the page and stores them without the task seeing them, and no task can read them back; you can view them in Settings → Credentials after confirming, and again entering your password if you signed in with one. With a KeePass copy on, they are written to the entry as a protected field.
+- Istota now saves the recovery codes a site shows after two-factor enrollment on an account it created (#688). `browse interact --save-recovery` reads them from the page and stores them without the task seeing them, and no task can read them back; you can view them in Settings → Credentials after an emailed confirmation. Exports and age backups include them as protected fields.
 
   **Upgrade note:** Update the browser image with the daemon; an older image refuses `--save-recovery` before reading anything.
 
 - Browser tasks can fill two-factor codes from KeePass and local credentials without showing the code or seed in their output. Tasks can save a new enrollment once on a credential they created under `generated/`, and the settings list marks credentials with two-factor enabled.
 
-  **Upgrade note:** Update the browser image with the daemon. The first vault sync removes the old raw OTP field names; change any prompt using `--fill-credential` with `<entry>_totp_seed` to `--fill-otp` with `<entry>`. The old form typed the seed, which was never a valid second-factor code.
+  **Upgrade note:** Update the browser image with the daemon. Import reads OTP fields privately; change any prompt using `--fill-credential` with `<entry>_totp_seed` to `--fill-otp` with `<entry>`. The old form typed the seed, which was never a valid second-factor code.
 
 - Wallet settings let you add a payment card, set automatic purchase limits and approve purchases that need your decision. Tasks can fill an authorized checkout without receiving the card number or security code in their output; the purchase list records their declared amounts and reported outcomes. With a static card these limits govern permission to fill, not what a merchant charges, so use a card with its own issuer-side limit.
 
@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A `## ` section of `USER.md` whose heading ends in `<!-- pinned -->` is kept from the nightly memory curator.** The curator may add to it but cannot remove, rewrite or drop anything in it, and cannot create one; you, or the bot when you ask, still can. A pin covers one `## ` section, so use `### ` for its subsections.
 
 ### Changed
+
+- Credentials now live in Istota's encrypted store. Import selected entries from KeePass, download a fresh password-protected copy, or register an age recipient for scheduled backups. Replaced and deleted values have bounded history, and sensitive actions require an emailed confirmation code.
+- Live KeePass sync and generated-credential copies are retired. Upgrade attempts one final import without deleting credentials, leaves the original file untouched, and tells each affected user what happened.
+
 
 - **Credentials Istota generates now live in Istota, not only in your KeePass file** (#686). `istota-credential new` and `otp-set` store the password and the two-factor seed in Istota and work without a vault, and the KeePass `generated/` entry becomes an optional one-way copy you turn on or off in Settings, Credentials. A sync never deletes or changes a generated credential from the file: a missing or edited copy is reported, with "Write KeePass copy now" to restore it, and retiring a credential (Settings, or `istota secret retire`) is the only way to delete one. **Upgrade note:** the first sync after upgrading takes over credentials already in `generated/`; deleting such an entry in your password manager no longer removes it from Istota.
 

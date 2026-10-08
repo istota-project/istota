@@ -10,7 +10,6 @@ export { default as SecurityCard } from './SecurityCard.svelte';
 export { default as CredentialsCard } from './CredentialsCard.svelte';
 export { default as CredentialAccessFields } from './CredentialAccessFields.svelte';
 export { default as CredentialFormModal } from './CredentialFormModal.svelte';
-export { default as VaultCard } from './VaultCard.svelte';
 export { default as WalletCardsCard } from './WalletCardsCard.svelte';
 export { default as WalletPolicyCard } from './WalletPolicyCard.svelte';
 export { default as WalletPurchasesCard } from './WalletPurchasesCard.svelte';

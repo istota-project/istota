@@ -1253,6 +1253,12 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
         );
     """)
     _add_columns(conn, "credential_bindings", {"kind": "TEXT NOT NULL DEFAULT 'value'"})
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='istota_kv'").fetchone():
+        # Preserve the old source until the final import has compared ownership.
+        conn.execute("""UPDATE credential_bindings SET source='local' WHERE source='vault'
+            AND user_id IN (SELECT user_id FROM istota_kv
+                            WHERE namespace='_credential_migration' AND key='vault_retired')""")
+
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS signup_tags (
             tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT NOT NULL,
@@ -5913,7 +5919,6 @@ def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
     binding = get_room_binding(conn, room_token, "email")
     room = get_room(conn, room_token) if binding is not None else None
     return room is not None and is_private_email_ref(binding.surface_ref, room.user_id)
-
 
 
 def is_private_room_of(

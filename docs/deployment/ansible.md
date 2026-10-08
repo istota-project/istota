@@ -124,7 +124,6 @@ istota_users:
         path: "/shared/Projects"
         name: "Projects"
         permissions: "write"
-    vault_path: "/srv/vaults/alice.kdbx"  # only for a file outside istota/vault/
     default_briefings: false
     briefing_email_html: false
     timezone_follow_location: true
@@ -147,7 +146,7 @@ An empty list for `disabled_skills` or `disabled_modules` is the same as omittin
 
 `routing` maps a purpose (`reply`, `alert`, `log`, `briefing`, `notification`) to an output target. A `web:<room>` token exists only once the room has been created, so inventory can name only a room that is already there; a bare `web` lands in the user's default room.
 
-`vault_path` is needed only for a KDBX file outside the user's own `istota/vault/` folder, which is where the ordinary route puts it and which needs no inventory entry. A relative path is under the user's workspace. An absolute path is a host path and must resolve outside every tree a task sandbox can write. The passphrase goes in `istota_user_secrets` as service `vault`, key `passphrase`. See [the credential vault](../configuration/credentials.md#credential-vault).
+Existing inventory `vault_path` values remain rendered for one release so the credential retirement migration can find the old file. New users import KeePass files in Settings. Do not provision a vault passphrase for new users.
 
 `briefings` takes a list of block briefings, seeded once into the user's module database; see [Briefings](../features/briefings.md).
 
@@ -379,3 +378,7 @@ The play and the unattended updater share an offline wrapper under the update lo
 Exit 0 means success or an already migrated database. Exit 1 refuses the migration before any room changes; only the exact `refusal: live_tasks` is tolerated by deployment, reported, and retried at the next deploy. Finish or cancel pending confirmations before retrying `refusal: pending_confirmation`. Unknown columns, ambiguous bindings and unreadable state require operator attention. Exit 2 means some work may have completed: inspect the named failures, resolve file conflicts or restore workspace access, and rerun in another offline window. Do not delete the mapping table or manually replace surface tokens.
 
 For an inspection, set `ISTOTA_CONFIG_PATH` to the installed config and run `python -m istota.maintenance.room_relocate --list` or `--dry-run` with the installation's Python. Add `--reconcile-mount --dry-run` to inspect the remaining workspace work. File rewrites keep dated originals under `Backups/`; conflicting files are preserved. The old and new channel directory names remain readable until a production reconciliation reports zero outstanding and the compatibility reader is removed in a separate change. The mapping table and forwarding of old bookmarks and sent-mail descriptors are permanent.
+
+### Credential backups and history
+
+`istota_scheduler_credential_backup_interval` defaults to 86400 seconds. `istota_security_credential_backup_retention` defaults to 30 files; `istota_security_credential_history_days` and `istota_security_credential_audit_days` default to 180 and 365 days. Users register their own age public recipient in Settings. Keep the private key outside the server and back up `/etc/<namespace>/secrets.env` separately from database snapshots. See [credential backups](../configuration/credentials.md#scheduled-backups).

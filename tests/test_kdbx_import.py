@@ -1,11 +1,12 @@
 """Stateless import through the parser and encrypted store."""
+from istota.credentials import kdbx_import as credential_read
 import io
 from dataclasses import asdict
 
 import pytest
 
 from istota import db
-from istota.credentials import generated, store, vault
+from istota.credentials import generated, store
 from istota.credentials.broker import bindings, grants
 from tests.support.kdbx import create_database
 
@@ -124,7 +125,7 @@ def test_digest_selection_and_keyfile(database):
     key = b"k" * 32
     data = kdbx([{"title": "keyed"}], keyfile=key)
     for supplied in (None, b"x" * 32):
-        with pytest.raises(vault.VaultLocked):
+        with pytest.raises(credential_read.VaultLocked):
             kdbx_import.preview(database, "alice", data, PASSPHRASE, keyfile=supplied)
     p = kdbx_import.preview(database, "alice", data, PASSPHRASE, keyfile=key)
     for selected, digest, reason in [(["keyed"], "0" * 64, "import_file_changed"),
@@ -169,7 +170,7 @@ def test_entry_and_generated_name_collision_is_skipped(database):
     data = kdbx([{"title": "generated_account"}, {"title": "account", "generated": True}])
     p = kdbx_import.preview(database, "alice", data, PASSPHRASE)
     assert p.items[0].status == "skipped"
-    assert p.items[0].reason == vault.SKIP_DUPLICATE_NAME
+    assert p.items[0].reason == credential_read.SKIP_DUPLICATE_NAME
     result = kdbx_import.apply(database, "alice", data, PASSPHRASE, selected=["generated_account"],
                                expected_digest=p.digest, actor="import")
     assert result.imported == []

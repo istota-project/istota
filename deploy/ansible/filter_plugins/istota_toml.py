@@ -244,6 +244,7 @@ def istota_briefing_shared_blocks_toml(shared_blocks) -> str:
     return "\n".join(out).rstrip() + ("\n" if out else "")
 
 
+# Legacy paths remain for one release so retirement can read the old file.
 def istota_vault_users_toml(users) -> str:
     """Render the retired vault path for one release so migration can find it.
 
