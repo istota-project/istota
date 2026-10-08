@@ -755,3 +755,32 @@ def test_otp_expiry_checked_after_waiting_for_selector(monkeypatch, now, accepte
         handle.evaluate.assert_not_called()
         assert not browse_api._credential_values
     page.fill.assert_not_called()
+
+
+@pytest.mark.parametrize("suffix,source,attr", [("", "text", None), ("::value", "value", None), ("::attr(data-secret)", "attr", "data-secret")])
+def test_secret_capture_frame_and_sources(monkeypatch, suffix, source, attr):
+    page = mock.Mock(url="https://unbound.example")
+    handle = page.frame_locator.return_value.locator.return_value.element_handle.return_value
+    handle.owner_frame.return_value.url = "https://acme.example/setup"
+    handle.evaluate.return_value = {"ok": True, "text": "JBSW Y3DP EHPK 3PXP"}
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result, text = browse_api._read_secret_action(page, {"selector": "iframe>>>#seed" + suffix, "kind": "otp", "bound_hosts": ["acme.example"]})
+    assert result["ok"] and text
+    assert result["host"] == "acme.example"
+    assert handle.evaluate.call_args.args[1] == {"origin": "https://acme.example", "source": source, "attr": attr}
+    assert "JBSWY3DPEHPK3PXP" in browse_api._credential_values
+    handle.owner_frame.return_value.url = "https://unbound.example"
+    result, text = browse_api._read_secret_action(page, {"selector": "iframe>>>#seed", "kind": "otp", "bound_hosts": ["acme.example"]})
+    assert result["error"] == "credential_origin_mismatch" and not text
+
+
+def test_capture_phrase_redacts_lines_and_joined_readback(monkeypatch):
+    page = mock.Mock()
+    handle = page.wait_for_selector.return_value
+    handle.owner_frame.return_value.url = "https://acme.example/setup"
+    phrase = "apple berry cherry\nlemon mango peach\napple berry cherry\nlemon mango peach"
+    handle.evaluate.return_value = {"ok": True, "text": phrase}
+    monkeypatch.setattr(browse_api, "_credential_values", set())
+    result, text = browse_api._read_secret_action(page, {"selector": "#phrase", "kind": "phrase", "bound_hosts": ["acme.example"]})
+    assert result["ok"] and text == phrase
+    assert {"apple berry cherry", "lemon mango peach", " ".join(phrase.split())} <= browse_api._credential_values

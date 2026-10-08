@@ -372,3 +372,12 @@ class TestTheModuleIsGone:
         cached module object rather than on the file being absent."""
         assert "istota.user_vault_config" not in sys.modules
         assert not (REPO / "src" / "istota" / "user_vault_config.py").exists()
+
+
+def test_keepass_writes_belong_only_to_export():
+    for path in (REPO / "src").rglob("*.py"):
+        source = path.read_text()
+        if "pykeepass" not in source or path.name == "kdbx_export.py":
+            continue
+        calls = [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)]
+        assert not any(isinstance(n.func, ast.Attribute) and n.func.attr == "save" for n in calls), path

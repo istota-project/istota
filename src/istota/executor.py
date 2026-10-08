@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 from . import db
 from istota.mail import support as email_support
-from istota.credentials import vault as secrets_vault
+from istota.credentials import names as secrets_vault
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox import task_env
 from istota.rooms import speech_gate

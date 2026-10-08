@@ -1,20 +1,11 @@
-"""Credentials added in Istota: the one writer of ``source="local"`` rows.
+"""User-owned credentials, created in Settings or imported from a file.
 
-A local credential has the shape a KeePassXC entry produces in the
-``vault_entries`` namespace — a value row, optional ``<name>_username`` and
-``<name>_url`` rows, one binding per row carrying ``credential: <name>`` — so a
-task cannot tell the two apart and nothing that reads the store changes. What
-differs is the binding's ``source``, which is what keeps the KeePassXC sync's
-sweep off these rows (``secrets_vault.apply_vault``).
-
-Nothing here touches a file, pykeepass or a passphrase, which is why it sits
-beside ``secrets_vault`` rather than inside it.
-
-**No value leaves this module.** Refusal messages are fixed text plus the
-credential *name*; return values carry names and the grant, never a value.
+Writes return names and grants, never secret values. Imported credentials use
+this same source and edit path.
 """
 
 from __future__ import annotations
+from istota.credentials import kdbx_import as credential_read
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +13,7 @@ from urllib.parse import urlsplit
 
 from istota import db
 from istota.credentials import store as secrets_store
-from istota.credentials import vault as secrets_vault
+from istota.credentials import names as secrets_vault
 from istota.credentials.broker import bindings as _bindings
 from istota.credentials.broker import grants as _grants
 from istota.lib.totp import TotpError, parse_user_input, to_uri
@@ -59,8 +50,8 @@ class LocalCredentialError(ValueError):
 
 def derived_names(name: str) -> tuple[str | None, str | None, str | None]:
     return (
-        secrets_vault.slug_name((name, secrets_vault._USERNAME_SEGMENT)),
-        secrets_vault.slug_name((name, secrets_vault._URL_SEGMENT)),
+        secrets_vault.slug_name((name, credential_read._USERNAME_SEGMENT)),
+        secrets_vault.slug_name((name, credential_read._URL_SEGMENT)),
         secrets_vault.slug_name((name, "totp")),
     )
 
@@ -180,7 +171,7 @@ def _foreign_field(conn, user_id: str, owner: str, field_name: str) -> bool:
         return False
     binding = _bindings.get_binding(conn, user_id, field_name)
     return (_bindings.credential_name(conn, user_id, field_name) != owner
-            or binding is None or binding["source"] != SOURCE)
+            or binding is None or _bindings.effective_source(binding["source"]) != SOURCE)
 
 
 def _begin(conn) -> None:
@@ -196,13 +187,9 @@ def is_local(conn, user_id: str, name: str) -> bool:
     """
     if _bindings.credential_name(conn, user_id, name) != name:
         return False
-    row = conn.execute(
-        "SELECT b.source FROM secrets s JOIN credential_bindings b "
-        "ON b.user_id = s.user_id AND b.name = s.key "
-        "WHERE s.user_id=? AND s.service=? AND s.key=?",
-        (user_id, _SERVICE, name),
-    ).fetchone()
-    return row is not None and row[0] == SOURCE
+    groups = _bindings.credential_groups(conn, user_id)
+    members = groups.get(name, [])
+    return bool(members) and all(_owned_field(conn, user_id, name, member) for member in members)
 
 
 def stored_fields(conn, user_id: str, name: str) -> dict:
@@ -220,7 +207,7 @@ def stored_fields(conn, user_id: str, name: str) -> dict:
     if url_name and _owned_field(conn, user_id, name, url_name):
         stored = secrets_store.get_secret(None, user_id, _SERVICE, url_name, connection=conn)
         url = stored if isinstance(stored, str) else ""
-    binding = _bindings.get_binding(conn, user_id, name) or {"hosts": []}
+    binding = _bindings.get_entry_binding(conn, user_id, name) or {"hosts": []}
     site_hosts = set(_bindings.parse_binding(url, {}, [], source=SOURCE)["hosts"]) if url else set()
     extra_hosts = [host for host in binding["hosts"] if host not in site_hosts]
     return {
@@ -242,10 +229,12 @@ def _owned_field(conn, user_id: str, owner: str, field_name: str) -> bool:
 
 
 def _write_fields(conn, user_id, name, username_name, url_name, otp_name, *,
-                  value, username, url, otp, binding):
+                  value, username, url, otp, binding, actor):
     """Write or remove fields; an omitted value keeps its row and kind."""
-    for field_name, field_value in ((name, value), (username_name, username),
-                                    (url_name, url), (otp_name, otp)):
+    fields = {name: value, username_name: username, url_name: url, otp_name: otp}
+    for member in _bindings.credential_groups(conn, user_id).get(name, []):
+        fields.setdefault(member, None)
+    for field_name, field_value in fields.items():
         if field_value is None and not _owned_field(conn, user_id, name, field_name):
             continue
         previous = _bindings.get_binding(conn, user_id, field_name)
@@ -257,12 +246,12 @@ def _write_fields(conn, user_id, name, username_name, url_name, otp_name, *,
             _bindings.put_binding(conn, user_id, field_name, owned)
         elif field_value:
             secrets_store.set_secret(None, user_id, _SERVICE, field_name, field_value,
-                                     binding=owned, connection=conn)
+                                     binding=owned, connection=conn, actor=actor)
         else:
-            secrets_store.delete_secret(None, user_id, _SERVICE, field_name, connection=conn)
+            secrets_store.delete_secret(None, user_id, _SERVICE, field_name, connection=conn, actor=actor)
 
 
-def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = None) -> dict:
+def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = None, actor: str = "system") -> dict:
     """Store a new local credential and, with ``access``, its grant, in one transaction.
 
     ``conn`` is the caller's (``db.get_db``), and is put inside ``BEGIN
@@ -279,7 +268,7 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
             raise LocalCredentialError(
                 "name", f"{name} would clash with the existing credential {candidate}"
             )
-    for suffix in ("_" + secrets_vault._USERNAME_SEGMENT, "_" + secrets_vault._URL_SEGMENT, "_totp"):
+    for suffix in ("_" + credential_read._USERNAME_SEGMENT, "_" + credential_read._URL_SEGMENT, "_totp"):
         owner = name[: -len(suffix)] if name.endswith(suffix) else ""
         if owner and owner in taken:
             raise LocalCredentialError(
@@ -300,7 +289,7 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
             )
 
     _write_fields(conn, user_id, name, username_name, url_name, otp_name,
-                  value=value, username=username, url=cred.url, otp=otp, binding=binding)
+                  value=value, username=username, url=cred.url, otp=otp, binding=binding, actor=actor)
     grant = None
     if access is not None:
         try:
@@ -316,21 +305,20 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
 
 
 def update(conn, user_id: str, name: str, *, value: str | None, username: str | None, url: str,
-           extra_hosts: str, headers: str, revealable: bool, otp: str | None = None) -> dict:
+           extra_hosts: str, headers: str, revealable: bool, otp: str | None = None, actor: str = "system") -> dict:
     """Replace a local credential's metadata, and its value unless ``value`` is ``None``.
 
     ``username=None`` keeps the stored username, which the edit form needs
     because it can never read it back. An empty username or URL deletes that
     row. Every field's binding is
     rewritten from the new inputs; a host change takes effect on the next
-    request, as a KeePassXC edit does.
+    request.
     """
     _begin(conn)
     if not isinstance(name, str) or not is_local(conn, user_id, name):
         raise LocalCredentialError(
             "name",
-            "no credential added in Istota has this name; one from KeePassXC "
-            "or the deployment is edited there",
+            "no editable credential has this name",
         )
     _, username_name, url_name, otp_name = _check_name(name)
     if value is not None:
@@ -357,7 +345,7 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str | 
         )
 
     _write_fields(conn, user_id, name, username_name, url_name, otp_name,
-                  value=value, username=username, url=url, otp=otp, binding=binding)
+                  value=value, username=username, url=url, otp=otp, binding=binding, actor=actor)
     has_username = (bool(username) if username is not None
                     else _owned_field(conn, user_id, name, username_name))
     return {
@@ -376,11 +364,8 @@ def delete(db_path: Path, user_id: str, name: str) -> bool:
     """
     with db.get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        exists = conn.execute(
-            "SELECT 1 FROM secrets WHERE user_id=? AND service=? AND key=?",
-            (user_id, _SERVICE, name),
-        ).fetchone()
-        if exists is None:
+        groups = _bindings.credential_groups(conn, user_id)
+        if name not in groups and not any(name in members for members in groups.values()):
             return False
         if not is_local(conn, user_id, name):
             raise LocalCredentialError(

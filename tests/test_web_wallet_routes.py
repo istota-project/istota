@@ -101,7 +101,7 @@ async def test_parse_and_store_errors_are_safe(signed_client, monkeypatch, caplo
 
 
 async def test_writes_gate_origin_and_isolation(signed_client, config, monkeypatch):  # noqa: F811
-    from istota.credentials import vault
+    from istota.credentials import names as vault
     writes = [("post", "/cards"), ("patch", "/cards/1"), ("delete", "/cards/1"),
               ("put", "/policy"), ("post", "/purchases/1/cancel")]
     for method, path in writes:

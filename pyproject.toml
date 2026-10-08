@@ -199,6 +199,7 @@ sms = [
 # a sync cycle that stops at the file digest loads none of it.
 vault = [
     "pykeepass>=4.2",
+    "pyrage>=1.4,<2",
 ]
 
 # Meta WhatsApp Cloud API client. `pywa`, not `pywa[server]`: istota already

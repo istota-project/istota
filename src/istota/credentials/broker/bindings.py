@@ -9,6 +9,11 @@ DEFAULT_HEADERS = ["authorization", "private-token", "x-api-key", "x-auth-token"
 _HEADER = re.compile(r"[!#$%&'*+.^_`|~0-9a-z-]+")
 
 
+def effective_source(source: str) -> str:
+    """Treat rows left by an older daemon as user-owned credentials."""
+    return "local" if source == "vault" else source
+
+
 def credential_host(url, *, allow_http=False):
     """Exact authority; HTTP retains its scheme so it cannot share HTTPS grants."""
     if (not isinstance(url, str) or not url or not url.isascii()
@@ -38,7 +43,7 @@ def https_host(url):
     return credential_host(url)
 
 
-def parse_binding(url, attributes, tags, *, source="vault"):
+def parse_binding(url, attributes, tags, *, source="local"):
     """Invalid host metadata unbinds the entry; it never retains an old host."""
     hosts = set()
     # A value a person typed into a URL field: a KeePass entry, a credential
@@ -70,6 +75,16 @@ def parse_binding(url, attributes, tags, *, source="vault"):
     return {"hosts": sorted(hosts), "headers": headers,
             "revealable": "istota:reveal" in (tags or []), "source": source}
 
+
+def binding_entry_fields(binding):
+    """Encode the hosts, headers and reveal permission in KeePass metadata."""
+    hosts = list(binding["hosts"])
+    http = [host for host in hosts if host.startswith("http://")]
+    url = http[0] if http else ""
+    attributes = {"istota_hosts": ",".join(host for host in hosts if host != url),
+                  "istota_headers": ",".join(binding["headers"]) or ","}
+    tags = ["istota:reveal"] if binding["revealable"] else []
+    return url, attributes, tags
 
 def put_binding(conn, user_id, name, binding):
     """Caller owns the transaction, including the credential value write."""

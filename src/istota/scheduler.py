@@ -3543,12 +3543,12 @@ def process_one_task(
     from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
-    purchase_question = relay_question if relay_question and relay_question["kind"] == "purchase" else None
-    if purchase_question and not success and not dry_run:
+    credential_question = relay_question if relay_question and relay_question["kind"] in ("purchase", "recovery_fill") else None
+    if credential_question and not success and not dry_run:
         from istota.relay.relays import close_task_questions
         with db.get_db(config.db_path) as conn:
             close_task_questions(conn, task_id, reason="attempt_failed")
-    if relay_question and purchase_question is None and not dry_run:
+    if relay_question and credential_question is None and not dry_run:
         if run_coro(present_question(config, task=task, success=success)):
             if event_writer is not None:
                 event_writer.finish()
@@ -3567,7 +3567,7 @@ def process_one_task(
         # in the room after all, so it is dropped rather than replayed.
         _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
         with db.get_db(config.db_path) as conn:
-            if purchase_question:
+            if credential_question:
                 from istota.relay.relays import close_task_questions
                 close_task_questions(conn, task_id, reason="turn_declined")
             db.update_task_status(
@@ -3656,8 +3656,8 @@ def process_one_task(
         and asks_for_confirmation(result)
     )
 
-    if purchase_question and success and not dry_run:
-        result = purchase_question["preview"]
+    if credential_question and success and not dry_run:
+        result = credential_question["preview"]
         is_confirmation_request = True
 
     # The room was switched off while this task ran (multiplayer D12): its
@@ -3770,11 +3770,11 @@ def process_one_task(
                         task.execution_trace, attempt_trace, prompt=result,
                     ),
                 )
-                if purchase_question:
+                if credential_question:
                     from istota.relay.requests import associate_confirmation
                     associate_confirmation(
                         conn, actor_user_id=task.user_id, task_id=task_id,
-                        request_id=purchase_question["id"], preview_digest=purchase_question["preview_digest"],
+                        request_id=credential_question["id"], preview_digest=credential_question["preview_digest"],
                     )
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
                 # Talk confirmations post the prompt to the room; web/stream
@@ -3910,8 +3910,9 @@ def process_one_task(
                 # the bell renders the question from the live task, and a guest
                 # proposal's preview only in the authenticated bell.
                 bell_only = private_park is not None and private_park.dest is None
-                if purchase_question is not None:
-                    _park_title = confirmation_source.PURCHASE_TITLE
+                if credential_question is not None:
+                    _park_title = (confirmation_source.RECOVERY_FILL_TITLE if credential_question["kind"] == "recovery_fill"
+                                   else confirmation_source.PURCHASE_TITLE)
                     _park_body = (confirmation_source.PARK_BELL_BODY if bell_only
                                   else confirmation_source.PARK_BODY)
                 elif guest_route is not None:
@@ -6075,19 +6076,9 @@ def run_startup_checks(config: Config) -> list:
     return results
 
 
-# Checks the interval sweep leaves alone, and why. `runtime.framework_db` runs
-# `PRAGMA quick_check`, which reads the whole database — `check_db_health` owns
-# that job and does it once a day. Running it hourly here would be the same
-# full-DB scan 24 times over, for a second opinion nobody asked for. It still
-# runs at boot and whenever an operator types `istota doctor`.
-#
-# `security.vault_contents` opens every configured KDBX credential vault: a
-# workspace read, a Fernet decrypt that writes `last_accessed_at` on that user's
-# passphrase row, and an Argon2id derivation, all of it per user. Same shape as
-# the entry above — answered at boot and on demand rather than every hour — and
-# the four cheap `security.credential_vault` arms still sweep, so a vault that
-# stops resolving is still reported hourly.
-SWEEP_SKIPPED_CHECKS = ("runtime.framework_db", "security.vault_contents")
+# The daily DB health check owns the full-database scan. Doctor still runs it
+# at boot and on demand.
+SWEEP_SKIPPED_CHECKS = ("runtime.framework_db",)
 
 
 def check_doctor(config: Config, state: dict) -> list:
@@ -7869,6 +7860,13 @@ def run_cleanup_checks(config: Config) -> None:
     except Exception:
         logger.exception("Wallet purchase expiry failed")
 
+    try:
+        from istota.credentials.recovery_fill import expire as expire_recovery_fills
+        with db.get_db(config.db_path) as conn:
+            expire_recovery_fills(conn)
+    except Exception:
+        logger.exception("Recovery fill expiry failed")
+
     # Composed inside the transaction below, delivered after it closes. The
     # notice routes by purpose now, so it can land on the web surface, whose
     # delivery opens a second connection to this database — inline it would
@@ -9362,33 +9360,9 @@ class IntervalGate:
         return self.fixed_interval
 
 
-def vault_sync_enabled(config: Config) -> bool:
-    """Whether this deployment runs the KDBX credential vault sync at all.
-
-    **Read by the gate's ``enabled`` and by the startup call, which is the
-    point.** The gate carried the `bool(interval)` term the `IntervalGate`
-    contract requires while the startup `sync_all` was unconditional — so an
-    operator who set `vault_sync_interval = 0` to switch the feature off still
-    got one full apply on every daemon restart, deletions included. A switch
-    that leaves a destructive pass running is worse than no switch.
-
-    `> 0` rather than `bool()`: a negative interval is truthy, and
-    `_tick_interval_gates` bypasses the clock for any non-positive one — that
-    branch exists for `backup-stale-alert`'s deliberate every-tick shape, so a
-    negative value here would spawn a background sync roughly twice a second.
-    """
-    from istota.credentials import vault as secrets_vault  # noqa: PLC0415 - keeps `config` load-time light
-
-    # The interval half is `secrets_vault.sync_is_scheduled`, not a second copy:
-    # the notification resolver needs the same rule and cannot import this
-    # module, so the predicate lives beside the thing it governs.
-    # `any_vault_configured` rather than a loop over `vault_path_for`, so a user
-    # who configured their vault in the browser turns the gate on **and** this
-    # stays one read. `_tick_interval_gates` asks on every dispatch tick, and
-    # `any()` over a per-user accessor short-circuits only when somebody *has* a
-    # vault — so the per-user database opens would land on exactly the
-    # deployments that have none, which is all of them by default.
-    return secrets_vault.sync_is_scheduled(config) and config.any_vault_configured()
+def vault_retire_enabled(config: Config) -> bool:
+    from istota.credentials.vault_retire import pending_users
+    return bool(pending_users(config))
 
 
 def _db_backup_last_time(config: Config) -> float:
@@ -9396,6 +9370,11 @@ def _db_backup_last_time(config: Config) -> float:
     from istota.maintenance import db_backup as _db_backup
 
     return _db_backup.last_backup_time(config)
+
+
+def _credential_backup_last_time(config: Config) -> float:
+    from istota.credentials.backup_export import last_run_time
+    return last_run_time(config)
 
 
 def build_interval_gates(
@@ -9577,10 +9556,21 @@ def build_interval_gates(
             now=now,
         )
 
-    def _vault_sync(now: float) -> None:
-        from istota.credentials import vault as secrets_vault
+    def _vault_retire(now: float) -> None:
+        from istota.credentials.vault_retire import retire_all
+        retire_all(config)
 
-        secrets_vault.sync_all(config)
+    def _credential_backup(now: float) -> None:
+        from istota.credentials.backup_export import run_all
+        run_all(config)
+
+    def _credential_maintenance(now: float) -> None:
+        from istota.credentials import audit, store
+        from istota.webui.auth import prune_step_ups
+        with db.get_db(config.db_path) as conn:
+            store.prune_history(conn, older_than_days=config.security.credential_history_days)
+            audit.prune(conn, older_than_days=config.security.credential_audit_days)
+        prune_step_ups(config.db_path)
 
     def _operator_persona(now: float) -> None:
         from istota.prompts.persona import sync_operator_persona
@@ -9854,33 +9844,31 @@ def build_interval_gates(
             ),
             background=True,
         ),
-        # The KDBX credential vault. Startup alone is not enough — a user edits
-        # their file at 3pm and nothing would happen until the next restart — and
-        # five minutes is chosen against the rclone dir-cache lag, which adds its
-        # own delay on top. Off the loop thread because a cycle touches a FUSE
-        # mount, runs Argon2id and may deliver a notification, none of which
-        # belongs on the dispatch thread. A cycle whose digest has not moved
-        # stops at the hash and costs none of that — with one deliberate
-        # exception: `VaultLocked` and the other remedied-elsewhere classes
-        # cache no digest, so a user whose stored passphrase is wrong spends a
-        # full key derivation every interval until somebody re-provisions it.
-        # That is the trade for the remedy working at all.
         IntervalGate(
-            name="vault-sync",
-            run=_vault_sync,
-            field="vault_sync_interval",
-            enabled=vault_sync_enabled,
-            # Seeded to *now*, unlike the sweeps above. `run_daemon` has already
-            # run one `sync_all` synchronously by the time the loop starts, so
-            # the epoch seed made the first tick a second pass ~0.5s later — free
-            # for a user whose digest is cached, and a second Argon2id derivation
-            # for one whose vault is locked, since that class is deliberately
-            # uncached.
+            name="vault-retire",
+            run=_vault_retire,
+            fixed_interval=3600,
+            enabled=vault_retire_enabled,
             seed=lambda c: time.time(),
             background=True,
             one_shot=True,
-            on_error="Vault sync failed: %s",
-            one_shot_on_error="Vault sync failed: %s",
+            on_error="Vault retirement failed: %s",
+            one_shot_on_error="Vault retirement failed: %s",
+        ),
+        IntervalGate(
+            name="credential-backup",
+            run=_credential_backup,
+            field="credential_backup_interval",
+            seed=_credential_backup_last_time,
+            background=True,
+            on_error="Credential backup failed: %s",
+        ),
+        IntervalGate(
+            name="credential-maintenance",
+            run=_credential_maintenance,
+            fixed_interval=86400,
+            background=True,
+            on_error="Credential maintenance failed: %s",
         ),
         # `{root}/PERSONA.md` under the conffile rule, and the last good copy
         # the prompt path falls back to during a mount outage. `istota init`
@@ -10537,30 +10525,11 @@ def run_daemon(
     except Exception as e:  # noqa: BLE001
         logger.warning("Secrets import skipped: %s", e)
 
-    # The KDBX credential vault, immediately after the TOML importer above and
-    # deliberately not before it: the vault is the live authority for the
-    # services it owns, so a vault-owned row has to win over a TOML-seeded one
-    # on the same start. Startup alone is not enough — a user edits their file
-    # at 3pm — so the `vault-sync` interval gate carries it from here on.
-    # `sync_all` contains one user's failure rather than costing the rest.
-    # Gated on the same predicate as the interval gate: the pass deletes rows,
-    # so `vault_sync_interval = 0` has to mean off here too.
-    #
-    # It delivers, and on a fresh failure that means boot blocks on a Talk and
-    # ntfy fan-out. `deliver=False` was considered and is wrong: the dedup bump
-    # does not redeliver, so a row this pass wrote without delivering would be
-    # bumped in silence by every later cycle and the push would never happen at
-    # all — the notification would be lost rather than deferred. The cost is
-    # bounded in a way that is easy to misread as unbounded: only a *transition*
-    # raises, and a restart over an already-open row bumps, so this is one
-    # delivery at the first failure rather than one per boot.
     try:
-        from istota.credentials import vault as secrets_vault  # noqa: PLC0415
-
-        if vault_sync_enabled(config):
-            secrets_vault.sync_all(config)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Vault sync skipped: %s", e)
+        from istota.credentials.vault_retire import retire_all
+        retire_all(config)
+    except Exception as exc:
+        logger.warning("Vault retirement skipped: %s", type(exc).__name__)
 
     # Phase 6: migrate per-user TOML profile fields into the user_profiles
     # table on first run. Idempotent — only writes rows that don't exist.

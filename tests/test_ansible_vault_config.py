@@ -227,26 +227,8 @@ class TestTheFilterIsTotal:
         assert vault_filter()({"alice": {"vault_path": 7}}) == ""
 
 
-class TestTheSyncInterval:
-    def test_it_renders_from_inventory(self):
-        config = load_config_from(render(istota_scheduler_vault_sync_interval=900))
-        assert config.scheduler.vault_sync_interval == 900
-
-    def test_the_default_matches_the_dataclass(self):
-        # The `config_mapper` defect class: a role default that disagrees with
-        # the dataclass is a setting whose value depends on which shape you
-        # deployed.
-        from istota.config import SchedulerConfig
-
-        config = load_config_from(render())
-        assert (
-            config.scheduler.vault_sync_interval
-            == SchedulerConfig().vault_sync_interval
-        )
-
-    def test_zero_turns_the_gate_off(self):
-        config = load_config_from(render(istota_scheduler_vault_sync_interval=0))
-        assert config.scheduler.vault_sync_interval == 0
+def test_retired_sync_interval_is_not_rendered():
+    assert "vault_sync_interval" not in render(istota_scheduler_vault_sync_interval=900)
 
 
 def test_the_filter_is_registered():
@@ -255,14 +237,11 @@ def test_the_filter_is_registered():
     assert "istota_vault_users_toml" in _custom_filters()
 
 
-def test_the_docs_document_the_key():
-    """`istota_users` is documented by an example, not a schema.
-
-    The role defaults point at `docs/deployment/ansible.md` for the per-user
-    keys, so a key that page does not show is a key no operator finds.
-    """
+def test_the_docs_document_credential_backups():
     text = (ANSIBLE.parent.parent / "docs" / "deployment" / "ansible.md").read_text()
-    assert "vault_path:" in text
+    assert "istota_scheduler_credential_backup_interval" in text
+    assert "age public recipient" in text
+    assert "vault_path:" not in text
     assert "docs/deployment/ansible.md" in (ANSIBLE / "defaults" / "main.yml").read_text()
 
 
@@ -311,7 +290,7 @@ class TestTheInstallerPathReachesBothSettings:
         )
         config = load_config_from(render(**variables))
         assert config.users["alice"].vault_path == ALICE["vault_path"]
-        assert config.scheduler.vault_sync_interval == 900
+        assert "vault_sync_interval" not in render(**variables)
 
 
 @pytest.mark.parametrize("allowed", [False, True])

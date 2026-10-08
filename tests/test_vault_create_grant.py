@@ -3,6 +3,7 @@
 Later tasks in the same conversation may use it; other conversations,
 scheduled tasks and a grant the user narrowed or revoked stay as they were.
 """
+from istota.credentials import kdbx_import as credential_read
 
 import base64
 
@@ -10,7 +11,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, UserConfig
-from istota.credentials import store, vault
+from istota.credentials import store, names as vault
 from istota.credentials.broker import bindings, grants
 from istota.sandbox.skill_proxy import SkillProxy
 from tests.support.kdbx import create_database
@@ -67,7 +68,10 @@ def _notice(config):
 
 
 def _sync(config, path):
-    vault.apply_vault(config.db_path, "alice", vault.parse_vault(path.read_bytes(), "test-passphrase"))
+    preview = credential_read.preview(config.db_path, "alice", path.read_bytes(), "test-passphrase")
+    selected = [i.name for i in preview.items if i.status in ("new", "changed")]
+    if selected:
+        credential_read.apply(config.db_path, "alice", path.read_bytes(), "test-passphrase", selected=selected, expected_digest=preview.digest, actor="import")
 
 
 def test_a_later_task_in_the_same_conversation_can_fill_the_entry(configured, sock):
@@ -120,7 +124,7 @@ def test_otp_set_in_one_task_then_fill_otp_in_the_next(configured, sock):
     config, _ = configured
     _create(config, sock, _task(config, "room-a"))
     with SkillProxy(sock, {}, {}, config=config, user_id="alice", task_id=_task(config, "room-a"),
-                    vault_write_limit=1):
+                    vault_credentials=_namespace(config), vault_write_limit=1):
         assert _request(sock, {"type": "vault_otp_set", "name": "generated_acme", "otp": SEED}) == {
             "name": "generated_acme", "otp": True,
         }
@@ -134,7 +138,7 @@ def test_an_entry_written_under_generated_by_hand_is_still_declined(configured, 
     _create(config, sock, _task(config, "room-a"))
     from pykeepass import PyKeePass
     kp = PyKeePass(str(path), password="test-passphrase")
-    group = kp.find_groups(name="generated", first=True)
+    group = kp.find_groups(name="generated", first=True) or kp.add_group(kp.root_group, "generated")
     kp.add_entry(group, "handmade", "alice", "fixture-password", url="https://handmade.example")
     kp.save()
     _sync(config, path)

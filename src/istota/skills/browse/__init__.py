@@ -25,6 +25,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from istota.browser.owner import browser_headers, with_browser_owner
 from istota.browser.admission import BrowserQueueTimeout, browser_request
@@ -37,10 +38,10 @@ from istota.sandbox.host_paths import (
     user_workspace_root,
     write_resolved,
 )
-from istota.sandbox.credential_shim import ProxyError as CredentialProxyError, store_recovery
+from istota.sandbox.credential_shim import ProxyError as CredentialProxyError, capture_secret, recovery_fill
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._credref import (
-    CARD, OTP_PAIR, PAIR, RECOVERY_PAIR, CardSecret, CredentialPair, OtpPair, RecoveryTarget, credential_ref,
+    CARD, OTP_PAIR, PAIR, RECOVERY_PAIR, RECOVERY_FILL, CardSecret, CredentialPair, OtpPair, RecoveryTarget, credential_ref,
 )
 from istota.skills._hostpath import WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
@@ -160,18 +161,18 @@ def _profile_result(data, scope):
     return {**data, "shared_profile": True}
 
 
-def _credential_preflight(url, *, card_fill=False, otp_fill=False, recovery_save=False):
+def _credential_preflight(url, *, card_fill=False, otp_fill=False, recovery_save=False, recovery_download=False, discovery=False):
     """Refuse the whole action list before a credential can reach an old image."""
     headers = browser_headers()
     try:
         resp = browser_request("get", f"{url}/health", headers=headers, timeout=REQUEST_TIMEOUT)
         data = resp.json()
-        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True) and (not otp_fill or data.get("otp_expiry_check") is True) and (not recovery_save or data.get("recovery_save") is True):
+        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True) and (not otp_fill or data.get("otp_expiry_check") is True) and (not recovery_save or data.get("secret_capture") is True) and (not recovery_download or data.get("secret_capture_download") is True) and (not discovery or data.get("secret_discovery") is True):
             return None
     except (httpx.HTTPError, BrowserQueueTimeout, ValueError):
         pass
     return error_envelope(
-        "Credential fill refused: browser profile isolation, credential origin checks, OTP expiry checks, recovery code saving or card fill support were not confirmed. "
+        "Credential fill refused: browser profile isolation, credential origin checks, OTP expiry checks, recovery code saving, secret masking, discovery, downloads or card fill support were not confirmed. "
         "Run the full Ansible play to rebuild the browser image with credential origin checks. "
         "No interaction actions were sent."
     )
@@ -276,6 +277,10 @@ def _decode(resp):
 def cmd_get(args):
     """Browse a URL and return page content."""
     url = get_api_url()
+    if getattr(args, "mask_secrets", False):
+        refusal = _credential_preflight(url, discovery=True)
+        if refusal:
+            return refusal
     if not args.url and not args.session:
         return {"status": "error", "error": "get needs a URL or --session <id>"}
     payload = {
@@ -296,6 +301,9 @@ def cmd_get(args):
     if args.max_links:
         payload["max_links"] = args.max_links
 
+    if getattr(args, "mask_secrets", False):
+        payload["mask_secrets"] = True
+
     resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     return _decode(resp)
 
@@ -308,6 +316,10 @@ def cmd_render(args):
     silence (ISSUE-516). `--include-frames` is what splices that content in.
     """
     url = get_api_url()
+    if getattr(args, "mask_secrets", False):
+        refusal = _credential_preflight(url, discovery=True)
+        if refusal:
+            return refusal
     if not args.url and not args.session:
         return {
             "status": "error",
@@ -333,6 +345,9 @@ def cmd_render(args):
         payload["include_frames"] = True
     if args.skip_behavior:
         payload["skip_behavior"] = True
+
+    if getattr(args, "mask_secrets", False):
+        payload["mask_secrets"] = True
 
     resp = browser_request("post", f"{url}/render", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     if resp.status_code == 404:
@@ -843,6 +858,10 @@ def cmd_screenshot(args):
 def cmd_extract(args):
     """Extract content by CSS selector."""
     url = get_api_url()
+    if getattr(args, "mask_secrets", False):
+        refusal = _credential_preflight(url, discovery=True)
+        if refusal:
+            return refusal
     payload = {
         "selector": args.selector,
         "timeout": args.timeout,
@@ -855,6 +874,9 @@ def cmd_extract(args):
         payload["max_chars"] = args.max_chars
     if args.limit:
         payload["limit"] = args.limit
+
+    if getattr(args, "mask_secrets", False):
+        payload["mask_secrets"] = True
 
     resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     return _decode(resp)
@@ -947,11 +969,18 @@ def _fill_otp_action(pair):
     return action
 
 
-def _save_recovery_action(target):
+def _fill_recovery_action(target):
+    if not isinstance(target, RecoveryTarget):
+        raise ValueError("--fill-recovery was not resolved")
+    return {"type": "recovery_fill", "selector": target.label, "credential": True,
+            "credential_name": target.name, "bound_hosts": list(target.bound_hosts)}
+
+
+def _save_recovery_action(target, kind="codes", *, download=False):
     if not isinstance(target, RecoveryTarget):
         raise ValueError("--save-recovery was not resolved; the credential lookup did not run for this call")
     # `credential` puts it under the same preflight and profile check as a fill.
-    return {"type": "read_recovery", "selector": target.label, "credential": True,
+    return {"type": "read_secret_download" if download else "read_secret", "kind": kind, "selector": target.label, "credential": True,
             "bound_hosts": list(target.bound_hosts), "credential_name": target.name}
 
 
@@ -1074,7 +1103,13 @@ ACTION_EMITTERS = {
     "fill": _fill_action,
     "fill_credential": _fill_credential_action,
     "fill_otp": _fill_otp_action,
+    "fill_recovery": _fill_recovery_action,
     "save_recovery": _save_recovery_action,
+    "capture_codes": _save_recovery_action,
+    "capture_codes_download": lambda target: _save_recovery_action(target, download=True),
+    "find_secrets": lambda marker: {"type": "find_secrets"},
+    "capture_otp": lambda target: _save_recovery_action(target, "otp"),
+    "capture_phrase": lambda target: _save_recovery_action(target, "phrase"),
     "fill_card": _fill_card_action,
     "click_at": _click_at_action,
     "hover_at": _hover_at_action,
@@ -1461,46 +1496,50 @@ def _note_unanswered_interaction(url, command, actions, exc):
 
 
 def _save_recovered(decoded, actions, *, store=True):
-    """Store the codes a `read_recovery` action returned; the model gets a count.
+    """Send captured text to the private store channel and return only its shape.
 
-    `store` is false when the browser did not confirm the read ran in this
-    user's profile: then nothing is stored, since the text may be another's.
-
-    The container hands the element's text back beside the scrubbed result,
-    under `recovery`, and this is the only reader of it: the text goes over
-    the private channel to the store and is replaced, in the action's result,
-    by how many lines were saved. Returns the response without the text, and
-    the lines to scrub from the rest of it. A save that fails is reported in
-    the action's result; the page still shows the codes, so the call can be
-    repeated.
+    An unconfirmed browser profile cannot store anything. The text is removed
+    even on refusal and joins the response's redaction set.
     """
     recovered = decoded.pop("recovery", None) if isinstance(decoded, dict) else None
     texts = recovered if isinstance(recovered, list) else []
     lines = [line.strip() for text in texts if isinstance(text, str)
              for line in text.splitlines() if len(line.strip()) >= 4]
+    from istota.lib.secret_shapes import BASE32_RUN, CODE
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        lines.extend(token for token in text.split() if CODE.fullmatch(token) and any(c.isdigit() for c in token))
+        for match in BASE32_RUN.finditer(text.upper()):
+            bare = match.group().replace(" ", "").replace("-", "")
+            if len(bare) >= 16:
+                lines.extend((bare, match.group(), text[match.start():match.end()]))
     results = decoded.get("actions") if isinstance(decoded, dict) else None
     if not isinstance(results, list):
         return decoded, lines
     saved = []
     for index, result in enumerate(results):
         action = actions[index] if index < len(actions) else {}
-        if action.get("type") != "read_recovery" or not isinstance(result, dict):
+        if action.get("type") not in ("read_secret", "read_recovery", "read_secret_download") or not isinstance(result, dict):
             saved.append(result)
             continue
-        entry = {"action": "save_recovery", "selector": action.get("selector", ""),
+        entry = {"action": "capture_" + action.get("kind", "codes"), "selector": action.get("selector", ""),
                  "name": action.get("credential_name", "")}
         slot = result.get("recovery")
         if result.get("ok") is not True:
             entry.update(ok=False, error=result.get("error") or "recovery_read_failed")
+            if isinstance(result.get("candidates"), list):
+                entry["candidates"] = result["candidates"]
         elif type(slot) is not int or not 0 <= slot < len(texts) or not isinstance(texts[slot], str):
             entry.update(ok=False, error="recovery_not_returned")
         elif not store:
             entry.update(ok=False, error="profile_not_confirmed")
         else:
             try:
-                count, replaced = store_recovery(entry["name"], texts[slot],
-                                                 credential_fd=os.environ.get("ISTOTA_CRED_FD"))
-                entry.update(ok=True, saved=count, replaced=replaced)
+                entry = capture_secret(entry["name"], action.get("kind", "codes"), texts[slot],
+                                       source="download" if action.get("type") == "read_secret_download" else "page",
+                                       host=result.get("host"),
+                                       credential_fd=os.environ.get("ISTOTA_CRED_FD"))
             except CredentialProxyError as exc:
                 entry.update(ok=False, error=str(exc))
         saved.append(entry)
@@ -1512,15 +1551,46 @@ def cmd_interact(args):
     url = get_api_url()
     actions = _interact_actions(args)
     credential_fill = any(action.get("credential") for action in actions)
-    if credential_fill:
+    discovery = (getattr(args, "mask_secrets", False) or
+                 any(a.get("type") == "find_secrets" or a.get("selector") == "auto" for a in actions))
+    if credential_fill or discovery:
         refusal = _credential_preflight(
             url, card_fill=any(a.get("card_field") for a in actions),
             otp_fill=any("expires_at" in a for a in actions),
-            recovery_save=any(a.get("type") == "read_recovery" for a in actions),
+            recovery_save=any(a.get("type") in ("read_secret", "read_recovery", "read_secret_download") for a in actions),
+            recovery_download=any(a.get("type") == "read_secret_download" for a in actions),
+            discovery=discovery,
         )
         if refusal:
             return refusal
 
+    recovery_secrets = []
+    if any(action["type"] == "recovery_fill" for action in actions):
+        response = browser_request("get", f"{url}/sessions/{args.session_id}",
+                                   timeout=REQUEST_TIMEOUT, headers=browser_headers())
+        session = _decode(response)
+        parsed = urlsplit(session.get("url", ""))
+        host = parsed.netloc.lower()
+        if host.endswith(":443"):
+            host = host[:-4]
+        if (session.get("session_id") != args.session_id or parsed.scheme != "https"
+                or not host or parsed.username is not None):
+            return {"status": "error", "error": "Recovery fill requires a live HTTPS session."}
+        for action in actions:
+            if action["type"] != "recovery_fill":
+                continue
+            try:
+                reply = recovery_fill(action["credential_name"], host,
+                                      credential_fd=os.environ.get("ISTOTA_CRED_FD"))
+            except CredentialProxyError as exc:
+                return {"status": "error", "error": str(exc)}
+            if reply.get("held"):
+                return {"status": "held", "held": True}
+            recovery_secrets.append(reply["code"])
+            selector = action["selector"]
+            action.clear()
+            action.update(type="fill", selector=selector, value=reply["code"],
+                          credential=True, bound_hosts=reply["bound_hosts"])
     # A point is read off the delivered picture, so the container is told what
     # that picture measured and converts from it. The size is recomputed from
     # the record rather than remembered, which is the same arithmetic
@@ -1538,6 +1608,8 @@ def cmd_interact(args):
         "session_id": args.session_id,
         "actions": actions,
     }
+    if discovery:
+        payload["mask_secrets"] = True
 
     secrets = [
         pair.value.reveal()
@@ -1545,6 +1617,7 @@ def cmd_interact(args):
         for pair in (getattr(args, dest, None) or [])
         if isinstance(pair, (CredentialPair, OtpPair))
     ]
+    secrets.extend(recovery_secrets)
     purchase = getattr(args, "purchase", None)
     if isinstance(purchase, CardSecret):
         secrets.extend(value.reveal() for value in purchase.fields.values())
@@ -1867,14 +1940,12 @@ def build_parser():
         metavar="SELECTOR=NAME",
         help="Fill a current two-factor code from a shared credential without displaying it",
     )
-    credential_ref(
-        p_int, "--save-recovery", form=RECOVERY_PAIR, action=OrderedAppend,
-        metavar="SELECTOR=NAME",
-        help=(
-            "Save the recovery codes the page shows in SELECTOR to the generated credential "
-            "NAME, without displaying them. Replaces any codes saved before. Returns a count."
-        ),
-    )
+    credential_ref(p_int, "--fill-recovery", form=RECOVERY_FILL, action=OrderedAppend,
+                   metavar="SELECTOR=NAME", help="Fill one recovery code with approval for this use")
+    for flag in ("--capture-otp", "--capture-codes", "--capture-phrase", "--capture-codes-download", "--save-recovery"):
+        credential_ref(p_int, flag, form=RECOVERY_PAIR, action=OrderedAppend,
+                       metavar="SELECTOR=NAME", help=argparse.SUPPRESS if flag == "--save-recovery" else
+                       "Capture a secret from the generated credential's site without displaying it")
     credential_ref(p_int, "--purchase", form=CARD, metavar="ID",
                    help="Authorized purchase whose card fields may be filled")
     p_int.add_argument(
@@ -1963,6 +2034,10 @@ def build_parser():
     p_int.add_argument(
         "--scroll-amount", type=int, default=None, help=argparse.SUPPRESS,
     )
+
+    p_int.add_argument("--find-secrets", action=OrderedFlag, help="Find secret shapes and selectors without returning their values")
+    for secret_parser in (p_get, p_render, p_ext, p_int):
+        secret_parser.add_argument("--mask-secrets", action="store_true", help="Mask possible secrets before returning page text")
 
     # links
     p_links = sub.add_parser("links", help="Fetch a page and return only links")

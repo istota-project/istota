@@ -103,8 +103,9 @@ CARD = "card"
 #: `SELECTOR=NAME`: where a generated credential's recovery codes may be read
 #: from, for saving. Resolves hosts, never a value (ISSUE-688).
 RECOVERY_PAIR = "recovery_pair"
+RECOVERY_FILL = "recovery_fill"
 
-FORMS = (NAME, PAIR, OTP_PAIR, ENTRY, CARD, RECOVERY_PAIR)
+FORMS = (NAME, PAIR, OTP_PAIR, ENTRY, CARD, RECOVERY_PAIR, RECOVERY_FILL)
 
 #: Attribute set on the argparse action, holding the form. Named rather than
 #: inlined so the coverage walk and this module cannot disagree on the spelling.
@@ -381,7 +382,7 @@ def _resolve_one(
         return resolve_card(raw), None
     if form == ENTRY:
         return resolve_entry(raw, operation)
-    if form in (PAIR, OTP_PAIR, RECOVERY_PAIR):
+    if form in (PAIR, OTP_PAIR, RECOVERY_PAIR, RECOVERY_FILL):
         # The **last** `=`, not the first. A credential name cannot contain one
         # — `secrets_vault.VAULT_NAME_RE` is `[a-z][a-z0-9_]{0,63}` — while a
         # label routinely does: `input[type=password]=acme_pw` is the ordinary
@@ -398,7 +399,7 @@ def _resolve_one(
                 f"Malformed {operation} value: expected SELECTOR=NAME."
             )
         name = name.strip()
-        if form == RECOVERY_PAIR:
+        if form in (RECOVERY_PAIR, RECOVERY_FILL):
             if not name:
                 return None, f"Empty credential name: {operation} refused."
             try:

@@ -29,3 +29,16 @@ def test_browser_card_checkout(browser_image):
     script = Path(__file__).with_name("browser_checkout.py").read_text()
     result = run_in(browser_image, ["-c", script], entrypoint="python", timeout=180)
     assert_ok(result, "browser test checkout")
+
+
+def test_browser_secret_capture_capability(browser_image):
+    result = run_in(browser_image, ["-c", """
+import browse_api
+with browse_api.app.test_client() as client:
+    response = client.get('/health')
+    assert response.status_code == 200
+    assert response.get_json()['secret_capture'] is True
+    assert response.get_json()['secret_capture_download'] is True
+    assert response.get_json()['secret_discovery'] is True
+"""], entrypoint="python", timeout=60)
+    assert_ok(result, "browser secret capture capability")

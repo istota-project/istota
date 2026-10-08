@@ -445,6 +445,10 @@ features = []
 #   ISTOTA_DEVELOPER_GITLAB_TOKEN, ISTOTA_DEVELOPER_GITHUB_TOKEN
 
 # [security]
+# credential_history_days = 180
+# credential_audit_days = 365
+# credential_backup_retention = 30
+# credential_exports_per_day = 3
 # wallet_requests_per_task = 3    # purchase requests, including refusals
 # wallet_fills_per_purchase = 3   # card fills within one authorization
 # wallet_authorization_minutes = 30 # clamped to 5..240 minutes
@@ -999,6 +1003,7 @@ output = "console"
 # backup_count = 5
 
 [scheduler]
+credential_backup_interval = 86400 # 0 disables scheduled credential backups
 # Seconds between checking for new tasks in the queue
 poll_interval = 5
 # Seconds between pending-task dispatch scans within a single poll tick. The
@@ -1084,15 +1089,6 @@ avatar_import_interval = 21600
 # reindex makes no brain call, and putting it there stopped it running whenever
 # the sleep cycle was off or the primary brain's breaker was open.
 skill_overlay_reindex_interval = 21600
-
-# Seconds between KDBX credential-vault syncs (0 disables). Inert unless some
-# user has a `vault_path`. Startup alone is not enough — a user edits their
-# vault at 3pm and nothing happens until the next restart — and five minutes is
-# chosen against the rclone dir-cache lag, which adds its own delay on top; a
-# shorter interval mostly buys more `stat` calls. A cycle whose file digest is
-# unchanged stops at the hash, so the steady-state cost is one bounded read per
-# user rather than a key derivation.
-vault_sync_interval = 300
 
 # Defense-in-depth: alert an operator if the single-threaded main dispatch loop
 # stops ticking for this many seconds (a slow call that slipped onto the loop
@@ -1780,6 +1776,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # auth = ["nextcloud"]
 # auth_enrol_ttl_hours = 168
 # auth_reset_ttl_hours = 1
+# auth_step_up_ttl_minutes = 10
 # auth_sign_in_code_ttl_minutes = 10  # an emailed code works only in the browser that asked for it
 # auth_min_password_length = 12
 # auth_throttle_window_seconds = 900
@@ -1973,31 +1970,6 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
                                # plus a plain-text fallback part. Also settable per user via
                                # `istota user ensure --no-briefing-email-html` or the web UI
                                # (Briefings → settings → Email delivery).
-# vault_path = "istota/vault/credentials.kdbx"   # a KeePass (KDBX) file this user
-                               # maintains, read by the daemon and never written. Set it
-                               # only to name a file somewhere other than this user's own
-                               # `istota/vault/` folder: the ordinary route is that folder,
-                               # where they copy the file in and choose it from the
-                               # settings page, and this line is not needed for it. A
-                               # relative path resolves under this user's own workspace
-                               # directory, so they can edit it from a phone; an absolute
-                               # path is taken as a host path and must resolve outside
-                               # every tree a task sandbox can write, which keeps the file
-                               # out of reach of a task at the cost of the phone. Empty
-                               # (the default) means the folder decides. The passphrase is
-                               # a secret, provisioned with
-                               # `istota secret ensure -u alice --service vault --key passphrase`,
-                               # and must be a generated value rather than a chosen one;
-                               # without one nothing is read, whichever route named the
-                               # file. This line outranks the folder, so a vault set here
-                               # is shown on the settings page and not selectable there —
-                               # a stored choice this overrides would be a control that
-                               # does nothing. What the page never offers is the absolute
-                               # form: it is checked against the trees a task sandbox can
-                               # write, which is the right question for a path you wrote
-                               # and not a line to let a user answer for themselves. Not
-                               # in `user_profiles`.
-
 # Alice's resources — only `folder` (an out-of-workspace sandbox mount)
 # is declarable after the Resources sunset. todo/reminders/notes are
 # briefing-source properties (set the source `path`), and calendars are

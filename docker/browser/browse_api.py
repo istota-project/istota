@@ -23,6 +23,11 @@ import time
 import uuid
 from urllib.parse import quote, urlsplit
 
+from collections import Counter
+from dataclasses import dataclass
+from urllib.parse import parse_qs
+import base64
+
 from flask import Flask, Response, jsonify, request
 from werkzeug.local import LocalProxy
 from lib.istota_user_scope import scoped_user_dir
@@ -885,13 +890,13 @@ def _document_url(url):
     )
 
 
-def _navigation_error_response(error, secrets=()):
+def _navigation_error_response(error, secrets=(), mask_secrets=False):
     if isinstance(error, NavigationMismatch):
         return jsonify(_scrub_extracted({
             "status": "error", "error": "navigation_mismatch",
             "requested": error.requested, "landed": error.landed,
-        }, secrets)), 502
-    return jsonify(_scrub_extracted({"status": "error", "error": str(error)}, secrets)), 500
+        }, secrets, mask_secrets)), 502
+    return jsonify(_scrub_extracted({"status": "error", "error": str(error)}, secrets, mask_secrets)), 500
 
 
 def _navigate_and_wait(page, url, timeout_ms=30000):
@@ -1268,13 +1273,13 @@ def browse():
             max_chars=data.get("max_chars"),
             max_links=data.get("max_links"),
             offset=offset,
-            scrub=lambda value: _scrub_extracted(value, _credential_values),
+            scrub=lambda value: _scrub_extracted(value, _credential_values, mask_secrets=data.get("mask_secrets", False)),
         )
         result = {"status": "ok", **content}
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
-        result = _scrub_extracted(result, _credential_values)
+        result = _scrub_extracted(result, _credential_values, mask_secrets=data.get("mask_secrets", False))
         if keep_session or not created_new:
             result["session_id"] = session_id
         else:
@@ -1285,7 +1290,7 @@ def browse():
     except Exception as e:
         if created_new and not keep_session:
             _close_session(session_id)
-        return _navigation_error_response(e, _credential_values)
+        return _navigation_error_response(e, _credential_values, mask_secrets=data.get("mask_secrets", False))
 
 
 @app.route("/screenshot", methods=["POST"])
@@ -1457,7 +1462,106 @@ _PASSWORD_VALUES_JS = """() => Array.from(
 ).flat()"""
 
 
-def _scrub_extracted(value, secrets):
+# Detection copy of istota.lib.secret_shapes; tests/test_secret_shape_drift.py guards it.
+BASE32_RUN = re.compile(r"(?<![A-Z0-9])[A-Z2-7]{4,}(?:[ -][A-Z2-7]{4,})*(?![A-Z0-9])")
+CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{3,63}$")
+ENUMERATOR = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s*")
+
+
+@dataclass(frozen=True)
+class Shape:
+    kind: str
+    count: int
+    length: int
+    charset: str
+
+
+class ShapeError(ValueError):
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _charset(code):
+    if code.lower() == code:
+        return "[a-z0-9-]" if "-" in code else "[a-z0-9]"
+    if code.upper() == code and "-" not in code:
+        return "[A-Z0-9]"
+    return "[A-Za-z0-9-]"
+
+
+def parse_codes(text: str) -> tuple[list[str], Shape]:
+    candidates = []
+    for line in text.splitlines():
+        line = ENUMERATOR.sub("", line)
+        # Google prints each eight-digit code as two four-digit groups.
+        line = re.sub(r"(?<!\d)\b(\d{4}) (\d{4})\b(?!\d)", r"\1\2", line)
+        for token in line.split():
+            if CODE.fullmatch(token) and any(c.isdigit() for c in token):
+                candidates.append(token)
+    if not candidates:
+        raise ShapeError("codes_not_found")
+    groups = Counter((len(c), _charset(c)) for c in candidates)
+    (length, charset), count = groups.most_common(1)[0]
+    if count / len(candidates) < 0.8:
+        raise ShapeError("codes_inconsistent")
+    codes = [c for c in candidates if (len(c), _charset(c)) == (length, charset)]
+    if len(codes) > 64:
+        raise ShapeError("codes_too_many")
+    return codes, Shape("codes", len(codes), length, charset)
+
+
+def parse_phrase(text: str) -> tuple[str, Shape]:
+    text = " ".join(ENUMERATOR.sub("", line) for line in text.splitlines())
+    words = re.findall(r"\b[a-z]+\b", text.lower())
+    if len(words) not in (12, 15, 18, 21, 24) or any(not 3 <= len(w) <= 8 for w in words):
+        raise ShapeError("phrase_word_count")
+    return " ".join(words), Shape("phrase", 1, len(words), "words")
+
+
+# Detection is deliberately broader than capture validation: masking must also
+# hide an ambiguous or malformed block that the store would refuse.
+OTP_URI = re.compile(r"otpauth://[^\s<>\"']+")
+CODE_RUN = re.compile(r"(?<![A-Za-z0-9-])[A-Za-z0-9][A-Za-z0-9-]{3,63}(?![A-Za-z0-9-])")
+PHRASE_RUN = re.compile(r"\b[a-z]{3,8}(?:(?:\s+(?:[0-9]+[.)]\s*|[-*•]\s*)?)[a-z]{3,8}){11,}\b")
+
+
+def mask_secret_text(text):
+    text = OTP_URI.sub("[secret]", text)
+    text = BASE32_RUN.sub(lambda m: "[secret]" if len(m.group().replace(" ", "").replace("-", "")) >= 16 else m.group(), text)
+    text = CODE_RUN.sub(lambda m: "[secret]" if any(c.isdigit() for c in m.group()) else m.group(), text)
+    return PHRASE_RUN.sub("[secret]", text)
+
+
+def detect_secret_shapes(text):
+    uris = OTP_URI.findall(text)
+    runs = uris or [m.group() for m in BASE32_RUN.finditer(text)
+                    if len(m.group().replace(" ", "").replace("-", "")) >= 16]
+    if len(runs) == 1:
+        seed = runs[0]
+        if uris:
+            seed = parse_qs(urlsplit(seed).query).get("secret", [""])[0]
+        seed = seed.replace(" ", "").replace("-", "").upper().rstrip("=")
+        try:
+            length = len(base64.b32decode(seed + "=" * (-len(seed) % 8)))
+        except (ValueError, base64.binascii.Error):
+            length = 0
+        if 10 <= length <= 128:
+            return [{"kind_guess": "otp", "count": 1, "length": length, "charset": "base32"}]
+    # An ambiguous seed is never rediscovered as a set of digit-bearing codes.
+    if runs:
+        return []
+    for parser in (parse_codes, parse_phrase):
+        try:
+            _, shape = parser(text)
+        except ShapeError:
+            continue
+        return [{"kind_guess": shape.kind, "count": shape.count,
+                 "length": shape.length, "charset": shape.charset}]
+    return []
+
+
+def _scrub_extracted(value, secrets, mask_secrets=False):
     if isinstance(value, str):
         variants = set()
         for secret in secrets:
@@ -1469,11 +1573,14 @@ def _scrub_extracted(value, secrets):
                                  attribute_escaped, quote(secret, safe='')))
         for secret in sorted(variants, key=len, reverse=True):
             value = value.replace(secret, '[REDACTED]')
+        if mask_secrets:
+            value = mask_secret_text(value)
         return value
     if isinstance(value, dict):
-        return {key: _scrub_extracted(item, secrets) for key, item in value.items()}
+        return {key: _scrub_extracted(item, secrets, mask_secrets and key != "candidates")
+                for key, item in value.items()}
     if isinstance(value, list):
-        return [_scrub_extracted(item, secrets) for item in value]
+        return [_scrub_extracted(item, secrets, mask_secrets) for item in value]
     return value
 
 
@@ -1547,7 +1654,7 @@ def extract():
                 entry.pop("value", None)
             # Scrub before the budgets: truncation can otherwise leave a
             # credential prefix which no longer matches the complete secret.
-            entry = _scrub_extracted(entry, secrets)
+            entry = _scrub_extracted(entry, secrets, mask_secrets=data.get("mask_secrets", False))
             for key, value in entry.items():
                 if isinstance(value, str):
                     entry[key] = value[:max_chars if key in ("text", "html", "value") else 500]
@@ -1562,12 +1669,12 @@ def extract():
             "selector": selector,
             "count": len(results),
             "elements": results,
-        }, secrets))
+        }, secrets, mask_secrets=data.get("mask_secrets", False)))
     except Exception as e:
         if created_new:
             _close_session(session_id)
         return jsonify(_scrub_extracted({"status": "error", "error": str(e)},
-                                        locals().get("secrets", _credential_values))), 500
+                                        locals().get("secrets", _credential_values), mask_secrets=data.get("mask_secrets", False))), 500
 
 
 # How many frames `include_frames` will actually read. Separate from the
@@ -1721,13 +1828,13 @@ def render_page():
 
         html = page.content()
         frame_payload, frames_capped = _collect_frames(page, include_frames)
-        html = _scrub_extracted(html, _credential_values)
-        frame_payload = _scrub_extracted(frame_payload, _credential_values)
+        html = _scrub_extracted(html, _credential_values, mask_secrets=data.get("mask_secrets", False))
+        frame_payload = _scrub_extracted(frame_payload, _credential_values, mask_secrets=data.get("mask_secrets", False))
         rendered = render.to_markdown(
             html, base_url=page.url, mode=mode, max_chars=max_chars,
             frames=frame_payload, include_frames=include_frames,
             frames_capped=frames_capped, offset=offset,
-            scrub=lambda value: _scrub_extracted(value, _credential_values),
+            scrub=lambda value: _scrub_extracted(value, _credential_values, mask_secrets=data.get("mask_secrets", False)),
         )
         result = {
             "status": "ok",
@@ -1738,7 +1845,7 @@ def render_page():
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
 
-        result = _scrub_extracted(result, _credential_values)
+        result = _scrub_extracted(result, _credential_values, mask_secrets=data.get("mask_secrets", False))
         if keep_session or not created_new:
             result["session_id"] = session_id
         else:
@@ -1749,7 +1856,7 @@ def render_page():
     except Exception as e:
         if created_new and not keep_session:
             _close_session(session_id)
-        return _navigation_error_response(e, _credential_values)
+        return _navigation_error_response(e, _credential_values, mask_secrets=data.get("mask_secrets", False))
 
 
 # Asked of the module that does the typing rather than written down here.
@@ -2516,10 +2623,11 @@ _CREDENTIAL_FILL_JS = """(el, {value, origin, card_field}) => {
 }"""
 
 
-_RECOVERY_READ_JS = """(el, {origin}) => {
+_RECOVERY_READ_JS = """(el, {origin, source = "text", attr = null}) => {
     if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
         return {ok: false, error: "credential_origin_mismatch"};
-    const text = (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
+    const text = source === "attr" ? el.getAttribute(attr) :
+        (source === "value" || el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
         ? el.value : (el.innerText || el.textContent || "");
     return {ok: true, text: text};
 }"""
@@ -2536,30 +2644,185 @@ def _recovery_redactions(text):
 
     The whole block, each code-shaped line, and each code-shaped token, so a
     page that later joins or splits the codes differently still matches.
-    Code-shaped is six characters or more with a digit or a hyphen in it:
+    Code-shaped is four characters or more with a digit or a hyphen in it:
     these join the user's redaction set for good, so a plain word like
     "Recovery" there would vanish from every later page.
     """
     def code_shaped(part):
-        return len(part) >= 6 and any(c.isdigit() or c == "-" for c in part)
+        return len(part) >= 4 and any(c.isdigit() or c == "-" for c in part)
 
     lines = [line.strip() for line in text.splitlines()]
     tokens = [token for line in lines for token in line.split()]
     return {text.strip()} | {part for part in lines + tokens if code_shaped(part)}
 
 
-def _read_recovery_action(page, action):
-    """Read a page's recovery codes for the caller to store (ISSUE-688).
+# Paths contain positions only: page-controlled IDs can themselves be secrets.
+_SECRET_PATH_JS = """el => {
+    function path(node) {
+        const parent = node.parentElement;
+        const root = node.getRootNode();
+        const siblings = parent ? parent.children : root.children;
+        const part = '*:nth-child(' + (Array.from(siblings).indexOf(node) + 1) + ')';
+        if (parent) return path(parent) + ' > ' + part;
+        if (root.host) return path(root.host) + ' ' + part;
+        return part;
+    }
+    return path(el);
+}"""
 
-    Returns ``(result, text)``. The same origin rule as a credential fill, and
-    the read happens in one evaluation with the origin re-checked inside it.
-    The text never goes in ``result``: the route returns it beside the
-    scrubbed response, and its lines join the redaction set first.
-    """
+_FIND_SECRETS_JS = r"""() => {
+    const path = (PATH_FUNCTION);
+    const rows = [];
+    function walk(root) {
+        for (const el of Array.from(root.querySelectorAll('*')).slice(0, 5000)) {
+            if (rows.length >= 500) return;
+            if (el.shadowRoot) walk(el.shadowRoot);
+            const style = getComputedStyle(el);
+            if (!el.getClientRects().length || style.visibility === 'hidden' || style.display === 'none') continue;
+            const selector = path(el);
+            const text = el.innerText || el.textContent || '';
+            const add = (suffix, value) => {
+                if (typeof value === 'string' && value.length <= 16384 &&
+                    /otpauth:\/\/|[A-Z2-7]{4}|[0-9]|(?:[a-z]{3,8}\s+){11}/.test(value))
+                    rows.push({selector: selector + suffix, text: value, download: false});
+            };
+            if (el.matches('input, textarea')) add('::value', el.value);
+            else if (!el.children.length || el.matches('pre, code, ul, ol, table, div, section')) add('', text);
+            for (const attr of el.attributes) {
+                if ((attr.name.startsWith('data-') || attr.name === 'value' ||
+                     (attr.name === 'href' && attr.value.startsWith('otpauth://'))) &&
+                    /^[A-Za-z0-9_:-]{1,64}$/.test(attr.name) && attr.value !== el.value)
+                    add('::attr(' + attr.name + ')', attr.value);
+            }
+            if (el.matches('a, button') && /download|save|\.txt/i.test(text)) {
+                const region = el.closest('section, form, article, div') || el.parentElement;
+                if (region && Array.from(region.querySelectorAll('h1,h2,h3,h4,h5,h6')).some(
+                    h => /recovery|backup|scratch|codes/i.test(h.textContent)))
+                    rows.push({selector, text: '', download: true});
+            }
+        }
+    }
+    walk(document);
+    return rows;
+}""".replace('PATH_FUNCTION', _SECRET_PATH_JS)
+
+
+def _find_secrets(page, *, limit=10):
+    candidates = []
+    for frame in page.frames:
+        try:
+            parts = []
+            ancestor = frame
+            while ancestor != page.main_frame:
+                parts.insert(0, ancestor.frame_element().evaluate(_SECRET_PATH_JS))
+                ancestor = ancestor.parent_frame
+            frame_selector = '>>>'.join(parts) or None
+            rows = frame.evaluate(_FIND_SECRETS_JS)
+        except Exception:
+            continue  # A detached frame has no reachable candidate.
+        for row in rows:
+            css = re.sub(r"::(?:value|attr\([A-Za-z0-9_:-]{1,64}\))$", "", row["selector"])
+            try:
+                if frame.locator(css).count() != 1:
+                    continue
+            except Exception:
+                continue
+            shapes = ([{"kind_guess": "codes", "count": 0, "length": 0, "charset": "[a-z0-9]"}]
+                      if row.get("download") else detect_secret_shapes(row.get("text", "")))
+            for shape in shapes:
+                candidate = {"selector": row["selector"], "frame": frame_selector,
+                             **shape, "download": bool(row.get("download"))}
+                if any(c["frame"] == frame_selector and c["kind_guess"] == candidate["kind_guess"]
+                       and c["download"] == candidate["download"]
+                       and (candidate["selector"] == c["selector"] or
+                            candidate["selector"].startswith(c["selector"] + " > "))
+                       for c in candidates):
+                    continue
+                candidates.append(candidate)
+                if limit is not None and len(candidates) == limit:
+                    return candidates
+    return candidates
+
+
+_SECRET_CLICK_JS = """(el, {origin}) => {
+    if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
+        return {ok: false, error: "credential_origin_mismatch"};
+    el.click();
+    return {ok: true};
+}"""
+
+
+def _download_secret(page, handle, origin):
+    try:
+        with page.expect_download(timeout=SELECTOR_TIMEOUT_MS) as pending:
+            checked = handle.evaluate(_SECRET_CLICK_JS, {"origin": origin})
+            if not isinstance(checked, dict) or checked.get("ok") is not True:
+                # Raising cancels the event waiter instead of waiting for a click
+                # that the document-origin check deliberately did not perform.
+                raise ValueError("credential_origin_mismatch")
+    except ValueError:
+        return {"ok": False, "error": "credential_origin_mismatch"}
+    download = pending.value
+    try:
+        if not download.suggested_filename.lower().endswith('.txt'):
+            return {"ok": False, "error": "capture_download_not_text"}
+        with open(download.path(), 'rb') as stream:
+            data = stream.read(65537)
+        if len(data) > 65536:
+            return {"ok": False, "error": "recovery_too_large"}
+        try:
+            text = data.decode('utf-8')
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "capture_download_not_text"}
+        if '\0' in text:
+            return {"ok": False, "error": "capture_download_not_text"}
+        _credential_values.update(_recovery_redactions(text))
+        return {"ok": True, "text": text}
+    finally:
+        download.delete()
+
+
+def _locate(page, selector):
+    if ">>>" in selector:
+        parts = selector.split(">>>")
+        locator = page
+        for frame in parts[:-1]:
+            locator = locator.frame_locator(frame.strip())
+        locator = locator.locator(parts[-1].strip())
+        locator.wait_for(state="visible", timeout=SELECTOR_TIMEOUT_MS)
+        return locator.element_handle(timeout=SELECTOR_TIMEOUT_MS)
+    return page.wait_for_selector(selector, state="visible", timeout=SELECTOR_TIMEOUT_MS)
+
+
+def _read_recovery_action(page, action):
+    return _read_secret_action(page, action)
+
+
+def _read_secret_action(page, action):
+    """Read from the element's bound frame and register redactions before returning."""
     selector = action.get("selector") or ""
     if not selector:
-        return {"action": "read_recovery", "ok": False, "error": "selector is required"}, ""
-    handle = page.wait_for_selector(selector, state="visible", timeout=SELECTOR_TIMEOUT_MS)
+        return {"action": action.get("type", "read_secret"), "ok": False, "error": "selector is required"}, ""
+    download = action.get("type") == "read_secret_download"
+    if selector == "auto":
+        candidates = _find_secrets(page, limit=None)
+        matching = [c for c in candidates if c["kind_guess"] == action.get("kind", "codes")
+                    and c["download"] == download]
+        if len(matching) != 1:
+            return {"action": action.get("type", "read_secret"), "ok": False,
+                    "error": "capture_auto_ambiguous", "candidates": candidates[:10]}, ""
+        candidate = matching[0]
+        selector = (candidate["frame"] + ">>>" if candidate["frame"] else "") + candidate["selector"]
+    source, attr = action.get("source", "text"), action.get("attr")
+    suffix = re.search(r"::(value|attr\(([A-Za-z0-9_:-]{1,64})\))$", selector)
+    if suffix:
+        source = "value" if suffix.group(1) == "value" else "attr"
+        attr = suffix.group(2)
+        selector = selector[:suffix.start()]
+    if source not in ("text", "value", "attr") or (source == "attr" and (
+            not isinstance(attr, str) or not re.fullmatch(r"[A-Za-z0-9_:-]{1,64}", attr))):
+        return {"action": "read_secret", "ok": False, "error": "capture_source_invalid"}, ""
+    handle = _locate(page, selector)
     frame = handle.owner_frame()
     try:
         parsed = urlsplit(frame.url if frame else "")
@@ -2569,24 +2832,37 @@ def _read_recovery_action(page, action):
     hosts = action.get("bound_hosts", [])
     if (not isinstance(hosts, list) or not origin.startswith("https://")
             or origin[len("https://"):] not in hosts):
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": "credential_origin_mismatch"}, ""
-    read = handle.evaluate(_RECOVERY_READ_JS, {"origin": origin})
+    args = {"origin": origin}
+    if action.get("type") != "read_recovery":
+        args.update(source=source, attr=attr)
+    read = (_download_secret(page, handle, origin) if download
+            else handle.evaluate(_RECOVERY_READ_JS, args))
     if not isinstance(read, dict) or read.get("ok") is not True:
         error = read.get("error") if isinstance(read, dict) else None
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": error or "recovery_read_failed"}, ""
     text = read.get("text") if isinstance(read.get("text"), str) else ""
     if not text.strip():
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": "recovery_empty"}, ""
-    if (len(text) > RECOVERY_MAX_CHARS
+    if (len(text) > (65536 if download else RECOVERY_MAX_CHARS)
             or sum(1 for line in text.splitlines() if line.strip()) > RECOVERY_MAX_LINES):
-        return {"action": "read_recovery", "selector": selector, "ok": False,
+        return {"action": action.get("type", "read_secret"), "selector": selector, "ok": False,
                 "error": "recovery_too_large"}, ""
     _credential_values.update(_recovery_redactions(text))
-    return {"action": "read_recovery", "selector": selector, "ok": True, "path": "cdp",
-            "path_reason": "credential origin checked"}, text
+    if action.get("kind") == "phrase":
+        _credential_values.update(line.strip() for line in text.splitlines() if line.strip())
+        _credential_values.add(" ".join(text.split()))
+    if action.get("kind") == "otp":
+        for match in re.finditer(r"(?<![A-Z0-9])[A-Z2-7]{4,}(?:[ -][A-Z2-7]{4,})*(?![A-Z0-9])", text.upper()):
+            grouped = match.group()
+            bare = grouped.replace(" ", "").replace("-", "")
+            if len(bare) >= 16:
+                _credential_values.update((grouped, bare, text[match.start():match.end()]))
+    return {"action": action.get("type", "read_secret"), "selector": selector, "ok": True, "path": "cdp",
+            "path_reason": "credential origin checked", "host": origin[len("https://"):]}, text
 
 
 def _selector_action(session, page, action, others=(), owned=()):
@@ -2600,15 +2876,7 @@ def _selector_action(session, page, action, others=(), owned=()):
     action_type = action["type"]
     selector = action.get("selector") or ""
     if selector and action_type == "fill" and action.get("credential"):
-        if action.get("card_field") and ">>>" in selector:
-            frame_selector, inner_selector = selector.split(">>>", 1)
-            locator = page.frame_locator(frame_selector.strip()).locator(inner_selector.strip())
-            locator.wait_for(state="visible", timeout=SELECTOR_TIMEOUT_MS)
-            handle = locator.element_handle(timeout=SELECTOR_TIMEOUT_MS)
-        else:
-            handle = page.wait_for_selector(
-                selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
-            )
+        handle = _locate(page, selector)
         # Read the field's own document, including a selector into a frame.
         # Filling that handle cannot re-resolve the selector after navigation.
         frame = handle.owner_frame()
@@ -2787,14 +3055,16 @@ def interact():
     results = []
     # Read recovery codes, returned beside the scrubbed response and never in
     # it: the caller stores them and replaces each with a count (ISSUE-688).
+    if any(a.get("type") == "find_secrets" or a.get("selector") == "auto" for a in actions):
+        data["mask_secrets"] = True
     recovered = []
     try:
         for action in actions:
             action_type = action.get("type")
             selector = action.get("selector", "")
 
-            if action_type == "read_recovery":
-                read, text = _read_recovery_action(page, action)
+            if action_type in ("read_recovery", "read_secret", "read_secret_download"):
+                read, text = (_read_recovery_action if action_type == "read_recovery" else _read_secret_action)(page, action)
                 if text:
                     recovered.append(text)
                     read["recovery"] = len(recovered) - 1
@@ -2804,10 +3074,12 @@ def interact():
                         "status": "error", "actions": results,
                         "error": read.get("error", "recovery_read_failed"),
                         "actions_not_run": len(actions) - len(results),
-                    }, _credential_values)
+                    }, _credential_values, mask_secrets=data.get("mask_secrets", False))
                     result["session_id"] = session_id
                     result["recovery"] = recovered
                     return jsonify(result)
+            elif action_type == "find_secrets":
+                results.append({"action": "find_secrets", "ok": True, "candidates": _find_secrets(page)})
             elif action_type in _SELECTOR_ACTIONS:
                 results.append(
                     _selector_action(session, page, action, others, owned))
@@ -2817,7 +3089,7 @@ def interact():
                         "status": "error", "actions": results,
                         "error": results[-1].get("error", "credential_fill_failed"),
                         "actions_not_run": len(actions) - len(results),
-                    }, _credential_values)
+                    }, _credential_values, mask_secrets=data.get("mask_secrets", False))
                     result["session_id"] = session_id
                     result["recovery"] = recovered
                     return jsonify(result)
@@ -2862,7 +3134,7 @@ def interact():
                                          recovery=recovered)
 
         content = browsing.extract_page_content(
-            page, scrub=lambda value: _scrub_extracted(value, _credential_values),
+            page, scrub=lambda value: _scrub_extracted(value, _credential_values, mask_secrets=data.get("mask_secrets", False)),
         )
         result = {
             "status": "ok",
@@ -2871,7 +3143,7 @@ def interact():
         }
         if solved == CHALLENGE_CLEARED:
             result["challenge_solved"] = True
-        result = _scrub_extracted(result, _credential_values)
+        result = _scrub_extracted(result, _credential_values, mask_secrets=data.get("mask_secrets", False))
         result["session_id"] = session_id
         result["recovery"] = recovered
         return jsonify(result)
@@ -2890,7 +3162,7 @@ def interact():
                         len(results), e, exc_info=True)
         result = _scrub_extracted({
             "status": "error", "actions": results, "error": str(e),
-        }, _credential_values)
+        }, _credential_values, mask_secrets=data.get("mask_secrets", False))
         result["session_id"] = session_id
         result["recovery"] = recovered
         return jsonify(result), 500
@@ -3193,6 +3465,9 @@ def health():
         "credential_origin_check": True,
         "otp_expiry_check": True,
         "recovery_save": True,
+        "secret_capture": True,
+        "secret_capture_download": True,
+        "secret_discovery": True,
         "card_fill": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,

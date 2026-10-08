@@ -53,7 +53,7 @@ istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
 istota user show --name USER_ID              # Dump the stored profile row as JSON
 istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
-istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--sms-number E164 | --clear-sms-number] [--whatsapp-number E164 | --clear-whatsapp | --reset-whatsapp-identity] [--whatsapp-bsuid BSUID] [--clear-vault-config] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--outbound-approval off|untrusted|all|""] [--external-turn-display full|collapsed|hidden] [--default-briefings | --no-default-briefings] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
+istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--sms-number E164 | --clear-sms-number] [--whatsapp-number E164 | --clear-whatsapp | --reset-whatsapp-identity] [--whatsapp-bsuid BSUID] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--outbound-approval off|untrusted|all|""] [--external-turn-display full|collapsed|hidden] [--default-briefings | --no-default-briefings] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
 ```
 
 `istota user ensure` has no `-u`/`--user` flag — the user id comes from `--name` (required). `--tz` and `--timezone` are aliases. `--email` takes a bare address and is repeatable (each pass replaces the stored list). Worker caps are `--max-foreground-workers` / `--max-background-workers`.
@@ -62,7 +62,6 @@ istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR 
 
 `--whatsapp-number` binds a bootstrap E.164 number for the WhatsApp surface, used for the first binding and as an outbound fallback; `--whatsapp-bsuid` enrolls the business-scoped user id explicitly, which is the only route for a WhatsApp user with a username and no reachable number. The two may be given together. `--reset-whatsapp-identity` clears the learned identity and keeps the number, `--clear-whatsapp` removes the binding. Changing the number discards the 24-hour service window along with everything else learned about the previous holder. See [WhatsApp](../features/whatsapp.md).
 
-`--clear-vault-config` forgets which file in the user's own `vault/` folder their [credential vault](../configuration/credentials.md#credential-vault) is, so the folder's own rules decide again — the single `.kdbx` there if there is one, or nothing until they choose another in the browser. There is no CLI flag that *sets* the choice: that is the settings card's, validated against a listing the server just produced. A `[users.<id>] vault_path` in `config.toml` outranks both.
 
 `--default-briefings` / `--no-default-briefings` controls whether the shared `[[default_briefings]]` set is seeded into this user (on by default). Seeding is one-time per briefing name, so a later opt-in never clobbers briefings the user has edited.
 
@@ -158,19 +157,17 @@ istota secret ensure -u USER --service SERVICE --key KEY --value VALUE   # value
 istota secret list   -u USER                                             # service/key/last_accessed; values never printed
 istota secret remove -u USER --service SERVICE --key KEY
 
-istota secret ensure -u USER --service vault --key passphrase --generate [--force]
-istota secret vault-status [-u USER]                                     # resolved path, passphrase, scope, names
-istota secret vault-sync   [-u USER]                                     # one sync pass by hand, cached hash ignored
+istota secret export --user USER --out PATH
+istota secret import --user USER PATH [--include-changed] [--keyfile PATH]
 istota secret vault-new    -u USER --slug SLUG [--username USER] [--url URL] [--length N] [--no-symbols]
 ```
 
 Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are long-only (`-v` is the global verbose flag).
 
-`--generate` mints the value instead of taking one, stores it and prints it once. It applies to the vault passphrase only, and refuses to replace a passphrase that is already there unless you pass `--force` — minting a second one destroys the only copy of the value the KDBX file is encrypted under.
 
-The two `vault-*` actions default to every configured user and take `-u` for one; `-u` with an unknown id is an error rather than "no vault configured". Neither prints a credential value — counts, service names, key names and group names only. `vault-sync` ignores the file-digest cache the daemon's own cycles use, so it is the way to force a read after an edit rather than waiting out `[scheduler] vault_sync_interval`; it writes a notification row for a failure but pushes nothing, since the operator is reading the failure off their own terminal. See [credential vault](../configuration/credentials.md#credential-vault).
+Export requires a terminal and prints a generated password once. Import prompts privately for the source passphrase, prints a preview, and imports new entries; `--include-changed` also replaces changed entries. Both use the same credential modules as Settings.
 
-`vault-new` is the operator's counterpart to a task's `istota-credential new`. It needs `-u` and `--slug`, generates a password (24 characters by default, symbols unless `--no-symbols`), writes the entry under `generated/` in that user's KDBX, and prints the three credential names. It never prints the password. The username defaults to the user's first configured email address. The file is unlocked and checked before the write, and a name collision is refused. It warns on stderr that a password manager holding the file open may overwrite the new entry on its next save. It is not counted against `[security] vault_writes_per_task`, which bounds tasks.
+`vault-new` creates a generated credential in the encrypted table and prints its names, never its password. It requires a configured user and a unique slug; `--length` and `--no-symbols` set password requirements. It does not write a KeePass file.
 
 ### Ensure-CLI state contract
 

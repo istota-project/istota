@@ -25,10 +25,10 @@ REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 #: room writing to its principal privately (the name predates ISSUE-608 and is
 #: kept to avoid a CHECK rebuild), `room_post` a private-room task's post into
 #: a shared room, held for the member's approval.
-KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase")
+KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase", "recovery_fill")
 ROOM_KINDS = ("side_whisper", "room_post")
-_SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase")
-_HELD_KINDS = ("relay_question", "room_post", "purchase")
+_SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase", "recovery_fill")
+_HELD_KINDS = ("relay_question", "room_post", "purchase", "recovery_fill")
 
 
 class RequestError(ValueError):
@@ -783,7 +783,7 @@ def park_question(conn, config, *, task) -> dict | None:
         return dict(row)
 
 
-def approve_request(conn, *, task, request_id: str, preview_digest: str, config=None) -> None:
+def approve_request(conn, *, task, request_id: str, preview_digest: str, config=None, actor="system") -> None:
     """Only the currently displayed immutable request receives authority."""
     from istota.relay import relays as message_relays
     with write_transaction(conn):
@@ -799,7 +799,22 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str, config=
         if row["relay_id"] and message_relays.is_blocked(
                 conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
             raise RequestError("recipient_unavailable")
-        if row["kind"] == "purchase":
+        if row["kind"] == "recovery_fill":
+            from istota.credentials import recovery_fill
+            destination = json.loads(row["destination"] or "{}")
+            authorization = conn.execute(
+                "SELECT * FROM recovery_fill_authorizations WHERE id=? AND user_id=? AND task_id=? AND request_id=?",
+                (destination.get("authorization_id"), task.user_id, task.id, request_id),
+            ).fetchone()
+            if authorization is None:
+                raise RequestError("confirmation_unavailable")
+            recovery_fill.authorize_held(conn, authorization["id"], preview_digest, actor=actor)
+            conn.execute(
+                "UPDATE whatsapp_skill_requests SET state='approved', approved_digest=?, "
+                "approved_at=datetime('now'), closed_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
+                (preview_digest, request_id),
+            )
+        elif row["kind"] == "purchase":
             from istota.wallet import purchases
 
             destination = json.loads(row["destination"] or "{}")

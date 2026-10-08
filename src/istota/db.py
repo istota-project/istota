@@ -1253,6 +1253,12 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
         );
     """)
     _add_columns(conn, "credential_bindings", {"kind": "TEXT NOT NULL DEFAULT 'value'"})
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='istota_kv'").fetchone():
+        # Preserve the old source until the final import has compared ownership.
+        conn.execute("""UPDATE credential_bindings SET source='local' WHERE source='vault'
+            AND user_id IN (SELECT user_id FROM istota_kv
+                            WHERE namespace='_credential_migration' AND key='vault_retired')""")
+
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS signup_tags (
             tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT NOT NULL,
@@ -1292,6 +1298,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # same way: a CHECK cannot be altered, so it is rebuilt.
     _migrate_skill_request_room_kinds(conn)
     _migrate_skill_request_purchase_kind(conn)
+    _rebuild_skill_request_kinds(conn, "recovery_fill")
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -5915,7 +5922,6 @@ def room_has_phone_binding(conn: sqlite3.Connection, room_token: str) -> bool:
     return room is not None and is_private_email_ref(binding.surface_ref, room.user_id)
 
 
-
 def is_private_room_of(
     conn: sqlite3.Connection, token: str | None, user_id: str, *, allow_phone: bool = False,
 ) -> bool:
@@ -7731,7 +7737,7 @@ _SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,

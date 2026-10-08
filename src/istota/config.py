@@ -424,14 +424,8 @@ class SchedulerConfig:
     # it: the two answer the same disk, and a cache that went over its ceiling
     # is not urgent — it is over budget, not broken.
     sandbox_cache_sweep_interval: int = 21600
-    # Seconds between KDBX credential-vault syncs (0 = off; the gate is also
-    # inert unless some user has a `vault_path`). Startup alone is not enough —
-    # a user edits their vault at 3pm and nothing happens until the next restart
-    # — and five minutes is chosen against the rclone dir-cache lag, which adds
-    # its own delay on top; a shorter interval mostly buys more `stat` calls. A
-    # cycle whose digest is unchanged stops at the hash, so the steady-state
-    # cost is one bounded read per user rather than an Argon2id unlock.
-    vault_sync_interval: int = 300
+    # Seconds between encrypted credential backups (0 = off).
+    credential_backup_interval: int = 86400
     # Seconds between Nextcloud profile-picture import ticks (0 = off). Six
     # hours, and the number is a compromise the spec names rather than a round
     # figure: the import runs on a cadence rather than at login (a 10-second
@@ -1244,6 +1238,7 @@ class WebConfig:
     auth_enrol_ttl_hours: int = 168
     auth_reset_ttl_hours: int = 1
     auth_sign_in_code_ttl_minutes: int = 10
+    auth_step_up_ttl_minutes: int = 10
     auth_min_password_length: int = 12
     auth_throttle_window_seconds: int = 900
     auth_throttle_max_email: int = 10
@@ -1292,7 +1287,6 @@ class WebConfig:
 
     def has_method(self, name: str) -> bool:
         return name in self.auth
-
 
 
 @dataclass
@@ -1514,6 +1508,10 @@ class CredentialBrokerConfig:
 @dataclass
 class SecurityConfig:
     """Security hardening configuration."""
+    credential_history_days: int = 180
+    credential_audit_days: int = 365
+    credential_exports_per_day: int = 3
+    credential_backup_retention: int = 30
     credential_broker: CredentialBrokerConfig = field(default_factory=CredentialBrokerConfig)
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
     skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket
@@ -2681,10 +2679,7 @@ class Config:
             return False
         try:
             from istota.credentials import store as secrets_store  # noqa: PLC0415 - import cost
-            from istota.credentials.vault import (  # noqa: PLC0415 - import cost
-                VAULT_PASSPHRASE_KEY,
-                VAULT_PASSPHRASE_SERVICE,
-            )
+            from istota.credentials.vault_retire import VAULT_PASSPHRASE_KEY, VAULT_PASSPHRASE_SERVICE
             return secrets_store.any_user_has_secret(
                 Path(self.db_path), VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
             )
@@ -2963,6 +2958,8 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         user_data.get("sms_phone_number", ""), allow_empty=True,
     )
 
+    if "vault_path" in user_data:
+        logger.warning("[users.%s] vault_path is retired; it is read only for credential migration", user_id)
     return UserConfig(
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
@@ -3013,7 +3010,6 @@ def _vault_path_value(user_id: str, raw: object) -> str:
         "user", user_id, type(raw).__name__,
     )
     return ""
-
 
 
 #: What a `shim_commands` entry may look like. A shim's name becomes a filename
@@ -4229,6 +4225,9 @@ def load_config(config_path: Path | None = None) -> Config:
     with open(config_path, "rb") as f:
         data = tomli.load(f)
 
+    if isinstance(data.get("scheduler"), dict) and "vault_sync_interval" in data["scheduler"]:
+        logger.warning("[scheduler] vault_sync_interval is retired and ignored")
+
     config = Config()
     config.config_path = config_path
 
@@ -4645,7 +4644,6 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_forge_urls(config)
 
     return config
-
 
 
 SMS_PROVIDER_NAMES = ("twilio", "telnyx")

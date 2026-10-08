@@ -239,11 +239,12 @@ _OWNER = "lib/atomic_write.py"
 #: Files that publish with `os.replace` and are deliberately not copies of
 #: `atomic_writer`, each with what it needs that the helper does not do.
 _NOT_A_COPY = {
-    # A KDBX create: the staging file is opened relative to a directory fd,
-    # parsed back and verified before the rename, and the rename is refused if
-    # the live file changed underneath it. `atomic_writer` takes a path and
-    # publishes whatever the body wrote.
-    "credentials/vault.py",
+    # Publishes ciphertext relative to a held directory fd; the path-based
+    # atomic writer would reopen a user-writable ancestor by name.
+    "credentials/backup_export.py",
+    # The fixed .tmp suffix is part of pending()'s crash-recovery sweep.
+    # atomic_writer uses random dot-prefixed names with no matching sweep.
+    "transport/whatsapp/inbound_spool.py",
 }
 
 

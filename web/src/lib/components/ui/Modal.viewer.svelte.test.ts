@@ -47,12 +47,15 @@ describe('viewer modal', () => {
     expect(within(dialog).queryByRole('button', { name: 'Next entry' })).not.toBeInTheDocument();
   });
 
-  it('dismisses on Escape and restores the opener', async () => {
-    const { dialog, opener } = await open();
-    await fireEvent.keyDown(dialog, { key: 'Escape' });
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    await waitFor(() => expect(opener).toHaveFocus());
-  });
+  it.each(['default', 'viewer'])(
+    'dismisses the %s dialog on Escape and restores the opener',
+    async (variant) => {
+      const { dialog, opener } = await open({ variant });
+      await fireEvent.keyDown(dialog, { key: 'Escape' });
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      await waitFor(() => expect(opener).toHaveFocus());
+    },
+  );
 
   it('only navigates enabled endpoints, and blocks next while busy', async () => {
     const nav = navigation();

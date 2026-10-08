@@ -3971,7 +3971,7 @@ class TestSaveRecovery:
     proxy = TestFillCredential.proxy
     VAULT = {}
     CODES = "fixture-rc-1111-aaaa\nfixture-rc-2222-bbbb"
-    HEALTH = {"per_user_profiles": True, "credential_origin_check": True, "recovery_save": True}
+    HEALTH = {"per_user_profiles": True, "credential_origin_check": True, "recovery_save": True, "secret_capture": True}
 
     @pytest.fixture
     def recovery_proxy(self, proxy, tmp_path, monkeypatch):
@@ -3985,7 +3985,7 @@ class TestSaveRecovery:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             generated.create(conn, "alice", name="generated_acme", username="alice@example.com",
-                             password="fixture-password", url="https://acme.example", mirror=False)
+                             password="fixture-password", url="https://acme.example")
         server = proxy(config=config, user_id="alice", vault_write_limit=2,
                        vault_credentials={"generated_acme": "fixture-password"})
         with server._credential_channel(10) as fd:
@@ -4005,13 +4005,13 @@ class TestSaveRecovery:
         ) as post:
             main(["interact", "s1", "--click", "#show", "--save-recovery", "#codes=generated_acme"])
         sent = post.call_args.kwargs["json"]["actions"]
-        assert sent[1] == {"type": "read_recovery", "selector": "#codes", "credential": True,
+        assert sent[1] == {"type": "read_secret", "kind": "codes", "selector": "#codes", "credential": True,
                            "bound_hosts": ["acme.example"], "credential_name": "generated_acme"}
         output = capsys.readouterr().out
         assert "fixture-rc" not in output
         result = json.loads(output)
-        assert result["actions"][1] == {"action": "save_recovery", "selector": "#codes",
-                                        "name": "generated_acme", "ok": True, "saved": 2,
+        assert result["actions"][1] == {"name": "generated_acme", "kind": "codes",
+                                        "shape": {"count": 2, "length": 20, "charset": "[a-z0-9-]"},
                                         "replaced": False}
         assert "recovery" not in result
         assert store.get_secret(config.db_path, "alice", "vault_entries",
@@ -4070,3 +4070,69 @@ class TestSaveRecovery:
         assert result["actions"][0]["error"] == "credential_origin_mismatch"
         assert store.get_secret(config.db_path, "alice", "vault_entries",
                                 "generated_acme_recovery") is None
+
+
+class TestSecretCapture:
+    proxy = TestSaveRecovery.proxy
+    recovery_proxy = TestSaveRecovery.recovery_proxy
+    HEALTH = {**TestSaveRecovery.HEALTH, "secret_capture_download": True, "secret_discovery": True}
+    VAULT = {}
+    @pytest.mark.parametrize("flag,kind,text", [
+        ("--capture-otp", "otp", "Your secret key is JBSW Y3DP EHPK 3PXP"),
+        ("--capture-codes", "codes", "Your scratch token is a1b2c3d4e5"),
+        ("--capture-codes-download", "codes", "Your scratch token is a1b2c3d4e5"),
+        ("--capture-phrase", "phrase", "apple " * 12),
+    ])
+    def test_capture_shape_and_audit(self, recovery_proxy, capsys, caplog, flag, kind, text):
+        from istota import db
+        from istota.credentials import store
+        server, config = recovery_proxy
+        response = {"status": "ok", "user_scope": "alice", "session_id": "s1",
+                    "actions": [{"action": "read_secret", "ok": True, "recovery": 0, "host": "acme.example"}],
+                    "recovery": [text]}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=self.HEALTH)), patch(
+            "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=response)):
+            main(["interact", "s1", flag, "#secret=generated_acme"])
+        output = capsys.readouterr().out
+        result = json.loads(output)
+        assert result["status"] == "ok"
+        assert result["actions"][0]["kind"] == kind
+        assert result["actions"][0]["shape"]["count"] == 1
+        assert text.strip() not in output + caplog.text
+        assert server._captured_codes_this_attempt == ({"generated_acme": "acme.example"} if kind == "codes" else {})
+        member = "_totp" if kind == "otp" else "_recovery"
+        assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_acme" + member)
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute("SELECT detail_json FROM credential_audit WHERE action='capture'").fetchone()
+            assert json.loads(row[0]) == {"kind": kind, "count": 1, "source": "download" if flag.endswith("-download") else "page", "replaced": False}
+            assert text.strip() not in "\n".join(conn.iterdump())
+
+
+@pytest.mark.parametrize("argv", [
+    ["get", "https://acme.example", "--mask-secrets"],
+    ["render", "https://acme.example", "--mask-secrets"],
+    ["extract", "https://acme.example", "-s", "input", "--mask-secrets"],
+    ["interact", "s1", "--mask-secrets", "--find-secrets"],
+])
+@pytest.mark.parametrize("capable", [True, False])
+def test_secret_discovery_cli_preflight_and_payload(argv, capable, capsys):
+    health = {**TestSaveRecovery.HEALTH, "secret_discovery": capable}
+    with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=health)), patch(
+        "istota.skills.browse.httpx.post", return_value=httpx.Response(200, json={"status": "ok"}),
+    ) as post:
+        if capable:
+            main(argv)
+            assert post.call_args.kwargs["json"]["mask_secrets"] is True
+            if argv[0] == "interact":
+                assert post.call_args.kwargs["json"]["actions"] == [{"type": "find_secrets"}]
+        else:
+            with pytest.raises(SystemExit):
+                main(argv)
+            post.assert_not_called()
+    capsys.readouterr()
+
+
+def test_download_requires_its_own_capability():
+    from istota.skills.browse import _credential_preflight
+    with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=TestSaveRecovery.HEALTH)):
+        assert _credential_preflight("http://browser", recovery_save=True, recovery_download=True)["status"] == "error"

@@ -5,6 +5,7 @@ Run as: uvicorn istota.webui.app:app --host 127.0.0.1 --port 8766
 Email and Nextcloud authentication with signed, revocable sessions.
 SvelteKit frontend served as static files, Python handles auth and API.
 """
+from istota.credentials import kdbx_import as credential_read
 
 import asyncio
 import codecs
@@ -1196,6 +1197,7 @@ async def login_email(request: Request):
             request.session.clear()
             request.session["user"] = {"username": identity.user_id, "display_name": profile.display_name}
             request.session["auth"] = {"method": "email", "epoch": identity.credential_epoch}
+            request.session["session_id"] = secrets.token_hex(16)
             return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
     await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
     return await _auth_error("Sign-in failed", "Email or password was not accepted.", 400)
@@ -1255,6 +1257,7 @@ async def _start_email_session(request: Request, result) -> Response | None:
     request.session.clear()
     request.session["user"] = {"username": user_id, "display_name": profile.display_name}
     request.session["auth"] = {"method": "email", "epoch": epoch}
+    request.session["session_id"] = secrets.token_hex(16)
     return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1716,6 +1719,7 @@ async def callback(request: Request):
         "display_name": display_name,
     }
     request.session["auth"] = {"method": "nextcloud", "epoch": epoch}
+    request.session["session_id"] = secrets.token_hex(16)
     return RedirectResponse(url=landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
@@ -12522,6 +12526,63 @@ async def _avatar_upload_part(request: Request, raw: bytes):
         await form.close()
 
 
+_SECRET_KEYFILE_CAP = 1024 * 1024
+_SECRET_FIELDS_CAP = 64 * 1024
+
+
+async def _secret_multipart(request: Request, *, limit: int, fields: set[str]):
+    """Bound secret uploads before parsing and keep both files in memory."""
+    from python_multipart.exceptions import FormParserError
+    from starlette.datastructures import UploadFile as UploadedPart
+    from starlette.formparsers import MultiPartException, MultiPartParser
+    from .avatars import AvatarError
+
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        raise AvatarError(400, "Expected a multipart upload.")
+    body_limit = limit + _SECRET_KEYFILE_CAP + _SECRET_FIELDS_CAP
+    raw = await _read_bounded_body(request, body_limit)
+
+    async def chunks(body):
+        yield body
+
+    parser = MultiPartParser(request.headers, chunks(raw), max_files=2,
+                             max_fields=len(fields), max_part_size=_SECRET_FIELDS_CAP)
+    # The body is already bounded. Starlette's default spills files over 1 MiB.
+    parser.spool_max_size = body_limit
+    form = None
+    try:
+        form = await parser.parse()
+        values, files = {}, {}
+        seen = set()
+        for name, value in form.multi_items():
+            if name in seen:
+                raise AvatarError(400, "Duplicate upload field.")
+            seen.add(name)
+            if isinstance(value, UploadedPart):
+                if name not in ("file", "keyfile"):
+                    raise AvatarError(400, "Unknown upload field.")
+                cap = limit if name == "file" else _SECRET_KEYFILE_CAP
+                if value.size is None or value.size > cap:
+                    raise AvatarError(413, "That upload is too large.")
+                files[name] = await value.read()
+            elif name in fields and isinstance(value, str):
+                values[name] = value
+            else:
+                raise AvatarError(400, "Unknown upload field.")
+        if "file" not in files or set(values) != fields:
+            raise AvatarError(400, "The upload is missing required fields.")
+        return files["file"], files.get("keyfile"), values
+    except (MultiPartException, FormParserError):
+        raise AvatarError(400, "That upload is not a valid multipart body.") from None
+    finally:
+        if form is not None:
+            await form.close()
+        else:
+            for part in parser._files_to_close_on_error:
+                part.close()
+        del raw
+
+
 async def _read_avatar_upload(request: Request) -> tuple[bytes, str]:
     """A multipart request body → normalized WebP bytes and their sha256.
 
@@ -13028,7 +13089,6 @@ def _service_status(schema: dict, configured_keys: set[str]) -> str:
     return "missing"
 
 
-
 def _build_service_card(
     service: str,
     schema: dict,
@@ -13126,7 +13186,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
     from istota import db
     from istota.credentials import generated
     from istota.credentials import local as local_credentials
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
     from istota.credentials.broker import bindings, grants
     from istota.executor import effective_sandboxing
 
@@ -13162,7 +13222,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
         credentials = []
         for credential_name in sorted(names):
             binding = bindings.get_entry_binding(conn, username, credential_name) or {
-                "hosts": [], "headers": [], "revealable": False, "source": "vault"}
+                "hosts": [], "headers": [], "revealable": False, "source": "local"}
             row = {"name": credential_name, **binding,
                    "grant": grants.get_grant(conn, username, credential_name),
                    "otp": any((bindings.get_binding(conn, username, member) or {}).get("kind") == "totp"
@@ -13171,19 +13231,17 @@ def _credential_settings(username: str, action="list", name="", payload=None):
                 # The edit form's inputs. Never the value or the username.
                 row.update(local_credentials.stored_fields(conn, username, credential_name))
             if binding.get("source") == generated.SOURCE:
-                row["generated"] = generated.mirror_state(conn, username, credential_name)
                 # Whether there are codes to show; the codes are fetched on demand.
                 row["recovery"] = generated.has_recovery(conn, username, credential_name)
+                state = generated.recovery_state(conn, username, credential_name)
+                row["recovery_remaining"] = state["remaining"] if state else None
             credentials.append(row)
         existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
-        default_mirror = generated.default_mirror(conn, username)
     refusal = secrets_vault.vault_isolation_refusal(_config, username) or ""
     return {"credentials": credentials, "rooms": rooms,
             "grant_existing_available": existing_available, "sandboxed": effective_sandboxing(_config),
             "can_add": not refusal, "add_blocked_reason": refusal,
-            "broker_enabled": bool(_config.security.credential_broker.enabled),
-            "vault_enabled": secrets_vault._vault_is_enabled(_config, username),
-            "generated_default_mirror": default_mirror}
+            "broker_enabled": bool(_config.security.credential_broker.enabled)}
 
 
 # The body carries a secret, so the write routes parse it themselves: a
@@ -13270,7 +13328,7 @@ def _create_local_credential(user_id: str, fields: dict) -> dict:
             extra_hosts=fields.get("extra_hosts", ""), headers=fields.get("headers", ""),
             revealable=fields.get("revealable", False), otp=fields.get("otp", ""),
         )
-        return local_credentials.create(conn, user_id, cred, access=access)
+        return local_credentials.create(conn, user_id, cred, access=access, actor=f"web:{user_id}")
 
 
 def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
@@ -13282,14 +13340,14 @@ def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
         return local_credentials.update(
             conn, user_id, name, value=fields.get("value"), username=fields.get("username"),
             url=fields["url"], extra_hosts=fields["extra_hosts"], headers=fields["headers"],
-            revealable=fields["revealable"], otp=fields.get("otp"),
+            revealable=fields["revealable"], otp=fields.get("otp"), actor=f"web:{user_id}",
         )
 
 
 async def _write_local_credential(request: Request, user_id: str, name: str | None):
     """Create (``name is None``) or update a credential added in Istota."""
     from istota.credentials import local as local_credentials
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -13319,6 +13377,222 @@ async def _write_local_credential(request: Request, user_id: str, name: str | No
         return JSONResponse({"detail": _CREDENTIAL_STORE_FAILED}, status_code=500)
     logger.info("credential %s via settings: %s", verb, secrets_vault._label(result["name"]))
     return {"ok": True, **result}
+
+
+async def _import_credentials(request: Request, user_id: str, *, preview_only: bool):
+    from dataclasses import asdict
+    from istota.credentials import kdbx_import, store, names as vault
+    from .avatars import AvatarError
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="Credential settings are unavailable.")
+    refusal = vault.vault_isolation_refusal(_config, user_id)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    data, keyfile, fields = None, None, {}
+    headers = {"Cache-Control": "no-store"}
+    try:
+        required = {"passphrase"} if preview_only else {"passphrase", "selected", "digest"}
+        data, keyfile, fields = await _secret_multipart(
+            request, limit=credential_read.VAULT_READ_CAP_BYTES, fields=required)
+        if preview_only:
+            result = await asyncio.to_thread(kdbx_import.preview, _config.db_path, user_id,
+                                             data, fields["passphrase"], keyfile=keyfile)
+        else:
+            try:
+                selected = json.loads(fields["selected"])
+            except (ValueError, RecursionError):
+                raise AvatarError(400, "Selected credentials must be a list of names.") from None
+            if (not isinstance(selected, list) or len(selected) > credential_read.VAULT_MAX_NAMES
+                    or any(not isinstance(name, str) or not vault.VAULT_NAME_RE.fullmatch(name)
+                           for name in selected)):
+                raise AvatarError(400, "Selected credentials must be a list of names.")
+            result = await asyncio.to_thread(
+                kdbx_import.apply, _config.db_path, user_id, data, fields["passphrase"],
+                keyfile=keyfile, selected=selected, expected_digest=fields["digest"], actor="import")
+        return JSONResponse(asdict(result), headers=headers)
+    except credential_read.VaultLocked:
+        return JSONResponse({"detail": "Wrong passphrase or key file.", "field": "passphrase"},
+                             status_code=400, headers=headers)
+    except credential_read.VaultCorrupt:
+        return JSONResponse({"detail": "Not a KeePass file Istota can read."}, status_code=400, headers=headers)
+    except credential_read.VaultLibraryMissing:
+        return JSONResponse({"detail": "Install the vault extra to import KeePass files."},
+                             status_code=503, headers=headers)
+    except store.SecretKeyMissingError:
+        return JSONResponse({"detail": "The credential store is not configured."}, status_code=503, headers=headers)
+    except AvatarError as exc:
+        return JSONResponse({"detail": exc.message}, status_code=exc.status, headers=headers)
+    except ValueError as exc:
+        reason = str(exc)
+        if reason not in {"import_file_changed", "import_nothing_selected"}:
+            reason = "import_refused"
+        return JSONResponse({"detail": reason}, status_code=400, headers=headers)
+    except Exception as exc:
+        logger.error("credential import failed: %s", type(exc).__name__)
+        return JSONResponse({"detail": "Credential import failed."}, status_code=500, headers=headers)
+    finally:
+        fields.clear()
+        del data, keyfile
+
+
+def _export_limit(conn, user_id):
+    limit = max(1, _config.security.credential_exports_per_day)
+    rows = conn.execute(
+        "SELECT datetime(at, '+1 day') FROM credential_audit "
+        "WHERE user_id=? AND action='export' AND at > datetime('now', '-1 day') ORDER BY at DESC",
+        (user_id,),
+    ).fetchall()
+    if len(rows) >= limit:
+        raise HTTPException(status_code=429, detail={"detail": "export_rate_limited",
+                                                     "next_allowed_at": rows[limit - 1][0]})
+
+
+def _build_credential_export(user_id, keyfile, ip, user_agent):
+    from dataclasses import asdict
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    from istota import db
+    from istota.credentials import audit, kdbx_export
+    from istota.notifications.resolvers import task_alert
+
+    if not kdbx_export.EXPORT_SLOT.acquire(timeout=30):
+        raise HTTPException(status_code=503, detail="Another export is running")
+    try:
+        with db.get_db(_config.db_path) as conn:
+            _export_limit(conn, user_id)
+        password = kdbx_export.generate_export_password()
+        data, summary = kdbx_export.build_kdbx(_config.db_path, user_id, password=password,
+                                              keyfile=keyfile, options=kdbx_export.INTERACTIVE)
+        user_config = _config.users.get(user_id)
+        try:
+            zone = ZoneInfo(user_config.timezone if user_config else "UTC")
+        except (ValueError, ZoneInfoNotFoundError):
+            zone = ZoneInfo("UTC")
+        when = datetime.now(zone)
+        notice = (f"Your credentials were exported at {when.isoformat()} from {ip or 'an unknown address'}. "
+                  f"Browser: {user_agent or 'unknown'}. "
+                  "If this was not you, sign out everywhere in Settings → Account and change the passwords in the export.")
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Another web process can finish while this process builds its file.
+            _export_limit(conn, user_id)
+            audit.record(conn, user_id, action="export", actor=f"web:{user_id}",
+                         detail={**asdict(summary), "keyfile": keyfile is not None, "ip": ip})
+            audit_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            task_alert.write(conn, user_id, dedup_key=f"credentials-exported:{audit_id}",
+                             title="Your credentials were exported", body=notice, severity="warning")
+        return {"filename": f"istota-export-{when.date().isoformat()}.kdbx", "password": password,
+                "file": base64.b64encode(data).decode("ascii"), "summary": asdict(summary)}, when.isoformat()
+    finally:
+        kdbx_export.EXPORT_SLOT.release()
+
+
+@api_router.get("/settings/credentials/backup")
+async def settings_credentials_backup(user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import backup_export
+    await _credential_isolation(user["username"])
+    def read():
+        with db.get_db(_config.db_path) as conn:
+            recipient = backup_export.recipient_for(conn, user["username"])
+            return {"recipient_suffix": recipient[-8:] if recipient else None,
+                    "last_run": backup_export.last_run(conn, user["username"]),
+                    "interval": _config.scheduler.credential_backup_interval,
+                    "available": backup_export.available()}
+    return JSONResponse(await asyncio.to_thread(read), headers={"Cache-Control": "no-store"})
+
+
+@api_router.put("/settings/credentials/backup")
+async def settings_credentials_backup_update(request: Request, user: dict = Depends(_require_api_auth),
+                                              _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import backup_export
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    headers = {"Cache-Control": "no-store"}
+    if "recipient" not in body or set(body) - {"recipient", "step_up"}:
+        return JSONResponse({"detail": "Expected recipient and step_up."}, status_code=400, headers=headers)
+    refusal = await _require_step_up(request, body, "backup_recipient")
+    if refusal:
+        return refusal
+    def update():
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            backup_export.set_recipient(conn, user["username"], body["recipient"], actor=f"web:{user['username']}")
+            recipient = backup_export.recipient_for(conn, user["username"])
+            return {"recipient_suffix": recipient[-8:] if recipient else None}
+    try:
+        return JSONResponse(await asyncio.to_thread(update), headers=headers)
+    except backup_export.BackupRecipientError:
+        return JSONResponse({"detail": "backup_recipient_unsupported", "field": "recipient"}, status_code=400, headers=headers)
+    except credential_read.VaultLibraryMissing:
+        return JSONResponse({"detail": "Install the vault extra to enable backups."}, status_code=503, headers=headers)
+
+
+@api_router.post("/settings/credentials/export")
+async def settings_credentials_export(request: Request, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import kdbx_export, store
+    await _credential_isolation(user["username"])
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    body = await _credential_json(request)
+    if set(body) - {"keyfile", "step_up"}:
+        return JSONResponse({"detail": "Unexpected export field."}, status_code=400, headers=headers)
+    keyfile = body.get("keyfile")
+    if keyfile is not None:
+        if not isinstance(keyfile, str) or len(keyfile) > 4096:
+            return JSONResponse({"detail": "keyfile_invalid", "field": "keyfile"}, status_code=400, headers=headers)
+        try:
+            keyfile = keyfile.encode("utf-8")
+            invalid_keyfile = kdbx_export.keyfile_refusal(keyfile)
+        except UnicodeEncodeError:
+            invalid_keyfile = True
+        except credential_read.VaultLibraryMissing:
+            return JSONResponse({"detail": "Install the vault extra to export KeePass files."}, status_code=503, headers=headers)
+        if invalid_keyfile:
+            return JSONResponse({"detail": "keyfile_invalid", "field": "keyfile"}, status_code=400, headers=headers)
+    refusal = await _require_step_up(request, body, "export")
+    if refusal:
+        return refusal
+    ip = _client_ip(request)
+    user_agent = " ".join(request.headers.get("user-agent", "")[:200].split())
+    try:
+        payload, when = await asyncio.to_thread(_build_credential_export, user["username"], keyfile, ip, user_agent)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail}
+        return JSONResponse(detail, status_code=exc.status_code, headers=headers)
+    except credential_read.VaultLibraryMissing:
+        return JSONResponse({"detail": "Install the vault extra to export KeePass files."}, status_code=503, headers=headers)
+    except store.SecretKeyMissingError:
+        return JSONResponse({"detail": "The credential store is not configured."}, status_code=503, headers=headers)
+    except ValueError as exc:
+        reason = str(exc) if str(exc) in {"export_empty", "export_value_unavailable", "keyfile_invalid"} else "export_refused"
+        return JSONResponse({"detail": reason}, status_code=400, headers=headers)
+    except Exception as exc:
+        logger.error("credential export failed: %s", type(exc).__name__)
+        return JSONResponse({"detail": "Credential export failed."}, status_code=500, headers=headers)
+    identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user["username"])
+    message = web_auth_mail.build_export_notice_email(_config.bot_name, user.get("display_name", ""), when, ip, user_agent)
+    response = JSONResponse(payload, headers=headers)
+    response.background = BackgroundTask(web_auth_mail.send_auth_email, _config, identity.email, *message)
+    return response
+
+
+@api_router.post("/settings/credentials/import/preview")
+async def settings_credentials_import_preview(
+    request: Request, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    return await _import_credentials(request, user["username"], preview_only=True)
+
+
+@api_router.post("/settings/credentials/import")
+async def settings_credentials_import(
+    request: Request, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    return await _import_credentials(request, user["username"], preview_only=False)
 
 
 @api_router.post("/settings/credentials")
@@ -13388,7 +13662,7 @@ async def _read_wallet_body(request: Request, operation: str) -> dict:
 def _wallet_settings(user_id: str) -> dict:
     from dataclasses import asdict
     from istota import db
-    from istota.credentials.vault import vault_isolation_refusal
+    from istota.credentials.names import vault_isolation_refusal
     from istota.wallet import cards, policy, purchases
     from istota.rooms.scopes import canonical_token
     from istota.wallet.money import CURRENCY_EXPONENTS
@@ -13430,7 +13704,7 @@ def _mutate_wallet(user_id: str, operation: str, ident: int | None, fields: dict
 
 
 async def _write_wallet(request: Request, user_id: str, operation: str, ident: str | None = None):
-    from istota.credentials.vault import vault_isolation_refusal
+    from istota.credentials.names import vault_isolation_refusal
     from istota.wallet.cards import CardError
     from istota.wallet.purchases import WalletRefusal
 
@@ -13510,134 +13784,207 @@ async def settings_credentials_grant_existing(
     return await asyncio.to_thread(_credential_settings, user["username"], "existing")
 
 
-def _generated_mirror_action(user_id: str, action: str, name: str = "", on: bool = False) -> dict:
-    """The KeePass mirror of generated credentials (ISSUE-686). Values never leave."""
-    from istota import db
-    from istota.credentials import generated
-    from istota.credentials import vault as secrets_vault
-
-    with db.get_db(_config.db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        if action == "default":
-            generated.set_default_mirror(conn, user_id, on)
-            return {"ok": True, "generated_default_mirror": on}
-        try:
-            if action == "toggle":
-                generated.set_mirror(conn, user_id, name, on)
-            elif not generated.is_generated(conn, user_id, name):
-                raise generated.GeneratedCredentialError("not_generated", "not generated by Istota")
-            elif not generated.mirror_state(conn, user_id, name)["mirror"]:
-                raise generated.GeneratedCredentialError("mirror_off", "turn on the KeePass copy first")
-        except generated.GeneratedCredentialError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-    if action == "toggle" and not on:
-        return {"ok": True, "state": "off"}
-    return {"ok": True, "state": secrets_vault.mirror_generated(_config, user_id, name)}
+_STEP_UP_LABELS = {
+    "export": "export your credentials",
+    "recovery_reveal": "show recovery codes",
+    "backup_recipient": "change your credential backup recipient",
+    "history_restore": "restore credential history",
+    "history_purge": "permanently delete credential history",
+}
 
 
-async def _generated_mirror_request(request: Request, user_id: str, action: str, name: str = ""):
-    from istota.credentials import vault as secrets_vault
-    from istota.credentials.local import LocalCredentialError
+def _step_up_session(request: Request) -> str:
+    # Older signed sessions have no identifier; seed it once on first use.
+    if not request.session.get("session_id"):
+        request.session["session_id"] = secrets.token_hex(16)
+    return request.session["session_id"]
 
+
+async def _credential_isolation(user_id: str):
+    from istota.credentials import names as vault
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
-    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, user_id)
+    refusal = await asyncio.to_thread(vault.vault_isolation_refusal, _config, user_id)
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)
-    on = False
-    if action != "remirror":
-        try:
-            body = await _read_credential_body(request)
-        except LocalCredentialError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        if not isinstance(body, dict) or set(body) != {"mirror"} or type(body["mirror"]) is not bool:
-            raise HTTPException(status_code=400, detail='expected {"mirror": true|false}')
-        on = body["mirror"]
-    return await asyncio.to_thread(_generated_mirror_action, user_id, action, name, on)
 
 
-@api_router.put("/settings/credentials/generated/default")
-async def settings_generated_default_mirror(
-    request: Request, user: dict = Depends(_require_api_auth), _csrf: None = Depends(_verify_origin),
-):
-    return await _generated_mirror_request(request, user["username"], "default")
+async def _credential_json(request: Request) -> dict:
+    from istota.credentials.local import LocalCredentialError
+    try:
+        body = await _read_credential_body(request)
+    except LocalCredentialError:
+        raise HTTPException(status_code=400, detail="invalid request body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected an object")
+    return body
 
 
-@api_router.put("/settings/credentials/{name}/mirror")
-async def settings_generated_mirror(
-    name: str, request: Request, user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    return await _generated_mirror_request(request, user["username"], "toggle", name)
+def _send_step_up(config, user_id, action, session_key, request_id, name, ip):
+    try:
+        issued = web_auth.start_step_up(config.db_path, web_auth.policy_from_config(config),
+                                       user_id, action, session_key, request_id=request_id)
+        if issued is None:
+            return
+        identity = web_auth.get_identity(config.db_path, user_id)
+        profile = user_profiles.get_profile(config.db_path, user_id)
+        if identity is None or profile is None:
+            return
+        label = _STEP_UP_LABELS[action]
+        if name:
+            label += f" for {name}"
+        message = web_auth_mail.build_step_up_email(config.bot_name, profile.display_name, issued[1], label,
+                                                   config.web.auth_step_up_ttl_minutes, ip)
+        web_auth_mail.send_auth_email(config, identity.email, *message)
+    except Exception:
+        logger.warning("Requested confirmation code could not be sent")
 
 
-@api_router.post("/settings/credentials/{name}/remirror")
-async def settings_generated_remirror(
-    name: str, request: Request, user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    return await _generated_mirror_request(request, user["username"], "remirror", name)
+@api_router.post("/settings/step-up")
+async def settings_step_up(request: Request, user: dict = Depends(_require_api_auth),
+                           _csrf: None = Depends(_verify_origin)):
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    action, name = body.get("action"), body.get("name")
+    if (not isinstance(action, str) or action not in web_auth.STEP_UP_ACTIONS
+            or (name is not None and (not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_.-]{1,128}", name)))):
+        raise HTTPException(status_code=400, detail="invalid confirmation action")
+    identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user["username"])
+    if identity is None or identity.disabled:
+        raise HTTPException(status_code=403, detail="step_up_unavailable")
+    request_id = secrets.token_urlsafe(18)
+    email_hint = identity.email[0] + "•••@" + identity.email.rsplit("@", 1)[-1]
+    response = JSONResponse({"request_id": request_id, "email_hint": email_hint,
+                             "expires_at": web_auth._timestamp(_config.web.auth_step_up_ttl_minutes * 60)},
+                            headers={"Cache-Control": "no-store"})
+    response.background = BackgroundTask(_send_step_up, _config, user["username"], action,
+                                         _step_up_session(request), request_id, name, _client_ip(request))
+    return response
+
+
+async def _require_step_up(request: Request, body: dict, action: str) -> JSONResponse | None:
+    user_id = _require_api_auth(request)["username"]
+    identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
+    reason = "unavailable"
+    if identity is not None and not identity.disabled:
+        proof = body.get("step_up")
+        if not isinstance(proof, dict):
+            proof = {}
+        reason = await asyncio.to_thread(web_auth.redeem_step_up, _config.db_path,
+                                         proof.get("request_id"), user_id, action,
+                                         _step_up_session(request), proof.get("code"))
+    if reason == "ok":
+        return None
+    detail = ("This needs a code sent to your sign-in email address, and your account has none. "
+              "Ask the operator to add one." if reason == "unavailable" else
+              "That code was not accepted. Try again." if reason == "bad" else
+              "That code has expired. Request a new code.")
+    return JSONResponse({"detail": detail, "field": "code", "reason": reason}, status_code=403,
+                        headers={"Cache-Control": "no-store"})
+
+
+@api_router.get("/settings/credentials/activity")
+async def settings_credential_activity(user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import audit
+    await _credential_isolation(user["username"])
+    def read():
+        with db.get_db(_config.db_path) as conn:
+            return audit.recent(conn, user["username"])
+    return JSONResponse(await asyncio.to_thread(read), headers={"Cache-Control": "no-store"})
+
+
+@api_router.get("/settings/credentials/deleted")
+async def settings_credential_deleted(user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import store
+    await _credential_isolation(user["username"])
+    return JSONResponse(await asyncio.to_thread(store.list_deleted, _config.db_path, user["username"]),
+                        headers={"Cache-Control": "no-store"})
+
+
+@api_router.get("/settings/credentials/{name}/history")
+async def settings_credential_history(name: str, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import store
+    await _credential_isolation(user["username"])
+    return JSONResponse(await asyncio.to_thread(store.list_history, _config.db_path, user["username"], name),
+                        headers={"Cache-Control": "no-store"})
+
+
+@api_router.post("/settings/credentials/history/{history_id}/restore")
+async def settings_credential_restore(history_id: int, request: Request, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import audit, store
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    refusal = await _require_step_up(request, body, "history_restore")
+    if refusal is not None:
+        return refusal
+    def restore():
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            restored = store.restore_history(_config.db_path, user["username"], history_id,
+                                             actor=f"restore:{user['username']}", connection=conn)
+            audit.record(conn, user["username"], action="restore", actor=f"web:{user['username']}",
+                         name=restored[0], detail={"fields": len(restored)})
+            return restored
+    try:
+        restored = await asyncio.to_thread(restore)
+    except ValueError as exc:
+        if str(exc) in {"history_name_taken", "history_not_found"}:
+            raise HTTPException(status_code=409 if str(exc) == "history_name_taken" else 404, detail=str(exc)) from None
+        raise
+    return {"restored": restored}
+
+
+@api_router.delete("/settings/credentials/{name}/history")
+async def settings_credential_history_purge(name: str, request: Request, user: dict = Depends(_require_api_auth),
+                                           _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import audit, store
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    refusal = await _require_step_up(request, body, "history_purge")
+    if refusal is not None:
+        return refusal
+    def purge():
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            count = store.purge_history(_config.db_path, user["username"], name, connection=conn)
+            audit.record(conn, user["username"], action="history_purge", actor=f"web:{user['username']}",
+                         name=name, detail={"versions": count})
+            return count
+    return {"purged": await asyncio.to_thread(purge)}
 
 
 @api_router.post("/settings/credentials/{name}/recovery")
-async def settings_generated_recovery(
-    name: str, request: Request, user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    """A generated credential's recovery codes, for the user to read (ISSUE-688).
-
-    The one web path that hands a stored value back, so it asks more than the
-    rest: an explicit ``{"confirm": true}``, the account password again on a
-    session that signed in with one, and a log line naming the credential.
-    The list payload says only whether codes exist.
-    """
+async def settings_generated_recovery(name: str, request: Request, user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
     from istota import db
-    from istota.credentials import generated
-    from istota.credentials import vault as secrets_vault
-    from istota.credentials.local import LocalCredentialError
-
+    from istota.credentials import audit, generated
+    from istota.credentials import names as secrets_vault
     username = user["username"]
-    if _config is None or not _config.db_path:
-        raise HTTPException(status_code=503, detail="config not loaded")
-    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, username)
-    if refusal:
-        raise HTTPException(status_code=403, detail=refusal)
-    try:
-        body = await _read_credential_body(request)
-    except LocalCredentialError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    if (not isinstance(body, dict) or body.get("confirm") is not True
-            or not set(body) <= {"confirm", "password"}
-            or not isinstance(body.get("password", ""), str)):
-        raise HTTPException(status_code=400, detail='expected {"confirm": true}')
-    identity = getattr(request.state, "web_auth_identity", None)
-    if (request.session.get("auth", {}).get("method") == "email"
-            and identity is not None and identity.password_hash):
-        policy = web_auth.policy_from_config(_config)
-        started = time.monotonic()
-        ip = _client_ip(request)
-        accepted = False
-        if body.get("password") and _admit_password_request(identity.email, ip, policy):
-            accepted = await _run_password_work(
-                web_auth.confirm_password, _config.db_path, policy, identity,
-                body["password"], ip=ip,
-            )
-        if not accepted:
-            await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
-            # `field` tells the card to ask for the password, apart from any other 403.
-            return JSONResponse(status_code=403, content={
-                "detail": "Enter your account password to show the codes.", "field": "password"})
-
-    def read() -> str | None:
+    await _credential_isolation(username)
+    body = await _credential_json(request)
+    refusal = await _require_step_up(request, body, "recovery_reveal")
+    if refusal is not None:
+        return refusal
+    def read():
         with db.get_db(_config.db_path) as conn:
-            return generated.read_recovery(conn, username, name)
-
-    codes = await asyncio.to_thread(read)
+            conn.execute("BEGIN IMMEDIATE")
+            codes = generated.read_recovery(conn, username, name)
+            if codes is not None:
+                audit.record(conn, username, action="reveal", actor=f"web:{username}", name=name)
+            return codes, generated.recovery_state(conn, username, name)
+    codes, state = await asyncio.to_thread(read)
     if codes is None:
         raise HTTPException(status_code=404, detail="no recovery codes are stored for that credential")
-    logger.info("recovery codes viewed via settings: %s by %s",
-                secrets_vault._label(name), secrets_vault._label(username))
-    return JSONResponse({"codes": codes}, headers={"Cache-Control": "no-store"})
+    logger.info("recovery codes viewed via settings: %s by %s", secrets_vault._label(name), secrets_vault._label(username))
+    return JSONResponse({"codes": codes.splitlines(), "spent": state["spent"], "format": state["format"]},
+                        headers={"Cache-Control": "no-store"})
 
 
 @api_router.put("/settings/credentials/{name}")
@@ -13669,7 +14016,7 @@ async def settings_credential_delete(
     from istota import db
     from istota.credentials import generated
     from istota.credentials import store as secrets_store
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -13687,233 +14034,21 @@ async def settings_credential_delete(
                                           credential_name(conn, user["username"], name))
 
     if await asyncio.to_thread(_is_generated):
-        deleted = await asyncio.to_thread(generated.retire, _config, user["username"], name)
+        deleted = await asyncio.to_thread(generated.retire, _config, user["username"], name, actor=f"web:{user['username']}")
     else:
-        deleted = await asyncio.to_thread(
-            secrets_store.delete_secret, _config.db_path, user["username"], "vault_entries", name,
-            all_fields=True,
-        )
+        def delete():
+            from istota.credentials import audit
+            with db.get_db(_config.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                removed = secrets_store.delete_secret(_config.db_path, user["username"], "vault_entries", name,
+                                                      all_fields=True, connection=conn, actor=f"web:{user['username']}")
+                if removed:
+                    audit.record(conn, user["username"], action="delete", actor=f"web:{user['username']}", name=name)
+                return removed
+        deleted = await asyncio.to_thread(delete)
     if deleted:
         logger.info("credential deleted via settings: %s", secrets_vault._label(name))
     return {"ok": True, "deleted": deleted}
-
-
-def _vault_settings_payload(username: str) -> dict:
-    """The credential vault's status and the folder's listing, for the card.
-
-    **The only thing this surface writes is a filename**, and that is what the
-    `files` / `vault_file` pair is for: the card offers the `.kdbx` files in
-    the user's vault folder and the user picks one of them. A filename is not a
-    path — it is validated by being one of the entries this listing returned,
-    which is set membership rather than a parse — so nothing here has a
-    traversal, an absolute form or a resolved-path preview to answer.
-
-    The listing rides on the status payload rather than getting an endpoint of
-    its own: there is one card, it already fetches its status on render, and a
-    second round trip would buy nothing.
-
-    **It does not open the vault.** `vault_status(parse=False)` is why: an
-    Argon2id unlock is tuned to about a second, and none of what §9's heading
-    shows needs one. What the parse would add — the groups found in the file and
-    their key counts — is a diagnostic for whoever is debugging a mapping, which
-    is `istota secret vault-status` on a host shell.
-
-    Values never appear, and neither does the passphrase: `passphrase_present`
-    is a boolean, and `reason` is the `NOTIFICATION_REASONS` sentence rather
-    than an exception's text, so nothing interpolated into an error message can
-    reach a browser through here. **`refusal` is the one exception to that** and
-    is safe for a different reason: it is one of `storage`'s own `VAULT_PATH_*`
-    constants, a fixed word with nothing interpolated into it, chosen from a
-    code-owned table. It is in the payload because it names *which* refusal,
-    which is what an operator reading a browser console needs and what the
-    prose sentence beside it deliberately does not carry.
-
-    `problem` is computed here rather than in the browser, and that is the point
-    of it: the precedence between a live finding and a recorded one is a rule,
-    and a rule stated in TypeScript is a second copy — the first version
-    compared `last_outcome !== 'ok'` in the template, which hardcodes
-    `OUTCOME_OK`'s value in another language with nothing holding the two in
-    step. Empty means working.
-
-    `last_success_at` is the field to render as a sync time. `last_sync_at`
-    moves on a failed cycle too.
-    """
-    from istota import storage
-    from istota.credentials import vault as secrets_vault
-
-    report = secrets_vault.vault_status(_config, username, parse=False)
-    files = storage.list_vault_files(_config, username) if _config else []
-    # The form's own fields, present whatever the status. They have to be: the
-    # user this page most needs to serve is the one with no vault yet, and a
-    # payload that carried the listing only once a vault existed would make the
-    # feature unreachable from the surface that sets it up.
-    form = {
-        # Whether this surface may store a choice at all. False for a user whose
-        # file is named in `config.toml`, because a stored choice that line
-        # outranks is a control that does nothing — precedence, not permission,
-        # which is why the card says so rather than hiding the dropdown.
-        #
-        # **A boolean rather than the three-state `source` it replaces**, and
-        # the third state is what left: a selection stored by the retired web
-        # form was `db`, and that table is gone, so what remains is an
-        # operator's line or nothing.
-        "editable": _vault_is_web_editable(username),
-        # Where the file goes, so the card can name the folder in its
-        # instruction. Not a disclosure: it is this user's own directory.
-        "vault_dir": storage.vault_dir_display(_config, username) if _config else "",
-        # The dropdown's options, and the whole of what a save may name.
-        "files": files,
-        # What resolution settled on, empty when nothing did — the folder is
-        # empty, or it holds several and none is chosen.
-        #
-        # Asked of the resolver rather than read off `report.path`, because the
-        # two answer different questions: the report has a path only for a
-        # vault that is *switched on*, and the dropdown has to show the user
-        # their own selection while they are still setting one up — a file
-        # copied in, no passphrase generated yet.
-        "vault_file": _vault_selected_file(username),
-        # A fact about the user rather than about the file, which is why it is
-        # on this half and why it is asked directly rather than read off the
-        # report: somebody who generated a passphrase a minute ago and has not
-        # yet put a file in the folder has to be told the half they have.
-        # There is no other route that would tell them, because the value is
-        # readable by nothing.
-        "passphrase_present": _vault_passphrase_present(username),
-    }
-    if not report.configured:
-        # The default for every user. The heading renders nothing for this, and
-        # the form renders for it — which is why the two read different keys.
-        return {"configured": False, **form}
-    entries = _vault_entries(username)
-    return {
-        "configured": True,
-        **form,
-        "path": report.path,
-        # What this call found now — a refused path is a fact about the
-        # configuration rather than about a past cycle, so it must not be read
-        # out of the record.
-        "outcome": report.outcome,
-        "reason": report.reason,
-        "refusal": report.refusal,
-        # What the syncing process last settled, which is a different question
-        # and the only one answerable from this process at all.
-        "last_success_at": report.last_success_at,
-        "last_sync_at": report.last_sync_at,
-        "last_outcome": report.recorded_outcome,
-        "last_reason": report.recorded_reason,
-        # §1: the last cycle read the whole file, because it holds no
-        # top-level `istota` group. Read off the durable record rather than
-        # off `report.scoped`, which is this call's own answer and is
-        # meaningless on the `parse=False` arm — the card must never open the
-        # file, so the syncing process is the only thing that can settle this
-        # and the record is how it says so.
-        "unscoped": report.recorded_unscoped,
-        # How many shared credentials istota holds *now*, from the `secrets`
-        # table rather than from the file — no parse, no Argon2id, no
-        # pykeepass in the web process. It is what makes the unscoped line
-        # actionable: "all 412 of them" is a different sentence from "all 3".
-        "entry_count": entries.count,
-        "generated_count": report.generated_count,
-        # File entries the last sync skipped because a credential added in
-        # Istota already holds the name. The card tells the user to rename one.
-        "name_conflicts": report.name_conflicts,
-        # The names themselves, which is the feedback this feature has never
-        # had: after dropping a file in and generating a passphrase, the user
-        # can see which names arrived, and a name they expected and cannot see
-        # is a group they misspelled or an entry the log has a warning about.
-        #
-        # **Showing a user their own labels is deliberately not the rule
-        # `doctor` follows.** `security.vault_contents` reports counts and never
-        # key names, because a `CheckResult` is rendered into the boot log and
-        # into the admin Health pane, where one user's labels are read by every
-        # admin. This is that user's own page, and the read is scoped by
-        # `username`.
-        #
-        # Names, never values: entry grouping decrypts nothing.
-        "entry_names": list(entries.names),
-        # Whether the list above was cut. A card silently showing the first
-        # fifty of four hundred names would answer "did mine arrive" wrongly,
-        # and the count beside it is what makes the cut legible.
-        "entry_names_truncated": entries.truncated,
-        # False here always, and it is not decoration: it is what tells a
-        # renderer that the parse-only fields are empty because nothing
-        # looked, rather than because the file holds nothing. A surface wanting
-        # the name list asks the CLI; this one says it did not ask.
-        "parsed": report.parsed,
-        # The rendered verdict, empty when the vault is working. A live finding
-        # outranks a recorded one: `reason` and `outcome` are what this request
-        # established — a refused path, a folder with no file in it, or a
-        # folder with several and none chosen — which is true *now* and about
-        # the configuration, while `last_outcome` is what some earlier cycle in
-        # another process settled and may predate the operator introducing it.
-        #
-        # `reason` is read ahead of `outcome` and **not gated on it**: the
-        # unchosen folder has a sentence and no outcome at all, because nothing
-        # about it has failed. Gating on the outcome the way this did would
-        # render that case as working.
-        "problem": (
-            (report.reason or report.outcome)
-            or (
-                (report.recorded_reason or report.recorded_outcome)
-                if report.recorded_outcome
-                and report.recorded_outcome != secrets_vault.OUTCOME_OK
-                else ""
-            )
-        ),
-    }
-
-
-def _vault_selected_file(username: str) -> str:
-    """Which file the folder settles on for this user, as a bare name.
-
-    One call into the resolver rather than a second copy of its four rules, so
-    what the dropdown shows selected is what the sync would open. The
-    descriptor it hands back is closed here: this asks a question and opens
-    nothing.
-
-    `""` where nothing settled, and also for a configured *path* — an absolute
-    one has no name in the folder, and a relative one is not a name the
-    dropdown may offer, since selecting it would store a value that line
-    outranks.
-    """
-    if _config is None:
-        return ""
-    from istota import storage
-
-    try:
-        resolution = storage.vault_location_for(_config, username)
-    except Exception:  # pragma: no cover - the resolver's own contract is no raise
-        logger.debug("vault file resolution failed for %r", username)
-        return ""
-    location = resolution.location
-    if location is None:
-        return ""
-    if location.dir_fd is not None:
-        os.close(location.dir_fd)
-    name = location.path.name
-    return name if name in storage.list_vault_files(_config, username) else ""
-
-
-def _vault_passphrase_present(username: str) -> bool:
-    """Whether this user has a stored vault passphrase. Presence, never a value.
-
-    `secret_exists` rather than `get_secret`: the question is whether a row
-    stands, and a read would decrypt a credential to answer it — which also
-    stamps `last_accessed_at` on every settings page load.
-    """
-    if _config is None or not _config.db_path:
-        return False
-    try:
-        from istota.credentials import store as secrets_store
-        from istota.credentials import vault as secrets_vault
-        return secrets_store.secret_exists(
-            _config.db_path, username,
-            secrets_vault.VAULT_PASSPHRASE_SERVICE,
-            secrets_vault.VAULT_PASSPHRASE_KEY,
-        )
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault passphrase presence lookup failed for %r", username)
-        return False
 
 
 #: How many shared-credential names the settings card carries. A cap rather
@@ -13921,292 +14056,6 @@ def _vault_passphrase_present(username: str) -> bool:
 #: card rendering four hundred names is a page nobody can read past. The count
 #: beside it is uncapped, so a cut list still adds up.
 VAULT_ENTRY_NAMES_SHOWN = 50
-
-
-@dataclass(frozen=True)
-class _VaultEntries:
-    """What the card says about the shared namespace: a count and some names."""
-
-    count: int
-    names: tuple[str, ...]
-    truncated: bool
-
-
-def _vault_entries(username: str) -> _VaultEntries:
-    """This user's shared credential names, and how many there are.
-
-    Group stored fields by the parser's entry metadata, as the grants list
-    does. This reads no credential values and does not update last_accessed_at.
-
-    **The count is of the whole namespace and the list is capped**, which is
-    what makes a cut legible: `truncated` says the list is short and `count`
-    says how short. Sorted, so the card's order does not move with the table's.
-
-    Empty on any failure, which is the same direction the sibling helpers
-    degrade in: this is one line on a card whose real content is the status
-    beside it.
-    """
-    if _config is None or not _config.db_path:
-        return _VaultEntries(0, (), False)
-    try:
-        from istota import db
-        from istota.credentials.broker.bindings import credential_groups
-        with db.get_db(_config.db_path) as conn:
-            names = sorted(credential_groups(conn, username))
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault entry listing failed for %r", username)
-        return _VaultEntries(0, (), False)
-    return _VaultEntries(
-        len(names),
-        tuple(names[:VAULT_ENTRY_NAMES_SHOWN]),
-        len(names) > VAULT_ENTRY_NAMES_SHOWN,
-    )
-
-
-def _vault_is_web_editable(username: str) -> bool:
-    """Whether this surface may store this user's choice of file.
-
-    False whenever a `vault_path` in `config.toml` outranks the filename, and
-    that is the substance of the rule — see `_vault_settings_payload` for why it
-    is about precedence rather than about permission.
-
-    It fails **closed**: a question that could not be answered is not one to
-    write over, since the thing it might be is an operator's line. That is why
-    the failure arm returns False rather than letting the exception reach the
-    caller, and why the test is for a value that is *empty* rather than for one
-    that is set.
-
-    **Truthiness, never `.strip()`**, and the difference is a real state rather
-    than a nicety. `resolve_user_vault_path` draws its own line at `not raw`,
-    and refuses a blank-but-present value as a configured path that resolves to
-    nothing (`VAULT_PATH_NOT_A_FILENAME`) — so `vault_path = "  "` returns at
-    rule 1 of `vault_location_for` and the stored filename is never consulted.
-    Stripping here would call that user editable, take their choice, write the
-    KV row, and answer `{"ok": true}` about a control that does nothing, which
-    is the exact state the 409 exists to prevent. `doctor._vault_users` names
-    the same shape as one it expects to meet.
-    """
-    if _config is None:
-        return False
-    try:
-        return not (_config.vault_path_for(username) or "")
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault path lookup failed for %r", username)
-        return False
-
-
-def _select_vault_file(username: str, name: str) -> dict:
-    """Store which file in the vault folder this user's vault is.
-
-    Off the event loop by its caller: the listing reads a directory under the
-    workspace, which is a FUSE mount on the deployment shape this runs on.
-
-    **A filename, validated by membership in a listing taken now.** That is the
-    whole of the path handling, and it is why there is no traversal check, no
-    absolute-path refusal and no containment resolver here: the value is one of
-    the names `list_vault_files` just produced, so it cannot be a path, cannot
-    climb and cannot point anywhere else. A file deleted between the page load
-    and the save is refused rather than stored.
-
-    `""` clears the selection and returns the user to the resolver's rules 3
-    and 4 — the only file if there is one, a question if there are several.
-    """
-    from fastapi import HTTPException
-
-    from istota import storage
-
-    if not _vault_is_web_editable(username):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "this vault's file is set in this deployment's configuration; "
-                "an operator has to change it there"
-            ),
-        )
-    chosen = (name or "").strip()
-    if chosen and chosen not in storage.list_vault_files(_config, username):
-        # Named rather than described: the user picked from a dropdown, so a
-        # name that is not in the folder means the folder moved under them.
-        raise HTTPException(
-            status_code=400,
-            detail="that file is not in your vault folder any more",
-        )
-    storage.store_vault_file(_config, username, chosen)
-    return {"ok": True, "vault_file": chosen}
-
-
-@api_router.put("/settings/vault")
-async def settings_vault_update(
-    payload: dict,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-) -> dict:
-    """Choose which file in this user's vault folder their vault is.
-
-    Body: ``{"vault_file": "personal.kdbx"}`` and nothing else. The name must be
-    one the folder holds, or 400; ``""`` clears the choice. A user whose vault
-    file is set in configuration gets 409, because a stored choice that a
-    configured path outranks is a control that does nothing.
-
-    Unlike its GET sibling this may **not** degrade — a settings read that fails
-    costs a status line, and a settings write that fails quietly leaves the user
-    believing the daemon is about to decrypt a file it has never heard of.
-    """
-    from fastapi import HTTPException
-
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be an object")
-    if _config is None or not _config.db_path:
-        raise HTTPException(status_code=503, detail="config not loaded")
-    name = payload.get("vault_file", "")
-    if not isinstance(name, str):
-        raise HTTPException(status_code=400, detail="vault_file must be a string")
-    return await asyncio.to_thread(_select_vault_file, user["username"], name)
-
-
-@api_router.put("/settings/vault/passphrase")
-async def settings_vault_passphrase(
-    payload: dict,
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-) -> dict:
-    """Store this user's vault passphrase. Write-only in the strong sense.
-
-    Body is one of ``{"generate": true}`` or ``{"passphrase": "..."}``.
-
-    **Generate is the path meant to be taken, and the reason is the only
-    boundary in this design that is about an adversary rather than a mistake.**
-    The KDBX file sits in a tree bound read-write into that user's own sandbox,
-    so a prompt-injected task can read its ciphertext and carry it out. Argon2id
-    makes that useless against 256 random bits and does not make it useless
-    against a memorable phrase. `secrets_vault.generate_passphrase` mints it.
-
-    A typed value is accepted at `secrets_vault.passphrase_refusal`'s floor —
-    the same function `istota secret ensure` applies, asked rather than
-    restated, so the rule cannot come to mean two things on two surfaces. That
-    floor is a proxy and says so in its own docstring: it catches the careless
-    case, not the confident one.
-
-    **The generated value is returned exactly once and is readable by nothing
-    afterwards.** The user needs it to open their own KDBX, so there is no shape
-    of this feature where it is never shown; what there is instead is no route
-    that shows it a second time. A typed value is never echoed, nothing here is
-    logged, and no GET payload carries either.
-    """
-    from fastapi import HTTPException
-
-    from istota.credentials import store as secrets_store
-    from istota.credentials import vault as secrets_vault
-
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="payload must be an object")
-    if _config is None or not _config.db_path:
-        raise HTTPException(status_code=503, detail="config not loaded")
-
-    refusal = await asyncio.to_thread(
-        secrets_vault.vault_isolation_refusal, _config, user["username"],
-    )
-    if refusal:
-        raise HTTPException(status_code=403, detail=refusal)
-
-    generate = bool(payload.get("generate"))
-    supplied = payload.get("passphrase", "")
-    replace = bool(payload.get("replace"))
-    if generate and not replace and _vault_passphrase_present(user["username"]):
-        # The CLI's `--force` gate, on the same reasoning and not a second one:
-        # minting a second passphrase destroys the only copy this deployment
-        # has of the value the KDBX is already encrypted under, so the vault
-        # fails `VaultLocked` until the user re-keys the file by hand. The CLI
-        # refuses without `--force`; a click that did it silently would be the
-        # one irreversible thing on this page.
-        #
-        # Generate-only, exactly as `--force` is: a *typed* value is one the
-        # user already holds, so re-storing it destroys nothing they cannot
-        # type again.
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "a vault passphrase is already stored, and generating a new one "
-                "will not re-encrypt a file saved under the old one; pass "
-                "replace to overwrite it"
-            ),
-        )
-    if generate and supplied:
-        # Refused rather than resolved one way. Both fields set is a client
-        # asking for two different things, and picking either silently discards
-        # a credential the user may believe they set.
-        raise HTTPException(
-            status_code=400, detail="pass either generate or passphrase, not both"
-        )
-    if generate:
-        value = secrets_vault.generate_passphrase()
-    else:
-        if not isinstance(supplied, str):
-            raise HTTPException(status_code=400, detail="passphrase must be a string")
-        refusal = secrets_vault.passphrase_refusal(supplied)
-        if refusal:
-            raise HTTPException(status_code=400, detail=refusal)
-        value = supplied
-
-    def _store() -> None:
-        secrets_store.set_secret(
-            _config.db_path, user["username"],
-            secrets_vault.VAULT_PASSPHRASE_SERVICE,
-            secrets_vault.VAULT_PASSPHRASE_KEY,
-            value,
-        )
-
-    try:
-        await asyncio.to_thread(_store)
-    except Exception as e:
-        # The store's own message names the master key's *length* on its
-        # too-weak arm, which is a deployment-level fact on a per-user surface.
-        # The daemon log is where that detail belongs.
-        logger.warning(
-            "could not store the vault passphrase for %r: %s", user["username"], e,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="the passphrase could not be stored; see the daemon log",
-        )
-    # No user id and no length: this line is the one place a value could leak
-    # through a mistake in a later edit, so it carries nothing but the fact.
-    logger.info("vault passphrase stored")
-    # `generated` only on the generate path. A typed value is never echoed — the
-    # client already has it, and putting it in a response body is a copy in a
-    # proxy log for no gain.
-    return {"ok": True, "generated": value if generate else ""}
-
-
-@api_router.get("/settings/vault")
-async def settings_vault(user: dict = Depends(_require_api_auth)) -> dict:
-    """The current user's credential vault status. Read-only; see the builder.
-
-    Degrades to the unconfigured answer rather than raising, matching the
-    sibling helpers: this is a status line on a settings page whose actual
-    content is the cards below it, and an optional feature almost nobody has
-    must not be able to 500 the page that governs them. The frontend catches
-    too, so this only keeps the log honest — but a guard on one side only is
-    the kind that gets removed because it looks redundant.
-
-    Nothing turns on its answer any more, which is a change rather than a
-    property of this function: the vault used to own typed services and a 409
-    refused an edit to one, so there was a sibling read whose failure had to
-    be a refusal. The vault writes only its own `vault_entries` namespace now,
-    so there is no authorization question left here at all.
-    """
-    if not _config:
-        return {"configured": False}
-    try:
-        # Off the event loop: the builder resolves a path under the workspace,
-        # which is a FUSE mount on the deployment shape this runs on.
-        return await asyncio.to_thread(_vault_settings_payload, user["username"])
-    except Exception:
-        logger.warning(
-            "could not build the vault status for %r", user["username"],
-            exc_info=True,
-        )
-        return {"configured": False}
 
 
 def _visible_modules(cfg) -> list[str]:
@@ -14326,10 +14175,6 @@ async def settings_set_secret(
 
     value = (payload.get("value") or "").strip() if isinstance(payload, dict) else ""
 
-    if value and service == "vault" and key == "passphrase":
-        # The generic route must enforce the same policy and passphrase floor.
-        await settings_vault_passphrase({"passphrase": value}, user=user, _csrf=None)
-        return {"ok": True, "service": service, "key": key, "configured": True}
 
     try:
         secrets_store.set_secret(_config.db_path, user["username"], service, key, value)

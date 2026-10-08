@@ -584,6 +584,10 @@ TOML
     cat >> "$CONFIG_FILE" <<TOML
 
 [security]
+credential_history_days = ${ISTOTA_SECURITY_CREDENTIAL_HISTORY_DAYS:-180}
+credential_audit_days = ${ISTOTA_SECURITY_CREDENTIAL_AUDIT_DAYS:-365}
+credential_backup_retention = ${ISTOTA_SECURITY_CREDENTIAL_BACKUP_RETENTION:-30}
+credential_exports_per_day = ${ISTOTA_SECURITY_CREDENTIAL_EXPORTS_PER_DAY:-3}
 sandbox_enabled = ${ISTOTA_SECURITY_SANDBOX_ENABLED:-true}
 allow_unsandboxed_multi_user_vaults = ${ISTOTA_SECURITY_ALLOW_UNSANDBOXED_MULTI_USER_VAULTS:-false}
 skill_proxy_enabled = ${ISTOTA_SECURITY_SKILL_PROXY_ENABLED:-true}
@@ -685,6 +689,7 @@ max_size_mb = ${ISTOTA_LOGGING_MAX_SIZE_MB:-10}
 backup_count = ${ISTOTA_LOGGING_BACKUP_COUNT:-5}
 
 [scheduler]
+credential_backup_interval = ${ISTOTA_SCHEDULER_CREDENTIAL_BACKUP_INTERVAL:-86400}
 poll_interval = ${ISTOTA_SCHEDULER_POLL_INTERVAL:-5}
 dispatch_interval = ${ISTOTA_SCHEDULER_DISPATCH_INTERVAL:-0.5}
 talk_poll_interval = ${ISTOTA_SCHEDULER_TALK_POLL_INTERVAL:-10}
@@ -729,8 +734,6 @@ cron_max_staleness_minutes = ${ISTOTA_SCHEDULER_CRON_MAX_STALENESS_MINUTES:-60}
 max_subtasks_per_task = ${ISTOTA_SCHEDULER_MAX_SUBTASKS_PER_TASK:-10}
 max_subtask_depth = ${ISTOTA_SCHEDULER_MAX_SUBTASK_DEPTH:-3}
 max_subtask_prompt_chars = ${ISTOTA_SCHEDULER_MAX_SUBTASK_PROMPT_CHARS:-8000}
-# KDBX credential-vault sync (0 disables); inert unless a user has a vault_path.
-vault_sync_interval = ${ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL:-300}
 talk_cache_max_per_conversation = ${ISTOTA_SCHEDULER_TALK_CACHE_MAX_PER_CONVERSATION:-200}
 temp_file_retention_days = ${ISTOTA_SCHEDULER_TEMP_FILE_RETENTION_DAYS:-7}
 location_ping_retention_days = ${ISTOTA_SCHEDULER_LOCATION_PING_RETENTION_DAYS:-365}
@@ -858,6 +861,7 @@ TOML
     cat >> "$CONFIG_FILE" <<TOML
 
 [web]
+auth_step_up_ttl_minutes = ${ISTOTA_WEB_AUTH_STEP_UP_TTL_MINUTES:-10}
 enabled = true
 port = ${WEB_PORT:-8766}
 auth = ${WEB_AUTH}

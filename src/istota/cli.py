@@ -937,22 +937,7 @@ def cmd_job_run(args):
 
 
 def cmd_secret(args):
-    """Manage per-user encrypted secrets.
-
-    Same partial-update + state-output contract as ``user ensure`` and
-    ``resource ensure``. Validation is gated by the central
-    ``secret_schema`` registry — operators get a loud error on a typo
-    instead of an orphan row that no skill ever reads.
-
-    Plaintext values are never echoed to stdout, with **one** exception:
-    ``--generate`` prints the value it minted, once. That is the whole point of
-    the flag — the vault passphrase has to reach the operator's own password
-    manager and the alternative is a human choosing one — and it is the reason
-    this verb is never to be run through a task shell, where a host-side CLI
-    invoked from the developer skill puts the value in a session transcript.
-    Everywhere else ``ensure`` prints the decision (created / updated / noop)
-    and ``list`` prints (service, key, last_updated) tuples only.
-    """
+    """Manage secrets; file import/export requires the operator terminal."""
     from istota.credentials import store as secrets_store
     from istota.credentials.schema import all_known_services, known_service_keys
 
@@ -965,8 +950,8 @@ def cmd_secret(args):
     if args.action == "retire":
         _cmd_secret_retire(config, args)
         return
-    if args.action in ("vault-sync", "vault-status"):
-        _cmd_secret_vault(config, args)
+    if args.action in ("export", "import"):
+        _cmd_secret_file(config, args)
         return
 
     if args.action == "list":
@@ -1015,30 +1000,16 @@ def cmd_secret(args):
         sys.exit(1)
 
     if args.action == "ensure":
-        from istota.credentials import vault as secrets_vault
 
-        if args.service == "vault" and args.key == "passphrase":
-            refusal = secrets_vault.vault_isolation_refusal(config, args.user)
-            if refusal:
-                print(f"Error: {refusal}", file=sys.stderr)
-                sys.exit(1)
-        value = _secret_ensure_value(config, args)
+        value = args.value
+        if not value:
+            print("Error: --value is required for ensure", file=sys.stderr)
+            sys.exit(1)
         state = secrets_store.upsert_secret(
             db_path, args.user, args.service, args.key, value,
         )
         print(f"Secret ensured for {args.user!r}: service={args.service} key={args.key}")
         print(f"STATE: {state}")
-        if args.generate:
-            # The one place this CLI prints a plaintext, and it prints it once.
-            # The operator has to copy it into their own password manager;
-            # every extra copy is another line of scrollback, another tmux
-            # buffer and another thing whatever logs that shell keeps.
-            print()
-            print(f"Vault passphrase (shown once, store it now): {value}")
-            print(
-                "Keep it in your own password manager. Istota cannot show it "
-                "again, and losing it means re-encrypting the vault file."
-            )
         return
 
     if args.action == "remove":
@@ -1061,115 +1032,73 @@ def cmd_secret(args):
         return
 
 
-def _secret_ensure_value(config, args) -> str:
-    """The value `secret ensure` will store: supplied, or minted by --generate.
+def _cmd_secret_file(config, args) -> None:
+    """Import or export credentials at the operator's terminal."""
+    import getpass
+    import os
+    from istota.credentials import audit, kdbx_export, kdbx_import, names
 
-    Three rules meet here and the third is the one worth reading twice.
-
-    ``--generate`` is **only** for the vault passphrase. Every other credential
-    in the schema is issued by the far side — a Karakeep API key is Karakeep's
-    to mint — so generating one would store a value nothing on the other end
-    recognises. The vault passphrase is the one credential this deployment
-    issues to itself.
-
-    ``--generate`` with ``--value`` is two answers to one question and is
-    refused rather than resolved by precedence, in either direction.
-
-    **The floor applies to a supplied value and never to a generated one**, and
-    that asymmetry is the point rather than an oversight. ``--generate`` exists
-    *because* of the floor: a floor applied to the generated value too — or
-    checked before the branch, against an absent ``--value`` — would refuse the
-    one command the documentation tells every operator to run, and the failure
-    would look exactly like the floor working.
-    """
-    from istota.credentials import store as secrets_store
-    from istota.credentials import vault as secrets_vault
-
-    is_vault_passphrase = (
-        args.service == secrets_vault.VAULT_PASSPHRASE_SERVICE
-        and args.key == secrets_vault.VAULT_PASSPHRASE_KEY
-    )
-
-    if args.generate:
-        if is_vault_passphrase and secrets_store.secret_exists(
-            config.db_path, args.user, args.service, args.key
-        ) and not args.force:
-            # The data-loss path, and it is reachable by re-running the exact
-            # command the documentation gives. Every credential in the vault
-            # file is encrypted under the passphrase this row holds; overwriting
-            # it with a freshly minted one destroys the only copy the server has
-            # and leaves the file unopenable — every later sync comes back
-            # `VaultLocked`, and the value that would fix it is gone. The
-            # subcommand advertises itself as idempotent, so an Ansible play
-            # re-running it is the ordinary case rather than the careless one.
-            #
-            # A *supplied* `--value` is deliberately not refused here: §7's
-            # rotation walkthrough is exactly that command, re-provisioning a
-            # passphrase the operator already set in KeePassXC. What cannot be
-            # right is minting a value nobody has used to encrypt anything.
-            print(
-                f"Error: {args.user} already has a vault passphrase, and "
-                "--generate would replace it with a new one.\n"
-                "       The vault file is encrypted under the stored value, so "
-                "replacing it makes the file unopenable and the old value is "
-                "not recoverable.\n"
-                "       To re-provision a passphrase you already know, pass "
-                "--value. To rotate for real, change the master password in "
-                "your KeePass client first, then pass --value.\n"
-                "       Pass --force to generate anyway.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if args.value:
-            print(
-                "Error: --generate and --value are two answers to one question; "
-                "pass one.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if not is_vault_passphrase:
-            print(
-                f"Error: --generate is only supported for --service "
-                f"{secrets_vault.VAULT_PASSPHRASE_SERVICE} --key "
-                f"{secrets_vault.VAULT_PASSPHRASE_KEY}. Every other credential "
-                "here is issued by the service it belongs to.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        return secrets_vault.generate_passphrase()
-
-    if not args.value:
-        print(
-            "Error: --value is required for ensure (use `secret remove` to clear)",
-            file=sys.stderr,
-        )
+    if not args.user or args.user not in config.users:
+        print("Error: a configured --user is required", file=sys.stderr)
         sys.exit(1)
-
-    if is_vault_passphrase:
-        refusal = secrets_vault.passphrase_refusal(args.value)
-        if refusal is not None:
-            print(
-                f"Error: {refusal}.\n"
-                "       The vault file sits where a task can read its "
-                "ciphertext, and a generated passphrase is the only thing "
-                "standing in front of that.\n"
-                "       Use `--generate` instead of `--value`.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    return args.value
+    refusal = names.vault_isolation_refusal(config, args.user)
+    if refusal:
+        print(f"Error: {refusal}", file=sys.stderr)
+        sys.exit(1)
+    if not sys.stdout.isatty() or (args.action == "import" and not sys.stdin.isatty()):
+        print("Error: credential import and export require a terminal", file=sys.stderr)
+        sys.exit(1)
+    try:
+        if args.action == "export":
+            if not args.out:
+                raise ValueError("--out is required")
+            password = kdbx_export.generate_export_password()
+            data, summary = kdbx_export.build_kdbx(config.db_path, args.user,
+                password=password, keyfile=None, options=kdbx_export.INTERACTIVE)
+            fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            with db.get_db(config.db_path) as conn:
+                audit.record(conn, args.user, action="export", actor="cli",
+                             detail={"credentials": summary.credentials})
+            print(f"Exported {summary.credentials} credentials.")
+            print(f"Export password (shown once, save it now): {password}")
+        else:
+            if not args.path:
+                raise ValueError("a source file is required")
+            with open(args.path, "rb") as source:
+                data = source.read(kdbx_import.VAULT_READ_CAP_BYTES + 1)
+            if len(data) > kdbx_import.VAULT_READ_CAP_BYTES:
+                raise ValueError("source file exceeds the import limit")
+            keyfile = None
+            if args.keyfile:
+                with open(args.keyfile, "rb") as source:
+                    keyfile = source.read(4097)
+                if len(keyfile) > 4096:
+                    raise ValueError("source key file exceeds the import limit")
+            passphrase = getpass.getpass("KeePass passphrase: ")
+            preview = kdbx_import.preview(config.db_path, args.user, data, passphrase, keyfile=keyfile)
+            for item in preview.items:
+                print(f"{item.status}: {names.label_for_display(item.name)}")
+            selected = [item.name for item in preview.items if item.status == "new"
+                        or (args.include_changed and item.status == "changed")]
+            if not selected:
+                print("No credentials selected for import.")
+                return
+            result = kdbx_import.apply(config.db_path, args.user, data, passphrase,
+                selected=selected, expected_digest=preview.digest, actor="import", keyfile=keyfile)
+            print(f"Imported {len(result.imported)} credentials.")
+    except (OSError, ValueError, names.VaultError) as exc:
+        # Exceptions from parsers and paths can contain caller-supplied data.
+        print(f"Error: credential {args.action} failed ({type(exc).__name__})", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_secret_vault_new(config, args) -> None:
-    """Generate one credential from an operator shell without printing its value.
-
-    Stored in the secrets table like a task's ``istota-credential new``
-    (ISSUE-686), and mirrored to the user's KeePass file when they have one and
-    mirroring is on.
-    """
+    """Create a generated credential directly in the encrypted table."""
     from istota import db
     from istota.credentials import generated
-    from istota.credentials import vault as secrets_vault
+    from istota.credentials import names as secrets_vault
 
     if not args.user or args.user not in config.users or not args.slug:
         print("Error: vault-new needs a configured --user and --slug", file=sys.stderr)
@@ -1201,24 +1130,14 @@ def _cmd_secret_vault_new(config, args) -> None:
     try:
         with db.get_db(config.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            mirror = (generated.default_mirror(conn, args.user)
-                      and secrets_vault._vault_is_enabled(config, args.user))
             generated.create(conn, args.user, name=names[0], username=username,
-                             password=password, url=args.url or "", mirror=mirror)
+                             password=password, url=args.url or "")
     except generated.GeneratedCredentialError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-    state = secrets_vault.mirror_generated(config, args.user, names[0]) if mirror else "off"
     print(f"Created credential: {names[0]}")
     print(f"Username name: {names[1]}")
     print(f"URL name: {names[2]}")
-    print(f"KeePass copy: {state}")
-    if state == "mirrored":
-        print(
-            "Warning: a password manager that already has this vault open may "
-            "overwrite the copy on its next save; Istota keeps its own.",
-            file=sys.stderr,
-        )
 
 
 def _cmd_secret_retire(config, args) -> None:
@@ -1241,189 +1160,6 @@ def _cmd_secret_retire(config, args) -> None:
         print(f"Error: no credential named {args.name}", file=sys.stderr)
         sys.exit(1)
     print(f"Retired credential: {args.name}")
-
-
-def _cmd_secret_vault(config, args) -> None:
-    """`istota secret vault-sync` and `istota secret vault-status`.
-
-    Both default to every configured user and take ``-u`` for one. Neither
-    prints a credential value: counts, service names, key names and group names
-    only, which is the same rule the sync's own log lines follow.
-    """
-    from istota.credentials import vault as secrets_vault
-
-    if args.user and args.user not in config.users:
-        # Otherwise a typo'd id reaches `config.users.get(...)` -> None and is
-        # reported as "no vault configured", which is indistinguishable from a
-        # correctly spelled user with the feature off.
-        print(
-            f"Error: no configured user named {args.user!r} "
-            f"(known: {', '.join(sorted(config.users)) or 'none'})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    users = [args.user] if args.user else list(config.users)
-    if not users:
-        print("No users configured.")
-        return
-
-    if args.action == "vault-status":
-        for user_id in users:
-            _print_vault_status(secrets_vault.vault_status(config, user_id))
-        return
-
-    # `force=True`: this command is the operator's escape hatch from every
-    # cache-shaped surprise, so it must not be subject to the cache it exists to
-    # defeat. A fresh CLI process has an empty cache anyway — what this covers is
-    # the in-process caller and the contract.
-    #
-    # `deliver=False`: the notification *row* is still written, because a
-    # failure seen here is a failure the user should find in their panel — the
-    # same reasoning `write_for_service` exists for on the Garmin skill-CLI leg.
-    # What is withheld is the push. The operator running this is reading the
-    # failure off their own terminal as it prints, so a push tells them nothing;
-    # and delivering one from a one-shot CLI process means standing an
-    # `AsyncRuntime` up and tearing it down for a Talk and ntfy fan-out nobody
-    # asked for. The daemon's own cycles still push.
-    for result in secrets_vault.sync_all(
-        config, users=users, force=True, deliver=False
-    ):
-        _print_vault_sync(result)
-
-
-def _print_vault_sync(result) -> None:
-    """One user's sync, as lines. Counts and names, never a value."""
-    from istota.credentials import vault as secrets_vault
-
-    if result.outcome == secrets_vault.OUTCOME_NOT_CONFIGURED:
-        print(f"{result.user_id}: no vault configured")
-        return
-
-    header = f"{result.user_id}: {result.outcome}"
-    if result.path:
-        header += f"  path={result.path}"
-    print(header)
-    if result.unscoped:
-        # §1: the file has no `istota` group, so all of it is shared. A notice
-        # rather than a failure — but an operator running this by hand is
-        # exactly who should be told, and the durable notification only fires
-        # on the first such cycle.
-        print(
-            f"  unscoped: the file has no top-level 'istota' group, so all "
-            f"{result.names} credential(s) in it are shared"
-        )
-    if result.reason:
-        print(f"  reason: {result.reason}")
-
-    applied = result.apply
-    if applied is None:
-        return
-    # `created + updated` is the figure that is always right. The *split*
-    # between them is derived from whether the stored row could be read
-    # (`upsert_secret` compares via `get_secret`), so on a deployment whose
-    # master key cannot decrypt what is already there, every write reads as
-    # `created`. Reporting the total first is what keeps the line honest;
-    # the warning below is what names the condition when it is detectable.
-    print(
-        f"  {applied.created + applied.updated} written "
-        f"({applied.created} created, {applied.updated} updated), "
-        f"{applied.unchanged} unchanged, {applied.deleted} deleted"
-    )
-    if not applied.swept:
-        # A truncated read withholds every deletion, so "0 deleted" above is
-        # not evidence the file still holds everything the table does.
-        print(
-            "  note: the read stopped at a cap, so nothing was deleted this "
-            "cycle"
-        )
-    # Every name below came out of the vault file, which a task in the user's
-    # own sandbox can overwrite, and the consumer is an operator's terminal —
-    # so an unflattened one can carry a newline and forge a line of this
-    # report.
-    label = secrets_vault.label_for_display
-    for name in applied.deleted_keys:
-        print(f"  deleted: {label(name)}")
-    for name, reason in applied.skipped:
-        print(f"  skipped: {label(name)} ({reason})")
-    # Two independent signals of the same stale master key, and neither
-    # substitutes for the other: `unreadable_overwrites` counts rows the pass
-    # *wrote* over without being able to read them first, and
-    # `SKIP_UNREADABLE_ROW` counts rows it declined to *delete* for the same
-    # reason. A vault naming every stored name produces only the first, which
-    # is why keying the warning on the skip list alone reported nothing in the
-    # cleanest instance of the condition.
-    held = sum(
-        1 for _name, reason in applied.skipped
-        if reason == secrets_vault.SKIP_UNREADABLE_ROW
-    )
-    if applied.unreadable_overwrites or held:
-        print(
-            f"  warning: {applied.unreadable_overwrites} stored value(s) were "
-            f"overwritten without being readable first and {held} were held "
-            "back from deletion for the same reason. Check ISTOTA_SECRET_KEY."
-        )
-
-
-def _print_vault_status(report) -> None:
-    """One user's vault, as lines. Names and counts, never a value."""
-    from istota.credentials import vault as secrets_vault
-
-    if not report.configured:
-        print(f"{report.user_id}: no vault configured")
-        return
-
-    print(f"{report.user_id}:")
-    print(f"  path:       {report.path or '(refused)'}")
-    if report.refusal:
-        print(f"  refused:    {report.refusal}")
-    print(
-        "  passphrase: "
-        + ("provisioned" if report.passphrase_present else "NOT PROVISIONED")
-    )
-    # The durable record, which is the only thing here that survives the
-    # process that wrote it. `last_success_at` rather than `last_sync_at`: the
-    # latter moves on a failed cycle too, so printing it as "last synced" would
-    # make a vault broken for a week read as having synced a moment ago.
-    print(f"  last sync:  {report.last_success_at or 'never (no record)'}")
-    if report.recorded_outcome and report.recorded_outcome != secrets_vault.OUTCOME_OK:
-        print(f"  last cycle: {report.recorded_outcome}")
-        # The class names the condition and the sentence names the remedy, so
-        # printing the first without the second reports a failure and withholds
-        # the actionable half of it.
-        if report.recorded_reason:
-            print(f"  last error: {report.recorded_reason}")
-    if report.outcome and report.outcome != secrets_vault.OUTCOME_OK:
-        print(f"  status:     {report.outcome}")
-        if report.reason:
-            print(f"  reason:     {report.reason}")
-        return
-
-    if not report.parsed:
-        return
-    # Every name below came out of the vault file, which a task in the user's
-    # own sandbox can overwrite, and the consumer is an operator's terminal —
-    # so each goes through the module's own bound. An unflattened name can
-    # carry a newline and forge a line of this report.
-    label = secrets_vault.label_for_display
-    if not report.scoped:
-        # §1's notice, on the surface an operator reaches for. The count is the
-        # thing that makes it actionable: "all 412 of them" is a different
-        # sentence from "all 3 of them".
-        print(
-            f"  unscoped:   the file has no top-level "
-            f"'{secrets_vault.VAULT_ROOT_GROUP}' group, so all "
-            f"{len(report.names)} credential(s) in it are shared"
-        )
-    if report.truncated:
-        print(
-            f"  truncated:  the read stopped at the {report.truncated} cap, so "
-            "this is a prefix of the file and nothing is deleted"
-        )
-    print(f"  shared:     {len(report.names)} credential(s)")
-    for name in report.names:
-        print(f"    {label(name)}")
-    for name, reason in report.skipped:
-        print(f"  skipped:    {label(name)} ({reason})")
 
 
 def cmd_email(args):
@@ -2182,14 +1918,6 @@ def cmd_user_ensure(args):
     # this process would have to read off a FUSE mount. Taking the stored name
     # away is the operator's route back to the resolver's own rules — the only
     # file in the folder, or a question when there are several.
-    if getattr(args, "clear_vault_config", False):
-        from . import storage
-
-        if storage.stored_vault_file(config, user_id):
-            storage.store_vault_file(config, user_id, "")
-            print(f"Cleared the stored vault file for {user_id}.")
-        else:
-            print(f"{user_id} had no stored vault file.")
 
     if binding is not None:
         # Masked, always. `istota user show` is the private operator surface
@@ -5129,10 +4857,14 @@ def main():
     )
     secret_parser.add_argument(
         "action",
-        choices=["ensure", "list", "remove", "vault-sync", "vault-status", "vault-new", "retire"],
+        choices=["ensure", "list", "remove", "export", "import", "vault-new", "retire"],
         help="Action",
     )
     secret_parser.add_argument("-u", "--user", help="User id")
+    secret_parser.add_argument("path", nargs="?", help="KeePass file to import")
+    secret_parser.add_argument("--out", help="New KeePass export path")
+    secret_parser.add_argument("--keyfile", help="Source key file for import")
+    secret_parser.add_argument("--include-changed", action="store_true", help="Import changed entries too")
     secret_parser.add_argument("--slug", help="Generated credential title (vault-new only)")
     secret_parser.add_argument("--username", help="Username (vault-new only)")
     secret_parser.add_argument("--url", help="Site URL (vault-new only)")
@@ -5148,23 +4880,6 @@ def main():
     secret_parser.add_argument(
         "--value",
         help="Secret value (ensure only). Use `secret remove` to clear.",
-    )
-    secret_parser.add_argument(
-        "--generate",
-        action="store_true",
-        help=(
-            "Mint the value instead of supplying one, and print it once "
-            "(vault passphrase only)."
-        ),
-    )
-    secret_parser.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "Replace an existing vault passphrase with a freshly generated "
-            "one. The vault file is encrypted under the stored value, so the "
-            "file becomes unopenable."
-        ),
     )
 
     # email
@@ -5292,16 +5007,6 @@ def main():
         help=(
             "Clear only the learned WhatsApp identity (BSUID, send id, "
             "username, service window), keeping the bootstrap number."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--clear-vault-config",
-        action="store_true",
-        help=(
-            "Forget which file in the user's vault folder their vault is, so "
-            "the folder decides again: the only .kdbx there if there is one, "
-            "or nothing until they choose. The operator's route to a choice "
-            "made in the browser."
         ),
     )
     user_ensure_parser.add_argument(

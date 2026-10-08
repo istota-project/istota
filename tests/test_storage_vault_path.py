@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 
 from istota.config import Config, UserConfig
-from istota.credentials.vault import VaultUnreadable, read_vault_bytes
+from istota.credentials.vault_retire import VaultUnreadable, read_vault_bytes
 from istota.skills._loader import OVERLAY_IS_A_SYMLINK, OVERLAY_NOT_A_REGULAR_FILE
 from istota.storage import (
     VAULT_DIR_EMPTY,
@@ -51,9 +51,7 @@ from istota.storage import (
     VAULT_PATH_OUTSIDE_USER_TREE,
     list_vault_files,
     resolve_user_vault_path,
-    store_vault_file,
     stored_vault_file,
-    vault_dir_display,
     vault_location_for,
 )
 
@@ -860,7 +858,7 @@ class TestWhichFileTheFolderSettlesOn:
         folder = _vault_dir(config)
         _seed(folder / "personal.kdbx")
         _seed(folder / "work.kdbx")
-        store_vault_file(config, "alice", "work.kdbx")
+        _store_file(config, "alice", "work.kdbx")
         assert stored_vault_file(config, "alice") == "work.kdbx"
         location = _located(config).location
         assert location is not None and location.path.name == "work.kdbx"
@@ -871,7 +869,7 @@ class TestWhichFileTheFolderSettlesOn:
         folder = _vault_dir(config)
         _seed(folder / "personal.kdbx")
         _seed(folder / "work.kdbx")
-        store_vault_file(config, "alice", "work.kdbx")
+        _store_file(config, "alice", "work.kdbx")
         (folder / "work.kdbx").unlink()
         _seed(folder / "archive.kdbx")
         assert _located(config).refusal == VAULT_DIR_UNCHOSEN
@@ -880,7 +878,7 @@ class TestWhichFileTheFolderSettlesOn:
         config = _with_db(_config(tmp_path, alice=UserConfig()))
         folder = _vault_dir(config)
         _seed(folder / "personal.kdbx")
-        store_vault_file(config, "alice", "work.kdbx")
+        _store_file(config, "alice", "work.kdbx")
         location = _located(config).location
         assert location is not None and location.path.name == "personal.kdbx"
 
@@ -893,7 +891,7 @@ class TestWhichFileTheFolderSettlesOn:
         folder = _vault_dir(config)
         _seed(folder / "personal.kdbx")
         _seed(folder / "work.kdbx")
-        store_vault_file(config, "alice", stored)
+        _store_file(config, "alice", stored)
         assert _located(config).refusal == VAULT_DIR_UNCHOSEN
 
     def test_clearing_the_stored_name_returns_the_question(self, tmp_path):
@@ -901,8 +899,8 @@ class TestWhichFileTheFolderSettlesOn:
         folder = _vault_dir(config)
         _seed(folder / "personal.kdbx")
         _seed(folder / "work.kdbx")
-        store_vault_file(config, "alice", "work.kdbx")
-        store_vault_file(config, "alice", "")
+        _store_file(config, "alice", "work.kdbx")
+        _store_file(config, "alice", "")
         assert stored_vault_file(config, "alice") == ""
         assert _located(config).refusal == VAULT_DIR_UNCHOSEN
 
@@ -934,8 +932,11 @@ class TestWhichFileTheFolderSettlesOn:
         assert resolution.location is None
         assert resolution.refusal == VAULT_DIR_EMPTY
 
-    def test_the_folder_display_path_names_the_folder(self, tmp_path):
-        config = _config(tmp_path, alice=UserConfig())
-        folder = _vault_dir(config)
-        assert Path(vault_dir_display(config, "alice")).name == "vault"
-        assert Path(vault_dir_display(config, "alice")).resolve() == folder.resolve()
+
+def _store_file(config, user_id, name):
+    from istota import db
+    with db.get_db(config.db_path) as conn:
+        if name:
+            db.kv_set(conn, user_id, "_vault_file", "name", name)
+        else:
+            db.kv_delete(conn, user_id, "_vault_file", "name")

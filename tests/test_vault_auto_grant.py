@@ -13,11 +13,10 @@ import pytest
 
 from istota import db, doctor
 from istota.credentials import store as secrets_store
-from istota.credentials import vault as secrets_vault
 from istota.config import Config
 from istota.credentials.broker import grants
 from istota.credentials.broker.bindings import parse_binding
-from tests.test_secrets_vault import _new_db, _read
+from tests.test_kdbx_import_read import _new_db
 
 
 @pytest.fixture
@@ -34,8 +33,14 @@ def _vault(tmp_path):
 
 
 def _sync(database, path):
-    read, _ = _read(path)
-    return secrets_vault.apply_vault(database, "alice", read)
+    from istota.credentials import kdbx_import
+    from tests.test_kdbx_import_read import PASSPHRASE
+    data = path.read_bytes()
+    preview = kdbx_import.preview(database, "alice", data, PASSPHRASE)
+    selected = [i.name for i in preview.items if i.status in ("new", "changed")]
+    if selected:
+        return kdbx_import.apply(database, "alice", data, PASSPHRASE, selected=selected,
+                                 expected_digest=preview.digest, actor="import")
 
 
 def _grant(database, name):
@@ -93,6 +98,7 @@ def test_a_nogrant_tag_keeps_the_entry_ungranted_until_it_is_removed(tmp_path, d
     _sync(database, path)
     assert _grant(database, "nebula") is None
     entry.tags = []
+    entry.password = "updated-value"
     kp.save()
     _sync(database, path)
     assert _grant(database, "nebula") is not None
@@ -146,10 +152,10 @@ def test_restoring_an_old_copy_of_the_file_does_not_widen_a_narrowed_grant(tmp_p
     kp.delete_entry(entry)
     kp.save()
     _sync(database, path)
-    assert _grant(database, "nebula") is None
+    assert _grant(database, "nebula")["rooms"] == ["room-a"]
     path.write_bytes(kept)
     _sync(database, path)
-    assert _grant(database, "nebula") is None
+    assert _grant(database, "nebula")["rooms"] == ["room-a"]
 
 
 def test_a_file_with_no_istota_group_grants_nothing_until_it_is_scoped(tmp_path, database):
@@ -160,24 +166,8 @@ def test_a_file_with_no_istota_group_grants_nothing_until_it_is_scoped(tmp_path,
     assert _grant(database, "nebula") is None
     group = kp.add_group(kp.root_group, "istota")
     kp.move_entry(entry, group)
+    entry.password = "changed-after-scoping"
     kp.save()
-    _sync(database, path)
-    assert _grant(database, "nebula") is not None
-
-
-def test_a_pass_that_fails_before_granting_is_retried(tmp_path, database, monkeypatch):
-    kp, path, group = _vault(tmp_path)
-    kp.add_entry(group, "nebula", "alice", "fixture-password", url="https://nebula.example")
-    kp.save()
-    original = grants.auto_grant_vault_entries
-
-    def fail(*args, **kwargs):
-        raise RuntimeError("fixture failure")
-
-    monkeypatch.setattr(grants, "auto_grant_vault_entries", fail)
-    with pytest.raises(RuntimeError):
-        _sync(database, path)
-    monkeypatch.setattr(grants, "auto_grant_vault_entries", original)
     _sync(database, path)
     assert _grant(database, "nebula") is not None
 
@@ -190,17 +180,6 @@ def test_grant_existing_skips_an_opted_out_entry(tmp_path, database):
     _sync(database, path)
     with db.get_db(database) as conn:
         assert grants.grant_what_exists(conn, "alice") == 0
-    assert _grant(database, "nebula") is None
-
-
-def test_a_name_held_by_a_local_credential_is_not_granted(tmp_path, database):
-    binding = parse_binding("https://local.example", {}, [], source="local")
-    secrets_store.upsert_secret(database, "alice", "vault_entries", "nebula", "typed-password",
-                                binding=dict(binding, credential="nebula"))
-    kp, path, group = _vault(tmp_path)
-    kp.add_entry(group, "nebula", "alice", "fixture-password", url="https://nebula.example")
-    kp.save()
-    _sync(database, path)
     assert _grant(database, "nebula") is None
 
 

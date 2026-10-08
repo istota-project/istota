@@ -31,6 +31,7 @@ credential.
 """
 
 from __future__ import annotations
+from istota.credentials import kdbx_import as credential_read
 
 import base64
 import contextlib
@@ -48,25 +49,11 @@ from unittest import mock
 import pytest
 
 from istota.credentials import store as secrets_store
-from istota.credentials import vault as secrets_vault_module
+from istota.credentials import names as secrets_vault_module
 from istota.config import UserConfig, load_config
-from istota.credentials.vault import (
-    SKIP_DUPLICATE_NAME,
-    SKIP_OVERSIZE_VALUE,
-    SKIP_UNREADABLE_ROW,
-    SKIP_UNUSABLE_NAME,
-    VAULT_ENTRY_SERVICE,
-    VAULT_READ_CAP_BYTES,
-    VaultCorrupt,
-    VaultLibraryMissing,
-    VaultLocked,
-    VaultMissing,
-    VaultRead,
-    VaultUnreadable,
-    apply_vault,
-    parse_vault,
-    read_vault_bytes,
-)
+from istota.credentials.kdbx_import import SKIP_DUPLICATE_NAME, SKIP_OVERSIZE_VALUE, SKIP_UNUSABLE_NAME, VAULT_READ_CAP_BYTES, VaultCorrupt, VaultLibraryMissing, VaultLocked, VaultRead, parse_vault
+from istota.credentials.names import VAULT_ENTRY_SERVICE
+from istota.credentials.vault_retire import VaultMissing, VaultUnreadable, read_vault_bytes
 from istota.skills._loader import (
     OVERLAY_IS_A_SYMLINK,
     OVERLAY_NOT_A_REGULAR_FILE,
@@ -97,7 +84,7 @@ def _ours(caplog):
     satisfied by a third party's output and stayed green with all three
     warnings deleted.
     """
-    return [r.getMessage() for r in caplog.records if r.name == "istota.credentials.vault"]
+    return [r.getMessage() for r in caplog.records if r.name in {"istota.credentials.kdbx_import", "istota.credentials.vault_retire"}]
 
 
 def _new_db(tmp_path, *, password=PASSPHRASE, name="vault.kdbx"):
@@ -106,7 +93,7 @@ def _new_db(tmp_path, *, password=PASSPHRASE, name="vault.kdbx"):
     Imported inside the helper rather than at module scope: `pykeepass` pulls
     `lxml`, `argon2-cffi` and `pycryptodomex`, and nothing in this repository
     should pay that at collection — which is the same rule
-    `secrets_vault.parse_vault` follows and `test_the_library_import_is_function_scoped`
+    `credential_read.parse_vault` follows and `test_the_library_import_is_function_scoped`
     holds it to.
     """
     from tests.support.kdbx import create_database
@@ -307,7 +294,7 @@ class TestRead:
         kp.add_entry(root, "Acme", USERNAME_VALUE, "")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert read.services == {"acme_username": USERNAME_VALUE}
@@ -358,7 +345,7 @@ class TestRead:
         kp.add_entry(root, "Acme", "", "")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert read.services == {}
@@ -377,7 +364,7 @@ class TestRead:
         kp.add_entry(root, "Other", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert read.services == {"other": API_KEY_VALUE}
@@ -422,7 +409,7 @@ class TestRead:
         kp.add_entry(root, "AWS Key", "", "ak-from-the-flat-entry")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert "aws_key" not in read.services
@@ -455,7 +442,7 @@ class TestRead:
         kp.add_entry(root, "AWS Key", "", "")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert "aws_key" not in read.services
@@ -466,27 +453,6 @@ class TestRead:
         said = [m for m in _ours(caplog) if "aws_key" in m]
         assert len(said) == 1, said
 
-    def test_a_held_collision_does_not_delete_the_stored_row(
-        self, tmp_path, db_path, secret_key_env
-    ):
-        """The hold driven through to the rows, which is where it matters.
-
-        `held` is a field; a test asserting only on the field passes against an
-        apply that ignores it.
-        """
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(kp.add_group(root, "aws"), "key", "", API_KEY_VALUE)
-        kp.save()
-        apply_vault(db_path, "alice", _read(path)[0])
-        assert _entry(db_path, "alice", "aws_key") == API_KEY_VALUE
-
-        kp.add_entry(root, "AWS Key", "", "")
-        kp.save()
-        result = apply_vault(db_path, "alice", _read(path)[0])
-
-        assert result.deleted == 0
-        assert _entry(db_path, "alice", "aws_key") == API_KEY_VALUE
 
     def test_two_case_variant_roots_that_collide_hold_rather_than_delete(
         self, tmp_path
@@ -608,7 +574,7 @@ class TestRead:
         kp.add_entry(root, "!!!", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert read.services == {}
@@ -697,7 +663,7 @@ class TestRead:
 
         Every call site warns for itself, because only the caller knows which
         entry and which field produced the name."""
-        from istota.credentials.vault import slug_name
+        from istota.credentials.names import slug_name
 
         assert slug_name(["GitHub PAT"]) == "github_pat"
         assert slug_name(["Home Assistant", "Token"]) == "home_assistant_token"
@@ -719,9 +685,9 @@ class TestRead:
     def test_the_shipped_caps(self):
         """Module constants rather than settings: an operator who needs a
         different *parse* cap is a signal to revisit the design."""
-        assert secrets_vault_module.VAULT_MAX_DEPTH == 8
-        assert secrets_vault_module.VAULT_MAX_ENTRIES == 512
-        assert secrets_vault_module.VAULT_MAX_NAMES == 1024
+        assert credential_read.VAULT_MAX_DEPTH == 8
+        assert credential_read.VAULT_MAX_ENTRIES == 512
+        assert credential_read.VAULT_MAX_NAMES == 1024
         assert secrets_vault_module.VAULT_MAX_VALUE_BYTES == 8192
         assert secrets_vault_module.VAULT_NAME_MAX_CHARS == 64
 
@@ -730,7 +696,7 @@ class TestRead:
     ):
         """The cap is counted in subgroup levels below the root group, so a
         cap of 1 admits `istota/<group>/<entry>` and nothing below it."""
-        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_DEPTH", 1)
+        monkeypatch.setattr(credential_read, "VAULT_MAX_DEPTH", 1)
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
         shallow = kp.add_group(root, "aws")
@@ -738,7 +704,7 @@ class TestRead:
         kp.add_entry(kp.add_group(shallow, "deeper"), "key", "", BASE_URL_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert read.services == {"aws_key": API_KEY_VALUE}
@@ -761,14 +727,14 @@ class TestRead:
     def test_the_entry_cap_stops_the_walk_and_applies_what_it_read(
         self, tmp_path, monkeypatch, caplog
     ):
-        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_ENTRIES", 2)
+        monkeypatch.setattr(credential_read, "VAULT_MAX_ENTRIES", 2)
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
         for index in range(4):
             kp.add_entry(root, f"entry{index}", "", f"value-{index}")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert set(read.services) == {"entry0", "entry1"}
@@ -783,14 +749,14 @@ class TestRead:
     ):
         """Names are counted as they are produced, so the cap can fall inside
         an entry — the password, the username and the URL are three."""
-        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_NAMES", 2)
+        monkeypatch.setattr(credential_read, "VAULT_MAX_NAMES", 2)
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
         kp.add_entry(root, "Acme", USERNAME_VALUE, API_KEY_VALUE, url=BASE_URL_VALUE)
         kp.add_entry(root, "Other", "", TOPIC_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert read.services == {"acme": API_KEY_VALUE, "acme_username": USERNAME_VALUE}
@@ -808,7 +774,7 @@ class TestRead:
         whose custom fields all slug to nothing emitting one of each per field,
         past every cap, from a file a task in that user's own sandbox can
         write."""
-        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_NAMES", 4)
+        monkeypatch.setattr(credential_read, "VAULT_MAX_NAMES", 4)
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
         entry = kp.add_entry(root, "Acme", "", API_KEY_VALUE)
@@ -817,7 +783,7 @@ class TestRead:
         kp.add_entry(root, "Other", "", BASE_URL_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         # Four fields: the password, the username, the URL, and one custom
@@ -852,7 +818,7 @@ class TestRead:
         kp.add_group(kp.root_group, "istota")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert read.services == {} and read.held == frozenset()
@@ -1191,9 +1157,9 @@ class TestRead:
         The names in the file are attacker-reachable strings, since a task in
         the user's own sandbox can write it, and the values are the credentials
         the whole module exists to keep out of a log line."""
-        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_VALUE_BYTES", 16)
-        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_DEPTH", 1)
-        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_ENTRIES", 7)
+        monkeypatch.setattr(credential_read, "VAULT_MAX_VALUE_BYTES", 16)
+        monkeypatch.setattr(credential_read, "VAULT_MAX_DEPTH", 1)
+        monkeypatch.setattr(credential_read, "VAULT_MAX_ENTRIES", 7)
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
         aws = kp.add_group(root, "aws")
@@ -1247,7 +1213,7 @@ class TestRead:
         kp.add_entry(root, "", "", "untitled-value")
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             _read(path)
 
         said = _ours(caplog)
@@ -1269,7 +1235,7 @@ class TestRead:
             kp.add_entry(karakeep, "", "", API_KEY_VALUE, force_creation=True)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             _read(path)
 
         assert _ours(caplog) == ["vault: 4 entries had no title, skipped"]
@@ -1286,7 +1252,7 @@ class TestRead:
         kp.add_entry(kp.add_group(root, "x" * 400), "api_key", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         assert _ours(caplog), "the fixture reached no warning at all"
@@ -1336,8 +1302,8 @@ class TestRead:
             rendered = f"{record.getMessage()} {record.args!r} {record.exc_text!r}"
             assert API_KEY_VALUE not in rendered
         said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.credentials.vault"]
-        assert said == ["vault: parse failed (tests.test_secrets_vault._Boom)"]
+                if r.name in {"istota.credentials.kdbx_import", "istota.credentials.vault_retire"}]
+        assert said == ["vault: parse failed (tests.test_kdbx_import_read._Boom)"]
 
     def test_a_truncated_file_takes_the_catch_all_and_says_so(
         self, tmp_path, caplog
@@ -1353,23 +1319,23 @@ class TestRead:
         _, path = _standard_vault(tmp_path)
         whole = path.read_bytes()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             with pytest.raises(VaultCorrupt):
                 parse_vault(whole[: len(whole) // 2], PASSPHRASE)
 
         said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.credentials.vault"]
+                if r.name in {"istota.credentials.kdbx_import", "istota.credentials.vault_retire"}]
         assert said == ["vault: parse failed (construct.core.StreamError)"]
 
     def test_bytes_that_are_not_a_kdbx_take_the_mapped_arm(self, tmp_path, caplog):
         """The control for the one above: a bad *header* is mapped, so it logs
         nothing. Without this the assertion there is about a string rather than
         about which branch ran."""
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             with pytest.raises(VaultCorrupt):
                 parse_vault(b"# just some text\n" * 20, PASSPHRASE)
 
-        assert [r for r in caplog.records if r.name == "istota.credentials.vault"] == []
+        assert [r for r in caplog.records if r.name in {"istota.credentials.kdbx_import", "istota.credentials.vault_retire"}] == []
 
 
 class TestScope:
@@ -1433,7 +1399,7 @@ class TestScope:
         kp.add_entry(kp.add_group(kp.root_group, "aws"), "key", "", API_KEY_VALUE)
         kp.save()
 
-        with caplog.at_level(logging.WARNING, logger="istota.credentials.vault"):
+        with caplog.at_level(logging.WARNING, logger="istota.credentials.kdbx_import"):
             read, _ = _read(path)
 
         messages = _ours(caplog)
@@ -1585,9 +1551,8 @@ class TestTheLibraryStaysOutOfTheImportGraph:
         a test asserting against source text executes none of the lines it
         reads, so testmon would otherwise never run this one."""
 
-        from istota.credentials import vault as secrets_vault
 
-        source = source_of(secrets_vault)
+        source = source_of(credential_read)
         for line in source.splitlines():
             if line.startswith(("import ", "from ")):
                 assert "pykeepass" not in line, (
@@ -1646,302 +1611,6 @@ def _vault_read(services, *, held=(), truncated="", scoped=True, skipped=()):
 
 def _entry(db_path, user, name):
     return secrets_store.get_secret(db_path, user, VAULT_ENTRY_SERVICE, name)
-
-
-class TestApply:
-    """Writing a read into `vault_entries`, and sweeping the namespace.
-
-    Every test here runs against a real temp database with a real master key:
-    the subject is the state of rows, and two of the three counting states
-    (`updated` against `unchanged`) are a property of what is already stored.
-    """
-
-    def test_a_first_apply_creates_every_name(self, db_path, secret_key_env):
-        read = _vault_read({"karakeep_api_key": API_KEY_VALUE,
-                            "github_pat": TOPIC_VALUE})
-
-        result = apply_vault(db_path, "alice", read)
-
-        assert (result.created, result.updated, result.unchanged) == (2, 0, 0)
-        assert result.deleted == 0 and result.deleted_keys == []
-        assert result.skipped == []
-        assert result.swept is True
-        assert _entry(db_path, "alice", "karakeep_api_key") == API_KEY_VALUE
-        assert _entry(db_path, "alice", "github_pat") == TOPIC_VALUE
-
-    def test_an_unchanged_value_is_counted_apart_from_an_updated_one(
-        self, db_path, secret_key_env
-    ):
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
-                                                   "b": TOPIC_VALUE}))
-
-        result = apply_vault(
-            db_path, "alice", _vault_read({"a": API_KEY_VALUE, "b": "moved"})
-        )
-
-        assert (result.created, result.updated, result.unchanged) == (0, 1, 1)
-
-    # ---- the namespace sweep --------------------------------------------
-
-    def test_a_name_removed_from_the_file_is_deleted(self, db_path, secret_key_env):
-        """The whole of what makes deleting an entry revoke it."""
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
-                                                   "b": TOPIC_VALUE}))
-
-        result = apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-
-        assert result.deleted == 1 and result.deleted_keys == ["b"]
-        assert _entry(db_path, "alice", "b") is None
-        assert _entry(db_path, "alice", "a") == API_KEY_VALUE
-
-    def test_an_empty_read_deletes_every_row(self, db_path, secret_key_env):
-        """How a user revokes the whole namespace: empty the `istota` group, or
-        empty the file. Both are unambiguous under §1."""
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
-                                                   "b": TOPIC_VALUE}))
-
-        result = apply_vault(db_path, "alice", _vault_read({}))
-
-        assert result.deleted == 2
-        assert sorted(result.deleted_keys) == ["a", "b"]
-
-    def test_deletion_is_scoped_to_the_user(self, db_path, secret_key_env):
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-        apply_vault(db_path, "bob", _vault_read({"a": TOPIC_VALUE}))
-
-        apply_vault(db_path, "alice", _vault_read({}))
-
-        assert _entry(db_path, "alice", "a") is None
-        assert _entry(db_path, "bob", "a") == TOPIC_VALUE
-
-    def test_another_service_is_never_touched(self, db_path, secret_key_env):
-        """**The passphrase-isolation control**, and the one test in this file
-        whose failure mode is a deployment that cannot open its own vault.
-
-        The sweep enumerates `vault_entries` alone, and `vault/passphrase` is a
-        different service — so the isolation is structural rather than a filter
-        somebody has to keep right. A vault holding an entry the user titled
-        `passphrase` is what makes that concrete: applied against a database
-        already holding `vault/passphrase`, the stored passphrase is byte
-        -identical afterwards and a *separate* row carries the file's value.
-        """
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "the-real-one")
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "typed")
-
-        apply_vault(
-            db_path, "alice", _vault_read({"passphrase": API_KEY_VALUE})
-        )
-
-        assert secrets_store.get_secret(
-            db_path, "alice", "vault", "passphrase"
-        ) == "the-real-one"
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key"
-        ) == "typed"
-        assert _entry(db_path, "alice", "passphrase") == API_KEY_VALUE
-
-    def test_an_empty_read_leaves_the_passphrase_alone(self, db_path, secret_key_env):
-        """The other half of the control: a sweep that deleted every row of
-        every service would take the passphrase with it, and the vault could
-        never be opened again."""
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "the-real-one")
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-
-        apply_vault(db_path, "alice", _vault_read({}))
-
-        assert secrets_store.get_secret(
-            db_path, "alice", "vault", "passphrase"
-        ) == "the-real-one"
-
-    def test_every_write_happens_before_any_delete(
-        self, db_path, secret_key_env, monkeypatch
-    ):
-        """A failure part-way through must leave credentials present rather than
-        absent, which is why the deletions are planned and executed at the end
-        rather than inline."""
-        apply_vault(db_path, "alice", _vault_read({"old": TOPIC_VALUE}))
-
-        order: list[str] = []
-        real_upsert = secrets_store.upsert_secret
-        real_delete = secrets_store.delete_secret
-
-        def _upsert(*args, **kwargs):
-            order.append("write")
-            return real_upsert(*args, **kwargs)
-
-        def _delete(*args, **kwargs):
-            order.append("delete")
-            return real_delete(*args, **kwargs)
-
-        monkeypatch.setattr(secrets_vault_module.secrets_store, "upsert_secret", _upsert)
-        monkeypatch.setattr(secrets_vault_module.secrets_store, "delete_secret", _delete)
-
-        apply_vault(db_path, "alice", _vault_read({"new": API_KEY_VALUE}))
-
-        assert order == ["write", "delete"]
-
-    # ---- what holds a deletion back --------------------------------------
-
-    def test_a_held_name_is_not_deleted(self, db_path, secret_key_env):
-        """The fat-finger case: a password field blanked in the file must not
-        delete the credential it was meant to change."""
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-
-        result = apply_vault(db_path, "alice", _vault_read({}, held=["a"]))
-
-        assert result.deleted == 0 and result.deleted_keys == []
-        assert _entry(db_path, "alice", "a") == API_KEY_VALUE
-
-    def test_a_blanked_password_holds_its_row_through_a_real_parse(
-        self, tmp_path, db_path, secret_key_env
-    ):
-        """The seam, driven end to end rather than through the helper: what the
-        parse puts in `held` is the whole of what the apply declines to delete.
-        """
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(root, "github pat", "", API_KEY_VALUE)
-        kp.save()
-        apply_vault(db_path, "alice", _read(path)[0])
-        assert _entry(db_path, "alice", "github_pat") == API_KEY_VALUE
-
-        entry = kp.find_entries(title="github pat", first=True)
-        entry.password = ""
-        kp.save()
-        result = apply_vault(db_path, "alice", _read(path)[0])
-
-        assert result.deleted == 0
-        assert _entry(db_path, "alice", "github_pat") == API_KEY_VALUE
-
-    def test_a_truncated_read_withholds_every_deletion(self, db_path, secret_key_env):
-        """A prefix of the file says nothing about a stored name's absence, so
-        the sweep is withheld whole rather than filtered — there is no way to
-        tell a name past the cap from one the user removed. Writes still land.
-        """
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
-                                                   "b": TOPIC_VALUE}))
-
-        result = apply_vault(
-            db_path, "alice", _vault_read({"a": "moved"}, truncated="entry")
-        )
-
-        assert result.swept is False
-        assert result.deleted == 0 and result.deleted_keys == []
-        assert _entry(db_path, "alice", "b") == TOPIC_VALUE
-        assert _entry(db_path, "alice", "a") == "moved"
-
-    def test_a_row_that_will_not_decrypt_is_never_deleted(
-        self, db_path, secret_key_env
-    ):
-        """A stale master key is a transient misconfiguration; a delete makes it
-        permanent. The credential comes back when the right key does and never
-        from a delete."""
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE secrets SET encrypted_value = ? "
-                "WHERE user_id = ? AND service = ? AND key = ?",
-                (b"not-a-fernet-token", "alice", VAULT_ENTRY_SERVICE, "a"),
-            )
-
-        result = apply_vault(db_path, "alice", _vault_read({}))
-
-        assert result.deleted == 0
-        assert result.skipped == [("a", SKIP_UNREADABLE_ROW)]
-        with sqlite3.connect(db_path) as conn:
-            rows = conn.execute(
-                "SELECT COUNT(*) FROM secrets WHERE user_id = ? AND service = ?",
-                ("alice", VAULT_ENTRY_SERVICE),
-            ).fetchone()
-        assert rows[0] == 1
-
-    def test_an_unreadable_row_overwritten_is_counted_rather_than_created(
-        self, db_path, secret_key_env
-    ):
-        """`upsert_secret` derives its own answer from `get_secret`, which
-        reports an undecryptable row as absent — so on a deployment with a stale
-        master key every write would otherwise read as `created` and the counts
-        an operator reads would be exactly backwards."""
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE secrets SET encrypted_value = ? "
-                "WHERE user_id = ? AND service = ? AND key = ?",
-                (b"not-a-fernet-token", "alice", VAULT_ENTRY_SERVICE, "a"),
-            )
-
-        result = apply_vault(db_path, "alice", _vault_read({"a": TOPIC_VALUE}))
-
-        assert (result.created, result.updated) == (0, 1)
-        assert result.unreadable_overwrites == 1
-        assert _entry(db_path, "alice", "a") == TOPIC_VALUE
-
-    def test_a_missing_master_key_refuses_the_whole_pass(self, db_path):
-        """Without it an empty read on a deployment that can neither read what
-        it is removing nor write a replacement would sweep the namespace flat.
-        """
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("ISTOTA_SECRET_KEY", None)
-            with pytest.raises(secrets_store.SecretKeyMissingError):
-                apply_vault(db_path, "alice", _vault_read({}))
-
-    # ---- reporting -------------------------------------------------------
-
-    def test_the_reads_own_skips_travel_on_the_result(self, db_path, secret_key_env):
-        read = _vault_read({}, skipped=[("aws_key", SKIP_DUPLICATE_NAME)])
-
-        result = apply_vault(db_path, "alice", read)
-
-        assert result.skipped == [("aws_key", SKIP_DUPLICATE_NAME)]
-
-    def test_no_log_record_carries_a_value(self, db_path, secret_key_env, caplog):
-        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
-        with caplog.at_level(logging.DEBUG, logger="istota.credentials.vault"):
-            apply_vault(
-                db_path, "alice", _vault_read({"b": TOPIC_VALUE}, truncated="entry")
-            )
-            apply_vault(db_path, "alice", _vault_read({}))
-
-        for message in _ours(caplog):
-            assert API_KEY_VALUE not in message
-            assert TOPIC_VALUE not in message
-
-    def test_the_skip_vocabulary_is_exactly_seven(self):
-        """The four service-mapping reasons went with the machinery that
-        produced them. A reason with no producer reads as a condition the apply
-        can still reach. `SKIP_NAME_TAKEN` is produced by the apply when a
-        credential added in Istota holds a name the file produces."""
-        assert secrets_vault_module.SKIP_REASONS == frozenset({
-            SKIP_UNUSABLE_NAME,
-            SKIP_DUPLICATE_NAME,
-            secrets_vault_module.SKIP_EMPTY_VALUE,
-            SKIP_OVERSIZE_VALUE,
-            SKIP_UNREADABLE_ROW,
-            secrets_vault_module.SKIP_NAME_TAKEN,
-            secrets_vault_module.SKIP_UNUSABLE_OTP,
-        })
-
-    @pytest.mark.parametrize(
-        "name",
-        [
-            "SKIP_RESERVED_SERVICE",
-            "SKIP_INELIGIBLE_SERVICE",
-            "SKIP_UNKNOWN_KEY",
-            "SKIP_DELETE_HELD",
-            "eligible_services",
-            "service_refusal",
-            "_service_refusal",
-            "DAEMON_WRITTEN_SERVICES",
-            "_near_miss_title",
-            "vault_owned_services",
-            "format_skip",
-        ],
-    )
-    def test_the_removed_machinery_is_gone(self, name):
-        """A drift guard rather than a behaviour: each of these is on the
-        stage's own removal list, and one coming back would bring the service
-        mapping's reasoning with it."""
-        assert not hasattr(secrets_vault_module, name), name
 
 
 class TestReadingThroughADescriptor:
@@ -2008,18 +1677,11 @@ class TestReadingThroughADescriptor:
 
 
 class TestTheConfigFields:
-    """`vault_path` and `scheduler.vault_sync_interval`.
-
-    Asserted as a round trip through `load_config` rather than against the
-    dataclass alone, because "declared, documented, and read by nothing" is a
-    defect class `config_mapper.py` records eleven instances of — and for both
-    of these the symptom is a feature the operator configured and the daemon
-    never ran.
-    """
+    """The legacy path remains available to the retirement migration."""
 
     def test_the_defaults_leave_the_feature_off(self, tmp_path):
         config = _load_config_text(tmp_path, 'bot_name = "Istota"\n')
-        assert config.scheduler.vault_sync_interval == 300
+        assert not hasattr(config.scheduler, "vault_sync_interval")
         assert UserConfig().vault_path == ""
 
     def test_the_user_field_round_trips(self, tmp_path):
@@ -2031,11 +1693,11 @@ class TestTheConfigFields:
             config.users["alice"].vault_path == "istota/vault/credentials.kdbx"
         )
 
-    def test_the_interval_round_trips(self, tmp_path):
+    def test_the_retired_interval_is_ignored(self, tmp_path):
         config = _load_config_text(
             tmp_path, "[scheduler]\nvault_sync_interval = 60\n"
         )
-        assert config.scheduler.vault_sync_interval == 60
+        assert not hasattr(config.scheduler, "vault_sync_interval")
 
     def test_a_non_string_vault_path_is_dropped(self, tmp_path):
         config = _load_config_text(tmp_path, """
@@ -2043,14 +1705,6 @@ class TestTheConfigFields:
             vault_path = 7
         """)
         assert config.users["alice"].vault_path == ""
-
-    def test_the_interval_is_documented(self):
-        """`tests/test_config_field_coverage.py` holds every leaf field of the
-        tree to the example or the Ansible template, with an exemption list that
-        is deliberately empty. Named here so a reader of this file finds out
-        where the line has to live."""
-        text = (REPO / "config" / "config.example.toml").read_text()
-        assert "vault_sync_interval" in text
 
 
 class TestTheProfileTableGuard:
@@ -2153,7 +1807,7 @@ class TestNoSkillManifestDeclaresThePassphrase:
         a manifest at all, and a comparison that let one spelling through would
         be relitigated the first time the store's matching changed.
         """
-        from istota.credentials.vault import VAULT_PASSPHRASE_KEY, VAULT_PASSPHRASE_SERVICE
+        from istota.credentials.vault_retire import VAULT_PASSPHRASE_KEY, VAULT_PASSPHRASE_SERVICE
 
         declared = [
             f"{skill}: {spec.var or '<unnamed>'}"
@@ -2189,56 +1843,9 @@ class TestNoSkillManifestDeclaresThePassphrase:
         )
 
 
-class TestThePassphraseFloor:
-    """What `passphrase_refusal` accepts, and the asymmetry that broke a vault.
-
-    The floor used to measure `value.strip()` while every caller stored `value`
-    itself. A passphrase pasted with a trailing newline — what copying out of a
-    password manager, a terminal or a file gives you — therefore satisfied a
-    check about one string and was stored as a different one, after which the
-    unlock failed for the life of the deployment and reported `VaultLocked`:
-    "the stored passphrase does not match the file", about a password that was
-    correct. Found in production, not by a test.
-    """
-
-    def test_a_long_enough_passphrase_is_accepted(self):
-        assert secrets_vault_module.passphrase_refusal("x" * 32) is None
-
-    def test_a_short_passphrase_is_refused_by_length(self):
-        refusal = secrets_vault_module.passphrase_refusal("x" * 31)
-        assert refusal is not None
-        assert "at least" in refusal
-
-    def test_a_trailing_newline_is_refused_rather_than_stripped(self):
-        refusal = secrets_vault_module.passphrase_refusal("x" * 32 + "\n")
-        assert refusal is not None
-        assert "line break" in refusal
-
-    def test_a_trailing_space_is_refused(self):
-        assert secrets_vault_module.passphrase_refusal("x" * 32 + " ") is not None
-
-    def test_a_leading_space_is_refused(self):
-        assert secrets_vault_module.passphrase_refusal(" " + "x" * 32) is not None
-
-    def test_the_length_is_measured_on_what_will_be_stored(self):
-        """The discriminating case, and the whole point of the change.
-
-        Thirty-two characters of padding and one of password: the old floor
-        measured the stripped form and so refused this, which was right — but
-        it measured the stripped form of an *acceptable* value too, which is
-        what let a padded 32-character passphrase through. Both arms have to
-        agree that the value stored is the value judged.
-        """
-        padded = " " * 32 + "x"
-        assert secrets_vault_module.passphrase_refusal(padded) is not None
-
-    def test_a_generated_passphrase_is_never_refused(self):
-        """The remedy the floor exists to steer people towards must survive it."""
-        for _ in range(20):
-            assert secrets_vault_module.passphrase_refusal(
-                secrets_vault_module.generate_passphrase()
-            ) is None
-
-    def test_whitespace_inside_a_passphrase_is_untouched(self):
-        """Only the ends are ambiguous. A passphrase of words is ordinary."""
-        assert secrets_vault_module.passphrase_refusal("correct horse battery staple xyz") is None
+def test_skip_reason_vocabulary_matches_the_parser():
+    assert credential_read.SKIP_REASONS == {
+        credential_read.SKIP_UNUSABLE_NAME, credential_read.SKIP_DUPLICATE_NAME,
+        credential_read.SKIP_EMPTY_VALUE, credential_read.SKIP_OVERSIZE_VALUE,
+        credential_read.SKIP_UNUSABLE_OTP,
+    }

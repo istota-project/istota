@@ -329,6 +329,8 @@ def close_task_questions(conn, task_id: int, *, reason: str = "cancelled") -> No
             (task_id,),
         ).fetchall()
         state = "expired" if reason == "confirmation_expired" else "cancelled"
+        from istota.credentials import recovery_fill
+        recovery_fill.close_for_task(conn, task_id, "declined" if reason == "declined" else state)
         from istota.wallet.purchases import close_for_task
         close_for_task(conn, task_id, "declined" if reason == "declined" else state)
         for row in rows:

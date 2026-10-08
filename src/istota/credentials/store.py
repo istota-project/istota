@@ -19,6 +19,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import json
+import secrets
 from contextlib import nullcontext
 import os
 import sqlite3
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 # ``ISTOTA_SECRET_KEY=test`` derives the well-known SHA-256 of "test".
 _KEY_ENV_VAR = "ISTOTA_SECRET_KEY"
 _MIN_KEY_LEN = 32
+HISTORY_MAX_VERSIONS = 10
 
 # scrypt cost factors. The numbers are conservative; the master key is
 # expected to be high entropy already (the docs steer operators to
@@ -143,7 +146,7 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
 
 def upsert_secret(
     db_path: Path, user_id: str, service: str, key: str, value: str,
-    *, binding: dict | None = None,
+    *, binding: dict | None = None, actor: str = "system",
 ) -> str:
     """Idempotent secret upsert. Returns ``"created"``, ``"updated"``, or ``"noop"``.
 
@@ -166,7 +169,7 @@ def upsert_secret(
         state = "updated"
 
     if state != "noop":
-        set_secret(db_path, user_id, service, key, value, binding=binding)
+        set_secret(db_path, user_id, service, key, value, binding=binding, actor=actor)
     elif binding is not None:
         from istota.credentials.broker.bindings import put_binding
         with _connect(db_path) as conn:
@@ -176,7 +179,7 @@ def upsert_secret(
 
 def set_secret(
     db_path: Path, user_id: str, service: str, key: str, value: str,
-    *, binding: dict | None = None, connection=None,
+    *, binding: dict | None = None, connection=None, actor: str = "system",
 ) -> None:
     """Encrypt and upsert a secret.
 
@@ -188,13 +191,25 @@ def set_secret(
     lands or rolls back with whatever else the caller wrote.
     """
     if not value:
-        delete_secret(db_path, user_id, service, key, connection=connection)
+        delete_secret(db_path, user_id, service, key, connection=connection, actor=actor)
         return
 
     fernet = _get_fernet()
     token = fernet.encrypt(value.encode("utf-8"))
 
     with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if service == "vault_entries":
+            row = conn.execute("SELECT encrypted_value FROM secrets WHERE user_id=? AND service=? AND key=?",
+                               (user_id, service, key)).fetchone()
+            if row is not None:
+                try:
+                    changed = fernet.decrypt(row[0]).decode("utf-8") != value
+                except Exception:
+                    changed = True
+                if changed:
+                    _archive_secret(conn, user_id, key, row[0], op="update", actor=actor)
         conn.execute(
             """
             INSERT INTO secrets (user_id, service, key, encrypted_value, created_at, updated_at)
@@ -271,7 +286,7 @@ def get_secret(
 
 
 def delete_secret(
-    db_path: Path, user_id: str, service: str, key: str, *, all_fields=False, connection=None,
+    db_path: Path, user_id: str, service: str, key: str, *, all_fields=False, connection=None, actor: str = "system",
 ) -> bool:
     """Delete a stored secret. Returns True if a row was removed.
 
@@ -281,12 +296,20 @@ def delete_secret(
         from istota.credentials.broker.bindings import credential_groups, credential_name
         from istota.credentials.broker.grants import delete_grant
         from istota import db
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        batch_id = secrets.token_hex(16)
         keys = [key]
         if service == "vault_entries" and all_fields:
             keys = credential_groups(conn, user_id).get(credential_name(conn, user_id, key), [key])
         deleted = False
         for member in keys:
             owner = credential_name(conn, user_id, member) if service == "vault_entries" else member
+            if service == "vault_entries":
+                row = conn.execute("SELECT encrypted_value FROM secrets WHERE user_id=? AND service=? AND key=?",
+                                   (user_id, service, member)).fetchone()
+                if row is not None:
+                    _archive_secret(conn, user_id, member, row[0], op="delete", actor=actor, batch_id=batch_id)
             cur = conn.execute(
                 "DELETE FROM secrets WHERE user_id=? AND service=? AND key=?",
                 (user_id, service, member),
@@ -299,6 +322,114 @@ def delete_secret(
                              (user_id, member))
                 db.kv_delete(conn, user_id, "_credential_fields", member)
         return deleted
+
+
+def _archive_secret(conn, user_id, key, ciphertext, *, op, actor, batch_id=None):
+    from istota.credentials.broker.bindings import get_binding, credential_name
+    binding = get_binding(conn, user_id, key)
+    # Ownership is stored outside the binding row and must survive a deletion.
+    metadata = {**(binding or {}), "credential": credential_name(conn, user_id, key)}
+    conn.execute("INSERT INTO secrets_history (user_id, service, key, encrypted_value, binding_json, op, batch_id, actor) "
+                 "VALUES (?, 'vault_entries', ?, ?, ?, ?, ?, ?)",
+                 (user_id, key, ciphertext, json.dumps(metadata), op, batch_id, actor))
+    conn.execute("DELETE FROM secrets_history WHERE user_id=? AND service='vault_entries' AND key=? "
+                 "AND id NOT IN (SELECT id FROM secrets_history WHERE user_id=? AND service='vault_entries' "
+                 "AND key=? ORDER BY id DESC LIMIT ?)", (user_id, key, user_id, key, HISTORY_MAX_VERSIONS))
+
+
+def _history_rows(conn, user_id):
+    columns = "id, key, binding_json, op, batch_id, actor, replaced_at"
+    rows = conn.execute(f"SELECT {columns} FROM secrets_history WHERE user_id=? AND service='vault_entries' ORDER BY id DESC",
+                        (user_id,)).fetchall()
+    return [{"id": r[0], "key": r[1], "binding": json.loads(r[2]) if r[2] else {},
+             "op": r[3], "batch_id": r[4], "actor": r[5], "at": r[6]} for r in rows]
+
+
+def list_history(db_path, user_id, name) -> list[dict]:
+    with _connect(db_path) as conn:
+        return _history_listing(conn, user_id, name)
+
+
+def _history_listing(conn, user_id, name):
+    result = {}
+    for row in _history_rows(conn, user_id):
+        owner = row["binding"].get("credential", row["key"])
+        if name is not None and owner != name:
+            continue
+        group = row["batch_id"] or row["id"]
+        if group not in result:
+            result[group] = {"id": row["id"], "name": owner, "op": row["op"],
+                             "actor": row["actor"], "at": row["at"], "fields": []}
+        result[group]["fields"].append(row["key"])
+    return list(result.values())
+
+
+def list_deleted(db_path, user_id) -> list[dict]:
+    from istota.credentials.broker.bindings import credential_groups
+    with _connect(db_path) as conn:
+        owners = credential_groups(conn, user_id)
+        result = {}
+        for row in _history_listing(conn, user_id, None):
+            if row["op"] == "delete" and row["name"] not in owners:
+                result.setdefault(row["name"], row)
+        return list(result.values())
+
+
+def restore_history(db_path, user_id, history_id, *, actor, connection=None) -> list[str]:
+    from istota.credentials.broker.bindings import get_binding, credential_name, effective_source
+    with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT batch_id FROM secrets_history WHERE id=? AND user_id=? AND service='vault_entries'",
+                           (history_id, user_id)).fetchone()
+        if row is None:
+            raise ValueError("history_not_found")
+        rows = conn.execute("SELECT key, encrypted_value, binding_json FROM secrets_history "
+                            "WHERE user_id=? AND service='vault_entries' AND (id=? OR (? IS NOT NULL AND batch_id=?)) ORDER BY id",
+                            (user_id, history_id, row[0], row[0])).fetchall()
+        restored = []
+        for key, ciphertext, raw_binding in rows:
+            binding = json.loads(raw_binding) if raw_binding else {}
+            if binding.get("source") == "vault":
+                binding["source"] = "local"
+            owner = binding.get("credential", key)
+            for candidate in {key, owner}:
+                current = get_binding(conn, user_id, candidate)
+                if current and (effective_source(current.get("source")) != effective_source(binding.get("source"))
+                                or credential_name(conn, user_id, candidate) != owner):
+                    raise ValueError("history_name_taken")
+            restored.append((key, _get_fernet().decrypt(ciphertext).decode("utf-8"), binding))
+        for key, value, binding in restored:
+            reset_recovery = (binding.get("kind") == "recovery"
+                              and get_secret(db_path, user_id, "vault_entries", key, connection=conn) != value)
+            before = conn.execute("SELECT max(id) FROM secrets_history").fetchone()[0] or 0
+            set_secret(db_path, user_id, "vault_entries", key, value, connection=conn,
+                       binding=binding if "hosts" in binding else None, actor=actor)
+            if reset_recovery:
+                # Historical ciphertext has no matching spent-code snapshot.
+                # Falling back to a block prevents automatic code reuse.
+                conn.execute("DELETE FROM recovery_code_state WHERE user_id=? AND name=?",
+                             (user_id, binding.get("credential", key)))
+            conn.execute("UPDATE secrets_history SET op='restore' WHERE id>? AND user_id=?", (before, user_id))
+        return [key for key, _, _ in restored]
+
+
+def purge_history(db_path, user_id, name, *, connection=None) -> int:
+    with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        ids = [r["id"] for r in _history_rows(conn, user_id)
+               if r["binding"].get("credential", r["key"]) == name]
+        for history_id in ids:
+            conn.execute("DELETE FROM secrets_history WHERE id=? AND user_id=?", (history_id, user_id))
+        return len(ids)
+
+
+def prune_history(conn, *, older_than_days: int) -> int:
+    if older_than_days <= 0:
+        raise ValueError("retention must be positive")
+    return conn.execute("DELETE FROM secrets_history WHERE replaced_at < datetime('now', ?)",
+                        (f"-{older_than_days} days",)).rowcount
 
 
 def secret_exists(db_path: Path, user_id: str, service: str, key: str) -> bool:

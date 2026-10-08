@@ -250,9 +250,7 @@ describe('what a failed request says', () => {
       }),
     );
 
-    await expect(api.setVaultPassphrase({ passphrase: 'short' })).rejects.toThrow(
-      /at least 32 characters/,
-    );
+    await expect(api.getCredentialBackup()).rejects.toThrow(/at least 32 characters/);
   });
 
   it('unwraps a structured detail to its message', async () => {
@@ -262,7 +260,7 @@ describe('what a failed request says', () => {
       }),
     );
 
-    await expect(api.setVaultPassphrase({ generate: true })).rejects.toThrow(/already stored/);
+    await expect(api.getCredentialBackup()).rejects.toThrow(/already stored/);
   });
 
   it("reads this app's own `error` spelling too", async () => {
@@ -270,7 +268,7 @@ describe('what a failed request says', () => {
       jsonResponse(400, { error: 'that file is not in your vault folder' }),
     );
 
-    await expect(api.selectVaultFile('gone.kdbx')).rejects.toThrow(/not in your vault folder/);
+    await expect(api.getCredentialBackup()).rejects.toThrow(/not in your vault folder/);
   });
 
   it('falls back to the status when the body carries no reason', async () => {
@@ -286,7 +284,7 @@ describe('what a failed request says', () => {
       },
     } as unknown as Response);
 
-    await expect(api.getVaultStatus()).rejects.toThrow('API error: 502');
+    await expect(api.getCredentialBackup()).rejects.toThrow('API error: 502');
   });
 
   it('leaves a 401 as an AuthError, which is not a message at all', async () => {
@@ -295,7 +293,7 @@ describe('what a failed request says', () => {
     // rendering whatever the server said about it.
     fetchMock.mockResolvedValue(jsonResponse(401, { detail: 'Not authenticated' }));
 
-    await expect(api.getVaultStatus()).rejects.toBeInstanceOf(api.AuthError);
+    await expect(api.getCredentialBackup()).rejects.toBeInstanceOf(api.AuthError);
   });
 });
 

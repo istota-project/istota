@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+RECOVERY_FILL_TITLE = "Recovery code waiting for approval"
+
 SOURCE = "confirmation"
 OBJECT_TYPE = "task"
 
@@ -234,6 +236,8 @@ def _relay_held_view(conn, row: "NotificationRow", task) -> "NotificationView":
     ) or "a room"
     if request is not None and request["kind"] == "purchase":
         label = "this purchase"
+    if request is not None and request["kind"] == "recovery_fill":
+        label = "this recovery code"
     preview = task.confirmation_prompt or ""
     lines = [line for line in preview.splitlines() if line.strip()]
     actions = []

@@ -114,12 +114,13 @@ async def test_totp_names_are_reserved_and_foreign_rows_survive(signed_client, c
     assert row["otp_set"] is False
 
 
-async def test_vault_group_label_uses_kind_not_name(signed_client, config):  # noqa: F811
+async def test_imported_group_label_uses_kind_not_name(signed_client, config):  # noqa: F811
     binding = {**bindings.parse_binding("acme.example", {}, []), "credential": "vault_entry", "kind": "totp"}
     store.set_secret(config.db_path, "alice", "vault_entries", "arbitrary_field", URI, binding=binding)
     row = (await signed_client.get(BASE)).json()["credentials"][0]
     assert row["name"] == "vault_entry" and row["otp"] is True
-    assert "otp_set" not in row
+    # Imported entries are editable; this field is not the form's canonical OTP row.
+    assert row["otp_set"] is False
 
 
 def test_local_repr_hides_seed():

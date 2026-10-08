@@ -244,8 +244,9 @@ def istota_briefing_shared_blocks_toml(shared_blocks) -> str:
     return "\n".join(out).rstrip() + ("\n" if out else "")
 
 
+# Legacy paths remain for one release so retirement can read the old file.
 def istota_vault_users_toml(users) -> str:
-    """Render ``[users.<uid>]`` blocks carrying the credential vault's path.
+    """Render the retired vault path for one release so migration can find it.
 
     Returns "" when no user declares one, so a deployment where every vault is
     a file in the user's own folder renders no ``[users.<uid>]`` section at

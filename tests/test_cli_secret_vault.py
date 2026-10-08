@@ -30,7 +30,6 @@ is what holds that.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -59,15 +58,6 @@ class _Args:
         }
         defaults.update(kwargs)
         self.__dict__.update(defaults)
-
-
-@pytest.fixture(autouse=True)
-def _clean_sync_state():
-    from istota.credentials import vault as secrets_vault
-
-    secrets_vault.reset_sync_state()
-    yield
-    secrets_vault.reset_sync_state()
 
 
 @pytest.fixture
@@ -153,703 +143,14 @@ def _write_vault(path: Path, *, password=PASSPHRASE, ntfy=False, group_name="kar
 # ---------------------------------------------------------------------------
 
 
-class TestGenerate:
-    def test_generate_mints_stores_and_prints_the_value_once(self, env, capsys):
-        from istota.cli import cmd_secret
-        from istota.credentials.vault import VAULT_PASSPHRASE_MIN_CHARS
-
-        cfg, db_path, _mount = env
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="vault",
-                key="passphrase",
-                generate=True,
-            )
-        )
-        out = capsys.readouterr().out
-        stored = secrets_store.get_secret(db_path, "alice", "vault", "passphrase")
-
-        assert stored is not None
-        # 32 random bytes as urlsafe base64. The length is asserted as a literal
-        # rather than recomputed from the constant, which would compare the
-        # implementation with itself.
-        assert len(stored) == 43
-        assert len(stored) >= VAULT_PASSPHRASE_MIN_CHARS
-        assert re.fullmatch(r"[A-Za-z0-9_-]+", stored)
-        # Printed exactly once: the operator has to copy it into their own
-        # password manager, and every extra copy is another line of scrollback.
-        assert out.count(stored) == 1
-
-    def test_two_generates_do_not_produce_the_same_value(self, env, capsys):
-        """`--force` on the second, because a bare re-generate is refused —
-        see `TestGenerateNeverSilentlyRotates`. What is asserted here is the
-        generator, not the refusal."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        args = dict(
-            config=str(cfg),
-            action="ensure",
-            user="alice",
-            service="vault",
-            key="passphrase",
-            generate=True,
-        )
-        cmd_secret(_Args(**args))
-        first = secrets_store.get_secret(db_path, "alice", "vault", "passphrase")
-        capsys.readouterr()
-        cmd_secret(_Args(force=True, **args))
-        second = secrets_store.get_secret(db_path, "alice", "vault", "passphrase")
-        assert first != second
-
-    def test_generate_with_a_value_is_refused(self, env, capsys):
-        """Two answers to one question. Neither is safe to pick silently."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(
-                _Args(
-                    config=str(cfg),
-                    action="ensure",
-                    user="alice",
-                    service="vault",
-                    key="passphrase",
-                    generate=True,
-                    value="x" * 64,
-                )
-            )
-        assert exc.value.code == 1
-        assert secrets_store.secret_exists(db_path, "alice", "vault", "passphrase") is False
-
-    def test_generate_is_refused_for_anything_but_the_vault_passphrase(
-        self, env, capsys
-    ):
-        """Only a credential this deployment *issues* can be minted here.
-
-        A Karakeep API key is issued by Karakeep; generating one would store a
-        value nothing on the other end recognises.
-        """
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(
-                _Args(
-                    config=str(cfg),
-                    action="ensure",
-                    user="alice",
-                    service="karakeep",
-                    key="api_key",
-                    generate=True,
-                )
-            )
-        assert exc.value.code == 1
-        assert secrets_store.secret_exists(db_path, "alice", "karakeep", "api_key") is False
-
-
-class TestGenerateNeverSilentlyRotates:
-    """The data-loss path, reachable by re-running the documented command.
-
-    Every credential in the vault file is encrypted under the stored passphrase.
-    Minting a new one overwrites the only copy the server has and leaves the file
-    unopenable — every later sync comes back `VaultLocked`, and the value that
-    would fix it is gone. The subcommand advertises itself as idempotent, so an
-    Ansible play re-running it is the ordinary case rather than the careless one.
-    """
-
-    def _provision(self, cfg, db_path):
-        from istota.cli import cmd_secret
-
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="vault",
-                key="passphrase",
-                generate=True,
-            )
-        )
-        return secrets_store.get_secret(db_path, "alice", "vault", "passphrase")
-
-    def test_a_second_generate_is_refused_and_keeps_the_stored_value(
-        self, env, capsys
-    ):
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        first = self._provision(cfg, db_path)
-        capsys.readouterr()
-
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(
-                _Args(
-                    config=str(cfg),
-                    action="ensure",
-                    user="alice",
-                    service="vault",
-                    key="passphrase",
-                    generate=True,
-                )
-            )
-        assert exc.value.code == 1
-        # The assertion that matters: the value that opens the file is still
-        # there. A refusal that had already written would be the defect with a
-        # message attached.
-        assert (
-            secrets_store.get_secret(db_path, "alice", "vault", "passphrase") == first
-        )
-        assert "--force" in capsys.readouterr().err
-
-    def test_force_rotates(self, env, capsys):
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        first = self._provision(cfg, db_path)
-        capsys.readouterr()
-
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="vault",
-                key="passphrase",
-                generate=True,
-                force=True,
-            )
-        )
-        assert (
-            secrets_store.get_secret(db_path, "alice", "vault", "passphrase") != first
-        )
-
-    def test_a_supplied_value_still_replaces_without_force(self, env):
-        """Deliberately not refused, and the reason is the documented remedy.
-
-        The way out of `VaultLocked` is exactly this command: re-provisioning a
-        passphrase the operator already set in their KeePass client. Refusing it
-        would break the one sequence the reporting design tells them to run. What
-        cannot be right is minting a value nobody has encrypted anything with.
-        """
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        self._provision(cfg, db_path)
-        chosen = "a-passphrase-the-operator-already-set-in-keepassxc"
-
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="vault",
-                key="passphrase",
-                value=chosen,
-            )
-        )
-        assert (
-            secrets_store.get_secret(db_path, "alice", "vault", "passphrase") == chosen
-        )
-
-    def test_the_refusal_does_not_reach_other_services(self, env):
-        """`--generate` is vault-only anyway, so this is a control against the
-        existence check being applied where it has no meaning."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "existing")
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="karakeep",
-                key="api_key",
-                value="replacement",
-            )
-        )
-        assert (
-            secrets_store.get_secret(db_path, "alice", "karakeep", "api_key")
-            == "replacement"
-        )
-
-
-class TestTheFloor:
-    def test_a_supplied_value_below_the_floor_is_refused(self, env, capsys):
-        """Refused, not warned about. §5's own words, and the reason is there."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(
-                _Args(
-                    config=str(cfg),
-                    action="ensure",
-                    user="alice",
-                    service="vault",
-                    key="passphrase",
-                    value="correct horse battery",
-                )
-            )
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert "--generate" in err
-        assert secrets_store.secret_exists(db_path, "alice", "vault", "passphrase") is False
-
-    def test_a_supplied_value_at_the_floor_is_accepted(self, env):
-        """The control: the floor refuses below it and nothing above it."""
-        from istota.cli import cmd_secret
-        from istota.credentials.vault import VAULT_PASSPHRASE_MIN_CHARS
-
-        cfg, db_path, _mount = env
-        value = "q" * VAULT_PASSPHRASE_MIN_CHARS
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="vault",
-                key="passphrase",
-                value=value,
-            )
-        )
-        assert secrets_store.get_secret(db_path, "alice", "vault", "passphrase") == value
-
-    def test_the_floor_does_not_apply_to_other_services(self, env):
-        """A short Karakeep API key is Karakeep's business, not this floor's."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="karakeep",
-                key="api_key",
-                value="short",
-            )
-        )
-        assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") == "short"
-
-
-class TestTheFloorAppliesToTheSuppliedPathOnly:
-    """The control the stage line asks for, and it is not decorative.
-
-    `--generate` exists *because* of the floor. A floor applied to the generated
-    value as well — or applied before the generation, to an absent `--value` —
-    would refuse the one command §5 tells every operator to run, and the failure
-    would look like the floor working.
-    """
-
-    def test_generate_is_unaffected_by_the_floor(self, env, monkeypatch, capsys):
-        from istota.credentials import vault as secrets_vault
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = env
-        # A floor above anything `--generate` can mint. If the generated value
-        # were put through it, this refuses and the assertion below fails.
-        monkeypatch.setattr(secrets_vault, "VAULT_PASSPHRASE_MIN_CHARS", 4096)
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="vault",
-                key="passphrase",
-                generate=True,
-            )
-        )
-        assert secrets_store.secret_exists(db_path, "alice", "vault", "passphrase")
-
-
 # ---------------------------------------------------------------------------
 # Open question 3: the refusal on a vault-owned service
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureIsNoLongerRefusedByTheVault:
-    """The 409-shaped CLI refusal went with the eligibility machinery.
-
-    It refused a write on the claim that the next vault sync would overwrite it.
-    The vault writes only its own `vault_entries` namespace now, so that claim
-    is false for every typed service and the refusal would be a lie. What the
-    class keeps is the control: a user who really does have a vault, so a
-    reintroduced refusal would have something to fire on.
-    """
-
-    def test_a_service_the_vault_used_to_own_is_written(self, env):
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="karakeep",
-                key="api_key",
-                value="typed-by-hand",
-            )
-        )
-        assert (
-            secrets_store.get_secret(db_path, "alice", "karakeep", "api_key")
-            == "typed-by-hand"
-        )
-
-    def test_the_passphrase_is_still_provisionable(self, env):
-        """The provisioning path, which a refusal there would have closed."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="vault",
-                key="passphrase",
-                generate=True,
-            )
-        )
-        assert secrets_store.secret_exists(db_path, "alice", "vault", "passphrase")
-
-
 # ---------------------------------------------------------------------------
 # vault-sync and vault-status
 # ---------------------------------------------------------------------------
-
-
-class TestVaultSync:
-    def test_it_names_counts_and_never_a_value(self, env, capsys):
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alice"))
-        out = capsys.readouterr().out
-
-        # The counts themselves are the applying half's, which the change
-        # landing beside this one restores over the flat `vault_entries`
-        # namespace. That the line is printed at all, and carries no value, is
-        # this renderer's.
-        assert "alice" in out and "written" in out
-        assert API_KEY_VALUE not in out
-        assert BASE_URL_VALUE not in out
-        assert PASSPHRASE not in out
-
-    def test_it_parses_even_on_a_digest_a_previous_cycle_cached(
-        self, env, capsys, monkeypatch
-    ):
-        """The operator's escape hatch from every cache-shaped surprise.
-
-        §8's remedy strings name this command, so it must not be subject to the
-        cache it exists to defeat. Driven in-process because the CLI's own module
-        state is empty in a fresh process — which is precisely why the clearing
-        has to live on `sync_user` rather than in the CLI branch.
-        """
-        from istota.credentials import vault as secrets_vault
-        from istota.cli import cmd_secret
-        from istota.config import load_config
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        # Prime the cache the way an ordinary interval cycle would. The digest
-        # has not moved, so an ordinary cycle would skip the parse entirely.
-        secrets_vault.sync_user(load_config(cfg), "alice")
-
-        calls = []
-        real = secrets_vault.parse_vault
-
-        def counted(data, passphrase):
-            calls.append(1)
-            return real(data, passphrase)
-
-        monkeypatch.setattr(secrets_vault, "parse_vault", counted)
-        cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alice"))
-
-        # Counted rather than read off the rows: what the apply then writes is
-        # the applying half's, which the change landing beside this one
-        # restores. That the cache was defeated is this command's own subject.
-        assert calls == [1]
-
-    def test_a_name_cannot_forge_a_line_of_the_sync_report(self, env, capsys):
-        """The service-level refusal's empty-key rendering went with the
-        refusal — a skip is now one bounded name and one reason. What
-        survives is the bound: every name here came out of the vault file, which
-        a task in the user's own sandbox can overwrite, and the consumer is an
-        operator's terminal.
-        """
-        from istota.cli import _print_vault_sync
-        from istota.credentials.vault import (
-            SKIP_DUPLICATE_NAME,
-            VaultApplyResult,
-            VaultSyncResult,
-        )
-
-        forged = "a\nSTATE: ok\n" + "b" * 200
-        _print_vault_sync(
-            VaultSyncResult(
-                user_id="alice",
-                outcome="ok",
-                apply=VaultApplyResult(
-                    created=1,
-                    deleted_keys=[forged],
-                    skipped=[(forged, SKIP_DUPLICATE_NAME)],
-                ),
-            )
-        )
-        out = capsys.readouterr().out
-
-        assert "\nSTATE: ok" not in out
-        assert "b" * 200 not in out
-        assert SKIP_DUPLICATE_NAME in out
-
-    def test_a_user_with_no_vault_is_reported_rather_than_skipped(self, env, capsys):
-        from istota.cli import cmd_secret
-
-        cfg, _db_path, _mount = env
-        cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alice"))
-        out = capsys.readouterr().out
-        assert "alice" in out
-
-
-class TestAnUnknownUser:
-    def test_vault_sync_refuses_a_user_nobody_configured(self, env, capsys):
-        """A typo'd `-u` used to read as "no vault configured", which is
-        indistinguishable from a correctly spelled user with the feature off."""
-        from istota.cli import cmd_secret
-
-        cfg, _db_path, _mount = env
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alicce"))
-        assert exc.value.code == 1
-        assert "alicce" in capsys.readouterr().err
-
-    def test_vault_status_refuses_one_too(self, env, capsys):
-        from istota.cli import cmd_secret
-
-        cfg, _db_path, _mount = env
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(_Args(config=str(cfg), action="vault-status", user="bob"))
-        assert exc.value.code == 1
-
-
-class TestVaultStatus:
-    def test_an_unconfigured_user_exits_cleanly(self, env, capsys):
-        from istota.cli import cmd_secret
-
-        cfg, _db_path, _mount = env
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-        assert "alice" in out
-
-    def test_it_reports_the_file_the_passphrase_and_the_names(self, env, capsys):
-        """§10: the count, the names, and the skips.
-
-        The name list is the feedback this feature has never had — a name here
-        is a credential istota holds, and one the user expected and cannot see
-        is an entry with a skip beside it. Values never appear, which the sweep
-        below is what holds; unlike the interim version of this test it is no
-        longer vacuous, because there is now something printed to sweep.
-        """
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx", ntfy=True)
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-
-        assert "vault.kdbx" in out and "passphrase: provisioned" in out
-        assert "shared:     3 credential(s)" in out
-        assert "karakeep_api_key" in out
-        assert "karakeep_base_url" in out
-        assert "ntfy_topic" in out
-        # A scoped file says nothing about scope: the notice is for the other
-        # case, and printing it always would make it noise.
-        assert "unscoped" not in out
-        assert API_KEY_VALUE not in out
-        assert BASE_URL_VALUE not in out
-        assert PASSPHRASE not in out
-
-    def test_an_unscoped_file_says_so_with_a_count(self, env, capsys):
-        """§1's notice on the surface an operator reaches for. The count is
-        what makes it actionable: "all 412 of them" is a different sentence
-        from "all 2 of them"."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_unscoped_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-
-        assert "unscoped" in out
-        assert "all 2 credential(s) in it are shared" in out
-        assert API_KEY_VALUE not in out
-
-    def test_a_skip_is_named_with_its_reason(self, env, capsys):
-        """The other half of the feedback: a name the user expected and cannot
-        see has a line saying why."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_colliding_vault(
-            mount / "Users" / "alice" / "config" / "vault.kdbx"
-        )
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-
-        assert "skipped:    aws_key" in out
-        assert "two entries produce the same name" in out
-
-    def test_it_reports_the_last_cycle_the_daemon_settled(self, env, capsys):
-        """The record, which is the only thing here that crosses a process.
-
-        This command runs in a shell, so its own `_SYNC_STATE` is empty and
-        always has been — the last cycle it can report on is one the scheduler
-        ran, in another process and under Ansible in another systemd unit. Both
-        halves are printed: the class names the condition and the sentence names
-        the remedy, so printing the first alone reports a failure and withholds
-        the actionable half of it.
-        """
-        from istota import db
-        from istota.credentials import vault as secrets_vault
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-        with db.get_db(db_path) as conn:
-            db.kv_set(
-                conn, "alice",
-                secrets_vault.VAULT_SYNC_STATE_NAMESPACE,
-                secrets_vault.VAULT_SYNC_STATE_KEY,
-                secrets_vault.encode_sync_state(
-                    secrets_vault.VaultLocked.__name__,
-                    secrets_vault.notification_reason(
-                        secrets_vault.VaultLocked.__name__
-                    ),
-                    now="2026-09-17T10:00:00Z",
-                    previous=None,
-                ),
-            )
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-
-        assert "VaultLocked" in out
-        # The product's own sentence rather than a restatement of it: this
-        # asserts that the recorded class resolves to its reason and that the
-        # reason reaches stdout, which is what `vault-status` is for. A literal
-        # pins the wording instead, and went red the day the sentence stopped
-        # naming a cause pykeepass cannot distinguish.
-        assert secrets_vault.notification_reason("VaultLocked") in out
-
-    def test_a_healthy_record_reports_a_sync_time_and_no_error(self, env, capsys):
-        """The control, and the reason `last error` is conditional.
-
-        A working vault must not print an error line, and `last sync` must carry
-        the success stamp rather than the empty string a never-synced vault has.
-        """
-        from istota import db
-        from istota.credentials import vault as secrets_vault
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-        with db.get_db(db_path) as conn:
-            db.kv_set(
-                conn, "alice",
-                secrets_vault.VAULT_SYNC_STATE_NAMESPACE,
-                secrets_vault.VAULT_SYNC_STATE_KEY,
-                secrets_vault.encode_sync_state(
-                    secrets_vault.OUTCOME_OK, "",
-                    now="2026-09-17T10:00:00Z", previous=None,
-                ),
-            )
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-
-        assert "2026-09-17T10:00:00Z" in out
-        assert "last error" not in out
-        assert "last cycle" not in out
-
-    def test_it_does_not_write_anything(self, env, capsys):
-        """A status verb that applied would be a verb nobody could run safely."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        assert (
-            secrets_store.secret_exists(db_path, "alice", "karakeep", "api_key")
-            is False
-        )
-
-    def test_a_missing_passphrase_is_reported_without_parsing(self, env, capsys):
-        from istota.cli import cmd_secret
-
-        cfg, _db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out.lower()
-        assert "passphrase" in out
-
-
-@pytest.mark.parametrize("allowed,sandboxed,second_user", [
-    (False, False, True), (True, False, True),
-    (False, True, True), (False, False, False),
-])
-def test_multi_user_vault_needs_isolation_or_opt_in(
-    env, monkeypatch, capsys, allowed, sandboxed, second_user,
-):
-    from istota.cli import cmd_secret
-
-    cfg, db_path, _ = env
-    with cfg.open("a") as config_file:
-        if second_user:
-            config_file.write('\n[users.bob]\ndisplay_name = "Bob"\n')
-        config_file.write(
-            '\n[security]\nallow_unsandboxed_multi_user_vaults = '
-            + str(allowed).lower() + '\n'
-        )
-    monkeypatch.setattr("istota.executor._bwrap_available", lambda: sandboxed)
-    secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-    target = "bob" if second_user else "alice"
-    args = _Args(config=str(cfg), action="ensure", user=target,
-                 service="vault", key="passphrase", generate=True, force=True)
-    if second_user and not (allowed or sandboxed):
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(args)
-        assert exc.value.code == 1
-        assert not secrets_store.secret_exists(db_path, target, "vault", "passphrase")
-        assert "allow_unsandboxed_multi_user_vaults" in capsys.readouterr().err
-    else:
-        cmd_secret(args)
-        assert secrets_store.secret_exists(db_path, target, "vault", "passphrase")
 
 
 def test_vault_new_refuses_a_name_a_local_credential_holds(env, monkeypatch, capsys):
@@ -861,7 +162,7 @@ def test_vault_new_refuses_a_name_a_local_credential_holds(env, monkeypatch, cap
 
     from istota.cli import main
     from istota.credentials.broker.bindings import parse_binding
-    from istota.credentials.vault import VAULT_ENTRY_SERVICE
+    from istota.credentials.names import VAULT_ENTRY_SERVICE
 
     cfg, db_path, mount = _with_vault(env)
     path = mount / "Users" / "alice" / "config" / "vault.kdbx"
@@ -894,12 +195,12 @@ def test_retire_needs_yes_and_removes_only_a_generated_credential(env, monkeypat
     from istota.cli import main
     from istota.credentials import generated
     from istota.credentials.broker.bindings import parse_binding
-    from istota.credentials.vault import VAULT_ENTRY_SERVICE
+    from istota.credentials.names import VAULT_ENTRY_SERVICE
 
     cfg, db_path, _ = _with_vault(env)
     with db.get_db(db_path) as conn:
         generated.create(conn, "alice", name="generated_example", username="alice",
-                         password="fixture-password", url="", mirror=False)
+                         password="fixture-password", url="")
     secrets_store.set_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "github", "typed",
                              binding=parse_binding("github.com", {}, [], source="local"))
 
@@ -921,3 +222,37 @@ def test_retire_needs_yes_and_removes_only_a_generated_credential(env, monkeypat
     main()
     assert "Retired credential: generated_example" in capsys.readouterr().out
     assert secrets_store.get_secret(db_path, "alice", VAULT_ENTRY_SERVICE, "generated_example") is None
+
+
+def test_export_and_import_use_a_terminal_and_shared_modules(tmp_path, monkeypatch, capsys):
+    import sys
+    from types import SimpleNamespace
+    from istota.cli import _cmd_secret_file
+    from istota.config import Config, UserConfig
+    from istota.credentials import kdbx_export
+    from tests.test_kdbx_import import seed
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
+    path = tmp_path / "test.db"
+    db.init_db(path)
+    config = Config(db_path=path, users={"alice": UserConfig()})
+    seed(path, "example", "first-value")
+    monkeypatch.setattr(kdbx_export, "INTERACTIVE", kdbx_export.ExportOptions(1024, 1, 1))
+    args = SimpleNamespace(action="export", user="alice", out=str(tmp_path / "export.kdbx"))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    with pytest.raises(SystemExit):
+        _cmd_secret_file(config, args)
+    assert not Path(args.out).exists()
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    _cmd_secret_file(config, args)
+    password = capsys.readouterr().out.split("save it now): ")[1].strip()
+    assert Path(args.out).stat().st_mode & 0o777 == 0o600
+    seed(path, "example", "current-value")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda _: password)
+    args = SimpleNamespace(action="import", user="alice", path=args.out, keyfile=None, include_changed=False)
+    _cmd_secret_file(config, args)
+    assert secrets_store.get_secret(path, "alice", "vault_entries", "example") == "current-value"
+    args.include_changed = True
+    _cmd_secret_file(config, args)
+    assert secrets_store.get_secret(path, "alice", "vault_entries", "example") == "first-value"
+    assert password not in capsys.readouterr().out

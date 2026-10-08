@@ -216,3 +216,7 @@ Sources: `config`, `secret`, `setup_env`, `template_file`, `user_id` (the resour
 ## WhatsApp and relay task skills
 
 `whatsapp` (capability-gated, companions `sensitive_actions`, `untrusted_input`) queues self-sends only, with no address or approval argument; `status` refuses a relay row. `relay` (`ask`, `status`, `list`) has no capability gate; the daemon picks the destination, decides approval and sends. `whatsapp ask`/`relays` are gone. `agent/events._private_relay_tool` matches `relay ask` and `whatsapp ask`. Rules in `.claude/rules/relay.md`.
+
+## Credential file boundary
+
+Tasks create and fill table-backed credentials through the proxy. They have no import/export verb and never receive a file passphrase or export password. Only Settings and the host terminal import or export KeePass files. Generated credentials are not written to a shared file; recovery storage remains daemon-only and exports provide the independent copy.

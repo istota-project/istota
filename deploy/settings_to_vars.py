@@ -225,6 +225,7 @@ _SECTION_FLAT_KEYS = {
         "hostname": "istota_hostname",
     },
     "web": {
+        "auth_step_up_ttl_minutes": "istota_web_auth_step_up_ttl_minutes",
         "enabled": "istota_web_enabled",
         "port": "istota_web_port",
         "oauth2_provider": "istota_web_oauth2_provider",
@@ -246,6 +247,11 @@ _SECTION_PREFIX_MAP = {
 
 # Security section has nested structure
 _SECURITY_KEYS = {
+    "credential_history_days": "istota_credential_history_days",
+    "credential_audit_days": "istota_credential_audit_days",
+    "credential_backup_retention": "istota_credential_backup_retention",
+    "credential_exports_per_day": "istota_credential_exports_per_day",
+
     "sandbox_enabled": "istota_security_sandbox_enabled",
     "skill_proxy_enabled": "istota_security_skill_proxy_enabled",
     "skill_proxy_timeout": "istota_security_skill_proxy_timeout",
@@ -442,6 +448,9 @@ def convert(settings: dict) -> dict:
         if isinstance(section, dict):
             for key, value in section.items():
                 result[f"{prefix}{key}"] = value
+
+    if "istota_scheduler_credential_backup_interval" in result:
+        result["istota_credential_backup_interval"] = result.pop("istota_scheduler_credential_backup_interval")
 
     # Security section (can have nested [security.network])
     security = settings.get("security", {})

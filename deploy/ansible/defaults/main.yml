@@ -235,13 +235,6 @@ istota_scheduler_worktree_reap_interval: 21600  # developer-worktree reaping swe
 # Package-cache sweep (ISSUE-317). Inert unless a cache root resolves — the
 # derived one under istota_developer_repos_dir, or istota_security_sandbox_cache_dir.
 istota_scheduler_sandbox_cache_sweep_interval: 21600  # 6h; 0 disables
-# KDBX credential-vault sync (0 disables). Inert unless some user in
-# istota_users declares a vault_path. Startup alone is not enough — a user edits
-# their vault at 3pm and nothing happens until the next restart — and five
-# minutes is chosen against the rclone dir-cache lag, which adds its own delay
-# on top. A cycle whose file digest is unchanged stops at the hash, so the
-# steady-state cost is one bounded read per user rather than a key derivation.
-istota_scheduler_vault_sync_interval: 300
 # Nextcloud profile-picture import. Also gated by
 # istota_web_avatar_import_from_nextcloud and by a Nextcloud storage backend.
 # Six-hourly rather than daily: a new user sees the initial chip until the tick.
@@ -1275,3 +1268,11 @@ istota_security_network_extra_hosts: []
 # When true, secrets are loaded from /etc/<namespace>/secrets.env via EnvironmentFile=
 # and omitted from config.toml (config.py reads them from env vars)
 istota_use_environment_file: true
+
+# Credential history, export and scheduled backup policy.
+istota_credential_backup_interval: 86400
+istota_credential_history_days: 180
+istota_credential_audit_days: 365
+istota_credential_backup_retention: 30
+istota_credential_exports_per_day: 3
+istota_web_auth_step_up_ttl_minutes: 10
