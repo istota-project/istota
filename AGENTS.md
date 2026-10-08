@@ -20,6 +20,7 @@ Subsystems:
 - `relay.md` — relay questions between users: destinations (room, WhatsApp, SMS), the recipient preference, clean-turn approval, per-surface answers and returns
 - `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream, read-only phone rooms
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
+- `search.md` — unified web search: source scope, query matching, deadlines, result links and the search dialog
 - `notifications.md` — the notifications table, the resolver seam, and the shipped sources
 - `briefings.md` — block/source briefings, shared blocks, titles, HTML email
 - `health.md` — health module schema, documents store, OCR/explainer, serialisers, surfaces
@@ -134,6 +135,7 @@ src/istota/
 │   ├── proxy_protocol.py # Wire protocol for the devbox proxy (single-line JSON, 16 MiB cap) → devbox.md
 │   ├── exec_protocol.py  # The exec transport's wire format → devbox.md
 │   └── exec_client.py    # The other end, copied into each task's shim directory → devbox.md
+├── search/               # Federated web search: core, provider registry, framework sources and links → search.md
 ├── notifications/        # Delivery, the inbox behind the bell, and its sources → notifications.md
 │   ├── delivery.py       # Talk / Email / ntfy dispatcher, distinct from the inbox below
 │   ├── store.py          # The `notifications` table: the durable open set behind the bell → notifications.md
@@ -183,6 +185,7 @@ src/istota/
 │   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 │   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
+│   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
 │   └── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
 ├── briefings/            # Block/source briefings module — DB, source resolvers, generation, reader/settings routes, migration

@@ -2,7 +2,8 @@ import { base } from '$app/paths';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import type { SearchGroup, SearchHit } from '$lib/api';
+import type { SearchGroup, SearchHit, SearchResponse } from '$lib/api';
+import moneyResponses from '$lib/test/fixtures/money-search.json';
 import * as navigation from '../../../../vitest-stubs/app-navigation';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -136,4 +137,29 @@ it('keeps failures in the dialog and retries on the next query', async () => {
   await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'again' } });
   await waitFor(() => expect(screen.queryByText('Search is unavailable right now.')).toBeNull());
   expect(await screen.findByText('No matches.')).toBeInTheDocument();
+});
+
+it('opens an on-demand transaction from the authenticated ledger response', async () => {
+  api.search.mockImplementation(async (_q, options) =>
+    options?.sources?.includes('money')
+      ? (moneyResponses.money as SearchResponse)
+      : (moneyResponses.all as SearchResponse),
+  );
+  render(SearchDialog, { open: true, controller });
+  await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'Coffee' } });
+  await fireEvent.click(await screen.findByRole('button', { name: 'Search Transactions' }));
+  await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
+  expect(api.search).toHaveBeenLastCalledWith(
+    'Coffee',
+    expect.objectContaining({ sources: ['money'], limit: 20 }),
+  );
+  expect(screen.getAllByRole('option')[0]).toHaveTextContent('Acme');
+  expect(screen.getAllByRole('option')[0]).toHaveTextContent('Expenses:Food:Coffee');
+  expect(screen.getAllByRole('option')[0].querySelector('mark')).toHaveTextContent('Coffee');
+  await fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
+  await waitFor(() =>
+    expect(navigation.goto).toHaveBeenCalledWith(
+      `${base}/money/transactions/?account=Expenses%3AFood%3ACoffee&year=2024`,
+    ),
+  );
 });

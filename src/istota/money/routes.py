@@ -180,37 +180,14 @@ async def api_transactions(
     per_page: int = 100,
     user_ctx: UserContext = Depends(get_user_config),
 ):
-    from istota.money.core.ledger import run_bean_query, _sanitize_bql_string
+    from istota.money.core.ledger import search_transactions
 
     ledger_path = _resolve_user_ledger(user_ctx, ledger)
     if not ledger_path:
         return JSONResponse({"error": "ledger not found"}, status_code=404)
 
-    conditions = []
-    if account:
-        safe = _sanitize_bql_string(account)
-        conditions.append(f"account ~ '{safe}'")
-    else:
-        conditions.append("account ~ '^(Income|Expenses):'")
-    if year:
-        conditions.append(f"year = {int(year)}")
-    if filter:
-        safe = _sanitize_bql_string(filter)
-        if safe.startswith("#"):
-            tag = safe[1:]
-            conditions.append(f"'{tag}' IN tags")
-        else:
-            conditions.append(f"(payee ~ '{safe}' OR narration ~ '{safe}')")
-
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    bql = (
-        f"SELECT date, flag, payee, narration, account, position, tags,"
-        f" entry_meta('id') as id"
-        f"{where} ORDER BY date DESC"
-    )
-
     try:
-        rows = run_bean_query(ledger_path, bql)
+        rows = search_transactions(ledger_path, filter, account=account, year=year)
         total = len(rows)
         start = (page - 1) * per_page
         end = start + per_page

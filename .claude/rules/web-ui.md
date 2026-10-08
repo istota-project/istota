@@ -83,6 +83,14 @@ Three smaller things there, each of which is a defect if reversed. The hash is q
 
 **`GET /api/map/basemap`** hands the frontend the resolved tile spec for the calling user — style URLs and attribution, a CARTO key only already embedded in the URL, never as a field (ISSUE-334). It is a thin read over `webui/map_basemap.py`, which is deliberately the **only** place the URL shapes exist: doctor's `web.basemap` check reads the same resolver, and a second copy there would let the check pass while the map rendered CARTO's "API KEY REQUIRED" watermark. A user's own stored `location`/`carto` key selects CARTO for them, overriding the operator's `[web.map] provider`. See `.claude/rules/config.md` under `WebMapConfig` for why the check opens no socket.
 
+## Search routes
+
+`GET /istota/api/search?q=&sources=&limit=&offset=` authenticates through `_require_api_auth`, takes the user from the session and delegates to `search.core.run_search`. Module gates run per request. Unknown or unavailable sources return no group; money is listed under `on_demand` until explicitly selected. Full source scope and deadline rules are in `.claude/rules/search.md`.
+
+`GET /istota/api/chat/rooms/{room_id}/messages` accepts `until_ts` and `until_id` together with `before_ts` and `before_id`. It extends the contiguous history window to the target, capped at 2,000 durable rows including system notes, and returns `truncated` when the band is larger. Partial cursors or `until` without `before` return 400.
+
+`GET /istota/api/feeds/entries/{entry_id}` reads only the caller's feed database and returns 404 when absent. Client destinations are `/feeds/?entry=`, `/health/documents/?id=`, `/location/?place=`, and `/chat/?room=&msg=&ts=` beneath the `/istota` base. Money hits open `/money/transactions/?account=&year=`. Same-route selections use `createUrlSelection`.
+
 ## Native email login
 
 `webui/auth.py` owns identities, scrypt hashes, token digests, budgets and transactional consumption. `webui/auth_mail.py` builds and sends mail; `webui/origin.py` builds external links; `webui/session_secret.py` resolves signing secrets without importing the app. Read failures propagate so callers can fail closed; `authenticate` catches failures and returns a generic bad-login result. A random initial epoch prevents deleted and recreated identities reviving old cookies; credential changes increment it. Removing an identity retains a session generation in `web_auth_retired_epochs`, so earlier Nextcloud and legacy cookies stay revoked; a fresh Nextcloud login uses that retained generation. Email login requires a live profile, while the Nextcloud callback keeps its first-login profile seed.
