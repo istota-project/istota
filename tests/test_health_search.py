@@ -87,7 +87,7 @@ async def test_merge_dates_marker_dedupe_scope_and_fallback(config):
     result = search(config, "falcon", limit=3)
     assert [h.kind for h in result.hits] == ["health_marker", "health_document", "health_panel"]
     assert result.has_more
-    assert result.hits[0].date.startswith("2026-01-07")
+    assert result.hits[0].date == "2026-01-07"
     assert result.hits[0].link["params"] == {"name": "marker"}
     second = search(config, "falcon", limit=3, offset=3)
     assert [h.kind for h in second.hits] == ["health_encounter", "health_diagnosis", "health_immunization"]
@@ -116,3 +116,14 @@ def test_equal_dates_keep_numeric_order_across_pages(config):
     first = search(config, "falcon", limit=5)
     second = search(config, "falcon", limit=5, offset=5)
     assert [h.id for h in first.hits + second.hits] == [f"health:panels:{i}" for i in range(15, 5, -1)]
+
+
+def test_calendar_dates_stay_dates_and_timestamps_sort_chronologically(config):
+    with populate(config) as conn:
+        insert(conn, "panels", {"drawn_at": "2026-01-04", "notes": "Falcon"})
+        insert(conn, "panels", {"drawn_at": "2026-01-03T23:30:00-02:00", "notes": "Falcon"})
+        insert(conn, "encounters", {"encounter_date": "2026-01-04", "encounter_type": "Falcon"})
+        conn.commit()
+    hits = search(config, "falcon").hits
+    assert hits[0].date == "2026-01-04T01:30:00Z"
+    assert [h.date for h in hits[1:]] == ["2026-01-04", "2026-01-04"]

@@ -30,6 +30,7 @@ async def test_selection_fallback_and_pagination(monkeypatch):
         provider("money", demand, on_demand=True),
     ])
     config = Mock()
+    config.db_path = None
     config.is_module_enabled.return_value = False
     result = await run_search(config, "alice", "falcon invoice", limit=20, offset=0)
     assert calls == [("strict", 5, 0), ("relaxed", 5, 0)]
@@ -48,7 +49,7 @@ async def test_sql_deadline_and_failure_are_isolated(monkeypatch, caplog):
     def slow(ctx, *args):
         conn = sqlite3.connect(":memory:", check_same_thread=False)
         closed.append(conn)
-        with open_with_deadline(lambda: conn, ctx.deadline) as c:
+        with open_with_deadline(lambda **options: conn, ctx.deadline) as c:
             c.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n").fetchone()
         return ProviderResult([], False)
     def broken(*args):
@@ -160,3 +161,80 @@ def test_shared_helpers_keep_web_aliases():
     from istota.briefings.db import connect
     assert module_loader("briefings")[2] is connect
     assert module_loader("briefings")[1] is briefings.resolve_for_user
+
+
+@pytest.mark.parametrize("store", ["feeds", "framework"])
+@pytest.mark.parametrize("release_after", [0.02, 0.6])
+async def test_lock_waits_respect_deadlines_and_short_contention_retries(tmp_path, monkeypatch, store, release_after):
+    import threading
+    from istota import db
+    from istota.feeds import db as feeds_db
+
+    path = tmp_path / "locked.db"
+    if store == "feeds":
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            for suffix in ("ai", "ad", "au"):
+                conn.execute(f"DROP TRIGGER feed_entries_fts_{suffix}")
+            conn.execute("DROP TABLE feed_entries_fts")
+            conn.execute("UPDATE schema_meta SET value='8' WHERE key='version'")
+            conn.commit()
+    else:
+        db.init_db(path)
+    blocker = sqlite3.connect(path, check_same_thread=False)
+    if store == "framework":
+        blocker.execute("PRAGMA journal_mode=DELETE")
+        blocker.execute("BEGIN EXCLUSIVE")
+    else:
+        blocker.execute("BEGIN IMMEDIATE")
+    timer = threading.Timer(release_after, blocker.rollback)
+    timer.start()
+    def locked(ctx, *args):
+        opener = feeds_db.connect if store == "feeds" else db.get_db
+        with open_with_deadline(lambda **options: opener(path, **options), ctx.deadline) as conn:
+            if store == "feeds":
+                feeds_db._migrate_v8_to_v9(conn)
+            conn.execute("SELECT 1").fetchone()
+        return ProviderResult([hit()], False)
+    monkeypatch.setattr("istota.search.registry.providers", lambda: [
+        provider("locked", locked, timeout_s=0.1),
+        provider("good", lambda *args: ProviderResult([hit()], False)),
+    ])
+    try:
+        start = time.monotonic()
+        groups = (await run_search(Mock(), "alice", "falcon"))["groups"]
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.4
+        assert groups[0]["error"] == ("timeout" if release_after > 0.1 else None)
+        assert groups[1]["results"] and groups[1]["error"] is None
+    finally:
+        timer.cancel()
+        timer.join()
+        blocker.close()
+
+
+async def test_locked_module_profile_does_not_block_search_or_use_stale_access(tmp_path, monkeypatch):
+    import threading
+    from istota import db
+    from istota.config import Config, UserConfig
+
+    path = tmp_path / "profiles.db"
+    db.init_db(path)
+    config = Config(db_path=path, users={"alice": UserConfig()})
+    run = Mock(return_value=ProviderResult([hit()], False))
+    monkeypatch.setattr("istota.search.registry.providers", lambda: [provider("health", run, module="health")])
+    blocker = sqlite3.connect(path, check_same_thread=False)
+    blocker.execute("PRAGMA journal_mode=DELETE")
+    blocker.execute("BEGIN EXCLUSIVE")
+    timer = threading.Timer(0.6, blocker.rollback)
+    timer.start()
+    try:
+        start = time.monotonic()
+        result = await run_search(config, "alice", "falcon")
+        assert time.monotonic() - start < 0.4
+        assert result["groups"] == []
+        run.assert_not_called()
+    finally:
+        timer.cancel()
+        timer.join()
+        blocker.close()

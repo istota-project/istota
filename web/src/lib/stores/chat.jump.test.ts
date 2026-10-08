@@ -211,6 +211,61 @@ describe('chat store — jump-to-response', () => {
     else expect(get(s.scrollTarget)?.cid).toBe(get(s.messages)[0].cid);
   });
 
+  it.each([false, true])(
+    'fills a system-note hole without moving the paging cursor (more=%s)',
+    async (more) => {
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+      const oldest = { ts: '2026-06-10 12:00:00', id: 1 };
+      const target = { ts: '2026-06-10 12:05:00', id: 2 };
+      const next = { ts: target.ts, id: target.id + 1 };
+      api.getRoomMessages.mockResolvedValueOnce(
+        page(
+          [
+            { ...userTurn(1, 'first'), created_at: '2026-06-10T12:00:00Z', msg_id: 1 },
+            {
+              role: 'system',
+              text: 'last visible note',
+              created_at: '2026-06-10T12:05:00Z',
+              msg_id: 12,
+              notif_id: 12,
+            },
+            { ...asstTurn(3, 'last'), created_at: '2026-06-10T12:09:00Z', msg_id: 63 },
+          ],
+          { oldest_cursor: oldest, has_more: more },
+        ),
+      );
+      const session = await freshSession();
+      await session.init();
+      api.getRoomMessages.mockClear();
+      api.getRoomMessages.mockResolvedValueOnce(
+        page(
+          [
+            {
+              role: 'system',
+              text: 'omitted note',
+              created_at: '2026-06-10T12:05:00Z',
+              msg_id: 2,
+              notif_id: 2,
+            },
+          ],
+          { oldest_cursor: target, has_more: true },
+        ),
+      );
+      expect(await session.jumpToMsgId('t1', 2, target)).toBe(true);
+      expect(api.getRoomMessages).toHaveBeenCalledExactlyOnceWith(1, {
+        before: next,
+        until: target,
+      });
+      expect(get(session.messages).map((m) => m.msgId)).toEqual([1, 2, 12, 63]);
+      expect(get(session.hasMore)).toBe(more);
+      if (more) {
+        api.getRoomMessages.mockResolvedValueOnce(page([]));
+        await session.loadOlder();
+        expect(api.getRoomMessages).toHaveBeenLastCalledWith(1, { before: oldest });
+      }
+    },
+  );
+
   it('keeps the five-page bound without a cursor', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomMessages.mockResolvedValue(

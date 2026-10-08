@@ -414,7 +414,7 @@ def _migrate_diagnosis_encounters(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
+def connect(db_path: Path, *, busy_timeout_ms: int = 30_000) -> Iterator[sqlite3.Connection]:
     """Open a row-factory-equipped connection with FKs on.
 
     ``busy_timeout`` is now issued explicitly, matching ``init_db`` above and
@@ -423,7 +423,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     lock budget depending on an argument two lines away, which is what let this
     helper read as the one store with no busy timeout at all.
     """
-    with sqlite_util.open_db(db_path) as conn:
+    with sqlite_util.open_db(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
         yield conn
 
 

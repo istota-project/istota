@@ -111,3 +111,10 @@ def test_hidden_archived_dismissed_rooms_exclude_channel_memory(ctx):
         conn.execute("INSERT INTO room_dismissals (room_token,user_id) VALUES ('dismissed','alice')")
     assert memory(ctx, parse_query("falcon"), "strict", 5, 0).hits == []
     assert rooms(ctx, parse_query("falcon"), "strict", 5, 0).hits == []
+
+
+def test_fact_calendar_dates_stay_dates(ctx):
+    from istota.search.framework import facts
+    with db.get_db(ctx.config.db_path) as conn:
+        conn.execute("INSERT INTO knowledge_facts (user_id,subject,predicate,object,valid_from) VALUES ('alice','falcon','is','current','2026-01-04')")
+    assert facts(ctx, parse_query("falcon"), "strict", 5, 0).hits[0].date == "2026-01-04"

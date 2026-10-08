@@ -8,7 +8,7 @@ from collections import Counter
 from istota.lib.text_match import make_snippet, terms_to_plain
 from istota.money._loader import UserNotFoundError, resolve_for_user
 from istota.money.core.ledger import search_transactions
-from istota.search.core import Provider, ProviderResult, SearchHit
+from istota.search.core import Provider, ProviderResult, SearchHit, resolve_module_user
 from istota.search.links import route
 
 
@@ -16,7 +16,7 @@ def search(ctx, terms, mode, limit, offset):
     if time.monotonic() >= ctx.deadline:
         raise TimeoutError
     try:
-        user = resolve_for_user(ctx.user_id, ctx.config)
+        user = resolve_module_user(ctx, resolve_for_user)
     except (UserNotFoundError, FileNotFoundError):
         return ProviderResult([], False)
     remaining = ctx.deadline - time.monotonic()

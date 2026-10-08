@@ -3,7 +3,7 @@
 from istota.feeds import db
 from istota.lib.text_match import MARK_OPEN, fts5_match, markers_to_offsets
 from istota.modules import module_loader
-from istota.search.core import Provider, ProviderResult, SearchHit, open_with_deadline
+from istota.search.core import Provider, ProviderResult, SearchHit, open_with_deadline, resolve_module_user
 from istota.search.links import route
 
 
@@ -35,11 +35,11 @@ def search_entries(conn, match: str, limit: int, offset: int) -> list[dict]:
 def search(ctx, terms, mode, limit, offset):
     _, resolve, connect, not_found = module_loader("feeds")
     try:
-        user = resolve(ctx.user_id, ctx.config)
+        user = resolve_module_user(ctx, resolve)
         # The regular module connector creates an empty file when missing.
         if not user.db_path.is_file():
             return ProviderResult([], False)
-        with open_with_deadline(lambda: connect(user.db_path), ctx.deadline) as conn:
+        with open_with_deadline(lambda **options: connect(user.db_path, **options), ctx.deadline) as conn:
             if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='feed_entries_fts'").fetchone():
                 db._migrate_v8_to_v9(conn)
                 conn.commit()

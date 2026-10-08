@@ -650,7 +650,10 @@ function createSession(): ChatSession {
     if (ts && SERVER_STAMP.test(ts)) {
       const at = arr.findIndex(
         (m) =>
-          m.msgId != null && !!m.createdAt && SERVER_STAMP.test(m.createdAt) && m.createdAt > ts,
+          m.msgId != null &&
+          !!m.createdAt &&
+          SERVER_STAMP.test(m.createdAt) &&
+          (m.createdAt > ts || (m.createdAt === ts && row.msgId != null && m.msgId > row.msgId)),
       );
       if (at !== -1) {
         const next = arr.slice();
@@ -3227,7 +3230,15 @@ function createSession(): ChatSession {
     id: number;
   }): Promise<{ history: ChatHistory; added: boolean } | null> {
     const roomId = get(activeRoomId);
-    if (roomId == null || !get(hasMore) || get(loadingOlder) || !oldestCursor) return null;
+    if (roomId == null || get(loadingOlder)) return null;
+    if (!until && (!get(hasMore) || !oldestCursor)) return null;
+    // Auxiliary notes can be omitted inside an otherwise loaded spine window.
+    const fillsHole =
+      !!until &&
+      (!oldestCursor ||
+        until.ts > oldestCursor.ts ||
+        (until.ts === oldestCursor.ts && until.id >= oldestCursor.id));
+    const before = fillsHole ? { ts: until!.ts, id: until!.id + 1 } : oldestCursor!;
     const req = ++olderRequest;
     loadingOlder.set(true);
     try {
@@ -3235,7 +3246,7 @@ function createSession(): ChatSession {
       // and a slow scroll-up page is not an outage. A late answer is dropped by
       // the request check below rather than applied.
       const hist = await getRoomMessages(roomId, {
-        before: oldestCursor,
+        before,
         ...(until ? { until } : {}),
       });
       // Switched rooms mid-fetch — drop the page rather than prepend it into
@@ -3264,9 +3275,16 @@ function createSession(): ChatSession {
         return true;
       });
       const page = fresh.map(buildHistoryMessage);
-      if (page.length) messages.update((cur) => [...page, ...cur]);
-      oldestCursor = hist.oldest_cursor ?? null;
-      hasMore.set(!!hist.has_more);
+      if (fillsHole) {
+        messages.update((cur) => {
+          for (const row of page) cur = insertStreamedRow(cur, row);
+          return cur;
+        });
+      } else {
+        if (page.length) messages.update((cur) => [...page, ...cur]);
+        oldestCursor = hist.oldest_cursor ?? null;
+        hasMore.set(!!hist.has_more);
+      }
       return { history: hist, added: page.length > 0 };
     } catch (e) {
       if (until) throw e;

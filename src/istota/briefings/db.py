@@ -160,13 +160,13 @@ def _read_schema_version(conn: sqlite3.Connection) -> int:
 
 
 @contextmanager
-def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
+def connect(db_path: Path, *, busy_timeout_ms: int = 30_000) -> Iterator[sqlite3.Connection]:
     """Open a SQLite connection with the module's conventions.
 
     ``foreign_keys = ON`` (so the source→block cascade behaves) + ``Row``
     factory. ``journal_mode`` is set once by ``init_db`` (not re-issued here).
     """
-    with sqlite_util.open_db(db_path) as conn:
+    with sqlite_util.open_db(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
         yield conn
 
 

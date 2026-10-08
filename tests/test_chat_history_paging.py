@@ -500,3 +500,23 @@ class TestUntilBand:
         tail = load("u", "tok", 2, (_ts(0), ids[1]))
         assert [m["msg_id"] for m in tail["messages"]] == ids[:1]
         assert tail["has_more"] is False
+
+
+@_needs_web
+def test_search_cursor_refills_a_system_note_inside_the_loaded_window(db_path):
+    load = _loader(db_path)
+    with db.get_db(db_path) as conn:
+        db.register_room(conn, "tok", "u", origin="web")
+        _turn(conn, "tok", "first", "reply", created_at=_ts(0))
+        targets = [_system(conn, "tok", f"falcon note {i}", created_at=_ts(5)) for i in range(60)]
+        _turn(conn, "tok", "last", "reply", created_at=_ts(9))
+        found = db.search_messages(conn, "u", '"falcon"*', limit=100, offset=0, exclude_tokens=[])
+    target = next(row for row in found if row["msg_id"] == targets[0])
+    head = load("u", "tok", 50)
+    assert not head["has_more"]
+    assert target["msg_id"] not in {row.get("msg_id") for row in head["messages"]}
+    band = load("u", "tok", 50,
+                (target["created_at"], target["msg_id"] + 1),
+                (target["created_at"], target["msg_id"]))
+    assert not band["truncated"]
+    assert target["msg_id"] in {row.get("msg_id") for row in band["messages"]}

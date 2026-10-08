@@ -24,7 +24,7 @@ def _visible_rooms(conn, user_id):
 
 
 def chats(ctx, terms, mode, limit, offset):
-    with open_with_deadline(lambda: db.get_db(ctx.config.db_path), ctx.deadline) as conn:
+    with open_with_deadline(lambda **options: db.get_db(ctx.config.db_path, **options), ctx.deadline) as conn:
         rows = db.search_messages(conn, ctx.user_id, fts5_match(terms, mode), limit=limit + 1,
                                   offset=offset, exclude_tokens=db.hidden_room_tokens_for_member(conn, ctx.user_id))
         hits = []
@@ -52,7 +52,7 @@ def chats(ctx, terms, mode, limit, offset):
 
 
 def rooms(ctx, terms, mode, limit, offset):
-    with open_with_deadline(lambda: db.get_db(ctx.config.db_path), ctx.deadline) as conn:
+    with open_with_deadline(lambda **options: db.get_db(ctx.config.db_path, **options), ctx.deadline) as conn:
         matched = [(room, name) for room, name in _visible_rooms(conn, ctx.user_id) if text_matches(name, terms, mode)]
         hits = []
         for room, name in matched[offset:offset + limit]:
@@ -81,7 +81,7 @@ def _memory_file_link(ctx, source):
 
 
 def memory(ctx, terms, mode, limit, offset):
-    with open_with_deadline(lambda: db.get_db(ctx.config.db_path), ctx.deadline) as conn:
+    with open_with_deadline(lambda **options: db.get_db(ctx.config.db_path, **options), ctx.deadline) as conn:
         namespaces = {}
         for room, name in _visible_rooms(conn, ctx.user_id):
             for token in storage.channel_memory_tokens(ctx.config, room.token):
@@ -112,7 +112,7 @@ def memory(ctx, terms, mode, limit, offset):
 
 def facts(ctx, terms, mode, limit, offset):
     predicate, params = like_predicate(["subject", "predicate", "object"], terms, mode)
-    with open_with_deadline(lambda: db.get_db(ctx.config.db_path), ctx.deadline) as conn:
+    with open_with_deadline(lambda **options: db.get_db(ctx.config.db_path, **options), ctx.deadline) as conn:
         rows = conn.execute(
             "SELECT * FROM knowledge_facts WHERE user_id=? AND (valid_until IS NULL OR valid_until>?) "
             f"AND ({predicate}) ORDER BY valid_from DESC, id DESC LIMIT ? OFFSET ?",
@@ -123,7 +123,7 @@ def facts(ctx, terms, mode, limit, offset):
             title = " ".join(f"{row['subject']} {row['predicate']} {row['object']}".split())
             snippet, highlights = make_snippet(title, terms)
             hits.append(SearchHit(f"facts:{row['id']}", "fact", title, None, snippet, highlights,
-                                  iso_utc(row["valid_from"] or row["created_at"]), None, []))
+                                  iso_utc(row["valid_from"] or row["created_at"], preserve_date=True), None, []))
         return ProviderResult(hits, len(rows) > limit)
 
 

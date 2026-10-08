@@ -10,6 +10,7 @@ from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from typing import Callable
 
+from istota import db
 from istota.config import Config
 from istota.lib.text_match import Term, parse_query
 
@@ -58,11 +59,12 @@ class Provider:
 
 @contextmanager
 def open_with_deadline(open_fn, deadline):
-    """Accept a connection or an existing store's connection context manager."""
-    opened = open_fn()
+    """Open without SQLite lock waits; the provider retries within its deadline."""
+    opened = open_fn(busy_timeout_ms=0)
     # sqlite3.Connection.__exit__ commits, but does not close the connection.
     manager = closing(opened) if isinstance(opened, sqlite3.Connection) else opened
     with manager as conn:
+        conn.execute("PRAGMA busy_timeout=0")
         conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
         try:
             if time.monotonic() > deadline:
@@ -72,22 +74,61 @@ def open_with_deadline(open_fn, deadline):
             conn.set_progress_handler(None, 0)
 
 
+def resolve_module_user(ctx, resolve):
+    if not db.database_present(ctx.config.db_path):
+        return resolve(ctx.user_id, ctx.config)
+    with open_with_deadline(lambda **options: db.get_db(ctx.config.db_path, **options), ctx.deadline) as conn:
+        conn.execute("BEGIN")
+        conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+        return resolve(ctx.user_id, ctx.config, conn=conn)
+
+
+def _available_providers(config, user_id, registered):
+    if not any(provider.module for provider in registered):
+        return registered
+    if not db.database_present(config.db_path):
+        return [p for p in registered if p.module is None or config.is_module_enabled(user_id, p.module)]
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=0) as conn:
+            # Pin a read snapshot before Config's compatibility fallback can run.
+            conn.execute("BEGIN")
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            return [p for p in registered if p.module is None or config.is_module_enabled(user_id, p.module, conn=conn)]
+    except sqlite3.OperationalError:
+        logger.warning("Search module access could not be read")
+        return [p for p in registered if p.module is None]
+
+
 def _run_one(provider, ctx, terms, limit, offset):
     start = time.monotonic()
     result = ProviderResult([], False)
     relaxed = False
     error = None
     hits = []
+
+    def run(mode, page_limit, page_offset):
+        while True:
+            remaining = ctx.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            try:
+                return provider.run(ctx, terms, mode, page_limit, page_offset)
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+                if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
+                time.sleep(min(0.01, max(0, ctx.deadline - time.monotonic())))
+
     try:
-        result = provider.run(ctx, terms, "strict", limit, offset)
+        result = run("strict", limit, offset)
         if time.monotonic() > ctx.deadline:
             raise TimeoutError
         if not result.hits and len(terms) > 1 and provider.source != "money":
             # An empty later page does not mean the strict source has no hits.
-            first = provider.run(ctx, terms, "strict", 1, 0) if offset else result
+            first = run("strict", 1, 0) if offset else result
             if not first.hits:
                 relaxed = True
-                result = provider.run(ctx, terms, "relaxed", limit, offset)
+                result = run("relaxed", limit, offset)
         if time.monotonic() > ctx.deadline:
             raise TimeoutError
         hits = [asdict(hit) for hit in result.hits]
@@ -115,7 +156,7 @@ async def run_search(config, user_id, q, *, sources=None, limit=5, offset=0):
     terms = parse_query(q)
     if not any(len(term.text) >= 2 for term in terms):
         return {"query": q, "groups": []}
-    available = [p for p in providers() if p.module is None or config.is_module_enabled(user_id, p.module)]
+    available = await asyncio.to_thread(_available_providers, config, user_id, providers())
     selected = [p for p in available if (p.source in sources if sources is not None else not p.on_demand)]
     selected.sort(key=lambda p: p.order)
     global _semaphore, _semaphore_loop

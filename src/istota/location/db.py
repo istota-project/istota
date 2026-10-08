@@ -276,7 +276,7 @@ def _backfill_declared_points(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def connect(path: Path | str) -> Iterator[sqlite3.Connection]:
+def connect(path: Path | str, *, busy_timeout_ms: int = 30_000) -> Iterator[sqlite3.Connection]:
     """Open a connection to an already-initialised ``location.db``.
 
     Yields a row-factory-equipped connection with ``foreign_keys`` on.
@@ -287,7 +287,7 @@ def connect(path: Path | str) -> Iterator[sqlite3.Connection]:
     timeout already installed a 30s busy handler — but it stops the lock budget
     depending on an argument two lines away.
     """
-    with sqlite_util.open_db(path) as conn:
+    with sqlite_util.open_db(path, busy_timeout_ms=busy_timeout_ms) as conn:
         yield conn
 
 

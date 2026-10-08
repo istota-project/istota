@@ -116,7 +116,7 @@ def is_future_date(iso_date: str | None, *, today: date | None = None) -> bool:
     return parsed > (today or date.today())
 
 
-def iso_utc(ts: str | None) -> str | None:
+def iso_utc(ts: str | None, *, preserve_date: bool = False) -> str | None:
     """Normalize a heterogeneous timestamp string to ISO 8601 UTC.
 
     Inputs come from three writers with different conventions:
@@ -127,10 +127,13 @@ def iso_utc(ts: str | None) -> str | None:
     - Python ``datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")`` — naive.
 
     Naive timestamps are treated as UTC. Output is always ``YYYY-MM-DDTHH:MM:SSZ``
-    so the frontend can pass it straight to ``new Date()``.
+    so the frontend can pass it straight to ``new Date()``. ``preserve_date``
+    retains bare calendar dates for displays that must not shift their day.
     """
     if not ts:
         return None
+    if preserve_date and _ISO_RE.fullmatch(ts):
+        return ts
     try:
         dt = datetime.fromisoformat(ts.replace(" ", "T"))
     except (ValueError, TypeError):

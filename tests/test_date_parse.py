@@ -159,3 +159,10 @@ class TestThereIsOneCopy:
             if "def _normalise_date(" in p.read_text(encoding="utf-8")
         ]
         assert offenders == []
+
+
+def test_iso_utc_option_preserves_calendar_dates_without_changing_defaults():
+    from istota.lib.date_parse import iso_utc
+    assert iso_utc("2026-01-04") == "2026-01-04T00:00:00Z"
+    assert iso_utc("2026-01-04", preserve_date=True) == "2026-01-04"
+    assert iso_utc("2026-01-03T23:30:00-02:00", preserve_date=True) == "2026-01-04T01:30:00Z"

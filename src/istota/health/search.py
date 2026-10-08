@@ -3,7 +3,7 @@
 from istota.lib.date_parse import iso_utc
 from istota.lib.text_match import like_predicate, make_snippet
 from istota.modules import module_loader
-from istota.search.core import Provider, ProviderResult, SearchHit, open_with_deadline
+from istota.search.core import Provider, ProviderResult, SearchHit, open_with_deadline, resolve_module_user
 from istota.search.links import route
 
 
@@ -24,7 +24,7 @@ _TABLES = (
 
 def _sort_key(hit):
     stable_id = hit.id if hit.kind == "health_marker" else int(hit.id.rsplit(":", 1)[1])
-    return hit.date or "", hit.kind, stable_id
+    return iso_utc(hit.date) or "", hit.kind, stable_id
 
 
 def search(ctx, terms, mode, limit, offset):
@@ -32,10 +32,10 @@ def search(ctx, terms, mode, limit, offset):
     hits = []
     count = offset + limit + 1
     try:
-        user = resolve(ctx.user_id, ctx.config)
+        user = resolve_module_user(ctx, resolve)
         if not user.db_path.is_file():
             return ProviderResult([], False)
-        with open_with_deadline(lambda: connect(user.db_path), ctx.deadline) as conn:
+        with open_with_deadline(lambda **options: connect(user.db_path, **options), ctx.deadline) as conn:
             for table, columns, date, title, subtitle, kind, path in _TABLES:
                 predicate, params = like_predicate(columns, terms, mode)
                 rows = conn.execute(
@@ -49,15 +49,18 @@ def search(ctx, terms, mode, limit, offset):
                         id=f"health:{table}:{row['id']}", kind=kind,
                         title=" ".join((row["title"] or "").split()),
                         subtitle=" ".join((row["subtitle"] or "").split()) or None,
-                        snippet=snippet, highlights=highlights, date=iso_utc(row["hit_date"]),
+                        snippet=snippet, highlights=highlights, date=iso_utc(row["hit_date"], preserve_date=True),
                         link=route(path, **({} if table == "diagnoses" else {"id": row["id"]})), badges=[],
                     ))
             predicate, params = like_predicate(["b.name", "b.display_name"], terms, mode)
             rows = conn.execute(
-                "SELECT b.name, MAX(b.display_name) AS display_name, "
-                "strftime('%Y-%m-%dT%H:%M:%SZ', MAX(julianday(p.drawn_at))) AS hit_date "
-                "FROM biomarkers b JOIN panels p ON p.id = b.panel_id GROUP BY b.name "
-                f"HAVING MAX({predicate}) ORDER BY hit_date DESC, b.name DESC LIMIT ?",
+                "WITH markers AS (SELECT b.name, p.drawn_at AS hit_date, "
+                "MAX(b.display_name) OVER (PARTITION BY b.name) AS display_name, "
+                f"MAX({predicate}) OVER (PARTITION BY b.name) AS matched, "
+                "ROW_NUMBER() OVER (PARTITION BY b.name ORDER BY julianday(p.drawn_at) DESC, b.id DESC) AS position "
+                "FROM biomarkers b JOIN panels p ON p.id = b.panel_id) "
+                "SELECT name, display_name, hit_date FROM markers WHERE position=1 AND matched "
+                "ORDER BY julianday(hit_date) DESC, name DESC LIMIT ?",
                 [*params, count],
             ).fetchall()
             for row in rows:
@@ -66,7 +69,7 @@ def search(ctx, terms, mode, limit, offset):
                 hits.append(SearchHit(
                     id=f"health:marker:{row['name']}", kind="health_marker",
                     title=" ".join(title.split()), subtitle=None,
-                    snippet=snippet, highlights=highlights, date=row["hit_date"],
+                    snippet=snippet, highlights=highlights, date=iso_utc(row["hit_date"], preserve_date=True),
                     link=route("/health/labs/marker/", name=row["name"]), badges=[],
                 ))
     except (not_found, FileNotFoundError):

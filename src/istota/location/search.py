@@ -3,7 +3,7 @@
 from istota.lib.date_parse import iso_utc
 from istota.lib.text_match import like_predicate, make_snippet
 from istota.modules import module_loader
-from istota.search.core import Provider, ProviderResult, SearchHit, open_with_deadline
+from istota.search.core import Provider, ProviderResult, SearchHit, open_with_deadline, resolve_module_user
 from istota.search.links import route
 
 
@@ -12,10 +12,10 @@ def search(ctx, terms, mode, limit, offset):
     columns = ["name", "category", "notes"]
     predicate, params = like_predicate(columns, terms, mode)
     try:
-        user = resolve(ctx.user_id, ctx.config)
+        user = resolve_module_user(ctx, resolve)
         if not user.db_path.is_file():
             return ProviderResult([], False)
-        with open_with_deadline(lambda: connect(user.db_path), ctx.deadline) as conn:
+        with open_with_deadline(lambda **options: connect(user.db_path, **options), ctx.deadline) as conn:
             rows = conn.execute(
                 f"SELECT * FROM places WHERE {predicate} ORDER BY name, id LIMIT ? OFFSET ?",
                 [*params, limit + 1, offset],

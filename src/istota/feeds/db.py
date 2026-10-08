@@ -583,7 +583,7 @@ def _read_schema_version(conn: sqlite3.Connection) -> int:
 
 
 @contextmanager
-def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
+def connect(db_path: Path, *, busy_timeout_ms: int = 30_000) -> Iterator[sqlite3.Connection]:
     """Open a SQLite connection with the conventions this module expects.
 
     - ``foreign_keys = ON`` so the FK from feeds.category_id and from
@@ -594,7 +594,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     # — NOT re-issued here; sqlite_util's docstring has the reason. The 30s busy
     # handler absorbs any residual contention between the web reader and the
     # */5min feeds poll instead of raising SQLITE_BUSY.
-    with sqlite_util.open_db(db_path) as conn:
+    with sqlite_util.open_db(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
         yield conn
 
 

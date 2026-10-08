@@ -180,7 +180,7 @@ def test_interrupted_migration_leaves_no_partial_index(tmp_path, monkeypatch):
         "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n",
     ))
     with pytest.raises(sqlite3.OperationalError, match="interrupted"):
-        with open_with_deadline(lambda: db.connect(path), time.monotonic()+0.02) as conn:
+        with open_with_deadline(lambda **options: db.connect(path, **options), time.monotonic()+0.02) as conn:
             db._migrate_v8_to_v9(conn)
     with db.connect(path) as conn:
         assert conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'feed_entries_fts%'").fetchall() == []
