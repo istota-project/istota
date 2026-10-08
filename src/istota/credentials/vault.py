@@ -943,7 +943,7 @@ def mirror_pending(config, user_id: str) -> None:
                            _label(name), exc_info=True)
 
 
-def parse_vault(data: bytes, passphrase: str) -> VaultRead:
+def parse_vault(data: bytes, passphrase: str, *, keyfile: bytes | None = None) -> VaultRead:
     """``data`` opened with ``passphrase``, mapped, or a mapped ``VaultError``.
 
     ``PyKeePass`` takes a file-like object — ``PyKeePass.read`` branches on
@@ -995,16 +995,13 @@ def parse_vault(data: bytes, passphrase: str) -> VaultRead:
         ) from exc
 
     try:
-        kp = PyKeePass(io.BytesIO(data), password=passphrase)
+        kp = PyKeePass(io.BytesIO(data), password=passphrase,
+                       keyfile=io.BytesIO(keyfile) if keyfile is not None else None)
         return _map_groups(kp, _digest(data))
     except CredentialsError as exc:
-        # Deliberately does not name the passphrase as the cause: see
-        # VaultLocked. The key file is named because it is the one cause the
-        # user can check in a few seconds and the one istota cannot support.
         raise VaultLocked(
-            "the stored credentials do not open this vault — the passphrase may "
-            "be wrong, or the file may also need a key file or a hardware key, "
-            "which istota cannot supply"
+            "the supplied credentials do not open this vault — check the passphrase "
+            "and key file; hardware keys are not supported"
         ) from exc
     except (HeaderChecksumError, PayloadChecksumError) as exc:
         raise VaultCorrupt("the file is not a readable KeePass database") from exc

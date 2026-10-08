@@ -141,7 +141,7 @@ def auto_grant_vault_entries(conn, user_id, owners, *, declined, scoped):
             continue
         if get_grant(conn, user_id, owner) is None:
             binding = get_entry_binding(conn, user_id, owner)
-            if not scoped or not binding or not binding["hosts"] or binding["source"] != "vault":
+            if not scoped or not binding or not binding["hosts"] or binding["source"] not in ("vault", "local"):
                 if marker != AUTO_GRANT_PENDING:
                     db.kv_set(conn, user_id, NAMESPACE, key, AUTO_GRANT_PENDING)
                 continue

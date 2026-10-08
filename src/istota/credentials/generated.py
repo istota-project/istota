@@ -193,8 +193,9 @@ def create(conn, user_id: str, *, name: str, username: str, password: str, url: 
     return rows
 
 
-def set_otp(conn, user_id: str, name: str, uri: str, *, actor: str = "system") -> str:
-    """Attach a factor once to a generated credential; returns the seed's row name.
+def set_otp(conn, user_id: str, name: str, uri: str, *, replace: bool = False,
+            actor: str = "system") -> str:
+    """Attach a factor; explicit imports may replace an existing owned seed.
 
     The seed takes the entry's hosts and ``credential: <name>``, so the entry's
     grant covers it (ISSUE-685) and ``--fill-otp`` resolves it by entry name.
@@ -204,7 +205,12 @@ def set_otp(conn, user_id: str, name: str, uri: str, *, actor: str = "system") -
         raise GeneratedCredentialError("otp_set_not_generated", "otp_set_not_generated")
     seed_name = entry_names(name)["otp"]
     if _taken(conn, user_id, (seed_name,)) is not None:
-        raise GeneratedCredentialError("otp_already_set", "otp_already_set")
+        if not replace:
+            raise GeneratedCredentialError("otp_already_set", "otp_already_set")
+        binding = _bindings.get_binding(conn, user_id, seed_name)
+        if (binding is None or binding["source"] != SOURCE
+                or _bindings.credential_name(conn, user_id, seed_name) != name):
+            raise GeneratedCredentialError("name_taken", "name_taken")
     canonical = totp.to_uri(totp.parse_user_input(uri))
     url = secrets_store.get_secret(None, user_id, _SERVICE, entry_names(name)["url"], connection=conn)
     secrets_store.set_secret(None, user_id, _SERVICE, seed_name, canonical,

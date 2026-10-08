@@ -1,13 +1,16 @@
 <script lang="ts">
+  import KeepassImportCard from '$lib/components/settings/KeepassImportCard.svelte';
   import CredentialActivity from '$lib/components/settings/CredentialActivity.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { SettingsLayout, VaultCard, CredentialsCard } from '$lib/components/settings';
 
+  let refresh = $state(0);
   const identity = getCurrentUser();
 </script>
 
 <SettingsLayout description="Credentials your tasks can use, and who may use them.">
-  <CredentialsCard onSignedOut={identity.expireSession} />
+  {#key refresh}<CredentialsCard onSignedOut={identity.expireSession} />{/key}
+  <KeepassImportCard onImported={() => (refresh += 1)} />
   <VaultCard />
-  <CredentialActivity />
+  {#key refresh}<CredentialActivity />{/key}
 </SettingsLayout>

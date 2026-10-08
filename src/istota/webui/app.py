@@ -12525,6 +12525,63 @@ async def _avatar_upload_part(request: Request, raw: bytes):
         await form.close()
 
 
+_SECRET_KEYFILE_CAP = 1024 * 1024
+_SECRET_FIELDS_CAP = 64 * 1024
+
+
+async def _secret_multipart(request: Request, *, limit: int, fields: set[str]):
+    """Bound secret uploads before parsing and keep both files in memory."""
+    from python_multipart.exceptions import FormParserError
+    from starlette.datastructures import UploadFile as UploadedPart
+    from starlette.formparsers import MultiPartException, MultiPartParser
+    from .avatars import AvatarError
+
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        raise AvatarError(400, "Expected a multipart upload.")
+    body_limit = limit + _SECRET_KEYFILE_CAP + _SECRET_FIELDS_CAP
+    raw = await _read_bounded_body(request, body_limit)
+
+    async def chunks(body):
+        yield body
+
+    parser = MultiPartParser(request.headers, chunks(raw), max_files=2,
+                             max_fields=len(fields), max_part_size=_SECRET_FIELDS_CAP)
+    # The body is already bounded. Starlette's default spills files over 1 MiB.
+    parser.spool_max_size = body_limit
+    form = None
+    try:
+        form = await parser.parse()
+        values, files = {}, {}
+        seen = set()
+        for name, value in form.multi_items():
+            if name in seen:
+                raise AvatarError(400, "Duplicate upload field.")
+            seen.add(name)
+            if isinstance(value, UploadedPart):
+                if name not in ("file", "keyfile"):
+                    raise AvatarError(400, "Unknown upload field.")
+                cap = limit if name == "file" else _SECRET_KEYFILE_CAP
+                if value.size is None or value.size > cap:
+                    raise AvatarError(413, "That upload is too large.")
+                files[name] = await value.read()
+            elif name in fields and isinstance(value, str):
+                values[name] = value
+            else:
+                raise AvatarError(400, "Unknown upload field.")
+        if "file" not in files or set(values) != fields:
+            raise AvatarError(400, "The upload is missing required fields.")
+        return files["file"], files.get("keyfile"), values
+    except (MultiPartException, FormParserError):
+        raise AvatarError(400, "That upload is not a valid multipart body.") from None
+    finally:
+        if form is not None:
+            await form.close()
+        else:
+            for part in parser._files_to_close_on_error:
+                part.close()
+        del raw
+
+
 async def _read_avatar_upload(request: Request) -> tuple[bytes, str]:
     """A multipart request body → normalized WebP bytes and their sha256.
 
@@ -13322,6 +13379,79 @@ async def _write_local_credential(request: Request, user_id: str, name: str | No
         return JSONResponse({"detail": _CREDENTIAL_STORE_FAILED}, status_code=500)
     logger.info("credential %s via settings: %s", verb, secrets_vault._label(result["name"]))
     return {"ok": True, **result}
+
+
+async def _import_credentials(request: Request, user_id: str, *, preview_only: bool):
+    from dataclasses import asdict
+    from istota.credentials import kdbx_import, store, vault
+    from .avatars import AvatarError
+
+    if _config is None:
+        raise HTTPException(status_code=503, detail="Credential settings are unavailable.")
+    refusal = vault.vault_isolation_refusal(_config, user_id)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    data, keyfile, fields = None, None, {}
+    headers = {"Cache-Control": "no-store"}
+    try:
+        required = {"passphrase"} if preview_only else {"passphrase", "selected", "digest"}
+        data, keyfile, fields = await _secret_multipart(
+            request, limit=vault.VAULT_READ_CAP_BYTES, fields=required)
+        if preview_only:
+            result = await asyncio.to_thread(kdbx_import.preview, _config.db_path, user_id,
+                                             data, fields["passphrase"], keyfile=keyfile)
+        else:
+            try:
+                selected = json.loads(fields["selected"])
+            except (ValueError, RecursionError):
+                raise AvatarError(400, "Selected credentials must be a list of names.") from None
+            if (not isinstance(selected, list) or len(selected) > vault.VAULT_MAX_NAMES
+                    or any(not isinstance(name, str) or not vault.VAULT_NAME_RE.fullmatch(name)
+                           for name in selected)):
+                raise AvatarError(400, "Selected credentials must be a list of names.")
+            result = await asyncio.to_thread(
+                kdbx_import.apply, _config.db_path, user_id, data, fields["passphrase"],
+                keyfile=keyfile, selected=selected, expected_digest=fields["digest"], actor="import")
+        return JSONResponse(asdict(result), headers=headers)
+    except vault.VaultLocked:
+        return JSONResponse({"detail": "Wrong passphrase or key file.", "field": "passphrase"},
+                             status_code=400, headers=headers)
+    except vault.VaultCorrupt:
+        return JSONResponse({"detail": "Not a KeePass file Istota can read."}, status_code=400, headers=headers)
+    except vault.VaultLibraryMissing:
+        return JSONResponse({"detail": "Install the vault extra to import KeePass files."},
+                             status_code=503, headers=headers)
+    except store.SecretKeyMissingError:
+        return JSONResponse({"detail": "The credential store is not configured."}, status_code=503, headers=headers)
+    except AvatarError as exc:
+        return JSONResponse({"detail": exc.message}, status_code=exc.status, headers=headers)
+    except ValueError as exc:
+        reason = str(exc)
+        if reason not in {"import_file_changed", "import_nothing_selected"}:
+            reason = "import_refused"
+        return JSONResponse({"detail": reason}, status_code=400, headers=headers)
+    except Exception as exc:
+        logger.error("credential import failed: %s", type(exc).__name__)
+        return JSONResponse({"detail": "Credential import failed."}, status_code=500, headers=headers)
+    finally:
+        fields.clear()
+        del data, keyfile
+
+
+@api_router.post("/settings/credentials/import/preview")
+async def settings_credentials_import_preview(
+    request: Request, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    return await _import_credentials(request, user["username"], preview_only=True)
+
+
+@api_router.post("/settings/credentials/import")
+async def settings_credentials_import(
+    request: Request, user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    return await _import_credentials(request, user["username"], preview_only=False)
 
 
 @api_router.post("/settings/credentials")

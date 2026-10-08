@@ -5156,3 +5156,62 @@ export function saveWalletPolicy(policy: WalletPolicy): Promise<{ ok: boolean }>
 export function cancelWalletPurchase(id: number): Promise<{ ok: boolean }> {
   return apiFetch(`/settings/wallet/purchases/${id}/cancel`, { method: 'POST' });
 }
+
+export interface KeepassImportItem {
+  name: string;
+  origin: 'entry' | 'generated';
+  fields: string[];
+  hosts: string[];
+  status: 'new' | 'changed' | 'unchanged' | 'conflict' | 'skipped';
+  changed_fields: string[];
+  reason: string | null;
+  default_selected: boolean;
+}
+
+export interface KeepassImportPreview {
+  digest: string;
+  scoped: boolean;
+  truncated: string;
+  items: KeepassImportItem[];
+  skipped: Record<string, number>;
+}
+
+export interface KeepassImportResult {
+  imported: string[];
+  not_imported: Record<string, string>;
+}
+
+function keepassImportForm(file: File, passphrase: string, keyfile: File | null): FormData {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('passphrase', passphrase);
+  if (keyfile) form.append('keyfile', keyfile);
+  return form;
+}
+
+export function previewKeepassImport(
+  file: File,
+  passphrase: string,
+  keyfile: File | null,
+  signal?: AbortSignal,
+): Promise<KeepassImportPreview> {
+  return apiFetch('/settings/credentials/import/preview', {
+    method: 'POST',
+    body: keepassImportForm(file, passphrase, keyfile),
+    signal,
+  });
+}
+
+export function applyKeepassImport(
+  file: File,
+  passphrase: string,
+  keyfile: File | null,
+  selected: string[],
+  digest: string,
+  signal?: AbortSignal,
+): Promise<KeepassImportResult> {
+  const form = keepassImportForm(file, passphrase, keyfile);
+  form.append('selected', JSON.stringify(selected));
+  form.append('digest', digest);
+  return apiFetch('/settings/credentials/import', { method: 'POST', body: form, signal });
+}

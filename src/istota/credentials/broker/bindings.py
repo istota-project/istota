@@ -9,6 +9,11 @@ DEFAULT_HEADERS = ["authorization", "private-token", "x-api-key", "x-auth-token"
 _HEADER = re.compile(r"[!#$%&'*+.^_`|~0-9a-z-]+")
 
 
+def effective_source(source: str) -> str:
+    """Treat rows left by an older daemon as user-owned credentials."""
+    return "local" if source == "vault" else source
+
+
 def credential_host(url, *, allow_http=False):
     """Exact authority; HTTP retains its scheme so it cannot share HTTPS grants."""
     if (not isinstance(url, str) or not url or not url.isascii()
