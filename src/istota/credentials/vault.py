@@ -697,9 +697,14 @@ def mirror_entry(
             entry.otp = values["otp"]
         elif entry.otp:
             entry.otp = ""
+        from istota.credentials import generated
+        for field_name in list(entry.custom_properties):
+            if str(field_name).casefold() == generated.RECOVERY_FIELD.casefold():
+                entry.delete_custom_property(field_name)
+        if values.get("recovery"):
+            entry.set_custom_property(generated.RECOVERY_FIELD, values["recovery"], protect=True)
 
         def check(verified):
-            from istota.credentials import generated
             return not generated.divergence(values, verified.generated.get(name))
 
         return check
@@ -1919,11 +1924,15 @@ def _take_generated_copy(walk: _Walk, name: str, entry, otp_value: str | None) -
         walk.generated_duplicates.add(name)
         walk.skipped.append((name, SKIP_DUPLICATE_NAME))
         return
+    from istota.credentials.generated import RECOVERY_FIELD
+    recovery = next((str(raw or "").strip() for field_name, raw in entry.custom_properties.items()
+                     if str(field_name).casefold() == RECOVERY_FIELD.casefold()), "")
     walk.generated[name] = {
         "password": str(entry.password or "").strip(),
         "username": str(entry.username or "").strip(),
         "url": str(entry.url or "").strip(),
         "otp": otp_value or "",
+        "recovery": recovery,
     }
 
 

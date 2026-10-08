@@ -41,6 +41,13 @@ VAULT_MODES = frozenset({"skill", "inject", "read"})
 VAULT_MODE_DEFAULT = "read"
 OTP_MIN_REMAINING_SECONDS = 10
 
+#: What a task is told when it asks for a value only the daemon may read.
+_DAEMON_ONLY_MESSAGES = {
+    "credential_is_otp_seed": "Credential is an OTP seed; use browse --fill-otp",
+    "credential_is_recovery": ("Credential holds recovery codes, which only the user can read, "
+                               "in Settings, Credentials"),
+}
+
 
 def entry_fields(entry: str, values: dict[str, str]) -> dict[str, str]:
     """An entry's member names as field keys: `password`, `username`, `url`, custom.
@@ -636,6 +643,10 @@ class SkillProxy:
                 self._serve_vault_otp_set(conn, request)
                 return
 
+            if req_type == "vault_recovery_set":
+                self._serve_vault_recovery_set(conn, request)
+                return
+
             if req_type == "vault_create":
                 self._serve_vault_create(conn, request)
                 return
@@ -795,13 +806,18 @@ class SkillProxy:
                     except (ValueError, UnicodeError):
                         return
                     req_type = request.get("type") if isinstance(request, dict) else None
-                    if req_type not in ("vault_credential", "vault_entry", "vault_otp", "wallet_card"):
+                    if req_type not in ("vault_credential", "vault_entry", "vault_otp", "wallet_card",
+                                        "vault_recovery_target", "vault_recovery_set"):
                         self._send_response(conn, {
                             "error": "Private channel accepts credential reads only",
                             "reason": "invalid_credential_request",
                         })
                         return
-                    if req_type == "wallet_card":
+                    if req_type == "vault_recovery_target":
+                        self._serve_vault_recovery_target(conn, request)
+                    elif req_type == "vault_recovery_set":
+                        self._serve_vault_recovery_set(conn, request)
+                    elif req_type == "wallet_card":
                         self._serve_wallet_card(conn, request)
                     elif req_type == "vault_otp":
                         self._serve_vault_otp(conn, request)
@@ -1142,6 +1158,136 @@ class SkillProxy:
             logger.warning("vault_otp_set task_id=%s: notice could not be sent", self.task_id)
         self._send_response(conn, {"name": name, "otp": True})
 
+    def _recovery_reach_refusal(self, name: str) -> tuple[str, str] | None:
+        """Whether this task may touch ``name``'s recovery codes; ``(reason, message)`` if not.
+
+        A save replaces the stored set, so it is held to what a read of the
+        entry needs: in this task's snapshot, and granted to it when the
+        broker is on, unless this attempt created it.
+        """
+        label = label_for_display(name)
+        if name not in self.vault_credentials:
+            return "vault_credential_not_present", f"No shared credential named {label!r}"
+        if (self.config is not None and self.config.security.credential_broker.enabled
+                and name not in self._created_names):
+            reason = self._skill_grant_refusal(name)
+            if reason:
+                return reason, f"Credential {label!r} is not granted to this task"
+        return None
+
+    def _serve_vault_recovery_target(self, conn: socket.socket, request: dict) -> None:
+        """Where ``browse --save-recovery`` may read codes for ``name`` (ISSUE-688).
+
+        Hosts for a name in this task's reach, which ``vault_list`` already
+        shows, so it spends no budget; the save that follows spends the write.
+        """
+        from istota import db
+        from istota.credentials import generated
+        from istota.credentials import vault
+        from istota.credentials.broker.bindings import get_binding
+
+        def refuse(reason, message):
+            self._send_response(conn, {"error": f"{message} ({reason})", "reason": reason})
+
+        name = request.get("name")
+        if self.config is None or not self.user_id:
+            refuse("vault_not_configured", "No credential store is available to this task")
+            return
+        if vault.vault_isolation_refusal(self.config, self.user_id):
+            refuse("vault_isolation_required", "The credential store is not isolated")
+            return
+        if not isinstance(name, str) or not name:
+            refuse("recovery_set_not_generated", "An entry name is required")
+            return
+        reach = self._recovery_reach_refusal(name)
+        if reach:
+            refuse(*reach)
+            return
+        with db.get_db(self.config.db_path) as database:
+            if not generated.is_generated(database, self.user_id, name):
+                refuse("recovery_set_not_generated",
+                       "Recovery codes can be saved only for a credential Istota generated")
+                return
+            hosts = (get_binding(database, self.user_id, name) or {}).get("hosts", [])
+        if not hosts:
+            refuse("credential_unbound", "The credential has no site to read the codes from")
+            return
+        self._send_response(conn, {"name": name, "bound_hosts": hosts})
+
+    def _serve_vault_recovery_set(self, conn: socket.socket, request: dict) -> None:
+        """Store or replace a generated credential's recovery codes (ISSUE-688).
+
+        The reply carries a line count and whether an earlier set was replaced;
+        the codes go to the table and the mirror, never back to the caller and
+        never into this task's credential snapshot.
+        """
+        from istota import db
+        from istota.credentials import generated
+        from istota.credentials import vault
+        from istota.notifications.resolvers import task_alert
+        from istota.notifications.store import deliver_pending
+
+        def refuse(reason, message):
+            self._send_response(conn, {"error": f"{message} ({reason})", "reason": reason})
+
+        if not self._spend_vault_write(conn):
+            return
+        config, user_id = self.config, self.user_id
+        if config is None or not user_id:
+            refuse("vault_not_configured", "No credential store is available to this task")
+            return
+        refusal = vault.vault_isolation_refusal(config, user_id)
+        if refusal:
+            self._send_response(conn, {"error": refusal, "reason": "vault_isolation_required"})
+            return
+        name, text = request.get("name"), request.get("text")
+        if not isinstance(name, str) or not name or not isinstance(text, str):
+            refuse("recovery_empty", "An entry name and the codes are required")
+            return
+        reach = self._recovery_reach_refusal(name)
+        if reach:
+            refuse(*reach)
+            return
+        try:
+            with db.get_db(config.db_path) as db_conn:
+                db_conn.execute("BEGIN IMMEDIATE")
+                _, count, replaced = generated.set_recovery(db_conn, user_id, name, text)
+                mirror = generated.mirror_state(db_conn, user_id, name)["mirror"]
+        except generated.GeneratedCredentialError as exc:
+            refuse(exc.reason, {
+                "recovery_set_not_generated":
+                    "Recovery codes can be saved only for a credential Istota generated",
+                "recovery_empty": "No recovery codes were given",
+                "recovery_too_large": "That is more text than a set of recovery codes",
+                "recovery_unusable": "The codes contain control characters",
+            }.get(exc.reason, "Recovery codes could not be saved"))
+            return
+
+        mirrored = self._mirror_generated(name) if mirror else "off"
+        logger.info("vault_recovery_set task_id=%s name=%s count=%d replaced=%s",
+                    self.task_id, label_for_display(name), count, replaced)
+        try:
+            with db.get_db(config.db_path) as db_conn:
+                raised = task_alert.write(
+                    db_conn, user_id,
+                    dedup_key=(f"vault-recovery-{'replaced' if replaced else 'saved'}:"
+                               f"{task_alert._slug(name, limit=64)}"),
+                    title=(f"Istota replaced the recovery codes for {name}" if replaced
+                           else f"Istota saved recovery codes for {name}"),
+                    body=(("A new set of recovery codes replaced the earlier one, which the site "
+                           "no longer accepts." if replaced else
+                           "The site's recovery codes were saved in Istota.")
+                          + " Only you can read them, in Settings, Credentials."
+                          + self._mirror_sentence(mirrored)),
+                    severity="warning", actionable=True,
+                    params={"task_id": self.task_id, "status": "vault_recovery_set"},
+                )
+            if raised is not None:
+                deliver_pending(config, [raised])
+        except Exception:
+            logger.warning("vault_recovery_set task_id=%s: notice could not be sent", self.task_id)
+        self._send_response(conn, {"name": name, "count": count, "replaced": replaced})
+
     def _skill_grant_refusal(self, name: str) -> str | None:
         """Live grant check for the private skill channel; fails closed."""
         if not self.user_id or not self.task_id:
@@ -1223,7 +1369,7 @@ class SkillProxy:
 
         from istota import db
         from istota.credentials import store as secrets_store
-        from istota.credentials.broker.bindings import get_binding, is_otp_seed
+        from istota.credentials.broker.bindings import daemon_only_refusal, get_binding
 
         live = self.config is not None and bool(self.user_id)
         with db.get_db(self.config.db_path) if live else nullcontext(None) as database:
@@ -1231,10 +1377,11 @@ class SkillProxy:
                 # The kind must describe the value returned, including across a
                 # concurrent rotation from a plain field to a seed.
                 database.execute("BEGIN IMMEDIATE")
-                if is_otp_seed(database, self.user_id, name):
+                refusal = daemon_only_refusal(database, self.user_id, name)
+                if refusal:
                     self._send_response(conn, {
-                        "error": "Credential is an OTP seed; use browse --fill-otp (credential_is_otp_seed)",
-                        "reason": "credential_is_otp_seed", "name": label,
+                        "error": _DAEMON_ONLY_MESSAGES[refusal] + f" ({refusal})",
+                        "reason": refusal, "name": label,
                     })
                     return
             if (trusted_skill and self.config is not None
@@ -1442,6 +1589,8 @@ class SkillProxy:
             database.execute("BEGIN IMMEDIATE")
             seeds = {m for m in members if is_otp_seed(database, self.user_id, m)}
             members = [m for m in members if m not in seeds]
+            has_otp = any((get_binding(database, self.user_id, m) or {}).get("kind") == "totp"
+                          for m in seeds)
             if trusted_skill and self.config.security.credential_broker.enabled:
                 for member in members:
                     if member in self._created_names:
@@ -1474,7 +1623,7 @@ class SkillProxy:
             self.task_id, label, mode, len(values), count,
         )
         reply = {"fields": entry_fields(name, values), "bound_hosts": hosts}
-        if seeds:
+        if has_otp:
             reply["otp"] = True
         self._send_response(conn, reply)
 

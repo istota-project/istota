@@ -37,8 +37,11 @@ from istota.sandbox.host_paths import (
     user_workspace_root,
     write_resolved,
 )
+from istota.sandbox.credential_shim import ProxyError as CredentialProxyError, store_recovery
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
-from istota.skills._credref import CARD, OTP_PAIR, PAIR, CardSecret, CredentialPair, OtpPair, credential_ref
+from istota.skills._credref import (
+    CARD, OTP_PAIR, PAIR, RECOVERY_PAIR, CardSecret, CredentialPair, OtpPair, RecoveryTarget, credential_ref,
+)
 from istota.skills._hostpath import WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
 
@@ -157,18 +160,18 @@ def _profile_result(data, scope):
     return {**data, "shared_profile": True}
 
 
-def _credential_preflight(url, *, card_fill=False, otp_fill=False):
+def _credential_preflight(url, *, card_fill=False, otp_fill=False, recovery_save=False):
     """Refuse the whole action list before a credential can reach an old image."""
     headers = browser_headers()
     try:
         resp = browser_request("get", f"{url}/health", headers=headers, timeout=REQUEST_TIMEOUT)
         data = resp.json()
-        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True) and (not otp_fill or data.get("otp_expiry_check") is True):
+        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True and (not card_fill or data.get("card_fill") is True) and (not otp_fill or data.get("otp_expiry_check") is True) and (not recovery_save or data.get("recovery_save") is True):
             return None
     except (httpx.HTTPError, BrowserQueueTimeout, ValueError):
         pass
     return error_envelope(
-        "Credential fill refused: browser profile isolation, credential origin checks, OTP expiry checks or card fill support were not confirmed. "
+        "Credential fill refused: browser profile isolation, credential origin checks, OTP expiry checks, recovery code saving or card fill support were not confirmed. "
         "Run the full Ansible play to rebuild the browser image with credential origin checks. "
         "No interaction actions were sent."
     )
@@ -944,6 +947,14 @@ def _fill_otp_action(pair):
     return action
 
 
+def _save_recovery_action(target):
+    if not isinstance(target, RecoveryTarget):
+        raise ValueError("--save-recovery was not resolved; the credential lookup did not run for this call")
+    # `credential` puts it under the same preflight and profile check as a fill.
+    return {"type": "read_recovery", "selector": target.label, "credential": True,
+            "bound_hosts": list(target.bound_hosts), "credential_name": target.name}
+
+
 _CARD_FORMATS = {
     "number": (None,), "cvc": (None,), "name": (None,),
     "exp": ("MM/YY", "MM/YYYY", "MMYY"),
@@ -1063,6 +1074,7 @@ ACTION_EMITTERS = {
     "fill": _fill_action,
     "fill_credential": _fill_credential_action,
     "fill_otp": _fill_otp_action,
+    "save_recovery": _save_recovery_action,
     "fill_card": _fill_card_action,
     "click_at": _click_at_action,
     "hover_at": _hover_at_action,
@@ -1448,6 +1460,53 @@ def _note_unanswered_interaction(url, command, actions, exc):
     )
 
 
+def _save_recovered(decoded, actions, *, store=True):
+    """Store the codes a `read_recovery` action returned; the model gets a count.
+
+    `store` is false when the browser did not confirm the read ran in this
+    user's profile: then nothing is stored, since the text may be another's.
+
+    The container hands the element's text back beside the scrubbed result,
+    under `recovery`, and this is the only reader of it: the text goes over
+    the private channel to the store and is replaced, in the action's result,
+    by how many lines were saved. Returns the response without the text, and
+    the lines to scrub from the rest of it. A save that fails is reported in
+    the action's result; the page still shows the codes, so the call can be
+    repeated.
+    """
+    recovered = decoded.pop("recovery", None) if isinstance(decoded, dict) else None
+    texts = recovered if isinstance(recovered, list) else []
+    lines = [line.strip() for text in texts if isinstance(text, str)
+             for line in text.splitlines() if len(line.strip()) >= 4]
+    results = decoded.get("actions") if isinstance(decoded, dict) else None
+    if not isinstance(results, list):
+        return decoded, lines
+    saved = []
+    for index, result in enumerate(results):
+        action = actions[index] if index < len(actions) else {}
+        if action.get("type") != "read_recovery" or not isinstance(result, dict):
+            saved.append(result)
+            continue
+        entry = {"action": "save_recovery", "selector": action.get("selector", ""),
+                 "name": action.get("credential_name", "")}
+        slot = result.get("recovery")
+        if result.get("ok") is not True:
+            entry.update(ok=False, error=result.get("error") or "recovery_read_failed")
+        elif type(slot) is not int or not 0 <= slot < len(texts) or not isinstance(texts[slot], str):
+            entry.update(ok=False, error="recovery_not_returned")
+        elif not store:
+            entry.update(ok=False, error="profile_not_confirmed")
+        else:
+            try:
+                count, replaced = store_recovery(entry["name"], texts[slot],
+                                                 credential_fd=os.environ.get("ISTOTA_CRED_FD"))
+                entry.update(ok=True, saved=count, replaced=replaced)
+            except CredentialProxyError as exc:
+                entry.update(ok=False, error=str(exc))
+        saved.append(entry)
+    return {**decoded, "actions": saved}, lines
+
+
 def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
@@ -1457,6 +1516,7 @@ def cmd_interact(args):
         refusal = _credential_preflight(
             url, card_fill=any(a.get("card_field") for a in actions),
             otp_fill=any("expires_at" in a for a in actions),
+            recovery_save=any(a.get("type") == "read_recovery" for a in actions),
         )
         if refusal:
             return refusal
@@ -1503,6 +1563,8 @@ def cmd_interact(args):
 
     decoded = _decode(resp)
     scope_confirmed = decoded.get("user_scope") == os.environ.get("ISTOTA_USER_ID")
+    decoded, saved_codes = _save_recovered(decoded, actions, store=scope_confirmed)
+    secrets.extend(saved_codes)
     session_confirmed = decoded.get("session_id") == args.session_id
     decoded = _note_stale_container(_scrub(decoded, secrets))
     if scope_confirmed and isinstance(purchase, CardSecret):
@@ -1804,6 +1866,14 @@ def build_parser():
         p_int, "--fill-otp", form=OTP_PAIR, action=OrderedAppend,
         metavar="SELECTOR=NAME",
         help="Fill a current two-factor code from a shared credential without displaying it",
+    )
+    credential_ref(
+        p_int, "--save-recovery", form=RECOVERY_PAIR, action=OrderedAppend,
+        metavar="SELECTOR=NAME",
+        help=(
+            "Save the recovery codes the page shows in SELECTOR to the generated credential "
+            "NAME, without displaying them. Replaces any codes saved before. Returns a count."
+        ),
     )
     credential_ref(p_int, "--purchase", form=CARD, metavar="ID",
                    help="Authorized purchase whose card fields may be filled")

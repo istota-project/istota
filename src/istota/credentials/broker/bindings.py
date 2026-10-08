@@ -113,6 +113,24 @@ def is_otp_seed(conn, user_id, name):
         return True
 
 
+def daemon_only_refusal(conn, user_id, name):
+    """The refusal for a value no task may read, by kind, or ``None``.
+
+    Recovery codes (ISSUE-688) get their own reason, since the OTP one tells
+    the caller to use ``--fill-otp``, which computes nothing from them.
+    """
+    if not is_otp_seed(conn, user_id, name):
+        return None
+    try:
+        row = conn.execute("SELECT kind FROM credential_bindings WHERE user_id=? AND name=?",
+                           (user_id, name)).fetchone()
+    except Exception:
+        row = None
+    if row is not None and row[0] == "recovery":
+        return "credential_is_recovery"
+    return "credential_is_otp_seed"
+
+
 def forge_bindings(developer):
     """Deployment tokens retain their config values and have a separate namespace."""
     result = {}

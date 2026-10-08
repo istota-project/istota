@@ -22,7 +22,7 @@ It replaces the socket client ``skills/developer.setup_env`` used to generate.
 With the broker enabled, developer credential helpers use placeholders. The
 legacy ``env`` verb still uses the same public socket and reveal policy.
 
-Eight verbs::
+Nine verbs::
 
     istota-credential list                       # shared credential names
     istota-credential placeholder <name>         # inert auth-header text
@@ -32,6 +32,7 @@ Eight verbs::
     istota-credential env <VAR>                  # a manifest-declared var
     istota-credential new <slug> [options]        # generate and store a credential
     istota-credential otp-set <name>              # enrollment seed on stdin
+    istota-credential recovery-set <name>         # recovery codes on stdin
 
 ``placeholder`` is the broker path: the value is added outside the sandbox.
 ``get`` and both forms of ``run`` ask for a value and, under reveal enforcement,
@@ -139,6 +140,7 @@ USAGE = (
     "  istota-credential get NAME\n"
     "  istota-credential env VAR\n"
     "  istota-credential otp-set NAME  # read enrollment secret from stdin\n"
+    "  istota-credential recovery-set NAME  # read recovery codes from stdin\n"
     "  istota-credential new SLUG [--username USER] [--url URL] [--length N] [--no-symbols]\n"
 )
 
@@ -339,7 +341,7 @@ def _cmd_list() -> int:
         for item in credentials:
             print("\t".join((item["name"], ",".join(item["bound_hosts"]) or "unbound",
                              "yes" if item["revealable"] else "no", item["grant"],
-                             "yes" if item.get("kind", "value") != "value" else "no")))
+                             "yes" if item.get("kind", "value") == "totp" else "no")))
     else:
         for name in names:
             print(name)
@@ -355,6 +357,8 @@ def _cmd_placeholder(args: list[str]) -> int:
     reply = _request({"type": "vault_list"})
     for item in reply.get("credentials", []):
         if item.get("name") == name:
+            if item.get("kind") == "recovery":
+                raise ProxyError("credential_is_recovery: only the user can read recovery codes")
             if item.get("kind", "value") != "value":
                 raise ProxyError("credential_is_otp_seed: use browse --fill-otp")
             hosts = item.get("bound_hosts", [])
@@ -420,6 +424,44 @@ def _cmd_otp_set(args: list[str]) -> int:
     if not isinstance(reply.get("name"), str) or reply.get("otp") is not True:
         raise ProxyError("the credential proxy answered unparseably")
     print(json.dumps({"name": reply["name"], "otp": True}))
+    return 0
+
+
+def store_recovery(name: str, text: str, *, credential_fd: str | None = None) -> tuple[int, bool]:
+    """Save a generated credential's recovery codes: ``(line count, replaced)``.
+
+    The codes go one way, to the daemon; the reply carries neither them nor
+    anything derived from them beyond the count.
+    """
+    reply = _request({"type": "vault_recovery_set", "name": name, "text": text},
+                     timeout=CREATE_TIMEOUT_SECONDS, credential_fd=credential_fd)
+    count, replaced = reply.get("count"), reply.get("replaced")
+    if type(count) is not int or type(replaced) is not bool:
+        raise ProxyError("the credential proxy answered unparseably")
+    return count, replaced
+
+
+def fetch_recovery_target(name: str, *, credential_fd: str | None) -> tuple[str, ...]:
+    """The hosts ``browse --save-recovery`` may read ``name``'s codes on. Private channel only."""
+    if credential_fd is None:
+        raise ProxyError("the private credential channel is unavailable")
+    reply = _request({"type": "vault_recovery_target", "name": name}, credential_fd=credential_fd)
+    hosts = reply.get("bound_hosts")
+    if (not isinstance(hosts, list) or not hosts
+            or not all(isinstance(host, str) for host in hosts)):
+        raise ProxyError("the credential proxy answered unparseably")
+    return tuple(hosts)
+
+
+def _cmd_recovery_set(args: list[str]) -> int:
+    if len(args) != 1:
+        print(USAGE, file=sys.stderr)
+        return EXIT_REFUSED
+    text = sys.stdin.read(65537)
+    if not text.strip() or len(text) > 65536:
+        raise ProxyError("recovery_empty: provide the recovery codes on stdin")
+    count, replaced = store_recovery(args[0], text)
+    print(json.dumps({"name": args[0], "saved": count, "replaced": replaced}))
     return 0
 
 
@@ -557,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         "env": lambda: _cmd_env(rest),
         "new": lambda: _cmd_new(rest),
         "otp-set": lambda: _cmd_otp_set(rest),
+        "recovery-set": lambda: _cmd_recovery_set(rest),
     }
     handler = handlers.get(verb)
     if handler is None:

@@ -15,8 +15,10 @@ vi.mock('$lib/api', async (importOriginal) => ({
   setGeneratedMirror: vi.fn(),
   remirrorGenerated: vi.fn(),
   setGeneratedDefaultMirror: vi.fn(),
+  showRecoveryCodes: vi.fn(),
 }));
 import {
+  showRecoveryCodes,
   getCredentialGrants,
   saveCredentialGrant,
   grantExistingCredentials,
@@ -574,5 +576,60 @@ describe('generated credentials', () => {
     expect(words(dialog)).toContain('its KeePass copy is removed, and it cannot be recovered');
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Retire' }));
     await waitFor(() => expect(deleteCredential).toHaveBeenCalledWith('generated_acme'));
+  });
+
+  it('shows recovery codes only after an explicit Show', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(
+      settings({ credentials: [made({ recovery: true })] }),
+    );
+    vi.mocked(showRecoveryCodes).mockResolvedValue({ codes: 'fixture-rc-1111\nfixture-rc-2222' });
+    render(CredentialsCard);
+    await screen.findByText('acme.example');
+    expect(within(row('generated_acme')).getByText('Recovery codes')).toBeTruthy();
+    await chooseAction('generated_acme', 'Show recovery codes');
+    const dialog = screen.getByRole('dialog', { name: 'Recovery codes for generated_acme' });
+    expect(showRecoveryCodes).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('recovery-codes')).toBeNull();
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Show codes' }));
+    await waitFor(() =>
+      expect(showRecoveryCodes).toHaveBeenCalledWith('generated_acme', undefined),
+    );
+    expect((await screen.findByTestId('recovery-codes')).textContent).toBe(
+      'fixture-rc-1111\nfixture-rc-2222',
+    );
+  });
+
+  it('asks for the account password when the server does', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(
+      settings({ credentials: [made({ recovery: true })] }),
+    );
+    vi.mocked(showRecoveryCodes)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Enter your account password to show the codes.'), {
+          status: 403,
+          field: 'password',
+        }),
+      )
+      .mockResolvedValueOnce({ codes: 'fixture-rc-1111' });
+    render(CredentialsCard);
+    await screen.findByText('acme.example');
+    await chooseAction('generated_acme', 'Show recovery codes');
+    const dialog = screen.getByRole('dialog', { name: 'Recovery codes for generated_acme' });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Show codes' }));
+    const password = await within(dialog).findByLabelText('Account password');
+    expect(within(dialog).getByRole('alert').textContent).toContain('account password');
+    await fireEvent.input(password, { target: { value: 'my password' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Show codes' }));
+    await waitFor(() =>
+      expect(showRecoveryCodes).toHaveBeenLastCalledWith('generated_acme', 'my password'),
+    );
+    expect((await screen.findByTestId('recovery-codes')).textContent).toBe('fixture-rc-1111');
+  });
+
+  it('offers no reveal for a generated credential without codes', async () => {
+    vi.mocked(getCredentialGrants).mockResolvedValue(settings({ credentials: [made()] }));
+    render(CredentialsCard);
+    await screen.findByText('acme.example');
+    expect(await menuLabels('generated_acme')).not.toContain('Show recovery codes');
   });
 });

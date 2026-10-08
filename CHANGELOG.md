@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Istota now saves the recovery codes a site shows after two-factor enrollment on an account it created (#688). `browse interact --save-recovery` reads them from the page and stores them without the task seeing them, and no task can read them back; you can view them in Settings → Credentials after confirming, and again entering your password if you signed in with one. With a KeePass copy on, they are written to the entry as a protected field.
+
+  **Upgrade note:** Update the browser image with the daemon; an older image refuses `--save-recovery` before reading anything.
+
 - Browser tasks can fill two-factor codes from KeePass and local credentials without showing the code or seed in their output. Tasks can save a new enrollment once on a credential they created under `generated/`, and the settings list marks credentials with two-factor enabled.
 
   **Upgrade note:** Update the browser image with the daemon. The first vault sync removes the old raw OTP field names; change any prompt using `--fill-credential` with `<entry>_totp_seed` to `--fill-otp` with `<entry>`. The old form typed the seed, which was never a valid second-factor code.

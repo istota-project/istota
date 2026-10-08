@@ -21,7 +21,7 @@ import h11
 from istota import db
 from istota.credentials import store as secrets_store
 from . import ca
-from .bindings import get_entry_binding, https_host, credential_host, is_otp_seed
+from .bindings import get_entry_binding, https_host, credential_host, daemon_only_refusal
 from .grants import check_credential_grant
 
 logger = logging.getLogger("istota.credentials.broker")
@@ -122,8 +122,9 @@ def _headers(broker, request, host):
                 name = match[1].decode("ascii")
                 if header in STRUCTURAL:
                     raise Refused("credential_header_not_allowed")
-                if is_otp_seed(conn, broker.user_id, name):
-                    raise Refused("credential_is_otp_seed")
+                refusal = daemon_only_refusal(conn, broker.user_id, name)
+                if refusal:
+                    raise Refused(refusal)
                 reason = check_credential_grant(
                     conn, broker.task_id, broker.user_id, name, host,
                     header.decode("ascii"), config=broker.config,
