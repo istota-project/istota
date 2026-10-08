@@ -1275,3 +1275,11 @@ istota_security_network_extra_hosts: []
 # When true, secrets are loaded from /etc/<namespace>/secrets.env via EnvironmentFile=
 # and omitted from config.toml (config.py reads them from env vars)
 istota_use_environment_file: true
+
+# Credential history, export and scheduled backup policy.
+istota_credential_backup_interval: 86400
+istota_credential_history_days: 180
+istota_credential_audit_days: 365
+istota_credential_backup_retention: 30
+istota_credential_exports_per_day: 3
+istota_web_auth_step_up_ttl_minutes: 10

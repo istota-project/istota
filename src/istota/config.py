@@ -431,6 +431,7 @@ class SchedulerConfig:
     # its own delay on top; a shorter interval mostly buys more `stat` calls. A
     # cycle whose digest is unchanged stops at the hash, so the steady-state
     # cost is one bounded read per user rather than an Argon2id unlock.
+    credential_backup_interval: int = 86400
     vault_sync_interval: int = 300
     # Seconds between Nextcloud profile-picture import ticks (0 = off). Six
     # hours, and the number is a compromise the spec names rather than a round
@@ -1518,6 +1519,7 @@ class SecurityConfig:
     credential_history_days: int = 180
     credential_audit_days: int = 365
     credential_exports_per_day: int = 3
+    credential_backup_retention: int = 30
     credential_broker: CredentialBrokerConfig = field(default_factory=CredentialBrokerConfig)
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
     skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket

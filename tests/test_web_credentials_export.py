@@ -55,7 +55,6 @@ async def test_limit_consumes_code(signed_client, config, mail, cheap):
 
 
 async def test_empty_body_validation_origin_isolation_and_semaphore(signed_client, config, mail, cheap, monkeypatch):
-    import istota.webui.app as mod
     assert (await signed_client.post(BASE, json={}, headers={})).status_code == 403
     assert (await signed_client.post(BASE, json={"password": PASSWORD}, headers=ORIGIN)).status_code == 400
     assert (await signed_client.post(BASE, json={"keyfile": "invalid"}, headers=ORIGIN)).status_code == 400
@@ -66,7 +65,7 @@ async def test_empty_body_validation_origin_isolation_and_semaphore(signed_clien
         def acquire(self, timeout):
             assert timeout == 30
             return False
-    monkeypatch.setattr(mod, "_credential_export_slot", Busy())
+    monkeypatch.setattr(cheap, "EXPORT_SLOT", Busy())
     response = await signed_client.post(BASE, json=await step_up(signed_client, mail, "export"), headers=ORIGIN)
     assert response.status_code == 503
     monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *args: "isolation-required")

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CredentialBackupCard from '$lib/components/settings/CredentialBackupCard.svelte';
   import KeepassExportCard from '$lib/components/settings/KeepassExportCard.svelte';
   import KeepassImportCard from '$lib/components/settings/KeepassImportCard.svelte';
   import CredentialActivity from '$lib/components/settings/CredentialActivity.svelte';
@@ -13,6 +14,7 @@
   {#key refresh}<CredentialsCard onSignedOut={identity.expireSession} />{/key}
   <KeepassImportCard onImported={() => (refresh += 1)} />
   <KeepassExportCard onExported={() => (refresh += 1)} />
+  <CredentialBackupCard />
   <VaultCard />
   {#key refresh}<CredentialActivity />{/key}
 </SettingsLayout>

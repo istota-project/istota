@@ -80,6 +80,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
     ("vault-sync", "vault_sync_interval"),
+    ("credential-backup", "credential_backup_interval"),
     ("credential-maintenance", None),
     ("operator-persona", None),
     ("db-backup", "db_backup_interval"),
@@ -104,6 +105,7 @@ KNOWN_FIELD_MISMATCHES = {
 # (`background_check_still_running name=%s`) and key the in-flight registry, so
 # they are not free to change.
 EXPECTED_BACKGROUND = {
+    "credential-backup",
     "credential-maintenance",
     "whatsapp-requests",
     "room-notices",
@@ -240,7 +242,7 @@ class TestTheDispatchShape:
 class TestTheClockSeeds:
     def test_most_gates_are_due_on_the_first_tick(self):
         config = Config()
-        seeded_elsewhere = {"doctor", "scheduler-stats", "db-backup", "vault-sync"}
+        seeded_elsewhere = {"doctor", "scheduler-stats", "db-backup", "vault-sync", "credential-backup"}
         for gate in _gates(config):
             if gate.name in seeded_elsewhere:
                 continue

@@ -9393,6 +9393,11 @@ def _db_backup_last_time(config: Config) -> float:
     return _db_backup.last_backup_time(config)
 
 
+def _credential_backup_last_time(config: Config) -> float:
+    from istota.credentials.backup_export import last_run_time
+    return last_run_time(config)
+
+
 def build_interval_gates(
     config: Config,
     *,
@@ -9576,6 +9581,10 @@ def build_interval_gates(
         from istota.credentials import vault as secrets_vault
 
         secrets_vault.sync_all(config)
+
+    def _credential_backup(now: float) -> None:
+        from istota.credentials.backup_export import run_all
+        run_all(config)
 
     def _credential_maintenance(now: float) -> None:
         from istota.credentials import audit, store
@@ -9884,6 +9893,14 @@ def build_interval_gates(
             one_shot=True,
             on_error="Vault sync failed: %s",
             one_shot_on_error="Vault sync failed: %s",
+        ),
+        IntervalGate(
+            name="credential-backup",
+            run=_credential_backup,
+            field="credential_backup_interval",
+            seed=_credential_backup_last_time,
+            background=True,
+            on_error="Credential backup failed: %s",
         ),
         IntervalGate(
             name="credential-maintenance",

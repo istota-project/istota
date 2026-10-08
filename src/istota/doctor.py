@@ -2935,6 +2935,39 @@ def _vault_label(user_id: str) -> str:
     return flat[:_VAULT_LABEL_CHARS] + "…"
 
 
+def check_credential_backup(config: "Config", probe: bool) -> list[CheckResult]:
+    from contextlib import closing
+    import sqlite3
+    from istota.credentials import backup_export
+    name = "security.credential_backup"
+    if not config.db_path.exists():
+        return [CheckResult(name, SKIP, "No credential backup recipients registered")]
+    try:
+        with closing(sqlite_util.connect_read_only(config.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            states = [backup_export.last_run(conn, uid) for uid in config.users
+                      if backup_export.recipient_for(conn, uid)]
+    except Exception:
+        return [CheckResult(name, WARN, "Credential backup status is unavailable", "Check the framework database.")]
+    if not states:
+        return [CheckResult(name, SKIP, "No credential backup recipients registered")]
+    interval = config.scheduler.credential_backup_interval
+    if interval <= 0:
+        return [CheckResult(name, WARN, "Credential backups are disabled", "Set scheduler.credential_backup_interval above zero.")]
+    stale = 0
+    for state in states:
+        try:
+            age = time.time() - datetime.fromisoformat(state["at"]).timestamp()
+            healthy = state["outcome"] in ("ok", "empty") and age <= 2 * interval
+        except (TypeError, ValueError, KeyError):
+            healthy = False
+        stale += not healthy
+    if stale:
+        return [CheckResult(name, WARN, f"{stale} credential backups failed or are overdue",
+                            "Check Settings → Credentials and the scheduler backup log.")]
+    return [CheckResult(name, OK, f"{len(states)} credential backups are current")]
+
+
 def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     """Whether each configured KDBX credential vault can actually be applied.
 
@@ -9747,6 +9780,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.vault_isolation", check_vault_isolation),
     ("security.wallet", check_wallet),
     ("security.room_scope_confinement", check_room_scope_confinement),
+    ("security.credential_backup", check_credential_backup),
     ("security.credential_vault", check_credential_vault),
     ("security.vault_contents", check_vault_contents),
     ("security.signup_tags", check_signup_tags),
@@ -9865,6 +9899,7 @@ CHECK_SCOPES: dict[str, str] = {
     "security.wallet": DEPLOYMENT,
     # Deployment: a room policy and a sandbox are properties of an install.
     "security.room_scope_confinement": DEPLOYMENT,
+    "security.credential_backup": DEPLOYMENT,
     "security.credential_vault": DEPLOYMENT,
     # Deployment, and a sibling name rather than a child of the one above:
     # `only` and `skip` match by prefix, so a dotted child could not be skipped

@@ -13438,9 +13438,6 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
         del data, keyfile
 
 
-_credential_export_slot = threading.Semaphore(1)
-
-
 def _export_limit(conn, user_id):
     limit = max(1, _config.security.credential_exports_per_day)
     rows = conn.execute(
@@ -13460,7 +13457,7 @@ def _build_credential_export(user_id, keyfile, ip, user_agent):
     from istota.credentials import audit, kdbx_export
     from istota.notifications.resolvers import task_alert
 
-    if not _credential_export_slot.acquire(timeout=30):
+    if not kdbx_export.EXPORT_SLOT.acquire(timeout=30):
         raise HTTPException(status_code=503, detail="Another export is running")
     try:
         with db.get_db(_config.db_path) as conn:
@@ -13489,7 +13486,50 @@ def _build_credential_export(user_id, keyfile, ip, user_agent):
         return {"filename": f"istota-export-{when.date().isoformat()}.kdbx", "password": password,
                 "file": base64.b64encode(data).decode("ascii"), "summary": asdict(summary)}, when.isoformat()
     finally:
-        _credential_export_slot.release()
+        kdbx_export.EXPORT_SLOT.release()
+
+
+@api_router.get("/settings/credentials/backup")
+async def settings_credentials_backup(user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import backup_export
+    await _credential_isolation(user["username"])
+    def read():
+        with db.get_db(_config.db_path) as conn:
+            recipient = backup_export.recipient_for(conn, user["username"])
+            return {"recipient_suffix": recipient[-8:] if recipient else None,
+                    "last_run": backup_export.last_run(conn, user["username"]),
+                    "interval": _config.scheduler.credential_backup_interval,
+                    "available": backup_export.available()}
+    return JSONResponse(await asyncio.to_thread(read), headers={"Cache-Control": "no-store"})
+
+
+@api_router.put("/settings/credentials/backup")
+async def settings_credentials_backup_update(request: Request, user: dict = Depends(_require_api_auth),
+                                              _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import backup_export, vault
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    headers = {"Cache-Control": "no-store"}
+    if "recipient" not in body or set(body) - {"recipient", "step_up"}:
+        return JSONResponse({"detail": "Expected recipient and step_up."}, status_code=400, headers=headers)
+    refusal = await _require_step_up(request, body, "backup_recipient")
+    if refusal:
+        return refusal
+    def update():
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            backup_export.set_recipient(conn, user["username"], body["recipient"], actor=f"web:{user['username']}")
+            recipient = backup_export.recipient_for(conn, user["username"])
+            return {"recipient_suffix": recipient[-8:] if recipient else None}
+    try:
+        return JSONResponse(await asyncio.to_thread(update), headers=headers)
+    except backup_export.BackupRecipientError:
+        return JSONResponse({"detail": "backup_recipient_unsupported", "field": "recipient"}, status_code=400, headers=headers)
+    except vault.VaultLibraryMissing:
+        return JSONResponse({"detail": "Install the vault extra to enable backups."}, status_code=503, headers=headers)
 
 
 @api_router.post("/settings/credentials/export")

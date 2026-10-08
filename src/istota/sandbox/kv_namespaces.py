@@ -19,6 +19,8 @@ whether a vault notification is still live, neither of those being a question
 the syncing process's own in-memory state can answer from another unit — and
 `_room_backfill`, the scheduler's per-user marker that a minted SMS or
 WhatsApp room's pre-room history has been copied in, and
+`_credential_backup`, the recipient and backup status (a task that could write
+its recipient could redirect backups to a key it holds), and
 `_vault_file`, the filename that user chose out of their vault folder, which is
 reserved for the same reason `_provisioned_rooms` is: it selects which file the
 daemon decrypts with a key it holds, and the folder it names is bound

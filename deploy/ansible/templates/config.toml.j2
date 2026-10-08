@@ -289,6 +289,10 @@ bypass_accept_marker = "{{ istota_brain_tmux_bypass_accept_marker | istota_toml_
 {% endif %}
 
 [security]
+credential_history_days = {{ istota_credential_history_days }}
+credential_audit_days = {{ istota_credential_audit_days }}
+credential_backup_retention = {{ istota_credential_backup_retention }}
+credential_exports_per_day = {{ istota_credential_exports_per_day }}
 sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}
 allow_unsandboxed_multi_user_vaults = {{ istota_security_allow_unsandboxed_multi_user_vaults | lower }}
 vault_fetch_limit_per_task = {{ istota_security_vault_fetch_limit_per_task }}
@@ -578,6 +582,7 @@ max_size_mb = {{ istota_logging_max_size_mb }}
 backup_count = {{ istota_logging_backup_count }}
 
 [scheduler]
+credential_backup_interval = {{ istota_credential_backup_interval }}
 poll_interval = {{ istota_scheduler_poll_interval }}
 dispatch_interval = {{ istota_scheduler_dispatch_interval }}
 talk_poll_interval = {{ istota_scheduler_talk_poll_interval }}
@@ -788,6 +793,7 @@ reconcile_min_dwell_sec = {{ istota_location_reconcile_min_dwell_sec }}
 {% if istota_web_enabled %}
 
 [web]
+auth_step_up_ttl_minutes = {{ istota_web_auth_step_up_ttl_minutes }}
 auth = {{ istota_web_auth | to_json }}
 auth_enrol_ttl_hours = {{ istota_web_auth_enrol_ttl_hours }}
 auth_reset_ttl_hours = {{ istota_web_auth_reset_ttl_hours }}

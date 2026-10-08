@@ -5231,3 +5231,19 @@ export function exportKeepass(
 ): Promise<KeepassExport> {
   return credentialWrite('/export', 'POST', { keyfile, step_up }, '/settings/credentials', signal);
 }
+
+export interface CredentialBackupSettings {
+  recipient_suffix: string | null;
+  last_run: { at: string; outcome: string; reason: string | null; file: string | null } | null;
+  interval: number;
+  available: boolean;
+}
+export function getCredentialBackup(): Promise<CredentialBackupSettings> {
+  return apiFetch('/settings/credentials/backup');
+}
+export function setCredentialBackup(
+  recipient: string | null,
+  step_up: StepUpProof,
+): Promise<{ recipient_suffix: string | null }> {
+  return credentialWrite('/backup', 'PUT', { recipient, step_up }, '/settings/credentials');
+}

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import hashlib
 import io
+import threading
 
 from istota import db
 from istota.credentials import generated, store, vault
@@ -19,6 +20,7 @@ class ExportOptions:
 
 INTERACTIVE = ExportOptions(256 * 1024, 8, 2)
 BACKUP = ExportOptions(64 * 1024, 2, 2)
+EXPORT_SLOT = threading.Semaphore(1)
 
 
 @dataclass(frozen=True)
