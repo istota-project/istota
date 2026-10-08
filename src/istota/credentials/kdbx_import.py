@@ -57,7 +57,7 @@ def _entries(read):
         for field, name in generated.entry_names(owner).items():
             if value := copy.get(field):
                 kind = {"otp": "totp", "recovery": "recovery"}.get(field, "value")
-                binding = bindings.parse_binding(copy.get("url", ""), {}, [], source="generated")
+                binding = read.generated_bindings.get(owner) or bindings.parse_binding(copy.get("url", ""), {}, [], source="generated")
                 members[name] = (value, {**binding, "credential": owner, "kind": kind})
         entries[owner] = members
     return entries
@@ -178,6 +178,8 @@ def apply(db_path, user_id, data: bytes, passphrase: str, *, selected: Sequence[
                     generated.set_otp(conn, user_id, owner, copy["otp"], replace=True, actor=actor)
                 if copy.get("recovery"):
                     generated.set_recovery(conn, user_id, owner, copy["recovery"], actor=actor)
+                for name, (_, binding) in members.items():
+                    bindings.put_binding(conn, user_id, name, binding)
             else:
                 for name, (value, binding) in members.items():
                     store.set_secret(None, user_id, _SERVICE, name, value,

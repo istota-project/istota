@@ -435,6 +435,7 @@ class VaultRead:
     #: ISSUE-686 they are the mirror of credentials the table owns, compared by
     #: ``credentials.generated.reconcile`` and never applied over it.
     generated: dict[str, dict[str, str]] = field(default_factory=dict)
+    generated_bindings: dict[str, dict] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         """Everything but the values.
@@ -681,28 +682,14 @@ def mirror_entry(
             # The copy being replaced may hold an edit made in the password
             # manager; history keeps it recoverable there.
             entry.save_history()
-            entry.password = password
-            entry.username = values.get("username") or ""
-            entry.url = values.get("url") or ""
         else:
             if len(kp.entries) >= VAULT_MAX_ENTRIES:
                 raise VaultWriteRefused("the vault is at its entry cap")
             entry = kp.add_entry(group, slug, values.get("username") or "", password,
                                  url=values.get("url") or "")
-        for field_name in list(entry.custom_properties):
-            folded = str(field_name).casefold()
-            if folded in _LEGACY_OTP_FIELDS or folded.startswith(("timeotp-", "hmacotp-")):
-                entry.delete_custom_property(field_name)
-        if values.get("otp"):
-            entry.otp = values["otp"]
-        elif entry.otp:
-            entry.otp = ""
         from istota.credentials import generated
-        for field_name in list(entry.custom_properties):
-            if str(field_name).casefold() == generated.RECOVERY_FIELD.casefold():
-                entry.delete_custom_property(field_name)
-        if values.get("recovery"):
-            entry.set_custom_property(generated.RECOVERY_FIELD, values["recovery"], protect=True)
+        from istota.credentials.kdbx_export import _write_generated_entry
+        _write_generated_entry(entry, values)
 
         def check(verified):
             return not generated.divergence(values, verified.generated.get(name))
@@ -1494,6 +1481,7 @@ class _Walk:
     otp_names: set[str] = field(default_factory=set)
     #: Mirror copies under `generated/`; a name produced twice is dropped.
     generated: dict[str, dict[str, str]] = field(default_factory=dict)
+    generated_bindings: dict[str, dict] = field(default_factory=dict)
     generated_duplicates: set[str] = field(default_factory=set)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     entries_visited: int = 0
@@ -1744,6 +1732,8 @@ def _map_groups(kp, digest: str) -> VaultRead:
                                "kind": "totp" if name in walk.otp_names else "value"})
                   for name in services.keys() | held},
         no_auto_grant=frozenset(walk.no_auto_grant),
+        generated_bindings={name: binding for name, binding in walk.generated_bindings.items()
+                            if name not in walk.generated_duplicates},
         generated={name: copy for name, copy in walk.generated.items()
                    if name not in walk.generated_duplicates},
     )
@@ -1924,6 +1914,8 @@ def _take_generated_copy(walk: _Walk, name: str, entry, otp_value: str | None) -
     from istota.credentials.generated import RECOVERY_FIELD
     recovery = next((str(raw or "").strip() for field_name, raw in entry.custom_properties.items()
                      if str(field_name).casefold() == RECOVERY_FIELD.casefold()), "")
+    from istota.credentials.broker.bindings import parse_binding
+    walk.generated_bindings[name] = parse_binding(entry.url, entry.custom_properties, entry.tags, source="generated")
     walk.generated[name] = {
         "password": str(entry.password or "").strip(),
         "username": str(entry.username or "").strip(),

@@ -4912,6 +4912,7 @@ async function credentialWrite<T = CredentialWriteResult>(
   method: string,
   body: unknown,
   prefix = '/settings/credentials',
+  signal?: AbortSignal,
 ) {
   let resp: Response;
   try {
@@ -4920,6 +4921,7 @@ async function credentialWrite<T = CredentialWriteResult>(
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: method === 'GET' ? undefined : JSON.stringify(body),
+      signal,
     });
   } catch {
     noteTransport(false, 'unreachable');
@@ -5214,4 +5216,18 @@ export function applyKeepassImport(
   form.append('selected', JSON.stringify(selected));
   form.append('digest', digest);
   return apiFetch('/settings/credentials/import', { method: 'POST', body: form, signal });
+}
+
+export interface KeepassExport {
+  filename: string;
+  password: string;
+  file: string;
+  summary: { credentials: number; generated: number; otp: number; recovery: number };
+}
+export function exportKeepass(
+  keyfile: string | null,
+  step_up: StepUpProof,
+  signal?: AbortSignal,
+): Promise<KeepassExport> {
+  return credentialWrite('/export', 'POST', { keyfile, step_up }, '/settings/credentials', signal);
 }

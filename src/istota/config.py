@@ -1517,6 +1517,7 @@ class SecurityConfig:
     """Security hardening configuration."""
     credential_history_days: int = 180
     credential_audit_days: int = 365
+    credential_exports_per_day: int = 3
     credential_broker: CredentialBrokerConfig = field(default_factory=CredentialBrokerConfig)
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
     skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket

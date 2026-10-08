@@ -76,6 +76,17 @@ def parse_binding(url, attributes, tags, *, source="vault"):
             "revealable": "istota:reveal" in (tags or []), "source": source}
 
 
+
+def binding_entry_fields(binding):
+    """Encode the hosts, headers and reveal permission in KeePass metadata."""
+    hosts = list(binding["hosts"])
+    http = [host for host in hosts if host.startswith("http://")]
+    url = http[0] if http else ""
+    attributes = {"istota_hosts": ",".join(host for host in hosts if host != url),
+                  "istota_headers": ",".join(binding["headers"]) or ","}
+    tags = ["istota:reveal"] if binding["revealable"] else []
+    return url, attributes, tags
+
 def put_binding(conn, user_id, name, binding):
     """Caller owns the transaction, including the credential value write."""
     from istota import db

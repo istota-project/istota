@@ -18,6 +18,7 @@
 
   interface Props {
     variant?: 'default' | 'viewer';
+    dismissible?: boolean;
     metadata?: Snippet;
     actions?: Snippet;
     navigation?: ViewerNavigation;
@@ -47,6 +48,7 @@
     footer,
     width,
     variant = 'default',
+    dismissible = true,
     metadata,
     actions,
     navigation,
@@ -144,6 +146,8 @@
         : 'ui-modal-content'}
       style="--modal-width: {width ?? (viewer ? '720px' : '420px')}; --modal-height: {height}"
       onkeydown={handleKeydown}
+      escapeKeydownBehavior={dismissible ? 'close' : 'ignore'}
+      interactOutsideBehavior={dismissible ? 'close' : 'ignore'}
     >
       {#if viewer}
         {#if navigation}<div class="ui-viewer-previous">{@render previous()}</div>{/if}

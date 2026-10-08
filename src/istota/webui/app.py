@@ -13438,6 +13438,109 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
         del data, keyfile
 
 
+_credential_export_slot = threading.Semaphore(1)
+
+
+def _export_limit(conn, user_id):
+    limit = max(1, _config.security.credential_exports_per_day)
+    rows = conn.execute(
+        "SELECT datetime(at, '+1 day') FROM credential_audit "
+        "WHERE user_id=? AND action='export' AND at > datetime('now', '-1 day') ORDER BY at DESC",
+        (user_id,),
+    ).fetchall()
+    if len(rows) >= limit:
+        raise HTTPException(status_code=429, detail={"detail": "export_rate_limited",
+                                                     "next_allowed_at": rows[limit - 1][0]})
+
+
+def _build_credential_export(user_id, keyfile, ip, user_agent):
+    from dataclasses import asdict
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    from istota import db
+    from istota.credentials import audit, kdbx_export
+    from istota.notifications.resolvers import task_alert
+
+    if not _credential_export_slot.acquire(timeout=30):
+        raise HTTPException(status_code=503, detail="Another export is running")
+    try:
+        with db.get_db(_config.db_path) as conn:
+            _export_limit(conn, user_id)
+        password = kdbx_export.generate_export_password()
+        data, summary = kdbx_export.build_kdbx(_config.db_path, user_id, password=password,
+                                              keyfile=keyfile, options=kdbx_export.INTERACTIVE)
+        user_config = _config.users.get(user_id)
+        try:
+            zone = ZoneInfo(user_config.timezone if user_config else "UTC")
+        except (ValueError, ZoneInfoNotFoundError):
+            zone = ZoneInfo("UTC")
+        when = datetime.now(zone)
+        notice = (f"Your credentials were exported at {when.isoformat()} from {ip or 'an unknown address'}. "
+                  f"Browser: {user_agent or 'unknown'}. "
+                  "If this was not you, sign out everywhere in Settings → Account and change the passwords in the export.")
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Another web process can finish while this process builds its file.
+            _export_limit(conn, user_id)
+            audit.record(conn, user_id, action="export", actor=f"web:{user_id}",
+                         detail={**asdict(summary), "keyfile": keyfile is not None, "ip": ip})
+            audit_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            task_alert.write(conn, user_id, dedup_key=f"credentials-exported:{audit_id}",
+                             title="Your credentials were exported", body=notice, severity="warning")
+        return {"filename": f"istota-export-{when.date().isoformat()}.kdbx", "password": password,
+                "file": base64.b64encode(data).decode("ascii"), "summary": asdict(summary)}, when.isoformat()
+    finally:
+        _credential_export_slot.release()
+
+
+@api_router.post("/settings/credentials/export")
+async def settings_credentials_export(request: Request, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import kdbx_export, store, vault
+    await _credential_isolation(user["username"])
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    body = await _credential_json(request)
+    if set(body) - {"keyfile", "step_up"}:
+        return JSONResponse({"detail": "Unexpected export field."}, status_code=400, headers=headers)
+    keyfile = body.get("keyfile")
+    if keyfile is not None:
+        if not isinstance(keyfile, str) or len(keyfile) > 4096:
+            return JSONResponse({"detail": "keyfile_invalid", "field": "keyfile"}, status_code=400, headers=headers)
+        try:
+            keyfile = keyfile.encode("utf-8")
+            invalid_keyfile = kdbx_export.keyfile_refusal(keyfile)
+        except UnicodeEncodeError:
+            invalid_keyfile = True
+        except vault.VaultLibraryMissing:
+            return JSONResponse({"detail": "Install the vault extra to export KeePass files."}, status_code=503, headers=headers)
+        if invalid_keyfile:
+            return JSONResponse({"detail": "keyfile_invalid", "field": "keyfile"}, status_code=400, headers=headers)
+    refusal = await _require_step_up(request, body, "export")
+    if refusal:
+        return refusal
+    ip = _client_ip(request)
+    user_agent = " ".join(request.headers.get("user-agent", "")[:200].split())
+    try:
+        payload, when = await asyncio.to_thread(_build_credential_export, user["username"], keyfile, ip, user_agent)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail}
+        return JSONResponse(detail, status_code=exc.status_code, headers=headers)
+    except vault.VaultLibraryMissing:
+        return JSONResponse({"detail": "Install the vault extra to export KeePass files."}, status_code=503, headers=headers)
+    except store.SecretKeyMissingError:
+        return JSONResponse({"detail": "The credential store is not configured."}, status_code=503, headers=headers)
+    except ValueError as exc:
+        reason = str(exc) if str(exc) in {"export_empty", "export_value_unavailable", "keyfile_invalid"} else "export_refused"
+        return JSONResponse({"detail": reason}, status_code=400, headers=headers)
+    except Exception as exc:
+        logger.error("credential export failed: %s", type(exc).__name__)
+        return JSONResponse({"detail": "Credential export failed."}, status_code=500, headers=headers)
+    identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user["username"])
+    message = web_auth_mail.build_export_notice_email(_config.bot_name, user.get("display_name", ""), when, ip, user_agent)
+    response = JSONResponse(payload, headers=headers)
+    response.background = BackgroundTask(web_auth_mail.send_auth_email, _config, identity.email, *message)
+    return response
+
+
 @api_router.post("/settings/credentials/import/preview")
 async def settings_credentials_import_preview(
     request: Request, user: dict = Depends(_require_api_auth),
