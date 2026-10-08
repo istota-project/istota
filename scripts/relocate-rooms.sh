@@ -51,7 +51,7 @@ result=0
 # trusted CLI needs the same Nextcloud credential as the stopped services.
 output=$(systemd-run --quiet --wait --pipe --collect --uid="$service_user" \
     --property="EnvironmentFile=-/etc/${namespace}/secrets.env" \
-    "$istota_bin" -c "$config_path" init --relocate-rooms 2>&1) || result=$?
+    "$istota_bin" -c "$config_path" init --relocate-rooms --scheduler-stopped 2>&1) || result=$?
 printf '%s\n' "$output"
 # Exit 2 is a partial: what could move moved, the rest is re-listed by every
 # later sweep, and the CLI has raised an admin alert naming it. Failing here
