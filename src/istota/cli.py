@@ -441,9 +441,14 @@ def cmd_run(args):
     reset_async_runtime()
 
 
-def _print_unmeasured(unmeasured, unmeasured_since, since):
+def _print_unmeasured(unmeasured, unmeasured_since, since, applicable=True):
     """The `istota usage` trailer for prompt tasks that recorded no usage."""
-    if unmeasured:
+    if not applicable:
+        print(
+            "\nUnmeasured tasks not applicable: --model and a non-task --origin "
+            "select usage rows, which an unmeasured task does not have."
+        )
+    elif unmeasured:
         where = (
             f"since {unmeasured_since[:10]}, the task-retention cutoff,"
             if unmeasured_since != since else "in this window"
@@ -491,9 +496,15 @@ def cmd_usage(args):
             unmeasured_sql, unmeasured_since, covered = unmeasured_window(
                 since, since_sql, until_sql, config.scheduler.task_retention_days,
             )
+            # An unmeasured task has no model, and its origin is `task` by
+            # definition; counting it under either filter would describe
+            # different tasks from the table's (ISSUE-681).
+            applicable = not args.model and args.origin in (None, "", "task")
             unmeasured = db.unmeasured_task_count(
                 conn, since=unmeasured_sql, until=until_sql, user_id=args.user,
-            ) if covered else None
+                source_type=args.source, brain_kind=args.brain,
+                brain_config=config.brain,
+            ) if covered and applicable else None
     except db.sqlite3.OperationalError as e:
         if "no such table" in str(e):
             print(
@@ -517,7 +528,7 @@ def cmd_usage(args):
 
     if not any(g["rows"] for g in groups):
         print("No usage recorded in this window.")
-        _print_unmeasured(unmeasured, unmeasured_since, since)
+        _print_unmeasured(unmeasured, unmeasured_since, since, applicable)
         return 0
 
     label = {"day": "Day", "user": "User", "model": "Model", "source": "Source",
@@ -570,7 +581,7 @@ def cmd_usage(args):
             f"{fmt_context(peak):>13} {pct:>18}"
         )
 
-    _print_unmeasured(unmeasured, unmeasured_since, since)
+    _print_unmeasured(unmeasured, unmeasured_since, since, applicable)
     return 0
 
 
