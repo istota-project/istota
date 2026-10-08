@@ -191,7 +191,7 @@ def test_otp_waits_for_fresh_window_without_holding_database(config, sock_path, 
 def test_otp_budget_shared_with_value_reads(config, sock_path, otp):
     with proxy(config, sock_path, vault_fetch_limit=1) as server:
         missing = ask(server, sock_path, {"type": "vault_otp", "name": "absent"}, True)
-        assert missing["reason"] == "credential_has_no_otp"
+        assert missing["reason"] == "vault_credential_not_present"
         replies = [ask(server, sock_path, {"type": kind, "name": name}, True)
                    for kind, name in [("vault_otp", "acme"), ("vault_otp", "absent"),
                                       ("vault_credential", "acme")]]
@@ -201,13 +201,15 @@ def test_otp_budget_shared_with_value_reads(config, sock_path, otp):
 
 
 @pytest.mark.parametrize("case,reason", [
-    ("no_seed", "credential_has_no_otp"), ("withheld", "credential_has_no_otp"),
-    ("multiple", "credential_has_no_otp"), ("unbound", "credential_unbound"),
-    ("malformed", "credential_otp_unusable"),
+    ("no_seed", "credential_has_no_otp"), ("withheld", "vault_credential_not_present"),
+    ("unknown", "vault_credential_not_present"), ("vanished", "vault_credential_not_present"),
+    ("multiple", "credential_otp_ambiguous"),
+    ("unbound", "credential_unbound"), ("malformed", "credential_otp_unusable"),
 ])
 def test_otp_refusals(config, sock_path, otp, case, reason, caplog):
+    name = {"unknown": "no_such_entry", "vanished": "acme_factor"}.get(case, "acme")
     with proxy(config, sock_path) as server:
-        if case == "no_seed":
+        if case in ("no_seed", "vanished"):
             store.delete_secret(config.db_path, "alice", "vault_entries", "acme_factor")
         elif case == "withheld":
             server.vault_credentials = {}
@@ -219,11 +221,22 @@ def test_otp_refusals(config, sock_path, otp, case, reason, caplog):
                 conn.execute("UPDATE credential_bindings SET hosts='[]' WHERE kind='totp'")
         elif case == "malformed":
             store.upsert_secret(config.db_path, "alice", "vault_entries", "acme_factor", SEED)
-        reply = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": name}, True)
         assert reply["reason"] == reason
         assert server._vault_fetches == 1
         assert SEED not in json.dumps(reply) + caplog.text
         assert otp[1] not in json.dumps(reply) + caplog.text
+
+
+def test_otp_ambiguity_names_the_field_route(config, sock_path, otp):
+    """More than one seed in an entry: the reply says to name the OTP field."""
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE credential_bindings SET kind='totp' WHERE name='acme_totp'")
+    with proxy(config, sock_path) as server:
+        reply = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+        assert reply["reason"] == "credential_otp_ambiguous"
+        assert "istota-credential list" in reply["error"]
+        assert "code" in ask(server, sock_path, {"type": "vault_otp", "name": "acme_factor"}, True)
 
 
 def test_otp_owner_grant_and_live_revocation(config, sock_path, otp):
