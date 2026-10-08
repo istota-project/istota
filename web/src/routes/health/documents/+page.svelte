@@ -15,12 +15,14 @@
    * is what holds that. A chip's label is the server's spelling, so this page
    * and `GET /documents/{id}` cannot disagree about what a document is on.
    */
-  import { onMount } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
+  import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   // A plain `Set` in `$state` is not deeply reactive in Svelte 5 — mutating it
   // would not re-render the rows reading `busy.has(...)`.
   import { SvelteSet } from 'svelte/reactivity';
   import {
     deleteDocument,
+    getDocument,
     linkDocument,
     listDiagnoses,
     listDocuments,
@@ -96,6 +98,54 @@
   let immunizations = $state<Immunization[]>([]);
 
   let unattachedOnly = $state(false);
+  let requestedDocumentId = $state<number | null>(null);
+  let selectedDocumentId = $state<number | null>(null);
+  let documentList: HTMLDivElement | undefined = $state();
+  const urlSelection = createUrlSelection<{ id: number | null }>({
+    key: 'healthDocument',
+    params: ['id'],
+    encode: ({ id }): Record<string, string> => (id === null ? {} : { id: String(id) }),
+    decode: (params) => ({
+      id: /^\d+$/.test(params.id ?? '') && Number(params.id) > 0 ? Number(params.id) : null,
+    }),
+    read: () => null,
+    apply: ({ id }) => {
+      requestedDocumentId = id;
+    },
+  });
+  urlSelection.start();
+
+  async function revealDocument(id: number) {
+    actionError = '';
+    selectedDocumentId = null;
+    try {
+      if (!byId.has(id)) {
+        const result = await getDocument(id);
+        if (requestedDocumentId !== id) return;
+        documents = [...documents, { ...result.document, links: result.links }];
+      }
+      if (requestedDocumentId !== id) return;
+      unattachedOnly = false;
+      selectedDocumentId = id;
+      await tick();
+      if (requestedDocumentId !== id) return;
+      documentList
+        ?.querySelector(`[data-document-id="${id}"]`)
+        ?.scrollIntoView({ block: 'center' });
+    } catch {
+      if (requestedDocumentId === id) actionError = "Couldn't locate that document.";
+    }
+  }
+
+  $effect(() => {
+    const id = requestedDocumentId;
+    if (loading) return;
+    if (id === null) selectedDocumentId = null;
+    else
+      untrack(() => {
+        void revealDocument(id);
+      });
+  });
 
   // A set, not a scalar: two mutations on different rows are both reachable
   // (each row's buttons are disabled only by its own id), and one scalar means
@@ -292,7 +342,10 @@
     ];
   }
 
-  onMount(load);
+  onMount(() => {
+    requestedDocumentId = urlSelection.current()?.id ?? null;
+    void load();
+  });
 </script>
 
 {#if !loading && !loadError}
@@ -353,7 +406,7 @@
 {:else if rows.length === 0}
   <div class="empty">Every document is attached to a record.</div>
 {:else}
-  <div class="table-scroll" class:refreshing>
+  <div class="table-scroll" class:refreshing bind:this={documentList}>
     <table class="grid">
       <thead>
         <tr>
@@ -366,7 +419,11 @@
       </thead>
       <tbody>
         {#each rows as doc (doc.id)}
-          <tr class:busy={busy.has(doc.id)}>
+          <tr
+            data-document-id={doc.id}
+            class:search-target={selectedDocumentId === doc.id}
+            class:busy={busy.has(doc.id)}
+          >
             <td>
               <a
                 class="name"
@@ -482,6 +539,10 @@
 />
 
 <style>
+  tr.search-target {
+    background: var(--status-info-bg);
+  }
+
   .header {
     display: flex;
     align-items: flex-start;
