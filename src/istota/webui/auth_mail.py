@@ -67,3 +67,14 @@ def send_auth_email(config: Config, to: str, subject: str, plain: str, html: str
     except Exception:
         logger.warning("Auth email could not be sent")
         return False
+
+
+def build_step_up_email(bot_name: str, display_name: str, code: str, action_label: str,
+                        ttl_minutes: int, ip: str | None) -> tuple[str, str, str]:
+    greeting = f"Hello {display_name}," if display_name else "Hello,"
+    detail = (f"Use this code to {action_label}. It expires in {ttl_minutes} minutes. "
+              f"Requested from {ip or 'an unknown address'}. "
+              "If you did not ask for this, someone is signed in as you: sign out everywhere in Settings → Account.")
+    return (f"{code} is your {bot_name} confirmation code",
+            f"{greeting}\n\n{code}\n\n{detail}\n",
+            f"<p>{escape(greeting)}</p><p><strong>{escape(code)}</strong></p><p>{escape(detail)}</p>")

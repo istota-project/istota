@@ -80,6 +80,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
     ("vault-sync", "vault_sync_interval"),
+    ("credential-maintenance", None),
     ("operator-persona", None),
     ("db-backup", "db_backup_interval"),
     ("backup-stale-alert", None),
@@ -103,6 +104,7 @@ KNOWN_FIELD_MISMATCHES = {
 # (`background_check_still_running name=%s`) and key the in-flight registry, so
 # they are not free to change.
 EXPECTED_BACKGROUND = {
+    "credential-maintenance",
     "whatsapp-requests",
     "room-notices",
     "phone-room-backfill",
@@ -1256,3 +1258,15 @@ class TestTheOneShotErrorPolicyIsObservedNotJustDeclared:
             "Error checking shared blocks: blocks down" in r.getMessage()
             for r in caplog.records
         )
+
+
+def test_credential_maintenance_prunes_history_and_audit(db_path):
+    from istota import db
+    config = Config(db_path=db_path)
+    gate = next(g for g in build_interval_gates(config) if g.name == "credential-maintenance")
+    assert gate.fixed_interval == 86400
+    with db.get_db(db_path) as conn:
+        conn.execute("INSERT INTO credential_audit (user_id, action, actor, at) VALUES ('alice', 'reveal', 'web:alice', datetime('now', '-366 days'))")
+    gate.run(0)
+    with db.get_db(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM credential_audit").fetchone()[0] == 0

@@ -242,7 +242,7 @@ def _owned_field(conn, user_id: str, owner: str, field_name: str) -> bool:
 
 
 def _write_fields(conn, user_id, name, username_name, url_name, otp_name, *,
-                  value, username, url, otp, binding):
+                  value, username, url, otp, binding, actor):
     """Write or remove fields; an omitted value keeps its row and kind."""
     for field_name, field_value in ((name, value), (username_name, username),
                                     (url_name, url), (otp_name, otp)):
@@ -257,12 +257,12 @@ def _write_fields(conn, user_id, name, username_name, url_name, otp_name, *,
             _bindings.put_binding(conn, user_id, field_name, owned)
         elif field_value:
             secrets_store.set_secret(None, user_id, _SERVICE, field_name, field_value,
-                                     binding=owned, connection=conn)
+                                     binding=owned, connection=conn, actor=actor)
         else:
-            secrets_store.delete_secret(None, user_id, _SERVICE, field_name, connection=conn)
+            secrets_store.delete_secret(None, user_id, _SERVICE, field_name, connection=conn, actor=actor)
 
 
-def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = None) -> dict:
+def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = None, actor: str = "system") -> dict:
     """Store a new local credential and, with ``access``, its grant, in one transaction.
 
     ``conn`` is the caller's (``db.get_db``), and is put inside ``BEGIN
@@ -300,7 +300,7 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
             )
 
     _write_fields(conn, user_id, name, username_name, url_name, otp_name,
-                  value=value, username=username, url=cred.url, otp=otp, binding=binding)
+                  value=value, username=username, url=cred.url, otp=otp, binding=binding, actor=actor)
     grant = None
     if access is not None:
         try:
@@ -316,7 +316,7 @@ def create(conn, user_id: str, cred: LocalCredential, *, access: dict | None = N
 
 
 def update(conn, user_id: str, name: str, *, value: str | None, username: str | None, url: str,
-           extra_hosts: str, headers: str, revealable: bool, otp: str | None = None) -> dict:
+           extra_hosts: str, headers: str, revealable: bool, otp: str | None = None, actor: str = "system") -> dict:
     """Replace a local credential's metadata, and its value unless ``value`` is ``None``.
 
     ``username=None`` keeps the stored username, which the edit form needs
@@ -357,7 +357,7 @@ def update(conn, user_id: str, name: str, *, value: str | None, username: str | 
         )
 
     _write_fields(conn, user_id, name, username_name, url_name, otp_name,
-                  value=value, username=username, url=url, otp=otp, binding=binding)
+                  value=value, username=username, url=url, otp=otp, binding=binding, actor=actor)
     has_username = (bool(username) if username is not None
                     else _owned_field(conn, user_id, name, username_name))
     return {

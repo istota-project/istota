@@ -1196,6 +1196,7 @@ async def login_email(request: Request):
             request.session.clear()
             request.session["user"] = {"username": identity.user_id, "display_name": profile.display_name}
             request.session["auth"] = {"method": "email", "epoch": identity.credential_epoch}
+            request.session["session_id"] = secrets.token_hex(16)
             return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
     await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
     return await _auth_error("Sign-in failed", "Email or password was not accepted.", 400)
@@ -1255,6 +1256,7 @@ async def _start_email_session(request: Request, result) -> Response | None:
     request.session.clear()
     request.session["user"] = {"username": user_id, "display_name": profile.display_name}
     request.session["auth"] = {"method": "email", "epoch": epoch}
+    request.session["session_id"] = secrets.token_hex(16)
     return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1716,6 +1718,7 @@ async def callback(request: Request):
         "display_name": display_name,
     }
     request.session["auth"] = {"method": "nextcloud", "epoch": epoch}
+    request.session["session_id"] = secrets.token_hex(16)
     return RedirectResponse(url=landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
@@ -13270,7 +13273,7 @@ def _create_local_credential(user_id: str, fields: dict) -> dict:
             extra_hosts=fields.get("extra_hosts", ""), headers=fields.get("headers", ""),
             revealable=fields.get("revealable", False), otp=fields.get("otp", ""),
         )
-        return local_credentials.create(conn, user_id, cred, access=access)
+        return local_credentials.create(conn, user_id, cred, access=access, actor=f"web:{user_id}")
 
 
 def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
@@ -13282,7 +13285,7 @@ def _update_local_credential(user_id: str, name: str, fields: dict) -> dict:
         return local_credentials.update(
             conn, user_id, name, value=fields.get("value"), username=fields.get("username"),
             url=fields["url"], extra_hosts=fields["extra_hosts"], headers=fields["headers"],
-            revealable=fields["revealable"], otp=fields.get("otp"),
+            revealable=fields["revealable"], otp=fields.get("otp"), actor=f"web:{user_id}",
         )
 
 
@@ -13579,64 +13582,205 @@ async def settings_generated_remirror(
     return await _generated_mirror_request(request, user["username"], "remirror", name)
 
 
-@api_router.post("/settings/credentials/{name}/recovery")
-async def settings_generated_recovery(
-    name: str, request: Request, user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-):
-    """A generated credential's recovery codes, for the user to read (ISSUE-688).
+_STEP_UP_LABELS = {
+    "export": "export your credentials",
+    "recovery_reveal": "show recovery codes",
+    "backup_recipient": "change your credential backup recipient",
+    "history_restore": "restore credential history",
+    "history_purge": "permanently delete credential history",
+}
 
-    The one web path that hands a stored value back, so it asks more than the
-    rest: an explicit ``{"confirm": true}``, the account password again on a
-    session that signed in with one, and a log line naming the credential.
-    The list payload says only whether codes exist.
-    """
-    from istota import db
-    from istota.credentials import generated
-    from istota.credentials import vault as secrets_vault
-    from istota.credentials.local import LocalCredentialError
 
-    username = user["username"]
+def _step_up_session(request: Request) -> str:
+    # Older signed sessions have no identifier; seed it once on first use.
+    if not request.session.get("session_id"):
+        request.session["session_id"] = secrets.token_hex(16)
+    return request.session["session_id"]
+
+
+async def _credential_isolation(user_id: str):
+    from istota.credentials import vault
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
-    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, username)
+    refusal = await asyncio.to_thread(vault.vault_isolation_refusal, _config, user_id)
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)
+
+
+async def _credential_json(request: Request) -> dict:
+    from istota.credentials.local import LocalCredentialError
     try:
         body = await _read_credential_body(request)
-    except LocalCredentialError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    if (not isinstance(body, dict) or body.get("confirm") is not True
-            or not set(body) <= {"confirm", "password"}
-            or not isinstance(body.get("password", ""), str)):
-        raise HTTPException(status_code=400, detail='expected {"confirm": true}')
-    identity = getattr(request.state, "web_auth_identity", None)
-    if (request.session.get("auth", {}).get("method") == "email"
-            and identity is not None and identity.password_hash):
-        policy = web_auth.policy_from_config(_config)
-        started = time.monotonic()
-        ip = _client_ip(request)
-        accepted = False
-        if body.get("password") and _admit_password_request(identity.email, ip, policy):
-            accepted = await _run_password_work(
-                web_auth.confirm_password, _config.db_path, policy, identity,
-                body["password"], ip=ip,
-            )
-        if not accepted:
-            await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
-            # `field` tells the card to ask for the password, apart from any other 403.
-            return JSONResponse(status_code=403, content={
-                "detail": "Enter your account password to show the codes.", "field": "password"})
+    except LocalCredentialError:
+        raise HTTPException(status_code=400, detail="invalid request body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected an object")
+    return body
 
-    def read() -> str | None:
+
+def _send_step_up(config, user_id, action, session_key, request_id, name, ip):
+    try:
+        issued = web_auth.start_step_up(config.db_path, web_auth.policy_from_config(config),
+                                       user_id, action, session_key, request_id=request_id)
+        if issued is None:
+            return
+        identity = web_auth.get_identity(config.db_path, user_id)
+        profile = user_profiles.get_profile(config.db_path, user_id)
+        if identity is None or profile is None:
+            return
+        label = _STEP_UP_LABELS[action]
+        if name:
+            label += f" for {name}"
+        message = web_auth_mail.build_step_up_email(config.bot_name, profile.display_name, issued[1], label,
+                                                   config.web.auth_step_up_ttl_minutes, ip)
+        web_auth_mail.send_auth_email(config, identity.email, *message)
+    except Exception:
+        logger.warning("Requested confirmation code could not be sent")
+
+
+@api_router.post("/settings/step-up")
+async def settings_step_up(request: Request, user: dict = Depends(_require_api_auth),
+                           _csrf: None = Depends(_verify_origin)):
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    action, name = body.get("action"), body.get("name")
+    if (not isinstance(action, str) or action not in web_auth.STEP_UP_ACTIONS
+            or (name is not None and (not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_.-]{1,128}", name)))):
+        raise HTTPException(status_code=400, detail="invalid confirmation action")
+    identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user["username"])
+    if identity is None or identity.disabled:
+        raise HTTPException(status_code=403, detail="step_up_unavailable")
+    request_id = secrets.token_urlsafe(18)
+    email_hint = identity.email[0] + "•••@" + identity.email.rsplit("@", 1)[-1]
+    response = JSONResponse({"request_id": request_id, "email_hint": email_hint,
+                             "expires_at": web_auth._timestamp(_config.web.auth_step_up_ttl_minutes * 60)},
+                            headers={"Cache-Control": "no-store"})
+    response.background = BackgroundTask(_send_step_up, _config, user["username"], action,
+                                         _step_up_session(request), request_id, name, _client_ip(request))
+    return response
+
+
+async def _require_step_up(request: Request, body: dict, action: str) -> JSONResponse | None:
+    user_id = _require_api_auth(request)["username"]
+    identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
+    reason = "unavailable"
+    if identity is not None and not identity.disabled:
+        proof = body.get("step_up")
+        if not isinstance(proof, dict):
+            proof = {}
+        reason = await asyncio.to_thread(web_auth.redeem_step_up, _config.db_path,
+                                         proof.get("request_id"), user_id, action,
+                                         _step_up_session(request), proof.get("code"))
+    if reason == "ok":
+        return None
+    detail = ("This needs a code sent to your sign-in email address, and your account has none. "
+              "Ask the operator to add one." if reason == "unavailable" else
+              "That code was not accepted. Try again." if reason == "bad" else
+              "That code has expired. Request a new code.")
+    return JSONResponse({"detail": detail, "field": "code", "reason": reason}, status_code=403,
+                        headers={"Cache-Control": "no-store"})
+
+
+@api_router.get("/settings/credentials/activity")
+async def settings_credential_activity(user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import audit
+    await _credential_isolation(user["username"])
+    def read():
         with db.get_db(_config.db_path) as conn:
-            return generated.read_recovery(conn, username, name)
+            return audit.recent(conn, user["username"])
+    return JSONResponse(await asyncio.to_thread(read), headers={"Cache-Control": "no-store"})
 
+
+@api_router.get("/settings/credentials/deleted")
+async def settings_credential_deleted(user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import store
+    await _credential_isolation(user["username"])
+    return JSONResponse(await asyncio.to_thread(store.list_deleted, _config.db_path, user["username"]),
+                        headers={"Cache-Control": "no-store"})
+
+
+@api_router.get("/settings/credentials/{name}/history")
+async def settings_credential_history(name: str, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota.credentials import store
+    await _credential_isolation(user["username"])
+    return JSONResponse(await asyncio.to_thread(store.list_history, _config.db_path, user["username"], name),
+                        headers={"Cache-Control": "no-store"})
+
+
+@api_router.post("/settings/credentials/history/{history_id}/restore")
+async def settings_credential_restore(history_id: int, request: Request, user: dict = Depends(_require_api_auth),
+                                      _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import audit, store
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    refusal = await _require_step_up(request, body, "history_restore")
+    if refusal is not None:
+        return refusal
+    def restore():
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            restored = store.restore_history(_config.db_path, user["username"], history_id,
+                                             actor=f"restore:{user['username']}", connection=conn)
+            audit.record(conn, user["username"], action="restore", actor=f"web:{user['username']}",
+                         name=restored[0], detail={"fields": len(restored)})
+            return restored
+    try:
+        restored = await asyncio.to_thread(restore)
+    except ValueError as exc:
+        if str(exc) in {"history_name_taken", "history_not_found"}:
+            raise HTTPException(status_code=409 if str(exc) == "history_name_taken" else 404, detail=str(exc)) from None
+        raise
+    return {"restored": restored}
+
+
+@api_router.delete("/settings/credentials/{name}/history")
+async def settings_credential_history_purge(name: str, request: Request, user: dict = Depends(_require_api_auth),
+                                           _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import audit, store
+    await _credential_isolation(user["username"])
+    body = await _credential_json(request)
+    refusal = await _require_step_up(request, body, "history_purge")
+    if refusal is not None:
+        return refusal
+    def purge():
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            count = store.purge_history(_config.db_path, user["username"], name, connection=conn)
+            audit.record(conn, user["username"], action="history_purge", actor=f"web:{user['username']}",
+                         name=name, detail={"versions": count})
+            return count
+    return {"purged": await asyncio.to_thread(purge)}
+
+
+@api_router.post("/settings/credentials/{name}/recovery")
+async def settings_generated_recovery(name: str, request: Request, user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    from istota import db
+    from istota.credentials import audit, generated
+    from istota.credentials import vault as secrets_vault
+    username = user["username"]
+    await _credential_isolation(username)
+    body = await _credential_json(request)
+    refusal = await _require_step_up(request, body, "recovery_reveal")
+    if refusal is not None:
+        return refusal
+    def read():
+        with db.get_db(_config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            codes = generated.read_recovery(conn, username, name)
+            if codes is not None:
+                audit.record(conn, username, action="reveal", actor=f"web:{username}", name=name)
+            return codes
     codes = await asyncio.to_thread(read)
     if codes is None:
         raise HTTPException(status_code=404, detail="no recovery codes are stored for that credential")
-    logger.info("recovery codes viewed via settings: %s by %s",
-                secrets_vault._label(name), secrets_vault._label(username))
+    logger.info("recovery codes viewed via settings: %s by %s", secrets_vault._label(name), secrets_vault._label(username))
     return JSONResponse({"codes": codes}, headers={"Cache-Control": "no-store"})
 
 
@@ -13687,12 +13831,18 @@ async def settings_credential_delete(
                                           credential_name(conn, user["username"], name))
 
     if await asyncio.to_thread(_is_generated):
-        deleted = await asyncio.to_thread(generated.retire, _config, user["username"], name)
+        deleted = await asyncio.to_thread(generated.retire, _config, user["username"], name, actor=f"web:{user['username']}")
     else:
-        deleted = await asyncio.to_thread(
-            secrets_store.delete_secret, _config.db_path, user["username"], "vault_entries", name,
-            all_fields=True,
-        )
+        def delete():
+            from istota.credentials import audit
+            with db.get_db(_config.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                removed = secrets_store.delete_secret(_config.db_path, user["username"], "vault_entries", name,
+                                                      all_fields=True, connection=conn, actor=f"web:{user['username']}")
+                if removed:
+                    audit.record(conn, user["username"], action="delete", actor=f"web:{user['username']}", name=name)
+                return removed
+        deleted = await asyncio.to_thread(delete)
     if deleted:
         logger.info("credential deleted via settings: %s", secrets_vault._label(name))
     return {"ok": True, "deleted": deleted}

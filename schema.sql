@@ -2259,3 +2259,44 @@ CREATE TABLE IF NOT EXISTS wallet_purchases (
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_purchases_user ON wallet_purchases(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_wallet_purchases_open ON wallet_purchases(state, expires_at);
+
+CREATE TABLE IF NOT EXISTS secrets_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    service TEXT NOT NULL,
+    key TEXT NOT NULL,
+    encrypted_value BLOB NOT NULL,
+    binding_json TEXT,
+    op TEXT NOT NULL CHECK (op IN ('update', 'delete', 'restore')),
+    batch_id TEXT,
+    actor TEXT NOT NULL,
+    replaced_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_secrets_history_key ON secrets_history(user_id, service, key, replaced_at);
+CREATE INDEX IF NOT EXISTS idx_secrets_history_batch ON secrets_history(batch_id);
+
+CREATE TABLE IF NOT EXISTS credential_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    name TEXT,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    detail_json TEXT,
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_credential_audit_user ON credential_audit(user_id, at);
+
+CREATE TABLE IF NOT EXISTS web_auth_step_ups (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    session_hash TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    credential_epoch INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_auth_step_ups_user ON web_auth_step_ups(user_id, used_at);

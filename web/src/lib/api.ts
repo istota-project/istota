@@ -4896,23 +4896,30 @@ export interface CredentialWriteResult {
  *  message is the server's and never carries the value. */
 export class CredentialWriteError extends Error {
   readonly field: string | null;
-  constructor(message: string, field: string | null) {
+  readonly reason: string | null;
+  constructor(message: string, field: string | null, reason: string | null = null) {
     super(message);
     this.name = 'CredentialWriteError';
+    this.reason = reason;
     this.field = field;
   }
 }
 
 /** Outside `apiFetch` because a refusal's `field` has to reach the form, and
  *  `apiFetch` keeps only the message. */
-async function credentialWrite(path: string, method: string, body: unknown) {
+async function credentialWrite<T = CredentialWriteResult>(
+  path: string,
+  method: string,
+  body: unknown,
+  prefix = '/settings/credentials',
+) {
   let resp: Response;
   try {
-    resp = await fetch(`${base}/api/settings/credentials${path}`, {
+    resp = await fetch(`${base}/api${prefix}${path}`, {
       method,
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: method === 'GET' ? undefined : JSON.stringify(body),
     });
   } catch {
     noteTransport(false, 'unreachable');
@@ -4930,14 +4937,18 @@ async function credentialWrite(path: string, method: string, body: unknown) {
     payload = null;
   }
   if (!resp.ok) {
-    const raw = (payload ?? {}) as { detail?: unknown; field?: unknown };
+    const raw = (payload ?? {}) as { detail?: unknown; field?: unknown; reason?: unknown };
     const message =
       typeof raw.detail === 'string' && raw.detail.trim()
         ? raw.detail
         : `API error: ${resp.status}`;
-    throw new CredentialWriteError(message, typeof raw.field === 'string' ? raw.field : null);
+    throw new CredentialWriteError(
+      message,
+      typeof raw.field === 'string' ? raw.field : null,
+      typeof raw.reason === 'string' ? raw.reason : null,
+    );
   }
-  return payload as CredentialWriteResult;
+  return payload as T;
 }
 
 export function createCredential(credential: NewCredential): Promise<CredentialWriteResult> {
@@ -4988,14 +4999,58 @@ export function remirrorGenerated(
     method: 'POST',
   });
 }
-/** A generated credential's recovery codes. `password` is required when the
- *  session signed in with an email password. */
-export function showRecoveryCodes(name: string, password?: string): Promise<{ codes: string }> {
-  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}/recovery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(password ? { confirm: true, password } : { confirm: true }),
-  });
+export type StepUpAction =
+  'export' | 'recovery_reveal' | 'backup_recipient' | 'history_restore' | 'history_purge';
+export interface StepUpProof {
+  request_id: string;
+  code: string;
+}
+export interface CredentialHistory {
+  id: number;
+  name: string;
+  op: string;
+  actor: string;
+  at: string;
+  fields: string[];
+}
+export interface CredentialActivityRow {
+  id: number;
+  name: string | null;
+  action: string;
+  actor: string;
+  at: string;
+  detail: Record<string, string | number | boolean | null> | null;
+}
+
+export function startStepUp(
+  action: StepUpAction,
+  name?: string,
+): Promise<{ request_id: string; expires_at: string; email_hint: string }> {
+  return credentialWrite('', 'POST', { action, name }, '/settings/step-up');
+}
+export function showRecoveryCodes(name: string, step_up: StepUpProof): Promise<{ codes: string }> {
+  return credentialWrite(`/${encodeURIComponent(name)}/recovery`, 'POST', { step_up });
+}
+export function getCredentialHistory(name: string): Promise<CredentialHistory[]> {
+  return credentialWrite(`/${encodeURIComponent(name)}/history`, 'GET', undefined);
+}
+export function getDeletedCredentials(): Promise<CredentialHistory[]> {
+  return credentialWrite('/deleted', 'GET', undefined);
+}
+export function getCredentialActivity(): Promise<CredentialActivityRow[]> {
+  return credentialWrite('/activity', 'GET', undefined);
+}
+export function restoreCredentialHistory(
+  id: number,
+  step_up: StepUpProof,
+): Promise<{ restored: string[] }> {
+  return credentialWrite(`/history/${id}/restore`, 'POST', { step_up });
+}
+export function purgeCredentialHistory(
+  name: string,
+  step_up: StepUpProof,
+): Promise<{ purged: number }> {
+  return credentialWrite(`/${encodeURIComponent(name)}/history`, 'DELETE', { step_up });
 }
 export function setGeneratedDefaultMirror(mirror: boolean): Promise<{ ok: boolean }> {
   return apiFetch('/settings/credentials/generated/default', {

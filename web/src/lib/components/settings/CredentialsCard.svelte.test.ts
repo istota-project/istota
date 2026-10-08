@@ -16,9 +16,11 @@ vi.mock('$lib/api', async (importOriginal) => ({
   remirrorGenerated: vi.fn(),
   setGeneratedDefaultMirror: vi.fn(),
   showRecoveryCodes: vi.fn(),
+  startStepUp: vi.fn(),
 }));
 import {
   showRecoveryCodes,
+  startStepUp,
   getCredentialGrants,
   saveCredentialGrant,
   grantExistingCredentials,
@@ -252,6 +254,7 @@ describe('the row menu', () => {
       'Edit',
       'Edit access',
       'Revoke access',
+      'History',
       'Delete',
     ]);
   });
@@ -260,7 +263,7 @@ describe('the row menu', () => {
     vi.mocked(getCredentialGrants).mockResolvedValue(settings());
     render(CredentialsCard);
     await screen.findByText('portal.example');
-    expect(await menuLabels('portal')).toEqual(['Edit access', 'Remove stored copy']);
+    expect(await menuLabels('portal')).toEqual(['Edit access', 'History', 'Remove stored copy']);
   });
 
   it('offers only access for a deployment credential', async () => {
@@ -427,7 +430,7 @@ describe('deletion', () => {
     await screen.findByText('No credentials yet.');
   });
 
-  it('says a deleted Istota credential cannot be recovered', async () => {
+  it('says a deleted Istota credential can be restored from history', async () => {
     vi.mocked(getCredentialGrants).mockResolvedValue(settings({ credentials: [local()] }));
     vi.mocked(deleteCredential).mockResolvedValue({ ok: true, deleted: true });
     render(CredentialsCard);
@@ -435,7 +438,7 @@ describe('deletion', () => {
     await chooseAction('openrouter_key', 'Delete');
     const dialog = screen.getByRole('dialog', { name: 'Delete credential' });
     expect(words(dialog)).toContain(
-      'Delete openrouter_key? Tasks lose it now, and it cannot be recovered.',
+      'Delete openrouter_key? Tasks lose it now. You can restore it from history until its saved versions expire.',
     );
     expect(words(dialog)).not.toContain('KeePassXC');
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
@@ -573,57 +576,35 @@ describe('generated credentials', () => {
     await screen.findByText('acme.example');
     await chooseAction('generated_acme', 'Retire');
     const dialog = screen.getByRole('dialog', { name: 'Retire credential' });
-    expect(words(dialog)).toContain('its KeePass copy is removed, and it cannot be recovered');
+    expect(words(dialog)).toContain('its KeePass copy is removed. You can restore it from history');
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Retire' }));
     await waitFor(() => expect(deleteCredential).toHaveBeenCalledWith('generated_acme'));
   });
 
-  it('shows recovery codes only after an explicit Show', async () => {
+  it('shows recovery codes only after an emailed confirmation', async () => {
     vi.mocked(getCredentialGrants).mockResolvedValue(
       settings({ credentials: [made({ recovery: true })] }),
     );
-    vi.mocked(showRecoveryCodes).mockResolvedValue({ codes: 'fixture-rc-1111\nfixture-rc-2222' });
+    vi.mocked(startStepUp).mockResolvedValue({
+      request_id: 'r',
+      expires_at: 'later',
+      email_hint: 'a•••@example.com',
+    });
+    vi.mocked(showRecoveryCodes).mockResolvedValue({ codes: 'fixture-rc-1111' });
     render(CredentialsCard);
     await screen.findByText('acme.example');
-    expect(within(row('generated_acme')).getByText('Recovery codes')).toBeTruthy();
     await chooseAction('generated_acme', 'Show recovery codes');
-    const dialog = screen.getByRole('dialog', { name: 'Recovery codes for generated_acme' });
+    await screen.findByText(/a•••@example.com/);
     expect(showRecoveryCodes).not.toHaveBeenCalled();
-    expect(screen.queryByTestId('recovery-codes')).toBeNull();
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Show codes' }));
-    await waitFor(() =>
-      expect(showRecoveryCodes).toHaveBeenCalledWith('generated_acme', undefined),
-    );
-    expect((await screen.findByTestId('recovery-codes')).textContent).toBe(
-      'fixture-rc-1111\nfixture-rc-2222',
-    );
-  });
-
-  it('asks for the account password when the server does', async () => {
-    vi.mocked(getCredentialGrants).mockResolvedValue(
-      settings({ credentials: [made({ recovery: true })] }),
-    );
-    vi.mocked(showRecoveryCodes)
-      .mockRejectedValueOnce(
-        Object.assign(new Error('Enter your account password to show the codes.'), {
-          status: 403,
-          field: 'password',
-        }),
-      )
-      .mockResolvedValueOnce({ codes: 'fixture-rc-1111' });
-    render(CredentialsCard);
-    await screen.findByText('acme.example');
-    await chooseAction('generated_acme', 'Show recovery codes');
-    const dialog = screen.getByRole('dialog', { name: 'Recovery codes for generated_acme' });
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Show codes' }));
-    const password = await within(dialog).findByLabelText('Account password');
-    expect(within(dialog).getByRole('alert').textContent).toContain('account password');
-    await fireEvent.input(password, { target: { value: 'my password' } });
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Show codes' }));
-    await waitFor(() =>
-      expect(showRecoveryCodes).toHaveBeenLastCalledWith('generated_acme', 'my password'),
-    );
+    await fireEvent.input(screen.getByLabelText('Confirmation code'), {
+      target: { value: '123456' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     expect((await screen.findByTestId('recovery-codes')).textContent).toBe('fixture-rc-1111');
+    expect(showRecoveryCodes).toHaveBeenCalledWith('generated_acme', {
+      request_id: 'r',
+      code: '123456',
+    });
   });
 
   it('offers no reveal for a generated credential without codes', async () => {

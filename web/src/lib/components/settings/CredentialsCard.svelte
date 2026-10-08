@@ -11,6 +11,9 @@
     setGeneratedDefaultMirror,
     setGeneratedMirror,
     showRecoveryCodes,
+    getDeletedCredentials,
+    type CredentialHistory,
+    type StepUpProof,
     type CredentialGrant,
     type CredentialGrantsSettings,
     type CredentialSummary,
@@ -21,8 +24,6 @@
     Chip,
     ConfirmDialog,
     CountPill,
-    Field,
-    Input,
     KebabMenu,
     Modal,
   } from '$lib/components/ui';
@@ -31,6 +32,8 @@
   import SettingsCard from './SettingsCard.svelte';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
   import CredentialFormModal from './CredentialFormModal.svelte';
+  import StepUpDialog from './StepUpDialog.svelte';
+  import CredentialHistoryDialog from './CredentialHistoryDialog.svelte';
 
   let { onSignedOut = () => {} }: { onSignedOut?: () => void } = $props();
   let data: CredentialGrantsSettings | null = $state(null);
@@ -48,42 +51,27 @@
   let confirmDelete: CredentialSummary | null = $state(null);
   // Mounted per open, so the form's fields start empty every time.
   let form: { mode: 'add' | 'edit'; credential: CredentialSummary | null } | null = $state(null);
-  // A generated credential's recovery codes, fetched only on an explicit
-  // confirm and dropped when the dialog closes. The password field appears
-  // when the server asks for it (an email-password session).
-  let reveal: {
-    name: string;
-    codes: string;
-    needsPassword: boolean;
-    password: string;
-    error: string;
-    busy: boolean;
-  } | null = $state(null);
+  let historyName: string | null = $state(null);
+  let deleted: CredentialHistory[] = $state([]);
+  let deletedOpen = $state(false);
+  let reveal: { name: string; codes: string } | null = $state(null);
+  let revealName: string | null = $state(null);
 
   function openReveal(name: string) {
-    reveal = { name, codes: '', needsPassword: false, password: '', error: '', busy: false };
+    revealName = name;
   }
-
-  async function showCodes() {
-    if (!reveal || reveal.busy) return;
-    const current = reveal;
-    current.busy = true;
-    current.error = '';
+  async function showCodes(proof: StepUpProof) {
+    const name = revealName;
+    if (!name) return;
+    const result = await showRecoveryCodes(name, proof);
+    if (revealName === name) reveal = { name, codes: result.codes };
+  }
+  async function showDeleted() {
     try {
-      const result = await showRecoveryCodes(current.name, current.password || undefined);
-      current.codes = result.codes;
-      current.password = '';
+      deleted = await getDeletedCredentials();
+      deletedOpen = true;
     } catch (e) {
-      if (e instanceof AuthError) {
-        reveal = null;
-        onSignedOut();
-        return;
-      }
-      const err = e as Error & { field?: string | null };
-      if (err.field === 'password') current.needsPassword = true;
-      current.error = err.message || 'The codes could not be shown.';
-    } finally {
-      current.busy = false;
+      report(e);
     }
   }
 
@@ -206,6 +194,8 @@
         disabled: busy,
         onSelect: () => (confirmRevoke = c.name),
       });
+    if (c.source !== 'config')
+      items.push({ label: 'History', onSelect: () => (historyName = c.name) });
     if (c.source === 'generated' && c.recovery)
       items.push({
         label: 'Show recovery codes',
@@ -361,57 +351,63 @@
     <Button variant="primary" onclick={save} loading={busy}>Save access</Button>
   {/snippet}
 </Modal>
+{#if revealName}
+  <StepUpDialog
+    action="recovery_reveal"
+    name={revealName}
+    onConfirm={showCodes}
+    onComplete={() => (revealName = null)}
+    onCancel={() => (revealName = null)}
+  />
+{/if}
 <Modal
-  open={reveal !== null}
+  open={reveal !== null && revealName === null}
   title="Recovery codes for {reveal?.name ?? ''}"
   onOpenChange={(open) => {
     if (!open) reveal = null;
   }}
 >
   {#if reveal}
-    {#if reveal.codes}
-      <p class="caption reveal-note">
-        Each code signs in once. Keep them somewhere only you can reach, and close this when you are
-        done.
-      </p>
-      <pre class="recovery-codes" data-testid="recovery-codes">{reveal.codes}</pre>
-    {:else}
-      <p class="reveal-note">
-        These codes get you into {reveal.name} if its two-factor stops working. Anyone who sees them can
-        sign in with them. Istota saved them for you and no task can read them.
-      </p>
-      {#if reveal.needsPassword}
-        <Field label="Account password">
-          <Input type="password" autocomplete="current-password" bind:value={reveal.password} />
-        </Field>
-      {/if}
-      {#if reveal.error}<p class="form-error" role="alert">{reveal.error}</p>{/if}
-    {/if}
+    <p class="caption reveal-note">
+      Keep these codes somewhere only you can reach, and close this when you are done.
+    </p>
+    <pre class="recovery-codes" data-testid="recovery-codes">{reveal.codes}</pre>
   {/if}
   {#snippet footer()}
-    {#if reveal?.codes}
-      <Button
-        variant="secondary"
-        onclick={() => reveal && copyText(reveal.codes, { label: 'Recovery codes' })}
-      >
-        Copy
-      </Button>
-      <Button variant="primary" onclick={() => (reveal = null)}>Done</Button>
-    {:else}
-      <Button variant="ghost" onclick={() => (reveal = null)} disabled={reveal?.busy}>Cancel</Button
-      >
-      <Button
-        variant="primary"
-        onclick={showCodes}
-        loading={reveal?.busy}
-        loadingLabel="Checking…"
-        disabled={reveal?.needsPassword && !reveal.password}
-      >
-        Show codes
-      </Button>
-    {/if}
+    <Button
+      variant="secondary"
+      onclick={() => reveal && copyText(reveal.codes, { label: 'Recovery codes' })}>Copy</Button
+    >
+    <Button variant="primary" onclick={() => (reveal = null)}>Done</Button>
   {/snippet}
 </Modal>
+<Button variant="ghost" onclick={showDeleted}>Recently deleted credentials</Button>
+<Modal
+  open={deletedOpen}
+  title="Recently deleted credentials"
+  onOpenChange={(open) => (deletedOpen = open)}
+>
+  {#if deleted.length}
+    {#each deleted as row (row.id)}
+      <p>
+        <Button
+          variant="ghost"
+          onclick={() => {
+            deletedOpen = false;
+            historyName = row.name;
+          }}>{row.name}</Button
+        >
+      </p>
+    {/each}
+  {:else}<p>No deleted credentials in history.</p>{/if}
+</Modal>
+{#if historyName}
+  <CredentialHistoryDialog
+    name={historyName}
+    onClose={() => (historyName = null)}
+    onChanged={refresh}
+  />
+{/if}
 <ConfirmDialog
   open={confirmDelete !== null}
   title={confirmDelete?.source === 'local'
@@ -420,9 +416,9 @@
       ? 'Retire credential'
       : 'Remove stored copy'}
   message={confirmDelete?.source === 'local'
-    ? `Delete ${confirmDelete?.name}? Tasks lose it now, and it cannot be recovered.`
+    ? `Delete ${confirmDelete?.name}? Tasks lose it now. You can restore it from history until its saved versions expire.`
     : confirmDelete?.source === 'generated'
-      ? `Retire ${confirmDelete?.name}? Tasks lose it now, its KeePass copy is removed, and it cannot be recovered. If the account still needs this password or its two-factor code, change them on the site first.`
+      ? `Retire ${confirmDelete?.name}? Tasks lose it now, its KeePass copy is removed. You can restore it from history until its saved versions expire. If the account still needs this password or its two-factor code, change them on the site first.`
       : `Remove the stored copy of ${confirmDelete?.name}? Tasks lose it now. If the entry is still in your KeePassXC file, the next sync brings it back without its access settings.`}
   confirmLabel={confirmDelete?.source === 'local'
     ? 'Delete'

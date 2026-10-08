@@ -7,6 +7,7 @@ from istota.credentials import generated
 from istota.credentials import store as secrets_store
 from tests.test_web_app import app, client, config  # noqa: F401 -- shared web fixtures
 from tests.test_web_credentials_local import BASE, ORIGIN, signed_client  # noqa: F401
+from tests.test_web_credentials_history import mail, step_up  # noqa: F401
 
 PASSWORD = "fixture-generated-password"
 
@@ -83,17 +84,17 @@ async def test_the_list_says_codes_exist_and_never_carries_them(signed_client, w
     assert "fixture-rc" not in response.text
 
 
-async def test_showing_the_codes_needs_a_confirm_and_is_logged_by_name(
-    signed_client, with_codes, caplog,  # noqa: F811
+async def test_showing_the_codes_needs_step_up_and_is_logged_by_name(
+    signed_client, with_codes, caplog, mail,  # noqa: F811
 ):
     url = f"{BASE}/generated_acme/recovery"
     for body in ({}, {"confirm": "yes"}, {"confirm": True, "extra": 1}):
         refused = await signed_client.post(url, json=body, headers=ORIGIN)
-        assert refused.status_code == 400
+        assert refused.status_code == 403
         assert "fixture-rc" not in refused.text
     assert (await signed_client.post(url, json={"confirm": True})).status_code == 403
     with caplog.at_level("INFO", logger="istota.webui.app"):
-        response = await signed_client.post(url, json={"confirm": True}, headers=ORIGIN)
+        response = await signed_client.post(url, json=await step_up(signed_client, mail, "recovery_reveal"), headers=ORIGIN)
     assert response.status_code == 200, response.text
     assert response.json() == {"codes": CODES}
     assert response.headers["cache-control"] == "no-store"
@@ -101,12 +102,12 @@ async def test_showing_the_codes_needs_a_confirm_and_is_logged_by_name(
     assert "fixture-rc" not in caplog.text
 
 
-async def test_no_codes_or_not_generated_is_a_404(signed_client, stored, config):  # noqa: F811
+async def test_no_codes_or_not_generated_is_a_404(signed_client, stored, config, mail):  # noqa: F811
     from istota.credentials.broker.bindings import parse_binding
     secrets_store.set_secret(config.db_path, "alice", "vault_entries", "github", "token",
                              binding=parse_binding("github.com", {}, [], source="local"))
     for name in ("generated_acme", "github", "absent"):
-        response = await signed_client.post(f"{BASE}/{name}/recovery", json={"confirm": True},
+        response = await signed_client.post(f"{BASE}/{name}/recovery", json=await step_up(signed_client, mail, "recovery_reveal"),
                                             headers=ORIGIN)
         assert response.status_code == 404
         assert "token" not in response.text

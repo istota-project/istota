@@ -1244,6 +1244,7 @@ class WebConfig:
     auth_enrol_ttl_hours: int = 168
     auth_reset_ttl_hours: int = 1
     auth_sign_in_code_ttl_minutes: int = 10
+    auth_step_up_ttl_minutes: int = 10
     auth_min_password_length: int = 12
     auth_throttle_window_seconds: int = 900
     auth_throttle_max_email: int = 10
@@ -1514,6 +1515,8 @@ class CredentialBrokerConfig:
 @dataclass
 class SecurityConfig:
     """Security hardening configuration."""
+    credential_history_days: int = 180
+    credential_audit_days: int = 365
     credential_broker: CredentialBrokerConfig = field(default_factory=CredentialBrokerConfig)
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
     skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket

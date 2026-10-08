@@ -1034,7 +1034,7 @@ class SkillProxy:
                 mirror = (generated.default_mirror(db_conn, user_id)
                           and secrets_vault._vault_is_enabled(config, user_id))
                 generated.create(db_conn, user_id, name=name, username=username,
-                                 password=password, url=url, mirror=mirror)
+                                 password=password, url=url, mirror=mirror, actor=f"task:{self.task_id}")
         except generated.GeneratedCredentialError as exc:
             if reserved_tag:
                 with db.get_db(config.db_path) as db_conn:
@@ -1131,7 +1131,7 @@ class SkillProxy:
         try:
             with db.get_db(config.db_path) as db_conn:
                 db_conn.execute("BEGIN IMMEDIATE")
-                seed_name = generated.set_otp(db_conn, user_id, name, canonical)
+                seed_name = generated.set_otp(db_conn, user_id, name, canonical, actor=f"task:{self.task_id}")
                 mirror = generated.mirror_state(db_conn, user_id, name)["mirror"]
         except generated.GeneratedCredentialError as exc:
             refuse(exc.reason, str(exc))
@@ -1251,7 +1251,7 @@ class SkillProxy:
         try:
             with db.get_db(config.db_path) as db_conn:
                 db_conn.execute("BEGIN IMMEDIATE")
-                _, count, replaced = generated.set_recovery(db_conn, user_id, name, text)
+                _, count, replaced = generated.set_recovery(db_conn, user_id, name, text, actor=f"task:{self.task_id}")
                 mirror = generated.mirror_state(db_conn, user_id, name)["mirror"]
         except generated.GeneratedCredentialError as exc:
             refuse(exc.reason, {

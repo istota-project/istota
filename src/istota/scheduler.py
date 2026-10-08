@@ -9577,6 +9577,14 @@ def build_interval_gates(
 
         secrets_vault.sync_all(config)
 
+    def _credential_maintenance(now: float) -> None:
+        from istota.credentials import audit, store
+        from istota.webui.auth import prune_step_ups
+        with db.get_db(config.db_path) as conn:
+            store.prune_history(conn, older_than_days=config.security.credential_history_days)
+            audit.prune(conn, older_than_days=config.security.credential_audit_days)
+        prune_step_ups(config.db_path)
+
     def _operator_persona(now: float) -> None:
         from istota.prompts.persona import sync_operator_persona
 
@@ -9876,6 +9884,13 @@ def build_interval_gates(
             one_shot=True,
             on_error="Vault sync failed: %s",
             one_shot_on_error="Vault sync failed: %s",
+        ),
+        IntervalGate(
+            name="credential-maintenance",
+            run=_credential_maintenance,
+            fixed_interval=86400,
+            background=True,
+            on_error="Credential maintenance failed: %s",
         ),
         # `{root}/PERSONA.md` under the conffile rule, and the last good copy
         # the prompt path falls back to during a mount outage. `istota init`
