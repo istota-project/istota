@@ -151,7 +151,7 @@
     // no question above it is what the inbound mirror was built to fix.
     externalDisplay?: ExternalTurnDisplay;
     // True in the cross-room views (All messages / Unread / Starred), where
-    // the hover bar carries only the task number — model and timings are
+    // the turn row's metadata is only the task number — model and timings are
     // room-level detail that belongs in the room view.
     aggregate?: boolean;
     // Touch surrogate for hover: the one row the user last tapped. A touch
@@ -400,7 +400,7 @@
     return groups.slice(i + 1);
   });
 
-  // Subtle per-message metadata, revealed on hover (bottom-right).
+  // Subtle per-message metadata, right-aligned in the turn action row.
   const meta = $derived.by(() => {
     const parts: string[] = [];
     if (message.taskId) parts.push(`#${message.taskId}`);
@@ -425,19 +425,12 @@
   const starrable = $derived(typeof message.msgId === 'number' && !!onToggleStar);
   const showRoomChip = $derived(!!message.roomName && !!onRoomClick);
 
-  // Under a finger the reveal is gated in the *markup*, not by opacity alone.
-  // A control at zero opacity is still hit-testable, and the star sits at the
-  // row's top-right: a tap that clipped it starred the message outright, and
-  // because a tap on a button deliberately leaves the activation alone (see
-  // tapActivation), the row never lit up either. What the user saw was a gold
-  // star with no metadata beside it, on every row a thumb had brushed —
-  // indistinguishable from the sticky-hover bug this was meant to have fixed,
-  // and the tell was that only the star persisted while the metadata behaved.
-  // A starred message keeps its star: that one is state, not an affordance.
+  // The metadata is always in the markup when the row has it, and hidden with
+  // the row's opacity like the buttons beside it. Gating it on `revealed`
+  // reflowed a row whose only content is metadata (a stopped turn with no
+  // stored row) when a tap opened it.
   const revealed = $derived(!touch || active);
-  const showMeta = $derived(revealed && meta.length > 0 && !message.streaming);
-  const showStar = $derived(starrable && (revealed || !!message.starred));
-  const hasActions = $derived(showStar || showMeta);
+  const showMeta = $derived(meta.length > 0 && !message.streaming && !isSystem);
 
   // Copy is per *turn*, in a row under the message, alongside delete.
   //
@@ -461,12 +454,8 @@
   const showDelete = $derived(
     typeof message.msgId === 'number' && !!onDelete && message.deletable !== false,
   );
-  // Star appears twice on a turn, and the two are not redundant. The hover bar's
-  // is the one that *persists* at rest on a starred row, which is what makes a
-  // starred message legible without hovering it; this one is where the hand
-  // already is once the row's actions are open, next to the other two things you
-  // do to a whole turn. Same condition as the bar's, so they can't disagree
-  // about whether the turn is starrable.
+  // The only star toggle on a row (ISSUE-691). At rest a starred row is marked
+  // by `.starred`'s left edge instead, so nothing tappable sits unseen.
   const showRowStar = $derived(starrable);
   // Reply needs a durable id to cite — the same rule star and delete follow,
   // which correctly withholds it from optimistic rows and in-flight
@@ -528,16 +517,17 @@
         : 'Waiting to send',
   );
 
-  // The row is in the layout whenever any of the three could be there, so
-  // revealing it never reflows the transcript under the pointer. Withheld
-  // entirely from a failed send: all three act on a durable turn, and this one
-  // never became one — star and delete have no `msgId` to work with, and a lone
-  // copy button would compete with the Retry that is the actual next move. A
-  // queued row is withheld for the same reason and one more: it is not a turn
-  // *yet*, so every one of them would be an action on something that has not
-  // happened, competing with the Send / Edit / Remove that have.
+  // The row is in the layout whenever any button or the metadata could be
+  // there, so revealing it never reflows the transcript under the pointer.
+  // Withheld entirely from a failed send: every button acts on a durable turn,
+  // and this one never became one — star and delete have no `msgId` to work
+  // with, and a lone copy button would compete with the Retry that is the
+  // actual next move. A queued row is withheld for the same reason and one
+  // more: it is not a turn *yet*, so every one of them would be an action on
+  // something that has not happened, competing with the Send / Edit / Remove
+  // that have. Neither has a task to describe, so no metadata is lost.
   const hasRowActions = $derived(
-    (showCopy || showRowStar || showReply || showDelete) && !sendFailed && !sendQueued,
+    (showCopy || showRowStar || showReply || showDelete || showMeta) && !sendFailed && !sendQueued,
   );
 
   // ---- Inline images ---------------------------------------------------------
@@ -689,7 +679,22 @@
         <Trash2 size={15} />
       </button>
     {/if}
+    <!-- Task id / model / duration / tool count, right-aligned on the same
+         line. It lived in a hover bar that floated over a continuation row's
+         first line, where nothing reserved space for it (ISSUE-691). -->
+    {#if showMeta}
+      <span class="meta-footer">{meta.join(' · ')}</span>
+    {/if}
   </div>
+{/snippet}
+
+<!-- The at-rest starred state for assistive tech. The visible mark is the
+     row's `::before` edge, and the toggle that also reports it is in the
+     hidden action row. -->
+{#snippet starredLabel()}
+  {#if message.starred}
+    <span class="starred-label">Starred</span>
+  {/if}
 {/snippet}
 
 <!-- The citation, above the body it belongs to. Rendered from the durable
@@ -724,43 +729,6 @@
       </div>
     {/if}
   {/if}
-{/snippet}
-
-{#snippet starButton()}
-  <button
-    class="star-btn touch-target"
-    class:starred={message.starred}
-    onclick={(e) => {
-      onToggleStar?.(message.cid);
-      // A pointer-driven click leaves the button focused, and a focus ring that
-      // also reveals the icon is a second way for a star to sit there lit after
-      // the user has moved on (Safari has shipped :focus-visible on tap).
-      // `detail > 0` is the pointer's signature — a keyboard activation reports
-      // 0, so this can't take focus away from keyboard use.
-      if (e.detail > 0) e.currentTarget.blur();
-    }}
-    aria-label={message.starred ? 'Unstar message' : 'Star message'}
-    aria-pressed={message.starred ? 'true' : 'false'}
-    title={message.starred ? 'Unstar' : 'Star'}
-    type="button"
-  >
-    <Star size={14} fill={message.starred ? 'currentColor' : 'none'} />
-  </button>
-{/snippet}
-
-<!-- Per-message metadata + actions: task id / model / duration / tool count,
-     then the star. Rendered as the trailing member of the author header on a
-     fresh group (so its text baseline-aligns with the timestamp for free), and
-     absolutely positioned on a continuation row, which has no header. -->
-{#snippet actionsBar()}
-  <div class="msg-actions">
-    {#if showMeta}
-      <span class="meta-footer">{meta.join(' · ')}</span>
-    {/if}
-    {#if showStar}
-      {@render starButton()}
-    {/if}
-  </div>
 {/snippet}
 
 <!-- The shared room a private reply is about (ISSUE-608). It opens that room
@@ -800,9 +768,11 @@
     class="cmd-row"
     class:active
     class:touch
+    class:starred={message.starred}
     data-cid={message.cid}
     data-task-id={message.taskId ?? undefined}
   >
+    {@render starredLabel()}
     <div class="gutter">
       {#if botVoice}
         <Avatar kind="bot" version={botAvatar} label={botName} />
@@ -921,11 +891,6 @@
         {@render turnActions()}
       {/if}
     </div>
-    {#if showStar}
-      <div class="msg-actions cmd-actions">
-        {@render starButton()}
-      </div>
-    {/if}
   </div>
 {:else}
   <div
@@ -935,9 +900,11 @@
     class:touch
     class:error={message.error}
     class:queued={sendQueued}
+    class:starred={message.starred}
     data-cid={message.cid}
     data-task-id={message.taskId ?? undefined}
   >
+    {@render starredLabel()}
     <div class="gutter">
       {#if !continuation}
         <Avatar
@@ -971,9 +938,6 @@
             </button>
           {/if}
           {@render aboutChip()}
-          {#if hasActions}
-            {@render actionsBar()}
-          {/if}
         </div>
       {/if}
 
@@ -1270,12 +1234,6 @@
         {@render turnActions()}
       {/if}
     </div>
-
-    <!-- A continuation row has no author header to hang the bar off, so it
-			     floats at the top-right, lined up with the gutter's hover time. -->
-    {#if continuation && hasActions}
-      {@render actionsBar()}
-    {/if}
   </div>
 {/if}
 
@@ -1293,7 +1251,7 @@
 		   line of text. */
     padding: 0.1rem var(--chat-row-inline) var(--space-2);
     align-items: flex-start;
-    /* Anchor for the absolutely-positioned .meta-footer (top-right). */
+    /* Anchor for the starred edge (`.starred::before`). */
     position: relative;
   }
   /* A fresh author group separates itself with padding alone. It also carried a
@@ -1314,123 +1272,65 @@
 	   media query knows a phone has no hover at all, `.touch` knows a finger was
 	   used on a device that also has a mouse. */
   @media (hover: hover) {
-    .msg:not(.touch):hover .hover-time,
-    .msg:not(.touch):hover .meta-footer {
+    .msg:not(.touch):hover .hover-time {
       opacity: 1;
     }
   }
-  .msg.active .hover-time,
-  .msg.active .meta-footer {
+  .msg.active .hover-time {
     opacity: 1;
   }
 
-  /* Per-message actions bar: hover metadata + the star toggle. One bar so the
-		   two hover surfaces can't collide. Where it sits depends on whether the row
-		   has an author header, because it must line up with that row's timestamp —
-		   and the timestamp lives in two different places. */
-  .msg-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-  /* Fresh group: the bar is the trailing member of the .meta header, so the
-		   shared `align-items: baseline` puts its text on the timestamp's baseline by
-		   construction. A hand-tuned offset can't do that — it has to hold across font
-		   metrics that differ per platform, and it drifted on iOS Safari. */
-  .meta .msg-actions {
-    margin-left: auto;
-    align-self: baseline;
-    /* Yield to the author/time rather than pushing them out of the row. */
-    min-width: 0;
-  }
-  /* The star is an icon button with no text baseline of its own; centre it on
-		   the bar instead of letting it hang off the synthesized one. */
-  .meta .msg-actions .star-btn {
-    align-self: center;
-  }
-  /* Continuation: no header, so float it top-right against the gutter's
-		   .hover-time. `top` matches the gutter's own padding, and the two share a
-		   font-size + line-height (below), so their line boxes — and therefore their
-		   baselines — coincide without a magic offset. */
-  .msg.continuation .msg-actions {
+  /* The starred mark (ISSUE-691): an amber rule inside the row's inline
+	   padding. A real border on the row would push the avatar and text off the
+	   column they share with the headings, since the padding, gutter and gap
+	   must total one fixed inset. A border rather than an inset box-shadow so it
+	   survives forced-colors mode, and inset vertically so two starred rows in a
+	   row read as two segments rather than one block. */
+  .msg.starred::before,
+  .cmd-row.starred::before {
+    content: '';
     position: absolute;
-    right: var(--chat-row-inline);
-    top: 0.1rem;
+    left: 0;
+    top: var(--space-1);
+    bottom: var(--space-1);
+    border-left: 4px solid var(--accent-amber);
+    pointer-events: none;
+  }
+  .starred-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    /* Kept out of a copied selection across the transcript. */
+    user-select: none;
   }
 
-  /* Subtle per-message metadata, revealed on hover (child of the actions bar). */
+  /* Task id / model / duration, the last member of the turn action row. The
+	   row's own reveal shows it; `margin-left: auto` puts it at the far end. */
   .meta-footer {
+    margin-left: auto;
+    min-width: 0;
     font-size: var(--text-xs);
     line-height: 1.6;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     /* A narrow row trims the tail (tool count, then duration) rather than
-			   squeezing the author name — the id and model are the identifying bits. */
+			   wrapping — the id and model are the identifying bits. */
     overflow: hidden;
     text-overflow: ellipsis;
-    opacity: 0;
-    transition: opacity var(--transition-fast);
   }
 
-  /* Star toggle: hidden at rest, revealed on row hover (or tap-activation on
-	   touch) / keyboard focus; a starred message keeps it visible (filled, gold)
-	   like the feeds cards.
-
-	   The fade is a pointer-device affordance only — see the `.touch` rule at the
-	   end of this block for why it is switched off under a finger. */
-  .star-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: none;
-    border: none;
-    padding: 0.1rem;
-    color: var(--text-dim);
-    cursor: pointer;
-    opacity: 0;
-    /* Hidden *and* inert. Opacity alone leaves the button hit-testable, so a
-		   tap landing on the invisible star starred the message with nothing on
-		   screen to explain it. The markup gate above covers the touch path once a
-		   finger has been seen; this covers the frame before that and any pointer
-		   device where the row renders the button unrevealed. Keyboard focus is
-		   unaffected — pointer-events does not gate Tab — and :focus-visible below
-		   hands interactivity back. */
-    pointer-events: none;
-    transition:
-      opacity var(--transition-fast),
-      color var(--transition-fast);
-  }
-  @media (hover: hover) {
-    .msg:not(.touch):hover .star-btn,
-    .cmd-row:not(.touch):hover .star-btn {
-      opacity: 1;
-      pointer-events: auto;
-    }
-    .msg:not(.touch) .star-btn:hover,
-    .cmd-row:not(.touch) .star-btn:hover {
-      color: var(--accent-amber);
-    }
-  }
-  .msg.active .star-btn,
-  .cmd-row.active .star-btn,
-  .star-btn:focus-visible,
-  .star-btn.starred {
-    opacity: 1;
-    pointer-events: auto;
-  }
-  .star-btn.starred {
-    color: var(--accent-amber);
-  }
-
-  /* Under a finger the reveal is a swap, not a fade — for both affordances, so
+  /* Under a finger the reveal is a swap, not a fade — for every affordance, so
 	   there is one rule rather than a fade here and an on/off there.
 
 	   Not cosmetic. An opacity transition is what asks the compositor to promote
 	   an element to its own layer, and a promoted layer whose opacity returns to
-	   0 without being repainted keeps showing what it last painted: the star
-	   stranded on every row a thumb had tapped, while the plain text span beside
-	   it — never promoted — cleared correctly. That asymmetry is what identified
+	   0 without being repainted keeps showing what it last painted: the old
+	   hover-bar star stranded on every row a thumb had tapped, while the plain
+	   text span beside it — never promoted — cleared correctly. That asymmetry is what identified
 	   the mechanism. The markup gate above does not on its own avoid this: the
 	   node is inserted and the row's .active class lands in an order that leaves
 	   a style change to animate, so a transition really does run on the touch
@@ -1438,28 +1338,25 @@
 	   flight). Keyed on .touch and not a width breakpoint, because the axis is
 	   what the user's hand is doing — an iPad is wide and touch, a narrow
 	   desktop window is neither. */
-  .msg.touch .star-btn,
-  .cmd-row.touch .star-btn,
-  .msg.touch .meta-footer,
   .msg.touch .hover-time,
   .msg.touch .turn-actions,
   .cmd-row.touch .turn-actions {
     transition: none;
   }
 
-  /* Turn-level action row: copy + delete, left-aligned under the message body.
-	   One row per turn rather than a button per block — see the script block for
-	   why that moved.
+  /* Turn-level action row: copy, star, reply, delete, then the metadata at the
+	   far end, under the message body. One row per turn rather than a button per
+	   block — see the script block for why that moved.
 
-	   Unlike the star, this is *in the flow*: it sits below the content it acts
-	   on, so it has to take the space it occupies or revealing it would push the
-	   next message down. The row is therefore always in the layout and only its
-	   opacity is gated, which is also what lets the buttons be bare icons with
-	   no background — they never overlap text.
+	   It is *in the flow*: it sits below the content it acts on, so it has to
+	   take the space it occupies or revealing it would push the next message
+	   down. The row is therefore always in the layout and only its opacity is
+	   gated, which is also what lets the buttons be bare icons with no
+	   background — they never overlap text.
 
-	   `pointer-events` follows opacity for the same reason the star's does: a
-	   control at zero opacity is still hit-testable, and a delete button a thumb
-	   can hit without seeing is the worst version of that bug. */
+	   `pointer-events` follows opacity: a control at zero opacity is still
+	   hit-testable, and a delete button a thumb can hit without seeing is the
+	   worst version of that bug. */
   .turn-actions {
     display: flex;
     align-items: center;
@@ -1509,7 +1406,7 @@
   }
   /* The starred colour is state, so it holds without hover — but the row it
 	   sits in is itself revealed on hover, so this never shows on a resting row.
-	   The hover-bar star is the one that persists at rest; see the script block. */
+	   At rest the row's `.starred` edge says it instead. */
   .turn-action.star.starred,
   .turn-action.star:hover {
     color: var(--accent-amber);
@@ -1642,16 +1539,13 @@
 		   and spill ~9px into the message text on hover. Drop it here rather than
 		   shrink it (no size makes it fit): it is a hover affordance, and this
 		   breakpoint is overwhelmingly touch, where it never appears anyway. The
-		   time is still on the group header above, and the floating actions bar is
-		   positioned independently of it. */
+		   time is still on the group header above. */
     .hover-time {
       display: none;
     }
   }
 
-  /* Continuation-row timestamp. Font-size and line-height are deliberately the
-	   same as .meta-footer's so the two line boxes match and the floating actions
-	   bar lands on this baseline exactly. */
+  /* Continuation-row timestamp, revealed with the row. */
   .hover-time {
     font-size: var(--text-xs);
     color: var(--text-dim);
@@ -1676,8 +1570,6 @@
     font-size: var(--text-base);
     font-weight: 600;
     color: var(--text-primary);
-    /* Author and time hold their size; the metadata bar is what gives way when
-		   the header row runs out of width. */
     flex-shrink: 0;
   }
   .author.bot {
@@ -2008,14 +1900,6 @@
       width: 0.85rem;
       height: 0.85rem;
     }
-  }
-  /* A command row has no header to hang its star off, so the bar floats
-	   top-right on the row. (The bar is only absolute here and on continuation
-	   rows.) */
-  .msg-actions.cmd-actions {
-    position: absolute;
-    right: var(--chat-row-inline);
-    top: 0.3rem;
   }
   .note-header {
     margin-bottom: var(--space-1);

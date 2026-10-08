@@ -196,7 +196,7 @@ describe('star affordance', () => {
       onReject: noop,
       onToggleStar: noop,
     });
-    expect(container.querySelector('.star-btn')).toBeNull();
+    expect(container.querySelector('.turn-action.star')).toBeNull();
   });
 
   it('renders no star button without an onToggleStar handler', () => {
@@ -205,17 +205,17 @@ describe('star affordance', () => {
       onConfirm: noop,
       onReject: noop,
     });
-    expect(container.querySelector('.star-btn')).toBeNull();
+    expect(container.querySelector('.turn-action.star')).toBeNull();
   });
 
-  it('renders a hover-revealed star button for a durable message', () => {
+  it('renders a star button in the action row for a durable message', () => {
     const { container } = render(Message, {
       message: finished({ msgId: 42, starred: false }),
       onConfirm: noop,
       onReject: noop,
       onToggleStar: noop,
     });
-    const btn = container.querySelector('.star-btn');
+    const btn = container.querySelector('.turn-action.star');
     expect(btn).not.toBeNull();
     expect(btn?.getAttribute('aria-label')).toBe('Star message');
     expect(btn?.classList.contains('touch-target')).toBe(true);
@@ -231,7 +231,7 @@ describe('star affordance', () => {
       onReject: noop,
       onToggleStar: noop,
     });
-    const btn = container.querySelector('.star-btn');
+    const btn = container.querySelector('.turn-action.star');
     expect(btn?.classList.contains('starred')).toBe(true);
     expect(btn?.getAttribute('aria-label')).toBe('Unstar message');
     expect(btn?.getAttribute('aria-pressed')).toBe('true');
@@ -246,7 +246,7 @@ describe('star affordance', () => {
       onReject: noop,
       onToggleStar,
     });
-    await fireEvent.click(container.querySelector('.star-btn')!);
+    await fireEvent.click(container.querySelector('.turn-action.star')!);
     expect(onToggleStar).toHaveBeenCalledWith(7);
   });
 
@@ -260,7 +260,7 @@ describe('star affordance', () => {
       onReject: noop,
       onToggleStar: noop,
     });
-    const btn = container.querySelector<HTMLButtonElement>('.star-btn')!;
+    const btn = container.querySelector<HTMLButtonElement>('.turn-action.star')!;
 
     btn.focus();
     await fireEvent.click(btn, { detail: 1 });
@@ -297,21 +297,21 @@ describe('tap activation (touch)', () => {
     expect(container.querySelector('.msg')?.classList.contains('active')).toBe(true);
   });
 
-  it('does not render the star on an unrevealed touch row', () => {
-    // The regression: opacity alone hid the star but left it hit-testable, and
-    // it sits at the row's top-right. A tap that clipped it starred the message
-    // outright — and since a tap on a button leaves the activation alone, the
-    // row never lit up, so a gold star appeared with no metadata beside it. It
-    // accumulated one row per tap and read exactly like the sticky-hover bug.
+  it('keeps the only star in the action row on an unrevealed touch row', () => {
+    // The regression: a hover-bar star at the row's top-right was hit-testable
+    // at zero opacity, so a tap that clipped it starred the message outright.
+    // That bar is gone; the action row's star is the only one, and the row is
+    // not hit-testable until it is revealed.
     const { container } = render(Message, {
-      message: finished({ msgId: 42 }),
+      message: finished({ msgId: 42, taskId: 7 }),
       onConfirm: noop,
       onReject: noop,
       onToggleStar: noop,
       touch: true,
     });
-    expect(container.querySelector('.star-btn')).toBeNull();
-    expect(container.querySelector('.meta-footer')).toBeNull();
+    const stars = container.querySelectorAll('button[aria-pressed]');
+    expect(stars).toHaveLength(1);
+    expect(stars[0].closest('.turn-actions')?.classList.contains('revealed')).toBe(false);
   });
 
   it('renders the star on the active touch row', () => {
@@ -323,12 +323,12 @@ describe('tap activation (touch)', () => {
       touch: true,
       active: true,
     });
-    expect(container.querySelector('.star-btn')).not.toBeNull();
+    expect(container.querySelector('.turn-action.star')).not.toBeNull();
   });
 
-  it('keeps an already-starred message showing its star while unrevealed', () => {
-    // Starred is state, not an affordance — hiding it would lose the only
-    // indication the message is starred at all.
+  it('marks an already-starred message on the row while unrevealed', () => {
+    // Starred is state, not an affordance — the row's edge mark carries it at
+    // rest, so the toggle can stay hidden with the rest of the action row.
     const { container } = render(Message, {
       message: finished({ msgId: 42, starred: true }),
       onConfirm: noop,
@@ -336,10 +336,10 @@ describe('tap activation (touch)', () => {
       onToggleStar: noop,
       touch: true,
     });
-    expect(container.querySelector('.star-btn')?.classList.contains('starred')).toBe(true);
+    expect(container.querySelector('.msg')?.classList.contains('starred')).toBe(true);
   });
 
-  it('does not render the star on an unrevealed touch system row', () => {
+  it('renders no star outside the action row on an unrevealed touch system row', () => {
     const { container } = render(Message, {
       message: finished({ role: 'system', msgId: 42 }),
       onConfirm: noop,
@@ -347,7 +347,9 @@ describe('tap activation (touch)', () => {
       onToggleStar: noop,
       touch: true,
     });
-    expect(container.querySelector('.star-btn')).toBeNull();
+    const stars = container.querySelectorAll('button[aria-pressed]');
+    expect(stars).toHaveLength(1);
+    expect(stars[0].closest('.turn-actions')).not.toBeNull();
   });
 
   it('marks the row touch-driven so the hover reveal stands down', () => {
@@ -410,12 +412,6 @@ describe('system rows carry the turn action row', () => {
     const { container } = render(Message, { message: systemRow(), ...everyHandler });
 
     expect(container.querySelector('.cmd-row > .content > .turn-actions')).not.toBeNull();
-  });
-
-  it('keeps the hover-bar star alongside it', () => {
-    const { container } = render(Message, { message: systemRow(), ...everyHandler });
-
-    expect(container.querySelector('.cmd-actions .star-btn')).not.toBeNull();
   });
 
   it('withholds it from a search-results row, which has no markdown source', () => {
@@ -574,33 +570,6 @@ describe('room label chip (aggregate views)', () => {
       onRoomClick: noop,
     });
     expect(container.querySelector('.room-chip')?.textContent?.trim()).toBe('general');
-  });
-});
-
-describe('hover metadata', () => {
-  const withMeta = () =>
-    finished({ taskId: 7, model: 'anthropic/claude-opus-4-8', durationSeconds: 12 });
-
-  it('shows task, model and duration in room mode', () => {
-    const { container } = render(Message, {
-      message: withMeta(),
-      onConfirm: noop,
-      onReject: noop,
-    });
-    const footer = container.querySelector('.meta-footer')?.textContent ?? '';
-    expect(footer).toContain('#7');
-    expect(footer).toContain('opus-4-8');
-    expect(footer).toContain('12s');
-  });
-
-  it('shows only the task number in the aggregate views', () => {
-    const { container } = render(Message, {
-      message: withMeta(),
-      onConfirm: noop,
-      onReject: noop,
-      aggregate: true,
-    });
-    expect(container.querySelector('.meta-footer')?.textContent?.trim()).toBe('#7');
   });
 });
 

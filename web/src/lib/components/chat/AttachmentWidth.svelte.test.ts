@@ -45,7 +45,7 @@ describe('attachment chip width', () => {
     const source = sourceOf('Composer.svelte');
     const css = styleOf('Composer.svelte');
     expect(source).toMatch(
-      /<span class="attach-chip"[\s\S]*?<span class="attach-name">\{att\.name\}<\/span>\s*<button\s+class="attach-x"/,
+      /<span class="attach-chip"[\s\S]*?<span class="attach-name">\{att\.name\}<\/span>\s*<button\s+class="attach-x[ "]/,
     );
     expect(rule(css, '.attach-row')).toMatch(/min-width:\s*0/);
     const chip = rule(css, '.attach-chip');

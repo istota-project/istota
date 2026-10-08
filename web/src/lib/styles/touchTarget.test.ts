@@ -189,7 +189,6 @@ describe('compact control touch targets', () => {
     ['lib/components/ui/CategoryGroup.svelte', 'caret-btn'],
     ['lib/components/ui/HintPopover.svelte', 'ui-hint-trigger'],
     ['lib/components/chat/Composer.svelte', 'attach-x'],
-    ['lib/components/chat/Message.svelte', 'star-btn'],
     ['routes/health/documents/+page.svelte', 'detach'],
     ['routes/health/labs/panel/+page.svelte', 'del'],
   ])('uses the shared target for %s %s', (file, control) => {
