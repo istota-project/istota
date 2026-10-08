@@ -50,6 +50,7 @@ import re
 from typing import TYPE_CHECKING, NamedTuple
 
 from istota import confirmations, db
+from istota.rooms import ack_reaction
 from istota.rooms import policy as room_policy
 from istota.rooms import veto as room_veto
 from .. import participants
@@ -94,12 +95,26 @@ QUOTE_WINDOW_SECONDS = 24 * 3600
 #: wait plus its 10-second lock wait, rounded up), so a claim that was in its
 #: window when asked is not refused for the fetch's own duration.
 CLAIM_SLACK_SECONDS = 120
+#: How long a member's opened photo or GIF with no caption waits before its
+#: task runs, so the words people send a few seconds after the file reach the
+#: same answer (`_held_bare_file`). Observed gaps were 9 and 13 seconds.
+BARE_FILE_HOLD_SECONDS = 30
+#: The kinds a bare file is held for. A voice note is not: it carries words.
+_HELD_KINDS = frozenset({"image", "gif"})
 
 
 class MediaClaim(NamedTuple):
     """An earlier group message whose unopened file a turn may claim."""
     message_id: str
     kind: str
+
+
+class HeldBareFile(NamedTuple):
+    """A member's opened file with no caption whose task has not started."""
+    row_id: int
+    task_id: int
+    kind: str
+    attachments: list[str]
 
 
 def group_room_token(group_jid: str) -> str:
@@ -772,6 +787,86 @@ def _settle_claim(conn, row_id: int, kind: str) -> None:
     )
 
 
+def _bare_file_kind(body: str) -> str | None:
+    """The kind of file a stored row's body says was sent with no caption."""
+    from .webhook import GIF_FRAMES_NOTE, GIF_ONLY_PROMPT, MEDIA_ONLY_PROMPT
+
+    if body == MEDIA_ONLY_PROMPT:
+        return "image"
+    if body == f"{GIF_ONLY_PROMPT}\n{GIF_FRAMES_NOTE}":
+        return "gif"
+    return None
+
+
+def _held_bare_file(conn, room_token: str, user_id: str) -> HeldBareFile | None:
+    """The sender's own bare file whose held task their next words join.
+
+    Read inside the batch's `BEGIN IMMEDIATE`, so no worker can claim the task
+    between this answer and the fold. Only the sender's latest such row, only
+    while its task is still the unattempted held row, and only while nothing
+    in the room was answered after it.
+    """
+    row = conn.execute(
+        "SELECT m.id, m.body, m.task_id, t.attachments FROM messages m "
+        "JOIN tasks t ON t.id = m.task_id "
+        "WHERE m.room_token = ? AND m.role = 'user' AND m.author_user_id = ? "
+        "AND t.status = 'pending' AND t.attempt_count = 0 "
+        "AND t.scheduled_for IS NOT NULL ORDER BY m.id DESC LIMIT 1",
+        (room_token, user_id),
+    ).fetchone()
+    if row is None:
+        return None
+    kind = _bare_file_kind(row["body"])
+    if kind is None:
+        return None
+    if conn.execute(
+        "SELECT 1 FROM messages WHERE room_token = ? AND id > ? "
+        "AND (role = 'assistant' OR task_id IS NOT NULL) LIMIT 1",
+        (room_token, row["id"]),
+    ).fetchone() is not None:
+        return None
+    try:
+        attachments = json.loads(row["attachments"] or "[]")
+    except ValueError:
+        return None
+    if not isinstance(attachments, list) or not attachments:
+        return None
+    return HeldBareFile(int(row["id"]), int(row["task_id"]), kind, attachments)
+
+
+def _fold_into_held(
+    conn, held: HeldBareFile, *, follow_up_id: int, text: str, addressed: bool,
+) -> bool:
+    """The follow-up becomes the held file's words, and its task runs now.
+
+    The task's prompt is what the pair would have been as one captioned
+    message (`webhook.media_turn_text`), the follow-up row takes the task and
+    the file, and the file's row says it was opened for a later message, as a
+    claim leaves it (ISSUE-658). An addressed follow-up is not declinable.
+    """
+    from .webhook import GIF_FRAMES_NOTE
+
+    prompt = f"{text}\n{GIF_FRAMES_NOTE}" if held.kind == "gif" else text
+    cur = conn.execute(
+        "UPDATE tasks SET prompt = ?, scheduled_for = NULL, "
+        "declinable = CASE WHEN ? THEN 0 ELSE declinable END "
+        "WHERE id = ? AND status = 'pending' AND attempt_count = 0",
+        (prompt, 1 if addressed else 0, held.task_id),
+    )
+    if cur.rowcount != 1:
+        return False
+    # The file's row lets go of the task first: one user row per task per room.
+    conn.execute(
+        "UPDATE messages SET task_id = NULL, body = ?, attachments = NULL, "
+        "attachment_paths = NULL WHERE id = ?",
+        (_claimed_stand_in(held.kind), held.row_id),
+    )
+    conn.execute(
+        "UPDATE messages SET task_id = ? WHERE id = ?", (held.task_id, follow_up_id),
+    )
+    return True
+
+
 def handle_group_message(
     conn, config: "Config", event: InboundWhatsAppEvent,
     *, classified: "GateDecision | None" = None,
@@ -943,26 +1038,67 @@ def handle_group_message(
             ))
     if user_id:
         confirmations.cancel_for_conversation(conn, room.token, user_id, by="whatsapp")
+    addressed = addressed_to_bot(
+        conn, config, text, mentions_bot=event.group.mentions_bot,
+        reply_to_message_id=event.reply_to_message_id,
+    )
+    author = ParticipantRef(
+        surface=SURFACE, surface_ref=ref, user_id=user_id,
+        display_name=event.from_user.username,
+    )
+    held = (
+        _held_bare_file(conn, room.token, user_id)
+        if user_id and text and not attachments and event.message_type in _TEXT_TYPES
+        else None
+    )
+    if held is not None:
+        # Whatever the gate makes of these words alone, they belong to the
+        # file the sender posted a moment ago, whose task is still waiting.
+        outcome = record_inbound(
+            conn, config,
+            surface=SURFACE, surface_ref=group_jid, user_id=user_id,
+            text=body, source_type="whatsapp", channel_name=None,
+            attachments=held.attachments,
+            external_id=event.message_id,
+            addressed_to_bot=addressed,
+            author=author,
+            room_container=True,
+            classified=classified,
+            record_only=True,
+        )
+        if outcome.message_id is not None and _fold_into_held(
+            conn, held, follow_up_id=outcome.message_id, text=text,
+            addressed=addressed,
+        ):
+            return done(WhatsAppEventResult(
+                "task", user_id=user_id, task_id=held.task_id,
+            ))
+        return done(WhatsAppEventResult(
+            f"group_{outcome.outcome}", user_id=user_id,
+        ))
+    bare = attached and not text and event.message_type in _HELD_KINDS
     outcome = record_inbound(
         conn, config,
         surface=SURFACE, surface_ref=group_jid, user_id=user_id or "",
         text=body, source_type="whatsapp", channel_name=None,
         attachments=attachments or None,
         external_id=event.message_id,
-        addressed_to_bot=addressed_to_bot(
-            conn, config, text, mentions_bot=event.group.mentions_bot,
-            reply_to_message_id=event.reply_to_message_id,
-        ),
-        author=ParticipantRef(
-            surface=SURFACE, surface_ref=ref, user_id=user_id,
-            display_name=event.from_user.username,
-        ),
+        addressed_to_bot=addressed,
+        author=author,
         is_command=is_command,
         room_container=True,
         classified=classified,
         worded=bool(text),
-        can_react=True,
+        # A bare file is held for its sender's next words below, never for a
+        # reaction, whose settle would delete the task those words join.
+        can_react=not bare,
     )
+    if bare and outcome.task_id is not None:
+        conn.execute(
+            "UPDATE tasks SET scheduled_for = ? "
+            "WHERE id = ? AND status = 'pending' AND attempt_count = 0",
+            (ack_reaction.hold_until(seconds=BARE_FILE_HOLD_SECONDS), outcome.task_id),
+        )
     if claimed is not None and outcome.task_id is not None:
         attached = True
         if not outcome.held_for_reaction:
