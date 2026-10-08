@@ -133,6 +133,22 @@ def test_refuses_active_tasks_without_any_write(database, status, capsys):
     assert snapshot(database) == before
 
 
+@pytest.mark.parametrize("status", ["locked", "running", "pending_confirmation"])
+def test_live_tasks_do_not_refuse_when_no_legacy_room_remains(database, status, capsys):
+    """The task table is consulted only when a room is pending (ISSUE-690)."""
+    with db.get_db(database) as conn:
+        legacy(conn)
+    assert room_relocate.migrate_database(database) == 0
+    with db.get_db(database) as conn:
+        ident = db.create_task(conn, user_id="alice", prompt="hi", source_type="web")
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, ident))
+    capsys.readouterr()
+    assert room_relocate.migrate_database(database) == 0
+    captured = capsys.readouterr()
+    assert "refusal:" not in captured.err
+    assert "0 migrated, 1 already-migrated, 0 failed" in captured.out
+
+
 @pytest.mark.parametrize("ddl", [
     "ALTER TABLE rooms ADD COLUMN future_token TEXT",
     "ALTER TABLE rooms ADD COLUMN future_token VARCHAR(255)",

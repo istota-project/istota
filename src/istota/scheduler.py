@@ -432,7 +432,7 @@ def _task_heartbeat(config: Config, task_id: int):
         thread.join(timeout=5)
 
 
-def recover_orphaned_tasks_on_startup(config: Config) -> None:
+def recover_orphaned_tasks_on_startup(config: Config) -> int:
     """Reclaim tasks abandoned mid-execution by a dead prior daemon instance.
 
     Runs once at startup under the flock, before any worker spawns, so every
@@ -448,13 +448,17 @@ def recover_orphaned_tasks_on_startup(config: Config) -> None:
     clients pick the frame up by polling the ``task_events`` table. Released
     orphans emit nothing: their re-run streams a fresh ``task_started`` and the
     client resumes from its cursor (the documented retry-continuity path).
+
+    Also run by ``init --relocate-rooms --scheduler-stopped``, which the
+    offline deploy window calls once it has stopped the scheduler. Returns the
+    number of rows recovered.
     """
     with db.get_db(config.db_path) as conn:
         recovered = db.recover_orphaned_tasks(
             conn, config.scheduler.max_retry_age_minutes,
         )
     if not recovered:
-        return
+        return 0
 
     counts = {"released": 0, "cancelled": 0, "failed": 0}
     for info in recovered:
@@ -483,6 +487,7 @@ def recover_orphaned_tasks_on_startup(config: Config) -> None:
         "(released=%d, cancelled=%d, failed=%d)",
         len(recovered), counts["released"], counts["cancelled"], counts["failed"],
     )
+    return len(recovered)
 
 
 def _is_policy_refusal(error_text: str) -> bool:

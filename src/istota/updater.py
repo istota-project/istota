@@ -117,7 +117,8 @@ def _run_fresh_migrations(config_path: Path | None, run: Runner) -> None:
     cmd = ["istota"]
     if config_path is not None:
         cmd += ["-c", str(config_path)]
-    cmd += ["init", "--relocate-rooms"]
+    # run_update refuses while the daemon holds its lock, so it is stopped.
+    cmd += ["init", "--relocate-rooms", "--scheduler-stopped"]
     result = run(cmd)
     if result.returncode != 0:
         raise UpdateError(
