@@ -69,6 +69,8 @@ import {
   type HealthDocument,
 } from '$lib/api';
 import Page from './+page.svelte';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
+import { __history } from '../../../../vitest-stubs/app-navigation';
 import { viewer } from '$lib/fileViewer/store.svelte';
 
 afterEach(() => {
@@ -123,6 +125,8 @@ beforeEach(() => {
   // No `clearMocks` in vitest.config, so call counts would otherwise carry
   // across tests and every "called once" assertion would drift upward.
   vi.clearAllMocks();
+  __history.reset('/istota/health/documents/');
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.mocked(listDocuments).mockResolvedValue({ documents: [attached, loose] });
   vi.mocked(listDocuments).mockImplementation(async (_entity, page) =>
     // A short page, so the paging walk stops after one request. A mock that
@@ -415,4 +419,33 @@ describe('document list image links', () => {
     expect(viewer.state).toEqual({ mode: 'images', images: [image.url], index: 0 });
     expect(screen.queryByRole('menu')).toBeNull();
   });
+});
+
+it('scrolls to a document on initial and same-route search navigation', async () => {
+  __history.reset('/istota/health/documents/?id=2');
+  const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+  render(Page);
+  const second = (await screen.findByText('scan.pdf')).closest('tr');
+  await waitFor(() => expect(second).toHaveClass('search-target'));
+  expect(scroll.mock.instances).toContain(second);
+  page.url = new URL('http://localhost/istota/health/documents/?id=1');
+  page.state = {};
+  const first = screen.getByText('discharge.pdf').closest('tr');
+  await waitFor(() => expect(first).toHaveClass('search-target'));
+  expect(second).not.toHaveClass('search-target');
+  expect(scroll.mock.instances).toContain(first);
+  expect(getDocument).not.toHaveBeenCalled();
+});
+
+it('fetches a search target outside the loaded list and reports a stale link', async () => {
+  __history.reset('/istota/health/documents/?id=99');
+  vi.mocked(getDocument).mockResolvedValue({ document: doc(99, 'older.pdf', []), links: [] });
+  render(Page);
+  const row = (await screen.findByText('older.pdf')).closest('tr');
+  await waitFor(() => expect(row).toHaveClass('search-target'));
+  expect(getDocument).toHaveBeenCalledWith(99);
+  vi.mocked(getDocument).mockRejectedValueOnce(new Error('Not found'));
+  page.url = new URL('http://localhost/istota/health/documents/?id=100');
+  page.state = {};
+  expect(await screen.findByText("Couldn't locate that document.")).toBeInTheDocument();
 });

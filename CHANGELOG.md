@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Search beside the notification bell finds messages, room names, memories, facts and records in your enabled modules. Open it with Cmd+K or Ctrl+K, choose a result to open its source, or search transactions when you need them. Older message results can load the matching history and mark the message in its room.
+
 - Recovery-code sign-in can fill one saved code after your approval, without displaying it in chat. Used codes stay marked in Settings, and a notice asks you to regenerate a nearly exhausted set; enrollment can confirm one freshly captured code without a separate approval.
 
 - Browser enrollment can capture two-factor seeds, recovery codes and recovery phrases directly from the page without showing them in chat. Masked page reads and secret discovery let tasks choose a capture selector without reading the value, including codes in text downloads. Recovery sets record used codes, and credential exports preserve those markers.

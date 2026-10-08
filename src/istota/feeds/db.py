@@ -38,7 +38,31 @@ from istota.lib.timestamps import iso_now
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+
+
+_FTS_STATEMENTS = (
+    """CREATE VIRTUAL TABLE IF NOT EXISTS feed_entries_fts USING fts5(
+        title, author, content_text,
+        content='feed_entries', content_rowid='id',
+        tokenize='unicode61 remove_diacritics 2'
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS feed_entries_fts_ai AFTER INSERT ON feed_entries BEGIN
+        INSERT INTO feed_entries_fts(rowid, title, author, content_text)
+        VALUES (new.id, new.title, new.author, new.content_text);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS feed_entries_fts_ad AFTER DELETE ON feed_entries BEGIN
+        INSERT INTO feed_entries_fts(feed_entries_fts, rowid, title, author, content_text)
+        VALUES ('delete', old.id, old.title, old.author, old.content_text);
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS feed_entries_fts_au
+    AFTER UPDATE OF title, author, content_text ON feed_entries BEGIN
+        INSERT INTO feed_entries_fts(feed_entries_fts, rowid, title, author, content_text)
+        VALUES ('delete', old.id, old.title, old.author, old.content_text);
+        INSERT INTO feed_entries_fts(rowid, title, author, content_text)
+        VALUES (new.id, new.title, new.author, new.content_text);
+    END""",
+)
 
 
 SCHEMA_SQL = """
@@ -163,6 +187,9 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 """
+
+
+SCHEMA_SQL += "\n" + ";\n".join(_FTS_STATEMENTS) + ";\n"
 
 
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -455,6 +482,31 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='feed_entries_fts'").fetchone():
+        return
+    # Hold the writer lock before checking: a second opener must see either
+    # the complete index or none of it, never a table awaiting its rebuild.
+    conn.execute("SAVEPOINT feeds_fts")
+    try:
+        conn.execute("UPDATE schema_meta SET value=value WHERE key='version'")
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='feed_entries_fts'"
+        ).fetchone()
+        if not exists:
+            for statement in _FTS_STATEMENTS:
+                conn.execute(statement)
+            conn.execute("INSERT INTO feed_entries_fts(feed_entries_fts) VALUES ('rebuild')")
+        conn.execute("RELEASE feeds_fts")
+    except BaseException:
+        # SQLITE_INTERRUPT during rebuild may already have rolled back the
+        # entire transaction, including this savepoint.
+        if conn.in_transaction:
+            conn.execute("ROLLBACK TO feeds_fts")
+            conn.execute("RELEASE feeds_fts")
+        raise
+
+
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (2, _migrate_v1_to_v2),
     (3, _migrate_v2_to_v3),
@@ -463,6 +515,7 @@ _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (6, _migrate_v5_to_v6),
     (7, _migrate_v6_to_v7),
     (8, _migrate_v7_to_v8),
+    (9, _migrate_v8_to_v9),
 ]
 
 
@@ -530,7 +583,7 @@ def _read_schema_version(conn: sqlite3.Connection) -> int:
 
 
 @contextmanager
-def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
+def connect(db_path: Path, *, busy_timeout_ms: int = 30_000) -> Iterator[sqlite3.Connection]:
     """Open a SQLite connection with the conventions this module expects.
 
     - ``foreign_keys = ON`` so the FK from feeds.category_id and from
@@ -541,7 +594,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     # — NOT re-issued here; sqlite_util's docstring has the reason. The 30s busy
     # handler absorbs any residual contention between the web reader and the
     # */5min feeds poll instead of raising SQLITE_BUSY.
-    with sqlite_util.open_db(db_path) as conn:
+    with sqlite_util.open_db(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
         yield conn
 
 
@@ -1517,6 +1570,11 @@ def image_key_owners(
             (r["image_key"], int(r["entry_id"]), int(r["seen_ts"])) for r in rows
         )
     return out
+
+
+def get_entry(conn: sqlite3.Connection, entry_id: int) -> EntryRecord | None:
+    row = conn.execute("SELECT * FROM feed_entries WHERE id = ?", (entry_id,)).fetchone()
+    return _row_to_entry(row) if row else None
 
 
 def list_entries(

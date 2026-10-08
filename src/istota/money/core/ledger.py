@@ -48,7 +48,7 @@ def run_bean_check(ledger_path: Path) -> tuple[bool, list[str]]:
         raise ValueError("bean-check timed out")
 
 
-def run_bean_query(ledger_path: Path, query: str) -> list[dict]:
+def run_bean_query(ledger_path: Path, query: str, *, timeout: float | None = None) -> list[dict]:
     """Run bean-query and return results as list of dicts."""
     try:
         result = subprocess.run(
@@ -56,7 +56,7 @@ def run_bean_query(ledger_path: Path, query: str) -> list[dict]:
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=120,
+            timeout=120 if timeout is None else timeout,
         )
         if result.returncode != 0:
             error_msg = result.stderr.strip() or "Query failed"
@@ -74,8 +74,10 @@ def run_bean_query(ledger_path: Path, query: str) -> list[dict]:
         return rows
     except FileNotFoundError:
         raise ValueError("bean-query not found. Is beancount installed?")
-    except subprocess.TimeoutExpired:
-        raise ValueError("bean-query timed out")
+    except subprocess.TimeoutExpired as exc:
+        if timeout is not None:
+            raise TimeoutError("bean-query timed out") from exc
+        raise ValueError("bean-query timed out") from exc
 
 
 def check(ledger_path: Path) -> dict:
@@ -114,6 +116,39 @@ def list_open_accounts(ledger_path: Path) -> list[str]:
 def _sanitize_bql_string(value: str) -> str:
     """Escape single quotes in a value interpolated into a BQL query string."""
     return value.replace("'", "''")
+
+
+def search_transactions(
+    ledger_path: Path, text: str | None = None, *, account: str | None = None,
+    year: int | None = None, limit: int | None = None, offset: int = 0,
+    timeout: float | None = None,
+) -> list[dict]:
+    """Read the same posting rows for the transactions page and global search."""
+    conditions = []
+    if account:
+        safe = _sanitize_bql_string(account)
+        conditions.append(f"account ~ '{safe}'")
+    else:
+        conditions.append("account ~ '^(Income|Expenses):'")
+    if year:
+        conditions.append(f"year = {int(year)}")
+    if text:
+        safe = _sanitize_bql_string(text)
+        if safe.startswith("#"):
+            conditions.append(f"'{safe[1:]}' IN tags")
+        else:
+            conditions.append(f"(payee ~ '{safe}' OR narration ~ '{safe}')")
+    where = " WHERE " + " AND ".join(conditions)
+    bql = (
+        "SELECT date, flag, payee, narration, account, position, tags,"
+        " entry_meta('id') as id"
+        f"{where} ORDER BY date DESC"
+    )
+    if timeout is None:
+        rows = run_bean_query(ledger_path, bql)
+    else:
+        rows = run_bean_query(ledger_path, bql, timeout=timeout)
+    return rows[offset:offset + limit] if limit is not None else rows[offset:]
 
 
 def balances(ledger_path: Path, account: str | None = None) -> dict:

@@ -86,7 +86,7 @@
   } = session;
 
   type ChatSelection =
-    | { kind: 'room'; room: string; task?: number; msg?: number }
+    | { kind: 'room'; room: string; task?: number; msg?: number; ts?: string }
     | { kind: 'view'; view: ChatView }
     | { kind: 'empty' };
   let selectionReady = $state(false);
@@ -95,20 +95,29 @@
     if (selection.kind === 'empty') return;
     if (selection.kind === 'view') await session.selectView(selection.view);
     else if (selection.task !== undefined) await session.jumpToTask(selection.room, selection.task);
-    else if (selection.msg !== undefined) await session.jumpToMsgId(selection.room, selection.msg);
-    else await session.selectRoomByToken(selection.room);
+    else if (selection.msg !== undefined) {
+      if (selection.ts)
+        await session.jumpToMsgId(selection.room, selection.msg, {
+          ts: selection.ts,
+          id: selection.msg,
+        });
+      else await session.jumpToMsgId(selection.room, selection.msg);
+    } else await session.selectRoomByToken(selection.room);
   }
 
   const chatSel = createUrlSelection<ChatSelection>({
     key: 'chat',
-    params: ['room', 'view', 'task', 'msg'],
+    params: ['room', 'view', 'task', 'msg', 'ts'],
     compareKeys: ['room', 'view'],
     encode(selection) {
       if (selection.kind === 'empty') return {};
       if (selection.kind === 'view') return { view: selection.view };
       const params: Params = { room: selection.room };
       if (selection.task !== undefined) params.task = String(selection.task);
-      else if (selection.msg !== undefined) params.msg = String(selection.msg);
+      else if (selection.msg !== undefined) {
+        params.msg = String(selection.msg);
+        if (selection.ts) params.ts = selection.ts;
+      }
       return params;
     },
     decode(params) {
@@ -118,7 +127,10 @@
         const task = Number(params.task);
         const msg = Number(params.msg);
         if (Number.isSafeInteger(task) && task > 0) selection.task = task;
-        else if (Number.isSafeInteger(msg) && msg > 0) selection.msg = msg;
+        else if (Number.isSafeInteger(msg) && msg > 0) {
+          selection.msg = msg;
+          if (params.ts) selection.ts = params.ts;
+        }
         return selection;
       }
       if (params.view === 'all' || params.view === 'unread' || params.view === 'starred') {
@@ -772,7 +784,7 @@
    * first pin.
    */
   function pinToBottom(repaint = false) {
-    if (!listEl) return;
+    if (!listEl || !atBottom) return;
     // A plain pin mid-settle would land between the nudge and its paint (a
     // resize observation is delivered after frame callbacks, before paint) and
     // put the offset back where it was, so the frame repaints nothing. The
@@ -788,7 +800,7 @@
       if (gen === settleGen) settling = false;
     };
     requestAnimationFrame(() => {
-      if (!listEl) return settle();
+      if (!listEl || gen !== settleGen) return settle();
       // Relative to the max *scroll offset*, not scrollHeight: scrollHeight - 1
       // clamps straight back to the bottom on any scroller taller than a pixel,
       // so it would leave the offset unchanged and repaint nothing.
@@ -796,7 +808,7 @@
       if (maxTop <= 1) return settle(); // nothing to scroll, so nothing was jumped
       listEl.scrollTop = maxTop - 1;
       requestAnimationFrame(() => {
-        if (listEl) listEl.scrollTop = listEl.scrollHeight;
+        if (listEl && gen === settleGen) listEl.scrollTop = listEl.scrollHeight;
         settle();
       });
     });
@@ -987,7 +999,11 @@
       // scroll event re-samples if it happens to land at the bottom.
       atBottom = false;
       showJumpToLatest = true;
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      ++settleGen;
+      settling = false;
+      // A long smooth scroll can still report the old bottom before moving,
+      // which lets the resize pin cancel the jump. Move atomically instead.
+      el.scrollIntoView({ behavior: 'instant', block: 'center' });
       el.classList.add('jump-highlight');
       if (highlightTimer) clearTimeout(highlightTimer);
       highlightTimer = setTimeout(() => el.classList.remove('jump-highlight'), 2000);

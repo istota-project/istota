@@ -354,7 +354,11 @@ export interface ChatSession {
   // The same jump keyed on a canonical `messages.id` — what a rendered
   // citation clicks through to. A sibling of `jumpToTask` rather than a
   // parameter on it: only the resolution step differs.
-  jumpToMsgId: (roomToken: string, msgId: number) => Promise<boolean>;
+  jumpToMsgId: (
+    roomToken: string,
+    msgId: number,
+    cursor?: { ts: string; id: number },
+  ) => Promise<boolean>;
   scrollToCid: (cid: number) => void;
   scrollTarget: Writable<{ cid: number; nonce: number } | null>;
   newRoom: (name: string) => Promise<void>;
@@ -646,7 +650,10 @@ function createSession(): ChatSession {
     if (ts && SERVER_STAMP.test(ts)) {
       const at = arr.findIndex(
         (m) =>
-          m.msgId != null && !!m.createdAt && SERVER_STAMP.test(m.createdAt) && m.createdAt > ts,
+          m.msgId != null &&
+          !!m.createdAt &&
+          SERVER_STAMP.test(m.createdAt) &&
+          (m.createdAt > ts || (m.createdAt === ts && row.msgId != null && m.msgId > row.msgId)),
       );
       if (at !== -1) {
         const next = arr.slice();
@@ -3214,19 +3221,38 @@ function createSession(): ChatSession {
         if (req === olderRequest) loadingOlder.set(false);
       }
     }
+    const result = await loadOlderRoom();
+    return result?.added ?? false;
+  }
+
+  async function loadOlderRoom(until?: {
+    ts: string;
+    id: number;
+  }): Promise<{ history: ChatHistory; added: boolean } | null> {
     const roomId = get(activeRoomId);
-    if (roomId == null || !get(hasMore) || get(loadingOlder) || !oldestCursor) return false;
+    if (roomId == null || get(loadingOlder)) return null;
+    if (!until && (!get(hasMore) || !oldestCursor)) return null;
+    // Auxiliary notes can be omitted inside an otherwise loaded spine window.
+    const fillsHole =
+      !!until &&
+      (!oldestCursor ||
+        until.ts > oldestCursor.ts ||
+        (until.ts === oldestCursor.ts && until.id >= oldestCursor.id));
+    const before = fillsHole ? { ts: until!.ts, id: until!.id + 1 } : oldestCursor!;
     const req = ++olderRequest;
     loadingOlder.set(true);
     try {
       // Deliberately unbounded: a timeout here reports the connection offline,
       // and a slow scroll-up page is not an outage. A late answer is dropped by
       // the request check below rather than applied.
-      const hist = await getRoomMessages(roomId, { before: oldestCursor });
+      const hist = await getRoomMessages(roomId, {
+        before,
+        ...(until ? { until } : {}),
+      });
       // Switched rooms mid-fetch — drop the page rather than prepend it into
       // the wrong transcript. The request check also catches a switch away and
       // back, which leaves the room id equal and the transcript replaced.
-      if (get(activeRoomId) !== roomId || req !== olderRequest) return false;
+      if (get(activeRoomId) !== roomId || req !== olderRequest) return null;
       // Dedup against what's already on screen by the same identity the server
       // dedups on: (role, taskId) for task-backed turns, notif_id for system
       // rows. The band tiling already prevents overlap; this guards a
@@ -3249,13 +3275,21 @@ function createSession(): ChatSession {
         return true;
       });
       const page = fresh.map(buildHistoryMessage);
-      if (page.length) messages.update((cur) => [...page, ...cur]);
-      oldestCursor = hist.oldest_cursor ?? null;
-      hasMore.set(!!hist.has_more);
-      return page.length > 0;
-    } catch {
+      if (fillsHole) {
+        messages.update((cur) => {
+          for (const row of page) cur = insertStreamedRow(cur, row);
+          return cur;
+        });
+      } else {
+        if (page.length) messages.update((cur) => [...page, ...cur]);
+        oldestCursor = hist.oldest_cursor ?? null;
+        hasMore.set(!!hist.has_more);
+      }
+      return { history: hist, added: page.length > 0 };
+    } catch (e) {
+      if (until) throw e;
       // Transient — leave the cursor untouched so the next scroll retries.
-      return false;
+      return null;
     } finally {
       if (req === olderRequest) loadingOlder.set(false);
     }
@@ -3769,7 +3803,11 @@ function createSession(): ChatSession {
   // older history up to a bound when it's outside the loaded window — then
   // scroll to it. Returns false (and sets a transient error) on any miss rather
   // than throwing, so a stale/foreign link degrades gracefully.
-  async function jumpToRow(roomToken: string, resolve: () => number | null): Promise<boolean> {
+  async function jumpToRow(
+    roomToken: string,
+    resolve: () => number | null,
+    cursor?: { ts: string; id: number },
+  ): Promise<boolean> {
     try {
       const room = get(rooms).find((r) => r.token === roomToken);
       if (!room) {
@@ -3784,8 +3822,23 @@ function createSession(): ChatSession {
         }
       }
       let cid = resolve();
+      if (cid == null && cursor) {
+        const result = await loadOlderRoom(cursor);
+        if (get(activeRoomId) !== room.id || get(view) !== 'room') return false;
+        if (result?.history.truncated) {
+          notifyError('That message is too far back to open here.');
+          return false;
+        }
+        cid = resolve();
+      }
       let pages = 0;
-      while (cid == null && get(hasMore) && !get(loadingOlder) && pages < JUMP_MAX_PAGES) {
+      while (
+        !cursor &&
+        cid == null &&
+        get(hasMore) &&
+        !get(loadingOlder) &&
+        pages < JUMP_MAX_PAGES
+      ) {
         await loadOlder();
         pages += 1;
         cid = resolve();
@@ -3808,8 +3861,12 @@ function createSession(): ChatSession {
 
   /** The jump a rendered citation performs: same routine, keyed on the
    * canonical `messages.id` rather than on a task. */
-  function jumpToMsgId(roomToken: string, msgId: number): Promise<boolean> {
-    return jumpToRow(roomToken, () => findCidByMsgId(msgId));
+  function jumpToMsgId(
+    roomToken: string,
+    msgId: number,
+    cursor?: { ts: string; id: number },
+  ): Promise<boolean> {
+    return jumpToRow(roomToken, () => findCidByMsgId(msgId), cursor);
   }
 
   async function send(

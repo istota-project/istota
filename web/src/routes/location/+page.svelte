@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import {
     getLocationCurrent,
     getLocationPings,
@@ -24,6 +25,30 @@
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
   import { formatMinutes, formatRelative } from '$lib/dateFormat';
+
+  let requestedPlaceId = $state<number | null>(null);
+  const urlSelection = createUrlSelection<{ place: number | null }>({
+    key: 'locationPlace',
+    params: ['place'],
+    encode: ({ place }): Record<string, string> => (place === null ? {} : { place: String(place) }),
+    decode: (params) => ({
+      place:
+        /^\d+$/.test(params.place ?? '') && Number(params.place) > 0 ? Number(params.place) : null,
+    }),
+    read: () => null,
+    apply: ({ place }) => {
+      requestedPlaceId = place;
+    },
+  });
+  urlSelection.start();
+
+  $effect(() => {
+    const place = $locationPlaces.find((p) => p.id === requestedPlaceId);
+    if (requestedPlaceId !== null) {
+      selectedPlaceId.set(place?.id ?? null);
+      if (place) mapComponent?.flyTo(place.lat, place.lon, 15);
+    }
+  });
 
   let current = $state<CurrentLocation | null>(null);
   let pings: LocationPing[] = $state([]);
@@ -149,6 +174,7 @@
   }
 
   onMount(() => {
+    requestedPlaceId = urlSelection.current()?.place ?? null;
     loadData();
     pollInterval = setInterval(loadData, 60000);
   });

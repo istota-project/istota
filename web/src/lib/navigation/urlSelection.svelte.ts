@@ -102,8 +102,9 @@ export function createUrlSelection<T>(spec: UrlSelectionSpec<T>): UrlSelection<T
     observed = untrack(() => canonical(urlParams(), spec.params));
     $effect(() => {
       const state = (page.state as Record<string, unknown>)[spec.key];
-      // Only the namespace is reactive; store changes must not trigger replay.
+      // A same-route goto updates the URL; shallow history updates the namespace.
       void state;
+      void page.url;
       untrack(() => {
         const params = urlParams();
         const next = canonical(params, spec.params);

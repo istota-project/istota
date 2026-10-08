@@ -344,3 +344,23 @@ it('preserves a wallet validation field without losing the server message', asyn
     status: 400,
   });
 });
+
+describe('unified search', () => {
+  it('sends encoded query, source paging and cancellation through the authenticated client', async () => {
+    const response = { query: 'a & b', groups: [], on_demand: [] };
+    fetchMock.mockResolvedValue(jsonResponse(200, response));
+    const controller = new AbortController();
+    expect(
+      await api.search('a & b', {
+        sources: ['chats', 'memory'],
+        limit: 20,
+        offset: 40,
+        signal: controller.signal,
+      }),
+    ).toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/search?q=a+%26+b&sources=chats%2Cmemory&limit=20&offset=40',
+      expect.objectContaining({ credentials: 'same-origin', signal: controller.signal }),
+    );
+  });
+});

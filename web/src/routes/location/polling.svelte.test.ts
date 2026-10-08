@@ -7,12 +7,17 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
+const flyTo = vi.hoisted(() => vi.fn());
 vi.mock('$lib/components/location/LocationMap.svelte', () => ({
-  default: () => ({ flyTo: vi.fn() }),
+  default: () => ({ flyTo }),
 }));
 
 import { getDaySummary, getLocationCurrent, getLocationPings } from '$lib/api';
 import Page from './+page.svelte';
+import { get } from 'svelte/store';
+import { locationPlaces, selectedPlaceId } from '$lib/stores/location';
+import { page } from '../../../vitest-stubs/app-state.svelte';
+import { __history } from '../../../vitest-stubs/app-navigation';
 
 const PING: LocationPing = {
   timestamp: '2026-09-01T00:00:00Z',
@@ -52,6 +57,9 @@ function summary(date: string, stops = 0): DaySummary {
 }
 
 beforeEach(() => {
+  __history.reset('/istota/location/');
+  locationPlaces.set([]);
+  selectedPlaceId.set(null);
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2026, 7, 31, 23, 59, 30));
   vi.mocked(getLocationCurrent).mockResolvedValue({ last_ping: null, current_visit: null });
@@ -116,4 +124,24 @@ describe('location polling', () => {
     expect(getLocationPings).toHaveBeenCalledTimes(1);
     expect(getDaySummary).toHaveBeenCalledTimes(1);
   });
+});
+
+it('selects search places after the list loads and on same-route navigation', async () => {
+  vi.useRealTimers();
+  __history.reset('/istota/location/?place=2');
+  render(Page);
+  await waitFor(() => expect(getLocationCurrent).toHaveBeenCalledTimes(1));
+  locationPlaces.set([
+    { id: 1, name: 'Alpha', lat: 0, lon: 0, radius_meters: 100, category: '' },
+    { id: 2, name: 'Beta', lat: 1, lon: 1, radius_meters: 100, category: '' },
+  ]);
+  await waitFor(() => expect(get(selectedPlaceId)).toBe(2));
+  expect(flyTo).toHaveBeenLastCalledWith(1, 1, 15);
+  page.url = new URL('http://localhost/istota/location/?place=1');
+  page.state = {};
+  await waitFor(() => expect(get(selectedPlaceId)).toBe(1));
+  expect(flyTo).toHaveBeenLastCalledWith(0, 0, 15);
+  page.url = new URL('http://localhost/istota/location/?place=999');
+  page.state = {};
+  await waitFor(() => expect(get(selectedPlaceId)).toBe(null));
 });

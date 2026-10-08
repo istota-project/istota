@@ -262,6 +262,26 @@ def _plan_image_suppression(
     return plan_suppression(dated, owners, window_days=window_days)
 
 
+@router.get("/entries/{entry_id}")
+async def api_get_entry(
+    entry_id: int,
+    ctx: FeedsContext = Depends(get_user_context),
+):
+    def _query():
+        with feeds_db.connect(ctx.db_path) as conn:
+            entry = feeds_db.get_entry(conn, entry_id)
+            if entry is None:
+                return None
+            feeds = {f.id: f for f in feeds_db.list_feeds(conn)}
+            cats = {c.id: c for c in feeds_db.list_categories(conn)}
+            return _map_entry(entry, feeds, cats)
+
+    entry = await asyncio.to_thread(_query)
+    if entry is None:
+        return JSONResponse({"error": "Entry not found"}, status_code=404)
+    return entry
+
+
 @router.put("/entries/batch")
 async def api_update_entries_batch(
     request: Request,

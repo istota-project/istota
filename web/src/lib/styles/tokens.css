@@ -343,6 +343,8 @@
   --z-viewer: 60;
   --z-viewer-control: 61;
   --z-lightbox: 70;
+  --z-palette: 80;
+  --z-palette-panel: 81;
   --z-popover: 100;
   --z-toast: 200;
 

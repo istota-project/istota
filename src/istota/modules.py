@@ -61,3 +61,18 @@ def module_available(module: str) -> bool:
             cached = False
         _AVAILABILITY_CACHE[module] = cached
     return cached
+
+
+def module_loader(name: str):
+    """Resolve a module's loader protocol via lazy import.
+
+    Returns ``(list_users, resolve_for_user, connect, UserNotFoundError)``.
+    ``connect`` lives on the package for most modules but on the ``.db``
+    submodule for briefings — one fallback handles that without a per-module
+    special case. Lazy so importing ``web_app`` doesn't pull every module in.
+    """
+    mod = importlib.import_module(f"istota.{name}")
+    connect = getattr(mod, "connect", None)
+    if connect is None:
+        connect = importlib.import_module(f"istota.{name}.db").connect
+    return mod.list_users, mod.resolve_for_user, connect, mod.UserNotFoundError

@@ -179,4 +179,131 @@ describe('chat store — jump-to-response', () => {
     expect(second.cid).toBe(7);
     expect(second.nonce).toBeGreaterThan(first.nonce);
   });
+  it.each([false, true])('fetches one contiguous cursor band (truncated=%s)', async (truncated) => {
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    const before = { ts: '2026-06-10 12:00:00', id: 900 };
+    const until = { ts: '2026-01-01 00:00:00', id: 1 };
+    api.getRoomMessages.mockResolvedValueOnce(
+      page([{ ...asstTurn(900, 'recent'), msg_id: 900 }], {
+        has_more: true,
+        oldest_cursor: before,
+      }),
+    );
+    const s = await freshSession();
+    const notices = await freshNotices();
+    await s.init();
+    notices.clearNotices();
+    api.getRoomMessages.mockClear();
+    api.getRoomMessages.mockResolvedValueOnce(
+      page([{ ...asstTurn(1, 'old'), msg_id: truncated ? 2 : 1 }], {
+        has_more: true,
+        oldest_cursor: until,
+        truncated,
+      }),
+    );
+    expect(await s.jumpToMsgId('t1', 1, until)).toBe(!truncated);
+    expect(api.getRoomMessages).toHaveBeenCalledExactlyOnceWith(1, { before, until });
+    expect(get(s.messages)).toHaveLength(2);
+    if (truncated)
+      expect(get(notices.currentNotice)?.message).toBe(
+        'That message is too far back to open here.',
+      );
+    else expect(get(s.scrollTarget)?.cid).toBe(get(s.messages)[0].cid);
+  });
+
+  it.each([false, true])(
+    'fills a system-note hole without moving the paging cursor (more=%s)',
+    async (more) => {
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+      const oldest = { ts: '2026-06-10 12:00:00', id: 1 };
+      const target = { ts: '2026-06-10 12:05:00', id: 2 };
+      const next = { ts: target.ts, id: target.id + 1 };
+      api.getRoomMessages.mockResolvedValueOnce(
+        page(
+          [
+            { ...userTurn(1, 'first'), created_at: '2026-06-10T12:00:00Z', msg_id: 1 },
+            {
+              role: 'system',
+              text: 'last visible note',
+              created_at: '2026-06-10T12:05:00Z',
+              msg_id: 12,
+              notif_id: 12,
+            },
+            { ...asstTurn(3, 'last'), created_at: '2026-06-10T12:09:00Z', msg_id: 63 },
+          ],
+          { oldest_cursor: oldest, has_more: more },
+        ),
+      );
+      const session = await freshSession();
+      await session.init();
+      api.getRoomMessages.mockClear();
+      api.getRoomMessages.mockResolvedValueOnce(
+        page(
+          [
+            {
+              role: 'system',
+              text: 'omitted note',
+              created_at: '2026-06-10T12:05:00Z',
+              msg_id: 2,
+              notif_id: 2,
+            },
+          ],
+          { oldest_cursor: target, has_more: true },
+        ),
+      );
+      expect(await session.jumpToMsgId('t1', 2, target)).toBe(true);
+      expect(api.getRoomMessages).toHaveBeenCalledExactlyOnceWith(1, {
+        before: next,
+        until: target,
+      });
+      expect(get(session.messages).map((m) => m.msgId)).toEqual([1, 2, 12, 63]);
+      expect(get(session.hasMore)).toBe(more);
+      if (more) {
+        api.getRoomMessages.mockResolvedValueOnce(page([]));
+        await session.loadOlder();
+        expect(api.getRoomMessages).toHaveBeenLastCalledWith(1, { before: oldest });
+      }
+    },
+  );
+
+  it('keeps the five-page bound without a cursor', async () => {
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomMessages.mockResolvedValue(
+      page([asstTurn(2, 'recent')], {
+        has_more: true,
+        oldest_cursor: { ts: '2026-06-10 12:00:00', id: 2 },
+      }),
+    );
+    const s = await freshSession();
+    await s.init();
+    api.getRoomMessages.mockClear();
+    expect(await s.jumpToMsgId('t1', 999)).toBe(false);
+    expect(api.getRoomMessages).toHaveBeenCalledTimes(5);
+  });
+  it.each(['missing', 'failed'])(
+    'reports a %s cursor jump without paging again',
+    async (outcome) => {
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+      const cursor = { ts: '2026-01-01 00:00:00', id: 1 };
+      api.getRoomMessages.mockResolvedValueOnce(
+        page([{ ...asstTurn(2, 'recent'), msg_id: 2 }], {
+          has_more: true,
+          oldest_cursor: { ts: '2026-06-10 12:00:00', id: 2 },
+        }),
+      );
+      const s = await freshSession();
+      const notices = await freshNotices();
+      await s.init();
+      notices.clearNotices();
+      api.getRoomMessages.mockClear();
+      if (outcome === 'failed') api.getRoomMessages.mockRejectedValueOnce(new Error('offline'));
+      else api.getRoomMessages.mockResolvedValueOnce(page([]));
+      expect(await s.jumpToMsgId('t1', 1, cursor)).toBe(false);
+      expect(api.getRoomMessages).toHaveBeenCalledTimes(1);
+      expect(get(notices.currentNotice)?.message).toBe(
+        outcome === 'failed' ? "Couldn't jump to that message." : "Couldn't locate that message.",
+      );
+      expect(get(s.activeRoomId)).toBe(1);
+    },
+  );
 });

@@ -968,6 +968,10 @@ export async function getFeeds(params?: Record<string, string>): Promise<FeedsRe
   return apiFetch<FeedsResponse>(`/feeds${qs}`);
 }
 
+export async function getFeedEntry(id: number): Promise<FeedEntry> {
+  return apiFetch<FeedEntry>(`/feeds/entries/${id}`);
+}
+
 export async function updateEntryStatus(id: number, status: string): Promise<void> {
   await apiFetch(`/feeds/entries/${id}`, {
     method: 'PUT',
@@ -3111,6 +3115,7 @@ export interface ChatHistory {
   // Older history exists below this page (ISSUE-131). Absent on a pre-paging
   // backend, so the client treats `undefined` as "no more".
   has_more?: boolean;
+  truncated?: boolean;
   // Pass back as before_ts/before_id to fetch the next older page. `ts` is the
   // RAW stored created_at (`YYYY-MM-DD HH:MM:SS`), never the display value —
   // the keyset breaks if it's round-tripped through a normalized timestamp.
@@ -3599,7 +3604,12 @@ async function saveRoomFile(
 
 export function getRoomMessages(
   id: number,
-  opts: { limit?: number; before?: { ts: string; id: number } | null; timeoutMs?: number } = {},
+  opts: {
+    limit?: number;
+    before?: { ts: string; id: number } | null;
+    until?: { ts: string; id: number };
+    timeoutMs?: number;
+  } = {},
 ): Promise<ChatHistory> {
   const limit = opts.limit ?? 50;
   const params = new URLSearchParams({ limit: String(limit) });
@@ -3608,6 +3618,10 @@ export function getRoomMessages(
   if (opts.before) {
     params.set('before_ts', opts.before.ts);
     params.set('before_id', String(opts.before.id));
+  }
+  if (opts.until) {
+    params.set('until_ts', opts.until.ts);
+    params.set('until_id', String(opts.until.id));
   }
   return apiFetch<ChatHistory>(
     `/chat/rooms/${id}/messages?${params.toString()}`,
@@ -5070,4 +5084,43 @@ export function setCredentialBackup(
   step_up: StepUpProof,
 ): Promise<{ recipient_suffix: string | null }> {
   return credentialWrite('/backup', 'PUT', { recipient, step_up }, '/settings/credentials');
+}
+
+export type SearchLink =
+  { type: 'route'; path: string; params: Record<string, string> } | { type: 'file'; path: string };
+export interface SearchHit {
+  cursor?: { ts: string; id: number } | null;
+  id: string;
+  kind: string;
+  title: string;
+  subtitle: string | null;
+  snippet: string;
+  highlights: number[][];
+  date: string | null;
+  link: SearchLink | null;
+  badges: string[];
+}
+export interface SearchGroup {
+  source: string;
+  label: string;
+  results: SearchHit[];
+  has_more: boolean;
+  relaxed: boolean;
+  error: 'timeout' | 'failed' | null;
+  elapsed_ms: number;
+}
+export interface SearchResponse {
+  query: string;
+  groups: SearchGroup[];
+  on_demand?: { source: string; label: string }[];
+}
+export function search(
+  q: string,
+  options: { sources?: string[]; limit?: number; offset?: number; signal?: AbortSignal } = {},
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q });
+  if (options.sources) params.set('sources', options.sources.join(','));
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.offset !== undefined) params.set('offset', String(options.offset));
+  return apiFetch(`/search?${params}`, { signal: options.signal });
 }

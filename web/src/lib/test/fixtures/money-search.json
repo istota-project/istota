@@ -1,0 +1,127 @@
+{
+  "all": {
+    "query": "Coffee",
+    "groups": [
+      {
+        "source": "chats",
+        "label": "Chats",
+        "results": [],
+        "has_more": false,
+        "relaxed": false,
+        "error": null,
+        "elapsed_ms": 0
+      },
+      {
+        "source": "rooms",
+        "label": "Rooms",
+        "results": [],
+        "has_more": false,
+        "relaxed": false,
+        "error": null,
+        "elapsed_ms": 0
+      },
+      {
+        "source": "memory",
+        "label": "Memory",
+        "results": [],
+        "has_more": false,
+        "relaxed": false,
+        "error": null,
+        "elapsed_ms": 0
+      },
+      {
+        "source": "facts",
+        "label": "Facts",
+        "results": [],
+        "has_more": false,
+        "relaxed": false,
+        "error": null,
+        "elapsed_ms": 0
+      }
+    ],
+    "on_demand": [
+      {
+        "source": "money",
+        "label": "Transactions"
+      }
+    ]
+  },
+  "money": {
+    "query": "Coffee",
+    "groups": [
+      {
+        "source": "money",
+        "label": "Transactions",
+        "results": [
+          {
+            "id": "money:55787c389fd1fc8bfa955bada61490e59ed770246eccd03f4b55008552f688fb:1",
+            "kind": "transaction",
+            "title": "Acme",
+            "subtitle": "Expenses:Food:Coffee",
+            "snippet": "Acme Coffee refill",
+            "highlights": [[5, 11]],
+            "date": "2024-03-01",
+            "link": {
+              "type": "route",
+              "path": "/money/transactions/",
+              "params": {
+                "account": "Expenses:Food:Coffee",
+                "year": "2024"
+              }
+            },
+            "badges": [],
+            "cursor": null
+          },
+          {
+            "id": "money:fde3e1c3a9155e098c2e291972b229c5aabf28b0c6c23d9af90ece0a09d97b59:1",
+            "kind": "transaction",
+            "title": "Acme",
+            "subtitle": "Expenses:Food:Restaurants",
+            "snippet": "Acme Coffee refill",
+            "highlights": [[5, 11]],
+            "date": "2024-03-01",
+            "link": {
+              "type": "route",
+              "path": "/money/transactions/",
+              "params": {
+                "account": "Expenses:Food:Restaurants",
+                "year": "2024"
+              }
+            },
+            "badges": [],
+            "cursor": null
+          },
+          {
+            "id": "money:a0d8b7ecd8119504ae84c040a972d3a711dacd89d054fe3db58e0136f2ec7748:1",
+            "kind": "transaction",
+            "title": "Acme",
+            "subtitle": "Expenses:Food:Coffee",
+            "snippet": "Acme Coffee",
+            "highlights": [[5, 11]],
+            "date": "2024-02-01",
+            "link": {
+              "type": "route",
+              "path": "/money/transactions/",
+              "params": {
+                "account": "Expenses:Food:Coffee",
+                "year": "2024"
+              }
+            },
+            "badges": [],
+            "cursor": null
+          }
+        ],
+        "has_more": false,
+        "relaxed": false,
+        "error": null,
+        "elapsed_ms": 0
+      }
+    ],
+    "on_demand": [
+      {
+        "source": "money",
+        "label": "Transactions"
+      }
+    ]
+  }
+}

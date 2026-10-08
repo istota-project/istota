@@ -394,3 +394,15 @@ class TestPerRoomHistoryCarriesStarIdentity:
         msgs = resp.json()["messages"]
         target = next(m for m in msgs if m.get("msg_id") == a)
         assert target["starred"] is False
+
+
+@pytest.mark.parametrize("params", [
+    {"until_ts": "2026-01-01 00:00:00"},
+    {"until_id": 1},
+    {"until_ts": "2026-01-01 00:00:00", "until_id": 1},
+])
+async def test_room_until_requires_complete_before_cursor(chat_client, params):
+    cookies = await _login(chat_client, "alice")
+    room = await _default_room(chat_client, cookies)
+    response = await chat_client.get(f"/istota/api/chat/rooms/{room['id']}/messages", params=params, cookies=cookies)
+    assert response.status_code == 400

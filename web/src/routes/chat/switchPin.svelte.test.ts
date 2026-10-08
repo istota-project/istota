@@ -179,6 +179,7 @@ async function paintWire(list: HTMLElement) {
 beforeEach(() => {
   frames = [];
   observers = [];
+  session().scrollTarget.set(null);
   vi.stubGlobal(
     'fetch',
     vi.fn(() => new Promise<Response>(() => {})),
@@ -210,6 +211,22 @@ describe('a room switch', () => {
     // The pin, one pixel off the bottom of the *server* page, then the pin
     // again: the pass that makes WebKit repaint the swap.
     expect(writes).toEqual([2400, 2400 - 300 - 1, 2400]);
+  });
+
+  it('keeps an explicit jump when a room-switch repaint is still queued', async () => {
+    const list = await openRoomOne();
+    await switchAndPaintCache(list);
+    runFrames();
+    await paintWire(list);
+    const row = list.querySelector<HTMLElement>('[data-cid]')!;
+    row.scrollIntoView = vi.fn(() => {
+      list.scrollTop = 300;
+    });
+    session().scrollTarget.set({ cid: Number(row.dataset.cid), nonce: 1 });
+    await settle();
+    runFrames();
+    resize();
+    expect(list.scrollTop).toBe(300);
   });
 
   it('keeps paging off until the settle pin has landed', async () => {

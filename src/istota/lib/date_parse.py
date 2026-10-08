@@ -52,7 +52,7 @@ stdlib-only leaf; imports nothing from the package. Never raises.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 
 # A four-digit year, a two-digit month and a two-digit day, and nothing else
 # on either side. `fullmatch` is what the three copies used; the shape is
@@ -114,3 +114,30 @@ def is_future_date(iso_date: str | None, *, today: date | None = None) -> bool:
     except (ValueError, TypeError):
         return False
     return parsed > (today or date.today())
+
+
+def iso_utc(ts: str | None, *, preserve_date: bool = False) -> str | None:
+    """Normalize a heterogeneous timestamp string to ISO 8601 UTC.
+
+    Inputs come from three writers with different conventions:
+    - SQLite ``datetime('now')`` and ``strftime`` — naive, space-separated,
+      documented to be UTC.
+    - Python ``datetime.now(timezone.utc).isoformat()`` — offset-aware,
+      ``T`` separator, ``+00:00`` suffix.
+    - Python ``datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")`` — naive.
+
+    Naive timestamps are treated as UTC. Output is always ``YYYY-MM-DDTHH:MM:SSZ``
+    so the frontend can pass it straight to ``new Date()``. ``preserve_date``
+    retains bare calendar dates for displays that must not shift their day.
+    """
+    if not ts:
+        return None
+    if preserve_date and _ISO_RE.fullmatch(ts):
+        return ts
+    try:
+        dt = datetime.fromisoformat(ts.replace(" ", "T"))
+    except (ValueError, TypeError):
+        return ts
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

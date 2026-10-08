@@ -450,3 +450,73 @@ def _paginate(load, first):
         cur = out["oldest_cursor"]
         out = load("u", "tok", 2, (cur["ts"], cur["id"]))
         yield out
+
+
+@_needs_web
+class TestUntilBand:
+    def test_band_includes_target_and_aux_but_not_outside_rows(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            for minute in range(10):
+                _turn(conn, "tok", f"q{minute}", "a", created_at=_ts(minute))
+            _turn(conn, "tok", "failed inside", "failure", created_at=_ts(4), status="failed", spine=False)
+            _turn(conn, "tok", "failed outside", "failure", created_at=_ts(1), status="failed", spine=False)
+            target = conn.execute("SELECT id FROM messages WHERE body='q2'").fetchone()[0]
+            note = _system(conn, "tok", "note inside", created_at=_ts(3))
+        load = _loader(db_path)
+        head = load("u", "tok", 1)
+        out = load("u", "tok", 1, (_ts(9), head["oldest_cursor"]["id"]), (_ts(2), target))
+        assert _user_texts(out) == ["q2", "q3", "q4", "failed inside", "q5", "q6", "q7", "q8"]
+        assert note in [m.get("msg_id") for m in out["messages"]]
+        assert out["oldest_cursor"] == {"ts": _ts(2), "id": target}
+        assert out["has_more"] is True
+        assert out["truncated"] is False
+        assert out["active_tasks"] == []
+
+    @pytest.mark.parametrize("count,truncated", [(2000, False), (2001, True)])
+    @pytest.mark.parametrize("role", ["assistant", "system"])
+    def test_cap_with_tied_timestamps(self, db_path, count, truncated, role):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            ids = [db.add_message(conn, "tok", role=role, body=str(i), origin_surface="web") for i in range(count + 1)]
+            conn.execute("UPDATE messages SET created_at=?", (_ts(0),))
+        out = _loader(db_path)("u", "tok", 1, (_ts(0), ids[-1]), (_ts(0), ids[0]))
+        assert len(out["messages"]) == 2000
+        assert out["truncated"] is truncated
+        assert (ids[0] in [m["msg_id"] for m in out["messages"]]) is not truncated
+
+
+    def test_system_target_at_same_timestamp_and_notes_only_history(self, db_path):
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "tok", "u", origin="web")
+            ids = [_system(conn, "tok", str(i), created_at=_ts(0)) for i in range(12)]
+        load = _loader(db_path)
+        head = load("u", "tok", 2)
+        assert head["oldest_cursor"] == {"ts": _ts(0), "id": ids[-2]}
+        assert head["has_more"] is True
+        out = load("u", "tok", 2, (_ts(0), ids[-2]), (_ts(0), ids[1]))
+        assert [m["msg_id"] for m in out["messages"]] == ids[1:-2]
+        assert out["oldest_cursor"] == {"ts": _ts(0), "id": ids[1]}
+        tail = load("u", "tok", 2, (_ts(0), ids[1]))
+        assert [m["msg_id"] for m in tail["messages"]] == ids[:1]
+        assert tail["has_more"] is False
+
+
+@_needs_web
+def test_search_cursor_refills_a_system_note_inside_the_loaded_window(db_path):
+    load = _loader(db_path)
+    with db.get_db(db_path) as conn:
+        db.register_room(conn, "tok", "u", origin="web")
+        _turn(conn, "tok", "first", "reply", created_at=_ts(0))
+        targets = [_system(conn, "tok", f"falcon note {i}", created_at=_ts(5)) for i in range(60)]
+        _turn(conn, "tok", "last", "reply", created_at=_ts(9))
+        found = db.search_messages(conn, "u", '"falcon"*', limit=100, offset=0, exclude_tokens=[])
+    target = next(row for row in found if row["msg_id"] == targets[0])
+    head = load("u", "tok", 50)
+    assert not head["has_more"]
+    assert target["msg_id"] not in {row.get("msg_id") for row in head["messages"]}
+    band = load("u", "tok", 50,
+                (target["created_at"], target["msg_id"] + 1),
+                (target["created_at"], target["msg_id"]))
+    assert not band["truncated"]
+    assert target["msg_id"] in {row.get("msg_id") for row in band["messages"]}

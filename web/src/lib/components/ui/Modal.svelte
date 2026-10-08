@@ -17,7 +17,7 @@
   import { Dialog } from 'bits-ui';
 
   interface Props {
-    variant?: 'default' | 'viewer';
+    variant?: 'default' | 'viewer' | 'palette';
     dismissible?: boolean;
     metadata?: Snippet;
     actions?: Snippet;
@@ -74,6 +74,11 @@
   });
 
   function handleKeydown(event: KeyboardEvent) {
+    if (variant === 'palette') {
+      // Chips can hold focus too; page shortcuts must stay behind the palette.
+      if (event.key !== 'Escape') event.stopPropagation();
+      return;
+    }
     if (
       !viewer ||
       !navigation ||
@@ -139,11 +144,19 @@
 
 <Dialog.Root bind:open {onOpenChange}>
   <Dialog.Portal>
-    <Dialog.Overlay class={viewer ? 'ui-modal-overlay ui-viewer-overlay' : 'ui-modal-overlay'} />
+    <Dialog.Overlay
+      class={viewer
+        ? 'ui-modal-overlay ui-viewer-overlay'
+        : variant === 'palette'
+          ? 'ui-modal-overlay ui-palette-overlay'
+          : 'ui-modal-overlay'}
+    />
     <Dialog.Content
       class={viewer
         ? `ui-modal-content ui-viewer-content${navigation ? ' ui-viewer-navigable' : ''}`
-        : 'ui-modal-content'}
+        : variant === 'palette'
+          ? 'ui-modal-content ui-palette-content'
+          : 'ui-modal-content'}
       style="--modal-width: {width ?? (viewer ? '720px' : '420px')}; --modal-height: {height}"
       onkeydown={handleKeydown}
       escapeKeydownBehavior={dismissible ? 'close' : 'ignore'}
@@ -255,6 +268,32 @@
     padding-top: var(--space-3);
     border-top: 1px solid var(--border-subtle);
     flex-shrink: 0;
+  }
+  :global(.ui-palette-overlay) {
+    z-index: var(--z-palette);
+  }
+  :global(.ui-palette-content) {
+    z-index: var(--z-palette-panel);
+    top: 10dvh;
+    transform: translateX(-50%);
+    width: 40rem;
+    max-width: calc(100vw - 2 * var(--space-4) - var(--safe-left) - var(--safe-right));
+    max-height: calc(90dvh - var(--space-4) - var(--safe-bottom));
+  }
+  @media (max-width: 640px) {
+    :global(.ui-palette-content) {
+      inset: 0;
+      transform: none;
+      width: 100%;
+      height: 100dvh;
+      max-width: none;
+      max-height: none;
+      border-radius: 0;
+      padding-top: max(var(--space-4), var(--safe-top));
+      padding-bottom: max(var(--space-4), var(--safe-bottom));
+      padding-left: max(var(--space-4), var(--safe-left));
+      padding-right: max(var(--space-4), var(--safe-right));
+    }
   }
   :global(.ui-viewer-overlay) {
     background: var(--scrim-viewer-bg);

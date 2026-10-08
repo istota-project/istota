@@ -1516,6 +1516,22 @@ CREATE TABLE IF NOT EXISTS messages (
     -- body stays the whole note for the push surfaces. NULL on every other row.
     email_note TEXT
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    body, title,
+    content='messages', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, body, title) VALUES (new.id, new.body, new.title);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, body, title) VALUES ('delete', old.id, old.body, old.title);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF body, title ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, body, title) VALUES ('delete', old.id, old.body, old.title);
+    INSERT INTO messages_fts(rowid, body, title) VALUES (new.id, new.body, new.title);
+END;
+
 -- No index on either author column: they are projected, never filtered.
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_token, id);
 -- Partial, so the rows carrying no key are unconstrained. Keyed on different

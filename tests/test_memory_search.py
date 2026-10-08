@@ -1945,3 +1945,17 @@ class TestReindexSkillOverlays:
 
         assert out["status"] == "ok"
         assert out["skill_overlays"] == 1
+
+
+def test_vector_false_uses_bm25_without_embedding(tmp_path):
+    conn = _init_db(tmp_path / "memory.db")
+    try:
+        conn.execute("INSERT INTO memory_chunks (user_id, source_type, source_id, chunk_index, content, content_hash) VALUES ('alice', 'memory_file', 'note.md', 0, 'falcon invoice', 'abc')")
+        with patch("istota.memory.search._search_vec", side_effect=AssertionError("vector called")):
+            results = search(conn, "alice", "falcon", vector=False)
+        assert [r.content for r in results] == ["falcon invoice"]
+        with patch("istota.memory.search._search_vec", return_value=[]) as vector:
+            search(conn, "alice", "falcon")
+        vector.assert_called_once()
+    finally:
+        conn.close()
