@@ -395,7 +395,7 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if user}
-  <SearchDialog bind:open={searchOpen} />
+  <SearchDialog bind:open={searchOpen} features={user.features} />
   <nav class="app-nav">
     <a href="{base}/" class="app-name">
       <img class="sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />

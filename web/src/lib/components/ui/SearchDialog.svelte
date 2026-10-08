@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
-  import type { SearchHit } from '$lib/api';
+  import type { SearchHit, User } from '$lib/api';
   import { createSearch } from '$lib/stores/search';
   import { hrefFor } from '$lib/search/links';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -14,10 +14,32 @@
   let {
     open = $bindable(false),
     controller = createSearch(),
+    features = {},
   }: {
     open?: boolean;
+    features?: Partial<User['features']>;
     controller?: ReturnType<typeof createSearch>;
   } = $props();
+  const sourceOptions = $derived.by(() => {
+    const options = [
+      { value: '', label: 'All' },
+      { value: 'chats', label: 'Chats' },
+      { value: 'rooms', label: 'Rooms' },
+      { value: 'memory', label: 'Memory' },
+      { value: 'facts', label: 'Facts' },
+    ];
+    const modules = [
+      ['briefings', 'Briefings'],
+      ['feeds', 'Feeds'],
+      ['health', 'Health'],
+      ['location', 'Location'],
+      ['money', 'Transactions'],
+    ] as const;
+    for (const [source, label] of modules) {
+      if (features[source]) options.push({ value: source, label });
+    }
+    return options;
+  });
   const uid = $props.id();
   const inputId = `${uid}-input`;
   const listId = `${uid}-results`;
@@ -100,12 +122,8 @@
     />
     <Select
       value={$controller.selectedSource ?? ''}
-      options={[
-        { value: '', label: 'All' },
-        ...$controller.sources.map((source) => ({ value: source.source, label: source.label })),
-      ]}
+      options={sourceOptions}
       ariaLabel="Search sources"
-      widthChars={12}
       align="end"
       onValueChange={(value) => void selectSource(value || null)}
     />
