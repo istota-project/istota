@@ -127,6 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A photo or GIF with no caption in a WhatsApp group, followed a few seconds later by a comment from the same person, no longer gets two answers. The file's answer now waits 30 seconds; a text from the same member in that time becomes the file's caption, and the pair gets one reply. A bare file with nothing after it is answered when the wait ends.
+
 - A two-factor seed saved with `otp-set` could vanish when an older copy of the KeePass file was saved over Istota's write, locking the account; the seed is now kept in Istota (#685, see the generated credentials entry above). A task whose credential has a seed it was not granted now gets `credential_otp_not_granted` from `--fill-otp`, rather than being told the entry has no two-factor field.
 
 - A credential a task creates with `istota-credential new` is now usable by later tasks in the same conversation, so a signup finished after a CAPTCHA, a confirmation mail, two-factor enrollment and later logins no longer fail with `credential_not_granted`. The grant covers that conversation only, with scheduled use off; widen or revoke it in Settings → Credentials, and a change you make there survives later syncs.

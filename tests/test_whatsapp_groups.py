@@ -1561,3 +1561,129 @@ class TestANamelessGuestAfterTheHostsAnswer:
         assert decision is not None
         assert (decision.speak, decision.rung) == (False, "classifier")
         assert "the person Istota last answered: no" in prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# A bare file waits for the sender's next words
+# ---------------------------------------------------------------------------
+
+
+class TestABareFileWaitsForTheNextWords:
+    """A member's captionless photo or GIF the gate answers is held for
+    `BARE_FILE_HOLD_SECONDS`; the same member's next text turn inside the hold
+    becomes the file's words, so the pair gets one answer, not two."""
+
+    @staticmethod
+    def _speak(config, event):
+        decision, _ = TestACaptionlessMemberFile._classify(
+            config, event, '{"speak": true}',
+        )
+        assert decision is not None and decision.speak
+        return decision
+
+    def _bare(self, config, *, kind="gif", message_id="G1", sender=ALICE_JID,
+              attached_for="alice"):
+        config.speech_gate.mode = "classifier"
+        config.speech_gate.disposition = "friendly"
+        unplaced = _media_message(None, kind=kind, message_id=message_id, sender=sender)
+        decision = self._speak(config, unplaced)
+        placed = _media_message(
+            None, kind=kind, message_id=message_id, sender=sender,
+            attached_for=attached_for,
+        )
+        with db.get_db(config.db_path) as conn:
+            (result,) = handle_whatsapp_batch(
+                conn, config, [placed], provider=BAILEYS,
+                classified={message_id: decision},
+            )
+        return result
+
+    @staticmethod
+    def _held(config, task_id):
+        (row,) = _rows(
+            config,
+            "SELECT scheduled_for > datetime('now') AS held, status, prompt, "
+            "declinable FROM tasks WHERE id = ?", (task_id,),
+        )
+        return row
+
+    def test_the_files_task_is_created_held(self, group):
+        result = self._bare(group)
+
+        assert result.disposition == "task"
+        assert self._held(group, result.task_id)["held"] == 1
+        with db.get_db(group.db_path) as conn:
+            assert db.claim_task(conn, "w", user_id="alice") is None
+
+    def test_a_follow_up_becomes_the_files_words(self, group):
+        held = self._bare(group)
+
+        (result,) = _apply(group, _message("this is the one", message_id="T1"))
+
+        assert result.disposition == "task"
+        assert result.task_id == held.task_id
+        task = self._held(group, held.task_id)
+        assert task["held"] is None
+        assert task["prompt"] == f"this is the one\n{GIF_FRAMES_NOTE}"
+        assert _task(group, held.task_id).attachments == [INBOX_COPY]
+        rows = _rows(group, "SELECT body, task_id, attachments FROM messages "
+                     "WHERE room_token = ? AND role = 'user' ORDER BY id",
+                     (_room(group),))
+        assert rows[0]["body"] == "[Sent a GIF, opened for a later message.]"
+        assert rows[0]["task_id"] is None
+        assert rows[1]["body"] == "this is the one"
+        assert rows[1]["task_id"] == held.task_id
+        assert "whatsapp_0123456789abcdef.jpg" in rows[1]["attachments"]
+        assert len(_rows(group, "SELECT id FROM tasks WHERE user_id = 'alice'")) == 1
+
+    def test_an_image_follow_up_is_the_prompt_alone(self, group):
+        held = self._bare(group, kind="image")
+
+        _apply(group, _message("good book?", message_id="T1"))
+
+        assert self._held(group, held.task_id)["prompt"] == "good book?"
+
+    def test_an_addressed_follow_up_cannot_be_declined(self, group):
+        held = self._bare(group)
+        assert self._held(group, held.task_id)["declinable"] == 1
+
+        _apply(group, _message("Istota, who is this?", message_id="T1"))
+
+        assert self._held(group, held.task_id)["declinable"] == 0
+
+    def test_someone_elses_turn_leaves_the_hold_alone(self, group):
+        held = self._bare(group)
+
+        (result,) = _apply(group, _message("Istota, when is dinner?",
+                                           sender=BOB_JID, message_id="B1"))
+
+        assert result.task_id != held.task_id
+        assert self._held(group, held.task_id)["held"] == 1
+        assert _user_rows(group)[0]["body"] == f"The user sent a GIF with no caption.\n{GIF_FRAMES_NOTE}"
+
+    def test_a_task_already_claimed_is_not_folded(self, group):
+        held = self._bare(group)
+        with db.get_db(group.db_path) as conn:
+            conn.execute(
+                "UPDATE tasks SET scheduled_for = NULL WHERE id = ?", (held.task_id,),
+            )
+            assert db.claim_task(conn, "w", user_id="alice").id == held.task_id
+
+        (result,) = _apply(group, _message("Istota, who is this?", message_id="T1"))
+
+        assert result.task_id != held.task_id
+        assert _task(group, held.task_id).prompt.startswith("The user sent a GIF")
+
+    def test_a_captioned_file_is_not_held(self, group):
+        (result,) = _apply(group, _media_message(
+            "Istota what is this?", message_id="P1", attached_for="alice",
+        ))
+
+        assert self._held(group, result.task_id)["held"] is None
+
+    def test_a_command_is_not_folded(self, group):
+        held = self._bare(group)
+
+        _apply(group, _message("!status", message_id="T1"))
+
+        assert self._held(group, held.task_id)["held"] == 1

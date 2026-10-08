@@ -145,10 +145,10 @@ def should_hold(config, decision: GateDecision | None, *, can_react: bool) -> bo
     )
 
 
-def hold_until(now: datetime | None = None) -> str:
+def hold_until(now: datetime | None = None, *, seconds: int = HOLD_SECONDS) -> str:
     """``scheduled_for`` for a held task, in SQLite's ``datetime('now')`` form."""
     now = now or datetime.now(timezone.utc)
-    return (now + timedelta(seconds=HOLD_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
+    return (now + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 #: The held row and nothing else: still pending, never attempted. A task the
