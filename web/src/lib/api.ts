@@ -5071,3 +5071,41 @@ export function setCredentialBackup(
 ): Promise<{ recipient_suffix: string | null }> {
   return credentialWrite('/backup', 'PUT', { recipient, step_up }, '/settings/credentials');
 }
+
+export type SearchLink =
+  { type: 'route'; path: string; params: Record<string, string> } | { type: 'file'; path: string };
+export interface SearchHit {
+  id: string;
+  kind: string;
+  title: string;
+  subtitle: string | null;
+  snippet: string;
+  highlights: number[][];
+  date: string | null;
+  link: SearchLink | null;
+  badges: string[];
+}
+export interface SearchGroup {
+  source: string;
+  label: string;
+  results: SearchHit[];
+  has_more: boolean;
+  relaxed: boolean;
+  error: 'timeout' | 'failed' | null;
+  elapsed_ms: number;
+}
+export interface SearchResponse {
+  query: string;
+  groups: SearchGroup[];
+  on_demand?: { source: string; label: string }[];
+}
+export function search(
+  q: string,
+  options: { sources?: string[]; limit?: number; offset?: number; signal?: AbortSignal } = {},
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q });
+  if (options.sources) params.set('sources', options.sources.join(','));
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.offset !== undefined) params.set('offset', String(options.offset));
+  return apiFetch(`/search?${params}`, { signal: options.signal });
+}

@@ -37,3 +37,6 @@ export { default as NotificationItem } from './NotificationItem.svelte';
 export { default as NotificationDetail } from './NotificationDetail.svelte';
 export type { SelectOption } from './Select.svelte';
 export type { KebabItem } from './KebabMenu.svelte';
+export { default as SearchButton } from './SearchButton.svelte';
+export { default as SearchDialog } from './SearchDialog.svelte';
+export { default as SearchResultRow } from './SearchResultRow.svelte';

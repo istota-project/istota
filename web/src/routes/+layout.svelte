@@ -9,7 +9,7 @@
   import { DropdownMenu } from 'bits-ui';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
-  import { NotificationBell } from '$lib/components/ui';
+  import { NotificationBell, SearchButton, SearchDialog } from '$lib/components/ui';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
@@ -30,6 +30,7 @@
   let { children } = $props();
 
   let user: User | null = $state(null);
+  let searchOpen = $state(false);
   let loading = $state(true);
   let error = $state('');
   // Whether the identity on screen came from the server *this session*, rather
@@ -44,6 +45,30 @@
   // screen. The corollary for callers is that a notice meant to survive a
   // navigation has to be raised after it, not before.
   afterNavigate(() => clearNotices());
+
+  onMount(() => {
+    function searchShortcut(event: KeyboardEvent) {
+      if (!user || error || event.isComposing) return;
+      const command = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k';
+      const target = event.target;
+      const editable =
+        target instanceof Element &&
+        target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
+      const slash =
+        event.key === '/' &&
+        !editable &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey;
+      if (command || slash) {
+        event.preventDefault();
+        searchOpen = true;
+      }
+    }
+    window.addEventListener('keydown', searchShortcut);
+    return () => window.removeEventListener('keydown', searchShortcut);
+  });
 
   // App-wide, because a soft keyboard is raised from every section that has a
   // filter box or a form — not just the chat composer, which is where the first
@@ -370,6 +395,7 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if user}
+  <SearchDialog bind:open={searchOpen} />
   <nav class="app-nav">
     <a href="{base}/" class="app-name">
       <img class="sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
@@ -405,6 +431,11 @@
       >
         {user.display_name}
       </a>
+      <SearchButton
+        onclick={() => {
+          searchOpen = true;
+        }}
+      />
       <NotificationBell />
       <button
         type="button"

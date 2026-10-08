@@ -247,3 +247,12 @@ describe('URL selection', () => {
     expect(warn).toHaveBeenCalledWith('urlSelection', 'chat', error);
   });
 });
+
+it('applies a same-route navigation even when shallow state retains its identity', () => {
+  const h = setup({ compareKeys: ['room'] });
+  h.start();
+  page.url = new URL('http://localhost/istota/chat/?room=A&task=42');
+  flushSync();
+  expect(h.apply).toHaveBeenCalledExactlyOnceWith({ room: 'A', task: 42 });
+  expect(navigation.replaceState).not.toHaveBeenCalled();
+});

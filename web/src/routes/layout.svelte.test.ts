@@ -21,7 +21,7 @@
  * on a first launch.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 import type { User } from '$lib/api';
 
@@ -317,5 +317,36 @@ describe('the root layout with a server that answered', () => {
     await waitFor(() => expect(forgetLastUserId).toHaveBeenCalled());
     expect(readUser).not.toHaveBeenCalled();
     expect(screen.queryByText('Alice')).toBeNull();
+  });
+});
+
+describe('global search shortcuts', () => {
+  it.each([{ metaKey: true }, { ctrlKey: true }, {}])(
+    'opens from the page with %j',
+    async (modifiers) => {
+      getMe.mockResolvedValue(person());
+      render(Layout, { children });
+      await screen.findByText('Alice');
+      await fireEvent.keyDown(window, {
+        key: Object.keys(modifiers).length ? 'k' : '/',
+        ...modifiers,
+      });
+      expect(await screen.findByRole('dialog', { name: 'Search' })).toBeInTheDocument();
+    },
+  );
+  it('leaves slash alone in editable targets and modified shortcuts', async () => {
+    getMe.mockResolvedValue(person());
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    for (const tag of ['input', 'textarea', 'select', 'div']) {
+      const field = document.createElement(tag);
+      if (tag === 'div') field.setAttribute('contenteditable', 'true');
+      document.body.appendChild(field);
+      await fireEvent.keyDown(field, { key: '/' });
+      expect(screen.queryByRole('dialog', { name: 'Search' })).toBeNull();
+      field.remove();
+    }
+    await fireEvent.keyDown(window, { key: '/', ctrlKey: true });
+    expect(screen.queryByRole('dialog', { name: 'Search' })).toBeNull();
   });
 });

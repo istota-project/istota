@@ -1,3 +1,4 @@
+import { SearchDialog } from '$lib/components/ui';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
@@ -122,4 +123,21 @@ it('ignores a previous feed pagination response after a selection change', async
   await tick();
   expect(screen.getByText('New feed body')).toBeTruthy();
   expect(screen.queryByText('Old feed page')).toBeNull();
+});
+
+it('keeps search typing and chip shortcuts away from the feeds listener', async () => {
+  await open();
+  api.updateEntriesStatus.mockClear();
+  api.updateEntryStarred.mockClear();
+  render(SearchDialog, { open: true });
+  const input = screen.getByRole('combobox');
+  input.focus();
+  expect(input).toHaveFocus();
+  await fireEvent.keyDown(input, { key: 'f' });
+  await fireEvent.keyDown(input, { key: 'A', shiftKey: true });
+  const chip = screen.getByRole('button', { name: 'All' });
+  chip.focus();
+  await fireEvent.keyDown(chip, { key: 'A', shiftKey: true });
+  expect(api.updateEntriesStatus).not.toHaveBeenCalled();
+  expect(api.updateEntryStarred).not.toHaveBeenCalled();
 });

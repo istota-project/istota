@@ -172,6 +172,8 @@ describe('z-index scale', () => {
       '--z-viewer',
       '--z-viewer-control',
       '--z-lightbox',
+      '--z-palette',
+      '--z-palette-panel',
       '--z-popover',
       '--z-toast',
     ];
@@ -184,6 +186,11 @@ describe('z-index scale', () => {
     // Not theoretical: every money form is a Select inside a Modal, and both
     // portal to <body>, so the two values compete in the root stacking context.
     expect(z('--z-popover')).toBeGreaterThan(z('--z-modal-panel'));
+  });
+
+  it('puts global search above readers and image viewers', () => {
+    expect(z('--z-palette')).toBeGreaterThan(z('--z-lightbox'));
+    expect(z('--z-palette-panel')).toBeGreaterThan(z('--z-palette'));
   });
 
   it('puts the lightbox above the reader it opens from', () => {

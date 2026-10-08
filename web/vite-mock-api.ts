@@ -4577,7 +4577,63 @@ function mockWalletRoutes(url: string, method: string, body: any): unknown | und
   return undefined;
 }
 
+const searchHandler: MockHandler = ({ url }) => {
+  if (!url.startsWith('/istota/api/search?')) return;
+  const params = new URL(url, 'http://localhost').searchParams;
+  const query = params.get('q') ?? '';
+  const selected = params.get('sources');
+  const offset = Number(params.get('offset') ?? 0);
+  const sources = [
+    ['chats', 'Chats', '/chat/', { room: mockChatRooms[0].token, msg: '1201' }],
+    ['rooms', 'Rooms', '/chat/', { room: mockChatRooms[1].token }],
+    ['memory', 'Memory', '', {}],
+    ['facts', 'Facts', '', {}],
+    ['briefings', 'Briefings', '/briefings/', { id: '1' }],
+    ['feeds', 'Feeds', '/feeds/', { entry: '1' }],
+    ['health', 'Health', '/health/documents/', { id: '1' }],
+    ['location', 'Location', '/location/', { place: '1' }],
+    ['money', 'Transactions', '/money/transactions/', { q: query }],
+  ] as const;
+  const groups = sources
+    .filter(([source]) => (selected ? selected.split(',').includes(source) : source !== 'money'))
+    .map(([source, label, path, linkParams]) => ({
+      source,
+      label,
+      relaxed: source === 'facts',
+      error: source === 'location' ? 'timeout' : null,
+      elapsed_ms: 12,
+      has_more: source === 'chats' && offset === 0,
+      results:
+        source === 'location'
+          ? []
+          : [
+              {
+                id: `${source}:${offset + 1}`,
+                kind: source === 'chats' ? 'message' : source,
+                title: `${label}: ${query}`,
+                subtitle: 'Example result',
+                snippet: `${query} appears in this example. <img onerror> stays plain text.`,
+                highlights: [[0, Array.from(query).length]],
+                date: '2026-10-01T12:00:00Z',
+                badges: source === 'chats' ? ['shared', 'starred'] : [],
+                link:
+                  source === 'memory'
+                    ? { type: 'file', path: '/Users/alice/memories/example.md' }
+                    : path
+                      ? { type: 'route', path, params: linkParams }
+                      : null,
+              },
+            ],
+    }));
+  return {
+    query,
+    groups: query.trim().length < 2 ? [] : groups,
+    on_demand: [{ source: 'money', label: 'Transactions' }],
+  };
+};
+
 const handlers: MockHandler[] = [
+  searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   avatarsHandler,
