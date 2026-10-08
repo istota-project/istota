@@ -639,7 +639,7 @@
     color: var(--text-dim);
   }
 
-  .hamburger-btn {
+  .app-nav .nav-right .hamburger-btn {
     display: none;
     color: var(--text-muted);
   }
@@ -648,8 +648,8 @@
     color: var(--text-primary);
   }
 
-  @media (max-width: 640px) {
-    .hamburger-btn {
+  @media (max-width: 800px) {
+    .app-nav .nav-right .hamburger-btn {
       display: inline-flex;
     }
     .nav-user {

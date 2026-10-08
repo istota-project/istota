@@ -2,7 +2,7 @@
 
 Open Search beside the notification bell, or press Cmd+K on macOS or Ctrl+K elsewhere. `/` also opens it when you are outside a text field. Enter at least two characters to search; results update as you type.
 
-Results are grouped by source. Use the up and down arrows to select a result, Enter to open it, and Esc to close Search. Choose a source chip to see more results from that source, then **Show more** to continue. Recent queries appear when the input is empty. A query is saved in this browser only when you open a result, and Search keeps the eight most recent.
+Results are grouped by source. Use the up and down arrows to select a result, Enter to open it, and Esc to close Search. Choose a source in the dropdown beside the search field to see more results from that source, then **Show more** to continue. Recent queries appear when the input is empty. A query is saved in this browser only when you open a result, and Search keeps the eight most recent.
 
 ## What you can find
 
@@ -18,7 +18,7 @@ Results are grouped by source. Use the up and down arrows to select a result, En
 | Location | Saved place names, categories and notes | The place on the map |
 | Transactions | Payees and narrations in your default ledger | Transactions for that account and year |
 
-Module sources appear only when that module is available and enabled for you. Transactions run only after you choose **Search Transactions** or its source chip, because querying a ledger takes longer than the other sources. This uses the transactions page's filter: regular expressions and `#tag` queries work, and words are joined into one filter. There is no partial-match fallback for transactions. Results are posting rows, so one transaction split across accounts can appear more than once.
+Module sources appear only when that module is available and enabled for you. Transactions run only after you choose **Search Transactions** or select Transactions in the source dropdown, because querying a ledger takes longer than the other sources. This uses the transactions page's filter: regular expressions and `#tag` queries work, and words are joined into one filter. There is no partial-match fallback for transactions. Results are posting rows, so one transaction split across accounts can appear more than once.
 
 Search uses your current room membership. Shared-room messages include other participants' turns that you can already read. Archived rooms, dismissed rooms and hidden email threads are excluded. Channel memory includes notes filed under a room's earlier identifiers. Health reference material, such as general biomarker explanations, is not searched.
 
