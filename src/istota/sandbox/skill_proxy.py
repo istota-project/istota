@@ -1281,16 +1281,22 @@ class SkillProxy:
         name = str(request.get("name", ""))
         label = label_for_display(name)
 
-        def refuse(reason: str) -> None:
+        def refuse(reason: str, message: str | None = None) -> None:
             logger.warning(
                 "proxy_rejected task_id=%s type=vault_otp name=%s reason=%s",
                 self.task_id, label, reason,
             )
-            self._send_response(conn, {"error": f"OTP credential refused ({reason})",
+            self._send_response(conn, {"error": message or f"OTP credential refused ({reason})",
                                        "reason": reason})
 
+        # An unknown name answers as `vault_credential` does, so a misspelling
+        # never reads as "this entry has no OTP", which invites `otp-set`.
+        def not_present(message: str | None = None) -> None:
+            refuse("vault_credential_not_present",
+                   message or f"No shared credential named {label!r}")
+
         if not name or self.config is None or not self.user_id:
-            refuse("credential_has_no_otp")
+            not_present()
             return
         from istota import db
         from istota.credentials import store as secrets_store
@@ -1305,11 +1311,22 @@ class SkillProxy:
             if name in self.vault_credentials and is_otp_seed(database, self.user_id, name):
                 seed_name = name
             else:
-                seeds = [member for member in credential_groups(database, self.user_id).get(name, [])
-                         if member in self.vault_credentials
-                         and (get_binding(database, self.user_id, member) or {}).get("kind") == "totp"]
-                if len(seeds) != 1:
+                members = [member for member in credential_groups(database, self.user_id).get(name, [])
+                           if member in self.vault_credentials]
+                # The snapshot can outlive the row: a sync mid-attempt deletes it.
+                if not members and (name not in self.vault_credentials
+                                    or get_binding(database, self.user_id, name) is None):
+                    not_present()
+                    return
+                seeds = [member for member in members
+                         if (get_binding(database, self.user_id, member) or {}).get("kind") == "totp"]
+                if not seeds:
                     refuse("credential_has_no_otp")
+                    return
+                if len(seeds) > 1:
+                    refuse("credential_otp_ambiguous",
+                           f"Credential {label!r} has more than one OTP field; pass the OTP "
+                           "field name from istota-credential list (credential_otp_ambiguous)")
                     return
                 seed_name = seeds[0]
             owner = credential_name(database, self.user_id, seed_name)
@@ -1327,7 +1344,7 @@ class SkillProxy:
                 binding=True, connection=database,
             )
             if seed is None:
-                refuse("credential_has_no_otp")
+                not_present("Credential no longer available")
                 return
             hosts = seed["bound_hosts"]
             if not hosts:

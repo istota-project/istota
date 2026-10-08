@@ -3951,3 +3951,15 @@ class TestFillOtp:
         output = capsys.readouterr().out
         assert "--fill-otp" in output
         assert "credential_is_otp_seed" in output
+
+    def test_otp_fill_of_unknown_name_reads_as_not_shared(self, otp_proxy, capsys):
+        server, code, seed = otp_proxy
+        with patch("istota.skills.browse.httpx.post") as post, pytest.raises(SystemExit) as exc:
+            main(["interact", "s1", "--fill-otp", "#x=no_such_entry"])
+        assert exc.value.code == 1
+        post.assert_not_called()
+        envelope = json.loads(capsys.readouterr().out.strip())
+        assert envelope["reason"] == "vault_credential_refused"
+        assert "No shared credential named 'no_such_entry'" in envelope["error"]
+        assert "credential_has_no_otp" not in envelope["error"]
+        assert server._vault_fetches == 1
