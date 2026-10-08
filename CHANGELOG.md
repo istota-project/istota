@@ -139,6 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In web chat, a message's task number, model and duration no longer cover the first line of a follow-up message. They now appear at the right end of the action row under the message, and that row's star is the only one. A starred message is marked at rest by an amber bar along its left edge (#691).
+
 - Search now lists its sources and enabled modules before you type a query. The source dropdown fits its selected label instead of reserving extra width.
 
 - Credentials settings now use the same compact buttons, checkbox labels and text sizes as other settings pages. Import, export, backup and access fields have help popovers, and settings cards and dialogs use consistent text sizes.

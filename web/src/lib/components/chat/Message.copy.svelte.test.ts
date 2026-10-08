@@ -370,9 +370,6 @@ describe('star in the turn action row', () => {
   });
 
   it('renders starred when the message is starred', () => {
-    // The same toggle appears twice on a turn (here and in the hover bar), so
-    // both have to read the state — a star that looks empty in one place and
-    // filled in the other is worse than one place.
     const { container } = render(Message, {
       ...base,
       message: durable({ starred: true }),
@@ -416,10 +413,7 @@ describe('star in the turn action row', () => {
     expect(rowStars(container)).toHaveLength(1);
   });
 
-  it('is offered on a system row too, alongside the hover-bar star', () => {
-    // Both stars appear on a notice for the same reason they do on a turn: the
-    // hover bar's is the one that persists at rest, the row's is where the
-    // hand already is once the row is open.
+  it('is offered on a system row too, as its only star', () => {
     const { container } = render(Message, {
       ...base,
       message: {
@@ -434,20 +428,17 @@ describe('star in the turn action row', () => {
     });
 
     expect(rowStars(container)).toHaveLength(1);
-    expect(container.querySelectorAll('.cmd-actions .star-btn')).toHaveLength(1);
+    expect(container.querySelectorAll('button[aria-pressed]')).toHaveLength(1);
   });
 
-  it('leaves the hover-bar star in place', () => {
-    // Two places, deliberately: the hover bar's star is the one that persists
-    // at rest on a starred row, which is what makes a starred message legible
-    // without hovering it.
+  it('is the only star on a starred turn', () => {
     const { container } = render(Message, {
       ...base,
       message: durable({ starred: true }),
       onToggleStar: noop,
     });
 
-    expect(container.querySelectorAll('.star-btn')).toHaveLength(1);
+    expect(container.querySelectorAll('button[aria-pressed]')).toHaveLength(1);
     expect(rowStars(container)).toHaveLength(1);
   });
 });
