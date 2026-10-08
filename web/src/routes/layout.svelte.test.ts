@@ -350,3 +350,28 @@ describe('global search shortcuts', () => {
     expect(screen.queryByRole('dialog', { name: 'Search' })).toBeNull();
   });
 });
+
+it('populates search from the signed-in user’s enabled modules before any query', async () => {
+  const user = person();
+  user.features.health = true;
+  user.features.briefings = true;
+  user.features.location = true;
+  getMe.mockResolvedValue(user);
+  render(Layout, { children });
+  await screen.findByText('Alice');
+  await fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+  const trigger = screen.getByRole('button', { name: 'Search sources' });
+  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(trigger);
+  expect(screen.getAllByRole('option').map((option) => option.textContent?.trim())).toEqual([
+    'All',
+    'Chats',
+    'Rooms',
+    'Memory',
+    'Facts',
+    'Briefings',
+    'Health',
+    'Location',
+  ]);
+});

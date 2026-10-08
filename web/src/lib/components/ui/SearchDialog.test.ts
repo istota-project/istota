@@ -50,7 +50,7 @@ async function open(groups: SearchGroup[]) {
     groups,
     on_demand: [{ source: 'money', label: 'Transactions' }],
   });
-  render(SearchDialog, { open: true, controller });
+  render(SearchDialog, { open: true, controller, features: { money: true } });
   await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'hello' } });
   await waitFor(() => expect(screen.getAllByRole('option').length).toBeGreaterThan(0));
 }
@@ -98,7 +98,7 @@ it('filters, appends a second page, and explicitly requests transactions', async
     query: 'hello',
     groups: [group('chats', [hit('2')], { has_more: true })],
   });
-  await chooseSource('chats');
+  await chooseSource('Chats');
   await waitFor(() =>
     expect(api.search).toHaveBeenLastCalledWith(
       'hello',
@@ -139,7 +139,7 @@ it('opens files through the viewer and skips results with refused routes', async
 });
 it('keeps failures in the dialog and retries on the next query', async () => {
   api.search.mockRejectedValueOnce(new Error('offline'));
-  render(SearchDialog, { open: true, controller });
+  render(SearchDialog, { open: true, controller, features: { money: true } });
   await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'hello' } });
   expect(await screen.findByText('Search is unavailable right now.')).toBeInTheDocument();
   api.search.mockResolvedValueOnce({ query: 'again' });
@@ -154,7 +154,7 @@ it('opens an on-demand transaction from the authenticated ledger response', asyn
       ? (moneyResponses.money as SearchResponse)
       : (moneyResponses.all as SearchResponse),
   );
-  render(SearchDialog, { open: true, controller });
+  render(SearchDialog, { open: true, controller, features: { money: true } });
   await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'Coffee' } });
   await fireEvent.click(await screen.findByRole('button', { name: 'Search Transactions' }));
   await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
@@ -174,7 +174,7 @@ it('opens an on-demand transaction from the authenticated ledger response', asyn
 });
 
 it('places the source dropdown beside the query and the close icon in the header', async () => {
-  render(SearchDialog, { open: true, controller });
+  render(SearchDialog, { open: true, controller, features: { money: true } });
   const input = screen.getByRole('combobox', { name: 'Search everything' });
   const source = screen.getByRole('button', { name: 'Search sources' });
   expect(input.parentElement).toContainElement(source);
@@ -186,4 +186,34 @@ it('places the source dropdown beside the query and the close icon in the header
   await waitFor(() => expect(input).toHaveFocus());
   await fireEvent.click(close);
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+});
+
+it('lists sources before typing and searches only the source chosen first', async () => {
+  api.search.mockResolvedValue({ query: 'hello', groups: [] });
+  render(SearchDialog, { open: true, controller, features: { feeds: true, money: true } });
+  const trigger = screen.getByRole('button', { name: 'Search sources' });
+  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(trigger);
+  expect(screen.getAllByRole('option').map((option) => option.textContent?.trim())).toEqual([
+    'All',
+    'Chats',
+    'Rooms',
+    'Memory',
+    'Facts',
+    'Feeds',
+    'Transactions',
+  ]);
+  expect(api.search).not.toHaveBeenCalled();
+  const transactions = screen.getByRole('option', { name: 'Transactions' });
+  await fireEvent.pointerUp(transactions, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(transactions);
+  expect(api.search).not.toHaveBeenCalled();
+  await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'hello' } });
+  await waitFor(() =>
+    expect(api.search).toHaveBeenCalledExactlyOnceWith(
+      'hello',
+      expect.objectContaining({ sources: ['money'], limit: 20 }),
+    ),
+  );
 });

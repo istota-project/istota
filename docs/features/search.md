@@ -2,7 +2,7 @@
 
 Open Search beside the notification bell, or press Cmd+K on macOS or Ctrl+K elsewhere. `/` also opens it when you are outside a text field. Enter at least two characters to search; results update as you type.
 
-Results are grouped by source. Use the up and down arrows to select a result, Enter to open it, and Esc to close Search. Choose a source in the dropdown beside the search field to see more results from that source, then **Show more** to continue. Recent queries appear when the input is empty. A query is saved in this browser only when you open a result, and Search keeps the eight most recent.
+Results are grouped by source. Use the up and down arrows to select a result, Enter to open it, and Esc to close Search. The dropdown beside the search field lists sources and enabled modules as soon as Search opens. Choose one before or after typing to see more results from that source, then **Show more** to continue. Recent queries appear when the input is empty. A query is saved in this browser only when you open a result, and Search keeps the eight most recent.
 
 ## What you can find
 
