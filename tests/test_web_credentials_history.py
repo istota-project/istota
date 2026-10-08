@@ -55,7 +55,7 @@ async def test_history_delete_restore_purge_and_activity(signed_client, config, 
 
 async def test_reveal_on_nextcloud_needs_identity_and_step_up(signed_client, config, monkeypatch):
     with db.get_db(config.db_path) as conn:
-        generated.create(conn, "alice", name="generated_example", username="alice", password="fixture", url="example.com", mirror=False)
+        generated.create(conn, "alice", name="generated_example", username="alice", password="fixture", url="example.com")
         generated.set_recovery(conn, "alice", "generated_example", "SENTINEL-7f3a-code")
     response = await signed_client.post(f"{BASE}/generated_example/recovery", json={"confirm": True}, headers=ORIGIN)
     assert response.status_code == 403
@@ -81,7 +81,7 @@ async def test_generated_retirement_restores_the_whole_batch_from_a_member(signe
     from istota.credentials import store
     from istota.credentials.broker.bindings import credential_name, get_binding
     with db.get_db(config.db_path) as conn:
-        generated.create(conn, "alice", name="generated_example", username="alice", password="SENTINEL-7f3a-password", url="https://example.com", mirror=False)
+        generated.create(conn, "alice", name="generated_example", username="alice", password="SENTINEL-7f3a-password", url="https://example.com")
         generated.set_otp(conn, "alice", "generated_example", "JBSWY3DPEHPK3PXP")
         generated.set_recovery(conn, "alice", "generated_example", "SENTINEL-7f3a-recovery")
     response = await signed_client.delete(f"{BASE}/generated_example_recovery/value", headers=ORIGIN)

@@ -801,7 +801,7 @@ async def test_recovery_codes_need_step_up_on_an_email_session(client, configure
     path = configured._config.db_path
     with db.get_db(path) as conn:
         generated.create(conn, "alice", name="generated_acme", username="alice@example.com",
-                         password="fixture-password", url="https://acme.example", mirror=False)
+                         password="fixture-password", url="https://acme.example")
         generated.set_recovery(conn, "alice", "generated_acme", "fixture-rc-1111-aaaa")
     assert (await sign_in(client)).status_code == 302
     url = "/istota/api/settings/credentials/generated_acme/recovery"

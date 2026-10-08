@@ -3985,7 +3985,7 @@ class TestSaveRecovery:
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             generated.create(conn, "alice", name="generated_acme", username="alice@example.com",
-                             password="fixture-password", url="https://acme.example", mirror=False)
+                             password="fixture-password", url="https://acme.example")
         server = proxy(config=config, user_id="alice", vault_write_limit=2,
                        vault_credentials={"generated_acme": "fixture-password"})
         with server._credential_channel(10) as fd:

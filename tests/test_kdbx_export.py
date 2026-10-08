@@ -50,7 +50,7 @@ def test_round_trip_header_and_exclusions(database, cheap, tmp_path, monkeypatch
     seed(database, "other", "another-value")
     store.set_secret(database, "bob", "vault_entries", "bob_only", "another-user")
     with db.get_db(database) as conn:
-        generated.create(conn, "alice", name="generated_account", username="alice", password="generated-value", url="https://account.example", mirror=False)
+        generated.create(conn, "alice", name="generated_account", username="alice", password="generated-value", url="https://account.example")
         generated.set_otp(conn, "alice", "generated_account", OTP)
         generated.set_recovery(conn, "alice", "generated_account", "(used) first-code\nsecond-code")
         db.kv_set(conn, "alice", grants.NAMESPACE, "auto:portal", grants.AUTO_GRANT_DECLINED)
@@ -121,7 +121,7 @@ def test_export_import_preserves_generated_binding_and_custom_fields(database, c
     seed(database, "portal", "local-value")
     seed(database, "portal_extra", "custom-value", owner="portal")
     with db.get_db(database) as conn:
-        generated.create(conn, "alice", name="generated_account", username="alice", password="fixture", url="https://account.example", mirror=False)
+        generated.create(conn, "alice", name="generated_account", username="alice", password="fixture", url="https://account.example")
         binding = bindings.parse_binding("https://account.example", {"istota_hosts": "api.example", "istota_headers": "x-api-key"}, ["istota:reveal"], source="generated")
         for name in bindings.credential_groups(conn, "alice")["generated_account"]:
             bindings.put_binding(conn, "alice", name, {**binding, "credential": "generated_account"})

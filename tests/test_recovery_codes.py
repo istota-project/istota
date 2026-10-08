@@ -206,7 +206,7 @@ def test_the_private_channel_resolves_a_target_and_saves(tmp_path, monkeypatch, 
 def _stored_with_codes(config):
     with db.get_db(config.db_path) as conn:
         generated.create(conn, "alice", name="generated_acme", username="alice@example.com",
-                         password="fixture-password", url="https://acme.example", mirror=False)
+                         password="fixture-password", url="https://acme.example")
         generated.set_recovery(conn, "alice", "generated_acme", CODES)
 
 
