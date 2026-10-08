@@ -79,7 +79,8 @@ def _add_usage(conn, *, user, at, **kw):
 
 def _add_task(conn, *, user, at):
     tid = db.create_task(conn, prompt="p", user_id=user, source_type="talk")
-    conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (_sql(at), tid))
+    conn.execute("UPDATE tasks SET created_at = ?, status = 'completed' WHERE id = ?",
+                 (_sql(at), tid))
     return tid
 
 
@@ -242,7 +243,7 @@ class TestEmptyUser:
         """ISSUE-680: neither kind calls a model, so neither is a gap."""
         for kw in ({"command": "true"}, {"skill": "feeds"}):
             tid = db.create_task(conn, prompt="", user_id="alice", source_type="scheduled", **kw)
-            conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?",
+            conn.execute("UPDATE tasks SET created_at = ?, status = 'completed' WHERE id = ?",
                          (_sql(NOW - timedelta(hours=2)), tid))
         conn.commit()
 

@@ -724,7 +724,8 @@ class TestUnmeasuredTaskCount:
         """A tmux_claude task spends real tokens and writes no row. Counting it
         as zero-cost would make every average lie."""
         measured = db.create_task(db_conn, prompt="p", user_id="alice")
-        unmeasured = db.create_task(db_conn, prompt="p", user_id="alice")
+        unmeasured = _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"))
+        _ran(db_conn, measured)
         db.insert_task_usage(
             db_conn, usage=_usage(), task_id=measured, user_id="alice",
             brain_kind="claude_code",
@@ -740,7 +741,7 @@ class TestUnmeasuredTaskCount:
         inside the window. Passing an ISO-Z bound here compares `'2026-...T'`
         against `'2026-... '` and silently drops it — no error, just a wrong
         number."""
-        task_id = db.create_task(db_conn, prompt="p", user_id="alice")
+        task_id = _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"))
         at = datetime(2026, 8, 13, 0, 30, 0, tzinfo=timezone.utc)
         db_conn.execute(
             "UPDATE tasks SET created_at = ? WHERE id = ?", (_sql_datetime(at), task_id)
@@ -765,9 +766,9 @@ class TestUnmeasuredTaskCount:
         `command:` row is a shell command; neither calls a model, so neither
         can have a usage row. Counting them buried the one gap the counter
         exists to show under ~288 polls per user per day."""
-        db.create_task(db_conn, prompt="", command="true", user_id="alice")
-        db.create_task(db_conn, prompt="", skill="feeds", user_id="alice")
-        db.create_task(db_conn, prompt="p", user_id="alice")
+        _ran(db_conn, db.create_task(db_conn, prompt="", command="true", user_id="alice"))
+        _ran(db_conn, db.create_task(db_conn, prompt="", skill="feeds", user_id="alice"))
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"))
         db_conn.commit()
 
         since = _sql_datetime(NOW - timedelta(days=7))
@@ -775,12 +776,147 @@ class TestUnmeasuredTaskCount:
         assert db.unmeasured_task_counts_by_user(db_conn, since=since) == {"alice": 1}
 
     def test_scopes_by_user(self, db_conn):
-        db.create_task(db_conn, prompt="p", user_id="alice")
-        db.create_task(db_conn, prompt="p", user_id="bob")
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"))
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="bob"))
         db_conn.commit()
 
         since = _sql_datetime(NOW - timedelta(days=7))
         assert db.unmeasured_task_count(db_conn, since=since, user_id="alice") == 1
+
+    def test_scopes_by_source_type(self, db_conn):
+        """ISSUE-681: `--source talk` must not count a cli task."""
+        _ran(db_conn, db.create_task(
+            db_conn, prompt="p", user_id="alice", source_type="talk"))
+        _ran(db_conn, db.create_task(
+            db_conn, prompt="p", user_id="alice", source_type="cli"))
+        db_conn.commit()
+
+        since = _sql_datetime(NOW - timedelta(days=7))
+        assert db.unmeasured_task_count(
+            db_conn, since=since, source_type="talk") == 1
+
+    def test_scopes_by_resolved_brain_kind(self, db_conn):
+        """ISSUE-681: `--brain native` must not count a tmux task. The kind
+        is the resolver's answer, so a source-type override and a room pin
+        both count, and a pin the operator does not offer falls through."""
+        from istota.config import BrainConfig
+
+        brain = BrainConfig(
+            kind="native",
+            source_type_overrides={"scheduled": "tmux_claude"},
+            room_selectable=["tmux_claude"],
+        )
+        _ran(db_conn, db.create_task(
+            db_conn, prompt="p", user_id="alice", source_type="talk"))
+        _ran(db_conn, db.create_task(
+            db_conn, prompt="p", user_id="alice", source_type="scheduled"))
+        _ran(db_conn, db.create_task(
+            db_conn, prompt="p", user_id="alice", source_type="talk",
+            brain="tmux_claude"))
+        _ran(db_conn, db.create_task(
+            db_conn, prompt="p", user_id="alice", source_type="talk",
+            brain="claude_code"))  # not room_selectable: resolves to native
+        db_conn.commit()
+
+        since = _sql_datetime(NOW - timedelta(days=7))
+        count = db.unmeasured_task_count
+        assert count(db_conn, since=since, brain_kind="native",
+                     brain_config=brain) == 2
+        assert count(db_conn, since=since, brain_kind="tmux_claude",
+                     brain_config=brain) == 2
+        assert count(db_conn, since=since, brain_kind="tmux_claude",
+                     brain_config=brain, source_type="talk") == 1
+
+    def test_a_brain_filter_needs_the_config_it_resolves_against(self, db_conn):
+        with pytest.raises(ValueError):
+            db.unmeasured_task_count(
+                db_conn, since=_sql_datetime(NOW), brain_kind="native")
+
+
+def _ran(conn, task_id, status="completed", attempt_count=0):
+    conn.execute(
+        "UPDATE tasks SET status = ?, attempt_count = ? WHERE id = ?",
+        (status, attempt_count, task_id),
+    )
+    return task_id
+
+
+class TestUnmeasuredTaskStatus:
+    """ISSUE-682: a task that has not run a brain yet has spent nothing, so it
+    is not a gap in the record. Every case goes through the shared predicate,
+    which the CLI, the skill and both admin counters read."""
+
+    SINCE = _sql_datetime(NOW - timedelta(days=7))
+
+    def _count(self, conn):
+        return db.unmeasured_task_count(conn, since=self.SINCE)
+
+    def test_a_pending_task_never_attempted_is_not_counted(self, db_conn):
+        db.create_task(db_conn, prompt="p", user_id="alice")
+        assert self._count(db_conn) == 0
+        assert db.unmeasured_task_counts_by_user(db_conn, since=self.SINCE) == {}
+
+    def test_a_completed_task_with_no_usage_row_is_counted(self, db_conn):
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"))
+        assert self._count(db_conn) == 1
+
+    @pytest.mark.parametrize("status", ["locked", "running"])
+    def test_a_first_attempt_in_flight_is_not_counted(self, db_conn, status):
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"),
+             status=status)
+        assert self._count(db_conn) == 0
+
+    def test_pending_confirmation_is_counted(self, db_conn):
+        """It parked mid-run, so a brain did run."""
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"),
+             status="pending_confirmation")
+        assert self._count(db_conn) == 1
+
+    @pytest.mark.parametrize("status", ["pending", "running"])
+    def test_a_requeued_task_with_a_prior_attempt_is_counted(
+        self, db_conn, status
+    ):
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"),
+             status=status, attempt_count=1)
+        assert self._count(db_conn) == 1
+
+    def test_cancelled_before_it_ran_is_not_counted(self, db_conn):
+        _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"),
+             status="cancelled")
+        assert self._count(db_conn) == 0
+
+    def test_failed_before_it_ran_is_not_counted(self, db_conn):
+        """`fail_ancient_pending_tasks` fails a wedged queue's rows in bulk
+        without starting them."""
+        tid = db.create_task(db_conn, prompt="p", user_id="alice")
+        db_conn.execute(
+            "UPDATE tasks SET created_at = datetime('now', '-3 hours') WHERE id = ?",
+            (tid,))
+        db.fail_ancient_pending_tasks(db_conn, 2)
+        assert db_conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "failed"
+        assert self._count(db_conn) == 0
+
+    def test_failed_after_it_ran_is_counted(self, db_conn):
+        tid = _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"),
+                   status="failed")
+        db_conn.execute(
+            "UPDATE tasks SET started_at = datetime('now') WHERE id = ?", (tid,))
+        assert self._count(db_conn) == 1
+
+    def test_an_approved_confirmation_stays_counted(self, db_conn):
+        """Its parked run spent tokens; approval requeues it as `pending`."""
+        tid = _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"),
+                   status="pending_confirmation")
+        db.confirm_task(db_conn, tid)
+        assert self._count(db_conn) == 1
+
+    def test_cancelled_while_running_is_counted(self, db_conn):
+        tid = _ran(db_conn, db.create_task(db_conn, prompt="p", user_id="alice"),
+                   status="cancelled")
+        db_conn.execute(
+            "UPDATE tasks SET started_at = datetime('now') WHERE id = ?", (tid,))
+        assert self._count(db_conn) == 1
 
 
 class TestRetention:

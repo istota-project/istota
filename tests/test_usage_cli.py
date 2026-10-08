@@ -121,6 +121,13 @@ def _run(capsys, **kw):
     return code, capsys.readouterr().out
 
 
+def _ran_task(conn, **kw):
+    """A prompt task that ran; a never-started one is not unmeasured (ISSUE-682)."""
+    tid = db.create_task(conn, prompt="p", **kw)
+    conn.execute("UPDATE tasks SET status = 'completed' WHERE id = ?", (tid,))
+    return tid
+
+
 class TestCostRendering:
     def test_only_the_real_money_row_renders_as_currency(self, seeded, capsys):
         """Asserted together so a change that suppresses too much or too little
@@ -346,8 +353,8 @@ class TestFiltersAndWindow:
         # Wider than any window below, so the retention clamp stays out of it.
         seeded.scheduler.task_retention_days = 36500
         with db.get_db(seeded.db_path) as conn:
-            old_task = db.create_task(conn, prompt="p", user_id="alice")
-            new_task = db.create_task(conn, prompt="p", user_id="alice")
+            old_task = _ran_task(conn, user_id="alice")
+            new_task = _ran_task(conn, user_id="alice")
             conn.execute(
                 "UPDATE tasks SET created_at = ? WHERE id = ?",
                 ((NOW - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S"), old_task),
@@ -380,7 +387,7 @@ class TestFiltersAndWindow:
         can only see 7 days read as a regression on the retention date."""
         seeded.scheduler.task_retention_days = 7
         with db.get_db(seeded.db_path) as conn:
-            db.create_task(conn, prompt="p", user_id="alice")
+            _ran_task(conn, user_id="alice")
 
         _, out = _run(capsys, json=True)
         payload = json.loads(out)
@@ -400,7 +407,7 @@ class TestFiltersAndWindow:
         counter must not clamp to now and report a retained task as absent."""
         seeded.scheduler.task_retention_days = -1
         with db.get_db(seeded.db_path) as conn:
-            tid = db.create_task(conn, prompt="p", user_id="alice")
+            tid = _ran_task(conn, user_id="alice")
             conn.execute(
                 "UPDATE tasks SET created_at = ? WHERE id = ?",
                 ((NOW - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S"), tid),
@@ -417,11 +424,45 @@ class TestFiltersAndWindow:
         """An all-tmux window has no usage rows, which is exactly when the
         unmeasured count matters; the early return used to skip it."""
         with db.get_db(seeded.db_path) as conn:
-            db.create_task(conn, prompt="p", user_id="dave")
+            _ran_task(conn, user_id="dave")
 
         _, out = _run(capsys, user="dave", days=3)
         assert "No usage recorded in this window." in out
         assert "1 prompt task(s) in this window recorded no usage" in out
+
+    def test_the_counter_takes_the_source_and_brain_filters(self, seeded, capsys):
+        """ISSUE-681: the trailer describes the same tasks as the table, so
+        `--brain native` does not count a task that resolves to tmux."""
+        seeded.brain.kind = "native"
+        seeded.brain.source_type_overrides = {"scheduled": "tmux_claude"}
+        with db.get_db(seeded.db_path) as conn:
+            _ran_task(conn, user_id="alice", source_type="talk")
+            _ran_task(conn, user_id="alice", source_type="scheduled")
+
+        _, out = _run(capsys, brain="native", json=True)
+        assert json.loads(out)["unmeasured_tasks"] == 1
+        _, out = _run(capsys, brain="tmux_claude", json=True)
+        assert json.loads(out)["unmeasured_tasks"] == 1
+        _, out = _run(capsys, source="talk", brain="tmux_claude", json=True)
+        assert json.loads(out)["unmeasured_tasks"] == 0
+        _, out = _run(capsys, source="talk", origin="task", json=True)
+        assert json.loads(out)["unmeasured_tasks"] == 1
+
+    @pytest.mark.parametrize("filters", [{"model": "model-a"},
+                                         {"origin": "sleep_cycle"}])
+    def test_a_usage_only_filter_reports_the_count_as_not_applicable(
+        self, seeded, capsys, filters
+    ):
+        """An unmeasured task has no model, and only a task has origin `task`,
+        so an unfiltered number here would describe different tasks."""
+        with db.get_db(seeded.db_path) as conn:
+            _ran_task(conn, user_id="alice")
+
+        _, out = _run(capsys, json=True, **filters)
+        assert json.loads(out)["unmeasured_tasks"] is None
+        _, out = _run(capsys, **filters)
+        assert "Unmeasured tasks not applicable" in out
+        assert "task-retention cutoff" not in out
 
     def test_a_window_inside_retention_is_not_clamped(self, seeded, capsys):
         seeded.scheduler.task_retention_days = 7

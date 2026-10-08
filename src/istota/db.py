@@ -13083,8 +13083,19 @@ def _usage_summary_by_model(
 # Only a prompt task runs a brain. A `command` task is a shell command and a
 # `skill` task (every `_module.*` job, the feed poller among them) a skill CLI;
 # neither can have a usage row, and counting them buried the gap (ISSUE-680).
+# A task that has not reached a brain yet has spent nothing either: a first
+# attempt still queued or in flight (its row is written when the attempt ends),
+# or one cancelled or failed before it started (ISSUE-682). `attempt_count > 0`
+# keeps a requeued task whose earlier attempt did run, since a retry clears
+# `started_at`, and `confirmed_at` keeps an approved one, whose parked run did.
+# Not covered: `release_task_for_restart` clears `started_at` without bumping
+# `attempt_count`, so a restart-killed attempt that never re-runs is dropped.
 _UNMEASURED_TASK_WHERE = """
     t.command IS NULL AND t.skill IS NULL
+    AND NOT (t.attempt_count = 0 AND t.confirmed_at IS NULL AND (
+        t.status IN ('pending', 'locked', 'running')
+        OR (t.status IN ('cancelled', 'failed') AND t.started_at IS NULL)
+    ))
     AND NOT EXISTS (SELECT 1 FROM task_usage u WHERE u.task_id = t.id)
 """
 
@@ -13095,6 +13106,9 @@ def unmeasured_task_count(
     since: str,
     until: str | None = None,
     user_id: str | None = None,
+    source_type: str | None = None,
+    brain_kind: str | None = None,
+    brain_config=None,
 ) -> int:
     """Prompt tasks in the window with no `task_usage` row at all.
 
@@ -13111,7 +13125,14 @@ def unmeasured_task_count(
     section takes. Passing an ISO-Z bound here compares `'…T…'` against
     `'… …'` and silently excludes every task on the boundary day — no error,
     just a smaller number. Build them with `sql_datetime_days_ago`.
+
+    `brain_kind` matches the kind `brain.resolve_brain_kind` gives the task's
+    `source_type` and pin under `brain_config` (ISSUE-681). An unmeasured task
+    has no usage row to say which brain ran, so this is today's config's
+    answer and can differ from what ran if the config changed since.
     """
+    if brain_kind and brain_config is None:
+        raise ValueError("brain_kind needs the brain_config it resolves against")
     clauses = ["t.created_at >= ?"]
     params: list = [since]
     if until:
@@ -13120,14 +13141,27 @@ def unmeasured_task_count(
     if user_id:
         clauses.append("t.user_id = ?")
         params.append(user_id)
-    row = conn.execute(
+    if source_type:
+        clauses.append("t.source_type = ?")
+        params.append(source_type)
+    rows = conn.execute(
         f"""
-        SELECT COUNT(*) FROM tasks t
+        SELECT t.source_type, t.brain, COUNT(*) FROM tasks t
         WHERE {" AND ".join(clauses)} AND {_UNMEASURED_TASK_WHERE}
+        GROUP BY t.source_type, t.brain
         """,
         params,
-    ).fetchone()
-    return int(row[0])
+    ).fetchall()
+    if not brain_kind:
+        return sum(int(r[2]) for r in rows)
+
+    from istota.brain import resolve_brain_kind
+
+    return sum(
+        int(r[2]) for r in rows
+        if resolve_brain_kind(r[0], brain_config, override=r[1]).kind
+        == brain_kind
+    )
 
 
 def unmeasured_task_counts_by_user(
