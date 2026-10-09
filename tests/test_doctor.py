@@ -1976,6 +1976,128 @@ class TestSkillProxy:
             assert "readable by anything else the task runs" in posture.detail
 
 
+class TestTaskCgroups:
+    """`security.task_cgroups`: per-task resource limits are a parity row.
+
+    The fixture tree stands in for a container's private cgroup namespace:
+    `0::/supervisor` in `/proc/self/cgroup`, one cgroup2 mount at the root, and
+    the variable the entrypoint's root phase exports naming it. `probe` is the
+    module's own measurement and is stubbed per case; what is under test is
+    which answer the check gives for which tree.
+    """
+
+    NAME = "security.task_cgroups"
+
+    @pytest.fixture
+    def tree(self, tmp_path, monkeypatch):
+        proc = tmp_path / "proc"
+        (proc / "self").mkdir(parents=True)
+        (proc / "self" / "cgroup").write_text("0::/supervisor\n")
+        cg = tmp_path / "sys" / "fs" / "cgroup"
+        (cg / "supervisor").mkdir(parents=True)
+        (cg / "cgroup.subtree_control").write_text("")
+        monkeypatch.setattr(doctor, "_CGROUP_PROC_ROOT", proc)
+        monkeypatch.setattr(doctor, "_CGROUP_FS_ROOT", cg)
+        monkeypatch.setattr(doctor.sys, "platform", "linux")
+        for marker in doctor._TASK_ENV_MARKERS:
+            monkeypatch.delenv(marker, raising=False)
+        monkeypatch.delenv("ISTOTA_TASK_CGROUP_ROOT", raising=False)
+        self._mount(proc, cg, "/")
+        return proc, cg
+
+    @staticmethod
+    def _mount(proc, cg, root):
+        (proc / "self" / "mountinfo").write_text(
+            f"40 30 0:41 {root} {cg} rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw\n"
+        )
+
+    def _run(self, config):
+        return _by_name(run_checks(config, only=(self.NAME,)))[self.NAME]
+
+    def test_a_delegated_container_root_that_probes_clean_is_ok(
+        self, make_config, tree, monkeypatch
+    ):
+        _, cg = tree
+        monkeypatch.setenv("ISTOTA_TASK_CGROUP_ROOT", str(cg))
+        monkeypatch.setattr(doctor.task_cgroup, "probe", lambda root: None)
+
+        result = self._run(make_config())
+
+        assert result.status == OK, result
+        assert str(cg) in result.detail
+
+    def test_a_declared_root_mounted_above_the_container_fails_never_ok(
+        self, make_config, tree, monkeypatch
+    ):
+        # The host-bind control: writable, probes clean, and the VM's tree.
+        proc, cg = tree
+        self._mount(proc, cg, "/../..")
+        monkeypatch.setenv("ISTOTA_TASK_CGROUP_ROOT", str(cg))
+        monkeypatch.setattr(doctor.task_cgroup, "probe", lambda root: None)
+
+        result = self._run(make_config())
+
+        assert result.status == FAIL, result
+        assert "/../.." in result.detail
+        assert result.remedy
+
+    @pytest.mark.requires_dac
+    def test_a_declared_root_left_read_only_fails(self, make_config, tree, monkeypatch):
+        # The skipped-remount control: Docker's mount is read-only until the
+        # root phase remounts it.
+        _, cg = tree
+        monkeypatch.setenv("ISTOTA_TASK_CGROUP_ROOT", str(cg))
+        control = cg / "cgroup.subtree_control"
+        control.chmod(0o444)
+        try:
+            result = self._run(make_config())
+        finally:
+            control.chmod(0o644)
+
+        assert result.status == FAIL, result
+        assert "not writable" in result.detail
+
+    def test_a_declared_root_whose_probe_fails_fails(self, make_config, tree, monkeypatch):
+        _, cg = tree
+        monkeypatch.setenv("ISTOTA_TASK_CGROUP_ROOT", str(cg))
+        monkeypatch.setattr(
+            doctor.task_cgroup, "probe", lambda root: "no memory.max in a new cgroup"
+        )
+
+        result = self._run(make_config())
+
+        assert result.status == FAIL, result
+        assert "no memory.max" in result.detail
+
+    def test_no_delegated_subtree_at_all_warns(self, make_config, tree):
+        # The web container, or a host unit without Delegate=: nothing here
+        # declares a root, so there is no probe to fail.
+        result = self._run(make_config())
+
+        assert result.status == WARN, result
+        assert result.remedy
+
+    def test_skips_when_disabled(self, make_config, tree):
+        from istota.config import SchedulerConfig
+
+        result = self._run(make_config(scheduler=SchedulerConfig(task_cgroup_enabled=False)))
+
+        assert result.status == SKIP
+
+    def test_skips_off_linux(self, make_config, tree, monkeypatch):
+        monkeypatch.setattr(doctor.sys, "platform", "darwin")
+
+        assert self._run(make_config()).status == SKIP
+
+    def test_skips_inside_a_task(self, make_config, tree, monkeypatch):
+        monkeypatch.setenv("ISTOTA_TASK_ID", "7")
+
+        assert self._run(make_config()).status == SKIP
+
+    def test_is_deployment_scoped(self):
+        assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
+
+
 class TestProxyPeerCheck:
     """`security.proxy_peer_check` — ISSUE-550."""
 

@@ -49,13 +49,16 @@ import errno
 import logging
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 __all__ = [
+    "ROOT_ENV",
     "CgroupLimits",
+    "cgroup2_mount_root",
     "create",
+    "declared_root_problem",
     "destroy",
     "place",
     "placement",
@@ -131,11 +134,91 @@ class CgroupLimits:
     # contained task is observed driving host swap I/O rather than dying.
 
 
+#: Where a container's root phase says it delegated the container's own cgroup.
+ROOT_ENV = "ISTOTA_TASK_CGROUP_ROOT"
+
+
+def _unescape_mountinfo(field: str) -> str:
+    """mountinfo octal-escapes space, tab, newline and backslash in paths."""
+    out, i = [], 0
+    while i < len(field):
+        if field[i] == "\\" and i + 4 <= len(field) and field[i + 1:i + 4].isdigit():
+            out.append(chr(int(field[i + 1:i + 4], 8)))
+            i += 4
+        else:
+            out.append(field[i])
+            i += 1
+    return "".join(out)
+
+
+def cgroup2_mount_root(path: Path, *, proc_root: Path = Path("/proc")) -> str | None:
+    """The mountinfo ``root`` of the cgroup2 mount ``path`` sits on, or ``None``.
+
+    ``/`` is a mount of the process's own cgroup, which is what a private
+    cgroup namespace gives a container. Anything else (``/../..`` under a bind
+    of the host's ``/sys/fs/cgroup``) is a view of somebody else's tree. The
+    covering mount is the one with the longest mount point that is ``path`` or
+    an ancestor of it; a path whose covering mount is not cgroup2 has no answer.
+    """
+    text = _read_text(Path(proc_root) / "self" / "mountinfo")
+    if text is None:
+        return None
+    target = os.path.normpath(str(path))
+    best: tuple[int, str, str] | None = None
+    for line in text.splitlines():
+        fields = line.split()
+        if "-" not in fields:
+            continue
+        dash = fields.index("-")
+        if dash < 5 or dash + 1 >= len(fields):
+            continue
+        root = _unescape_mountinfo(fields[3])
+        point = os.path.normpath(_unescape_mountinfo(fields[4]))
+        covers = target == point or target.startswith(point.rstrip("/") + "/")
+        if covers and (best is None or len(point) >= best[0]):
+            best = (len(point), root, fields[dash + 1])
+    if best is None or best[2] != "cgroup2":
+        return None
+    return best[1]
+
+
+def declared_root_problem(path: Path, *, proc_root: Path = Path("/proc")) -> str | None:
+    """Why ``path`` cannot be the delegated root a root phase declared, or ``None``.
+
+    Three conditions, each one the kernel's answer rather than a convention:
+    a cgroup2 directory, on a mount of this process's own cgroup (root ``/``),
+    whose ``cgroup.subtree_control`` this process can write. The second is the
+    one a writability probe cannot see: a bind of the host's tree is writable,
+    probes clean, and is the VM's whole hierarchy.
+    """
+    path = Path(path)
+    if not path.is_dir():
+        return f"{path} is not a directory"
+    root = cgroup2_mount_root(path, proc_root=proc_root)
+    if root is None:
+        return f"{path} is not on a cgroup2 mount"
+    if root != "/":
+        return (
+            f"the cgroup2 mount at {path} is rooted at {root}, not at this "
+            "container's own cgroup (/)"
+        )
+    if not os.access(path / "cgroup.subtree_control", os.W_OK):
+        return f"{path}/cgroup.subtree_control is not writable by this process"
+    return None
+
+
 def resolve_root(
     proc_root: Path = Path("/proc"),
     cgroup_root: Path = Path("/sys/fs/cgroup"),
+    environ: Mapping[str, str] | None = None,
 ) -> Path | None:
     """The directory task cgroups are created in, or ``None`` where there is none.
+
+    **In a container** the entrypoint's root phase remounts the private
+    namespace's cgroup2 mount read-write, delegates its root to the daemon's
+    uid, and names it in :data:`ROOT_ENV`. That arm runs first and is taken only
+    when :func:`declared_root_problem` finds nothing wrong; otherwise the unit
+    walk below decides, as it always has.
 
     Reads the calling process's unified-hierarchy cgroup from
     ``/proc/self/cgroup`` and truncates at the ``.service`` / ``.scope``
@@ -158,6 +241,14 @@ def resolve_root(
     no subtree this module can be confident it owns, and creating directories
     in one it does not own is worse than leaving the task uncontained.
     """
+    env = os.environ if environ is None else environ
+    declared = env.get(ROOT_ENV, "")
+    if declared:
+        try:
+            if declared_root_problem(Path(declared), proc_root=proc_root) is None:
+                return Path(declared)
+        except (OSError, ValueError):
+            pass
     try:
         text = _read_text(Path(proc_root) / "self" / "cgroup")
         if text is None:

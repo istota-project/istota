@@ -671,6 +671,123 @@ class TestResolveRoot:
         assert task_cgroup.resolve_root(proc_root=proc, cgroup_root=cg) is None
 
 
+def _mountinfo(tmp_path: Path, *entries: tuple[str, str, str]) -> Path:
+    """A `/proc/self/mountinfo` with one line per `(root, mount point, fstype)`."""
+    proc = tmp_path / "proc" / "self"
+    proc.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"{40 + i} 30 0:{41 + i} {root} {point} rw,nosuid,nodev,noexec,relatime - {fstype} {fstype} rw"
+        for i, (root, point, fstype) in enumerate(entries)
+    ]
+    (proc / "mountinfo").write_text("\n".join(lines) + "\n")
+    return tmp_path / "proc"
+
+
+def _container_cgroupfs(tmp_path: Path, *, mount_root: str = "/") -> tuple[Path, Path]:
+    """A private cgroup namespace's mount: `0::/`, a cgroup2fs at the root, delegated."""
+    cg = tmp_path / "sys" / "fs" / "cgroup"
+    (cg / "supervisor").mkdir(parents=True)
+    (cg / "cgroup.subtree_control").write_text("")
+    proc = _proc_tree(tmp_path, "0::/supervisor\n")
+    _mountinfo(tmp_path, ("/", "/", "overlay"), (mount_root, str(cg), "cgroup2"))
+    return proc, cg
+
+
+class TestResolveRootInAContainer:
+    """The `ISTOTA_TASK_CGROUP_ROOT` arm: the container's own cgroup mount.
+
+    In a container with `cgroup: private` the cgroup line is `0::/supervisor`
+    and names no systemd unit, so the walk below finds nothing. The entrypoint's
+    root phase delegates the namespace's root instead, and says where with the
+    variable. The arm takes it only when the kernel's view agrees: a cgroup2
+    mount rooted at `/` (the container's own cgroup, not the VM's), with a
+    `cgroup.subtree_control` this process can write.
+    """
+
+    def test_a_delegated_container_root_is_taken(self, tmp_path):
+        proc, cg = _container_cgroupfs(tmp_path)
+
+        root = task_cgroup.resolve_root(
+            proc_root=proc, cgroup_root=cg, environ={"ISTOTA_TASK_CGROUP_ROOT": str(cg)}
+        )
+
+        assert root == cg
+
+    def test_without_the_variable_a_container_resolves_nothing(self, tmp_path):
+        proc, cg = _container_cgroupfs(tmp_path)
+
+        assert task_cgroup.resolve_root(proc_root=proc, cgroup_root=cg, environ={}) is None
+
+    def test_a_mount_rooted_above_the_container_is_refused(self, tmp_path):
+        # A bind of the host's /sys/fs/cgroup reads `/../..` here: writable,
+        # and the VM's whole tree. Handing that to the daemon is a way out of
+        # every per-task limit, so a writable directory is not enough.
+        proc, cg = _container_cgroupfs(tmp_path, mount_root="/../..")
+
+        root = task_cgroup.resolve_root(
+            proc_root=proc, cgroup_root=cg, environ={"ISTOTA_TASK_CGROUP_ROOT": str(cg)}
+        )
+
+        assert root is None
+        problem = task_cgroup.declared_root_problem(cg, proc_root=proc)
+        assert problem is not None and "/../.." in problem
+
+    def test_a_directory_on_no_cgroup2_mount_is_refused(self, tmp_path):
+        proc, cg = _container_cgroupfs(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "cgroup.subtree_control").write_text("")
+
+        root = task_cgroup.resolve_root(
+            proc_root=proc, cgroup_root=cg,
+            environ={"ISTOTA_TASK_CGROUP_ROOT": str(elsewhere)},
+        )
+
+        assert root is None
+        assert "cgroup2" in task_cgroup.declared_root_problem(elsewhere, proc_root=proc)
+
+    @pytest.mark.requires_dac
+    def test_a_root_this_process_cannot_write_is_refused(self, tmp_path):
+        # The read-only mount Docker hands a private namespace before the root
+        # phase remounts it. The remount is what makes the variable true.
+        proc, cg = _container_cgroupfs(tmp_path)
+        control = cg / "cgroup.subtree_control"
+        control.chmod(0o444)
+        try:
+            root = task_cgroup.resolve_root(
+                proc_root=proc, cgroup_root=cg,
+                environ={"ISTOTA_TASK_CGROUP_ROOT": str(cg)},
+            )
+            problem = task_cgroup.declared_root_problem(cg, proc_root=proc)
+        finally:
+            control.chmod(0o644)
+
+        assert root is None
+        assert "not writable" in problem
+
+    def test_a_bad_declaration_falls_through_to_the_unit_walk(self, tmp_path):
+        proc = _proc_tree(tmp_path, "0::/system.slice/istota-scheduler.service/supervisor\n")
+        cg = tmp_path / "sys" / "fs" / "cgroup"
+        unit = cg / "system.slice" / "istota-scheduler.service"
+        (unit / "supervisor").mkdir(parents=True)
+        _mountinfo(tmp_path, ("/", str(cg), "cgroup2"))
+
+        root = task_cgroup.resolve_root(
+            proc_root=proc, cgroup_root=cg,
+            environ={"ISTOTA_TASK_CGROUP_ROOT": str(tmp_path / "missing")},
+        )
+
+        assert root == unit
+
+    def test_the_longest_covering_mount_decides(self, tmp_path):
+        # A cgroup2 mount at / (unlikely, but mountinfo is ordered by mount,
+        # not by depth) must not answer for the one actually at the path.
+        proc, cg = _container_cgroupfs(tmp_path, mount_root="/../..")
+        _mountinfo(tmp_path, ("/", "/", "cgroup2"), ("/../..", str(cg), "cgroup2"))
+
+        assert task_cgroup.cgroup2_mount_root(cg, proc_root=proc) == "/../.."
+
+
 @pytest.mark.linux
 class TestAgainstARealCgroupFs:
     """The one test that can disagree with the fixture.

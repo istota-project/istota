@@ -53,6 +53,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable
@@ -64,6 +65,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from istota.lib import du
 from istota.lib import sqlite_util
+from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.user_scope import is_within, paths_overlap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
@@ -3570,10 +3572,13 @@ def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
 # unprivileged user namespaces. A remedy naming one sends half its readers to
 # the wrong file.
 _SANDBOX_EFFECTIVE_REMEDY = (
-    "On Docker, grant the istota service both seccomp:unconfined and "
-    "systempaths=unconfined (security_opt) — bubblewrap needs the first to "
-    "create the namespace and the second to mount a procfs inside it. On a "
-    "host, allow unprivileged user namespaces "
+    "On Docker, give the istota service the run contract docker-compose.yml "
+    "ships: security_opt seccomp=./istota/seccomp-istota.json, "
+    "apparmor=istota (with docker/istota/apparmor-istota loaded where AppArmor "
+    "is enabled) and systempaths=unconfined — the profiles let bubblewrap "
+    "create the namespace and mount inside it, and the last lets it mount a "
+    "procfs. seccomp:unconfined also works and drops the syscall denylist. On "
+    "a host, allow unprivileged user namespaces "
     "(sysctl kernel.unprivileged_userns_clone=1) and install a working "
     "bubblewrap. Or set [security] sandbox_enabled = false to say the "
     "deployment is deliberately unconfined."
@@ -3701,6 +3706,83 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
         name,
         OK,
         "bubblewrap can create a namespace here, so tasks are confined by the sandbox",
+    )
+
+
+# Parameters rather than literals so a test can point the check at a tree under
+# `tmp_path`, the way `sandbox/cgroup.py` takes its roots.
+_CGROUP_PROC_ROOT = Path("/proc")
+_CGROUP_FS_ROOT = Path("/sys/fs/cgroup")
+
+_TASK_CGROUPS_REMEDY = (
+    "In the container, the entrypoint's root phase remounts the private cgroup "
+    "namespace read-write and delegates it to the daemon's uid; that needs "
+    "`cgroup: private`, no bind of /sys/fs/cgroup, and CAP_SYS_ADMIN in "
+    "cap_add, as docker-compose.yml ships them. On a host, the unit needs "
+    "Delegate=memory pids cpu and DelegateSubgroup=supervisor."
+)
+
+
+def check_task_cgroups(config: "Config", probe: bool) -> CheckResult:
+    """Whether each task gets a cgroup of its own with its limits written.
+
+    Per-task resource limits are a security parity row, so a delegated root
+    that does not work is a ``FAIL`` rather than the startup report's quiet
+    warning. Two ways to have one: a container's root phase declares the
+    namespace's root in ``ISTOTA_TASK_CGROUP_ROOT``, or a systemd unit with
+    ``Delegate=``. A declared root is held to :func:`declared_root_problem`
+    first, which reads the mount's root in ``/proc/self/mountinfo``: a bind of
+    the host's tree is writable and probes clean, and must never read as OK.
+
+    ``WARN`` where nothing declares a root at all. That is a host unit without
+    ``Delegate=``, or a process that is not the daemon (the web container runs
+    the registry for the admin pane and has no delegated subtree of its own),
+    so there is no probe to fail. ``SKIP`` off Linux and inside a task.
+
+    The probe is three syscalls on the cgroup tree and spawns nothing, so it
+    runs under ``probe=False`` too.
+    """
+    name = "security.task_cgroups"
+    if not config.scheduler.task_cgroup_enabled:
+        return CheckResult(name, SKIP, "[scheduler] task_cgroup_enabled = false")
+    if not sys.platform.startswith("linux"):
+        return CheckResult(name, SKIP, "cgroup v2 is Linux-only; a development checkout runs tasks uncontained")
+    if _is_task_process():
+        return CheckResult(
+            name, SKIP,
+            "run from inside a task, which has no view of the daemon's cgroup tree",
+        )
+
+    declared = os.environ.get(task_cgroup.ROOT_ENV, "")
+    if declared:
+        problem = task_cgroup.declared_root_problem(Path(declared), proc_root=_CGROUP_PROC_ROOT)
+        if problem is not None:
+            return CheckResult(
+                name, FAIL,
+                f"{task_cgroup.ROOT_ENV} names {declared}, but {problem}; tasks run uncontained",
+                remedy=_TASK_CGROUPS_REMEDY,
+            )
+        root = Path(declared)
+    else:
+        root = task_cgroup.resolve_root(
+            proc_root=_CGROUP_PROC_ROOT, cgroup_root=_CGROUP_FS_ROOT, environ={}
+        )
+        if root is None:
+            return CheckResult(
+                name, WARN,
+                "no delegated cgroup subtree here (no container root declared, no "
+                "systemd unit in /proc/self/cgroup); tasks run without per-task limits",
+                remedy=_TASK_CGROUPS_REMEDY,
+            )
+
+    reason = task_cgroup.probe(root)
+    if reason is not None:
+        return CheckResult(
+            name, FAIL, f"{root}: {reason}; tasks run uncontained", remedy=_TASK_CGROUPS_REMEDY,
+        )
+    return CheckResult(
+        name, OK,
+        f"{root}: a new cgroup takes memory.max and accepts members, so each task is contained",
     )
 
 
@@ -9197,6 +9279,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.model_execution", check_model_execution),
     ("security.skill_proxy", check_skill_proxy),
     ("security.sandbox_effective", check_sandbox_effective),
+    ("security.task_cgroups", check_task_cgroups),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.proxy_peer_check", check_proxy_peer_check),
     ("security.credential_broker", check_credential_broker),
@@ -9305,6 +9388,9 @@ CHECK_SCOPES: dict[str, str] = {
     # no `security_opt` and asserts no check fails, so an IMAGE scope here would
     # fail every correct image. See `check_sandbox_effective`.
     "security.sandbox_effective": DEPLOYMENT,
+    # Deployment: a delegated cgroup subtree is a property of how the install
+    # runs the daemon (the container's root phase, or a unit's Delegate=).
+    "security.task_cgroups": DEPLOYMENT,
     # Deployment, not image: it reaches `istota.executor` for the bwrap
     # capability probe, and the pairing it reports is a posture an operator
     # chose in a rendered config. The image tier asserts over `--scope image`
