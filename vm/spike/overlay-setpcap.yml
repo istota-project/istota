@@ -1,0 +1,5 @@
+# Variant: the root-phase capabilities plus CAP_SETPCAP, which
+# `setpriv --bounding-set=-all` needs to empty the bounding set.
+services:
+  istota:
+    cap_add: !override [CHOWN, FOWNER, SETUID, SETGID, SYS_ADMIN, SETPCAP]

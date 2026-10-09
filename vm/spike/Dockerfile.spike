@@ -1,0 +1,22 @@
+# Stage 1 spike only: the current image plus the uid 10001 user and the
+# hand-patched entrypoint, so the run contract can be measured before Stage 2
+# changes the real Dockerfile. Not shipped.
+ARG BASE=istota-spike/istota:latest
+FROM ${BASE}
+
+RUN set -eux; \
+    if ! command -v setpriv >/dev/null; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends setpriv || apt-get install -y --no-install-recommends util-linux-extra; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    command -v setpriv; \
+    groupadd -g 10001 istota; \
+    useradd -u 10001 -g 10001 -M -d /data/home -s /usr/sbin/nologin istota
+
+COPY entrypoint.spike.sh /entrypoint.spike.sh
+COPY unprivileged.spike.sh /unprivileged.spike.sh
+COPY probes/ /spike/probes/
+RUN chmod 0755 /entrypoint.spike.sh /unprivileged.spike.sh /spike/probes/*
+
+ENTRYPOINT ["/entrypoint.spike.sh"]

@@ -1,0 +1,6 @@
+# Negative control for the mountinfo-root refusal: bind the VM's cgroup tree.
+# The entrypoint must refuse (root is not `/`) before writing anything.
+services:
+  istota:
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
