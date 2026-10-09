@@ -3081,9 +3081,12 @@ async def api_config_import(
         section_data = _extract_section_data(parsed, sec)
         if section_data is None:
             continue
-        diff = _compute_section_diff(user_ctx, sec, section_data, bool(replace))
-        if not dry_run:
-            _apply_section_import(user_ctx, sec, section_data, bool(replace))
+        try:
+            diff = _compute_section_diff(user_ctx, sec, section_data, bool(replace))
+            if not dry_run:
+                _apply_section_import(user_ctx, sec, section_data, bool(replace))
+        except ValueError as exc:
+            return JSONResponse({"status": "error", "error": str(exc)}, 400)
         sections_out.append({
             "section": sec,
             "states": [{"state": s, "message": m} for s, m in diff],

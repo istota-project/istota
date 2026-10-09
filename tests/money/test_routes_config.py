@@ -1659,3 +1659,15 @@ class TestPaymentDetectionSettings:
         })
         assert response.status_code == 400
         assert "ledger" in response.json()["error"].lower()
+
+
+@pytest.mark.parametrize("dry_run", [0, 1])
+def test_import_rejects_invalid_detection_pair(client, ctx, dry_run):
+    response = client.post(
+        f"/istota/api/money/config/import?section=invoicing&dry_run={dry_run}",
+        json={"text": '[companies.acme]\npayment_detection_enabled = true\n'
+                      'payment_detection_ledger = "other-users-ledger"\n'
+                      'payment_detection_income_account = "Income:Consulting"\n'},
+    )
+    assert response.status_code == 400
+    assert config_store.load_invoicing(ctx.db_path).companies == {}

@@ -288,3 +288,64 @@ def test_skill_review_commands_reach_the_real_actions(scenario, monkeypatch, dec
     assert len(matches) == (1 if decision == "settle" else 0)
     entries = work.get_entries_for_invoice(ctx.data_dir, "INV-000001")
     assert bool(entries[0].paid_date) == (decision == "settle")
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_authenticated_settings_sync_and_bell(scenario, ambiguous):
+    import json
+    import secrets
+    from base64 import b64encode
+    from itsdangerous import TimestampSigner
+    from starlette.middleware.sessions import SessionMiddleware
+    from istota.money import config_store
+
+    config, contexts = scenario
+    ctx = contexts["alice"]
+    ledger = ctx.users["alice"].ledgers[0]["path"]
+    target = ctx.data_dir / "ledgers" / "default.beancount"
+    target.parent.mkdir(exist_ok=True)
+    ledger.rename(target)
+    ctx.users["alice"].ledgers[0]["path"] = target
+    config_store.upsert_company(ctx.db_path, "default", payment_detection_enabled=False,
+                               payment_detection_ledger="", payment_detection_income_account="")
+    if not ambiguous:
+        work.record_invoice_payment(ctx.data_dir, "INV-000002", date.today())
+
+    app = FastAPI()
+    app.state.istota_config = config
+    app.include_router(router, prefix="/money")
+    session_secret = secrets.token_hex(32)
+    app.add_middleware(SessionMiddleware, secret_key=session_secret)
+    payload = b64encode(json.dumps({"user": {"username": "alice"}}).encode())
+    cookie = TimestampSigner(session_secret).sign(payload).decode()
+    endpoint = "/money/config/companies/default"
+    settings = {"payment_detection_enabled": True, "payment_detection_ledger": "DEFAULT",
+                "payment_detection_income_account": "Income:Consulting"}
+    with TestClient(app) as web:
+        assert web.put(endpoint, json=settings).status_code == 401
+        web.cookies.set("session", cookie)
+        response = web.put(endpoint, json=settings)
+        assert response.status_code == 200, response.text
+        saved = web.get("/money/config/companies").json()["companies"][0]
+        assert saved["payment_detection_enabled"] is True
+        assert saved["payment_detection_ledger"] == "default"
+        assert saved["payment_detection_income_account"] == "Income:Consulting"
+
+        sync(ctx, "sync-monarch")
+        with db.get_db(ctx.db_path) as conn:
+            matches = db.list_payment_matches(conn)
+        assert len(matches) == 1
+        assert matches[0]["ledger"] == "default"
+        assert matches[0]["income_account"] == "Income:Consulting"
+        assert matches[0]["account"] == "Assets:Bank:Checking"
+        assert matches[0]["status"] == ("review" if ambiguous else "settled")
+        assert web.put(endpoint, json={"payment_detection_enabled": False}).status_code == 200
+
+    with framework_db.get_db(config.db_path) as conn:
+        items, total = store.list_open(config, conn, "alice")
+        assert total == 1
+        assert "INV-000001" in items[0].body
+        assert store.list_open(config, conn, "bob")[1] == 0
+    assert rows(config)[0]["dedup_key"].startswith("review:" if ambiguous else "settled:")
+    entries = work.get_entries_for_invoice(ctx.data_dir, "INV-000001")
+    assert entries[0].paid_date == (None if ambiguous else date.today())

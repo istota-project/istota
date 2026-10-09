@@ -8,6 +8,7 @@ print ``error: …`` to stderr and exit 2. Safe for Ansible.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace as replace_dataclass
 import json
 import sqlite3
 import sys
@@ -429,6 +430,8 @@ _INVOICING_TOP_KEYS = {
 _INVOICING_COMPANY_KEYS = {
     "name", "address", "email", "payment_instructions", "logo",
     "ar_account", "bank_account", "currency",
+    "payment_detection_enabled", "payment_detection_ledger",
+    "payment_detection_income_account",
 }
 _INVOICING_CLIENT_KEYS = {
     "name", "address", "email", "terms", "ar_account", "entity", "invoicing",
@@ -588,9 +591,11 @@ def _compute_section_diff(
     """Return [(state, description)] tuples that describe what import will do."""
     out: list[tuple[str, str]] = []
     if section == "invoicing":
-        cfg_new = config_store.invoicing_config_from_toml_dict(data)
+        incoming = config_store.invoicing_config_from_toml_dict(data)
+        cfg_new = _prepare_invoicing_import(ctx, data, replace)
         cfg_cur = config_store.load_invoicing(ctx.db_path)
-        for key, comp in cfg_new.companies.items():
+        for key in incoming.companies:
+            comp = cfg_new.companies[key]
             cur = cfg_cur.companies.get(key)
             if cur is None:
                 out.append(("created", f"company key={key}"))
@@ -598,7 +603,7 @@ def _compute_section_diff(
                 out.append(("noop", f"company key={key}"))
             else:
                 out.append(("updated", f"company key={key}"))
-        for key, client in cfg_new.clients.items():
+        for key, client in incoming.clients.items():
             cur = cfg_cur.clients.get(key)
             if cur is None:
                 out.append(("created", f"client key={key}"))
@@ -606,7 +611,7 @@ def _compute_section_diff(
                 out.append(("noop", f"client key={key}"))
             else:
                 out.append(("updated", f"client key={key}"))
-        for key, svc in cfg_new.services.items():
+        for key, svc in incoming.services.items():
             cur = cfg_cur.services.get(key)
             if cur is None:
                 out.append(("created", f"service key={key} rate={svc.rate}"))
@@ -654,6 +659,8 @@ def _company_eq(a, b) -> bool:
     return all(getattr(a, k) == getattr(b, k) for k in (
         "name", "address", "email", "payment_instructions", "logo",
         "ar_account", "bank_account", "currency",
+        "payment_detection_enabled", "payment_detection_ledger",
+        "payment_detection_income_account",
     ))
 
 
@@ -671,6 +678,20 @@ def _service_eq(a, b) -> bool:
     ))
 
 
+def _prepare_invoicing_import(ctx, data: dict, replace: bool):
+    from istota.money.invoice_review import validate_payment_detection
+
+    previous = config_store.load_invoicing(ctx.db_path)
+    incoming = config_store.invoicing_config_from_toml_dict(data)
+    cfg = incoming if replace else _merge_invoicing(ctx.db_path, data)
+    for key in incoming.companies:
+        company = cfg.companies[key]
+        company.payment_detection_ledger = validate_payment_detection(
+            company, ctx.ledgers, previous=previous.companies.get(key),
+        )
+    return cfg
+
+
 def _apply_section_import(ctx, section: str, data: dict, replace: bool) -> None:
     """Apply a section's import.
 
@@ -681,12 +702,8 @@ def _apply_section_import(ctx, section: str, data: dict, replace: bool) -> None:
     clobber existing scalars), and write back.
     """
     if section == "invoicing":
-        if replace:
-            cfg = config_store.invoicing_config_from_toml_dict(data)
-            config_store.save_invoicing(ctx.db_path, cfg, replace_collections=True)
-        else:
-            cfg = _merge_invoicing(ctx.db_path, data)
-            config_store.save_invoicing(ctx.db_path, cfg, replace_collections=False)
+        cfg = _prepare_invoicing_import(ctx, data, replace)
+        config_store.save_invoicing(ctx.db_path, cfg, replace_collections=replace)
     elif section == "tax":
         if replace:
             cfg = config_store.tax_config_from_toml_dict(data)
@@ -725,7 +742,15 @@ def _merge_invoicing(db_path, data: dict):
         if key in data:
             setattr(merged, key, getattr(incoming, key))
     # company-level: TOML companies merge into existing
+    raw_companies = data.get("companies") or {"default": data.get("company", {})}
     for key, comp in incoming.companies.items():
+        previous = merged.companies.get(key)
+        if previous is not None:
+            fields = {
+                field: getattr(comp, field) for field in _INVOICING_COMPANY_KEYS
+                if field in raw_companies[key]
+            }
+            comp = replace_dataclass(previous, **fields)
         merged.companies[key] = comp
     for key, client in incoming.clients.items():
         merged.clients[key] = client
@@ -1019,7 +1044,7 @@ def _client_to_toml_dict(c) -> dict:
 def _add_company(sub) -> None:
     p = sub.add_parser("company", help="Manage invoicing companies")
     s = p.add_subparsers(dest="company_action", required=True)
-    for action in ("add", "update"):
+    for action in ("add", "update", "ensure"):
         a = s.add_parser(action, help=f"{action} a company")
         a.add_argument("--user", "-u", required=True)
         a.add_argument("--key", required=True)
@@ -1031,6 +1056,10 @@ def _add_company(sub) -> None:
         a.add_argument("--ar-account")
         a.add_argument("--bank-account")
         a.add_argument("--currency")
+        a.add_argument("--payment-detection-enabled", action=argparse.BooleanOptionalAction,
+                       default=None)
+        a.add_argument("--payment-detection-ledger")
+        a.add_argument("--payment-detection-income-account")
     rm = s.add_parser("remove", help="Delete a company")
     rm.add_argument("--user", "-u", required=True)
     rm.add_argument("--key", required=True)
@@ -1060,10 +1089,21 @@ def _company_dispatch(args, istota_config) -> int:
         ("payment_instructions", "payment_instructions"),
         ("logo", "logo"), ("ar_account", "ar_account"),
         ("bank_account", "bank_account"), ("currency", "currency"),
+        ("payment_detection_enabled", "payment_detection_enabled"),
+        ("payment_detection_ledger", "payment_detection_ledger"),
+        ("payment_detection_income_account", "payment_detection_income_account"),
     ):
         v = getattr(args, cli_field, None)
         if v is not None:
             fields[db_field] = v
+    from istota.money.core.models import CompanyConfig
+    from istota.money.invoice_review import validate_payment_detection
+
+    previous = config_store.load_invoicing(ctx.db_path).companies.get(args.key)
+    merged = replace_dataclass(previous or CompanyConfig(name="", key=args.key), **fields)
+    fields["payment_detection_ledger"] = validate_payment_detection(
+        merged, ctx.ledgers, previous=previous,
+    )
     _, state = config_store.upsert_company(ctx.db_path, args.key, **fields)
     _print_state(state, f"company key={args.key}")
     return 0

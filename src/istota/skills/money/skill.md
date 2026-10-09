@@ -158,6 +158,12 @@ Cash-basis accounting: no ledger entries at invoice time; income recognized when
 
 ### Payments matched automatically
 
+Automatic detection starts disabled for every billing entity, including existing entities. Configure it in Money → Settings → Invoicing → Edit entity: enable “Automatically detect invoice payments”, choose the ledger, then choose the declared `Income:*` revenue account. The credit must match this pair and the entity’s receiving bank account. An `Assets:*` bank account is not an income account, and selecting the detection pair does not change the bank account or manual payment posting. Ledger names resolve case-insensitively; income-account names are exact. Identical income-account names in different ledgers stay separate.
+
+For an operator, `istota money company ensure -u USER --key ENTITY --payment-detection-enabled --payment-detection-ledger LEDGER --payment-detection-income-account Income:Consulting` applies the pair; `company update ... --no-payment-detection-enabled` disables it while keeping the selections. Config import/export carries `payment_detection_enabled`, `payment_detection_ledger` and `payment_detection_income_account` under each company. Omitted fields survive merge imports. Never infer the income account from the bank account.
+
+A disabled entity creates no new automatic settlements or reviews, and `--match-invoices` cannot override it. Existing reviews remain actionable after settings change. Invalid saved settings skip that entity with a diagnostic without failing sync. Only newly imported positive bank credits are eligible; the normal negative revenue posting is expected. Enabling detection does not backfill old credits.
+
 `sync-monarch` and `run-scheduled` close the loop for the obvious case: a newly synced credit that fits **exactly one** open invoice marks that invoice paid, without a ledger posting — the sync already booked the income. An invoice is a candidate when its total matches the credit to the cent (or within `--tolerance`, in dollars) and it was issued no later than the payment. The credit must land in the invoice entity's configured bank account.
 
 Ambiguity is never resolved by guessing. Two open invoices that fit one credit, or two credits that fit one invoice, are reported and left alone:

@@ -552,11 +552,10 @@ def invoicing_to_toml_dict(cfg: InvoicingConfig) -> dict:
 
 
 def _company_to_dict(c: CompanyConfig) -> dict:
-    out: dict[str, Any] = {"name": c.name}
+    out: dict[str, Any] = {"name": c.name, "payment_detection_enabled": c.payment_detection_enabled}
     for attr in ("address", "email", "payment_instructions", "logo",
                  "ar_account", "bank_account", "currency",
-                 "payment_detection_enabled", "payment_detection_ledger",
-                 "payment_detection_income_account"):
+                 "payment_detection_ledger", "payment_detection_income_account"):
         v = getattr(c, attr)
         if v:
             out[attr] = v
