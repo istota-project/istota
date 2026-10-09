@@ -4560,6 +4560,7 @@ export interface NotificationAction {
   href: string | null;
   /** Offered only in the detail modal, beside the full body it acts on. */
   detail_only?: boolean;
+  body?: Record<string, unknown>;
 }
 
 /** A stored notification as the panel renders it.
@@ -4662,11 +4663,19 @@ export function markNotificationsSeen(seen: NotificationSeen[]): Promise<{ statu
  * Refuses anything the allowlist does not accept rather than fetching it. The
  * path is server-supplied and built by interpolating an `object_id` that is
  * opaque `TEXT` on the row, so `1/../../admin/x` is the shape being refused. */
-export async function runNotificationAction(endpoint: string): Promise<unknown> {
+export async function runNotificationAction(
+  endpoint: string,
+  body?: Record<string, unknown>,
+): Promise<unknown> {
   if (!isSafeActionPath(endpoint)) {
     throw new Error(`refusing an unsafe notification action path: ${endpoint}`);
   }
-  return apiFetch(endpoint, { method: 'POST' });
+  return apiFetch(endpoint, {
+    method: 'POST',
+    ...(body
+      ? { body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } }
+      : {}),
+  });
 }
 
 export { AuthError };

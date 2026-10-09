@@ -78,7 +78,15 @@ def _run(args: list[str]) -> dict:
     if err:
         return err
 
+    from copy import copy
+    from pathlib import Path
+
     obj = Context()
+    obj.framework_config = copy(istota_cfg)
+    framework_path = os.environ.get("ISTOTA_DB_PATH")
+    if framework_path:
+        obj.framework_config.db_path = Path(framework_path)
+    obj.framework_db_path = obj.framework_config.db_path
     obj.users[user_id] = user_ctx
     obj.activate_user(user_id)
     obj.secrets = load_user_secrets(user_id, istota_cfg) or None

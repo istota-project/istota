@@ -103,6 +103,18 @@ describe('runNotificationAction', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('posts the selected invoice as JSON', async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    await runNotificationAction('/money/invoices/review/abc/settle', {
+      invoice_number: 'INV-000001',
+    });
+    const [, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(init?.body).toBe(JSON.stringify({ invoice_number: 'INV-000001' }));
+    expect(new Headers(init?.headers).get('Content-Type')).toBe('application/json');
+  });
+
   it('posts a benign path', async () => {
     vi.mocked(globalThis.fetch).mockResolvedValue(
       new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),

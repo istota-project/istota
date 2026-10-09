@@ -49,6 +49,8 @@ class Context:
         self.invoicing_config_path: Path | None = None
         self.tax_config_path: Path | None = None
         self.db_path: Path | None = None
+        self.framework_db_path: Path | None = None
+        self.framework_config = None
         self.secrets: dict | None = None
         self.api_key: str | None = None
         self.users: dict[str, UserContext] = {}
@@ -631,6 +633,7 @@ def _run_monarch_sync(
     *,
     match_invoices: bool = True,
     tolerance: float = 0.0,
+    deliver_reviews: bool = False,
 ) -> dict:
     """Sync from Monarch, then settle the invoices the new credits pay for.
 
@@ -643,7 +646,7 @@ def _run_monarch_sync(
     """
     result = _sync_monarch_ledgers(ctx, dry_run, ledger)
     if match_invoices and not dry_run:
-        _apply_invoice_matching(ctx, result, tolerance)
+        _apply_invoice_matching(ctx, result, tolerance, deliver_reviews=deliver_reviews)
     # ``imported`` is plumbing for the matcher, not output. Every other
     # row-level detail in this result is a count, and this one would put a
     # record per booked transaction into a skill response that goes straight
@@ -770,7 +773,7 @@ def _tolerance_error(tolerance: float) -> str | None:
     return None
 
 
-def _apply_invoice_matching(ctx, result: dict, tolerance: float) -> None:
+def _apply_invoice_matching(ctx, result: dict, tolerance: float, *, deliver_reviews=False) -> None:
     """Settle the invoices this sync's credits pay for, in place on ``result``.
 
     Best-effort, and the whole body is guarded to make that true. By the time
@@ -781,14 +784,14 @@ def _apply_invoice_matching(ctx, result: dict, tolerance: float) -> None:
     not be able to break a bank sync. Everything is logged and skipped.
     """
     try:
-        _match_invoices_unguarded(ctx, result, tolerance)
+        _match_invoices_unguarded(ctx, result, tolerance, deliver_reviews=deliver_reviews)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger("istota.money.cli").warning(
             "auto-match: skipped after a successful sync: %s", exc, exc_info=True,
         )
 
 
-def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
+def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_reviews=False) -> None:
     """The body of :func:`_apply_invoice_matching`. Never call directly."""
     from istota.money.core.invoice_matching import (
         Payment, match_payments_to_invoices, summarize_matches,
@@ -896,6 +899,18 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
                 reason=match.note, decided_by="auto" if match.status == "matched" else "",
             )
 
+        from istota.notifications.resolvers import invoice_match
+
+        invoice_match.publish(
+            ctx.framework_config, ctx.framework_db_path, ctx.active_user,
+            {**row, "status": "settled" if match.status == "matched" else "review",
+             "txn_date": match.payment.date.isoformat(), "amount": match.payment.amount,
+             "payee": match.payment.payee, "invoice_number": match.invoice_number,
+             "candidates": match.candidates},
+            client=original[match.invoice_number].client if match.invoice_number else "",
+            deliver_reviews=deliver_reviews,
+        )
+
     # The matcher returns one verdict per payment, in order, so verdicts pair
     # with `owner_of_payment` by position and each profile reports only its
     # own credits.
@@ -936,7 +951,7 @@ def sync_monarch(ctx, dry_run, ledger, match_invoices, tolerance):
         return
     _output(_run_monarch_sync(
         ctx, dry_run, ledger,
-        match_invoices=match_invoices, tolerance=tolerance,
+        match_invoices=match_invoices, tolerance=tolerance, deliver_reviews=False,
     ))
 
 
@@ -1604,7 +1619,7 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     if ctx.monarch_config_path and not skip_monarch:
         monarch_result = _run_monarch_sync(
             ctx, dry_run=dry_run, ledger=None,
-            match_invoices=match_invoices, tolerance=tolerance,
+            match_invoices=match_invoices, tolerance=tolerance, deliver_reviews=True,
         )
 
     try:

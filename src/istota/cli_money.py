@@ -184,6 +184,8 @@ def _invoke_money_cli(istota_config, user_id: str, click_args: list[str]) -> int
 
     user_ctx = _load_user_ctx(istota_config, user_id)  # exits(2) on UserNotFound
     obj = Context()
+    obj.framework_config = istota_config
+    obj.framework_db_path = getattr(istota_config, "db_path", None)
     obj.users[user_id] = user_ctx
     obj.activate_user(user_id)
     try:

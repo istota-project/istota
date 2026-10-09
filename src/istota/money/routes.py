@@ -543,6 +543,55 @@ async def api_invoice_details(
     }
 
 
+@router.post("/invoices/review/{ledger_txn_id}/settle")
+async def api_invoice_review_settle(
+    ledger_txn_id: str,
+    request: Request,
+    user: dict = Depends(require_auth),
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money.invoice_review import settle_payment_review
+    from istota.notifications.resolvers.invoice_match import close_for_match
+
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _error("invalid JSON body", 400)
+    if not isinstance(body, dict) or not isinstance(body.get("invoice_number"), str):
+        return _error("invoice_number is required", 400)
+    config = _load_invoicing_config(user_ctx)
+    if config is None:
+        return _error("no invoicing config", 400)
+    try:
+        result = settle_payment_review(
+            user_ctx.db_path, user_ctx.data_dir, config, ledger_txn_id, body["invoice_number"],
+        )
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    close_for_match(request.app.state.istota_config.db_path, user["username"], ledger_txn_id)
+    return result
+
+
+@router.post("/invoices/review/{ledger_txn_id}/dismiss")
+async def api_invoice_review_dismiss(
+    ledger_txn_id: str,
+    request: Request,
+    user: dict = Depends(require_auth),
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money.invoice_review import dismiss_payment_review
+    from istota.notifications.resolvers.invoice_match import close_for_match
+
+    try:
+        result = dismiss_payment_review(user_ctx.db_path, ledger_txn_id)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    close_for_match(request.app.state.istota_config.db_path, user["username"], ledger_txn_id)
+    return result
+
+
 @router.post("/invoices/{invoice_number}/mark-paid")
 async def api_invoice_mark_paid(
     invoice_number: str,

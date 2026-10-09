@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Invoice payment reviews now appear in the notification bell, where you can settle a candidate or dismiss the credit. Daily sync alerts you when a decision is needed; automatic settlements appear in the bell without a push.
+
 - Synced invoice payments now have a durable history. List ambiguous credits with `invoice review list`, settle a candidate or dismiss the credit, and inspect settled or reverted payments with `invoice matches`.
 
 - Search beside the notification bell finds messages, room names, memories, facts and records in your enabled modules. Open it with Cmd+K or Ctrl+K, choose a result to open its source, or search transactions when you need them. Older message results can load the matching history and mark the message in its room.
