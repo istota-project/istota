@@ -10,6 +10,50 @@ from istota.money.core.invoice_matching import OpenInvoice
 from istota.money.core.invoicing import build_line_items, resolve_entity, resolve_bank_account
 
 
+def validate_payment_detection(company, ledgers, *, previous=None):
+    """Validate a merged entity and return its canonical detection ledger name.
+
+    A disabled entity may retain its saved pair even after the ledger disappears.
+    New selections and every enabled entity must resolve against this user's registry.
+    """
+    from click import ClickException
+    from istota.money.cli import _ledger_scope_name, resolve_ledger
+    from istota.money.core.ledger import list_open_accounts
+
+    enabled = company.payment_detection_enabled
+    ledger = company.payment_detection_ledger
+    account = company.payment_detection_income_account
+    if not isinstance(enabled, bool):
+        raise ValueError("invalid payment_detection_enabled — expected a boolean")
+    if not isinstance(ledger, str) or not isinstance(account, str):
+        raise ValueError("Payment detection ledger and income account must be text")
+    if not enabled and previous is not None and (
+        ledger == previous.payment_detection_ledger
+        and account == previous.payment_detection_income_account
+    ):
+        return ledger
+    if enabled and (not ledger or not account):
+        raise ValueError("Payment detection requires a ledger and income account")
+    if not ledger:
+        if account:
+            raise ValueError("Payment detection income account requires a ledger")
+        return ""
+    try:
+        ledger_path = resolve_ledger(ledger, ledgers)
+    except ClickException as exc:
+        raise ValueError(f"Payment detection ledger not found: {ledger}") from exc
+    if account:
+        if not account.startswith("Income:"):
+            raise ValueError("Payment detection account must be a declared Income:* account")
+        try:
+            accounts = list_open_accounts(ledger_path, strict=True)
+        except OSError as exc:
+            raise ValueError("Could not read payment detection ledger") from exc
+        if account not in accounts:
+            raise ValueError(f"Payment detection income account not declared in ledger: {account}")
+    return _ledger_scope_name(ledger, ledgers)
+
+
 def open_invoice(config, number, entries):
     """Build a matchable invoice from a live work snapshot."""
     if not entries or any(e.paid_date is not None for e in entries):

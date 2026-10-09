@@ -481,6 +481,9 @@ async def api_business_settings(user_ctx: UserContext = Depends(get_user_config)
         "ar_account": c.ar_account,
         "bank_account": c.bank_account,
         "currency": c.currency,
+        "payment_detection_enabled": c.payment_detection_enabled,
+        "payment_detection_ledger": c.payment_detection_ledger,
+        "payment_detection_income_account": c.payment_detection_income_account,
     } for key, c in config.companies.items()]
 
     services = [{
@@ -1269,6 +1272,9 @@ def _company_to_dict(c) -> dict:
         "payment_instructions": c.payment_instructions, "logo": c.logo,
         "ar_account": c.ar_account, "bank_account": c.bank_account,
         "currency": c.currency,
+        "payment_detection_enabled": c.payment_detection_enabled,
+        "payment_detection_ledger": c.payment_detection_ledger,
+        "payment_detection_income_account": c.payment_detection_income_account,
     }
 
 
@@ -1297,6 +1303,7 @@ _CLIENT_INT_FIELDS = ("schedule_day", "reminder_days", "days_until_overdue")
 _ENTITY_TEXT_FIELDS = (
     "name", "address", "email", "payment_instructions", "logo",
     "ar_account", "bank_account", "currency",
+    "payment_detection_ledger", "payment_detection_income_account",
 )
 _SERVICE_TEXT_FIELDS = ("display_name", "type", "income_account")
 
@@ -1384,10 +1391,31 @@ def _coerce_client_fields(body: dict) -> tuple[dict, str | None]:
 
 
 def _coerce_entity_fields(body: dict) -> tuple[dict, str | None]:
-    unknown = set(body) - set(_ENTITY_TEXT_FIELDS)
+    unknown = set(body) - (set(_ENTITY_TEXT_FIELDS) | {"payment_detection_enabled"})
     if unknown:
         return {}, f"unknown keys: {sorted(unknown)}"
-    return _coerce_text_fields(body, _ENTITY_TEXT_FIELDS)
+    fields, err = _coerce_text_fields(body, _ENTITY_TEXT_FIELDS)
+    if err:
+        return {}, err
+    if "payment_detection_enabled" in body:
+        enabled = body["payment_detection_enabled"]
+        if not isinstance(enabled, bool):
+            return {}, "invalid payment_detection_enabled — expected a boolean"
+        fields["payment_detection_enabled"] = enabled
+    return fields, None
+
+
+def _validate_entity_detection(user_ctx: UserContext, key: str, fields: dict) -> None:
+    from dataclasses import replace
+    from istota.money import config_store
+    from istota.money.core.models import CompanyConfig
+    from istota.money.invoice_review import validate_payment_detection
+
+    previous = config_store.load_invoicing(user_ctx.db_path).companies.get(key)
+    company = replace(previous or CompanyConfig(name="", key=key), **fields)
+    fields["payment_detection_ledger"] = validate_payment_detection(
+        company, user_ctx.ledgers, previous=previous,
+    )
 
 
 def _coerce_service_fields(body: dict) -> tuple[dict, str | None]:
@@ -1567,6 +1595,7 @@ async def api_config_companies_post(
     if err:
         return _error(err, 400)
     try:
+        _validate_entity_detection(user_ctx, key, fields)
         comp, state = config_store.upsert_company(
             user_ctx.db_path, key, create_only=True, **fields,
         )
@@ -1603,6 +1632,7 @@ async def api_config_companies_put(
     ).companies:
         return _error(f"entity '{key}' not found", 404)
     try:
+        _validate_entity_detection(user_ctx, key, fields)
         comp, state = config_store.upsert_company(user_ctx.db_path, key, **fields)
     except ValueError as exc:
         return _error(str(exc), 400)

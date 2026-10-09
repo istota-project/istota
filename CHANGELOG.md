@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Billing entities can save an automatic payment detection preference, ledger and income account through the company API. The preference starts off for new and existing entities, and switching it off preserves the saved selections.
+
 - Invoice payment reviews now appear in the notification bell and invoices page, where you can settle a candidate or dismiss the credit. Daily sync alerts you when a decision is needed; automatic settlements appear in the bell without a push and show their sync payment date on the invoices page.
 
 - Synced invoice payments now have a durable history. List ambiguous credits with `invoice review list`, settle a candidate or dismiss the credit, and inspect settled or reverted payments with `invoice matches`.

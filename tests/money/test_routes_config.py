@@ -1563,3 +1563,99 @@ class TestTransactionRuleMutationsRequireCsrf:
     def test_the_reads_are_not_blocked(self, ctx):
         blocked = self._client(ctx)
         assert blocked.get(f"{RULES}?ledger=&source=").status_code == 200
+
+
+@pytest.fixture
+def detection_ledger(ctx, tmp_path):
+    path = tmp_path / "business.beancount"
+    path.write_text(
+        "2000-01-01 open Assets:Bank:Checking USD\n"
+        "2000-01-01 open Income:Consulting USD\n"
+        "2000-01-01 open Income:Other USD\n"
+    )
+    ctx.ledgers = [{"name": "Business", "path": path}]
+    return path
+
+
+class TestPaymentDetectionSettings:
+    def test_defaults_and_save_reload(self, ctx, client, detection_ledger):
+        response = client.post(f"{API}/config/companies", json={"key": "acme"})
+        assert response.status_code == 200
+        company = response.json()["company"]
+        assert company["payment_detection_enabled"] is False
+        assert company["payment_detection_ledger"] == ""
+        assert company["payment_detection_income_account"] == ""
+        settings = {
+            "payment_detection_enabled": True,
+            "payment_detection_ledger": "business",
+            "payment_detection_income_account": "Income:Consulting",
+        }
+        response = client.put(f"{API}/config/companies/acme", json=settings)
+        assert response.status_code == 200, response.text
+        settings["payment_detection_ledger"] = "Business"
+        response = client.put(f"{API}/config/companies/acme", json={"name": "Acme"})
+        assert response.status_code == 200
+        for company in (
+            response.json()["company"],
+            client.get(f"{API}/config/companies").json()["companies"][0],
+            client.get(f"{API}/business-settings").json()["entities"][0],
+        ):
+            assert {field: company[field] for field in settings} == settings
+            assert company["bank_account"] == ""
+        response = client.put(
+            f"{API}/config/companies/acme",
+            json={"payment_detection_income_account": "Income:Other"},
+        )
+        assert response.status_code == 200
+        assert response.json()["company"]["payment_detection_ledger"] == "Business"
+
+    @pytest.mark.parametrize("settings", [
+        {"payment_detection_enabled": True},
+        {"payment_detection_enabled": True, "payment_detection_ledger": "Business"},
+        {"payment_detection_enabled": 1},
+        {"payment_detection_enabled": "false"},
+        {"payment_detection_enabled": None},
+        {"payment_detection_ledger": "OtherUsersLedger", "payment_detection_income_account": "Income:Consulting"},
+        {"payment_detection_ledger": "Business", "payment_detection_income_account": "Income:Missing"},
+        {"payment_detection_ledger": "Business", "payment_detection_income_account": "income:Consulting"},
+        {"payment_detection_ledger": "Business", "payment_detection_income_account": "Assets:Bank:Checking"},
+        {"payment_detection_income_account": "Income:Consulting"},
+    ])
+    def test_invalid_selection_rejected(self, ctx, client, detection_ledger, settings):
+        response = client.post(f"{API}/config/companies", json={"key": "acme", **settings})
+        assert response.status_code == 400, response.text
+        assert "acme" not in config_store.load_invoicing(ctx.db_path).companies
+
+    def test_merged_enabled_pair_must_stay_valid(self, ctx, client, detection_ledger):
+        response = client.post(f"{API}/config/companies", json={
+            "key": "acme", "payment_detection_enabled": True,
+            "payment_detection_ledger": "Business",
+            "payment_detection_income_account": "Income:Consulting",
+        })
+        assert response.status_code == 200, response.text
+        for field in ("payment_detection_ledger", "payment_detection_income_account"):
+            response = client.put(f"{API}/config/companies/acme", json={field: ""})
+            assert response.status_code == 400
+        ctx.ledgers = []
+        response = client.put(f"{API}/config/companies/acme", json={"name": "Acme"})
+        assert response.status_code == 400
+        response = client.put(f"{API}/config/companies/acme", json={
+            "payment_detection_enabled": False,
+            "payment_detection_ledger": "Business",
+            "payment_detection_income_account": "Income:Consulting",
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["company"]["payment_detection_ledger"] == "Business"
+        assert client.put(f"{API}/config/companies/acme", json={"name": "Acme"}).status_code == 200
+        assert client.put(f"{API}/config/companies/acme", json={"payment_detection_enabled": True}).status_code == 400
+
+    def test_parse_errors_rejected(self, client, detection_ledger):
+        with detection_ledger.open("a") as stream:
+            stream.write("not valid beancount\n")
+        response = client.post(f"{API}/config/companies", json={
+            "key": "acme", "payment_detection_enabled": True,
+            "payment_detection_ledger": "Business",
+            "payment_detection_income_account": "Income:Consulting",
+        })
+        assert response.status_code == 400
+        assert "ledger" in response.json()["error"].lower()
