@@ -35,6 +35,8 @@ class Payment:
     amount: float
     payee: str = ""
     account: str = ""
+    ledger: str = ""
+    income_account: str = ""
 
 
 @dataclass
@@ -53,6 +55,8 @@ class OpenInvoice:
     date: date
     total: float
     bank_account: str = ""
+    ledger: str = ""
+    income_account: str = ""
 
 
 @dataclass
@@ -127,6 +131,8 @@ def match_payments_to_invoices(
         by_amount = [
             inv for inv in open_invoices
             if payment.account and inv.bank_account == payment.account
+            and payment.ledger and inv.ledger == payment.ledger
+            and payment.income_account and inv.income_account == payment.income_account
             and abs(_cents(inv.total) - paid) <= slack
         ]
         # An invoice issued after the money arrived did not cause it.

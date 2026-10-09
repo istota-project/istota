@@ -115,7 +115,7 @@ def test_contested_credits_in_two_profiles_have_separate_reviews(scenario):
     ctx.users["default"].ledgers.append({"name": "other", "path": other})
     _seed_monarch(ctx.db_path, SyncFixtures._MONARCH_TOML +
                   '\n[monarch.profiles.default.tags]\ninclude = ["default"]\n'
-                  '[monarch.profiles.other]\nledger = "other"\n'
+                  '[monarch.profiles.other]\nledger = "default"\n'
                   '[monarch.profiles.other.tags]\ninclude = ["other"]\n')
     call("invoice", "void", "INV-000002")
     helper = SyncFixtures()
@@ -182,3 +182,151 @@ def test_failed_decision_write_leaves_stamped_work_and_open_review(scenario):
                                   config_store.load_invoicing(ctx.db_path), ident, "INV-000001")
     assert work.get_entries_for_invoice(ctx.data_dir, "INV-000001")[0].paid_date == date.today()
     assert call("invoice", "review", "list")["matches"][0]["status"] == "review"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("payment_detection_enabled", False),
+    ("payment_detection_income_account", "Income:Other"),
+    ("payment_detection_ledger", "removed"),
+])
+def test_existing_review_survives_detection_changes(scenario, field, value):
+    ctx, call, sync = scenario
+    sync()
+    row = call("invoice", "review", "list")["matches"][0]
+    assert row["ledger"] == "default"
+    assert row["income_account"] == "Income:Consulting"
+    with db.get_db(ctx.db_path) as conn:
+        conn.execute(f"UPDATE invoicing_companies SET {field} = ?", (value,))
+    current = call("invoice", "review", "list")["matches"][0]
+    assert len(current["candidate_details"]) == 2
+    call("invoice", "review", "settle", row["ledger_txn_id"], "--invoice", "INV-000001")
+    history = call("invoice", "matches")["matches"][0]
+    assert history["ledger"] == "default"
+    assert history["income_account"] == "Income:Consulting"
+    assert history["status"] == "settled"
+
+
+@pytest.mark.parametrize("setting", ["disabled", "wrong-income", "invalid-ledger"])
+def test_entity_gate_leaves_synced_credits_unmatched(scenario, setting, caplog):
+    ctx, call, sync = scenario
+    with db.get_db(ctx.db_path) as conn:
+        if setting == "disabled":
+            conn.execute("UPDATE invoicing_companies SET payment_detection_enabled = 0")
+        elif setting == "wrong-income":
+            ledger = ctx.data_dir / "main.beancount"
+            with ledger.open("a") as stream:
+                stream.write("2024-01-01 open Income:Other\n")
+            conn.execute("UPDATE invoicing_companies SET payment_detection_income_account = 'Income:Other'")
+        else:
+            conn.execute("UPDATE invoicing_companies SET payment_detection_ledger = 'missing'")
+    result = sync()
+    assert result["profiles"][0]["transaction_count"] == 1
+    assert call("invoice", "review", "list", "--all")["matches"] == []
+    assert all(e.paid_date is None for e in work.load_work_entries(ctx.data_dir))
+    if setting == "invalid-ledger":
+        assert caplog.text.count("Payment detection ledger not found") == 1
+
+
+def test_legacy_match_columns_upgrade_without_backfill(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    schema = db.SCHEMA.replace("    ledger TEXT NOT NULL DEFAULT '',\n", "").replace(
+        "    income_account TEXT NOT NULL DEFAULT '',\n", "")
+    with sqlite3.connect(path) as conn:
+        conn.executescript(schema)
+        conn.execute("INSERT INTO invoice_payment_matches "
+                     "(ledger_txn_id, txn_date, amount, status) VALUES ('old', '2026-01-01', 10, 'settled')")
+    db.init_db(path)
+    db.init_db(path)
+    with db.get_db(path) as conn:
+        row = db.list_payment_matches(conn)[0]
+    assert row["ledger"] == row["income_account"] == ""
+    assert row["status"] == "settled"
+
+
+@pytest.mark.parametrize("second_enabled,invalid", [(False, False), (True, False), (True, True)])
+def test_two_ledgers_keep_equal_invoice_payments_separate(scenario, second_enabled, invalid):
+    from istota.money import config_store
+    from dataclasses import replace
+
+    ctx, call, _ = scenario
+    other = ctx.data_dir / "other.beancount"
+    other.write_text("2024-01-01 open Assets:Bank:Checking\n"
+                     "2024-01-01 open Income:Consulting\n")
+    ctx.users["default"].ledgers.append({"name": "Other", "path": other})
+    config = config_store.load_invoicing(ctx.db_path)
+    config.companies["other"] = replace(
+        config.company, name="Other Co", payment_detection_enabled=second_enabled,
+        payment_detection_ledger="missing" if invalid else "oThEr",
+    )
+    config_store.save_invoicing(ctx.db_path, config)
+    entries = work.load_work_entries(ctx.data_dir)
+    entries[1].entity = "other"
+    work._save_entries(ctx.data_dir, entries)
+    _seed_monarch(ctx.db_path, SyncFixtures._MONARCH_TOML +
+                  '\n[monarch.profiles.default.tags]\ninclude = ["default"]\n'
+                  '[monarch.profiles.feed]\nledger = "OTHER"\n'
+                  '[monarch.profiles.feed.tags]\ninclude = ["other"]\n')
+    helper = SyncFixtures()
+    result = helper._sync(CliRunner(), ctx.data_dir, ctx, [
+        helper._credit(1200, payee=name, tags=[name]) for name in ("default", "other")
+    ])
+    assert [r["ledger"] for r in result["profiles"]] == ["default", "Other"]
+    rows = call("invoice", "matches")["matches"]
+    assert [(r["invoice_number"], r["ledger"], r["income_account"]) for r in rows] == (
+        [("INV-000001", "default", "Income:Consulting")]
+        + ([("INV-000002", "Other", "Income:Consulting")] if second_enabled and not invalid else [])
+    )
+    assert call("invoice", "review", "list")["matches"] == []
+    assert bool(work.get_entries_for_invoice(ctx.data_dir, "INV-000002")[0].paid_date) == (second_enabled and not invalid)
+
+
+def test_selected_profile_reports_canonical_ledger(scenario):
+    ctx, call, _ = scenario
+    call("invoice", "void", "INV-000002")
+    helper = SyncFixtures()
+    result = helper._sync(CliRunner(), ctx.data_dir, ctx, [helper._credit(1200)],
+                          extra_args=["--ledger", "DEFAULT"])
+    actual = result["profiles"][0]
+    assert actual["ledger"] == "default"
+    assert actual["invoice_matching"]["matched"][0]["invoice_number"] == "INV-000001"
+
+
+def test_explicit_match_flag_cannot_enable_disabled_entity(scenario):
+    ctx, call, _ = scenario
+    with db.get_db(ctx.db_path) as conn:
+        conn.execute("UPDATE invoicing_companies SET payment_detection_enabled = 0")
+    helper = SyncFixtures()
+    helper._sync(CliRunner(), ctx.data_dir, ctx, [helper._credit(1200)],
+                 extra_args=["--match-invoices"])
+    assert call("invoice", "review", "list", "--all")["matches"] == []
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_manual_review_retains_receiving_bank_guard(scenario, legacy):
+    ctx, call, sync = scenario
+    sync()
+    row = call("invoice", "review", "list")["matches"][0]
+    with db.get_db(ctx.db_path) as conn:
+        if legacy:
+            conn.execute("UPDATE invoice_payment_matches SET ledger = '', income_account = ''")
+        conn.execute("UPDATE invoicing_companies SET bank_account = 'Assets:Bank:Other'")
+    call("invoice", "review", "settle", row["ledger_txn_id"], "--invoice", "INV-000001", ok=False)
+    assert len(call("invoice", "review", "list")["matches"]) == 1
+    assert all(e.paid_date is None for e in work.load_work_entries(ctx.data_dir))
+
+
+def test_valid_entity_is_validated_once_across_invoices_and_settlement(scenario):
+    from istota.money.invoice_review import validate_payment_detection
+
+    ctx, call, _ = scenario
+    entries = work.load_work_entries(ctx.data_dir)
+    entries[1].qty = 4
+    work._save_entries(ctx.data_dir, entries)
+    helper = SyncFixtures()
+    with patch("istota.money.invoice_review.validate_payment_detection",
+               wraps=validate_payment_detection) as validate:
+        helper._sync(CliRunner(), ctx.data_dir, ctx, [helper._credit(1200), helper._credit(600)])
+    assert validate.call_count == 1
+    assert len(call("invoice", "matches")["matches"]) == 2

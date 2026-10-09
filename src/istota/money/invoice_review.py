@@ -5,6 +5,8 @@ stamp precedes the decision row; a failed row write leaves a stale review,
 never a settled row claiming work that was not stamped.
 """
 
+import logging
+
 from istota.money import db, work
 from istota.money.core.invoice_matching import OpenInvoice
 from istota.money.core.invoicing import build_line_items, resolve_entity, resolve_bank_account
@@ -54,7 +56,7 @@ def validate_payment_detection(company, ledgers, *, previous=None):
     return _ledger_scope_name(ledger, ledgers)
 
 
-def open_invoice(config, number, entries):
+def open_invoice(config, number, entries, *, automatic=False, ledgers=(), detection_cache=None):
     """Build a matchable invoice from a live work snapshot."""
     if not entries or any(e.paid_date is not None for e in entries):
         return None
@@ -64,18 +66,42 @@ def open_invoice(config, number, entries):
     entity = resolve_entity(
         config, entry=entries[0], client_config=config.clients.get(entries[0].client),
     )
+    ledger = entity.payment_detection_ledger
+    if automatic:
+        if not entity.payment_detection_enabled:
+            return None
+        if detection_cache is None:
+            detection_cache = {}
+        identity = id(entity)
+        if identity not in detection_cache:
+            try:
+                detection_cache[identity] = validate_payment_detection(entity, ledgers)
+            except ValueError as exc:
+                logging.getLogger(__name__).warning(
+                    "auto-match: skipping entity %s: %s", entity.name, exc,
+                )
+                detection_cache[identity] = None
+        ledger = detection_cache[identity]
+        if ledger is None:
+            return None
     return OpenInvoice(
         number=number, client=entries[0].client,
         date=work.invoice_issue_date(entries),
         total=sum(item.amount for item in items),
         bank_account=resolve_bank_account(entity, config),
+        ledger=ledger, income_account=entity.payment_detection_income_account,
     )
 
 
-def open_invoices(config, data_dir):
+def open_invoices(config, data_dir, *, automatic=False, ledgers=(), detection_cache=None):
     invoices = []
+    if detection_cache is None:
+        detection_cache = {}
     for number in work.get_invoice_numbers(data_dir):
-        invoice = open_invoice(config, number, work.get_entries_for_invoice(data_dir, number))
+        invoice = open_invoice(
+            config, number, work.get_entries_for_invoice(data_dir, number),
+            automatic=automatic, ledgers=ledgers, detection_cache=detection_cache,
+        )
         if invoice is not None:
             invoices.append(invoice)
     return invoices

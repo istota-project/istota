@@ -775,19 +775,25 @@ class TestSyncMonarchInvoiceMatching:
     _MONARCH_TOML = (
         '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
         '[monarch.sync]\nlookback_days = 30\n\n'
+        '[monarch.categories]\nConsulting = "Income:Consulting"\n\n'
         '[monarch.profiles.default]\nledger = "default"\n'
     )
 
     def _ctx(self, tmp_path):
         ledger = tmp_path / "main.beancount"
-        ledger.write_text("")
+        ledger.write_text("2024-01-01 open Assets:Bank:Checking\n"
+                          "2024-01-01 open Income:Consulting\n"
+                          "2024-01-01 open Assets:Bank:Business\n"
+                          "2024-01-01 open Liabilities:Card\n")
         obj = _make_context(tmp_path, ledgers=[{"name": "default", "path": ledger}])
         _seed_invoicing(
             obj.db_path,
             'accounting_path = "."\n'
             'invoice_output = "invoices"\n'
             'next_invoice_number = 1\n\n'
-            '[company]\nname = "Test Co"\n\n'
+            '[company]\nname = "Test Co"\n'
+            'payment_detection_enabled = true\npayment_detection_ledger = "default"\n'
+            'payment_detection_income_account = "Income:Consulting"\n\n'
             '[clients.acme]\nname = "Acme Corp"\nterms = 30\n\n'
             # Deliberately left on: with posting disabled, the "no double
             # booking" assertion below would hold no matter what the matcher
@@ -833,7 +839,11 @@ class TestSyncMonarchInvoiceMatching:
             'accounting_path = "."\ninvoice_output = "invoices"\n'
             'next_invoice_number = 1\ndefault_entity = "base"\n'
             '[companies.base]\nname = "Base Co"\nbank_account = "Assets:Bank:Checking"\n'
+            'payment_detection_enabled = true\npayment_detection_ledger = "default"\n'
+            'payment_detection_income_account = "Income:Consulting"\n'
             '[companies.business]\nname = "Business Co"\nbank_account = "Assets:Bank:Business"\n'
+            'payment_detection_enabled = true\npayment_detection_ledger = "default"\n'
+            'payment_detection_income_account = "Income:Consulting"\n'
             '[clients.acme]\nname = "Acme Corp"\nentity = "business"\n'
             '[services.dev]\ndisplay_name = "Development"\nrate = 150.0\ntype = "hours"\n',
         )
@@ -1335,14 +1345,19 @@ class TestSyncMonarchInvoiceMatching:
         matching profile and reads `out["profiles"][0]`.
         """
         other = tmp_path / "other.beancount"
-        other.write_text("")
+        other.write_text("2024-01-01 open Income:Consulting\n"
+                         "2024-01-01 open Assets:Bank:Checking\n")
         obj = self._ctx(tmp_path)
         obj.users["default"].ledgers.append({"name": "other", "path": other})
+        from istota.money import db
+        with db.get_db(obj.db_path) as conn:
+            conn.execute("UPDATE invoicing_companies SET payment_detection_ledger = 'other'")
         _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
             tmp_path=tmp_path, obj=obj)
 
         out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)],
-            extra_args=["--ledger", "other"])
+            extra_args=["--ledger", "OTHER"])
+        assert out["ledger"] == "other"
         assert "profiles" not in out
         assert [m["invoice_number"] for m in out["invoice_matching"]["matched"]] \
             == ["INV-000001"]
@@ -1397,7 +1412,8 @@ class TestSyncMonarchInvoiceMatching:
         silently unreported, with profile order deciding which.
         """
         biz = tmp_path / "biz.beancount"
-        biz.write_text("")
+        biz.write_text("2024-01-01 open Income:Consulting\n"
+                       "2024-01-01 open Assets:Bank:Checking\n")
         personal = tmp_path / "personal.beancount"
         personal.write_text("")
         obj = _make_context(tmp_path, ledgers=[
@@ -1408,7 +1424,9 @@ class TestSyncMonarchInvoiceMatching:
             'accounting_path = "."\n'
             'invoice_output = "invoices"\n'
             'next_invoice_number = 1\n\n'
-            '[company]\nname = "Test Co"\n\n'
+            '[company]\nname = "Test Co"\n'
+            'payment_detection_enabled = true\npayment_detection_ledger = "biz"\n'
+            'payment_detection_income_account = "Income:Consulting"\n\n'
             '[clients.acme]\nname = "Acme Corp"\nterms = 30\n\n'
             '[clients.acme.invoicing]\nledger_posting = false\n\n'
             '[services.dev]\ndisplay_name = "Development"\nrate = 150.0\ntype = "hours"\n'
@@ -1418,9 +1436,10 @@ class TestSyncMonarchInvoiceMatching:
             obj.db_path,
             '[monarch]\nsession_id = "sid"\ncsrftoken = "csrf"\n\n'
             '[monarch.sync]\nlookback_days = 30\n\n'
+            '[monarch.categories]\nConsulting = "Income:Consulting"\n\n'
             '[monarch.profiles.business]\nledger = "biz"\n\n'
             '[monarch.profiles.business.tags]\ninclude = ["business"]\n\n'
-            '[monarch.profiles.personal]\nledger = "personal"\n\n'
+            '[monarch.profiles.personal]\nledger = "biz"\n\n'
             '[monarch.profiles.personal.tags]\ninclude = ["personal"]\n',
         )
         _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],

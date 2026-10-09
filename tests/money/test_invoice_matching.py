@@ -17,13 +17,17 @@ from istota.money.core.invoice_matching import (
 )
 
 
-def _payment(amount, day=15, payee="Client Transfer", account="Assets:Bank:Checking"):
-    return Payment(date=date(2026, 5, day), amount=amount, payee=payee, account=account)
+def _payment(amount, day=15, payee="Client Transfer", account="Assets:Bank:Checking",
+             ledger="business", income_account="Income:Consulting"):
+    return Payment(date=date(2026, 5, day), amount=amount, payee=payee, account=account,
+                   ledger=ledger, income_account=income_account)
 
 
-def _invoice(number, total, day=1, client="acme", bank_account="Assets:Bank:Checking"):
+def _invoice(number, total, day=1, client="acme", bank_account="Assets:Bank:Checking",
+             ledger="business", income_account="Income:Consulting"):
     return OpenInvoice(
         number=number, client=client, date=date(2026, 5, day), total=total, bank_account=bank_account,
+        ledger=ledger, income_account=income_account,
     )
 
 
@@ -279,3 +283,25 @@ class TestAccountScoping:
         )
         assert [m.status for m in matches] == ["matched", "matched"]
         assert [m.invoice_number for m in matches] == ["INV-000001", "INV-000002"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ledger", "personal"), ("ledger", ""),
+    ("income_account", "Income:Salary"), ("income_account", ""),
+])
+def test_detection_requires_the_exact_nonempty_pair(field, value):
+    payment = _payment(1200, **{field: value})
+    invoice = _invoice("INV-000001", 1200)
+    assert match_payments_to_invoices([payment], [invoice])[0].status == "no_match"
+    setattr(invoice, field, value)
+    if not value:
+        assert match_payments_to_invoices([payment], [invoice])[0].status == "no_match"
+
+
+def test_identical_accounts_and_amounts_in_two_ledgers_match_independently():
+    payments = [_payment(1200, ledger=ledger) for ledger in ("business", "personal")]
+    invoices = [_invoice(f"INV-{index}", 1200, ledger=ledger)
+                for index, ledger in enumerate(("business", "personal"))]
+    matches = match_payments_to_invoices(payments, invoices)
+    assert [m.status for m in matches] == ["matched", "matched"]
+    assert [m.invoice_number for m in matches] == ["INV-0", "INV-1"]

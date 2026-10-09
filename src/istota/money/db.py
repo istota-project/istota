@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS invoice_payment_matches (
     amount REAL NOT NULL,
     payee TEXT NOT NULL DEFAULT '',
     account TEXT NOT NULL DEFAULT '',
+    ledger TEXT NOT NULL DEFAULT '',
+    income_account TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
     invoice_number TEXT,
     candidates TEXT NOT NULL DEFAULT '[]',
@@ -112,6 +114,12 @@ def init_db(db_path: Path | str) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
+        sqlite_util.add_columns(
+            conn, "invoice_payment_matches",
+            {"ledger": "TEXT NOT NULL DEFAULT ''",
+             "income_account": "TEXT NOT NULL DEFAULT ''"},
+            commit=True,
+        )
         # Portfolio schema family (runtime import: portfolio pulls in the
         # importers package, which must not load at db-module import time).
         from istota.money import portfolio
@@ -662,18 +670,19 @@ def clear_invoice_state(conn: sqlite3.Connection, invoice_number: str) -> dict:
 def record_payment_match(
     conn, *, ledger_txn_id, txn_date, amount, status, monarch_id="", profile="",
     payee="", account="", invoice_number=None, candidates=(), reason="",
-    decided_by="",
+    decided_by="", ledger="", income_account="",
 ) -> bool:
     if not ledger_txn_id:
         raise ValueError("A payment match requires a ledger transaction id")
     cursor = conn.execute(
         "INSERT OR IGNORE INTO invoice_payment_matches "
         "(ledger_txn_id, monarch_id, profile, txn_date, amount, payee, account, "
-        "status, invoice_number, candidates, reason, decided_by, decided_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "status, invoice_number, candidates, reason, decided_by, ledger, income_account, decided_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
         "CASE WHEN ? = 'settled' THEN datetime('now') END)",
         (ledger_txn_id, monarch_id, profile, txn_date, amount, payee, account,
-         status, invoice_number, json.dumps(list(candidates)), reason, decided_by, status),
+         status, invoice_number, json.dumps(list(candidates)), reason, decided_by,
+         ledger, income_account, status),
     )
     return cursor.rowcount == 1
 

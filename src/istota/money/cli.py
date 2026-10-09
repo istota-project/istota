@@ -709,7 +709,7 @@ def _sync_monarch_ledgers(ctx, dry_run: bool, ledger: str | None) -> dict:
                         dropped,
                     )
                     r["name"] = profile.name
-                    r["ledger"] = profile.ledger
+                    r["ledger"] = _ledger_scope_name(ledger, ctx.ledgers)
                     results.append(r)
                 return {"status": "ok", "profiles": results}
             else:
@@ -721,13 +721,15 @@ def _sync_monarch_ledgers(ctx, dry_run: bool, ledger: str | None) -> dict:
                     ctx.db_path, _ledger_scope_name(ledger, ctx.ledgers),
                     "monarch-api",
                 )
-                return annotate_rule_drops(
+                result = annotate_rule_drops(
                     core_sync(
                         ledger_path, config, db_conn=db_conn, dry_run=dry_run,
                         rules=rules,
                     ),
                     dropped,
                 )
+                result["ledger"] = _ledger_scope_name(ledger, ctx.ledgers)
+                return result
         else:
             return sync_all_profiles(
                 config, ctx.ledgers, db_conn=db_conn, dry_run=dry_run,
@@ -811,7 +813,11 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_re
     except click.ClickException:
         return  # invoicing isn't configured for this user; nothing to match
 
-    open_invoices = _open_invoices(config, ctx.data_dir)
+    detection_cache = {}
+    open_invoices = _open_invoices(
+        config, ctx.data_dir, automatic=True, ledgers=ctx.ledgers,
+        detection_cache=detection_cache,
+    )
     if not open_invoices:
         return
 
@@ -842,6 +848,8 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_re
             payments.append(Payment(
                 date=paid_on, amount=row.get("amount") or 0.0,
                 payee=row.get("payee", ""), account=row.get("account", ""),
+                ledger=sync_result.get("ledger", ""),
+                income_account=row.get("income_account", ""),
             ))
 
     bank_accounts = {inv.bank_account for inv in open_invoices if inv.bank_account}
@@ -879,7 +887,10 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_re
                 try:
                     stamped = record_invoice_payment(
                         ctx.data_dir, number, match.payment.date,
-                        validate=lambda entries: open_invoice(config, number, entries) == original[number],
+                        validate=lambda entries: open_invoice(
+                            config, number, entries, automatic=True, ledgers=ctx.ledgers,
+                            detection_cache=detection_cache,
+                        ) == original[number],
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("auto-match: could not mark %s paid: %s", number, exc)
@@ -894,6 +905,7 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_re
                 profile=sync_results[owner].get("name", ""),
                 txn_date=match.payment.date.isoformat(), amount=match.payment.amount,
                 payee=match.payment.payee, account=match.payment.account,
+                ledger=match.payment.ledger, income_account=match.payment.income_account,
                 status="settled" if match.status == "matched" else "review",
                 invoice_number=match.invoice_number, candidates=match.candidates,
                 reason=match.note, decided_by="auto" if match.status == "matched" else "",
