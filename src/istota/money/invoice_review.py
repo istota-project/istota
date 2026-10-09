@@ -1,11 +1,14 @@
 """Invoice match actions shared by the CLI and web routes.
 
-Money writers take the DB write reservation before the work lock. The work
-stamp precedes the decision row; a failed row write leaves a stale review,
-never a settled row claiming work that was not stamped.
+Money writers take the DB write reservation before the work lock. A review
+commits its chosen invoice before stamping work, so a failed decision write
+cannot release the same credit to another invoice.
 """
 
 import logging
+
+from dataclasses import replace
+from datetime import date
 
 from istota.money import db, work
 from istota.money.core.invoice_matching import OpenInvoice
@@ -115,6 +118,7 @@ def list_reviews(conn, config, data_dir, *, show_all=False):
             {"invoice_number": number, "client": live[number].client,
              "total": live[number].total}
             for number in row["candidates"] if number in live
+            and (not row["invoice_number"] or number == row["invoice_number"])
         ]
     return rows
 
@@ -128,18 +132,46 @@ def settle_payment_review(db_path, data_dir, config, ledger_txn_id, invoice_numb
             raise ValueError("Payment review not found or already decided")
         if invoice_number not in row["candidates"]:
             raise ValueError("Invoice is not a candidate for this credit")
+        if row["invoice_number"] and row["invoice_number"] != invoice_number:
+            raise ValueError("Payment review already chose another invoice; retry that invoice")
+
+        if not row["invoice_number"]:
+            with work._work_lock(data_dir):
+                live = open_invoice(config, invoice_number,
+                                    work.get_entries_for_invoice(data_dir, invoice_number))
+                if live is None or not row["account"] or live.bank_account != row["account"]:
+                    raise ValueError("Invoice is no longer wholly unpaid and eligible; review remains open")
+            if not db.claim_review(conn, ledger_txn_id, invoice_number):
+                raise ValueError("Could not reserve payment review")
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            current = next((r for r in db.list_payment_matches(conn, status="review")
+                            if r["ledger_txn_id"] == ledger_txn_id), None)
+            if current is None or current["invoice_number"] != invoice_number:
+                raise ValueError("Payment review not found or already decided")
+
+        already_paid = 0
+        paid_date = date.fromisoformat(row["txn_date"])
 
         def validate(entries):
+            nonlocal already_paid
+            # Only this durably chosen invoice can reconcile a completed work write.
+            if entries and all(e.paid_date == paid_date for e in entries):
+                live = open_invoice(config, invoice_number,
+                                    [replace(e, paid_date=None) for e in entries])
+                if live is not None and row["account"] and live.bank_account == row["account"]:
+                    already_paid = len(entries)
+                return False
             live = open_invoice(config, invoice_number, entries)
             return live is not None and bool(row["account"]) and live.bank_account == row["account"]
 
         count = work.record_invoice_payment(
             data_dir, invoice_number, row["txn_date"], validate=validate,
-        )
+        ) or already_paid
         if not count:
             raise ValueError("Invoice is no longer wholly unpaid and eligible; review remains open")
         if not db.settle_review(conn, ledger_txn_id, invoice_number):
-            raise ValueError("Could not close payment review after stamping the invoice")
+            raise ValueError("Could not close payment review after stamping the invoice; retry this invoice")
     return {"status": "ok", "ledger_txn_id": ledger_txn_id,
             "invoice_number": invoice_number, "entries_paid": count}
 

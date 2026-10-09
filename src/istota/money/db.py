@@ -706,6 +706,15 @@ def list_payment_matches(conn, *, status=None, invoice_number=None) -> list[dict
     return rows
 
 
+def claim_review(conn, ledger_txn_id, invoice_number) -> bool:
+    """Reserve a review's invoice before a work-file write can outlive rollback."""
+    return conn.execute(
+        "UPDATE invoice_payment_matches SET invoice_number = ? "
+        "WHERE ledger_txn_id = ? AND status = 'review' AND invoice_number IS NULL",
+        (invoice_number, ledger_txn_id),
+    ).rowcount == 1
+
+
 def settle_review(conn, ledger_txn_id, invoice_number) -> bool:
     row = conn.execute(
         "SELECT candidates FROM invoice_payment_matches "
@@ -716,8 +725,9 @@ def settle_review(conn, ledger_txn_id, invoice_number) -> bool:
     return conn.execute(
         "UPDATE invoice_payment_matches SET status = 'settled', invoice_number = ?, "
         "decided_by = 'user', decided_at = datetime('now') "
-        "WHERE ledger_txn_id = ? AND status = 'review'",
-        (invoice_number, ledger_txn_id),
+        "WHERE ledger_txn_id = ? AND status = 'review' "
+        "AND (invoice_number IS NULL OR invoice_number = ?)",
+        (invoice_number, ledger_txn_id, invoice_number),
     ).rowcount == 1
 
 

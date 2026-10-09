@@ -111,7 +111,8 @@ class InvoiceMatchResolver:
 
         invoicing = config_store.load_invoicing(ctx.db_path)
         live = {i.number: i for i in open_invoices(invoicing, ctx.data_dir)}
-        candidates = [live[n] for n in match["candidates"] if n in live]
+        candidates = [live[n] for n in match["candidates"] if n in live
+                      and (not match["invoice_number"] or n == match["invoice_number"])]
         if not candidates:
             return None
         actions = [NotificationAction(

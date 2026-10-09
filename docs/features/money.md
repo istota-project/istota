@@ -130,3 +130,5 @@ Two operations are behind operator feature flags — `lots` (tax lots, `money_ta
 | `[money] autoclass_lookup` | `true` | Allow portfolio auto-classification to look up unknown symbols |
 
 Everything else — clients, entities, services, tax config, portfolio accounts — lives in the per-user money DB, not in `config.toml`.
+
+A review saves its chosen invoice before recording payment on the work entries. If settlement is interrupted, retry the same credit and invoice with `invoice review settle`; it finishes that decision without paying another candidate. A refusal before any invoice is chosen leaves the other candidates available.

@@ -349,3 +349,26 @@ def test_authenticated_settings_sync_and_bell(scenario, ambiguous):
     assert rows(config)[0]["dedup_key"].startswith("review:" if ambiguous else "settled:")
     entries = work.get_entries_for_invoice(ctx.data_dir, "INV-000001")
     assert entries[0].paid_date == (None if ambiguous else date.today())
+
+
+def test_failed_settlement_never_exposes_another_candidate(scenario):
+    config, contexts = scenario
+    ctx = contexts["alice"]
+    sync(ctx)
+    ident = rows(config)[0]["object_id"]
+    endpoint = f"/money/invoices/review/{ident}/settle"
+    with client(config) as web:
+        with patch.object(db, "settle_review", return_value=False):
+            response = web.post(endpoint, json={"invoice_number": "INV-000001"})
+        assert response.status_code == 400
+        with framework_db.get_db(config.db_path) as conn:
+            assert store.list_open(config, conn, "alice")[1] == 0
+        response = web.post(endpoint, json={"invoice_number": "INV-000002"})
+        assert response.status_code == 400
+        response = web.post(endpoint, json={"invoice_number": "INV-000001"})
+        assert response.status_code == 200, response.text
+    assert work.get_entries_for_invoice(ctx.data_dir, "INV-000002")[0].paid_date is None
+    with db.get_db(ctx.db_path) as conn:
+        match = db.list_payment_matches(conn)[0]
+    assert match["status"] == "settled"
+    assert match["invoice_number"] == "INV-000001"

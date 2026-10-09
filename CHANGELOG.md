@@ -147,6 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An interrupted invoice review settlement keeps its chosen invoice. Retrying finishes that decision instead of allowing the same credit to pay another candidate.
+
 - Daily Monarch sync now runs for profiles configured through the settings page or operator CLI, without requiring a legacy configuration file. Previously those users could sync manually but the daily job skipped their profiles.
 
 - A card refund could mark an invoice paid when their amounts matched. Invoice auto-matching now requires the credit to land in the invoice entity’s configured bank account, and reports when no synced credit reaches an invoicing bank account.

@@ -181,7 +181,42 @@ def test_failed_decision_write_leaves_stamped_work_and_open_review(scenario):
             settle_payment_review(ctx.db_path, ctx.data_dir,
                                   config_store.load_invoicing(ctx.db_path), ident, "INV-000001")
     assert work.get_entries_for_invoice(ctx.data_dir, "INV-000001")[0].paid_date == date.today()
-    assert call("invoice", "review", "list")["matches"][0]["status"] == "review"
+    review = call("invoice", "review", "list")["matches"][0]
+    assert review["status"] == "review"
+    assert review["invoice_number"] == "INV-000001"
+    assert review["candidate_details"] == []
+    call("invoice", "review", "settle", ident, "--invoice", "INV-000002", ok=False)
+    assert work.get_entries_for_invoice(ctx.data_dir, "INV-000002")[0].paid_date is None
+    call("invoice", "review", "settle", ident, "--invoice", "INV-000001")
+    history = call("invoice", "matches")["matches"][0]
+    assert history["status"] == "settled"
+    assert history["invoice_number"] == "INV-000001"
+
+
+def test_refused_review_releases_choice_for_other_unpaid_candidate(scenario):
+    ctx, call, sync = scenario
+    sync()
+    ident = call("invoice", "review", "list")["matches"][0]["ledger_txn_id"]
+    call("invoice", "paid", "INV-000001", "--date", date.today().isoformat(), "--no-post")
+    call("invoice", "review", "settle", ident, "--invoice", "INV-000001", ok=False)
+    assert call("invoice", "review", "list")["matches"][0]["invoice_number"] is None
+    call("invoice", "review", "settle", ident, "--invoice", "INV-000002")
+
+
+def test_uncertain_work_write_keeps_review_choice(scenario):
+    from istota.money import config_store
+    from istota.money.invoice_review import settle_payment_review
+
+    ctx, call, sync = scenario
+    sync()
+    ident = call("invoice", "review", "list")["matches"][0]["ledger_txn_id"]
+    with patch.object(work, "_save_entries", side_effect=OSError("write interrupted")):
+        with pytest.raises(OSError, match="write interrupted"):
+            settle_payment_review(ctx.db_path, ctx.data_dir,
+                                  config_store.load_invoicing(ctx.db_path), ident, "INV-000001")
+    call("invoice", "review", "settle", ident, "--invoice", "INV-000002", ok=False)
+    call("invoice", "review", "settle", ident, "--invoice", "INV-000001")
+    assert work.get_entries_for_invoice(ctx.data_dir, "INV-000002")[0].paid_date is None
 
 
 @pytest.mark.parametrize("field,value", [
