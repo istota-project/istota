@@ -60,7 +60,7 @@ afterEach(() => {
 
 async function pick(label: string, optionName: string) {
   await fireEvent.keyDown(screen.getByRole('button', { name: label }), { key: 'Enter' });
-  const option = await screen.findByRole('option', { name: optionName, exact: true });
+  const option = await screen.findByRole('option', { name: optionName });
   await fireEvent.pointerDown(option, { pointerType: 'mouse' });
   await fireEvent.pointerUp(option, { pointerType: 'mouse' });
   await fireEvent.click(option);
@@ -73,9 +73,7 @@ async function enable() {
 }
 
 async function ready() {
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Ledger', exact: true })).not.toBeDisabled(),
-  );
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Ledger' })).not.toBeDisabled());
 }
 
 function row(overrides: Partial<EntityRow> = {}): EntityRow {
@@ -182,14 +180,12 @@ describe('EntityForm payment detection', () => {
     expect(screen.getByRole('checkbox')).not.toBeChecked();
     await enable();
     await ready();
-    expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     await pick('Ledger', 'Business');
     await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Income account', exact: true }),
-      ).not.toBeDisabled(),
+      expect(screen.getByRole('button', { name: 'Income account' })).not.toBeDisabled(),
     );
-    expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     await pick('Income account', 'Income:Royalties');
     await fireEvent.click(screen.getByText('Save'));
     await waitFor(() => expect(saved.payment_detection_enabled).toBe(true));
@@ -201,14 +197,10 @@ describe('EntityForm payment detection', () => {
     form.unmount();
     const data = await getBusinessSettings();
     mount({ entity: data.entities[0] });
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Save', exact: true })).not.toBeDisabled(),
-    );
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
     expect(screen.getByRole('checkbox')).toBeChecked();
-    expect(screen.getByRole('button', { name: 'Ledger', exact: true })).toHaveTextContent(
-      'Business',
-    );
-    expect(screen.getByRole('button', { name: 'Income account', exact: true })).toHaveTextContent(
+    expect(screen.getByRole('button', { name: 'Ledger' })).toHaveTextContent('Business');
+    expect(screen.getByRole('button', { name: 'Income account' })).toHaveTextContent(
       'Income:Royalties',
     );
   });
@@ -226,7 +218,7 @@ describe('EntityForm payment detection', () => {
     await ready();
     await pick('Ledger', 'Personal');
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Income account', exact: true })).toHaveTextContent(
+      expect(screen.getByRole('button', { name: 'Income account' })).toHaveTextContent(
         'Income:Consulting',
       ),
     );
@@ -240,11 +232,9 @@ describe('EntityForm payment detection', () => {
     );
     await pick('Ledger', 'Business');
     await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Income account', exact: true }),
-      ).not.toBeDisabled(),
+      expect(screen.getByRole('button', { name: 'Income account' })).not.toBeDisabled(),
     );
-    expect(screen.getByRole('button', { name: 'Income account', exact: true })).toHaveTextContent(
+    expect(screen.getByRole('button', { name: 'Income account' })).toHaveTextContent(
       'Choose an income account',
     );
     expect(screen.getByText('Save')).toBeDisabled();
@@ -273,7 +263,7 @@ describe('EntityForm payment detection', () => {
     resolveOld(response(accountData(['Income:Wrong'])));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryByText('Old ledger failed')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Income account', exact: true })).toHaveTextContent(
+    expect(screen.getByRole('button', { name: 'Income account' })).toHaveTextContent(
       'Income:Consulting',
     );
   });
@@ -374,7 +364,7 @@ describe('EntityForm payment detection', () => {
     await enable();
     await enable();
     await waitFor(() => expect(screen.getByText('Save')).not.toBeDisabled());
-    expect(screen.getByRole('button', { name: 'Income account', exact: true })).toHaveTextContent(
+    expect(screen.getByRole('button', { name: 'Income account' })).toHaveTextContent(
       'Income:Royalties',
     );
   });
