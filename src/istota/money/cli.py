@@ -1597,7 +1597,7 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     """Run periodic money tasks: monarch sync (if configured) + invoice schedule check.
 
     Meant to be called periodically by cron. The monarch sync runs first
-    when ``monarch_config`` is set; the invoice scheduler then checks each
+    when Monarch profiles are configured in the DB; the invoice scheduler checks each
     client's invoicing schedule and generates invoices when due. Either
     half is optional — users with only one feature configured get only
     that step.
@@ -1607,6 +1607,7 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     invoices paid without also skipping the ledger sync, which is what
     ``--skip-monarch`` would do.
     """
+    from istota.money import config_store
     from istota.money.core.invoicing import check_scheduled_invoices, generate_invoices_for_period
     from istota.money.db import set_invoice_schedule_generation
 
@@ -1616,7 +1617,7 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
         return
 
     monarch_result: dict | None = None
-    if ctx.monarch_config_path and not skip_monarch:
+    if not skip_monarch and ctx.db_path and config_store.has_monarch_data(ctx.db_path):
         monarch_result = _run_monarch_sync(
             ctx, dry_run=dry_run, ledger=None,
             match_invoices=match_invoices, tolerance=tolerance, deliver_reviews=True,

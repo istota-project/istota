@@ -35,7 +35,7 @@ def scenario(tmp_path):
             source.backup(dest)
         uctx = ctx.users.pop("default")
         uctx.db_path = target
-        uctx.monarch_config_path = workspace / "monarch.toml"
+        assert uctx.monarch_config_path is None
         ctx.users[user] = uctx
         ctx.activate_user(user)
         ctx.framework_config = config
