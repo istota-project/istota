@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Money → Settings → Invoicing now lets you turn automatic payment detection on for each billing entity and choose its ledger and income account. Detection starts off for new and existing entities, and switching it off preserves the saved selections.
+
+- Invoice payment reviews now appear in the notification bell and invoices page, where you can settle a candidate or dismiss the credit. Daily sync alerts you when a decision is needed; automatic settlements appear in the bell without a push and show their sync payment date on the invoices page.
+
+- Synced invoice payments now have a durable history. List ambiguous credits with `invoice review list`, settle a candidate or dismiss the credit, and inspect settled or reverted payments with `invoice matches`.
+
 - Search beside the notification bell finds messages, room names, memories, facts and records in your enabled modules. Open it with Cmd+K or Ctrl+K, choose a result to open its source, or search transactions when you need them. Older message results can load the matching history and mark the message in its room.
 
 - Recovery-code sign-in can fill one saved code after your approval, without displaying it in chat. Used codes stay marked in Settings, and a notice asks you to regenerate a nearly exhausted set; enrollment can confirm one freshly captured code without a separate approval.
@@ -75,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Automatic invoice payment detection now requires explicit enablement for each billing entity and matches its selected ledger and income account as well as its bank account. Existing entities start disabled; saved reviews remain available for manual decisions after settings change.
+
 - Search filters now use a dropdown beside the search field, with an X beside the Search title to close the dialog. The top navigation collapses into its menu at 800px.
 
 - Credentials now live in Istota's encrypted store. Import selected entries from KeePass, download a fresh password-protected copy, or register an age recipient for scheduled backups. Replaced and deleted values have bounded history, and sensitive actions require an emailed confirmation code. Imported entries remain editable even without a password, and their custom fields follow the entry’s access rules.
@@ -138,6 +146,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- An interrupted invoice review settlement keeps its chosen invoice. Retrying finishes that decision instead of allowing the same credit to pay another candidate.
+
+- Daily Monarch sync now runs for profiles configured through the settings page or operator CLI, without requiring a legacy configuration file. Previously those users could sync manually but the daily job skipped their profiles.
+
+- A card refund could mark an invoice paid when their amounts matched. Invoice auto-matching now requires the credit to land in the invoice entity’s configured bank account, and reports when no synced credit reaches an invoicing bank account.
 
 - In web chat, a message's task number, model and duration no longer cover the first line of a follow-up message. They now appear at the right end of the action row under the message, and that row's star is the only one. A starred message is marked at rest by an amber bar along its left edge (#691).
 

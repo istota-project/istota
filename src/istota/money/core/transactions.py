@@ -1088,6 +1088,10 @@ def sync_monarch(
             "date": txn_date.isoformat(),
             "amount": amount,
             "payee": merchant,
+            "account": contra_account,
+            "income_account": posting_account,
+            "ledger_txn_id": entry_metadata["id"],
+            "monarch_id": txn_id,
         })
 
         if txn_id:
@@ -1389,13 +1393,16 @@ def sync_all_profiles(
         rules, dropped = load_import_rules(
             db_path, ledgers[0].get("name", ""), "monarch-api",
         )
-        return annotate_rule_drops(
+        result = annotate_rule_drops(
             sync_monarch(
                 ledgers[0]["path"], config, db_conn=db_conn, dry_run=dry_run,
                 rules=rules,
             ),
             dropped,
         )
+
+        result["ledger"] = ledgers[0]["name"]
+        return result
 
     # Fetch transactions once for all profiles
     lookback = max(p.sync.lookback_days for p in config.profiles)
@@ -1405,7 +1412,7 @@ def sync_all_profiles(
         return {"status": "error", "error": f"Failed to fetch transactions: {e}"}
 
     # Build ledger lookup
-    ledger_by_name = {entry["name"].lower(): entry["path"] for entry in ledgers}
+    ledger_by_name = {entry["name"].lower(): entry for entry in ledgers}
 
     # Ahead of the loop, not inside it: the loop writes through `db_conn` and
     # holds that write transaction, so a load from inside it opens a second
@@ -1416,8 +1423,8 @@ def sync_all_profiles(
 
     profile_results = []
     for profile in config.profiles:
-        ledger_path = ledger_by_name.get(profile.ledger.lower())
-        if ledger_path is None:
+        ledger_entry = ledger_by_name.get(profile.ledger.lower())
+        if ledger_entry is None:
             profile_results.append({
                 "name": profile.name,
                 "ledger": profile.ledger,
@@ -1439,7 +1446,7 @@ def sync_all_profiles(
         rules, dropped = rules_by_ledger[profile.ledger]
         result = annotate_rule_drops(
             sync_monarch(
-                ledger_path, profile_config,
+                ledger_entry["path"], profile_config,
                 db_conn=db_conn, dry_run=dry_run,
                 transactions=all_transactions,
                 profile=profile.name,
@@ -1448,7 +1455,7 @@ def sync_all_profiles(
             dropped,
         )
         result["name"] = profile.name
-        result["ledger"] = profile.ledger
+        result["ledger"] = ledger_entry["name"]
         profile_results.append(result)
 
     return {"status": "ok", "profiles": profile_results}

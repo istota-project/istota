@@ -108,6 +108,9 @@ class CompanyConfig:
     ar_account: str = ""  # per-entity A/R override
     bank_account: str = ""  # per-entity bank account override
     currency: str = ""  # per-entity currency override
+    payment_detection_enabled: bool = False
+    payment_detection_ledger: str = ""
+    payment_detection_income_account: str = ""
 
 
 @dataclass

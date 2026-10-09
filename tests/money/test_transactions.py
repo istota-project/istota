@@ -672,6 +672,7 @@ class TestSyncAllProfiles:
 
         assert result["status"] == "ok"
         assert "profiles" not in result  # no profiles = single sync result
+        assert result["ledger"] == "main"
 
     def test_multiple_profiles(self, tmp_path):
         """Syncs each profile to its target ledger."""
@@ -1121,7 +1122,7 @@ class TestSyncMonarchImportedPayments:
         return MonarchConfig(
             credentials=MonarchCredentials(session_id="s", csrftoken="c"),
             sync=MonarchSyncSettings(default_account="Assets:Bank:Checking"),
-            accounts={}, categories={}, tags=MonarchTagFilters(),
+            accounts={}, categories={"Consulting": "Income:Consulting"}, tags=MonarchTagFilters(),
         )
 
     def _ledger(self, tmp_path):
@@ -1137,9 +1138,23 @@ class TestSyncMonarchImportedPayments:
             "account": {"displayName": "Checking"},
             "amount": 6400.00, "notes": "", "tags": [],
         }]
-        result = sync_monarch(self._ledger(tmp_path), self._config(), transactions=txns)
+        ledger = self._ledger(tmp_path)
+        result = sync_monarch(ledger, self._config(), transactions=txns)
+        from beancount import loader
+        from beancount.core.data import Transaction
+        entries, _, _ = loader.load_file(str(ledger))
+        booked = next(entry for entry in entries if isinstance(entry, Transaction))
+        assert [(p.account, float(p.units.number)) for p in booked.postings] == [
+            ("Assets:Bank:Checking", 6400.0), ("Income:Consulting", -6400.0),
+        ]
+        row = result["imported"][0]
+        assert row["ledger_txn_id"]
+        assert f'id: "{row["ledger_txn_id"]}"' in ledger.read_text()
         assert result["imported"] == [{
             "date": "2026-05-05", "amount": 6400.00, "payee": "Northwind Ltd",
+            "account": "Assets:Bank:Checking", "monarch_id": "mon-1",
+            "ledger_txn_id": row["ledger_txn_id"],
+            "income_account": "Income:Consulting",
         }]
 
     def test_debits_are_reported_too(self, tmp_path):

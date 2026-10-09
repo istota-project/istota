@@ -384,6 +384,8 @@ async def api_invoices(
     show_all: bool = False,
     user_ctx: UserContext = Depends(get_user_config),
 ):
+    from istota.money import db
+    from istota.money.invoice_review import list_reviews
     from istota.money.core.invoicing import build_line_items
     from istota.money.work import (
         get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
@@ -391,14 +393,22 @@ async def api_invoices(
 
     data_dir = user_ctx.data_dir
     if not data_dir:
-        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
+        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0, "payment_reviews": []}
 
     try:
         config = _load_invoicing_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
     if config is None:
-        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
+        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0, "payment_reviews": []}
+
+    with db.get_db(user_ctx.db_path) as conn:
+        matches = list_reviews(conn, config, data_dir, show_all=True)
+    reviews = [row for row in matches if row["status"] == "review" and row["candidate_details"]]
+    auto_settled = {
+        row["invoice_number"]: row["txn_date"] for row in matches
+        if row["status"] == "settled" and row["decided_by"] == "auto"
+    }
 
     invoice_numbers = get_invoice_numbers(data_dir)
     invoices = []
@@ -434,6 +444,8 @@ async def api_invoices(
         }
         if is_paid and paid_date_val:
             invoice_info["paid_date"] = paid_date_val.isoformat()
+            if auto_settled.get(inv_num) == invoice_info["paid_date"]:
+                invoice_info["paid_by_sync_date"] = auto_settled[inv_num]
         invoices.append(invoice_info)
 
     outstanding = [i for i in invoices if i["status"] == "outstanding"]
@@ -442,6 +454,7 @@ async def api_invoices(
         "invoice_count": len(invoices),
         "outstanding_count": len(outstanding),
         "invoices": invoices,
+        "payment_reviews": reviews,
     }
 
 
@@ -468,6 +481,9 @@ async def api_business_settings(user_ctx: UserContext = Depends(get_user_config)
         "ar_account": c.ar_account,
         "bank_account": c.bank_account,
         "currency": c.currency,
+        "payment_detection_enabled": c.payment_detection_enabled,
+        "payment_detection_ledger": c.payment_detection_ledger,
+        "payment_detection_income_account": c.payment_detection_income_account,
     } for key, c in config.companies.items()]
 
     services = [{
@@ -543,6 +559,55 @@ async def api_invoice_details(
     }
 
 
+@router.post("/invoices/review/{ledger_txn_id}/settle")
+async def api_invoice_review_settle(
+    ledger_txn_id: str,
+    request: Request,
+    user: dict = Depends(require_auth),
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money.invoice_review import settle_payment_review
+    from istota.notifications.resolvers.invoice_match import close_for_match
+
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return _error("invalid JSON body", 400)
+    if not isinstance(body, dict) or not isinstance(body.get("invoice_number"), str):
+        return _error("invoice_number is required", 400)
+    config = _load_invoicing_config(user_ctx)
+    if config is None:
+        return _error("no invoicing config", 400)
+    try:
+        result = settle_payment_review(
+            user_ctx.db_path, user_ctx.data_dir, config, ledger_txn_id, body["invoice_number"],
+        )
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    close_for_match(request.app.state.istota_config.db_path, user["username"], ledger_txn_id)
+    return result
+
+
+@router.post("/invoices/review/{ledger_txn_id}/dismiss")
+async def api_invoice_review_dismiss(
+    ledger_txn_id: str,
+    request: Request,
+    user: dict = Depends(require_auth),
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    from istota.money.invoice_review import dismiss_payment_review
+    from istota.notifications.resolvers.invoice_match import close_for_match
+
+    try:
+        result = dismiss_payment_review(user_ctx.db_path, ledger_txn_id)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    close_for_match(request.app.state.istota_config.db_path, user["username"], ledger_txn_id)
+    return result
+
+
 @router.post("/invoices/{invoice_number}/mark-paid")
 async def api_invoice_mark_paid(
     invoice_number: str,
@@ -592,7 +657,9 @@ async def api_invoice_mark_pending(
     _csrf: None = Depends(verify_origin),
 ):
     """Un-pay an invoice (clears paid_date, keeps the invoice number)."""
-    from istota.money.work import clear_invoice_payment, get_entries_for_invoice
+    from istota.money import db
+    from istota.money.invoice_review import revert_invoice_payment
+    from istota.money.work import get_entries_for_invoice
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -601,7 +668,8 @@ async def api_invoice_mark_pending(
     if not get_entries_for_invoice(data_dir, invoice_number):
         return JSONResponse({"status": "error", "error": "invoice not found"}, status_code=404)
 
-    count = clear_invoice_payment(data_dir, invoice_number)
+    with db.get_db(user_ctx.db_path) as conn:
+        count = revert_invoice_payment(conn, data_dir, invoice_number)
     return {"status": "ok", "invoice_number": invoice_number, "count": count}
 
 
@@ -1204,6 +1272,9 @@ def _company_to_dict(c) -> dict:
         "payment_instructions": c.payment_instructions, "logo": c.logo,
         "ar_account": c.ar_account, "bank_account": c.bank_account,
         "currency": c.currency,
+        "payment_detection_enabled": c.payment_detection_enabled,
+        "payment_detection_ledger": c.payment_detection_ledger,
+        "payment_detection_income_account": c.payment_detection_income_account,
     }
 
 
@@ -1232,6 +1303,7 @@ _CLIENT_INT_FIELDS = ("schedule_day", "reminder_days", "days_until_overdue")
 _ENTITY_TEXT_FIELDS = (
     "name", "address", "email", "payment_instructions", "logo",
     "ar_account", "bank_account", "currency",
+    "payment_detection_ledger", "payment_detection_income_account",
 )
 _SERVICE_TEXT_FIELDS = ("display_name", "type", "income_account")
 
@@ -1319,10 +1391,31 @@ def _coerce_client_fields(body: dict) -> tuple[dict, str | None]:
 
 
 def _coerce_entity_fields(body: dict) -> tuple[dict, str | None]:
-    unknown = set(body) - set(_ENTITY_TEXT_FIELDS)
+    unknown = set(body) - (set(_ENTITY_TEXT_FIELDS) | {"payment_detection_enabled"})
     if unknown:
         return {}, f"unknown keys: {sorted(unknown)}"
-    return _coerce_text_fields(body, _ENTITY_TEXT_FIELDS)
+    fields, err = _coerce_text_fields(body, _ENTITY_TEXT_FIELDS)
+    if err:
+        return {}, err
+    if "payment_detection_enabled" in body:
+        enabled = body["payment_detection_enabled"]
+        if not isinstance(enabled, bool):
+            return {}, "invalid payment_detection_enabled — expected a boolean"
+        fields["payment_detection_enabled"] = enabled
+    return fields, None
+
+
+def _validate_entity_detection(user_ctx: UserContext, key: str, fields: dict) -> None:
+    from dataclasses import replace
+    from istota.money import config_store
+    from istota.money.core.models import CompanyConfig
+    from istota.money.invoice_review import validate_payment_detection
+
+    previous = config_store.load_invoicing(user_ctx.db_path).companies.get(key)
+    company = replace(previous or CompanyConfig(name="", key=key), **fields)
+    fields["payment_detection_ledger"] = validate_payment_detection(
+        company, user_ctx.ledgers, previous=previous,
+    )
 
 
 def _coerce_service_fields(body: dict) -> tuple[dict, str | None]:
@@ -1502,6 +1595,7 @@ async def api_config_companies_post(
     if err:
         return _error(err, 400)
     try:
+        _validate_entity_detection(user_ctx, key, fields)
         comp, state = config_store.upsert_company(
             user_ctx.db_path, key, create_only=True, **fields,
         )
@@ -1538,6 +1632,7 @@ async def api_config_companies_put(
     ).companies:
         return _error(f"entity '{key}' not found", 404)
     try:
+        _validate_entity_detection(user_ctx, key, fields)
         comp, state = config_store.upsert_company(user_ctx.db_path, key, **fields)
     except ValueError as exc:
         return _error(str(exc), 400)
@@ -2986,9 +3081,12 @@ async def api_config_import(
         section_data = _extract_section_data(parsed, sec)
         if section_data is None:
             continue
-        diff = _compute_section_diff(user_ctx, sec, section_data, bool(replace))
-        if not dry_run:
-            _apply_section_import(user_ctx, sec, section_data, bool(replace))
+        try:
+            diff = _compute_section_diff(user_ctx, sec, section_data, bool(replace))
+            if not dry_run:
+                _apply_section_import(user_ctx, sec, section_data, bool(replace))
+        except ValueError as exc:
+            return JSONResponse({"status": "error", "error": str(exc)}, 400)
         sections_out.append({
             "section": sec,
             "states": [{"state": s, "message": m} for s, m in diff],

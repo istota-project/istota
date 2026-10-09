@@ -1003,3 +1003,133 @@ class TestTransactionRules:
         assert rc == 2
         assert "migration" in err
         assert out.strip() == ""
+
+
+@pytest.fixture
+def detection_ctx(patched_loader, tmp_path):
+    ledger = tmp_path / "business.beancount"
+    ledger.write_text('2024-01-01 open Income:Consulting USD\n')
+    patched_loader.ledgers = [{"name": "Business", "path": ledger}]
+    config_store.upsert_company(patched_loader.db_path, "acme", name="Acme",
+                              bank_account="Assets:Bank:Checking")
+    return patched_loader
+
+
+def test_company_detection_ensure_update_and_disable(detection_ctx):
+    args = ["money", "company", "ensure", "--user", "alice", "--key", "acme",
+            "--payment-detection-enabled", "--payment-detection-ledger", "business",
+            "--payment-detection-income-account", "Income:Consulting"]
+    for state in ("updated", "noop"):
+        rc, out, err = _run(args)
+        assert rc == 0, err
+        assert f"STATE: {state}" in out
+    rc, _, err = _run(["money", "company", "update", "--user", "alice", "--key", "acme",
+                       "--address", "1 Main St"])
+    assert rc == 0, err
+    saved = config_store.load_invoicing(detection_ctx.db_path).companies["acme"]
+    assert saved.payment_detection_enabled is True
+    assert saved.payment_detection_ledger == "Business"
+    assert saved.bank_account == "Assets:Bank:Checking"
+    detection_ctx.ledgers = []
+    rc, _, err = _run(["money", "company", "update", "--user", "alice", "--key", "acme",
+                       "--no-payment-detection-enabled"])
+    assert rc == 0, err
+    saved = config_store.load_invoicing(detection_ctx.db_path).companies["acme"]
+    assert saved.payment_detection_enabled is False
+    assert saved.payment_detection_income_account == "Income:Consulting"
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_detection_config_import_export_and_diff(detection_ctx, tmp_path, replace):
+    import tomli
+    path = tmp_path / "invoicing.toml"
+    path.write_text('[companies.acme]\npayment_detection_enabled = true\n'
+                    'payment_detection_ledger = "business"\n'
+                    'payment_detection_income_account = "Income:Consulting"\n')
+    args = ["money", "config", "import", "--user", "alice", "--file", str(path), "--strict"]
+    if replace:
+        args.append("--replace")
+    rc, out, err = _run(args + ["--dry-run"])
+    assert rc == 0, err
+    assert "STATE: updated company key=acme" in out
+    assert not config_store.load_invoicing(detection_ctx.db_path).companies["acme"].payment_detection_enabled
+    rc, _, err = _run(args)
+    assert rc == 0, err
+    rc, out, err = _run(["money", "config", "export", "--user", "alice", "--section", "invoicing"])
+    assert rc == 0, err
+    exported = tomli.loads(out)
+    assert exported["companies"]["acme"]["payment_detection_ledger"] == "Business"
+    assert exported["companies"]["acme"]["payment_detection_enabled"] is True
+    path.write_text(out)
+    rc, out, err = _run(args)
+    assert rc == 0, err
+    assert "STATE: noop company key=acme" in out
+    path.write_text('[companies.acme]\npayment_detection_enabled = false\n')
+    detection_ctx.ledgers = []
+    rc, out, err = _run(["money", "config", "diff", "--user", "alice", "--file", str(path)])
+    assert rc == 0, err
+    assert "STATE: updated company key=acme" in out
+    rc, _, err = _run(["money", "config", "import", "--user", "alice", "--file", str(path)])
+    assert rc == 0, err
+    saved = config_store.load_invoicing(detection_ctx.db_path).companies["acme"]
+    assert saved.payment_detection_enabled is False
+    assert saved.payment_detection_ledger == "Business"
+    assert saved.payment_detection_income_account == "Income:Consulting"
+    rc, exported, err = _run(["money", "config", "export", "--user", "alice", "--section", "invoicing"])
+    assert rc == 0, err
+    assert tomli.loads(exported)["companies"]["acme"]["payment_detection_enabled"] is False
+    path.write_text('[companies.acme]\nname = "Renamed"\n')
+    assert _run(["money", "config", "import", "--user", "alice", "--file", str(path)])[0] == 0
+    assert config_store.load_invoicing(detection_ctx.db_path).companies["acme"].payment_detection_ledger == "Business"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("payment_detection_enabled", '"yes"'),
+    ("payment_detection_ledger", '"another-users-ledger"'),
+    ("payment_detection_income_account", '"Income:Unknown"'),
+    ("payment_detection_income_account", '"Assets:Bank:Checking"'),
+])
+@pytest.mark.parametrize("mode", [[], ["--dry-run"], ["--replace"]])
+def test_detection_import_rejects_invalid_without_writes(detection_ctx, tmp_path, field, value, mode):
+    values = {"payment_detection_enabled": "true", "payment_detection_ledger": '"Business"',
+              "payment_detection_income_account": '"Income:Consulting"'}
+    values[field] = value
+    path = tmp_path / "invalid.toml"
+    path.write_text('next_invoice_number = 99\n[companies.acme]\n' +
+                    "\n".join(f"{k} = {v}" for k, v in values.items()))
+    rc, _, err = _run(["money", "config", "import", "--user", "alice", "--file", str(path), *mode])
+    assert rc == 2
+    assert "payment" in err.lower()
+    saved = config_store.load_invoicing(detection_ctx.db_path)
+    assert saved.next_invoice_number == 1
+    assert saved.companies["acme"].payment_detection_enabled is False
+
+
+@pytest.mark.parametrize("flag,value", [
+    ("--payment-detection-ledger", "another-users-ledger"),
+    ("--payment-detection-income-account", "Income:Unknown"),
+])
+def test_company_detection_rejects_invalid_selection(detection_ctx, flag, value):
+    rc, _, err = _run([
+        "money", "company", "update", "--user", "alice", "--key", "acme",
+        "--payment-detection-enabled", "--payment-detection-ledger", "Business",
+        "--payment-detection-income-account", "Income:Consulting", flag, value,
+    ])
+    assert rc == 2
+    assert "payment" in err.lower()
+    assert not config_store.load_invoicing(detection_ctx.db_path).companies["acme"].payment_detection_enabled
+
+
+def test_merge_import_preserves_omitted_enabled_detection(detection_ctx, tmp_path):
+    config_store.upsert_company(detection_ctx.db_path, "acme", payment_detection_enabled=True,
+                               payment_detection_ledger="Business",
+                               payment_detection_income_account="Income:Consulting")
+    path = tmp_path / "partial.toml"
+    path.write_text('[companies.acme]\nname = "Renamed"\n')
+    rc, _, err = _run(["money", "config", "import", "--user", "alice", "--file", str(path)])
+    assert rc == 0, err
+    saved = config_store.load_invoicing(detection_ctx.db_path).companies["acme"]
+    assert saved.payment_detection_enabled is True
+    assert saved.payment_detection_ledger == "Business"
+    assert saved.payment_detection_income_account == "Income:Consulting"
+    assert saved.name == "Renamed"

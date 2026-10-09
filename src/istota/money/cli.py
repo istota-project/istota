@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from istota.experimental import requires_feature
+from istota.money.invoice_review import open_invoices as _open_invoices
 
 
 def _output(result: dict) -> None:
@@ -48,6 +49,8 @@ class Context:
         self.invoicing_config_path: Path | None = None
         self.tax_config_path: Path | None = None
         self.db_path: Path | None = None
+        self.framework_db_path: Path | None = None
+        self.framework_config = None
         self.secrets: dict | None = None
         self.api_key: str | None = None
         self.users: dict[str, UserContext] = {}
@@ -630,6 +633,7 @@ def _run_monarch_sync(
     *,
     match_invoices: bool = True,
     tolerance: float = 0.0,
+    deliver_reviews: bool = False,
 ) -> dict:
     """Sync from Monarch, then settle the invoices the new credits pay for.
 
@@ -642,7 +646,7 @@ def _run_monarch_sync(
     """
     result = _sync_monarch_ledgers(ctx, dry_run, ledger)
     if match_invoices and not dry_run:
-        _apply_invoice_matching(ctx, result, tolerance)
+        _apply_invoice_matching(ctx, result, tolerance, deliver_reviews=deliver_reviews)
     # ``imported`` is plumbing for the matcher, not output. Every other
     # row-level detail in this result is a count, and this one would put a
     # record per booked transaction into a skill response that goes straight
@@ -705,7 +709,7 @@ def _sync_monarch_ledgers(ctx, dry_run: bool, ledger: str | None) -> dict:
                         dropped,
                     )
                     r["name"] = profile.name
-                    r["ledger"] = profile.ledger
+                    r["ledger"] = _ledger_scope_name(ledger, ctx.ledgers)
                     results.append(r)
                 return {"status": "ok", "profiles": results}
             else:
@@ -717,13 +721,15 @@ def _sync_monarch_ledgers(ctx, dry_run: bool, ledger: str | None) -> dict:
                     ctx.db_path, _ledger_scope_name(ledger, ctx.ledgers),
                     "monarch-api",
                 )
-                return annotate_rule_drops(
+                result = annotate_rule_drops(
                     core_sync(
                         ledger_path, config, db_conn=db_conn, dry_run=dry_run,
                         rules=rules,
                     ),
                     dropped,
                 )
+                result["ledger"] = _ledger_scope_name(ledger, ctx.ledgers)
+                return result
         else:
             return sync_all_profiles(
                 config, ctx.ledgers, db_conn=db_conn, dry_run=dry_run,
@@ -769,51 +775,7 @@ def _tolerance_error(tolerance: float) -> str | None:
     return None
 
 
-def _open_invoices(config, data_dir: Path) -> list:
-    """Wholly unpaid invoices whose total can be stated exactly.
-
-    Three kinds of invoice are deliberately left out, because matching on a
-    total that isn't the amount the client owes is how a wrong invoice gets
-    settled:
-
-    * **Partly paid** — some entries carry a `paid_date` and some don't. The
-      total of all its entries is no longer the outstanding balance.
-    * **Partly unrecognised** — `build_line_items` silently skips an entry
-      whose service is missing from the config, so the total would be less
-      than what was billed and a smaller unrelated credit could match it.
-    * Fully paid, or with no billable lines at all.
-
-    ``date`` is the invoice's issue date where one was recorded, and a lower
-    bound on it otherwise — see :func:`work.invoice_issue_date`. Invoices
-    raised before the issue date was stored fall back to the latest work
-    billed, which never rejects a real payment but admits credits from the gap
-    between the last work and the actual issue. For those, amount uniqueness
-    rather than the date is what keeps a match honest.
-    """
-    from istota.money.core.invoice_matching import OpenInvoice
-    from istota.money.core.invoicing import build_line_items
-    from istota.money.work import (
-        get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
-    )
-
-    invoices = []
-    for number in get_invoice_numbers(data_dir):
-        entries = get_entries_for_invoice(data_dir, number)
-        if not entries or any(e.paid_date is not None for e in entries):
-            continue
-        items = build_line_items(entries, config.services)
-        if not items or len(items) != len(entries):
-            continue
-        invoices.append(OpenInvoice(
-            number=number,
-            client=entries[0].client,
-            date=invoice_issue_date(entries),
-            total=sum(item.amount for item in items),
-        ))
-    return invoices
-
-
-def _apply_invoice_matching(ctx, result: dict, tolerance: float) -> None:
+def _apply_invoice_matching(ctx, result: dict, tolerance: float, *, deliver_reviews=False) -> None:
     """Settle the invoices this sync's credits pay for, in place on ``result``.
 
     Best-effort, and the whole body is guarded to make that true. By the time
@@ -824,14 +786,14 @@ def _apply_invoice_matching(ctx, result: dict, tolerance: float) -> None:
     not be able to break a bank sync. Everything is logged and skipped.
     """
     try:
-        _match_invoices_unguarded(ctx, result, tolerance)
+        _match_invoices_unguarded(ctx, result, tolerance, deliver_reviews=deliver_reviews)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger("istota.money.cli").warning(
             "auto-match: skipped after a successful sync: %s", exc, exc_info=True,
         )
 
 
-def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
+def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_reviews=False) -> None:
     """The body of :func:`_apply_invoice_matching`. Never call directly."""
     from istota.money.core.invoice_matching import (
         Payment, match_payments_to_invoices, summarize_matches,
@@ -851,7 +813,11 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
     except click.ClickException:
         return  # invoicing isn't configured for this user; nothing to match
 
-    open_invoices = _open_invoices(config, ctx.data_dir)
+    detection_cache = {}
+    open_invoices = _open_invoices(
+        config, ctx.data_dir, automatic=True, ledgers=ctx.ledgers,
+        detection_cache=detection_cache,
+    )
     if not open_invoices:
         return
 
@@ -864,6 +830,7 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
     # on profile order. One pass makes the whole run's contention visible.
     owner_of_payment: list[int] = []  # index into sync_results, per payment
     payments: list = []
+    imported_rows: list[dict] = []
     for index, sync_result in enumerate(sync_results):
         for row in sync_result.get("imported") or []:
             try:
@@ -877,38 +844,84 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
                             row.get("date"))
                 continue
             owner_of_payment.append(index)
+            imported_rows.append(row)
             payments.append(Payment(
                 date=paid_on, amount=row.get("amount") or 0.0,
-                payee=row.get("payee", ""),
+                payee=row.get("payee", ""), account=row.get("account", ""),
+                ledger=sync_result.get("ledger", ""),
+                income_account=row.get("income_account", ""),
             ))
 
-    matches = match_payments_to_invoices(payments, open_invoices, tolerance)
-    for match in matches:
-        if match.status != "matched" or not match.invoice_number:
-            continue
-        try:
-            stamped = record_invoice_payment(
-                ctx.data_dir, match.invoice_number, match.payment.date,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("auto-match: could not mark %s paid: %s",
-                        match.invoice_number, exc)
-            match.status = "review"
-            match.note = f"could not record payment: {exc}"
-            match.invoice_number = None
-            continue
+    bank_accounts = {inv.bank_account for inv in open_invoices if inv.bank_account}
+    credits = [payment for payment in payments if payment.amount > 0]
+    if credits and not any(payment.account in bank_accounts for payment in credits):
+        accounts = ", ".join(sorted(bank_accounts))
+        sync_results[0]["invoice_matching"] = {
+            "note": f"no synced credit landed in an invoicing bank account ({accounts})",
+        }
 
-        # Open invoices were read without the work lock, so a web-UI payment
-        # or a void can land in the gap before this write. `record_invoice_
-        # payment` only touches entries that are still unpaid, so a zero count
-        # means someone else got there first — reporting it as settled by this
-        # credit would be a plain lie about where the money went.
-        if stamped == 0:
-            log.warning("auto-match: %s was already settled or voided "
-                        "before this run could stamp it", match.invoice_number)
-            match.status = "review"
-            match.note = "already settled or voided by something else mid-sync"
-            match.invoice_number = None
+    matches = match_payments_to_invoices(payments, open_invoices, tolerance)
+    from istota.money import db
+    from istota.money.invoice_review import open_invoice
+
+    if ctx.db_path is None:
+        raise ValueError("No money database configured for invoice matching")
+    db.init_db(ctx.db_path)
+    original = {invoice.number: invoice for invoice in open_invoices}
+    for owner, row, match in zip(owner_of_payment, imported_rows, matches):
+        if match.status == "no_match":
+            continue
+        ledger_id = row.get("ledger_txn_id")
+        if not ledger_id:
+            raise ValueError("Imported credit has no ledger transaction id")
+        with db.get_db(ctx.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM invoice_payment_matches WHERE ledger_txn_id = ?",
+                (ledger_id,),
+            ).fetchone():
+                match.status = "no_match"
+                continue
+            if match.status == "matched" and match.invoice_number:
+                number = match.invoice_number
+                try:
+                    stamped = record_invoice_payment(
+                        ctx.data_dir, number, match.payment.date,
+                        validate=lambda entries: open_invoice(
+                            config, number, entries, automatic=True, ledgers=ctx.ledgers,
+                            detection_cache=detection_cache,
+                        ) == original[number],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("auto-match: could not mark %s paid: %s", number, exc)
+                    stamped = 0
+                    match.note = f"could not record payment: {exc}"
+                if not stamped:
+                    match.status = "review"
+                    match.note = match.note or "already settled or voided by something else mid-sync"
+                    match.invoice_number = None
+            db.record_payment_match(
+                conn, ledger_txn_id=ledger_id, monarch_id=row.get("monarch_id", ""),
+                profile=sync_results[owner].get("name", ""),
+                txn_date=match.payment.date.isoformat(), amount=match.payment.amount,
+                payee=match.payment.payee, account=match.payment.account,
+                ledger=match.payment.ledger, income_account=match.payment.income_account,
+                status="settled" if match.status == "matched" else "review",
+                invoice_number=match.invoice_number, candidates=match.candidates,
+                reason=match.note, decided_by="auto" if match.status == "matched" else "",
+            )
+
+        from istota.notifications.resolvers import invoice_match
+
+        invoice_match.publish(
+            ctx.framework_config, ctx.framework_db_path, ctx.active_user,
+            {**row, "status": "settled" if match.status == "matched" else "review",
+             "txn_date": match.payment.date.isoformat(), "amount": match.payment.amount,
+             "payee": match.payment.payee, "invoice_number": match.invoice_number,
+             "candidates": match.candidates},
+            client=original[match.invoice_number].client if match.invoice_number else "",
+            deliver_reviews=deliver_reviews,
+        )
 
     # The matcher returns one verdict per payment, in order, so verdicts pair
     # with `owner_of_payment` by position and each profile reports only its
@@ -950,7 +963,7 @@ def sync_monarch(ctx, dry_run, ledger, match_invoices, tolerance):
         return
     _output(_run_monarch_sync(
         ctx, dry_run, ledger,
-        match_invoices=match_invoices, tolerance=tolerance,
+        match_invoices=match_invoices, tolerance=tolerance, deliver_reviews=False,
     ))
 
 
@@ -1390,6 +1403,69 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     })
 
 
+@invoice.group("review")
+def invoice_review():
+    """List and decide synced credits that need an invoice."""
+
+
+@invoice_review.command("list")
+@click.option("--all", "show_all", is_flag=True, help="Include decided matches")
+@pass_ctx
+def invoice_review_list(ctx, show_all):
+    from istota.money.invoice_review import list_reviews
+    config, _, _ = _load_invoicing_config(ctx)
+    conn = _require_db(ctx)
+    try:
+        rows = list_reviews(conn, config, _require_data_dir(ctx), show_all=show_all)
+    finally:
+        conn.close()
+    _output({"status": "ok", "matches": rows})
+
+
+@invoice_review.command("settle")
+@click.argument("ledger_txn_id")
+@click.option("--invoice", "invoice_number", required=True)
+@pass_ctx
+def invoice_review_settle(ctx, ledger_txn_id, invoice_number):
+    from istota.money.invoice_review import settle_payment_review
+    config, _, _ = _load_invoicing_config(ctx)
+    _require_db(ctx).close()
+    try:
+        result = settle_payment_review(
+            ctx.db_path, _require_data_dir(ctx), config, ledger_txn_id, invoice_number,
+        )
+    except ValueError as exc:
+        result = {"status": "error", "error": str(exc)}
+    _output(result)
+
+
+@invoice_review.command("dismiss")
+@click.argument("ledger_txn_id")
+@pass_ctx
+def invoice_review_dismiss(ctx, ledger_txn_id):
+    from istota.money.invoice_review import dismiss_payment_review
+    _require_db(ctx).close()
+    try:
+        result = dismiss_payment_review(ctx.db_path, ledger_txn_id)
+    except ValueError as exc:
+        result = {"status": "error", "error": str(exc)}
+    _output(result)
+
+
+@invoice.command("matches")
+@click.option("--invoice", "invoice_number")
+@pass_ctx
+def invoice_matches(ctx, invoice_number):
+    from istota.money.db import list_payment_matches
+    conn = _require_db(ctx)
+    try:
+        rows = [row for row in list_payment_matches(conn, invoice_number=invoice_number)
+                if row["status"] in {"settled", "reverted"}]
+    finally:
+        conn.close()
+    _output({"status": "ok", "matches": rows})
+
+
 @invoice.command("unpaid")
 @click.argument("invoice_number")
 @pass_ctx
@@ -1403,7 +1479,7 @@ def invoice_unpaid(ctx, invoice_number):
     Any ledger posting made when the payment was recorded is left alone;
     reverse it with ``edit-transaction`` if there was one.
     """
-    from istota.money.work import clear_invoice_payment, get_entries_for_invoice
+    from istota.money.work import get_entries_for_invoice
 
     data_dir = _require_data_dir(ctx)
     entries = get_entries_for_invoice(data_dir, invoice_number)
@@ -1417,7 +1493,12 @@ def invoice_unpaid(ctx, invoice_number):
         })
         return
 
-    count = clear_invoice_payment(data_dir, invoice_number)
+    from istota.money.invoice_review import revert_invoice_payment
+    conn = _require_db(ctx)
+    try:
+        count = revert_invoice_payment(conn, data_dir, invoice_number)
+    finally:
+        conn.close()
     _output({
         "status": "ok",
         "invoice_number": invoice_number,
@@ -1525,7 +1606,7 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     """Run periodic money tasks: monarch sync (if configured) + invoice schedule check.
 
     Meant to be called periodically by cron. The monarch sync runs first
-    when ``monarch_config`` is set; the invoice scheduler then checks each
+    when Monarch profiles are configured in the DB; the invoice scheduler checks each
     client's invoicing schedule and generates invoices when due. Either
     half is optional — users with only one feature configured get only
     that step.
@@ -1535,6 +1616,7 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     invoices paid without also skipping the ledger sync, which is what
     ``--skip-monarch`` would do.
     """
+    from istota.money import config_store
     from istota.money.core.invoicing import check_scheduled_invoices, generate_invoices_for_period
     from istota.money.db import set_invoice_schedule_generation
 
@@ -1544,10 +1626,10 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
         return
 
     monarch_result: dict | None = None
-    if ctx.monarch_config_path and not skip_monarch:
+    if not skip_monarch and ctx.db_path and config_store.has_monarch_data(ctx.db_path):
         monarch_result = _run_monarch_sync(
             ctx, dry_run=dry_run, ledger=None,
-            match_invoices=match_invoices, tolerance=tolerance,
+            match_invoices=match_invoices, tolerance=tolerance, deliver_reviews=True,
         )
 
     try:

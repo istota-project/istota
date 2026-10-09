@@ -7,7 +7,7 @@ and refuses to guess at everything else.
 
 The rule is deliberately narrow. A payment settles an invoice only when
 **exactly one** open invoice fits it: same amount (to the cent, or within an
-explicit tolerance) and issued no later than the payment. Two invoices that fit
+explicit tolerance), the same bank account, and issued no later than the payment. Two invoices that fit
 one payment, or two payments that fit one invoice, are reported for review
 rather than resolved — a wrong auto-match is a money error, and the cost of
 asking is one line of output.
@@ -34,6 +34,9 @@ class Payment:
     date: date
     amount: float
     payee: str = ""
+    account: str = ""
+    ledger: str = ""
+    income_account: str = ""
 
 
 @dataclass
@@ -51,6 +54,9 @@ class OpenInvoice:
     client: str
     date: date
     total: float
+    bank_account: str = ""
+    ledger: str = ""
+    income_account: str = ""
 
 
 @dataclass
@@ -124,7 +130,10 @@ def match_payments_to_invoices(
         # worth a line; one that fits nothing is the normal case and is not.
         by_amount = [
             inv for inv in open_invoices
-            if abs(_cents(inv.total) - paid) <= slack
+            if payment.account and inv.bank_account == payment.account
+            and payment.ledger and inv.ledger == payment.ledger
+            and payment.income_account and inv.income_account == payment.income_account
+            and abs(_cents(inv.total) - paid) <= slack
         ]
         # An invoice issued after the money arrived did not cause it.
         candidates = [inv for inv in by_amount if inv.date <= payment.date]

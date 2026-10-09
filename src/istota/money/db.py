@@ -6,6 +6,7 @@ Work entries are stored in plaintext TOML files (see work.py).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -58,6 +59,28 @@ CREATE TABLE IF NOT EXISTS invoice_overdue_notified (
     notified_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS invoice_payment_matches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ledger_txn_id TEXT NOT NULL UNIQUE,
+    monarch_id TEXT NOT NULL DEFAULT '',
+    profile TEXT NOT NULL DEFAULT '',
+    txn_date TEXT NOT NULL,
+    amount REAL NOT NULL,
+    payee TEXT NOT NULL DEFAULT '',
+    account TEXT NOT NULL DEFAULT '',
+    ledger TEXT NOT NULL DEFAULT '',
+    income_account TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    invoice_number TEXT,
+    candidates TEXT NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL DEFAULT '',
+    decided_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_invoice_payment_matches_open
+    ON invoice_payment_matches(status) WHERE status = 'review';
+
 CREATE TABLE IF NOT EXISTS kv_store (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -91,6 +114,12 @@ def init_db(db_path: Path | str) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
+        sqlite_util.add_columns(
+            conn, "invoice_payment_matches",
+            {"ledger": "TEXT NOT NULL DEFAULT ''",
+             "income_account": "TEXT NOT NULL DEFAULT ''"},
+            commit=True,
+        )
         # Portfolio schema family (runtime import: portfolio pulls in the
         # importers package, which must not load at db-module import time).
         from istota.money import portfolio
@@ -636,3 +665,83 @@ def clear_invoice_state(conn: sqlite3.Connection, invoice_number: str) -> dict:
     )
     overdue_cleared = cursor.rowcount
     return {"overdue_notifications_cleared": overdue_cleared}
+
+
+def record_payment_match(
+    conn, *, ledger_txn_id, txn_date, amount, status, monarch_id="", profile="",
+    payee="", account="", invoice_number=None, candidates=(), reason="",
+    decided_by="", ledger="", income_account="",
+) -> bool:
+    if not ledger_txn_id:
+        raise ValueError("A payment match requires a ledger transaction id")
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO invoice_payment_matches "
+        "(ledger_txn_id, monarch_id, profile, txn_date, amount, payee, account, "
+        "status, invoice_number, candidates, reason, decided_by, ledger, income_account, decided_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "CASE WHEN ? = 'settled' THEN datetime('now') END)",
+        (ledger_txn_id, monarch_id, profile, txn_date, amount, payee, account,
+         status, invoice_number, json.dumps(list(candidates)), reason, decided_by,
+         ledger, income_account, status),
+    )
+    return cursor.rowcount == 1
+
+
+def list_payment_matches(conn, *, status=None, invoice_number=None) -> list[dict]:
+    filters, params = [], []
+    if status is not None:
+        filters.append("status = ?")
+        params.append(status)
+    if invoice_number is not None:
+        filters.append("invoice_number = ?")
+        params.append(invoice_number)
+    query = "SELECT * FROM invoice_payment_matches"
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    rows = []
+    for stored in conn.execute(query + " ORDER BY id", params):
+        row = dict(stored)
+        row["candidates"] = json.loads(row["candidates"])
+        rows.append(row)
+    return rows
+
+
+def claim_review(conn, ledger_txn_id, invoice_number) -> bool:
+    """Reserve a review's invoice before a work-file write can outlive rollback."""
+    return conn.execute(
+        "UPDATE invoice_payment_matches SET invoice_number = ? "
+        "WHERE ledger_txn_id = ? AND status = 'review' AND invoice_number IS NULL",
+        (invoice_number, ledger_txn_id),
+    ).rowcount == 1
+
+
+def settle_review(conn, ledger_txn_id, invoice_number) -> bool:
+    row = conn.execute(
+        "SELECT candidates FROM invoice_payment_matches "
+        "WHERE ledger_txn_id = ? AND status = 'review'", (ledger_txn_id,),
+    ).fetchone()
+    if row is None or invoice_number not in json.loads(row["candidates"]):
+        return False
+    return conn.execute(
+        "UPDATE invoice_payment_matches SET status = 'settled', invoice_number = ?, "
+        "decided_by = 'user', decided_at = datetime('now') "
+        "WHERE ledger_txn_id = ? AND status = 'review' "
+        "AND (invoice_number IS NULL OR invoice_number = ?)",
+        (invoice_number, ledger_txn_id, invoice_number),
+    ).rowcount == 1
+
+
+def dismiss_review(conn, ledger_txn_id) -> bool:
+    return conn.execute(
+        "UPDATE invoice_payment_matches SET status = 'dismissed', "
+        "decided_by = 'user', decided_at = datetime('now') "
+        "WHERE ledger_txn_id = ? AND status = 'review'", (ledger_txn_id,),
+    ).rowcount == 1
+
+
+def revert_settled(conn, invoice_number) -> int:
+    return conn.execute(
+        "UPDATE invoice_payment_matches SET status = 'reverted', "
+        "decided_by = 'user', decided_at = datetime('now') "
+        "WHERE invoice_number = ? AND status = 'settled'", (invoice_number,),
+    ).rowcount
