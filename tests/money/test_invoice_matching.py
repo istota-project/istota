@@ -17,13 +17,13 @@ from istota.money.core.invoice_matching import (
 )
 
 
-def _payment(amount, day=15, payee="Client Transfer"):
-    return Payment(date=date(2026, 5, day), amount=amount, payee=payee)
+def _payment(amount, day=15, payee="Client Transfer", account="Assets:Bank:Checking"):
+    return Payment(date=date(2026, 5, day), amount=amount, payee=payee, account=account)
 
 
-def _invoice(number, total, day=1, client="acme"):
+def _invoice(number, total, day=1, client="acme", bank_account="Assets:Bank:Checking"):
     return OpenInvoice(
-        number=number, client=client, date=date(2026, 5, day), total=total,
+        number=number, client=client, date=date(2026, 5, day), total=total, bank_account=bank_account,
     )
 
 
@@ -252,3 +252,30 @@ class TestSummary:
             [_payment(500.00)], [_invoice("INV-000001", 500.00)],
         )
         assert summarize_matches(matches)["matched"][0]["client"] == ""
+
+
+class TestAccountScoping:
+    @pytest.mark.parametrize("account, bank_account", [
+        ("Liabilities:Card", "Assets:Bank:Checking"),
+        ("", "Assets:Bank:Checking"),
+        ("Assets:Bank:Checking", ""),
+        ("", ""),
+    ])
+    def test_wrong_or_missing_account_never_matches(self, account, bank_account):
+        matches = match_payments_to_invoices(
+            [_payment(1200, account=account)],
+            [_invoice("INV-000001", 1200, bank_account=bank_account)],
+        )
+        assert matches[0].status == "no_match"
+
+    def test_equal_totals_match_by_bank_account(self):
+        matches = match_payments_to_invoices(
+            [_payment(1200), _payment(1200, account="Assets:Bank:Business")],
+            [
+                _invoice("INV-000001", 1200),
+                _invoice("INV-000002", 1200, client="northwind",
+                         bank_account="Assets:Bank:Business"),
+            ],
+        )
+        assert [m.status for m in matches] == ["matched", "matched"]
+        assert [m.invoice_number for m in matches] == ["INV-000001", "INV-000002"]

@@ -826,6 +826,61 @@ class TestSyncMonarchInvoiceMatching:
         return next(i for i in invoices if i["invoice_number"] == number)["status"]
 
     @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_equal_invoices_use_entry_then_client_entity(self, mock_pdf, runner, tmp_path):
+        obj = self._ctx(tmp_path)
+        _seed_invoicing(
+            obj.db_path,
+            'accounting_path = "."\ninvoice_output = "invoices"\n'
+            'next_invoice_number = 1\ndefault_entity = "base"\n'
+            '[companies.base]\nname = "Base Co"\nbank_account = "Assets:Bank:Checking"\n'
+            '[companies.business]\nname = "Business Co"\nbank_account = "Assets:Bank:Business"\n'
+            '[clients.acme]\nname = "Acme Corp"\nentity = "business"\n'
+            '[services.dev]\ndisplay_name = "Development"\nrate = 150.0\ntype = "hours"\n',
+        )
+        _seed_monarch(obj.db_path, self._MONARCH_TOML +
+                      '\n[monarch.accounts]\nBusiness = "Assets:Bank:Business"\n')
+        for extra_args in (["--entity", "base"], []):
+            created = _invoke(
+                runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8", *extra_args],
+                tmp_path=tmp_path, obj=obj,
+            )
+            assert created.exit_code == 0, created.output
+        business_credit = self._credit(1200, payee="Business payment")
+        business_credit["account"]["displayName"] = "Business"
+        out = self._sync(runner, tmp_path, obj, [self._credit(1200), business_credit])
+        matching = out["profiles"][0]["invoice_matching"]
+        assert [m["invoice_number"] for m in matching["matched"]] == [
+            "INV-000001", "INV-000002",
+        ]
+        assert "review" not in matching
+        for number in ("INV-000001", "INV-000002"):
+            assert self._invoice_status(runner, tmp_path, obj, number) == "paid"
+
+    @pytest.mark.parametrize("two_profiles", [False, True])
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_card_refund_reports_bank_account_diagnostic(
+        self, mock_pdf, runner, tmp_path, two_profiles,
+    ):
+        obj = self._ctx(tmp_path)
+        monarch = self._MONARCH_TOML + '\n[monarch.accounts]\nCard = "Liabilities:Card"\n'
+        if two_profiles:
+            other = tmp_path / "other.beancount"
+            other.write_text("")
+            obj.users["default"].ledgers.append({"name": "other", "path": other})
+            monarch += '\n[monarch.profiles.other]\nledger = "other"\n'
+        _seed_monarch(obj.db_path, monarch)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+                tmp_path=tmp_path, obj=obj)
+        credit = self._credit(1200)
+        credit["account"]["displayName"] = "Card"
+        out = self._sync(runner, tmp_path, obj, [credit])
+        assert out["profiles"][0]["invoice_matching"] == {
+            "note": "no synced credit landed in an invoicing bank account (Assets:Bank:Checking)",
+        }
+        assert self._invoice_status(runner, tmp_path, obj) == "outstanding"
+        assert sum("invoice_matching" in profile for profile in out["profiles"]) == 1
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
     def test_matching_credit_marks_the_invoice_paid(self, mock_pdf, runner, tmp_path):
         obj = self._ctx(tmp_path)
         _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],

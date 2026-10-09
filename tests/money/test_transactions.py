@@ -1137,9 +1137,15 @@ class TestSyncMonarchImportedPayments:
             "account": {"displayName": "Checking"},
             "amount": 6400.00, "notes": "", "tags": [],
         }]
-        result = sync_monarch(self._ledger(tmp_path), self._config(), transactions=txns)
+        ledger = self._ledger(tmp_path)
+        result = sync_monarch(ledger, self._config(), transactions=txns)
+        row = result["imported"][0]
+        assert row["ledger_txn_id"]
+        assert f'id: "{row["ledger_txn_id"]}"' in ledger.read_text()
         assert result["imported"] == [{
             "date": "2026-05-05", "amount": 6400.00, "payee": "Northwind Ltd",
+            "account": "Assets:Bank:Checking", "monarch_id": "mon-1",
+            "ledger_txn_id": row["ledger_txn_id"],
         }]
 
     def test_debits_are_reported_too(self, tmp_path):

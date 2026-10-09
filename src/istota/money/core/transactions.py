@@ -1088,6 +1088,9 @@ def sync_monarch(
             "date": txn_date.isoformat(),
             "amount": amount,
             "payee": merchant,
+            "account": contra_account,
+            "ledger_txn_id": entry_metadata["id"],
+            "monarch_id": txn_id,
         })
 
         if txn_id:

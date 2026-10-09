@@ -791,7 +791,7 @@ def _open_invoices(config, data_dir: Path) -> list:
     rather than the date is what keeps a match honest.
     """
     from istota.money.core.invoice_matching import OpenInvoice
-    from istota.money.core.invoicing import build_line_items
+    from istota.money.core.invoicing import build_line_items, resolve_entity, resolve_bank_account
     from istota.money.work import (
         get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
     )
@@ -804,11 +804,15 @@ def _open_invoices(config, data_dir: Path) -> list:
         items = build_line_items(entries, config.services)
         if not items or len(items) != len(entries):
             continue
+        entity = resolve_entity(
+            config, entry=entries[0], client_config=config.clients.get(entries[0].client),
+        )
         invoices.append(OpenInvoice(
             number=number,
             client=entries[0].client,
             date=invoice_issue_date(entries),
             total=sum(item.amount for item in items),
+            bank_account=resolve_bank_account(entity, config),
         ))
     return invoices
 
@@ -879,8 +883,16 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float) -> None:
             owner_of_payment.append(index)
             payments.append(Payment(
                 date=paid_on, amount=row.get("amount") or 0.0,
-                payee=row.get("payee", ""),
+                payee=row.get("payee", ""), account=row.get("account", ""),
             ))
+
+    bank_accounts = {inv.bank_account for inv in open_invoices if inv.bank_account}
+    credits = [payment for payment in payments if payment.amount > 0]
+    if credits and not any(payment.account in bank_accounts for payment in credits):
+        accounts = ", ".join(sorted(bank_accounts))
+        sync_results[0]["invoice_matching"] = {
+            "note": f"no synced credit landed in an invoicing bank account ({accounts})",
+        }
 
     matches = match_payments_to_invoices(payments, open_invoices, tolerance)
     for match in matches:
