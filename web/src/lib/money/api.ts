@@ -432,6 +432,16 @@ export interface InvoiceRow {
   total: number;
   status: string;
   paid_date?: string;
+  paid_by_sync_date?: string;
+}
+
+export interface InvoicePaymentReview {
+  ledger_txn_id: string;
+  txn_date: string;
+  amount: number;
+  payee: string;
+  account: string;
+  candidate_details: { invoice_number: string; client: string; total: number }[];
 }
 
 export interface InvoicesResponse {
@@ -439,6 +449,7 @@ export interface InvoicesResponse {
   invoice_count: number;
   outstanding_count: number;
   invoices: InvoiceRow[];
+  payment_reviews: InvoicePaymentReview[];
 }
 
 export async function getInvoices(opts?: {
@@ -450,6 +461,25 @@ export async function getInvoices(opts?: {
   if (opts?.show_all) params.set('show_all', 'true');
   const qs = params.toString();
   return apiFetch<InvoicesResponse>(`/invoices${qs ? '?' + qs : ''}`);
+}
+
+export async function settleInvoiceReview(
+  ledgerTxnId: string,
+  invoiceNumber: string,
+): Promise<void> {
+  await apiFetch(`/invoices/review/${encodeURIComponent(ledgerTxnId)}/settle`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ invoice_number: invoiceNumber }),
+  });
+}
+
+export async function dismissInvoiceReview(ledgerTxnId: string): Promise<void> {
+  await apiFetch(`/invoices/review/${encodeURIComponent(ledgerTxnId)}/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
 }
 
 export interface InvoiceDetailItem {

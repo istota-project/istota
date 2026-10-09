@@ -1,6 +1,9 @@
 <script lang="ts">
   import {
     getInvoices,
+    settleInvoiceReview,
+    dismissInvoiceReview,
+    type InvoicePaymentReview,
     getInvoiceDetails,
     markInvoicePaid,
     markInvoicePending,
@@ -9,7 +12,7 @@
     type InvoiceDetailItem,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { Button, NoticeBanner, KebabMenu, type KebabItem } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
 
@@ -19,6 +22,25 @@
   let invoiceCount = $state(0);
   let outstandingCount = $state(0);
   let sortAsc = $state(false);
+  let reviews: InvoicePaymentReview[] = $state([]);
+  let reviewsCollapsed = $state(true);
+  let busyReview = $state('');
+  let reviewError = $state('');
+
+  async function handleReview(review: InvoicePaymentReview, invoiceNumber?: string) {
+    if (busyReview) return;
+    busyReview = review.ledger_txn_id;
+    reviewError = '';
+    try {
+      if (invoiceNumber) await settleInvoiceReview(review.ledger_txn_id, invoiceNumber);
+      else await dismissInvoiceReview(review.ledger_txn_id);
+      await load();
+    } catch (e) {
+      reviewError = e instanceof Error ? e.message : 'Failed to update payment review';
+    } finally {
+      busyReview = '';
+    }
+  }
   // Invoice number currently running an action (disables its menu items).
   let busyInvoice = $state('');
 
@@ -104,6 +126,7 @@
     try {
       const resp = await getInvoices({ show_all: true });
       invoices = resp.invoices;
+      reviews = resp.payment_reviews ?? [];
       invoiceCount = resp.invoice_count;
       outstandingCount = resp.outstanding_count;
       expandedKeys = new Set();
@@ -160,6 +183,46 @@
     </div>
   {/if}
 
+  {#if !loading && !error && reviews.length > 0}
+    <div class="money-notice-bar">
+      <NoticeBanner
+        title={`Payments to review (${reviews.length})`}
+        bind:collapsed={reviewsCollapsed}
+      >
+        {#each reviews as review (review.ledger_txn_id)}
+          <div class="payment-review">
+            <p>${formatAmount(review.amount)} on {formatDate(review.txn_date)} — {review.payee}</p>
+            <p class="muted">{review.account}</p>
+            <div class="review-actions">
+              {#each review.candidate_details as candidate (candidate.invoice_number)}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!!busyReview}
+                  onclick={() => handleReview(review, candidate.invoice_number)}
+                >
+                  Settle {candidate.invoice_number} ({candidate.client}, ${formatAmount(
+                    candidate.total,
+                  )})
+                </Button>
+              {/each}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!!busyReview}
+                onclick={() => handleReview(review)}
+              >
+                Not an invoice payment
+              </Button>
+            </div>
+            {#if busyReview === review.ledger_txn_id}<p role="status">Saving…</p>{/if}
+          </div>
+        {/each}
+        {#if reviewError}<p class="form-error" role="alert">{reviewError}</p>{/if}
+      </NoticeBanner>
+    </div>
+  {/if}
+
   {#if loading}
     <div class="center-msg">Loading…</div>
   {:else if error}
@@ -206,7 +269,17 @@
             class:status-posted={inv.status === 'outstanding'}
             class:status-draft={inv.status === 'draft'}>{inv.invoice_number}</span
           >
-          <span class="inv-client">{inv.client}</span>
+          <span class="inv-client">
+            {inv.client}
+            {#if inv.paid_date}
+              <span class="paid-note caption">
+                Paid {formatDate(inv.paid_date)}
+                {#if inv.paid_by_sync_date}
+                  <span>paid by sync on {formatDate(inv.paid_by_sync_date)}</span>
+                {/if}
+              </span>
+            {/if}
+          </span>
           <span class="inv-date">{formatDate(inv.date)}</span>
           <span
             class="inv-status money-status"
@@ -248,6 +321,23 @@
 </div>
 
 <style>
+  .payment-review + .payment-review {
+    margin-top: var(--space-4);
+  }
+
+  .review-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .paid-note {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
+    white-space: normal;
+  }
+
   .invoices-content {
     display: flex;
     flex-direction: column;

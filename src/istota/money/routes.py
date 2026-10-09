@@ -384,6 +384,8 @@ async def api_invoices(
     show_all: bool = False,
     user_ctx: UserContext = Depends(get_user_config),
 ):
+    from istota.money import db
+    from istota.money.invoice_review import list_reviews
     from istota.money.core.invoicing import build_line_items
     from istota.money.work import (
         get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
@@ -391,14 +393,22 @@ async def api_invoices(
 
     data_dir = user_ctx.data_dir
     if not data_dir:
-        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
+        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0, "payment_reviews": []}
 
     try:
         config = _load_invoicing_config(user_ctx)
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
     if config is None:
-        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0}
+        return {"status": "ok", "invoices": [], "invoice_count": 0, "outstanding_count": 0, "payment_reviews": []}
+
+    with db.get_db(user_ctx.db_path) as conn:
+        matches = list_reviews(conn, config, data_dir, show_all=True)
+    reviews = [row for row in matches if row["status"] == "review" and row["candidate_details"]]
+    auto_settled = {
+        row["invoice_number"]: row["txn_date"] for row in matches
+        if row["status"] == "settled" and row["decided_by"] == "auto"
+    }
 
     invoice_numbers = get_invoice_numbers(data_dir)
     invoices = []
@@ -434,6 +444,8 @@ async def api_invoices(
         }
         if is_paid and paid_date_val:
             invoice_info["paid_date"] = paid_date_val.isoformat()
+            if auto_settled.get(inv_num) == invoice_info["paid_date"]:
+                invoice_info["paid_by_sync_date"] = auto_settled[inv_num]
         invoices.append(invoice_info)
 
     outstanding = [i for i in invoices if i["status"] == "outstanding"]
@@ -442,6 +454,7 @@ async def api_invoices(
         "invoice_count": len(invoices),
         "outstanding_count": len(outstanding),
         "invoices": invoices,
+        "payment_reviews": reviews,
     }
 
 
