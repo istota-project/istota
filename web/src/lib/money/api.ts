@@ -190,6 +190,9 @@ export async function getPostings(opts: {
 }
 
 export interface EntityRow {
+  payment_detection_enabled: boolean;
+  payment_detection_ledger: string;
+  payment_detection_income_account: string;
   key: string;
   name: string;
   address: string;
