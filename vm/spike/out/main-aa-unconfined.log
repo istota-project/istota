@@ -1,0 +1,16 @@
+##### variant main-aa-unconfined
+overlays: none
+env: SPIKE_SECCOMP=draft SPIKE_APPARMOR=unconfined SPIKE_BOUNDING=drop SPIKE_SKIP_CGROUP=0 SPIKE_DAEMON=1
+ Container istota-spike-istota-1 Started 
+applied: SecurityOpt=[seccomp={"defaultAction":"SCMP; no-new-privileges:true; apparmor=unconfined; ] CapAdd=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETUID CAP_SYS_ADMIN] CapDrop=[ALL] ReadonlyRootfs=true CgroupnsMode=private AppArmorProfile=unconfined
+
+=== daemon never came up ===
+running=false exit=127
+istota-1  | [spike-root] uid=0 caps: CapPrm:	00000000002000c9 CapEff:	00000000002000c9 CapBnd:	00000000002000c9 
+istota-1  | [spike-root] cgroup mount before: root=/ type=cgroup2 opts=ro,nosuid,nodev,noexec,relatime
+istota-1  | [spike-root] remount,rw: ok
+istota-1  | [spike-root] cgroup mount after: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+istota-1  | [spike-root] controllers available: cpuset cpu io memory hugetlb pids rdma misc
+istota-1  | [spike-root] root subtree_control: cpu memory pids
+istota-1  | [spike-root] dropping: setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all
+istota-1  | setpriv: apply bounding set: Operation not permitted

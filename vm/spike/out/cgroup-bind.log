@@ -1,0 +1,13 @@
+##### variant cgroup-bind
+overlays: overlay-setpcap.yml overlay-cgroup-bind.yml
+env: SPIKE_SECCOMP=draft SPIKE_APPARMOR=istota-spike-default SPIKE_BOUNDING=drop SPIKE_SKIP_CGROUP=0 SPIKE_DAEMON=1
+ Container istota-spike-istota-1 Started 
+applied: SecurityOpt=[seccomp={"defaultAction":"SCMP; no-new-privileges:true; apparmor=istota-spike-default; ] CapAdd=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN] CapDrop=[ALL] ReadonlyRootfs=true CgroupnsMode=private AppArmorProfile=istota-spike-default
+
+=== container state ===
+running=false exit=70
+
+=== container log ===
+[spike-root] uid=0 caps: CapPrm:	00000000002001c9 CapEff:	00000000002001c9 CapBnd:	00000000002001c9 
+[spike-root] cgroup mount before: root=/../.. type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+[spike-root] REFUSE: /sys/fs/cgroup is cgroup2 rooted at /../.., not the container's own cgroup2 at /

@@ -1,0 +1,73 @@
+##### podman variant no-sysadmin-istota-apparmor
+extra flags: --cap-add CHOWN --cap-add FOWNER --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --security-opt apparmor=istota-spike-default
+Error: template: inspect:1:87: executing "inspect" at <.HostConfig.CgroupnsMode>: can't evaluate field CgroupnsMode in type *define.InspectContainerHostConfig
+applied: caps=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETPCAP CAP_SETUID] apparmor=istota-spike-default cgroupns=
+
+=== container log ===
+[spike-root] uid=0 caps: CapPrm:	00000000000001c9 CapEff:	00000000000001c9 CapBnd:	00000000000001c9 
+[spike-root] cgroup mount before: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+[spike-root] cgroup mount already rw: no remount
+[spike-root] cgroup mount after: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+[spike-root] controllers available: cpuset cpu io memory hugetlb pids rdma misc
+[spike-root] root subtree_control: cpu memory pids
+[spike-root] dropping: setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all
+[spike-unpriv] uid=10001 gid=10001 groups=10001 caps: CapPrm:	0000000000000000 CapEff:	0000000000000000 CapBnd:	0000000000000000 
+[spike-unpriv] rendered /data/config/config.toml
+[spike-unpriv] istota init: ok
+[spike-unpriv] exec istota-scheduler --daemon
+2026-10-09 21:45:44 ERROR [istota.scheduler  ] doctor runtime.writable_dirs.mount: /mnt/shared does not exist and /mnt is not writable Create /mnt/shared and make it writable by the daemon's user.
+2026-10-09 21:45:44 WARNING [istota.scheduler  ] doctor config.operator_persona: /mnt/shared is not a directory; the last good copy, or the shipped persona, is in force Check the file root's mount (see `runtime.mount_liveness`). The operator persona syncs again once it is reachable.
+
+=== plain podman exec (uid 0) ===
+  CapPrm: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  CapEff: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  CapBnd: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  NoNewPrivs: 1
+  Seccomp: 2
+  Seccomp_filters: 1
+  apparmor: istota-spike-default (enforce)
+cgroup mount: root=/ opts=rw,nosuid,nodev,noexec,relatime type=cgroup2
+/proc/self/cgroup: 0::/supervisor
+root mkdir in /sys/fs/cgroup: Permission denied
+
+=== daemon ===
+daemon pid=1 cmd='/app/.venv/bin/python /app/.venv/bin/istota-scheduler --daemon -c /data/config/c'
+  Uid: 10001	10001	10001	10001
+  CapPrm: 0000000000000000 [-]
+  CapEff: 0000000000000000 [-]
+  CapBnd: 0000000000000000 [-]
+  NoNewPrivs: 1
+  apparmor: istota-spike-default (enforce)
+
+=== podman exec --user 10001:10001 ===
+  CapPrm: 0000000000000000 [-]
+  CapEff: 0000000000000000 [-]
+  CapBnd: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  NoNewPrivs: 1
+
+=== bwrap as 10001 ===
+uid=10001 bwrap=bubblewrap 0.12.0
+CASE userns exit=0 stderr= stdout=
+CASE userns_proc_dev exit=0 stderr= stdout=
+CASE plan_shape exit=0 stderr= stdout=0|touch: cannot touch '/data/db/x': Read-only file system|     10001          0          1|
+CASE unshare_net exit=0 stderr= stdout=ifaces ['lo']|connect OSError 101|
+CASE outside_net_control exit=0 stderr= stdout=connect TimeoutError None|
+CASE syscalls_in_sandbox exit=0 stderr= stdout=uid=10001|  bpf(BPF_MAP_CREATE, zeroed attr): EPERM|  keyctl(GET_KEYRING_ID, session): EPERM|  add_key(NULL type): EPERM|  userfaultfd(O_CLOEXEC|USER_MODE_ONLY): EPERM|  userfaultfd(O_CLOEXEC): EPERM|  perf_event_open(NULL attr): EPERM|  sysctl kernel.unprivileged_bpf_disabled=2 kernel.perf_event_pa
+CASE executor_bwrap_available exit=0 stderr= stdout=available True needs_unshare_user False|
+
+=== cgroup as 10001 ===
+uid=10001 root=/sys/fs/cgroup
+mountinfo: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+/proc/self/cgroup: 0::/supervisor
+root listing: ['supervisor']
+subtree_control: 'cpu memory pids'
+resolve_root() (unpatched, no ISTOTA_TASK_CGROUP_ROOT arm yet): None
+probe(): OK
+create(): /sys/fs/cgroup/task-990001-1
+  memory.max = 67108864
+  pids.max = 64
+  cpu.max = 50000 100000
+256 MiB child under 64 MiB: returncode=-9 stdout=''
+  memory.events: {'low': 0, 'high': 0, 'max': 38, 'oom': 1, 'oom_kill': 1, 'oom_group_kill': 0}
+16 MiB child under 64 MiB: returncode=0 stdout='survived'
+destroy(): True

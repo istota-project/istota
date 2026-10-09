@@ -1,0 +1,10 @@
+##### mountprobe seccomp=draft apparmor=docker-default
+ Container istota-spike-istota-1 Started 
+uid=0 before: root=/ mnt_opts=ro,nosuid,nodev,noexec,relatime type=cgroup2 super_opts=rw,nsdelegate,memory_recursiveprot
+remount (superblock + mount flags) rw: EACCES
+  after: root=/ mnt_opts=ro,nosuid,nodev,noexec,relatime type=cgroup2 super_opts=rw,nsdelegate,memory_recursiveprot
+remount bind rw (per-mount flags only): EACCES
+  after: root=/ mnt_opts=ro,nosuid,nodev,noexec,relatime type=cgroup2 super_opts=rw,nsdelegate,memory_recursiveprot
+fresh cgroup2 over it (no umount): EACCES
+  after: root=/ mnt_opts=ro,nosuid,nodev,noexec,relatime type=cgroup2 super_opts=rw,nsdelegate,memory_recursiveprot
+/proc/self/cgroup: 0::/
