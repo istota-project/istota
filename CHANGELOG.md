@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Invoice payment reviews now appear in the notification bell, where you can settle a candidate or dismiss the credit. Daily sync alerts you when a decision is needed; automatic settlements appear in the bell without a push.
+- Invoice payment reviews now appear in the notification bell and invoices page, where you can settle a candidate or dismiss the credit. Daily sync alerts you when a decision is needed; automatic settlements appear in the bell without a push and show their sync payment date on the invoices page.
 
 - Synced invoice payments now have a durable history. List ambiguous credits with `invoice review list`, settle a candidate or dismiss the credit, and inspect settled or reverted payments with `invoice matches`.
 
@@ -142,6 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- Daily Monarch sync now runs for profiles configured through the settings page or operator CLI, without requiring a legacy configuration file. Previously those users could sync manually but the daily job skipped their profiles.
 
 - A card refund could mark an invoice paid when their amounts matched. Invoice auto-matching now requires the credit to land in the invoice entity’s configured bank account, and reports when no synced credit reaches an invoicing bank account.
 
