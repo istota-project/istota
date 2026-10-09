@@ -10,7 +10,7 @@ from . import _common
 logger = logging.getLogger(__name__)
 SOURCE = "invoice_match"
 OBJECT_TYPE = "invoice_payment_match"
-REVIEW_HREF = "/money/invoices"
+REVIEW_HREF = "/money/business/invoices"
 PUSH_BODY = "A bank credit needs an invoice decision. Open the notification bell to review it."
 _LEDGER_ID = re.compile(r"[a-f0-9]{32}\Z")
 

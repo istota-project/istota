@@ -1031,9 +1031,9 @@ class TestDispatch:
         from istota.skills.money import GROUP_ACTION_DEST, build_parser
 
         groups = {
-            path.split(" ", 1)[0]
+            " ".join(path.split()[:depth])
             for path in self._command_paths(build_parser())
-            if " " in path
+            for depth in range(1, len(path.split()))
         }
         assert groups == set(GROUP_ACTION_DEST)
 
@@ -1046,6 +1046,15 @@ class TestDispatch:
         assert run.exit_code == 0
         assert "generate" in run.stdout
         assert "sync-monarch" not in run.stdout
+
+    def test_review_group_without_action_prints_review_help(self):
+        from tests.support.skill_cli import run_skill_main
+        from istota.skills.money import main
+
+        result = run_skill_main(main, ["invoice", "review"])
+        assert result.exit_code == 0
+        assert "settle" in result.stdout
+        assert "generate" not in result.stdout
 
     def test_no_command_at_all_prints_the_top_level_help(self):
         from tests.support.skill_cli import run_skill_main

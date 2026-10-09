@@ -150,13 +150,22 @@ def test_interactive_review_does_not_push_and_dismiss_route_closes(scenario):
     assert rows(config)[0]["state"] == "resolved"
 
 
-def test_reverted_settlement_is_stale(scenario):
+@pytest.mark.parametrize("surface", ["cli", "web"])
+def test_reverted_settlement_is_stale(scenario, surface):
     config, contexts = scenario
     ctx = contexts["alice"]
     work.record_invoice_payment(ctx.data_dir, "INV-000002", date.today())
     sync(ctx, "sync-monarch")
+    if surface == "web":
+        with client(config) as web:
+            response = web.post("/money/invoices/INV-000001/mark-pending")
+            assert response.status_code == 200, response.text
+    else:
+        result = CliRunner().invoke(cli, ["-u", "alice", "invoice", "unpaid", "INV-000001"], obj=ctx)
+        assert result.exit_code == 0, result.output
+    assert work.get_entries_for_invoice(ctx.data_dir, "INV-000001")[0].paid_date is None
     with db.get_db(ctx.db_path) as conn:
-        db.revert_settled(conn, "INV-000001")
+        assert db.list_payment_matches(conn)[0]["status"] == "reverted"
     with framework_db.get_db(config.db_path) as conn:
         assert store.list_open(config, conn, "alice")[1] == 0
     assert rows(config)[0]["state"] == "stale"
@@ -176,7 +185,7 @@ def test_candidate_cap_and_route_refusals(scenario):
     with framework_db.get_db(config.db_path) as conn:
         item = store.list_open(config, conn, "alice")[0][0]
     assert len([a for a in item.actions if a.id.startswith("settle-")]) == 3
-    assert next(a for a in item.actions if a.id == "open").href == "/money/invoices"
+    assert next(a for a in item.actions if a.id == "open").href == "/money/business/invoices"
     assert "INV-000004" in item.body
     action = item.actions[0]
     with client(config) as web:
@@ -248,3 +257,34 @@ def test_missing_framework_path_keeps_money_review(scenario, caplog):
         assert len(db.list_payment_matches(conn, status="review")) == 1
     assert rows(config) == []
     assert "bell write skipped" in caplog.text
+
+
+@pytest.mark.parametrize("decision", ["settle", "dismiss"])
+def test_skill_review_commands_reach_the_real_actions(scenario, monkeypatch, decision):
+    from istota.skills.money import main
+    from tests.support.skill_cli import run_skill_main
+
+    config, contexts = scenario
+    ctx = contexts["alice"]
+    sync(ctx, "sync-monarch")
+    monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+    monkeypatch.setattr("istota.skills.money._resolve_context",
+                        lambda: ("alice", config, ctx.users["alice"], None))
+
+    def call(*args):
+        result = run_skill_main(main, list(args))
+        assert result.exit_code == 0, result.stdout
+        return result.envelope
+
+    review = call("invoice", "review", "list")["matches"][0]
+    args = ["invoice", "review", decision, review["ledger_txn_id"]]
+    if decision == "settle":
+        args += ["--invoice", "INV-000001"]
+    call(*args)
+    assert call("invoice", "review", "list")["matches"] == []
+    history = call("invoice", "review", "list", "--all")["matches"]
+    assert history[0]["status"] == ("settled" if decision == "settle" else "dismissed")
+    matches = call("invoice", "matches", "--invoice", "INV-000001")["matches"]
+    assert len(matches) == (1 if decision == "settle" else 0)
+    entries = work.get_entries_for_invoice(ctx.data_dir, "INV-000001")
+    assert bool(entries[0].paid_date) == (decision == "settle")

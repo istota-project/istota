@@ -79,3 +79,12 @@ def dismiss_payment_review(db_path, ledger_txn_id):
         if not db.dismiss_review(conn, ledger_txn_id):
             raise ValueError("Payment review not found or already decided")
     return {"status": "ok", "ledger_txn_id": ledger_txn_id}
+
+
+def revert_invoice_payment(conn, data_dir, invoice_number):
+    """Reopen work and its match history with the same lock order as settlement."""
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        count = work.clear_invoice_payment(data_dir, invoice_number)
+        db.revert_settled(conn, invoice_number)
+    return count

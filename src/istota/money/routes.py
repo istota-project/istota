@@ -654,7 +654,9 @@ async def api_invoice_mark_pending(
     _csrf: None = Depends(verify_origin),
 ):
     """Un-pay an invoice (clears paid_date, keeps the invoice number)."""
-    from istota.money.work import clear_invoice_payment, get_entries_for_invoice
+    from istota.money import db
+    from istota.money.invoice_review import revert_invoice_payment
+    from istota.money.work import get_entries_for_invoice
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -663,7 +665,8 @@ async def api_invoice_mark_pending(
     if not get_entries_for_invoice(data_dir, invoice_number):
         return JSONResponse({"status": "error", "error": "invoice not found"}, status_code=404)
 
-    count = clear_invoice_payment(data_dir, invoice_number)
+    with db.get_db(user_ctx.db_path) as conn:
+        count = revert_invoice_payment(conn, data_dir, invoice_number)
     return {"status": "ok", "invoice_number": invoice_number, "count": count}
 
 

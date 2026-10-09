@@ -1467,7 +1467,7 @@ def invoice_unpaid(ctx, invoice_number):
     Any ledger posting made when the payment was recorded is left alone;
     reverse it with ``edit-transaction`` if there was one.
     """
-    from istota.money.work import clear_invoice_payment, get_entries_for_invoice
+    from istota.money.work import get_entries_for_invoice
 
     data_dir = _require_data_dir(ctx)
     entries = get_entries_for_invoice(data_dir, invoice_number)
@@ -1481,13 +1481,10 @@ def invoice_unpaid(ctx, invoice_number):
         })
         return
 
-    from istota.money.db import revert_settled
+    from istota.money.invoice_review import revert_invoice_payment
     conn = _require_db(ctx)
     try:
-        with conn:
-            conn.execute("BEGIN IMMEDIATE")
-            count = clear_invoice_payment(data_dir, invoice_number)
-            revert_settled(conn, invoice_number)
+        count = revert_invoice_payment(conn, data_dir, invoice_number)
     finally:
         conn.close()
     _output({
