@@ -27,6 +27,8 @@ import re
 
 import pytest
 
+from tests.support import parity
+
 pytestmark = pytest.mark.smoke
 
 #: `render-config.sh`: `workspace_path`, `temp_dir`, and the user and bot name
@@ -244,6 +246,7 @@ class TestATaskNobodyAskedInTheRoom:
         assert facts["memory_readable"] == "no", report
 
 
+@parity.witness(1)
 class TestAGuestsTurn:
     @pytest.mark.script(SCRIPT)
     def test_it_reaches_no_workspace_and_no_group(self, shared_rooms):

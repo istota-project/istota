@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support import parity
+
 pytestmark = pytest.mark.smoke
 
 # One turn that runs a command, then one that answers with what it saw. The
@@ -162,6 +164,7 @@ class TestTheSandboxRunsInsideTheContainer:
         )
 
 
+@parity.witness(1)
 class TestTheDatabaseMasks:
     """The boundary, observed from inside a live task in the shipped artifact.
 
