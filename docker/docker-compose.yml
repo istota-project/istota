@@ -138,11 +138,79 @@ services:
     depends_on:
       nextcloud:
         condition: service_healthy
+    # The run contract. Every task runs in a bubblewrap sandbox inside this
+    # container, and bwrap needs what Docker's defaults refuse: creating a user
+    # namespace (seccomp), mounting inside it (seccomp and AppArmor), and
+    # mounting a procfs there (systempaths). The first three lines are that
+    # grant and nothing wider:
+    #
+    #   - seccomp-istota.json is Docker's default profile plus clone, clone3,
+    #     mount, pivot_root, umount2 and unshare, minus the default's
+    #     CAP_SYS_ADMIN rule (Docker applies it per container, so with the root
+    #     phase's SYS_ADMIN below it would open bpf and perf_event_open to every
+    #     sandbox). bpf, keyctl, userfaultfd and the rest stay denied.
+    #   - apparmor=istota is docker-default plus mount and pivot_root. It has to
+    #     be loaded on the host (provision.sh does it); a host without AppArmor
+    #     ignores the option. It keeps docker-default's denial of writes to
+    #     /proc/sys, which systempaths=unconfined would otherwise open to a
+    #     uid-0 `docker exec`.
+    #   - systempaths=unconfined unmasks /proc, without which the kernel refuses
+    #     a procfs mount in a nested user namespace.
+    #
+    # tests/test_container_security_profiles.py holds both profiles to the
+    # Docker defaults they were derived from, and these lines to the lean test
+    # stack's.
+    security_opt:
+      - seccomp=./istota/seccomp-istota.json
+      - apparmor=istota
+      - systempaths=unconfined
+      - no-new-privileges:true
+    # The root phase (root-phase.sh) needs these six and nothing after it:
+    # CHOWN and FOWNER for the one-time ownership fix, SETUID, SETGID and
+    # SETPCAP for the drop (SETPCAP is what empties the bounding set), and
+    # SYS_ADMIN for the cgroup remount alone. `istota-drop` removes all six
+    # before the daemon starts. A `docker exec` does not inherit the drop, so
+    # every exec path goes through `istota-drop` too.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, SETPCAP, SYS_ADMIN]
+    read_only: true
+    tmpfs:
+      - /tmp
+    # A private cgroup namespace and no bind of /sys/fs/cgroup: Docker then
+    # mounts the container's own cgroup, read-only, which the root phase
+    # remounts and delegates to the daemon for per-task limits. A bind of the
+    # host path would show the VM's root cgroup instead; the root phase refuses
+    # to start on one.
+    cgroup: private
+    networks:
+      - default
+      - browser
+    healthcheck:
+      # The `tasks` table, not the file, which appears the moment anything opens
+      # the database. Through `istota-drop`: a healthcheck runs the way
+      # `docker exec` does, as uid 0 with the cap_add set, and a root-owned
+      # sidecar is how the daemon gets locked out of its own database.
+      test:
+        - CMD-SHELL
+        - >-
+          istota-drop python3 -c "import sqlite3,sys;
+          sys.exit(0 if sqlite3.connect('file:/data/db/istota.db?mode=ro', uri=True)
+          .execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'\")
+          .fetchone() else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 90
+      start_period: 30s
     volumes:
       - shared_files:/mnt/shared
       - nextcloud_data:/mnt/nc-data:ro
       - istota_data:/data
     environment:
+      # Where the root phase delegated the container's cgroup. Declared here as
+      # well as exported by the root phase, so a process started by
+      # `docker compose exec` (doctor through `istota-drop`) checks the same
+      # root the daemon uses.
+      ISTOTA_TASK_CGROUP_ROOT: /sys/fs/cgroup
       # Authentication (at least one required)
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
@@ -673,7 +741,9 @@ services:
         fi
         mkdir -p /app/config
         ln -sf /data/config/config.toml /app/config/config.toml
-        exec uv run uvicorn istota.webui.app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
+        # As the daemon's uid, like everything else that writes under /data: a
+        # root-owned database sidecar locks the daemon out (ISSUE-458).
+        exec istota-drop /app/.venv/bin/uvicorn istota.webui.app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
     command: []
     restart: unless-stopped
 
@@ -765,6 +835,11 @@ services:
       retries: 3
     volumes:
       - browser_profile:/data/browser-profile
+    # Its own network, joined by the daemon alone: a page the browser renders
+    # runs attacker-chosen code, and from the default network it could reach
+    # the web app, the webhook receiver and the signaling server directly.
+    networks:
+      - browser
     restart: unless-stopped
 
   # The Nextcloud Talk high-performance backend, which is what makes inbound
@@ -934,7 +1009,7 @@ services:
         # would hold the token however nginx is configured. nginx is told not
         # to log that path too; this is the half nginx cannot reach. The
         # receiver logs each event itself under a stable name, without it.
-        exec uv run uvicorn istota.webui.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
+        exec istota-drop /app/.venv/bin/uvicorn istota.webui.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
     command: []
     restart: unless-stopped
 
@@ -1001,6 +1076,11 @@ services:
   # docs/deployment/docker.md, and TestTheComposeShapeShipsNoDevbox in
   # tests/test_devbox_deployment_shape.py, which fails if one comes back
   # without that page following.
+
+networks:
+  default:
+  # The browser container and the daemon that drives it, nothing else.
+  browser:
 
 volumes:
   postgres_data:

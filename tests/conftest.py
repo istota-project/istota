@@ -942,6 +942,14 @@ def stacks(pytestconfig, tmp_path_factory, _sweep_leftover_stacks, _measure_prob
             image=lean_image_tag(),
             prebuilt_overlay=LEAN_PREBUILT_OVERLAY,
             ready_timeout=LEAN_READY_TIMEOUT,
+            # The smoke negative controls (scripts/test-smoke-negative-control.sh)
+            # break the run contract with a compose overlay applied to every
+            # lean stack. Unset in every ordinary run.
+            extra_overlays=tuple(
+                Path(part)
+                for part in os.environ.get("ISTOTA_TESTBED_CONTROL_OVERLAYS", "").split(os.pathsep)
+                if part
+            ),
         ),
         full=stack_support.FullShape(
             compose_file=FULL_COMPOSE_FILE,

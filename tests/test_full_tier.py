@@ -658,10 +658,13 @@ class TestTheOverlayIsAddressable:
         `unshare(CLONE_NEWUSER)` bubblewrap needs, and every task that runs a
         Bash tool call fails. Measured on the shipped image: `bwrap
         --unshare-user --ro-bind / / -- /bin/true` exits 1 without the grant and
-        0 with it."""
+        0 with it. The grant is the shipped profile now, from the shipped file,
+        and the overlay must not widen it back to `seccomp:unconfined`."""
         config = _compose_config(tmp_path)
+        opts = config["services"]["istota"]["security_opt"]
 
-        assert "seccomp:unconfined" in config["services"]["istota"]["security_opt"]
+        assert "seccomp=./istota/seccomp-istota.json" in opts
+        assert not [o for o in opts if "unconfined" in o and o.startswith("seccomp")]
 
     def test_the_unmasked_system_paths_reach_the_istota_service(self, tmp_path):
         """The second half of the same grant, and the quiet one.

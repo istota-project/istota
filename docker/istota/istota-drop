@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run "$@" as the istota user (uid and gid 10001) with every capability set
+# empty: the drop the entrypoint ends with, and the one every `docker exec`
+# path in the istota container goes through (the healthcheck, the VM's
+# `istota` wrapper). An exec'd process starts from the container's
+# configuration, uid 0 with the cap_add set, not from the daemon's state, and
+# `--user 10001:10001` alone leaves the bounding set full (Stage 1 measured
+# it). Needs CAP_SETUID, CAP_SETGID and CAP_SETPCAP, which only uid 0 in this
+# container holds.
+export HOME=/data/home
+exec setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all -- "$@"

@@ -261,32 +261,44 @@ The noVNC console is for operators only. Reach `/instances.html` on the existing
 ## Security differences
 
 - **No network allowlist.** `render-config.sh` writes `[security.network] enabled = false` unconditionally, so no CONNECT proxy runs and a task's outbound traffic is whatever the container's network permits. Docker's bridge is not a substitute: it isolates the container from the host's other services, and does nothing about which hosts on the internet a task may reach. The Ansible shape is where the `host:port` allowlist runs
-- **The filesystem sandbox does not run here**, though the config says it is on. Every task runs unconfined, with the framework database, every user's module databases, `config.toml` and `.secret_key` in view. See below
-- **Skill proxy**: enabled by default and works inside the container. It is what keeps credentials out of the model's environment, and with the sandbox off it is the only thing doing so
+- **The filesystem sandbox runs here**, under the run contract the `istota` service carries. See below
+- **Skill proxy**: enabled by default and works inside the container. It is what keeps credentials out of the model's environment
 - **All extras installed**: every optional dependency included in the image
 - **No devbox**: this stack ships no devbox service and the skill cannot be enabled on it. [Details above](#the-devbox-is-ansible-only)
 
 ### Running tasks sandboxed
 
-`sandbox_enabled` is true in the generated config, but Docker's default seccomp profile blocks the `unshare(CLONE_NEWUSER)` bubblewrap needs, so the daemon's startup probe fails and `build_bwrap_cmd` hands back every command unwrapped. It says so at startup, in a line carrying `bubblewrap unavailable` — as `SECURITY UNSUPPORTED CONFIGURATION` with more than one user configured, and as a plainer `SECURITY` warning with one.
-
-Two settings on the `istota` service fix it, and they are a pair:
+The `istota` service in `docker-compose.yml` carries the grant bubblewrap needs and nothing wider:
 
 ```yaml
     security_opt:
-      - seccomp:unconfined
+      - seccomp=./istota/seccomp-istota.json
+      - apparmor=istota
       - systempaths=unconfined
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, SETPCAP, SYS_ADMIN]
+    read_only: true
+    cgroup: private
 ```
 
-Seccomp alone lets bwrap create the user namespace but not mount a procfs inside one, which every sandbox does. `--cap-add=SYS_ADMIN` is not an alternative: it gets past the unshare and then fails at `pivot_root`.
+`seccomp-istota.json` is Docker's default profile plus the six calls bwrap needs to build a namespace (`clone`, `clone3`, `mount`, `pivot_root`, `umount2`, `unshare`), without the default's `CAP_SYS_ADMIN` rule, so `bpf`, `keyctl`, `userfaultfd`, `perf_event_open` and the rest of the default denylist stay refused for every task. `apparmor-istota` is Docker's `docker-default` plus `mount` and `pivot_root`; it keeps `docker-default`'s refusal of writes to `/proc/sys` and `/proc/sysrq-trigger`, which `systempaths=unconfined` would otherwise leave open to a root `docker exec`. On a host with AppArmor, load it before the stack starts:
 
-The shipped compose file grants neither, deliberately, and the cost is worth reading before you add them. The container runs as root and is not user-namespace remapped, so `systempaths=unconfined` gives container root a writable `/proc/sys`, and `/proc/sys/kernel` is not namespaced — entries like `core_pattern` are a route to running a command on the host. `seccomp:unconfined` separately removes the syscall filter standing between the container and the kernel's whole surface. So the trade is the container-to-host boundary for the task-to-daemon one. On a multi-user deployment that is plausibly the right way round, since without bwrap one user's task can read every other user's data and the credentials besides. On the single-user stack this page is mostly written for, it usually is not. The supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked and neither setting is needed.
+```bash
+sudo apparmor_parser -r -W docker/istota/apparmor-istota
+```
+
+A host without AppArmor, Docker Desktop among them, ignores the option.
+
+The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec istota istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
+
+These settings are meant for a host that runs nothing else, such as a VM dedicated to the install: `systempaths=unconfined` would let a uid-0 process in the container reach host sysctls if AppArmor were not loaded, and nothing in the container runs as uid 0 after the root phase.
 
 ### Nothing acts on the browser container's unhealthy verdict
 
 The browser container's healthcheck is thorough. It probes the liveness endpoint's deep tier, which asks whether the Chrome process is alive, whether Chrome's DevTools endpoint answers, and — since ISSUE-384 — whether the API process can still drive the browser it is reporting on. What this stack does not have is anything that reads the resulting `unhealthy` and does something about it. `restart: unless-stopped` reacts to a process exiting, not to a failing healthcheck, so a container that reports itself wedged stays wedged and stays running.
 
-The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` every minute, restarts after a debounce, and pages if the restarts start looping. There is no equivalent here, and adding one to a compose file is not straightforward — the point of the debounce and the crash-loop guard is that they are judgement, not a restart policy. So this is the same call the sandbox section above makes: bare metal via Ansible is the supported production shape, and this stack states the gap rather than half-closing it. The verdict is still worth reading by hand (`docker compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`) when browsing stops working.
+The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` every minute, restarts after a debounce, and pages if the restarts start looping. There is no equivalent here, and adding one to a compose file is not straightforward — the point of the debounce and the crash-loop guard is that they are judgement, not a restart policy. So this stack states the gap rather than half-closing it. The verdict is still worth reading by hand (`docker compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`) when browsing stops working.
 
 ## Key env vars
 

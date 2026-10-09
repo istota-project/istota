@@ -1,6 +1,10 @@
 #!/bin/bash
-# Istota container entrypoint.
+# Istota container entrypoint, the unprivileged phase.
 # Waits for Nextcloud provisioning, completes API-based setup, starts scheduler.
+#
+# Runs as uid 10001 with every capability set empty: the image's ENTRYPOINT is
+# the root phase (root-phase.sh), which delegates the cgroup, fixes ownership
+# and execs this through `istota-drop`. Nothing here may need root.
 
 set -euo pipefail
 
@@ -457,7 +461,7 @@ fi
 # In a subshell, because `export` sets the attribute on *this* shell for good,
 # not for one call — six of these are credentials (the app password, the OAuth
 # secret, the web session signing key, the room tokens and the ingest token) and
-# they would otherwise be inherited by the `exec uv run istota-scheduler` at the
+# they would otherwise be inherited by the `exec istota-scheduler` at the
 # end of this file. `build_clean_env` and `build_stripped_env` in executor.py
 # both happen to filter them out today, but that containment is incidental: it
 # keys on the substrings PASSWORD/SECRET/TOKEN, and a future credential named
@@ -725,7 +729,7 @@ fi
 # --- Initialize database ---
 
 echo "[istota] Initializing database..."
-uv run istota -c "$CONFIG_FILE" init
+istota -c "$CONFIG_FILE" init
 
 # --- Claude Code authentication ---
 
@@ -757,32 +761,14 @@ if claude --version >/dev/null 2>&1; then
     echo "[istota] Claude Code: $(claude --version 2>&1 | head -1)"
 fi
 
-# --- Workspace perms — make NC (www-data, uid 33) co-owner ---
+# --- Workspace perms ---
 #
-# The istota container runs as root, but NC's PHP runs as www-data (uid 33)
-# against the same /mnt/shared volume. The scheduler seeds workspace files
-# (README.md, notes/, scripts/, config/*.md, …) lazily AFTER this script
-# execs to the daemon, so we can't chown them post-hoc here. Instead:
-#
-#   - chown /mnt/shared to 33:33 — current files are now www-data-owned.
-#   - setgid (chmod 2775) every dir — files Python creates inside inherit
-#     group=33 automatically (kernel rule for setgid dirs).
-#   - umask 002 below — files come out 664, dirs 2775; combined with the
-#     inherited group=33, www-data has read AND write access.
-#
-# Idempotent — safe on every boot, including restarts after the volume is
-# already populated. The whole block is best-effort; failures (e.g. files
-# the scheduler is mid-write to) shouldn't block startup.
-for d in /mnt/shared/Users /mnt/shared/Channels; do
-    if [ -d "$d" ]; then
-        chown -R 33:33 "$d" 2>/dev/null || true
-        find "$d" -type d -exec chmod 2775 {} + 2>/dev/null || true
-        find "$d" -type f -exec chmod 664 {} + 2>/dev/null || true
-    fi
-done
+# The shared-volume convention with the bundled Nextcloud (33:33, setgid
+# directories) is applied by the root phase, which holds CAP_CHOWN; this phase
+# only sets the umask that keeps new files group-writable for www-data.
 umask 002
 
 # --- Start scheduler ---
 
 echo "[istota] Starting scheduler daemon..."
-exec uv run istota-scheduler --daemon -c "$CONFIG_FILE"
+exec /app/.venv/bin/istota-scheduler --daemon -c "$CONFIG_FILE"

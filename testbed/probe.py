@@ -201,6 +201,9 @@ class Probe:
                     "exec",
                     "-T",
                     self.service,
+                    # As the daemon's uid: an exec does not inherit the root
+                    # phase's drop (see `Stack.exec`).
+                    "istota-drop",
                     "python",
                     "-c",
                     _REMOTE_READER % self.db_path,

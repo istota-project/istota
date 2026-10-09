@@ -145,17 +145,16 @@ Four non-obvious points:
 `testbed/compose/testbed.yml` is a harness concession file, not a deployment recipe. It is the complete list of ways the `full` stack differs from what an operator boots, each with its reason inline:
 
 - `extra_hosts: host.docker.internal:host-gateway`: built in on Docker Desktop, absent on Docker Engine.
-- `security_opt: seccomp:unconfined` **and** `systempaths=unconfined`, the pair, on the `istota` service.
 - Three credential-shaped brain variables as fixed literals on `istota` and `web`, because the process environment outranks an `--env-file` and a developer's exported `ANTHROPIC_API_KEY` would otherwise reach a test container posting to a listener on their machine.
-- A healthcheck on the `tasks` table. The shipped `istota` service has none, and `restart: unless-stopped` brings back a container that exits on the 600-second provisioning timeout, so "is it running" reads a wedged boot as healthy.
+- Longer timings on the `tasks` healthcheck the shipped `istota` service now carries: the full shape waits up to 600 seconds on Nextcloud provisioning before it renders a config.
 
 Per-session values go in the env-file `StackPool` writes: generated passwords, the `ISTOTA_*_ENABLED` map derived from `Profile.services`, and the ephemeral `NC_PORT` with a matching explicit `ISTOTA_WEB_CALLBACK_URL` (which `provision-nc.sh` bakes irreversibly into `oauth2_clients` at first install).
 
-**The two `security_opt` lines are a pair, and neither substitutes for the other.** Seccomp lets bubblewrap *create* the user namespace; it does not let it mount a procfs inside one. Docker's masked `/proc` entries and read-only `/proc/sys` make the kernel refuse `mount("proc")` in a nested user namespace, and `build_bwrap_cmd` emits `--proc /proc` on every sandbox, so with seccomp alone every sandbox dies at "Can't mount proc on /newroot/proc". `--cap-add=SYS_ADMIN` is not an alternative: it fails at `pivot_root`. `docker/docker-compose.test.yml` carries the same pair, plus a fixed fake `ISTOTA_SECRET_KEY`, since bypassing the entrypoint bypasses the thing that generates one.
+**The sandbox grant is the shipped file's, on both shapes.** `docker/docker-compose.yml`'s `istota` service carries the run contract (the one-deployment-shape spec's Stage 2): `seccomp=./istota/seccomp-istota.json`, `apparmor=istota`, `systempaths=unconfined`, `no-new-privileges:true`, `cap_drop: ALL` with the six root-phase capabilities, `read_only`, `cgroup: private`. `docker/docker-compose.test.yml` carries the same lines, held equal by `tests/test_container_security_profiles.py`, and starts the daemon through the root phase rather than bypassing it. Neither file may carry `seccomp:unconfined` or `apparmor=unconfined` (`tests/test_smoke_tier.py`). Seccomp lets bubblewrap create the user namespace and mount inside it; `systempaths=unconfined` lets it mount a procfs there; on a host with AppArmor, the `istota` profile has to be loaded first, and Docker Desktop has none and ignores the option.
 
-`_bwrap_supports` returns False for every flag while `_bwrap_available()` is False, and the availability probe is the one carrying `--proc /proc`. So it is the pair making that probe succeed, not the writable `/proc/sys` reaching the flag probe, that lets `--disable-userns` be found supported and reach the real argv on both container shapes. No scenario asserts nested-userns behaviour, by decision.
+**Every exec into the `istota` container goes through `istota-drop`.** `Stack.exec` and `Probe.query` prefix it for the `istota` service, because a `docker compose exec` starts as uid 0 with the `cap_add` set, not from the daemon's state, and a root-owned file under `/data` locks the daemon out of it. A caller that needs uid 0 for a read passes `user="0"`.
 
-**The shipped `docker/docker-compose.yml` grants neither, so a Docker deployment runs every task unsandboxed.** Deliberate and settled: the pair costs the container's own boundary (root, not userns-remapped, a writable `/proc/sys` exposing non-namespaced kernel entries, no syscall filter). The supported production shape is bare metal via Ansible, where bwrap unshares the user namespace unasked. `_bwrap_available` retries its probe with `--unshare-user` and probes the same mount set `build_bwrap_cmd` emits, so the startup report is correct either way. Stated in the CHANGELOG and `docs/deployment/docker.md`.
+**The smoke negative controls break the run contract one line at a time.** `ISTOTA_TESTBED_CONTROL_OVERLAYS` (paths, `os.pathsep`-separated) adds compose overlays to every lean stack; `scripts/test-image-negative-control.sh run-contract` uses it with the overlays in `docker/test/run-contract-controls/` and two control images, and names the `tests/smoke/test_run_contract.py` node ids each must turn red.
 
 ## The storage backend
 
@@ -224,6 +223,7 @@ No variable names the checkout a stack builds from. `LeanShape` and `FullShape` 
 | `ISTOTA_TESTBED_MAIL_IMAGE` | override the pinned Maddy digest |
 | `ISTOTA_IMAGE_TAG` | use a prebuilt image instead of building; how the upgrade tier's negative control is fed |
 | `ISTOTA_UPDATE_GOLDEN` | rewrite the prompt goldens instead of comparing |
+| `ISTOTA_TESTBED_CONTROL_OVERLAYS` | extra compose overlays on every lean stack; how the run-contract negative controls break one line |
 
 `KEEP` does **not** wipe `shared_files`: that volume holds `/mnt/shared/.istota-provisioned`, which `provision-nc.sh` never rewrites, because it is a `post-installation` hook and `nextcloud:30-apache` runs those only when the installed version is `0.0.0.0`. Wiping it leaves `entrypoint.sh` waiting 600 seconds for a flag nothing writes, exiting 1, and restarting forever. The host port is also pinned across kept sessions, since the OAuth2 redirect URI is baked at first install. `KEEP` is unit-tested but has never been exercised across two real sessions; the measured cold boot makes it unnecessary rather than unproven.
 

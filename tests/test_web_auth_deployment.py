@@ -100,7 +100,7 @@ def test_nginx_negative_control(path, token_path):
 def launcher_command(path):
     text = (REPO / path).read_text()
     if path.endswith(".yml"):
-        return yaml.safe_load(text)["services"]["web"]["entrypoint"][-1].split("exec uv run uvicorn", 1)[1]
+        return yaml.safe_load(text)["services"]["web"]["entrypoint"][-1].split("/app/.venv/bin/uvicorn", 1)[1]
     text = Environment().from_string(text).render(istota_web_port=8766)
     return next(line for line in text.splitlines() if line.startswith("ExecStart="))
 

@@ -60,6 +60,9 @@ POLL_INTERVAL = 0.5
 #: The compose service the daemon runs as, on both shapes.
 ISTOTA_SERVICE = "istota"
 
+#: The setpriv wrapper the istota image ships for every exec path.
+DROP = "istota-drop"
+
 #: Where the entrypoint and the lean fixture both put the rendered config.
 CONTAINER_CONFIG = "/data/config/config.toml"
 
@@ -497,7 +500,17 @@ def _service_state(
         # whatever its service, which is inert on a one-service stack and wrong
         # the moment Layer 4 adds a second.
         if record.get("Service") == service:
-            return record.get("State", ""), record.get("Health", "")
+            health = record.get("Health", "")
+            if not health:
+                # Compose leaves `Health` empty on a container whose first
+                # check has not run, and says so only in `Status`. Read as "no
+                # healthcheck", that let `wait_ready` return on a container
+                # about to exit.
+                match = re.search(
+                    r"\((?:health: )?(starting|healthy|unhealthy)\)", record.get("Status", "")
+                )
+                health = match.group(1) if match else ""
+            return record.get("State", ""), health
     return "", ""
 
 
@@ -1347,6 +1360,13 @@ class Stack:
         fraction under a label that says `docker compose exec`.
         """
         prefix = ["exec", "-T"] + (["-u", user] if user else [])
+        # The daemon's container drops to uid 10001 in its root phase, and a
+        # `docker compose exec` does not inherit that: it would run as uid 0
+        # with the cap_add set and leave root-owned files under /data for the
+        # daemon to trip over. So every exec into it goes through the same drop
+        # the shipped healthcheck uses.
+        if service == ISTOTA_SERVICE and not user:
+            argv = [DROP, *argv]
         with probe_support.counted_exec():
             return subprocess.run(
                 self.args + prefix + [service, *argv],
@@ -1961,6 +1981,10 @@ class LeanShape:
     prebuilt_overlay: Path
     """Applied when a profile names its own `image`, so nothing is rebuilt."""
 
+    extra_overlays: tuple[Path, ...] = ()
+    """Applied to every lean stack after the profile's own: the negative
+    controls' way in (`ISTOTA_TESTBED_CONTROL_OVERLAYS`)."""
+
     ready_timeout: int = READY_TIMEOUT
 
     render_env: dict[str, str] = field(default_factory=dict)
@@ -2401,6 +2425,7 @@ class StackPool:
         if profile.image:
             lines.append(f"ISTOTA_TEST_IMAGE={profile.image}")
             overlays.append(self.lean.prebuilt_overlay)
+        overlays.extend(self.lean.extra_overlays)
         # Whatever the profile's own overlays need to resolve their binds. Empty
         # on every profile that names no overlay, which is most of them.
         #

@@ -360,81 +360,32 @@ class TestThePrebuiltOverlay:
         assert "build:" in result.stdout, result.stdout
 
 
-class TestTheSeccompGrantStaysInTheTestFile:
-    """The lean stack loosens seccomp so bwrap can build a namespace.
+class TestNoUnconfinedGrantInEitherComposeFile:
+    """The sandbox grant is the shipped profile pair, never `unconfined`.
 
-    That is a test-harness concession — the supported production shape is bare
-    metal via Ansible, where the syscall is not blocked — and the comment in
-    the test compose file says so. Nothing enforced it, so a copy across while
-    debugging would ship a container-escape-adjacent grant to every operator
-    running the Docker stack, and no test would notice.
-
-    Precedent for the shape: `TestVendoredCopy` and
-    `tests/test_private_data_scan.py` both guard a property whose violation is
-    otherwise silent.
+    Both compose files carry the same run contract now, held line by line in
+    `tests/test_container_security_profiles.py`. What this keeps out is the
+    wider grant the lean file used to carry (`seccomp:unconfined`) and its
+    AppArmor equivalent, which Stage 1 measured lets a uid-0 exec write VM
+    sysctls. A copy across while debugging would otherwise pass every witness:
+    unconfined is strictly more permissive than the profiles.
     """
 
+    @pytest.mark.parametrize("compose", ["docker-compose.yml", "docker-compose.test.yml"])
     @pytest.mark.parametrize(
-        "setting",
-        ["seccomp", "privileged", "cap_add", "apparmor", "systempaths"],
+        "grant",
+        ["seccomp:unconfined", "seccomp=unconfined", "apparmor:unconfined",
+         "apparmor=unconfined", "privileged:"],
     )
-    def test_the_production_compose_grants_no_extra_privilege(self, setting):
-        lines = (REPO / "docker" / "docker-compose.yml").read_text().splitlines()
-        offenders = []
-        for number, line in enumerate(lines, 1):
-            if setting not in line or line.strip().startswith("#"):
-                continue
-            # The key and the list under it, because a YAML sequence puts the
-            # value on the *following* lines and `cap_add:` alone says nothing
-            # about what is being added.
-            block = " ".join(part.strip() for part in lines[number - 1 : number + 3])
-            offenders.append(f"{number}: {block}")
+    def test_no_unconfined_grant(self, compose, grant):
+        lines = (REPO / "docker" / compose).read_text().splitlines()
+        offenders = [
+            f"{number}: {line.strip()}"
+            for number, line in enumerate(lines, 1)
+            if grant in line and not line.strip().startswith("#")
+        ]
 
-        # This used to exempt the devbox's `cap_add: NET_RAW`, which was there
-        # for ping and traceroute rather than as a sandbox grant. That service
-        # is gone, so the sweep is unqualified again: no capability, seccomp or
-        # systempaths grant belongs in this file at all.
-
-        assert not offenders, (
-            f"docker/docker-compose.yml grants {setting!r}: {offenders}. The "
-            "seccomp relaxation belongs to docker-compose.test.yml alone — see "
-            "the comment there."
-        )
-
-    def test_the_test_compose_still_carries_it(self):
-        """The control. Without this the assertion above would pass just as
-        well on a test file that had lost the grant, at which point the whole
-        smoke tier fails on bwrap and nothing explains why."""
-        body = (REPO / "docker" / "docker-compose.test.yml").read_text()
-
-        assert "seccomp:unconfined" in body, (
-            "the lean stack no longer relaxes seccomp; bwrap cannot create a "
-            "user namespace under Docker's default profile, so every task "
-            "running a Bash tool call will fail"
-        )
-
-    def test_the_test_compose_also_unmasks_the_system_paths(self):
-        """The other half, and the one whose loss is quiet rather than loud.
-
-        Without `systempaths=unconfined` bwrap creates the user namespace and
-        then cannot mount a procfs inside it: Docker's masked `/proc` entries
-        and read-only `/proc/sys` make the container's procfs not "fully
-        visible" to the kernel, and `build_bwrap_cmd` emits `--proc /proc`.
-
-        The daemon's response to a bwrap it cannot run is to disable the
-        sandbox for the process and carry on — `_bwrap_available` performs
-        those same mounts, so it answers no here — which means losing this line
-        does not fail the tier. It silently runs every scenario unconfined,
-        which is the state `TestTheDatabaseMasks` was written to catch and the
-        reason this guard is worth its three lines.
-        """
-        body = (REPO / "docker" / "docker-compose.test.yml").read_text()
-
-        assert "systempaths=unconfined" in body, (
-            "the lean stack no longer unmasks /proc, so bwrap cannot mount a "
-            "procfs inside its user namespace and every task will run with the "
-            "sandbox skipped rather than failing"
-        )
+        assert not offenders, f"docker/{compose} grants {grant!r}: {offenders}"
 
 
 class TestTheStackStartsTheWayTheDeploymentDoes:
@@ -548,6 +499,22 @@ class TestServiceStateParsing:
 
         # And the requested service is selected, not merely the first row.
         assert compose_support._service_state([], "istota") == ("running", "")
+
+    def test_a_starting_healthcheck_with_an_empty_health_field_is_still_starting(self, monkeypatch):
+        """Compose 5.5 leaves `Health` empty on the first poll of a container
+        whose healthcheck has not run yet, and says `(health: starting)` only in
+        `Status`. Read as "no healthcheck", `wait_ready` returned on a container
+        that exited a second later: a root phase refusing to start looked like
+        a stack that came up (measured with the run-contract controls)."""
+        self._with_ps_output(
+            monkeypatch,
+            json.dumps([{
+                "Service": "istota", "State": "running", "Health": "",
+                "Status": "Up Less than a second (health: starting)",
+            }]),
+        )
+
+        assert compose_support._service_state([], "istota") == ("running", "starting")
 
     def test_an_exited_container_is_reported_as_exited(self, monkeypatch):
         # `wait_ready`'s fast-fail keys on this exact string. It only ever

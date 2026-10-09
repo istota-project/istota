@@ -36,10 +36,13 @@ services:
     # default is for a hand-run `docker compose -f` outside the harness.
     image: ${ISTOTA_TEST_LEAN_IMAGE:-istota-test/lean:local}
 
-    # The command the shipped entrypoint execs, run directly. Bypassing
-    # entrypoint.sh is the whole point: everything it does before this line is
-    # Nextcloud provisioning, and the config it would generate has already been
-    # rendered on the host by the same render-config.sh the container ships.
+    # The root phase, then the command the shipped entrypoint execs. Bypassing
+    # entrypoint.sh is the whole point: everything it does before its last two
+    # lines is Nextcloud provisioning, and the config it would generate has
+    # already been rendered on the host by the same render-config.sh the
+    # container ships. The root phase is *not* bypassed: it is what delegates
+    # the cgroup, fixes ownership and drops to uid 10001, and the smoke tier's
+    # parity witnesses are about exactly that.
     #
     # Deliberately NOT `istota serve`. That launcher belongs to the local
     # single-user install; the Docker deployment runs istota-scheduler, and a
@@ -52,52 +55,34 @@ services:
     # produced a container that passed a health check and then logged
     # "no such table: tasks" twice a second forever.
     entrypoint:
+      - /usr/local/sbin/istota-root-phase
       - /bin/sh
       - -c
       - >-
-        uv run istota -c /data/config/config.toml init &&
-        exec uv run istota-scheduler --daemon -c /data/config/config.toml
+        istota -c /data/config/config.toml init &&
+        exec /app/.venv/bin/istota-scheduler --daemon -c /data/config/config.toml
 
-    # bubblewrap needs to create a user namespace, and Docker's default seccomp
-    # profile blocks the `unshare(CLONE_NEWUSER)` that takes — measured on
-    # Docker Desktop 29.x: `bwrap --unshare-user` reports "No permissions to
-    # create new namespace, likely because the kernel does not allow
-    # non-privileged user namespaces", which reads as a host misconfiguration
-    # rather than as a container policy. Without this the daemon does not fail
-    # loudly — `_bwrap_available` answers no, `build_bwrap_cmd` hands back the
-    # unwrapped argv, and every task runs unconfined behind one warning line,
-    # which is what makes an assertion on the masks the only way to tell the
-    # two apart. (This comment used to say every Bash tool call fails. It does
-    # not, and the reason it does not is the whole reason
-    # `test_sandbox_in_stack.py` asserts on a tmpfs rather than on output
-    # coming back.)
+    # The shipped file's run contract, line for line: the reasoning is there,
+    # and tests/test_container_security_profiles.py holds the two files equal on
+    # every line below. That equality is what lets a smoke witness speak for the
+    # shipped stack while the two are separate files (Stage 4 of the
+    # one-deployment-shape spec makes this shape the shipped file plus an
+    # overlay).
     #
-    # `systempaths=unconfined` is the second half of the same grant, and it was
-    # measured in Stage 7 rather than anticipated. seccomp lets bwrap *create*
-    # the user namespace; it does not let it mount a fresh procfs inside one.
-    # Docker's default masked paths (`/proc/kcore`, `/proc/keys`, … bind-mounted
-    # over) and its read-only `/proc/sys` make the container's procfs not
-    # "fully visible" to the kernel, and the kernel then refuses `mount("proc")`
-    # in a nested user namespace — `build_bwrap_cmd` emits `--proc /proc`, so
-    # with only the seccomp grant every real sandbox dies at "Can't mount proc
-    # on /newroot/proc: Operation not permitted". Measured on the shipped image:
-    # the same argv exits 0 with this line and 1 without it. `--cap-add=SYS_ADMIN`
-    # is not an alternative — measured too, it gets past the unshare and fails
-    # at `pivot_root`.
-    #
-    # The pair is the *whole* grant. One consequence worth stating: with
-    # `/proc/sys` writable, `executor._bwrap_supports_disable_userns` now finds
-    # `--disable-userns` supported and it reaches the real argv, so this tier
-    # exercises more of the production sandbox than it used to rather than
-    # less. Nothing here asserts about nested-userns behaviour either way.
-    #
-    # A test-harness concession, not a deployment recipe. The supported
-    # production shape is bare metal via Ansible, where nothing blocks any of
-    # this; docker-compose.yml deliberately carries neither line, which is why
-    # a Docker deployment runs its tasks unsandboxed.
+    # `apparmor=istota` on Docker Desktop: there is no AppArmor there and Docker
+    # ignores the option (measured on 29.8.2: the container starts, and
+    # /proc/self/attr/current is unreadable). On a Linux host with AppArmor the
+    # profile has to be loaded first (`apparmor_parser -r -W
+    # docker/istota/apparmor-istota`), or the container does not start.
     security_opt:
-      - seccomp:unconfined
+      - seccomp=./istota/seccomp-istota.json
+      - apparmor=istota
       - systempaths=unconfined
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, SETPCAP, SYS_ADMIN]
+    read_only: true
+    cgroup: private
 
     environment:
       # Config generation already happened on the host, so almost nothing is
@@ -123,8 +108,12 @@ services:
       # is 32 characters, which is the only property the loader checks.
       ISTOTA_SECRET_KEY: not-a-real-key-for-the-lean-test-stack-only
       PYTHONUNBUFFERED: "1"
+      ISTOTA_TASK_CGROUP_ROOT: /sys/fs/cgroup
 
     volumes:
+      # The state volume, as the shipped file has one: the root filesystem is
+      # read-only, and the daemon's home and the ownership marker live here.
+      - istota_test_data:/data
       # The rendered config, from a host directory the harness owns. A bind
       # mount rather than a named volume because the harness has to write the
       # file *before* the container starts, and a named volume has no host path
@@ -135,6 +124,7 @@ services:
       - istota_test_db:/data/db
 
     tmpfs:
+      - /tmp
       # The Nextcloud mount, which in this stack has no Nextcloud behind it.
       # tmpfs rather than a volume: nothing here outlives the run, and it keeps
       # a failed teardown from leaving state that the next run inherits.
@@ -153,10 +143,11 @@ services:
       # a container that reported healthy and then logged "no such table:
       # tasks" on every scheduler tick. Readiness is "the daemon can do work",
       # and the cheapest honest proxy for that is the table it dispatches from.
+      # Through `istota-drop`, as on the shipped file.
       test:
         - CMD-SHELL
         - >-
-          python -c "import sqlite3,sys;
+          istota-drop python3 -c "import sqlite3,sys;
           sys.exit(0 if sqlite3.connect('file:/data/db/istota.db?mode=ro', uri=True)
           .execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'\")
           .fetchone() else 1)"
@@ -224,4 +215,5 @@ services:
         exec /entrypoint.sh
 
 volumes:
+  istota_test_data:
   istota_test_db:

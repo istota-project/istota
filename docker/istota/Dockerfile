@@ -145,8 +145,25 @@ ENV PATH="/app/.venv/bin:${PATH}"
 # SvelteKit static build (from web-builder stage)
 COPY --from=web-builder /app/web/build /app/web/build
 
-# Data directories (persistent via volume)
-RUN mkdir -p /data/db /data/config /data/tmp
+# `uv run` syncs the project before it runs anything, which on this read-only
+# root means trying to install the dev group into /app/.venv and failing. The
+# image starts everything from the venv directly; this keeps an incidental
+# `uv run` (a habit, a test harness) from attempting the write.
+ENV UV_NO_SYNC=1
+
+# The daemon's user: a fixed uid and gid, 10001, chosen to collide with nothing
+# in the base image. No USER line: the root phase starts as root, delegates the
+# container's cgroup and fixes ownership, then `istota-drop` becomes 10001 with
+# every capability set empty. In group www-data (33) for the bundled
+# Nextcloud's shared volume, which goes with it in the one-deployment-shape
+# spec's Stage 4.
+RUN groupadd -g 10001 istota \
+    && useradd -u 10001 -g 10001 -G www-data -M -d /data/home -s /usr/sbin/nologin istota
+
+# Data directories (persistent via volume). Owned by the daemon's uid here so a
+# fresh named volume is seeded with the right owner.
+RUN mkdir -p /data/db /data/config /data/tmp /data/home \
+    && chown -R 10001:10001 /data
 
 # Entrypoint. render-config.sh must land beside it — the entrypoint resolves it
 # relative to its own directory, and the image tier runs it on its own to render
@@ -154,6 +171,9 @@ RUN mkdir -p /data/db /data/config /data/tmp
 COPY docker/istota/entrypoint.sh /entrypoint.sh
 COPY docker/istota/render-config.sh /render-config.sh
 COPY docker/istota/config-diff.py /config-diff.py
-RUN chmod +x /entrypoint.sh /render-config.sh /config-diff.py
+COPY docker/istota/root-phase.sh /usr/local/sbin/istota-root-phase
+COPY docker/istota/istota-drop /usr/local/bin/istota-drop
+RUN chmod 0755 /entrypoint.sh /render-config.sh /config-diff.py \
+        /usr/local/sbin/istota-root-phase /usr/local/bin/istota-drop
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/sbin/istota-root-phase", "/entrypoint.sh"]
