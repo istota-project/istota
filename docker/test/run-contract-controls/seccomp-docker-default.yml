@@ -1,0 +1,10 @@
+# Row 1's negative control: Docker's builtin seccomp profile in place of the
+# shipped one. With SYS_ADMIN in cap_add bwrap gets as far as pivot_root and is
+# refused there (Stage 1 measured it), so the root phase's grant probe refuses
+# to start the daemon and every sandbox witness errors at boot.
+services:
+  istota:
+    security_opt: !override
+      - apparmor=istota
+      - systempaths=unconfined
+      - no-new-privileges:true

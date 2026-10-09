@@ -1,0 +1,5 @@
+# Row 6's negative control: the lean stack without `read_only`. A uid-0 write
+# to /app, /usr or /etc then succeeds and the root mount reads `rw`.
+services:
+  istota:
+    read_only: false

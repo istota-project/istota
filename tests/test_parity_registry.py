@@ -60,8 +60,8 @@ def witnesses() -> dict[int, list[str]]:
 
 
 class TestTheMatrix:
-    def test_rows_are_numbered_one_to_nineteen_without_gaps(self):
-        assert sorted(parity.ROWS) == list(range(1, 20))
+    def test_rows_are_numbered_one_to_twenty_without_gaps(self):
+        assert sorted(parity.ROWS) == list(range(1, 21))
 
     def test_row_14_alone_is_not_witnessed_by_design(self):
         assert set(parity.NOT_WITNESSED) == {14}
@@ -105,6 +105,12 @@ class TestThePendingListOnlyShrinks:
         for row, stage in parity.PENDING.items():
             assert stage.startswith("Stage "), (row, stage)
 
+    def test_an_outstanding_half_belongs_to_a_witnessed_row(self, witnesses):
+        for row, half in parity.OUTSTANDING_HALVES.items():
+            assert row in witnesses, f"row {row} has an outstanding half but no witness"
+            assert row not in parity.PENDING
+            assert half.startswith("Stage "), (row, half)
+
 
 class TestTheScanner:
     def test_it_finds_both_spellings_and_ignores_other_decorators(self, tmp_path):
@@ -145,7 +151,7 @@ class TestTheDecorator:
         assert marked is Target
         assert Target.__parity_rows__ == (3, 2)
 
-    @pytest.mark.parametrize("rows", [(), (0,), (20,)])
+    @pytest.mark.parametrize("rows", [(), (0,), (21,)])
     def test_it_refuses_no_row_or_an_unknown_one(self, rows):
         with pytest.raises(ValueError):
             parity.witness(*rows)

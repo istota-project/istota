@@ -1,0 +1,20 @@
+# Negative control for parity row 4: a root phase that skips the cgroup remount.
+#
+# Docker hands a private cgroup namespace its own cgroup2 mount read-only. The
+# root phase remounts it read-write before it delegates; this control turns
+# that branch off, so delegation fails on the read-only mount, the root phase
+# logs it and carries on (as it does in production when delegation fails), and
+# the daemon starts with no writable cgroup root.
+#
+#   docker build -f docker/test/Dockerfile.no-cgroup-remount --build-arg BASE=<lean tag> \
+#       -t istota-test/no-cgroup-remount:<suffix> docker/test
+#
+# Expected: `security.task_cgroups` reports FAIL rather than OK, and no task
+# gets a cgroup of its own, so tests/smoke/test_run_contract.py's row 4
+# witnesses fail.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's/if \[\[ ",${opts}," != \*",rw,"\* \]\]; then/if false; then/' \
+        /usr/local/sbin/istota-root-phase \
+    && grep -q '^    if false; then$' /usr/local/sbin/istota-root-phase

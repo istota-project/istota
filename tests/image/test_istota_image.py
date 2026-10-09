@@ -56,10 +56,13 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 
 import pytest
 
-from .conftest import REPO, assert_ok, sh
+from tests.support import parity
+
+from .conftest import REPO, assert_ok, run_in, sh
 
 pytestmark = pytest.mark.image
 
@@ -114,6 +117,8 @@ EXTRA_WITNESSES = {
 WEB_INDEX = "/app/web/build/index.html"
 RENDER_CONFIG = "/render-config.sh"
 ENTRYPOINT = "/entrypoint.sh"
+ROOT_PHASE = "/usr/local/sbin/istota-root-phase"
+ISTOTA_DROP = "/usr/local/bin/istota-drop"
 
 
 def _dockerfile_arg(name: str) -> str:
@@ -444,16 +449,67 @@ class TestGroupBTheRuntime:
             f"import {module} (the [{extra}] extra)",
         )
 
-    @pytest.mark.parametrize("script", [ENTRYPOINT, RENDER_CONFIG])
+    @pytest.mark.parametrize("script", [ENTRYPOINT, RENDER_CONFIG, ROOT_PHASE])
     def test_the_shell_script_parses(self, istota_image, script):
         # `bash -n`, not `sh -n`: both files are #!/bin/bash, /bin/sh in this
         # image is dash, and dash would check the wrong grammar — giving a
         # different verdict here than the same check run on a macOS host.
         assert_ok(sh(istota_image, f"bash -n {script}"), f"bash -n {script}")
 
-    @pytest.mark.parametrize("script", [ENTRYPOINT, RENDER_CONFIG])
+    @pytest.mark.parametrize("script", [ENTRYPOINT, RENDER_CONFIG, ROOT_PHASE, ISTOTA_DROP])
     def test_the_shell_script_is_executable(self, istota_image, script):
         assert_ok(sh(istota_image, f"test -x {script}"), f"{script} is not executable")
+
+
+@parity.witness(5)
+class TestTheDropToTheDaemonsUser:
+    """The image half of row 5: a fixed uid, and the one drop every path takes.
+
+    `istota-drop` is what the root phase ends with and what the healthcheck and
+    every `docker exec` go through. Run here as the plain `docker run` root it
+    would be handed, it has to come out as uid 10001 with every capability set
+    empty, including the bounding set, which `--user 10001:10001` alone leaves
+    full (Stage 1 measured it).
+    """
+
+    def test_the_istota_user_is_10001(self, istota_image):
+        out = assert_ok(sh(istota_image, "id istota"), "id istota")
+
+        assert "uid=10001(istota)" in out and "gid=10001(istota)" in out, out
+
+    def test_the_drop_leaves_uid_10001_and_no_capabilities(self, istota_image):
+        out = assert_ok(
+            run_in(istota_image, ["cat", "/proc/self/status"], entrypoint=ISTOTA_DROP),
+            "istota-drop cat /proc/self/status",
+        )
+        status = dict(
+            (name.strip(), value.strip())
+            for name, _, value in (line.partition(":") for line in out.splitlines())
+        )
+
+        assert status["Uid"].split() == ["10001"] * 4, status["Uid"]
+        for capset in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+            assert status[capset] == "0000000000000000", f"{capset}={status[capset]}"
+
+    def test_the_image_starts_in_the_root_phase_with_no_user_line(self, istota_image):
+        inspected = subprocess.run(
+            ["docker", "image", "inspect", "--format",
+             "{{json .Config.User}} {{json .Config.Entrypoint}}", istota_image.tag],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert inspected.returncode == 0, inspected.stderr
+        user, entrypoint = inspected.stdout.split(" ", 1)
+
+        assert json.loads(user) == ""
+        assert json.loads(entrypoint) == [ROOT_PHASE, ENTRYPOINT]
+
+    def test_uv_run_does_not_try_to_sync_the_read_only_venv(self, istota_image):
+        # The root filesystem is read-only in the run contract. Without
+        # UV_NO_SYNC an incidental `uv run` tries to install the dev group.
+        assert_ok(
+            sh(istota_image, "env | grep -x UV_NO_SYNC=1"),
+            "UV_NO_SYNC in the image environment",
+        )
 
 
 class TestGroupCTheGeneratedConfig:

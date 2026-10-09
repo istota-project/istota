@@ -1,0 +1,7 @@
+# Row 4's second negative control: the host's cgroup tree bound in. The mount
+# is writable and rooted above the container (`/../..`), and the root phase
+# must refuse before it writes anything.
+services:
+  istota:
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw

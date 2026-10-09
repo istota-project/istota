@@ -55,6 +55,7 @@ ROWS: dict[int, str] = {
     17: "browser container cannot reach the rest of the stack",
     18: "proxied listener reachable only from the upstream",
     19: "TLS in direct mode",
+    20: "container MAC confinement",
 }
 
 NOT_WITNESSED: dict[int, str] = {
@@ -64,29 +65,43 @@ NOT_WITNESSED: dict[int, str] = {
 PENDING: dict[int, str] = {
     2: "Stage 4",
     3: "Stage 4",
-    4: "Stage 2",
-    5: "Stage 2 (daemon half), Stage 6 (wrapper half)",
-    6: "Stage 2",
     7: "Stage 7",
-    8: "Stage 2",
     9: "Stage 7",
     10: "Stage 7",
     11: "Stage 7",
-    12: "Stage 2",
+    # Stage 2 was to witness it. Compose refuses to start a service whose
+    # secret file is missing, and nothing writes those files until Stage 3's
+    # wizard, which also removes the environment blocks the witness's
+    # `docker inspect` half would read secrets out of.
+    12: "Stage 3",
     13: "Stage 6",
     15: "Stage 7",
-    16: "Stage 2",
-    17: "Stage 2",
+    # Stage 2 split the network in the shipped file; the runtime witness needs
+    # the browser profile booted, which the lean smoke shape cannot do until
+    # Stage 4 makes it the shipped file plus an overlay.
+    17: "Stage 4",
     18: "Stage 7",
     19: "Stage 7",
+    # Needs a host with AppArmor; Docker Desktop has none.
+    20: "Stage 7",
 }
 
 # The pending set as Stage 1 left it. `PENDING` may lose rows, never gain them.
 # Editing this to make room for a new pending row defeats the guard; a new row
-# lands with its witness instead.
+# lands with its witness instead. Row 20 is the one exception, and it was the
+# spec's: the AppArmor row was added after Stage 1 measured docker-default
+# refusing bwrap's mounts, and only a host with AppArmor can witness it.
 PENDING_AT_STAGE_1: frozenset[int] = frozenset(
-    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19}
+    {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20}
 )
+
+# A row the spec closes in two halves, witnessed for the half that has landed.
+# Each entry names the half still to come; the registry test requires the row
+# to be witnessed, so this records what a witness does not yet cover rather
+# than standing in for one.
+OUTSTANDING_HALVES: dict[int, str] = {
+    5: "Stage 6: the VM's `istota` wrapper and `istota-vm setup` exec as 10001",
+}
 
 
 def witness(*rows: int) -> Callable[[T], T]:

@@ -1,0 +1,5 @@
+# Row 8's negative control: the host's Docker socket bound into the container.
+services:
+  istota:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

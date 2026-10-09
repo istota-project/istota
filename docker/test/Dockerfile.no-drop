@@ -1,0 +1,21 @@
+# Negative control for parity row 5 in the image tier: the shipped image with
+# the drop removed.
+#
+# `istota-drop` is replaced by a script that keeps its interface (it still
+# sets HOME and execs its arguments) and skips `setpriv`, so whatever it runs
+# stays uid 0 with the container's capabilities. The image tier reads the drop
+# directly, so this is what turns its uid and capability assertion red. In a
+# stack the root phase's grant probe goes through the same script and stops
+# the boot first; Dockerfile.no-daemon-drop is the stack's control.
+#
+#   docker build -f docker/test/Dockerfile.no-drop --build-arg BASE=<image tag> \
+#       -t istota-test/no-drop:<suffix> docker/test
+#
+# Expected: tests/image/test_istota_image.py::TestTheDropToTheDaemonsUser::
+# test_the_drop_leaves_uid_10001_and_no_capabilities fails.
+ARG BASE
+FROM ${BASE}
+
+RUN printf '#!/bin/sh\nexport HOME=/data/home\nexec "$@"\n' > /usr/local/bin/istota-drop \
+    && chmod 0755 /usr/local/bin/istota-drop \
+    && ! grep -q setpriv /usr/local/bin/istota-drop

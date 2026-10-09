@@ -1,0 +1,20 @@
+# Negative control for parity row 5 in the smoke tier: a root phase that execs
+# the daemon without the drop.
+#
+# Only the root phase's last line changes, from `exec istota-drop "$@"` to
+# `exec "$@"`, so the grant probe and every exec path still drop and the one
+# thing different is the daemon itself: uid 0 with the cap_add set rather than
+# uid 10001 with nothing. (Dockerfile.no-drop breaks `istota-drop` instead,
+# which the image tier's witness reads directly; in a stack it stops the boot
+# at the grant probe, before any daemon runs.)
+#
+#   docker build -f docker/test/Dockerfile.no-daemon-drop --build-arg BASE=<lean tag> \
+#       -t istota-test/no-daemon-drop:<suffix> docker/test
+#
+# Expected: tests/smoke/test_run_contract.py::TestTheDaemonIsUnprivileged fails.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's/^    exec istota-drop "\$@"$/    exec "$@"/' /usr/local/sbin/istota-root-phase \
+    && grep -q '^    exec "\$@"$' /usr/local/sbin/istota-root-phase \
+    && ! grep -q 'exec istota-drop "\$@"' /usr/local/sbin/istota-root-phase

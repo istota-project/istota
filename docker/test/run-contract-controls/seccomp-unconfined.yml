@@ -1,0 +1,9 @@
+# Row 16's negative control: no syscall filter at all. bwrap still works, and
+# bpf, keyctl, add_key, userfaultfd and perf_event_open stop answering EPERM.
+services:
+  istota:
+    security_opt: !override
+      - seccomp:unconfined
+      - apparmor=istota
+      - systempaths=unconfined
+      - no-new-privileges:true
