@@ -351,15 +351,36 @@ def check_model_cli(config: "Config", probe: bool) -> CheckResult:
         )
     reached = ", ".join(kinds)
     path = shutil.which("claude")
+    # Set by the image build: whether Claude Code was installed, and at which
+    # pinned version (CLAUDE_CODE_VERSION in host.env, through istota-stack).
+    built_without = os.environ.get("ISTOTA_CLAUDE_CODE_INSTALLED") == "0"
+    pin = os.environ.get("ISTOTA_CLAUDE_CODE_VERSION", "").strip()
     if path is None:
         return CheckResult(
             "runtime.model_cli",
             FAIL,
-            f"{reached} is reachable on this deployment but there is no `claude` on PATH",
-            remedy="Install the Claude Code CLI, or stop routing tasks to it.",
+            f"{reached} is reachable on this deployment but there is no `claude` on PATH"
+            + (" (this image was built without Claude Code)" if built_without else ""),
+            remedy=(
+                "Rebuild the images: `istota-stack update <current tag>` builds with "
+                "Claude Code when config.toml names a brain that runs it."
+                if built_without
+                else "Install the Claude Code CLI, or stop routing tasks to it."
+            ),
             scope=IMAGE,
         )
     status, detail = _binary_status(path, probe=probe)
+    if status == OK and probe and pin and pin not in detail:
+        return CheckResult(
+            "runtime.model_cli",
+            WARN,
+            f"{detail}, but the image pins Claude Code {pin}",
+            remedy=(
+                "Something updated the CLI in place; the autoupdater is off in the "
+                "image. Rebuild with `istota-stack update <current tag>`."
+            ),
+            scope=IMAGE,
+        )
     return CheckResult(
         "runtime.model_cli",
         status,
@@ -6026,6 +6047,78 @@ def _uv_cache_result(
     )
 
 
+#: What a devbox must not reach, asked from inside it on the stack: cloud
+#: metadata and one RFC 1918 address. The VM's DOCKER-USER rules drop both.
+DEVBOX_EGRESS_TARGETS: tuple[tuple[str, int], ...] = (
+    ("169.254.169.254", 80),
+    ("10.0.0.1", 80),
+)
+DEVBOX_EGRESS_CONNECT_SECONDS = 3
+
+
+def _devbox_egress_probe(config: "Config", users: list[str], probe: bool) -> CheckResult:
+    """The stack's arm of ``security.devbox_netfilter``: connect from inside.
+
+    The daemon runs in a container with no view of the VM's DOCKER-USER chain,
+    so it cannot read the rules. It asks each devbox, through the exec
+    transport, to open a TCP connection to each of ``DEVBOX_EGRESS_TARGETS``;
+    a connection that opens is a FAIL. One that does not is an OK that cannot
+    tell a dropped packet from an address with nothing behind it: the vm tier's
+    row 10 witness supplies a target that answers, which this cannot.
+    """
+    name = "security.devbox_netfilter"
+    if not probe:
+        return CheckResult(
+            name, SKIP,
+            "asking the devboxes to connect out needs the exec transport (probe disabled)",
+        )
+    from istota import config as config_module  # noqa: PLC0415
+    from istota.devbox import exec_protocol as proto  # noqa: PLC0415
+
+    reached: list[str] = []
+    unasked: list[str] = []
+    for user_id in users:
+        socket_path = config_module.exec_socket_path(config, user_id)
+        if socket_path is None:
+            unasked.append(f"{user_id}: no exec socket path")
+            continue
+        for host, port in DEVBOX_EGRESS_TARGETS:
+            request = proto.encode_exec_request(
+                argv=["timeout", str(DEVBOX_EGRESS_CONNECT_SECONDS), "bash", "-c",
+                      f"exec 3<>/dev/tcp/{host}/{port}"],
+                cwd=None, stdin=False, timeout=CONTAINER_EXEC_TIMEOUT,
+            )
+            frames, error = _exec_transport_request(
+                socket_path, request, float(DEVBOX_EGRESS_CONNECT_SECONDS + 5),
+            )
+            terminal = next((f for f in frames if proto.is_terminal(f)), None)
+            if terminal is None:
+                unasked.append(f"{user_id}: {error or 'no exit status'}")
+                break
+            if terminal.get("exit_code") == 0:
+                reached.append(f"{user_id} reached {host}:{port}")
+    if reached:
+        return CheckResult(
+            name, FAIL,
+            "a devbox opened a connection it must not: " + "; ".join(reached),
+            remedy=(
+                "On the VM: `systemctl restart istota-devbox-egress`, and check that "
+                "ISTOTA_DEVBOX_SUBNET in /srv/istota/host.env is [devbox] network_subnet."
+            ),
+        )
+    if unasked:
+        return CheckResult(
+            name, WARN,
+            "the egress probe could not run in every devbox: " + "; ".join(unasked),
+            remedy="Check `istota-skill devbox status` for each user, then re-run doctor.",
+        )
+    targets = ", ".join(f"{host}:{port}" for host, port in DEVBOX_EGRESS_TARGETS)
+    return CheckResult(
+        name, OK,
+        f"no devbox ({len(users)}) could connect to {targets}",
+    )
+
+
 def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
     """Read the live ``DOCKER-USER`` chain and report anything shadowing our rules.
 
@@ -6057,6 +6150,9 @@ def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
             name, SKIP,
             "devbox is disabled ([devbox] enabled); the role adds no rules",
         )
+    stack_users = list(getattr(getattr(config, "devbox", None), "users", None) or [])
+    if stack_users:
+        return _devbox_egress_probe(config, stack_users, probe)
     if not probe:
         return CheckResult(
             name,

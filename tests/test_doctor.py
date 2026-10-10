@@ -601,6 +601,26 @@ class TestModelCli:
         assert r.status == OK
         assert "2.1.168" in r.detail
 
+    def test_a_version_other_than_the_images_pin_warns(self, make_config, tmp_path, monkeypatch):
+        _which_only(monkeypatch, "claude", _fake_bin(tmp_path / "bin" / "claude", "2.1.300 (Claude Code)"))
+        monkeypatch.setenv("ISTOTA_CLAUDE_CODE_VERSION", "2.1.296")
+        r = run_checks(make_config(), only=("runtime.model_cli",))[0]
+        assert r.status == WARN
+        assert "2.1.296" in r.detail and "2.1.300" in r.detail
+
+    def test_the_pinned_version_is_ok(self, make_config, tmp_path, monkeypatch):
+        _which_only(monkeypatch, "claude", _fake_bin(tmp_path / "bin" / "claude", "2.1.296 (Claude Code)"))
+        monkeypatch.setenv("ISTOTA_CLAUDE_CODE_VERSION", "2.1.296")
+        assert run_checks(make_config(), only=("runtime.model_cli",))[0].status == OK
+
+    def test_an_image_built_without_it_says_so(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        monkeypatch.setenv("ISTOTA_CLAUDE_CODE_INSTALLED", "0")
+        r = run_checks(make_config(), only=("runtime.model_cli",))[0]
+        assert r.status == FAIL
+        assert "built without Claude Code" in r.detail
+        assert "istota-stack update" in r.remedy
+
 
 class TestTmux:
     @staticmethod
