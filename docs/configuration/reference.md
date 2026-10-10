@@ -240,9 +240,9 @@ Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_DISPOSITION`, `ISTOTA_SPE
 | `email_max_attachment_bytes` | `26214400` | Attachment bytes **written to disk and uploaded** per message (25 MiB). Not a bound on the IMAP transfer — the client fetches and decodes the whole message before any part can be inspected. Whole attachments only: one that would cross the budget is skipped rather than truncated, and the prompt names it. 0 = unlimited |
 | `email_max_attachment_bytes_per_poll` | `104857600` | The same budget across one whole poll tick (100 MiB). A per-message cap alone bounds one message and not a batch of fifty. 0 = unlimited |
 | `briefing_check_interval` | `60` | Seconds between briefing/job/cleanup checks |
-| `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls |
-| `shared_file_check_interval` | `120` | Seconds between shared file checks |
-| `heartbeat_check_interval` | `60` | Seconds between heartbeat checks |
+| `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls; `0` turns them off |
+| `shared_file_check_interval` | `120` | Seconds between shared file checks; `0` turns them off |
+| `heartbeat_check_interval` | `60` | Seconds between heartbeat checks; `0` turns them off |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
 | `doctor_check_interval` | `3600` | Seconds between re-runs of the `istota doctor` runtime self-check (1h; 0 disables). Re-run rather than trusted from boot, because the drift it catches happens after boot — the auto-update cron changes what is installed under a config the daemon already loaded |
 | `worktree_reap_interval` | `21600` | Seconds between developer-worktree reaping sweeps (ISSUE-288, 6h; 0 disables). Also gated by `[developer] worktree_reap_enabled`. Well under the 24h default retention, so nothing waits long after becoming eligible. A periodic job rather than a task setup hook: `setup_env` hooks run for every skill whatever the task selected, so a sweep there fired on every Talk reply and every heartbeat tick |

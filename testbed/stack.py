@@ -716,6 +716,11 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_caldav_password",
     "istota_developer_gitlab_token",
     "istota_developer_github_token",
+    "istota_email_smtp_password",
+    "istota_sms_telnyx_api_key",
+    "istota_sms_telnyx_public_key",
+    "istota_sms_telnyx_messaging_profile_id",
+    "istota_google_workspace_client_secret",
 )
 
 #: What the scripted endpoint is sent as a key. Nothing in this tier can use a

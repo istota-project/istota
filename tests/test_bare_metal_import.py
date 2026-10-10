@@ -283,6 +283,16 @@ class TestTheConfigRewrite:
                     "security.allow_unsandboxed_multi_user_vaults"):
             assert key in report
 
+    def test_the_role_namespace_is_dropped_and_reported(self):
+        old = _old_config()
+        old["namespace"] = "example-ns"
+        result = bmi.rewrite_config(old, ingress="proxied")
+        assert "namespace" not in result.document
+        assert any(
+            line.startswith("namespace: dropped") and "example-ns" in line
+            for line in result.changes
+        )
+
     def test_devbox_docker_cli_is_dropped(self):
         old = _old_config()
         old["devbox"]["docker_cli"] = "/usr/bin/docker"
@@ -477,18 +487,64 @@ class TestTheImport:
         assert plan.stat().st_mode & 0o777 == 0o600
 
 
+#: Every name a role-rendered install of the surveyed shape carries across its
+#: two env files, with synthetic values.
+SURVEYED_SECRETS_ENV = "\n".join([
+    "ISTOTA_NEXTCLOUD_APP_PASSWORD=nc-app-password",
+    "ISTOTA_EMAIL_IMAP_PASSWORD=imap-password",
+    "ISTOTA_EMAIL_SMTP_PASSWORD=smtp-password",
+    "ISTOTA_SMS_TELNYX_API_KEY=telnyx-api-key",
+    "ISTOTA_SMS_TELNYX_PUBLIC_KEY=telnyx-public-key",
+    "ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID=telnyx-profile-id",
+    "ISTOTA_DEVELOPER_GITLAB_TOKEN=gitlab-token",
+    "ISTOTA_DEVELOPER_GITHUB_TOKEN=github-token",
+    "ISTOTA_WEB_OAUTH2_CLIENT_SECRET=oauth-secret",
+    "ISTOTA_WEB_SESSION_SECRET_KEY=session-key",
+    "ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET=gws-secret",
+    "CLAUDE_CODE_OAUTH_TOKEN=claude-token",
+    f"ISTOTA_SECRET_KEY={SECRET_KEY}",
+    "ISTOTA_BRAIN_NATIVE_API_KEY=native-key",
+    "",
+])
+
+
+class TestTheSurveyedSecretSet:
+    """The five names that had no file in this shape now have one each."""
+
+    NEW_FILES = {
+        "istota_email_smtp_password": "smtp-password",
+        "istota_sms_telnyx_api_key": "telnyx-api-key",
+        "istota_sms_telnyx_public_key": "telnyx-public-key",
+        "istota_sms_telnyx_messaging_profile_id": "telnyx-profile-id",
+        "istota_google_workspace_client_secret": "gws-secret",
+    }
+
+    def test_a_live_import_of_every_surveyed_name_succeeds(self, tmp_path, target):
+        source = _export(tmp_path, secrets=SURVEYED_SECRETS_ENV)
+        assert bmi.main(target.args(source)) == bmi.EXIT_OK
+        for name, value in self.NEW_FILES.items():
+            assert (target.secrets / name).read_text() == value, name
+        assert (target.secrets / "istota_brain_native_api_key").read_text() == "native-key"
+
+    def test_a_rehearsal_withholds_all_five(self, tmp_path, target):
+        source = _export(tmp_path, secrets=SURVEYED_SECRETS_ENV)
+        assert bmi.main(target.args(source, "--rehearsal")) == bmi.EXIT_OK
+        for name in self.NEW_FILES:
+            assert (target.secrets / name).read_text() == "", name
+
+
 class TestRefusals:
     def test_an_unmapped_secret_refuses_and_touches_nothing(self, tmp_path, target, capsys):
         source = _export(
-            tmp_path, secrets=SECRETS_ENV + "ISTOTA_SMS_TELNYX_API_KEY=telnyx-key\n",
+            tmp_path, secrets=SECRETS_ENV + "ISTOTA_SMS_TWILIO_AUTH_TOKEN=twilio-token\n",
         )
         before = target.snapshot()
         assert bmi.main(target.args(source)) == bmi.EXIT_REFUSED
         assert target.snapshot() == before
         assert not target.config.exists()
         err = capsys.readouterr().err
-        assert "ISTOTA_SMS_TELNYX_API_KEY" in err
-        assert "telnyx-key" not in err
+        assert "ISTOTA_SMS_TWILIO_AUTH_TOKEN" in err
+        assert "twilio-token" not in err
 
     def test_a_target_that_has_done_work_refuses(self, source, target):
         target.db_path.parent.mkdir(parents=True)
@@ -538,6 +594,181 @@ class TestRehearsal:
         )[0][0])
         assert meta["rehearsal"] is True
         assert "ISTOTA_SMS_TELNYX_API_KEY" in capsys.readouterr().out
+
+
+def _add_live_paths(db_path: Path) -> None:
+    """Rows a running install holds that would reach a person or a service."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO secrets (user_id, service, key, encrypted_value) "
+            "VALUES ('alice', 'ntfy', 'topic', x'00'), ('alice', 'ntfy', 'token', x'01'), "
+            "('alice', 'karakeep', 'api_key', x'02')"
+        )
+        # A module job the daemon had already failed on once and suspended
+        # (a stamp older than the rescue arm's cooldown), and one it had not.
+        conn.execute(
+            "INSERT INTO scheduled_jobs (user_id, name, cron_expression, skill, "
+            "skill_args, skip_log_channel, consecutive_failures, last_run_at, "
+            "auto_disabled_at) VALUES ('alice', '_module.feeds.run_scheduled', "
+            "'*/5 * * * *', 'feeds', 'run-scheduled', 1, 1, "
+            "datetime('now', '-3 hours'), datetime('now', '-2 hours'))"
+        )
+        conn.execute(
+            "INSERT INTO scheduled_jobs (user_id, name, cron_expression, skill, "
+            "skill_args, skip_log_channel) VALUES ('alice', '_module.health.garmin_sync', "
+            "'0 * * * *', 'health', 'garmin-sync', 1)"
+        )
+        conn.execute(
+            "INSERT INTO shared_block_configs (name, cron, title, enabled, sources, "
+            "created_at, updated_at) VALUES ('world-headlines', '45 5 * * *', 'Headlines', "
+            "1, '[]', datetime('now'), datetime('now'))"
+        )
+        for task_id, status in (
+            (10, "pending"), (11, "locked"), (12, "running"),
+            (13, "pending_confirmation"), (14, "failed"),
+        ):
+            conn.execute(
+                "INSERT INTO tasks (id, status, source_type, user_id, prompt) "
+                "VALUES (?, ?, 'talk', 'alice', 'queued on the old host')",
+                (task_id, status),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _loaded(document: dict):
+    """The written config as the daemon loads it, against no real database."""
+    from istota.config import load_config
+    from istota.lib import toml_write
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        probe = dict(document)
+        probe["db_path"] = str(Path(scratch) / "absent" / "istota.db")
+        path = Path(scratch) / "config.toml"
+        path.write_text(toml_write.dumps(probe), encoding="utf-8")
+        return load_config(path)
+
+
+class TestARehearsalIsNotASecondLiveBot:
+    """Every loop and delivery path that reaches a person or another service is
+    off in the imported copy, through a switch the daemon already reads."""
+
+    @pytest.fixture
+    def imported(self, tmp_path, target):
+        source = _export(tmp_path, secrets=SURVEYED_SECRETS_ENV)
+        _add_live_paths(source / "db" / "2026-10-10" / "framework" / "istota.db")
+        assert bmi.main(target.args(source, "--rehearsal")) == bmi.EXIT_OK
+        return target
+
+    def test_the_written_config_switches_each_poller_off(self, imported):
+        written = tomllib.loads(imported.config.read_text())
+        scheduler = written["scheduler"]
+        assert scheduler["heartbeat_check_interval"] == 0
+        assert scheduler["tasks_file_poll_interval"] == 0
+        assert scheduler["shared_file_check_interval"] == 0
+        assert scheduler["push_notification_sources"] == []
+        assert written["developer"]["worktree_reap_enabled"] is False
+        assert written["web"]["avatar_import_from_nextcloud"] is False
+        assert "default_briefings" not in written
+        assert [b["enabled"] for b in written["briefing_shared_blocks"]] == [False, False]
+
+    def test_the_daemon_builds_no_gate_for_any_of_them(self, imported):
+        from istota.scheduler import build_interval_gates
+
+        config = _loaded(tomllib.loads(imported.config.read_text()))
+        enabled = {g.name for g in build_interval_gates(config) if g.enabled(config)}
+        for name in (
+            "heartbeats", "tasks-file-poll", "briefing-triggers", "shared-files",
+            "email-poll", "worktree-reap", "avatar-import", "whatsapp-pairing",
+        ):
+            assert name not in enabled, name
+        assert config.talk.enabled is False
+        assert config.scheduler.push_notification_sources == []
+        assert all(not b.enabled for b in config.briefing_shared_blocks)
+        assert config.default_briefings == []
+
+    def test_ntfy_credentials_are_removed_and_others_kept(self, imported):
+        assert imported.rows("SELECT count(*) FROM secrets WHERE service = 'ntfy'") == [(0,)]
+        assert imported.rows("SELECT service FROM secrets") == [("karakeep",)]
+
+    def test_no_scheduled_job_can_fire(self, imported):
+        assert imported.rows(
+            "SELECT count(*) FROM scheduled_jobs "
+            "WHERE enabled = 1 AND auto_disabled_at IS NULL"
+        ) == [(0,)]
+        assert imported.rows(
+            "SELECT name FROM scheduled_jobs WHERE name LIKE '\\_module.%' ESCAPE '\\' "
+            "AND (enabled != 0 OR disabled_at IS NULL) ORDER BY name"
+        ) == []
+
+    def test_the_module_sync_does_not_bring_a_module_job_back(self, imported):
+        """The module sync rescues a `_module.*` row the daemon suspended once
+        its stamp is an hour old, so a suspension alone would not hold."""
+        from istota import scheduler
+        from istota.config import Config, UserConfig
+
+        conn = sqlite3.connect(imported.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            # As if the rehearsal had run for hours.
+            conn.execute(
+                "UPDATE scheduled_jobs SET auto_disabled_at = datetime('now', '-5 hours') "
+                "WHERE auto_disabled_at IS NOT NULL"
+            )
+            conn.commit()
+            config = Config(db_path=imported.db_path, users={"alice": UserConfig()})
+            scheduler._sync_module_jobs(
+                conn, config, module_name="feeds", module_prefix="_module.feeds.",
+                resolve_for_user=lambda user_id, cfg, conn=None: object(),
+                jobs_for_user=lambda ctx, user_id: [{
+                    "name": "_module.feeds.run_scheduled", "cron": "*/5 * * * *",
+                    "skill": "feeds", "skill_args": "run-scheduled",
+                }],
+                user_not_found_exc=LookupError,
+            )
+            live = conn.execute(
+                "SELECT name FROM scheduled_jobs WHERE enabled = 1 AND auto_disabled_at IS NULL"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert live == []
+
+    def test_shared_blocks_and_briefings_are_off(self, imported):
+        assert imported.rows("SELECT enabled FROM shared_block_configs") == [(0,)]
+        assert imported.rows("SELECT enabled FROM briefing_configs") == [(0,)]
+
+    def test_the_old_hosts_queue_is_cancelled_and_history_kept(self, imported):
+        assert imported.rows(
+            "SELECT id, status FROM tasks WHERE id >= 10 ORDER BY id"
+        ) == [
+            (10, "cancelled"), (11, "cancelled"), (12, "cancelled"),
+            (13, "cancelled"), (14, "failed"),
+        ]
+        assert imported.rows("SELECT status FROM tasks WHERE id = 1") == [("completed",)]
+
+    def test_the_report_names_what_was_switched_off(self, tmp_path, target, capsys):
+        source = _export(tmp_path, secrets=SURVEYED_SECRETS_ENV)
+        _add_live_paths(source / "db" / "2026-10-10" / "framework" / "istota.db")
+        assert bmi.main(target.args(source, "--rehearsal", "--dry-run")) == bmi.EXIT_OK
+        out = capsys.readouterr().out
+        assert "scheduler.heartbeat_check_interval" in out
+        assert "2 ntfy credential(s) removed" in out
+        assert "4 queued task(s) cancelled" in out
+
+    def test_a_live_import_switches_none_of_it_off(self, tmp_path, target):
+        source = _export(tmp_path, secrets=SURVEYED_SECRETS_ENV)
+        _add_live_paths(source / "db" / "2026-10-10" / "framework" / "istota.db")
+        assert bmi.main(target.args(source)) == bmi.EXIT_OK
+        written = tomllib.loads(target.config.read_text())
+        assert "heartbeat_check_interval" not in written["scheduler"] or (
+            written["scheduler"]["heartbeat_check_interval"] != 0
+        )
+        assert target.rows("SELECT count(*) FROM secrets WHERE service = 'ntfy'") == [(2,)]
+        assert target.rows("SELECT status FROM tasks WHERE id = 10") == [("pending",)]
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")

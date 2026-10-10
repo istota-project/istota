@@ -9621,6 +9621,7 @@ def build_interval_gates(
             name="briefing-triggers",
             run=_briefing_triggers,
             field="tasks_file_poll_interval",
+            enabled=lambda c: bool(c.scheduler.tasks_file_poll_interval),
             on_error="Error checking briefing triggers: %s",
         ),
         IntervalGate(
@@ -9683,6 +9684,7 @@ def build_interval_gates(
             name="shared-files",
             run=_shared_files,
             field="shared_file_check_interval",
+            enabled=lambda c: bool(c.scheduler.shared_file_check_interval),
             on_error="Error organizing shared files: %s",
             one_shot=True,
             one_shot_on_error="Error organizing shared files: %s",
@@ -9691,6 +9693,7 @@ def build_interval_gates(
             name="tasks-file-poll",
             run=_tasks_files,
             field="tasks_file_poll_interval",
+            enabled=lambda c: bool(c.scheduler.tasks_file_poll_interval),
             on_error="Error polling TASKS.md files: %s",
             one_shot=True,
             one_shot_on_error="Error polling TASKS.md files: %s",
@@ -9967,6 +9970,9 @@ def build_interval_gates(
             name="heartbeats",
             run=_heartbeats,
             field="heartbeat_check_interval",
+            # 0 is off, not every tick: a rehearsal import writes it so a
+            # copy of a live install runs nobody's HEARTBEAT.md.
+            enabled=lambda c: bool(c.scheduler.heartbeat_check_interval),
             background=True,
             overlap_expected=True,
             one_shot=True,

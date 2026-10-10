@@ -414,9 +414,9 @@ class SchedulerConfig:
     email_max_attachment_bytes: int = 26214400  # 25 MiB downloaded+uploaded per message
     email_max_attachment_bytes_per_poll: int = 104857600  # 100 MiB per poll tick, across every message in the batch
     briefing_check_interval: int = 60  # seconds between briefing checks
-    tasks_file_poll_interval: int = 30  # seconds between TASKS.md file polls
-    shared_file_check_interval: int = 120  # seconds between shared file organization checks
-    heartbeat_check_interval: int = 60  # seconds between heartbeat checks
+    tasks_file_poll_interval: int = 30  # seconds between TASKS.md file polls (and briefing trigger files); 0 = off
+    shared_file_check_interval: int = 120  # seconds between shared file organization checks; 0 = off
+    heartbeat_check_interval: int = 60  # seconds between heartbeat checks; 0 = off
     db_health_check_interval: int = 86400  # seconds between SQLite quick_check sweeps over per-user DBs
     # Seconds between `istota doctor` sweeps. Matters more than the boot run:
     # the drift we actually see happens *after* boot — the auto-update cron

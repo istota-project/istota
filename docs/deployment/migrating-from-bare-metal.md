@@ -29,7 +29,7 @@ The rclone configuration is the operator's input to `provision.sh` on the new VM
 
 ## What the import rewrites
 
-In `config.toml`, every state path is set to what `istota setup` writes for the container (`db_path`, `temp_dir`, `workspace_path`, `nextcloud_mount_path`, `developer.repos_dir`, the forge binary paths, the devbox socket directories, `browser.api_url`). Keys the container derives are dropped so they derive (`module_data_dir`, `skills_dir`, a set `brain.native.session_log.dir`, `logging.file`, `scheduler.host_pressure_docker_socket`, the Baileys paths). Keys this shape removed are dropped (`[devbox] docker_cli`, `[security] allow_unsandboxed_multi_user_vaults`). `web.trusted_proxy_hops` follows `--ingress`. Everything else stays as you had it, and any string still naming an old host path is listed.
+In `config.toml`, every state path is set to what `istota setup` writes for the container (`db_path`, `temp_dir`, `workspace_path`, `nextcloud_mount_path`, `developer.repos_dir`, the forge binary paths, the devbox socket directories, `browser.api_url`). Keys the container derives are dropped so they derive (`module_data_dir`, `skills_dir`, a set `brain.native.session_log.dir`, `logging.file`, `scheduler.host_pressure_docker_socket`, the Baileys paths). Keys this shape removed are dropped (`namespace`, `[devbox] docker_cli`, `[security] allow_unsandboxed_multi_user_vaults`). `web.trusted_proxy_hops` follows `--ingress`. Everything else stays as you had it, and any string still naming an old host path is listed.
 
 In the database, values under an old state root are rebased with a path boundary, inside JSON as decoded values: `tasks.attachments`, `memory_chunks.source_id` with the same rows' `metadata_json`, the `note_resurface_configs` and `note_resurface_history` tables when a user's script created them, and the `corpus` and `resurface` history rows in `istota_kv`. A value under no old root is listed and left alone. Free-text history (task prompts and results, logs, messages) is a record of what happened and is not rewritten.
 
@@ -41,6 +41,8 @@ Some rows are listed and not rewritten, because they come from somewhere else:
 ### Secrets
 
 Each variable in the two env files goes to the file the stack reads it from, under the variable's name lowercased (`ISTOTA_NEXTCLOUD_APP_PASSWORD` becomes `secrets/istota_nextcloud_app_password`). `ISTOTA_SECRET_KEY` becomes `/data/.secret_key` and `ISTOTA_WEB_TOKEN_KEY` becomes `/data/.web_token_key`, both 0600 and byte for byte: every stored credential is encrypted under the first, and every stored web token under the second.
+
+The SMTP password, the three Telnyx values and the Google Workspace client secret each have a file too (`istota_email_smtp_password`, `istota_sms_telnyx_api_key`, `istota_sms_telnyx_public_key`, `istota_sms_telnyx_messaging_profile_id`, `istota_google_workspace_client_secret`).
 
 A variable the stack has no secrets file for is a refusal, with nothing written. The import never drops a credential. The stack's compose file declares the set (`setup_wizard.SECRET_NAMES` is the same list); a credential outside it has to be added there before the import can carry it.
 
@@ -64,9 +66,43 @@ The rehearsal runs in a local Lima VM provisioned from `host/lima/istota.yaml`. 
    ```
 
 2. Point the rehearsal VM's rclone remote at a copy of the workspace, never at the production mount: `rclone sync` the users' folders into a scratch remote, and name that remote in the VM's `rclone.conf`.
-3. Unpack and import with `--rehearsal` and `--ingress local` (the import command is in step 6 of the cutover). A rehearsal import turns `talk`, `email`, `sms`, `whatsapp` and both sleep cycles off in the config, withholds every transport credential (Nextcloud, email, SMS, WhatsApp, CalDAV, Google Workspace, the Nextcloud OAuth client secret), suspends every scheduled job and disables every briefing in the database, and records itself as a rehearsal in the reserved `_migration` namespace.
-4. Check the import: the printed config changes and rebase counts, `istota doctor` clean apart from what the withheld credentials explain, the web UI logging in, and one task run by hand with `istota task`, which also confirms a `claude_code` brain runs on the token alone.
+3. Unpack and import with `--rehearsal` and `--ingress local` (the import command is in step 6 of the cutover). The import switches off every loop and delivery path that can reach a person or another service, each through a switch the daemon already reads, and prints each change. The list below is what it covers.
+4. Check the import: the printed config changes and rebase counts, `istota doctor` clean apart from what the withheld credentials explain and the `runtime.bare_metal_import` warning that names the copy as a rehearsal, the web UI logging in, and one task run by hand with `istota task`, which also confirms a `claude_code` brain runs on the token alone.
 5. Delete the rehearsal VM afterwards. It holds the master key and every user's data.
+
+### What a rehearsal import switches off
+
+In the written `config.toml`:
+
+| Switch | What it stops |
+|---|---|
+| `talk.enabled = false` | the Talk poller or signaling stream, posts to Talk rooms, room provisioning |
+| `email.enabled = false` | the IMAP poll, mail sends, the IMAP retention sweep |
+| `sms.enabled = false`, `whatsapp.enabled = false` | SMS and WhatsApp sends, the Baileys bridge and its pairing, request drains |
+| `sleep_cycle.enabled = false`, `channel_sleep_cycle.enabled = false` | the nightly memory passes, which call the model |
+| `scheduler.heartbeat_check_interval = 0` | every user's `HEARTBEAT.md`: shell commands, URL probes and their alerts |
+| `scheduler.tasks_file_poll_interval = 0` | `TASKS.md` files and briefing trigger files, which queue tasks |
+| `scheduler.shared_file_check_interval = 0` | accepting and moving files shared with the bot on the Nextcloud |
+| `scheduler.push_notification_sources = []` | the ntfy push when a long task finishes |
+| `developer.worktree_reap_enabled = false` | the worktree reaper, which fetches from each repository's remote |
+| `web.avatar_import_from_nextcloud = false` | avatar fetches from the Nextcloud |
+| `[[default_briefings]]` dropped, each `[[briefing_shared_blocks]]` `enabled = false` | briefings and shared blocks seeded from the config at start-up |
+
+An interval of 0 turns those three scheduler checks off; it does not run them every tick.
+
+In the imported database:
+
+| Rows | Change | What it stops |
+|---|---|---|
+| `scheduled_jobs` | `auto_disabled_at` set on every row | CRON.md jobs; the CRON.md sync never writes that column |
+| `scheduled_jobs`, `_module.*` rows | `enabled = 0` with `disabled_at` set | feeds polls, Garmin syncs and the money jobs; the module sync lifts the daemon's suspension after an hour but keeps a user's off switch |
+| `briefing_configs`, `shared_block_configs` | `enabled = 0` | every briefing and shared block |
+| `secrets` with `service = 'ntfy'` | deleted | ntfy pushes from heartbeats, job output, alerts and finished tasks |
+| `tasks` that are `pending`, `locked`, `running` or `pending_confirmation` | `cancelled` | the old host's queue at the moment of the online export |
+
+The credentials for every transport and for Google Workspace are withheld: the Nextcloud app password, the email, SMS, WhatsApp and CalDAV credentials, the Google Workspace client secret and the Nextcloud OAuth client secret. With those gone, the remaining start-up calls to the Nextcloud (user hydration, folder setup) cannot authenticate. Alerts from `doctor`, the loop watchdog and backups still go to each admin's alert route, which then reaches only the web bell.
+
+Two paths stay open and are yours to watch. A newer release can add a module job that the source's database did not hold; the module sync inserts it enabled. And a job added to a user's `CRON.md` between the export and the workspace copy is inserted by the CRON.md sync. Compare `!cron` against the export if the workspace copy was taken later. A task you run by hand still uses that user's stored credentials, such as a Karakeep key; a Google Workspace token cannot refresh without the withheld client secret.
 
 ## Cutover
 

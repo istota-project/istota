@@ -1314,6 +1314,11 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_caldav_password",
     "istota_developer_gitlab_token",
     "istota_developer_github_token",
+    "istota_email_smtp_password",
+    "istota_sms_telnyx_api_key",
+    "istota_sms_telnyx_public_key",
+    "istota_sms_telnyx_messaging_profile_id",
+    "istota_google_workspace_client_secret",
 )
 
 #: Ingress modes, as `host.env`'s INGRESS names them, mapped to the hop count the
@@ -1439,6 +1444,14 @@ def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
         ),
         "istota_developer_gitlab_token": a.gitlab_token if a.developer_enabled else "",
         "istota_developer_github_token": a.github_token if a.developer_enabled else "",
+        # Asked by no question here: the SMTP password falls back to the IMAP
+        # one, and the rest are written by an operator or by
+        # `istota migrate import-bare-metal`. A re-run keeps a non-empty file.
+        "istota_email_smtp_password": "",
+        "istota_sms_telnyx_api_key": "",
+        "istota_sms_telnyx_public_key": "",
+        "istota_sms_telnyx_messaging_profile_id": "",
+        "istota_google_workspace_client_secret": "",
     }
     assert tuple(values) == SECRET_NAMES
     return values

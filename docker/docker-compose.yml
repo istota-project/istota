@@ -75,6 +75,11 @@ x-istota-secrets: &istota_secrets
   - istota_caldav_password
   - istota_developer_gitlab_token
   - istota_developer_github_token
+  - istota_email_smtp_password
+  - istota_sms_telnyx_api_key
+  - istota_sms_telnyx_public_key
+  - istota_sms_telnyx_messaging_profile_id
+  - istota_google_workspace_client_secret
 
 services:
   istota:
@@ -585,6 +590,16 @@ secrets:
     file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_developer_gitlab_token
   istota_developer_github_token:
     file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_developer_github_token
+  istota_email_smtp_password:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_email_smtp_password
+  istota_sms_telnyx_api_key:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_sms_telnyx_api_key
+  istota_sms_telnyx_public_key:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_sms_telnyx_public_key
+  istota_sms_telnyx_messaging_profile_id:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_sms_telnyx_messaging_profile_id
+  istota_google_workspace_client_secret:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_google_workspace_client_secret
 
 volumes:
   istota_data:

@@ -43,12 +43,15 @@ with nothing touched, 2 partial. A partial leaves
 same export resumes; the record is written last, so a second run after success
 is a no-op.
 
-``--rehearsal`` is for a copy that must not act as a second live bot: every
-transport and both sleep cycles off in the config, every transport credential
-withheld (so nothing can reach the production Nextcloud, mailbox or phone
-providers), every scheduled job suspended through ``auto_disabled_at`` (which
-the CRON.md sync never writes) and every briefing disabled, and the record says
-it was a rehearsal.
+``--rehearsal`` is for a copy that must not act as a second live bot. Every
+scheduler loop and delivery path that can reach a person or another service is
+switched off through a switch the daemon already reads, in the written config
+(``REHEARSAL_DISABLED``, ``REHEARSAL_CONFIG``, the config-seeded briefings and
+shared blocks) or in the imported database (``_rehearse_database``: scheduled
+jobs, briefings, shared blocks, ntfy credentials, the old host's queue), every
+transport credential is withheld, and the record says it was a rehearsal. The
+full list, with what each switch stops, is in
+``docs/deployment/migrating-from-bare-metal.md``.
 """
 
 from __future__ import annotations
@@ -101,9 +104,33 @@ REHEARSAL_WITHHELD_PREFIXES = (
 
 REHEARSAL_DISABLED = ("talk", "email", "sms", "whatsapp", "sleep_cycle", "channel_sleep_cycle")
 
+#: The pollers and senders with no ``enabled`` of their own, set to the value
+#: that turns each off. An interval of 0 is off for these gates
+#: (``scheduler.build_interval_gates``), not every tick.
+REHEARSAL_CONFIG = (
+    # Each user's HEARTBEAT.md: shell commands, URL probes, alerts.
+    (("scheduler", "heartbeat_check_interval"), 0),
+    # TASKS.md files and the briefing trigger files, which queue tasks.
+    (("scheduler", "tasks_file_poll_interval"), 0),
+    # Accepts and moves files shared with the bot on the Nextcloud.
+    (("scheduler", "shared_file_check_interval"), 0),
+    # The ntfy push when a long task finishes.
+    (("scheduler", "push_notification_sources"), []),
+    # Fetches every repository's remote before reaping a worktree.
+    (("developer", "worktree_reap_enabled"), False),
+    # Fetches avatars from the Nextcloud.
+    (("web", "avatar_import_from_nextcloud"), False),
+)
+
+#: Task states the old host's daemon would still act on. A rehearsal cancels
+#: them: they were the production queue at the moment of the online export.
+LIVE_TASK_STATUSES = ("pending", "locked", "running", "pending_confirmation")
+
 #: Keys the container leaves to their default or derivation, as `istota setup`
 #: does, or that this shape removed. Dropped when present, and reported.
 DROPPED_KEYS = (
+    # The role's install name; nothing reads it (removed in Stage 9, S13).
+    ("namespace",),
     ("module_data_dir",),
     ("skills_dir",),
     ("logging", "file"),
@@ -340,6 +367,17 @@ def rewrite_config(
     if rehearsal:
         for section in REHEARSAL_DISABLED:
             assign((section, "enabled"), False)
+        for path, value in REHEARSAL_CONFIG:
+            assign(path, value)
+        # Seeded into every user without a briefing of the same name, at each
+        # start, and into `shared_block_configs` when a name has no row yet:
+        # the database switches below would not reach either.
+        if new.get("default_briefings"):
+            changes.append(f"default_briefings: dropped ({len(new.pop('default_briefings'))} briefing(s))")
+        for block in new.get("briefing_shared_blocks") or []:
+            if isinstance(block, dict) and block.get("enabled", True) is not False:
+                block["enabled"] = False
+                changes.append(f"briefing_shared_blocks {block.get('name', '?')!r}: enabled -> False")
 
     scan = [prefix for prefix, _ in prefixes]
     if old_home:
@@ -476,8 +514,7 @@ class DbReport:
     rebased: dict[str, int] = field(default_factory=dict)
     unmapped: list[str] = field(default_factory=list)
     report_only: list[str] = field(default_factory=list)
-    suspended_jobs: int = 0
-    disabled_briefings: int = 0
+    rehearsal: list[str] = field(default_factory=list)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -573,35 +610,106 @@ def rebase_database(
             report.report_only.append(f"istota_kv {namespace}/{key} ({user_id}) names a host path")
 
     if rehearsal:
-        report.suspended_jobs = conn.execute(
-            "SELECT count(*) FROM scheduled_jobs WHERE auto_disabled_at IS NULL"
-        ).fetchone()[0]
-        report.disabled_briefings = conn.execute(
-            "SELECT count(*) FROM briefing_configs WHERE enabled != 0"
-        ).fetchone()[0]
-        if write:
-            conn.execute(
-                "UPDATE scheduled_jobs SET auto_disabled_at = datetime('now') "
-                "WHERE auto_disabled_at IS NULL"
-            )
-            conn.execute("UPDATE briefing_configs SET enabled = 0")
+        report.rehearsal = _rehearse_database(conn, write=write)
     return report
+
+
+_MODULE_JOB = "name LIKE '\\_module.%' ESCAPE '\\'"
+
+#: ``(table, column, what it switches off, count query, update)``, in the order
+#: they are reported. A table or column the source's schema lacks is skipped.
+_REHEARSAL_ROWS = (
+    (
+        "scheduled_jobs", "auto_disabled_at", "scheduled job(s) suspended",
+        "SELECT count(*) FROM scheduled_jobs WHERE auto_disabled_at IS NULL",
+        # The daemon's suspension: the CRON.md sync rewrites `enabled` from each
+        # user's file every tick but never writes this column.
+        "UPDATE scheduled_jobs SET auto_disabled_at = datetime('now') "
+        "WHERE auto_disabled_at IS NULL",
+    ),
+    (
+        "scheduled_jobs", "disabled_at", "module job(s) switched off",
+        f"SELECT count(*) FROM scheduled_jobs WHERE {_MODULE_JOB} "
+        "AND NOT (enabled = 0 AND disabled_at IS NOT NULL)",
+        # A `_module.*` row is in nobody's CRON.md, and the module sync lifts the
+        # daemon's suspension after an hour; it keeps a user's `!cron disable`.
+        "UPDATE scheduled_jobs SET enabled = 0, "
+        "disabled_at = COALESCE(disabled_at, datetime('now')) "
+        f"WHERE {_MODULE_JOB} AND NOT (enabled = 0 AND disabled_at IS NOT NULL)",
+    ),
+    (
+        "briefing_configs", "enabled", "briefing(s) disabled",
+        "SELECT count(*) FROM briefing_configs WHERE enabled != 0",
+        "UPDATE briefing_configs SET enabled = 0 WHERE enabled != 0",
+    ),
+    (
+        "shared_block_configs", "enabled", "shared block(s) disabled",
+        "SELECT count(*) FROM shared_block_configs WHERE enabled != 0",
+        "UPDATE shared_block_configs SET enabled = 0 WHERE enabled != 0",
+    ),
+    (
+        # Per-user ntfy topics and tokens: a push to somebody's phone, from
+        # heartbeats, job output, alerts and finished tasks alike.
+        "secrets", "service", "ntfy credential(s) removed",
+        "SELECT count(*) FROM secrets WHERE service = 'ntfy'",
+        "DELETE FROM secrets WHERE service = 'ntfy'",
+    ),
+    (
+        "tasks", "status", "queued task(s) cancelled",
+        "SELECT count(*) FROM tasks WHERE status IN "
+        f"({', '.join(repr(s) for s in LIVE_TASK_STATUSES)})",
+        "UPDATE tasks SET status = 'cancelled', updated_at = datetime('now') "
+        f"WHERE status IN ({', '.join(repr(s) for s in LIVE_TASK_STATUSES)})",
+    ),
+)
+
+
+def _rehearse_database(conn: sqlite3.Connection, *, write: bool) -> list[str]:
+    """Switch off, in the imported copy, what would act on its own."""
+    lines = []
+    for table, column, what, count_sql, update_sql in _REHEARSAL_ROWS:
+        if column not in _columns(conn, table):
+            continue
+        count = conn.execute(count_sql).fetchone()[0]
+        if write and count:
+            conn.execute(update_sql)
+        lines.append(f"{count} {what}")
+    return lines
+
+
+def read_record(db_path: Path) -> dict | None:
+    """The ``_migration`` record, or None when this install was never imported.
+
+    Raises ``sqlite3.Error`` for a database it cannot read and ``ValueError``
+    for a record that is not a JSON object. ``doctor`` reads it through here.
+    """
+    conn = sqlite_util.connect_read_only(db_path)
+    try:
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shared_kv'"
+        ).fetchone() is None:
+            return None
+        row = conn.execute(
+            "SELECT value FROM shared_kv WHERE namespace = ? AND key = ?",
+            (MIGRATION_NAMESPACE, RECORD_KEY),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    record = json.loads(row[0])
+    if not isinstance(record, dict):
+        raise ValueError("the record is not a JSON object")
+    return record
 
 
 def _read_record(db_path: Path) -> dict | None:
     if not db_path.exists():
         return None
-    conn = sqlite_util.connect_read_only(db_path)
     try:
-        row = conn.execute(
-            "SELECT value FROM shared_kv WHERE namespace = ? AND key = ?",
-            (MIGRATION_NAMESPACE, RECORD_KEY),
-        ).fetchone()
+        return read_record(db_path)
     except sqlite3.Error:
         return None
-    finally:
-        conn.close()
-    return json.loads(row[0]) if row else None
 
 
 def _task_count(db_path: Path) -> int:
@@ -722,11 +830,8 @@ def _print_db_report(report: DbReport, out) -> None:
         out(f"  under no mapped prefix, left as is: {line}")
     for line in report.report_only:
         out(f"  report only: {line}")
-    if report.suspended_jobs or report.disabled_briefings:
-        out(
-            f"  rehearsal: {report.suspended_jobs} scheduled job(s) suspended, "
-            f"{report.disabled_briefings} briefing(s) disabled"
-        )
+    for line in report.rehearsal:
+        out(f"  rehearsal: {line}")
 
 
 def _scan_prefixes(source: Source, rewrite: ConfigRewrite) -> list[str]:

@@ -303,7 +303,7 @@ The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` ev
 
 ## Credentials
 
-Each is a file under `docker/secrets/`, named for the variable the daemon reads it from, lowercased: `claude_code_oauth_token`, `anthropic_api_key`, `istota_brain_native_api_key`, `istota_nextcloud_app_password`, `istota_web_oauth2_client_secret`, `istota_web_session_secret_key`, `istota_email_imap_password`, `istota_caldav_password`, `istota_developer_gitlab_token`, `istota_developer_github_token`. An empty file is a credential the install does not use. Credentials without a file here (the SMS and WhatsApp ones) go in `config.toml`, which `istota setup` creates 0600.
+Each is a file under `docker/secrets/`, named for the variable the daemon reads it from, lowercased: `claude_code_oauth_token`, `anthropic_api_key`, `istota_brain_native_api_key`, `istota_nextcloud_app_password`, `istota_web_oauth2_client_secret`, `istota_web_session_secret_key`, `istota_email_imap_password`, `istota_caldav_password`, `istota_developer_gitlab_token`, `istota_developer_github_token`, `istota_email_smtp_password`, `istota_sms_telnyx_api_key`, `istota_sms_telnyx_public_key`, `istota_sms_telnyx_messaging_profile_id`, `istota_google_workspace_client_secret`. An empty file is a credential the install does not use; the SMTP password falls back to the IMAP one. Credentials without a file here (the Twilio and WhatsApp ones) go in `config.toml`, which `istota setup` creates 0600.
 
 The stack has no settings of its own for Nextcloud: there is no bundled one to configure.
 
