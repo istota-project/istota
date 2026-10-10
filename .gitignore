@@ -101,3 +101,7 @@ src/istota/web_static/
 # Start from .private-data-local.example.
 .private-data-local
 
+
+# The stack directory a checkout doubles as: VM settings and the mount point.
+/docker/vm.env
+/docker/mount/

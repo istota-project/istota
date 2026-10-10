@@ -73,9 +73,9 @@ STUB_USER = {"id": 1, "username": "istota-test", "name": "Istota Test"}
 FORGE_TOKEN = "forge-token-for-the-smoke-tier"
 FORGE_PROJECT = "istota-test/smoke-project"
 
-# Where the daemon checks repositories out, inside the container. A tmpfs that
-# `docker-compose.test.yml` already declares, which the developer skill binds
-# read-write into the sandbox.
+# Where the daemon checks repositories out, inside the container: on the state
+# volume, as `istota setup` lays it out, and bound read-write into the sandbox
+# by the developer skill.
 CONTAINER_REPOS_DIR = "/data/repos"
 
 
@@ -231,9 +231,8 @@ class GitLabService(HttpStub):
         return {
             "developer": {
                 "enabled": True,
-                # A tmpfs the compose file already declares. The developer skill
-                # binds it read-write into the sandbox, which is where the
-                # scenarios clone.
+                # On the state volume. The developer skill binds it read-write
+                # into the sandbox, which is where the scenarios clone.
                 "repos_dir": CONTAINER_REPOS_DIR,
                 "gh_bin_path": "/usr/local/lib/istota_forge/gh",
                 "glab_bin_path": "/usr/local/lib/istota_forge/glab",

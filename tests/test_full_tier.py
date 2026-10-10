@@ -42,6 +42,7 @@ REPO = Path(__file__).resolve().parents[1]
 FULL_SCOPE = ["tests/full"]
 FULL_COMPOSE = REPO / "docker" / "docker-compose.yml"
 TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
+NEXTCLOUD_OVERLAY = REPO / "testbed" / "compose" / "nextcloud.yml"
 
 #: Obviously fake, so nothing here invents a credential-shaped string.
 CREDENTIALS = compose_support.FullCredentials(
@@ -61,6 +62,7 @@ SECRETS_DIR = Path("/nonexistent/secrets")
 def _env(services=None, credentials=CREDENTIALS) -> dict[str, str]:
     return compose_support.full_env(
         services or {}, credentials, config_dir=CONFIG_DIR, secrets_dir=SECRETS_DIR,
+        image="istota-test/lean:unit",
     )
 
 
@@ -137,11 +139,11 @@ class TestTheModuleSwitches:
         assert config.location.enabled is False
 
     def test_the_identity_variables_are_passed_through(self):
-        """`FULL_IDENTITY` is what this file hands compose for the bundled
-        Nextcloud's provisioning. `USER_NAME` is preflighted with
+        """`FULL_IDENTITY` is what this file hands compose for the Nextcloud
+        fixture's provisioning. `USER_NAME` is preflighted with
         `${USER_NAME:?}`, so getting its name wrong fails `up` during
         interpolation rather than at boot."""
-        compose = FULL_COMPOSE.read_text()
+        compose = NEXTCLOUD_OVERLAY.read_text()
         for variable in compose_support.FULL_IDENTITY:
             assert f"${{{variable}" in compose, variable
 
@@ -462,7 +464,8 @@ class TestTheProcessEnvironmentGuard:
             "ISTOTA_BOT_NAME", "ISTOTA_WEB_CALLBACK_URL", "ISTOTA_TALK_SIGNALING_PORT",
             "ISTOTA_TALK_SIGNALING_BACKEND_URLS", "ISTOTA_TEST_CONFIG_DIR",
             "ISTOTA_SECRETS_DIR", "ISTOTA_WEB_OAUTH2_CLIENT_ID",
-            "ISTOTA_WEB_OAUTH2_CLIENT_SECRET",
+            "ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "ISTOTA_TEST_IMAGE",
+            "ISTOTA_TESTBED_COMPOSE_DIR", "ISTOTA_TEST_BROWSER_IMAGE",
         }
         assert {k for k in environment if k.startswith("ISTOTA_")} == allowed
 
@@ -543,9 +546,9 @@ class TestTheSchedulerProbe:
         assert script.count("/proc/") == 1
 
     def test_wait_healthy_has_a_floor_under_a_spent_budget(self, tmp_path, monkeypatch):
-        """`_boot_full` hands over the remainder of a budget `up` has eaten
-        into, and `up` blocks on `depends_on: nextcloud: service_healthy`, whose
-        own check allows 300s of start period plus twenty 15s retries. Without a
+        """`_boot_stack` hands over the remainder of a budget `up` has eaten
+        into, and on the full shape `up` blocks on the fixture's health check,
+        which allows 300s of start period plus twenty 15s retries. Without a
         floor a slow but correct cold boot arrives here with one second."""
         seen = []
         monkeypatch.setattr(
@@ -558,6 +561,9 @@ class TestTheSchedulerProbe:
             args=["docker", "compose", "--project-name", "unit"],
             services={},
         )
+        monkeypatch.setattr(
+            stack, "exec", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        )
 
         stack.wait_healthy(timeout=1)
 
@@ -567,7 +573,7 @@ class TestTheSchedulerProbe:
 class TestTheKeptProjectIsNotSwept:
     def test_the_marker_is_in_the_project_name(self, tmp_path):
         pool = _pool(tmp_path, keep=True)
-        args, _ = pool._compose_args_full(profiles.FULL, tmp_path)
+        args, _ = pool._compose_args(profiles.FULL, tmp_path)
 
         assert compose_support.KEEP_PROJECT_MARKER in _project(args)
 
@@ -594,18 +600,30 @@ class TestTheKeptProjectIsNotSwept:
 
 
 class TestTheComposeInvocation:
-    def test_the_overlay_goes_on_last(self, tmp_path):
-        """Its concessions have to win. A profile overlay adds a service; adding
-        one must not be able to undo the seccomp grant."""
+    def test_the_overlays_go_on_in_their_order(self, tmp_path):
+        """Shipped file, profile overlays, concessions, then the Nextcloud
+        fixture, whose `/mnt/shared` has to win over the concessions' empty
+        one. A profile overlay adds a service; it comes before the
+        concessions."""
         pool = _pool(tmp_path)
         profile = profiles.FULL.__class__(
             "x", shape="full", compose_overlays=(Path("/tmp/mail.yml"),)
         )
 
-        args, _ = pool._compose_args_full(profile, tmp_path)
+        args, _ = pool._compose_args(profile, tmp_path)
 
         files = [args[i + 1] for i, token in enumerate(args) if token == "-f"]
-        assert files == [str(FULL_COMPOSE), "/tmp/mail.yml", str(TESTBED_OVERLAY)]
+        assert files == [
+            str(FULL_COMPOSE), "/tmp/mail.yml", str(TESTBED_OVERLAY), str(NEXTCLOUD_OVERLAY),
+        ]
+
+    def test_the_lean_shape_carries_no_fixture(self, tmp_path):
+        pool = _pool(tmp_path)
+
+        args, _ = pool._compose_args(profiles.BASE, tmp_path)
+
+        files = [args[i + 1] for i, token in enumerate(args) if token == "-f"]
+        assert files == [str(FULL_COMPOSE), str(TESTBED_OVERLAY)]
 
     def test_the_env_file_rides_in_the_argument_list(self, tmp_path):
         """Compose interpolates on *every* subcommand, so a variable supplied
@@ -613,7 +631,7 @@ class TestTheComposeInvocation:
         interpolation, before they touch a container."""
         pool = _pool(tmp_path)
 
-        args, env_file = pool._compose_args_full(profiles.FULL, tmp_path)
+        args, env_file = pool._compose_args(profiles.FULL, tmp_path)
 
         assert "--env-file" in args
         assert args[args.index("--env-file") + 1] == str(env_file)
@@ -626,13 +644,13 @@ class TestTheComposeInvocation:
         looks at again — `KEEP` would keep a growing pile of orphans and cache
         nothing."""
         ephemeral = _pool(tmp_path, keep=False)
-        first, _ = ephemeral._compose_args_full(profiles.FULL, tmp_path)
-        second, _ = ephemeral._compose_args_full(profiles.FULL, tmp_path)
+        first, _ = ephemeral._compose_args(profiles.FULL, tmp_path)
+        second, _ = ephemeral._compose_args(profiles.FULL, tmp_path)
         assert _project(first) != _project(second)
 
         kept = _pool(tmp_path, keep=True)
-        one, _ = kept._compose_args_full(profiles.FULL, tmp_path)
-        two, _ = kept._compose_args_full(profiles.FULL, tmp_path)
+        one, _ = kept._compose_args(profiles.FULL, tmp_path)
+        two, _ = kept._compose_args(profiles.FULL, tmp_path)
         assert _project(one) == _project(two)
 
 
@@ -642,9 +660,9 @@ class TestKeepSemantics:
     The spec's version wiped `shared_files` along with `istota_data`. That
     removes `/mnt/shared/.istota-provisioned`, which `provision-nc.sh` never
     rewrites — it is a `post-installation` hook and the Nextcloud image runs
-    those only when it performs the install — so `entrypoint.sh` waits its 600
-    seconds for a flag nothing will write, exits 1, and `restart: unless-stopped`
-    does that forever.
+    those only when it performs the install — so the fixture's health check
+    waits for a flag nothing will write, and `istota`, which depends on it,
+    never starts.
     """
 
     def test_only_the_daemons_own_volumes_are_wiped(self):
@@ -663,7 +681,7 @@ class TestKeepSemantics:
         assert "shared_files" not in compose_support.StackPool.KEEP_WIPES
 
     def test_an_ephemeral_session_gets_a_fresh_port_per_stack(self, tmp_path):
-        """`docker-compose.yml` publishes a *fixed* host port on nginx, and the
+        """The full shape publishes nginx on a *reserved* host port, and the
         pool can hold two full stacks at once — a `fresh=True` one alongside a
         cached one, or two `fresh=True` ones from different modules. One
         memoized port makes the second `up` fail on a bind, naming a port rather
@@ -1165,10 +1183,10 @@ class TestTheSharedMountName:
     `provision-nc.sh` creates the bot's `files_external` mount, and the mount
     point it chooses *is* the prefix the daemon has to put in front of every
     logical path before it becomes a DAV or OCS path — `/Users/alice` on the
-    volume is `/Shared Files/Users/alice` in the bot's Nextcloud tree. Compose
-    hands the name to the Nextcloud container; the daemon reads it from its
-    config, `[nextcloud] dav_prefix`, which the testbed writes as an install
-    moved off the compose Nextcloud keeps it.
+    volume is `/Shared Files/Users/alice` in the bot's Nextcloud tree. The
+    fixture hands the name to the Nextcloud container; the daemon reads it from
+    its config, `[nextcloud] dav_prefix`, which the testbed writes as an
+    install moved off the old bundled Nextcloud keeps it.
     """
 
     def test_the_nextcloud_container_and_the_config_agree(self, tmp_path):
@@ -1186,7 +1204,7 @@ class TestTheSharedMountName:
         mount_name = model["services"]["nextcloud"]["environment"][
             "ISTOTA_NC_SHARED_MOUNT_NAME"
         ]
-        script = (REPO / "docker" / "istota" / "provision-nc.sh").read_text()
+        script = (REPO / "testbed" / "compose" / "provision-nc.sh").read_text()
 
         fallback = re.search(r"\$\{ISTOTA_NC_SHARED_MOUNT_NAME:-([^}]*)\}", script)
 
@@ -1206,14 +1224,9 @@ class TestTheSharedMountName:
 def _pool(tmp_path, *, keep: bool = False) -> compose_support.StackPool:
     return compose_support.StackPool(
         workdir=tmp_path,
-        lean=compose_support.LeanShape(
-            compose_file=Path("/nonexistent/docker-compose.test.yml"),
-            image="istota-test/lean:unit",
-            prebuilt_overlay=Path("/nonexistent/prebuilt.yml"),
-        ),
-        full=compose_support.FullShape(
+        shape=compose_support.Shape(
             compose_file=FULL_COMPOSE,
-            overlay=TESTBED_OVERLAY,
+            image="istota-test/lean:unit",
             keep=keep,
             keep_dir=tmp_path / "keep",
         ),
@@ -1248,6 +1261,7 @@ def _compose_config(tmp_path, *, extra_env: dict[str, str] | None = None) -> dic
             "docker", "compose",
             "-f", str(FULL_COMPOSE),
             "-f", str(TESTBED_OVERLAY),
+            "-f", str(NEXTCLOUD_OVERLAY),
             "--project-name", "istota-testbed-unit",
             "--env-file", str(env_file),
             "config", "--format", "json",

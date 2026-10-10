@@ -578,7 +578,7 @@ def test_the_provisioning_enables_sharing_on_both_mounts():
     the human user unable to share out of their own workspace view, which is a
     second mount over the same bytes.
     """
-    script = (REPO / "docker" / "istota" / "provision-nc.sh").read_text()
+    script = (REPO / "testbed" / "compose" / "provision-nc.sh").read_text()
 
     options = re.findall(
         r'files_external:option\s+"\$\{(\w+)\}"\s+enable_sharing\s+true', script

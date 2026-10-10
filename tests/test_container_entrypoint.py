@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -48,7 +49,7 @@ db_path = "{db}"
 temp_dir = "{tmp}"
 
 [nextcloud]
-url = "http://nextcloud"
+url = "https://cloud.example.test"
 username = "istota"
 app_password = "pw"
 
@@ -90,8 +91,13 @@ class Volume:
         self.home = tmp_path / "home"
         self.home.mkdir()
         self.config = self.root / "config" / "config.toml"
+        self.workspace = tmp_path / "workspace"
+        self.mountinfo = tmp_path / "mountinfo"
+        self.mount_table("ext4")
         if config is not None:
-            self.config.write_text(config.format(db=self.db, tmp=tmp_path / "t"))
+            self.config.write_text(
+                config.format(db=self.db, tmp=tmp_path / "t", ws=self.workspace)
+            )
         (self.root / "config" / "admins").write_text(admins)
         for name, body in (
             ("istota", STUB.format(log=self.log, rooms_rc=rooms_rc)),
@@ -109,12 +115,25 @@ class Volume:
             "PATH": f"{self.bin}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}/usr/bin:/bin",
             "HOME": str(self.home),
             "ISTOTA_DATA_DIR": str(self.root),
+            # A host's mount table is not the container's; each test that
+            # cares writes its own.
+            "ISTOTA_MOUNTINFO": str(self.mountinfo),
             **env,
         }
         return subprocess.run(
             ["bash", str(ENTRYPOINT)], capture_output=True, text=True,
             env=environment, timeout=120,
         )
+
+    def mount_table(self, workspace_fstype: str | None) -> None:
+        """A mountinfo with an overlay root and, optionally, the workspace."""
+        lines = ["21 1 0:20 / / ro,relatime - overlay overlay rw"]
+        if workspace_fstype is not None:
+            mountpoint = str(self.workspace).replace(" ", "\\040")
+            lines.append(
+                f"33 21 0:31 / {mountpoint} rw,nosuid,nodev - {workspace_fstype} remote: rw"
+            )
+        self.mountinfo.write_text("\n".join(lines) + "\n")
 
     def calls(self) -> list[str]:
         if not self.log.exists():
@@ -238,6 +257,155 @@ class TestTalkRooms:
         assert any(c.startswith("scheduler --daemon") for c in volume.calls())
 
 
+FULL_INTEGRATION_CONFIG = """\
+db_path = "{db}"
+temp_dir = "{tmp}"
+workspace_path = "{ws}"
+
+[nextcloud]
+url = "https://cloud.example.test"
+username = "istota"
+
+[talk]
+enabled = false
+"""
+
+BUNDLED_NEXTCLOUD_CONFIG = """\
+db_path = "{db}"
+temp_dir = "{tmp}"
+workspace_path = "{ws}"
+
+[nextcloud]
+url = "http://nextcloud"
+username = "istota"
+"""
+
+SITE_CONFIG = LOCAL_CONFIG + """
+[site]
+hostname = "istota.example.test"
+"""
+
+
+def _resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return True
+
+
+class TestTheBundledNextcloudIsGone:
+    """A config `docker/init.sh` wrote still names the compose Nextcloud."""
+
+    def test_a_config_naming_it_is_refused_with_both_ways_out(self, tmp_path):
+        if _resolves("nextcloud"):
+            pytest.skip("a host named nextcloud resolves here")
+        volume = Volume(tmp_path, BUNDLED_NEXTCLOUD_CONFIG)
+
+        result = volume.run()
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "http://nextcloud" in result.stderr
+        assert "compose project of its own" in result.stderr
+        assert "local storage" in result.stderr
+        assert "docs/deployment/" in result.stderr
+        assert volume.calls() == []
+        assert not (volume.root / ".secret_key").exists()
+
+    def test_another_nextcloud_is_not_this_refusal(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("fuse.rclone")
+
+        result = volume.run()
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestTheExternalStoreMustBeMounted:
+    """Full integration never writes into an unmounted workspace (row 9)."""
+
+    def test_a_workspace_that_is_not_the_rclone_mount_is_refused(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("ext4")
+
+        result = volume.run()
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert str(volume.workspace) in result.stderr
+        assert "fuse.rclone" in result.stderr
+        assert "mount-nextcloud" in result.stderr
+        assert volume.calls() == []
+
+    def test_a_workspace_with_no_mount_of_its_own_is_refused(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table(None)
+
+        result = volume.run()
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "overlay" in result.stderr
+
+    def test_the_rclone_mount_passes(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("fuse.rclone")
+
+        result = volume.run()
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c.startswith("scheduler --daemon") for c in volume.calls())
+
+    def test_local_storage_needs_no_mount(self, tmp_path):
+        volume = Volume(tmp_path, LOCAL_CONFIG.replace(
+            'temp_dir = "{tmp}"', 'temp_dir = "{tmp}"\nworkspace_path = "{ws}"'))
+        volume.mount_table(None)
+
+        assert volume.run().returncode == 0
+
+    def test_the_testbed_volume_passes_as_a_mount_point_of_any_type(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("ext4")
+
+        result = volume.run(ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE="1")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_the_testbed_concession_still_needs_a_mount_point(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table(None)
+
+        result = volume.run(ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE="1")
+
+        assert result.returncode == 78, result.stdout + result.stderr
+
+
+class TestThePublicName:
+    """`DOMAIN` and `[site] hostname` drifting is a login that fails its origin check."""
+
+    @pytest.mark.parametrize("ingress", ["direct", "proxied"])
+    def test_a_mismatch_behind_tls_is_refused(self, tmp_path, ingress):
+        volume = Volume(tmp_path, SITE_CONFIG)
+
+        result = volume.run(INGRESS=ingress, DOMAIN="other.example.test")
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "other.example.test" in result.stderr
+        assert "istota.example.test" in result.stderr
+        assert volume.calls() == []
+
+    @pytest.mark.parametrize("ingress", ["direct", "proxied"])
+    def test_the_same_name_passes(self, tmp_path, ingress):
+        volume = Volume(tmp_path, SITE_CONFIG)
+
+        result = volume.run(INGRESS=ingress, DOMAIN="istota.example.test")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_local_ingress_is_not_checked(self, tmp_path):
+        volume = Volume(tmp_path, SITE_CONFIG)
+
+        assert volume.run(INGRESS="local", DOMAIN="localhost").returncode == 0
+
+
 class TestClaudeCode:
     def test_the_token_becomes_a_private_credentials_file_and_is_not_printed(self, tmp_path):
         volume = Volume(tmp_path, LOCAL_CONFIG)
@@ -258,11 +426,32 @@ def test_the_entrypoint_is_under_the_spec_target():
 
 
 class TestIstotaSecrets:
-    def _run(self, directory: Path) -> subprocess.CompletedProcess:
+    def _run(self, directory: Path, **env: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["bash", str(SECRETS), "env"], capture_output=True, text=True, timeout=30,
-            env={"PATH": "/usr/bin:/bin", "ISTOTA_SECRETS_DIR": str(directory)},
+            env={
+                "PATH": "/usr/bin:/bin", "ISTOTA_SECRETS_DIR": str(directory),
+                "ISTOTA_SECRET_KEY_FILE": str(directory / "absent-key"), **env,
+            },
         )
+
+    def test_the_master_key_comes_from_the_state_volume(self, tmp_path):
+        """A CLI call through `docker compose exec` reads stored credentials
+        the way the daemon does, so it needs the same key."""
+        key = tmp_path / "secret_key"
+        key.write_text("k" * 64)
+
+        result = self._run(tmp_path, ISTOTA_SECRET_KEY_FILE=str(key))
+
+        assert "ISTOTA_SECRET_KEY=" + "k" * 64 in result.stdout.splitlines()
+
+    def test_a_key_already_in_the_environment_wins(self, tmp_path):
+        key = tmp_path / "secret_key"
+        key.write_text("k" * 64)
+
+        result = self._run(tmp_path, ISTOTA_SECRET_KEY_FILE=str(key), ISTOTA_SECRET_KEY="e" * 64)
+
+        assert "ISTOTA_SECRET_KEY=" + "e" * 64 in result.stdout.splitlines()
 
     def test_each_file_becomes_its_uppercase_variable(self, tmp_path):
         (tmp_path / "istota_nextcloud_app_password").write_text("pw with spaces\n")

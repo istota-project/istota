@@ -1,0 +1,169 @@
+# The full test tier's Nextcloud: a fixture, not a supported way to run one.
+#
+# The shipped stack runs no Nextcloud (the one-deployment-shape spec's Stage 4);
+# an operator points istota at a Nextcloud of their own. The full tier still
+# needs a real one, because a client that negotiates capabilities is not to be
+# stubbed (.claude/rules/testbed.md, rule 4), so this file carries the
+# nextcloud, postgres and redis services and the provisioning script that used
+# to be in docker/docker-compose.yml, unchanged in what they do.
+#
+# The layout is the one a Docker install moved off the old bundled Nextcloud
+# runs (docs/deployment/moving-the-bundled-nextcloud.md): the bot's files are a
+# `files_external` mount called `Shared Files` over one volume, and istota sees
+# that volume at /mnt/shared. Here istota shares the Docker volume directly
+# rather than through an rclone mount of the bot's WebDAV tree, which no install
+# ships; the mount itself is the vm tier's job.
+#
+# Merged after testbed.yml, so its /mnt/shared wins over the empty volume that
+# file puts there for the lean shape. Paths arrive through the env-file
+# (ISTOTA_TESTBED_COMPOSE_DIR), because compose resolves a relative path against
+# the first -f file's directory, which is docker/.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?the harness must export POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nextcloud"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # The shared volume, owned by www-data with a setgid root, so what either
+  # side creates there keeps group www-data (the istota user is in it).
+  init-shared:
+    image: alpine:3
+    volumes:
+      - shared_files:/mnt/shared
+    command: ["sh", "-c", "chown 33:33 /mnt/shared && chmod 2775 /mnt/shared"]
+
+  nextcloud:
+    image: nextcloud:30-apache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      init-shared:
+        condition: service_completed_successfully
+    volumes:
+      - nextcloud_html:/var/www/html
+      - nextcloud_data:/var/www/html/data
+      - shared_files:/mnt/shared
+      - ${ISTOTA_TESTBED_COMPOSE_DIR:?the harness must export ISTOTA_TESTBED_COMPOSE_DIR}/provision-nc.sh:/docker-entrypoint-hooks.d/post-installation/provision.sh:ro
+    expose:
+      - "80"
+    environment:
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?the harness must export ADMIN_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: nextcloud
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      NEXTCLOUD_TRUSTED_DOMAINS: "localhost nextcloud"
+      # URLs as the browser sees them, through the stack's nginx on NC_PORT.
+      OVERWRITEHOST: localhost:${NC_PORT:?the harness must export NC_PORT}
+      OVERWRITEPROTOCOL: http
+      OVERWRITECLIURL: http://localhost:${NC_PORT}
+      TRUSTED_PROXIES: "172.16.0.0/12 192.168.0.0/16 10.0.0.0/8"
+      # Passed to provision-nc.sh.
+      BOT_USER: ${BOT_USER:?the harness must export BOT_USER}
+      BOT_PASSWORD: ${BOT_PASSWORD:?the harness must export BOT_PASSWORD}
+      ISTOTA_BOT_NAME: ${ISTOTA_BOT_NAME:-Istota}
+      USER_NAME: ${USER_NAME:?the harness must export USER_NAME}
+      USER_PASSWORD: ${USER_PASSWORD:?the harness must export USER_PASSWORD}
+      USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
+      ISTOTA_NC_SHARED_MOUNT_NAME: "Shared Files"
+      # Baked into `oauth2_clients` at first install, never revisited.
+      ISTOTA_WEB_CALLBACK_URL: ${ISTOTA_WEB_CALLBACK_URL:?the harness must export ISTOTA_WEB_CALLBACK_URL}
+      ISTOTA_TALK_SIGNALING_SERVER: ${ISTOTA_TALK_SIGNALING_SERVER:-}
+      ISTOTA_TALK_SIGNALING_SECRET: ${ISTOTA_TALK_SIGNALING_SECRET:-}
+      ISTOTA_WEB_OAUTH2_CLIENT_ID: ${ISTOTA_WEB_OAUTH2_CLIENT_ID:-}
+      ISTOTA_WEB_OAUTH2_CLIENT_SECRET: ${ISTOTA_WEB_OAUTH2_CLIENT_SECRET:-}
+    # Installed *and* provisioned: the bot user, Talk and the mounts exist only
+    # once the post-installation hook writes its flag.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true' && test -f /mnt/shared/.istota-provisioned"]
+      interval: 15s
+      timeout: 10s
+      start_period: 300s
+      retries: 20
+
+  # What the old root phase did for the bundled Nextcloud on every boot, now
+  # the fixture's: the trees provisioning made go to www-data, directories
+  # setgid and group-writable, files group-writable, so the daemon (uid 10001,
+  # in group www-data) can write where Nextcloud wrote.
+  shared-convention:
+    image: alpine:3
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    volumes:
+      - shared_files:/mnt/shared
+    command:
+      - sh
+      - -c
+      - >-
+        for d in /mnt/shared/Users /mnt/shared/Channels; do
+        [ -d "$$d" ] || continue;
+        chown -R 33:33 "$$d";
+        find "$$d" -type d -exec chmod 2775 {} +;
+        find "$$d" -type f -exec chmod 664 {} +;
+        done
+
+  istota:
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+      shared-convention:
+        condition: service_completed_successfully
+    volumes:
+      - shared_files:/mnt/shared
+      # Talk attachments, which the scheduler's nc-data fallback reads out of
+      # the fixture's data directory.
+      - nextcloud_data:/mnt/nc-data:ro
+    environment:
+      # The entrypoint refuses a full-integration workspace that is not the
+      # VM's rclone mount. This one is the shared Docker volume above, so the
+      # refusal is narrowed to "a mount point of its own" (entrypoint.sh).
+      ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE: "1"
+
+  web:
+    volumes:
+      - shared_files:/mnt/shared
+
+  webhooks:
+    volumes:
+      - shared_files:/mnt/shared
+
+  nginx:
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    volumes:
+      - ${ISTOTA_TESTBED_COMPOSE_DIR}/nextcloud-locations.conf:/etc/istota-testbed/root-locations.conf:ro
+    environment:
+      ISTOTA_NGINX_ROOT_LOCATIONS: /etc/istota-testbed/root-locations.conf
+
+volumes:
+  postgres_data:
+  redis_data:
+  nextcloud_html:
+  nextcloud_data:
+  shared_files:

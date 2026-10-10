@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Email sign-in is a typed code (ISSUE-574), so set-password is the one route
 # left that carries a credential in its query string.
 TOKEN_PATHS = ("/istota/auth/set-password",)
-NGINX = ("docker/nginx/default.conf.template", "deploy/ansible/templates/istota.conf.j2")
+NGINX = ("docker/nginx/istota.conf.template", "deploy/ansible/templates/istota.conf.j2")
 LAUNCHERS = ("docker/docker-compose.yml", "deploy/ansible/templates/istota-web.service.j2")
 
 
@@ -71,8 +71,11 @@ def assert_nginx_suppression(text):
         block = match.group(1)
         assert "access_log off;" in block, f"token access logging enabled: {path}"
         assert "proxy_pass http://" in block
-        for header in ("Host $http_host", "X-Real-IP $remote_addr", "X-Forwarded-For $proxy_add_x_forwarded_for", "X-Forwarded-Proto $scheme"):
+        for header in ("Host $http_host", "X-Real-IP $remote_addr", "X-Forwarded-For $proxy_add_x_forwarded_for"):
             assert f"proxy_set_header {header};" in block
+        # The compose nginx forwards the scheme its ingress mode set
+        # (`$forwarded_proto`); the Ansible template is always the edge.
+        assert re.search(r"proxy_set_header X-Forwarded-Proto \$(scheme|forwarded_proto);", block)
 
 
 @pytest.mark.parametrize("path", NGINX)

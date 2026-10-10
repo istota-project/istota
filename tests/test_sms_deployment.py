@@ -18,7 +18,7 @@ from tests.test_ansible_config_template import (
 
 REPO = Path(__file__).resolve().parent.parent
 COMPOSE = REPO / "docker" / "docker-compose.yml"
-DOCKER_NGINX = REPO / "docker" / "nginx" / "default.conf.template"
+DOCKER_NGINX = REPO / "docker" / "nginx" / "istota.conf.template"
 ANSIBLE = REPO / "deploy" / "ansible"
 
 SMS_VALUES = {

@@ -271,7 +271,7 @@ class TestAttachmentsWithoutNextcloud:
     **The spec expected the fallback branch here and that is not what happens.**
     `upload_file_to_inbox_v2` branches on `config.has_workspace`, not on the storage
     backend, and the config names `workspace_path` as the literal
-    `/mnt/shared` on every profile — so the "upload" is a `shutil.copy2` onto a
+    `/data/workspace` on every lean profile — so the "upload" is a `shutil.copy2` onto a
     directory, and it succeeds whether or not a Nextcloud exists to serve it.
     The local-path fallback is only reached when that copy *fails*, which on
     this shape would take breaking the workspace directory.
@@ -304,8 +304,8 @@ class TestAttachmentsWithoutNextcloud:
         assert stored.endswith('notes.txt"]'), stored
 
         # And the bytes really are there, under a name the daemon chose. Read
-        # from inside the container, because `/mnt/shared` is a tmpfs the
-        # compose file declares and the host has no view of it.
-        listing = stack.exec(["ls", "/mnt/shared/Users/testuser/inbox"])
+        # from inside the container, because the workspace is on the state
+        # volume and the host has no view of it.
+        listing = stack.exec(["ls", "/data/workspace/Users/testuser/inbox"])
         assert listing.returncode == 0, listing.stderr
         assert "notes.txt" in listing.stdout, listing.stdout

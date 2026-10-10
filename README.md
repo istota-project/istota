@@ -235,7 +235,7 @@ Istota has three deployment shapes.
 | Shape | Intended use | Nextcloud | Task sandbox |
 | --- | --- | --- | --- |
 | **Bare-metal server** | A persistent, multi-user installation on a Debian or Ubuntu VM | Connects to an existing Nextcloud | Bubblewrap and cgroups |
-| **Docker server** | Evaluation or a self-contained server stack with bundled Nextcloud, PostgreSQL, Redis, nginx, and the Istota web app | Bundled | Unsandboxed in the shipped Compose configuration |
+| **Docker server** | A server stack of the Istota scheduler, web app and nginx, in a VM dedicated to it | Optional: local storage, or an existing Nextcloud | Sandboxed under the shipped Compose run contract |
 | **Standalone** | A trusted single-user installation on your own machine | Not required | Unsandboxed by design |
 
 ### Bare-metal server

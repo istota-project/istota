@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from testbed import profiles
 from testbed import stack as compose_support
@@ -39,8 +40,10 @@ from testbed.services import gitlab
 from tests.support.nested_pytest import run_nested_pytest
 
 REPO = Path(__file__).resolve().parents[1]
-PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
-COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
+#: The lean stack: the shipped compose file plus the harness concessions.
+COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
+TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
+NEXTCLOUD_OVERLAY = REPO / "testbed" / "compose" / "nextcloud.yml"
 
 #: What the nested collects below walk. A tier guard asserts about the items of
 #: one tier, so it need not pay for the whole tree — 26631 items against 278
@@ -217,31 +220,59 @@ def _collect(scope: list[str], args: list[str] | None = None):
     )
 
 
+def _lean_env_file(tmp_path: Path, **extra: str) -> Path:
+    """The env-file a lean stack boots with, as `stack.lean_env` builds it."""
+    environment = compose_support.lean_env(
+        {}, image="istota-test/lean:unit", config_dir=tmp_path, secrets_dir=tmp_path / "secrets",
+    )
+    environment.update(extra)
+    compose_support.write_secrets(tmp_path / "secrets", {})
+    return compose_support.write_env_file(tmp_path / "compose.env", environment)
+
+
 class TestTheComposeFileIsAddressable:
     """`docker compose config` is the parser, not a YAML load — it applies the
     interpolation and schema rules the real invocation will."""
 
-    def _config(self, args: list[str], *, env: dict) -> subprocess.CompletedProcess:
+    def _config(self, args: list[str], *, env: dict, what: str = "--services") -> subprocess.CompletedProcess:
         return subprocess.run(
-            args + ["config", "--services"],
+            args + ["config", what],
             capture_output=True,
             text=True,
             timeout=60,
             env=env,
         )
 
-    def test_the_compose_file_is_valid_and_names_one_service(self, tmp_path):
+    def test_the_lean_stack_is_the_shipped_services(self, tmp_path):
+        """No Nextcloud, no harness-only service: istota, web and nginx, the
+        stack an operator runs with no profile on."""
         _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
         args = compose_support.compose_args(
-            COMPOSE_FILE, project="cfg-check", env_file=env_file
+            COMPOSE_FILE, project="cfg-check", env_file=_lean_env_file(tmp_path),
+            overlays=[TESTBED_OVERLAY],
         )
 
         result = self._config(args, env=_MINIMAL_ENV)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-        assert result.stdout.split() == ["istota"], result.stdout
+        assert sorted(result.stdout.split()) == ["istota", "nginx", "web"], result.stdout
+
+    def test_the_full_stack_adds_the_fixture(self, tmp_path):
+        _require_compose_cli()
+        env_file = _lean_env_file(
+            tmp_path, POSTGRES_PASSWORD="p", ADMIN_PASSWORD="p", NC_PORT="18080",
+            BOT_USER="istota", BOT_PASSWORD="p", USER_NAME="testuser",
+            USER_PASSWORD="p", ISTOTA_WEB_CALLBACK_URL="http://localhost:18080/istota/callback",
+        )
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="cfg-check", env_file=env_file,
+            overlays=[TESTBED_OVERLAY, NEXTCLOUD_OVERLAY],
+        )
+
+        result = self._config(args, env=_MINIMAL_ENV)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert {"nextcloud", "postgres", "redis"} <= set(result.stdout.split())
 
     def test_the_env_file_alone_satisfies_interpolation(self, tmp_path):
         """The bug this tier actually shipped once, pinned.
@@ -259,13 +290,13 @@ class TestTheComposeFileIsAddressable:
         exact distinction that broke.
         """
         _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
-
         from_args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file
+            COMPOSE_FILE, project="p", env_file=_lean_env_file(tmp_path),
+            overlays=[TESTBED_OVERLAY],
         )
-        without = compose_support.compose_args(COMPOSE_FILE, project="p")
+        without = compose_support.compose_args(
+            COMPOSE_FILE, project="p", overlays=[TESTBED_OVERLAY],
+        )
 
         assert self._config(from_args, env=_MINIMAL_ENV).returncode == 0
         # And the control: no env file, no ambient variable, so it must fail.
@@ -273,150 +304,135 @@ class TestTheComposeFileIsAddressable:
         # value came from.
         assert self._config(without, env=_MINIMAL_ENV).returncode != 0
 
-    def test_the_config_dir_is_required_rather_than_defaulted(self):
-        # `:?` not `:-`. A default would silently mount some other directory and
-        # the daemon would boot with no config, which surfaces as a health-check
-        # timeout rather than as "the harness forgot to supply this".
-        body = COMPOSE_FILE.read_text()
+    def test_the_config_dir_and_the_image_are_required_rather_than_defaulted(self):
+        # `:?` not `:-`. A default config directory would silently mount some
+        # other directory and the daemon would boot with no config, which
+        # surfaces as a health-check timeout; an empty image renders a service
+        # with no image at all.
+        body = TESTBED_OVERLAY.read_text()
 
         assert "${ISTOTA_TEST_CONFIG_DIR:?" in body, body[:400]
+        assert "${ISTOTA_TEST_IMAGE:?" in body, body[:400]
 
 
-class TestThePrebuiltOverlay:
-    """The overlay that points the stack at an image somebody else built.
+class TestTheImage:
+    """Every service built from the istota Dockerfile runs the session's tag.
 
-    Its only caller is the negative control, and the control is the one thing
-    proving the smoke tier can see a broken deployment — so an overlay that
-    silently failed to apply would disarm the tier's own falsification while
-    every test still passed.
+    A negative control runs a prebuilt image through the same tag variable, and
+    the pool passes no `--build` for it, so compose runs the tag as it is
+    rather than rebuilding the checkout over it, which would test the correct
+    image and pass.
     """
 
-    def test_the_merged_model_runs_the_named_image_and_builds_nothing(self, tmp_path):
-        """`build: !reset null` is the whole point, so it is what is asserted.
-
-        A service carrying both `build` and `image` is one compose rebuilds,
-        tagging the result over the name we asked it to run — the control would
-        then test the *correct* image and pass. `config` renders the merged
-        model, which is the only place that outcome is visible before a
-        container exists.
-        """
+    def _merged(self, tmp_path: Path, image: str) -> dict:
         _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(
-            f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n"
-            "ISTOTA_TEST_IMAGE=istota-test/no-forge:pinned\n"
-        )
         args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
+            COMPOSE_FILE, project="p", env_file=_lean_env_file(tmp_path, ISTOTA_TEST_IMAGE=image),
+            overlays=[TESTBED_OVERLAY], compose_profiles=("location",),
         )
-
         result = subprocess.run(
-            args + ["config"], capture_output=True, text=True, timeout=60,
-            env=_MINIMAL_ENV,
+            args + ["config", "--format", "json"], capture_output=True, text=True,
+            timeout=60, env=_MINIMAL_ENV,
         )
-
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-        assert "istota-test/no-forge:pinned" in result.stdout, result.stdout
-        assert "build:" not in result.stdout, (
-            "the overlay left a build section in the merged model, so compose "
-            "would rebuild and retag over the image the control asked for\n"
-            + result.stdout
+        return json.loads(result.stdout)
+
+    def test_istota_web_and_webhooks_run_the_named_tag(self, tmp_path):
+        merged = self._merged(tmp_path, "istota-test/no-forge:pinned")
+
+        for name in ("istota", "web", "webhooks"):
+            assert merged["services"][name]["image"] == "istota-test/no-forge:pinned", name
+
+    def test_a_profile_with_its_own_image_is_never_built(self, tmp_path, monkeypatch):
+        pool = compose_support.StackPool(
+            workdir=tmp_path,
+            shape=compose_support.Shape(compose_file=COMPOSE_FILE, image="istota-test/lean:unit"),
         )
+        calls: list[dict] = []
 
-    def test_the_image_is_required_rather_than_defaulted(self, tmp_path):
-        """`:?` not `:-`. An empty default renders a service with no image at
-        all, and the failure arrives as a compose error about a malformed
-        service rather than as "the harness forgot to say which image"."""
-        _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
-        args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
-        )
+        def fake_up(args, *, platform="", env=None, build=True, skip=()):
+            calls.append({"build": build, "args": args, "skip": skip})
+            raise compose_support.StackError("stop here")
 
-        result = subprocess.run(
-            args + ["config"], capture_output=True, text=True, timeout=60,
-            env=_MINIMAL_ENV,
-        )
+        monkeypatch.setattr(compose_support, "up", fake_up)
+        monkeypatch.setattr(compose_support, "down", lambda *a, **k: None)
+        control = dataclasses.replace(profiles.BASE, image="istota-test/no-forge:pinned")
 
-        assert result.returncode != 0
+        with pytest.raises(compose_support.StackError):
+            pool.get(control)
+        with pytest.raises(compose_support.StackError):
+            pool.get(profiles.BASE)
 
-    def test_the_base_file_still_builds_when_no_overlay_is_applied(self, tmp_path):
-        """The control for the control. Without this, the assertion above
-        would pass on a base file that had stopped declaring a build at all."""
-        _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
-        args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file
-        )
-
-        result = subprocess.run(
-            args + ["config"], capture_output=True, text=True, timeout=60,
-            env=_MINIMAL_ENV,
-        )
-
-        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-        assert "build:" in result.stdout, result.stdout
+        assert [call["build"] for call in calls] == [False, True]
+        # A lean profile that reads no web app starts neither web nor nginx.
+        assert calls[1]["skip"] == ("web", "nginx")
 
 
-class TestNoUnconfinedGrantInEitherComposeFile:
+class TestNoUnconfinedGrantInAnyComposeFile:
     """The sandbox grant is the shipped profile pair, never `unconfined`.
 
-    Both compose files carry the same run contract now, held line by line in
-    `tests/test_container_security_profiles.py`. What this keeps out is the
-    wider grant the lean file used to carry (`seccomp:unconfined`) and its
+    The shipped file carries the run contract, and no test overlay may touch it
+    (`tests/test_container_security_profiles.py`). What this keeps out is the
+    wider grant the old lean file carried (`seccomp:unconfined`) and its
     AppArmor equivalent, which Stage 1 measured lets a uid-0 exec write VM
     sysctls. A copy across while debugging would otherwise pass every witness:
     unconfined is strictly more permissive than the profiles.
     """
 
-    @pytest.mark.parametrize("compose", ["docker-compose.yml", "docker-compose.test.yml"])
+    @pytest.mark.parametrize(
+        "compose",
+        ["docker/docker-compose.yml", "testbed/compose/testbed.yml", "testbed/compose/nextcloud.yml"],
+    )
     @pytest.mark.parametrize(
         "grant",
         ["seccomp:unconfined", "seccomp=unconfined", "apparmor:unconfined",
          "apparmor=unconfined", "privileged:"],
     )
     def test_no_unconfined_grant(self, compose, grant):
-        lines = (REPO / "docker" / compose).read_text().splitlines()
+        lines = (REPO / compose).read_text().splitlines()
         offenders = [
             f"{number}: {line.strip()}"
             for number, line in enumerate(lines, 1)
             if grant in line and not line.strip().startswith("#")
         ]
 
-        assert not offenders, f"docker/{compose} grants {grant!r}: {offenders}"
+        assert not offenders, f"{compose} grants {grant!r}: {offenders}"
 
 
 class TestTheStackStartsTheWayTheDeploymentDoes:
-    def test_the_schema_is_created_before_the_scheduler_runs(self):
-        """`init` is not optional, and nothing else does it.
-
-        `db.init_db` is reached from the `init` subcommand alone — the scheduler
-        opens the DB without creating a schema. The shipped entrypoint runs
-        `istota … init` before exec'ing the scheduler; a lean stack that skips
-        it comes up and then logs "no such table: tasks" on every tick, forever.
-        Measured, before this was fixed.
-        """
-        body = COMPOSE_FILE.read_text()
-
-        assert "init &&" in body, "the lean stack does not run `istota init`"
-        assert "istota-scheduler" in body
+    def test_the_entrypoint_is_not_bypassed(self):
+        """The lean shape used to run `init` and the scheduler itself. It runs
+        the shipped entrypoint now, which is what makes a smoke boot a witness
+        for it: no overlay gives the istota service an entrypoint or a command."""
+        overlay = yaml.load(TESTBED_OVERLAY.read_text(), Loader=_ComposeLoader)
+        assert not {"entrypoint", "command"} & set(overlay["services"]["istota"])
 
     def test_the_health_check_asks_for_the_schema_not_the_file(self):
         """A file check is satisfied before `init` has run.
 
         Anything that opens the DB creates the file, so `test -f` reports
         healthy on a daemon that cannot dispatch. The health check has to name
-        a table.
+        a table, on the shipped file and on the overlay that polls it faster.
         """
-        body = COMPOSE_FILE.read_text()
+        for path in (COMPOSE_FILE, TESTBED_OVERLAY):
+            body = path.read_text()
+            assert "test -f /data/db/istota.db" not in body, path
+            assert "sqlite_master" in body and "'tasks'" in body, path
 
-        assert "test -f /data/db/istota.db" not in body, (
-            "the health check is back to a bare file test, which passes on a "
-            "container with no schema"
-        )
-        assert "sqlite_master" in body and "'tasks'" in body, body
+
+class _ComposeLoader(yaml.SafeLoader):
+    """Reads compose's merge tags (`!reset`, `!override`) as their plain value."""
+
+
+for _tag in ("!reset", "!override"):
+    _ComposeLoader.add_constructor(
+        _tag,
+        lambda loader, node: (
+            loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode)
+            else loader.construct_mapping(node) if isinstance(node, yaml.MappingNode)
+            else loader.construct_scalar(node)
+        ),
+    )
 
 
 class TestComposeArgs:
@@ -947,11 +963,7 @@ class TestStackPool:
     def _pool(self, tmp_path, monkeypatch) -> tuple:
         pool = compose_support.StackPool(
             workdir=tmp_path,
-            lean=compose_support.LeanShape(
-                compose_file=COMPOSE_FILE,
-                    image="istota-test/lean:unit",
-                prebuilt_overlay=PREBUILT_OVERLAY,
-            ),
+            shape=compose_support.Shape(compose_file=COMPOSE_FILE, image="istota-test/lean:unit"),
         )
         booted: list = []
         torn_down: list = []
@@ -1054,35 +1066,10 @@ class TestStackPool:
 
         assert len(seen) == 2
 
-    def test_a_full_shape_profile_needs_a_full_shape_to_boot_from(self, tmp_path):
-        """A pool with no `full=` must say so rather than boot a lean stack.
-
-        A one-container lean stack has no Nextcloud, no entrypoint and no
-        provisioning, so it would answer every assertion in `tests/full/`
-        wrongly rather than failing. The pool is constructible without a
-        `FullShape` on purpose — an external driver consuming `testbed` may only
-        want the lean one — which is what makes the guard necessary.
-        """
-        pool = compose_support.StackPool(
-            workdir=tmp_path,
-            lean=compose_support.LeanShape(
-                compose_file=COMPOSE_FILE,
-                    image="istota-test/lean:unit",
-                prebuilt_overlay=PREBUILT_OVERLAY,
-            ),
-        )
-
-        with pytest.raises(compose_support.StackError, match="no `full="):
-            pool.get(profiles.FULL)
-
     def test_an_unknown_shape_names_the_shapes_that_exist(self, tmp_path):
         pool = compose_support.StackPool(
             workdir=tmp_path,
-            lean=compose_support.LeanShape(
-                compose_file=COMPOSE_FILE,
-                    image="istota-test/lean:unit",
-                prebuilt_overlay=PREBUILT_OVERLAY,
-            ),
+            shape=compose_support.Shape(compose_file=COMPOSE_FILE, image="istota-test/lean:unit"),
         )
         nonsense = dataclasses.replace(profiles.BASE, name="odd", shape="medium")
 

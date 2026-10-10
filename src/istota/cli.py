@@ -4742,7 +4742,8 @@ def main():
     setup_parser.add_argument("--listen-addr", help="Proxied ingress: the private address to listen on")
     setup_parser.add_argument("--listen-port", type=int, help="Proxied ingress: the port to listen on")
     setup_parser.add_argument(
-        "--tls-cert-source", choices=["acme", "files"], help="Direct ingress: certificate source",
+        "--tls-cert-source", choices=["acme", "files"],
+        help="Certificate source: acme or files for direct ingress, files (or none) for proxied",
     )
     setup_parser.add_argument("--nextcloud-url", help="Existing Nextcloud, as the stack reaches it")
     setup_parser.add_argument("--nextcloud-public-url", help="The same Nextcloud, as browsers reach it")

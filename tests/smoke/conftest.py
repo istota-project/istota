@@ -1,16 +1,12 @@
 """The lean stack, brought up once per profile and shared for the session.
 
-Everything the lean shape exists for is getting from "a checkout" to "a running
-daemon that will answer a task" in under thirty seconds, with no Nextcloud and
-no API key. Three pieces make that possible, and each replaces something the
-full stack does slowly:
-
-- the config is rendered **on the host** by the same `render-config.sh` the
-  image ships, so the container never enters the provisioning branch and its
-  120-second Nextcloud polling loop;
-- the model is a scripted HTTP endpoint in the pytest process, reached through
-  `[brain.native] base_url`, so no credential and no network are involved;
-- the stack is one service.
+The lean shape is the shipped compose file plus `testbed/compose/testbed.yml`,
+booted through the shipped entrypoint, with local storage and no Nextcloud:
+the deployment an operator runs by default. It gets from "a checkout" to "a
+running daemon that will answer a task" in seconds because the config is an
+input the testbed writes before boot, and the model is a scripted HTTP
+endpoint in the pytest process, reached through `[brain.native] base_url`, so
+no credential and no external network are involved.
 
 A test declares what it needs and is handed a stack that already has it:
 
@@ -114,6 +110,25 @@ def no_forge_image(pytestconfig) -> str:
             pytrace=False,
         )
     return tag
+
+
+@pytest.fixture(scope="session")
+def testbed_browser_image(pytestconfig) -> str:
+    """The shipped browser image, built by the image tier's rule and tag.
+
+    `ISTOTA_BROWSER_IMAGE_TAG` first, as the image tier honours it. Otherwise a
+    `docker build` with that tier's tag, which is a no-op when an image tier run
+    already built this tree's browser.
+    """
+    _require_no_xdist(pytestconfig)
+    require_docker()
+    preexisting = os.environ.get("ISTOTA_BROWSER_IMAGE_TAG")
+    if preexisting:
+        return preexisting
+    dockerfile = REPO / "docker" / "browser" / "Dockerfile"
+    return image_support.build_image(
+        dockerfile, dockerfile.parent, platform="linux/amd64", prefix="browser",
+    ).tag
 
 
 # -- the email suite ---------------------------------------------------------

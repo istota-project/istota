@@ -1,13 +1,24 @@
-# The bot's `files_external` mount point, owned here because two containers
-# have to agree on it and neither can derive it from the other.
+# The stack ships no Nextcloud. Storage is one of two modes, chosen by
+# `[nextcloud] url` in config.toml:
 #
-# `provision-nc.sh` mounts the shared volume into the bot's Nextcloud file tree
-# under this name, so `/Users/alice` on the volume is `/Shared Files/Users/alice`
-# to the bot over DAV and OCS. The daemon has to send that second form, and a
-# second literal in the istota service would drift from the first the day
-# somebody renamed the mount — the symptom being a 404 from a client that reads
-# as correct on its own. One value, handed to both.
-x-shared-mount-name: &shared_mount_name "Shared Files"
+#   - local (the default): the workspace is /data/workspace on the state volume.
+#   - full Nextcloud integration: the bot is a user on an existing Nextcloud,
+#     and the workspace is the VM's rclone mount of its files, bound at
+#     /mnt/shared below. The entrypoint refuses to start when /mnt/shared is
+#     not that mount, so nothing is written into an unmounted store.
+#
+# The bind is always present and unused in local mode. `rslave`, so a remount
+# on the VM shows through without restarting the containers. Docker Desktop
+# refuses `rslave` on a macOS path ("not a shared or slave mount"), which is one
+# reason this file runs in a VM; the test tiers replace the mount.
+# ISTOTA_MOUNT_DIR defaults to ./mount, which is /srv/istota/mount on the VM.
+x-workspace-mount: &workspace_mount
+  type: bind
+  source: ${ISTOTA_MOUNT_DIR:-./mount}
+  target: /mnt/shared
+  bind:
+    propagation: rslave
+    create_host_path: true
 
 # The credentials every service built from the istota image mounts. One file
 # each under ISTOTA_SECRETS_DIR, named for the variable the daemon reads it
@@ -28,143 +39,10 @@ x-istota-secrets: &istota_secrets
   - istota_developer_github_token
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      POSTGRES_DB: nextcloud
-      POSTGRES_USER: nextcloud
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nextcloud"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # One-shot init: make shared volume writable by www-data (uid 33)
-  init-shared:
-    image: alpine:3
-    volumes:
-      - shared_files:/mnt/shared
-    command: ["sh", "-c", "chown 33:33 /mnt/shared && chmod 775 /mnt/shared"]
-
-  nextcloud:
-    image: nextcloud:30-apache
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      init-shared:
-        condition: service_completed_successfully
-    volumes:
-      - nextcloud_html:/var/www/html
-      - nextcloud_data:/var/www/html/data
-      - shared_files:/mnt/shared
-      - ./istota/provision-nc.sh:/docker-entrypoint-hooks.d/post-installation/provision.sh:ro
-    # Internal-only — nginx fronts the public port. To bypass nginx, uncomment
-    # the ports block below, remove the nginx service, AND wipe the shared
-    # volume (or /mnt/shared/.istota-provisioned) before restarting — the
-    # OAuth2 redirect URI is registered with NC at first boot and won't pick
-    # up the new direct-access URL otherwise. `expose:` is informational only;
-    # services on the same compose network already reach each other by name.
-    # ports:
-    #   - "${NC_PORT:-8080}:80"
-    expose:
-      - "80"
-    environment:
-      NEXTCLOUD_ADMIN_USER: admin
-      NEXTCLOUD_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
-      POSTGRES_HOST: postgres
-      POSTGRES_DB: nextcloud
-      POSTGRES_USER: nextcloud
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      REDIS_HOST: redis
-      NEXTCLOUD_TRUSTED_DOMAINS: "localhost nextcloud ${DOMAIN:-}"
-      # Reverse-proxy settings — make NC generate URLs that match what the
-      # browser sees through nginx. Re-applied on every container start by
-      # the official image's entrypoint.
-      #
-      # Defaults inherit DOMAIN when set so a single env var (DOMAIN=example.com)
-      # propagates to NEXTCLOUD_TRUSTED_DOMAINS, OVERWRITEHOST, OVERWRITECLIURL,
-      # the OAuth2 redirect URI, ISTOTA_WEB_NC_EXTERNAL_URL, and SITE_HOSTNAME.
-      # Set ISTOTA_PUBLIC_PROTO=https when fronting with TLS (Caddy/Traefik/
-      # Cloudflare in front, or terminating in this nginx with a real cert).
-      OVERWRITEHOST: ${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}
-      OVERWRITEPROTOCOL: ${ISTOTA_PUBLIC_PROTO:-http}
-      OVERWRITECLIURL: ${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}
-      TRUSTED_PROXIES: ${ISTOTA_TRUSTED_PROXIES:-172.16.0.0/12 192.168.0.0/16 10.0.0.0/8}
-      # Passed to provision-nc.sh
-      BOT_USER: ${BOT_USER:-istota}
-      BOT_PASSWORD: ${BOT_PASSWORD:?Set BOT_PASSWORD in .env}
-      ISTOTA_BOT_NAME: ${ISTOTA_BOT_NAME:-Istota}
-      USER_NAME: ${USER_NAME:?Set USER_NAME in .env}
-      USER_PASSWORD: ${USER_PASSWORD:?Set USER_PASSWORD in .env}
-      USER_DISPLAY_NAME: ${USER_DISPLAY_NAME:-}
-      # The mount point provision-nc.sh gives the bot over the shared volume.
-      # The istota service is handed the same value as ISTOTA_NEXTCLOUD_DAV_PREFIX.
-      ISTOTA_NC_SHARED_MOUNT_NAME: *shared_mount_name
-      # Web UI OAuth2 callback URL — must match what the user's browser hits.
-      # Defaults to the nginx-proxied path so the OAuth2 client NC registers
-      # matches the URL the SPA actually uses. Override either DOMAIN /
-      # ISTOTA_PUBLIC_HOST / ISTOTA_PUBLIC_PROTO or ISTOTA_WEB_CALLBACK_URL.
-      # NB: this URI is baked into NC at first provisioning. Changing DOMAIN /
-      # PUBLIC_HOST after provisioning leaves a stale registration — wipe the
-      # shared volume (or delete /mnt/shared/.istota-provisioned) to re-register.
-      ISTOTA_WEB_CALLBACK_URL: ${ISTOTA_WEB_CALLBACK_URL:-${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}/istota/callback}
-      # Register the standalone signaling server (the "high-performance
-      # backend") with Talk at first install. Both empty is the default and
-      # means provision-nc.sh registers nothing, which leaves Talk in
-      # `internal` signaling mode — the shape every deployment without the
-      # `signaling` compose profile runs.
-      #
-      # This is Talk's own credential for talking to the HPB, and it is the
-      # same value the `signaling` service below is given as its backend
-      # secret. It is not istota's: the daemon authenticates to the signaling
-      # server as its own Nextcloud user and holds no shared secret at all.
-      #
-      # Baked in at first install like the OAuth2 redirect URI: the hook runs
-      # only when the image performs the install, so changing either value
-      # later means `occ talk:signaling:add` by hand.
-      ISTOTA_TALK_SIGNALING_SERVER: ${ISTOTA_TALK_SIGNALING_SERVER:-}
-      ISTOTA_TALK_SIGNALING_SECRET: ${ISTOTA_TALK_SIGNALING_SECRET:-}
-      # The web login's OAuth2 client, registered by provision-nc.sh with these
-      # values when both are set, so the same pair can be given to `istota
-      # setup`. istota's config is an input now and nothing copies a minted
-      # client into it. Both empty keeps the old behaviour of minting one.
-      ISTOTA_WEB_OAUTH2_CLIENT_ID: ${ISTOTA_WEB_OAUTH2_CLIENT_ID:-}
-      ISTOTA_WEB_OAUTH2_CLIENT_SECRET: ${ISTOTA_WEB_OAUTH2_CLIENT_SECRET:-}
-    # Installed *and* provisioned: the bot user, Talk and the mounts exist only
-    # once the post-installation hook writes its flag, and the istota service
-    # provisions Talk rooms as soon as this reports healthy.
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true' && test -f /mnt/shared/.istota-provisioned"]
-      interval: 15s
-      timeout: 10s
-      start_period: 300s
-      retries: 20
-    restart: unless-stopped
-
   istota:
     build:
       context: ..
       dockerfile: docker/istota/Dockerfile
-    depends_on:
-      nextcloud:
-        condition: service_healthy
     # The run contract. Every task runs in a bubblewrap sandbox inside this
     # container, and bwrap needs what Docker's defaults refuse: creating a user
     # namespace (seccomp), mounting inside it (seccomp and AppArmor), and
@@ -229,9 +107,14 @@ services:
       retries: 90
       start_period: 30s
     volumes:
-      - shared_files:/mnt/shared
-      - nextcloud_data:/mnt/nc-data:ro
       - istota_data:/data
+      - *workspace_mount
+    # The ingress mode and the public name, for the entrypoint's check that
+    # `[site] hostname` is DOMAIN behind TLS. vm.env is written by `istota
+    # setup --vm-dir` beside this file; without one the stack is `local`.
+    env_file:
+      - path: ./vm.env
+        required: false
     # No istota configuration here. config.toml is an input: `istota setup`
     # writes /data/config/config.toml on the state volume once, and the
     # operator owns it after that. What remains are three facts about the
@@ -269,8 +152,8 @@ services:
       istota:
         condition: service_healthy
     volumes:
-      - shared_files:/mnt/shared
       - istota_data:/data
+      - *workspace_mount
     # Internal-only — nginx routes /istota/ to web:${WEB_PORT}. To bypass nginx,
     # uncomment the ports block below.
     # ports:
@@ -294,9 +177,6 @@ services:
       - /bin/sh
       - -c
       - |
-        # Match the istota service: any file we write to /mnt/shared needs
-        # to land mode 664 with group=33 so NC's www-data can edit it back.
-        umask 002
         # The secrets store's master key and the web-only token key, which the
         # istota service creates on its first boot. Healthy means it has.
         if [ -z "$${ISTOTA_SECRET_KEY:-}" ] && [ -f /data/.secret_key ]; then
@@ -313,34 +193,42 @@ services:
     command: []
     restart: unless-stopped
 
-  # Reverse proxy: single public port for Nextcloud + the istota web UI.
-  # Routes / -> nextcloud:80, /istota/ -> web:${WEB_PORT}. TLS is opt-in —
-  # drop a cert into ./nginx/certs/ and supply your own server block via the
-  # template (or front this with Caddy/Traefik/Cloudflare instead).
+  # The only listener the stack publishes, in every ingress mode. INGRESS
+  # (vm.env: direct, proxied or local) picks the server blocks the start script
+  # renders from docker/nginx/ (istota-ingress.sh, run by the image's own
+  # entrypoint before nginx starts); the location blocks exist once, in
+  # istota.conf.template. tests/image/test_nginx_ingress.py runs `nginx -t`
+  # over every mode.
+  #
+  # The two published ports are written by `istota setup` into .env, per mode:
+  # `direct` publishes 80 and 443 on every address; `proxied` one private
+  # address, on whichever slot it terminates; `local` loopback. Compose cannot
+  # leave a `ports:` entry out, so a slot a mode does not use is an ephemeral
+  # loopback port with nothing listening behind it.
+  #
+  # Certificates: CERTS_DIR is /srv/istota/letsencrypt (TLS_CERT_SOURCE=acme,
+  # written by certbot on the VM) or /srv/istota/certs (files), and ACME_WEBROOT
+  # is /srv/istota/acme. Neither is mounted into any istota container.
   nginx:
     image: nginx:alpine
     depends_on:
-      nextcloud:
-        condition: service_healthy
       web:
         condition: service_started
     ports:
-      - "${NC_PORT:-8080}:80"
-      # Uncomment when shipping TLS via the template:
-      # - "${NC_TLS_PORT:-8443}:443"
+      - "${NGINX_PUBLISH:-127.0.0.1:8080:80}"
+      - "${NGINX_PUBLISH_TLS:-127.0.0.1::443}"
     volumes:
-      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx:/etc/istota-nginx:ro
+      - ./nginx/istota-ingress.sh:/docker-entrypoint.d/15-istota-ingress.sh:ro
+      - ${CERTS_DIR:-./nginx/certs}:/etc/nginx/certs:ro
+      - ${ACME_WEBROOT:-./nginx/acme}:/var/www/acme:ro
+    env_file:
+      - path: ./vm.env
+        required: false
     environment:
-      DOMAIN: ${DOMAIN:-localhost}
       WEB_PORT: ${WEB_PORT:-8766}
       WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-512M}
-      # Limit envsubst to the four template knobs above. Without this filter,
-      # the nginx:alpine entrypoint would substitute every container env var
-      # — including ones whose names happen to match nginx runtime variables
-      # ($host, $remote_addr, $scheme, $proxy_add_x_forwarded_for, etc.).
-      NGINX_ENVSUBST_FILTER: '^(DOMAIN|WEB_PORT|WEBHOOKS_PORT|NGINX_CLIENT_MAX_BODY_SIZE)$$'
     restart: unless-stopped
 
   browser:
@@ -414,10 +302,10 @@ services:
   #     docker compose --profile signaling up -d
   #
   # Three things have to line up, and turning the profile on is only the first.
-  # Talk has to have the server registered — set ISTOTA_TALK_SIGNALING_SERVER
-  # and ISTOTA_TALK_SIGNALING_SECRET *before* the first install, since
-  # provision-nc.sh registers it in the post-installation hook. And the daemon
-  # has to be told to use it, with ISTOTA_TALK_SIGNALING_ENABLED=true.
+  # Your Nextcloud's Talk has to have the server registered (`occ
+  # talk:signaling:add https://<this stack>/standalone-signaling/ <secret>`,
+  # with ISTOTA_TALK_SIGNALING_SECRET as the secret), and the daemon has to be
+  # told to use it, with `[talk.signaling] enabled = true` in config.toml.
   #
   # Registering an external signaling server changes call signaling for every
   # Talk user on this Nextcloud, not only for istota. With no MCU configured
@@ -432,9 +320,6 @@ services:
     image: strukturag/nextcloud-spreed-signaling:${ISTOTA_TALK_SIGNALING_IMAGE_TAG:-2.1.1}
     profiles:
       - signaling
-    depends_on:
-      nextcloud:
-        condition: service_healthy
     # Loopback by default, and normally nothing outside the container network
     # needs it: nginx proxies `/standalone-signaling/` through to this service,
     # which is the address Talk gets registered with — one URL that a browser
@@ -457,7 +342,12 @@ services:
       # from where it lands — an unmatched backend request is counted as a
       # bruteforce attempt, so after a handful of them Talk gets `429 Too Many
       # Requests` and every room creation fails with a 500 that names nothing.
-      BACKEND_NEXTCLOUD_URLS: ${ISTOTA_TALK_SIGNALING_BACKEND_URLS:-http://nextcloud,${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost:${NC_PORT:-8080}}}}
+      #
+      # Both are your Nextcloud's: the URL browsers reach it on (what Talk
+      # stamps) and the one this stack reaches it on (what the daemon names),
+      # comma-separated, or one URL when they are the same. No default, since
+      # the stack runs no Nextcloud of its own.
+      BACKEND_NEXTCLOUD_URLS: ${ISTOTA_TALK_SIGNALING_BACKEND_URLS:-}
       # Talk's credential for this server, and the reason the two variables are
       # one value: `occ talk:signaling:add` on the Nextcloud side and the
       # backend secret here have to match or every backend request is refused.
@@ -539,8 +429,8 @@ services:
     expose:
       - "${ISTOTA_WEBHOOKS_PORT:-8765}"
     volumes:
-      - shared_files:/mnt/shared
       - istota_data:/data
+      - *workspace_mount
     environment:
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       # Admin allowlist (shared with the istota and web services).
@@ -551,7 +441,6 @@ services:
       - /bin/sh
       - -c
       - |
-        umask 002
         mkdir -p /app/config
         ln -sf /data/config/config.toml /app/config/config.toml
         # --no-access-log, because one route's query string is a credential.
@@ -661,10 +550,5 @@ secrets:
     file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_developer_github_token
 
 volumes:
-  postgres_data:
-  redis_data:
-  nextcloud_html:
-  nextcloud_data:
-  shared_files:
   istota_data:
   browser_profile:

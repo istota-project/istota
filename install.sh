@@ -215,7 +215,7 @@ run_docker() {
 
 Next, in $REPO_ROOT/docker:
 
-  1. cp .env.example .env, and fill in the bundled Nextcloud's values there.
+  1. cp .env.example .env
   2. docker compose build istota
   3. Let the image's uid 10001 write .env, vm.env and secrets/. Compose refuses
      to run a service whose secret file is missing, so each starts empty:

@@ -17,11 +17,10 @@ sandbox. A change to either file is therefore a change this test reports.
 Rendered from moby/profiles' template at the same engine version, vendored
 beside it. The diff is compared line by line, comments aside.
 
-**Compose carries the contract, on the shipped file and on the lean test file
-alike.** The smoke tier runs the lean file, so the witnesses there say
-something about the shipped stack only while the two agree on every line that
-decides the boundary. Stage 4 makes the lean shape the shipped file plus an
-overlay; until then this is what keeps them in step.
+**Compose carries the contract, and the test overlays leave it alone.** The
+smoke and full tiers run the shipped file plus `testbed/compose/testbed.yml`
+(and `nextcloud.yml` on the full shape), so their witnesses speak for the
+shipped stack only while no overlay touches a line that decides the boundary.
 """
 
 from __future__ import annotations
@@ -40,7 +39,10 @@ SECCOMP_DEFAULT = DOCKER / "istota" / "seccomp-docker-default-29.9.0.json"
 APPARMOR = DOCKER / "istota" / "apparmor-istota"
 APPARMOR_DEFAULT = DOCKER / "istota" / "apparmor-docker-default-29.9.0"
 SHIPPED_COMPOSE = DOCKER / "docker-compose.yml"
-LEAN_COMPOSE = DOCKER / "docker-compose.test.yml"
+TEST_OVERLAYS = (
+    REPO / "testbed" / "compose" / "testbed.yml",
+    REPO / "testbed" / "compose" / "nextcloud.yml",
+)
 
 #: Measured in the Stage 1 spike by removing one name at a time. `setns`, which
 #: the spec's first list named, is not needed by bwrap 0.12.
@@ -162,9 +164,9 @@ def _volume_targets(service: dict) -> list[str]:
     return targets
 
 
-@pytest.fixture(scope="module", params=[SHIPPED_COMPOSE, LEAN_COMPOSE], ids=["shipped", "lean"])
-def istota_service(request) -> tuple[Path, dict]:
-    return request.param, _service(request.param)
+@pytest.fixture(scope="module")
+def istota_service() -> tuple[Path, dict]:
+    return SHIPPED_COMPOSE, _service(SHIPPED_COMPOSE)
 
 
 class TestTheRunContract:
@@ -220,10 +222,45 @@ class TestTheRunContract:
         assert not [t for t in _volume_targets(service) if "docker" in t or t in ("/run", "/var/run")]
 
 
-class TestTheLeanShapeRunsTheRootPhase:
-    def test_the_lean_entrypoint_goes_through_the_root_phase(self):
-        entrypoint = _service(LEAN_COMPOSE)["entrypoint"]
-        assert entrypoint[0] == "/usr/local/sbin/istota-root-phase", entrypoint
+#: The keys of the `istota` service that decide its boundary. An overlay the
+#: test tiers apply may not set one, or a witness would observe the overlay.
+CONTRACT_KEYS = (
+    "security_opt", "cap_add", "cap_drop", "read_only", "cgroup", "user",
+    "privileged", "entrypoint", "command", "tmpfs", "pid", "ipc", "network_mode",
+    "devices", "userns_mode",
+)
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    """Reads compose's merge tags (`!reset`, `!override`) as their plain value."""
+
+
+for _tag in ("!reset", "!override"):
+    _ComposeLoader.add_constructor(
+        _tag,
+        lambda loader, node: (
+            loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode)
+            else loader.construct_mapping(node) if isinstance(node, yaml.MappingNode)
+            else loader.construct_scalar(node)
+        ),
+    )
+
+
+def _overlay_istota(overlay: Path) -> dict:
+    return yaml.load(overlay.read_text(), Loader=_ComposeLoader)["services"].get("istota", {})
+
+
+class TestTheTestOverlaysLeaveTheContractAlone:
+    @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
+    def test_no_overlay_sets_a_contract_key_on_istota(self, overlay):
+        service = _overlay_istota(overlay)
+        assert not set(service) & set(CONTRACT_KEYS), sorted(set(service) & set(CONTRACT_KEYS))
+
+    @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
+    def test_no_overlay_binds_anything_under_sys_or_a_docker_socket(self, overlay):
+        service = _overlay_istota(overlay)
+        targets = _volume_targets(service)
+        assert not [t for t in targets if t.startswith("/sys") or "docker" in t], targets
 
     def test_the_shipped_image_entrypoint_is_the_root_phase(self):
         dockerfile = (DOCKER / "istota" / "Dockerfile").read_text()

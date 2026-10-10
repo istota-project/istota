@@ -172,7 +172,7 @@ def _docker_run(
     `check_mount_liveness` reports a configured-but-unmounted workspace as
     `FAIL` — correctly: a dropped rclone mount leaves exactly an empty
     directory. A tmpfs is a real mount point, which is the same accommodation
-    `docker-compose.test.yml` makes for the smoke tier. `shared_dir` swaps that
+    the old lean compose file made for the smoke tier. `shared_dir` swaps that
     tmpfs for a host directory where a test needs state to survive between two
     runs, which the relocation test does.
 
@@ -964,6 +964,12 @@ def entrypoint_boot(istota_image, platform, tmp_path_factory) -> EntrypointBoot:
         assert seeded.returncode == 0, seeded.stderr
         started = _docker(
             "run", "-d", *platform_args, "--name", container, *_RUN_CONTRACT,
+            # The rendered config names a Nextcloud and workspace /mnt/shared,
+            # which the entrypoint refuses unless it is the rclone mount. The
+            # run contract's tmpfs there plus the full tier's concession lets
+            # the boot reach the daemon with the file as the old release
+            # rendered it.
+            "-e", "ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE=1",
             "-v", f"{volume}:/data", istota_image.tag,
         )
         assert started.returncode == 0, started.stderr

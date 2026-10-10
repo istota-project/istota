@@ -154,15 +154,17 @@ ENV UV_NO_SYNC=1
 # The daemon's user: a fixed uid and gid, 10001, chosen to collide with nothing
 # in the base image. No USER line: the root phase starts as root, delegates the
 # container's cgroup and fixes ownership, then `istota-drop` becomes 10001 with
-# every capability set empty. In group www-data (33) for the bundled
-# Nextcloud's shared volume, which goes with it in the one-deployment-shape
-# spec's Stage 4.
+# every capability set empty. In group www-data (33) for one reader only: the
+# full test tier's Nextcloud fixture (testbed/compose/nextcloud.yml) shares a
+# Docker volume with this container, owned by www-data. No shipped stack runs a
+# Nextcloud, and www-data owns nothing in this image.
 RUN groupadd -g 10001 istota \
     && useradd -u 10001 -g 10001 -G www-data -M -d /data/home -s /usr/sbin/nologin istota
 
 # Data directories (persistent via volume). Owned by the daemon's uid here so a
-# fresh named volume is seeded with the right owner.
-RUN mkdir -p /data/db /data/config /data/tmp /data/home \
+# fresh named volume is seeded with the right owner. /data/workspace is the
+# local storage mode's workspace.
+RUN mkdir -p /data/db /data/config /data/tmp /data/home /data/workspace \
     && chown -R 10001:10001 /data
 
 # `istota setup` run in this image writes the container shape's config

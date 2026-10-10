@@ -1,6 +1,6 @@
 #!/bin/bash
 # The istota container's root phase: the only code in the container that runs
-# as uid 0 before the drop. It does four things, then execs `istota-drop "$@"`,
+# as uid 0 before the drop. It does three things, then execs `istota-drop "$@"`,
 # which becomes uid 10001 with every capability set empty:
 #
 #   1. Delegates the container's own cgroup to the daemon's uid, the container
@@ -8,12 +8,11 @@
 #      Refuses first, before writing anything, unless /sys/fs/cgroup is a cgroup2
 #      mount rooted at `/`: a bind of the host's tree (root `/../..`) is writable
 #      and is the VM's whole hierarchy.
-#   2. Fixes ownership of /data and the workspace once, for a volume an older
-#      image wrote as root (recorded by /data/.ownership-10001).
-#   3. Applies the bundled Nextcloud's shared-volume convention on every boot,
-#      where the workspace is that volume (owned by www-data). Goes with the
-#      bundled Nextcloud in Stage 4 of the one-deployment-shape spec.
-#   4. Checks the sandbox grant: bubblewrap must be able to build the sandbox's
+#   2. Fixes ownership of /data, the local workspace included, once, for a
+#      volume an older image wrote as root (recorded by /data/.ownership-10001).
+#      A full-integration workspace is the VM's rclone mount, whose owner the
+#      mount unit sets; nothing here touches it.
+#   3. Checks the sandbox grant: bubblewrap must be able to build the sandbox's
 #      namespace as uid 10001, or the container exits naming the compose lines.
 #
 # Its capabilities are compose's cap_add (CHOWN, FOWNER, SETUID, SETGID,
@@ -26,8 +25,6 @@ ISTOTA_UID=10001
 ISTOTA_GID=10001
 CGROUP_MOUNT=/sys/fs/cgroup
 OWNERSHIP_MARKER=/data/.ownership-10001
-WORKSPACE=/mnt/shared
-BUNDLED_NEXTCLOUD_UID=33
 
 log() { echo "[istota-root] $*"; }
 
@@ -126,31 +123,9 @@ fix_ownership() {
     fi
     log "one-time ownership fix: /data to ${ISTOTA_UID}"
     chown_tree /data
-    if [ -d "$WORKSPACE" ] && [ "$(stat -c %u "$WORKSPACE")" != "$BUNDLED_NEXTCLOUD_UID" ]; then
-        log "one-time ownership fix: ${WORKSPACE} to ${ISTOTA_UID}"
-        chown_tree "$WORKSPACE"
-    fi
     if ! istota-drop sh -c "mkdir -p /data/home && : > $OWNERSHIP_MARKER" 2>/dev/null; then
         log "could not record ${OWNERSHIP_MARKER} (no writable state volume); the walk repeats next boot"
     fi
-}
-
-# The bundled Nextcloud (www-data, uid 33) and the daemon share /mnt/shared.
-# Files there are 33:33 with setgid directories, so what the daemon creates
-# inherits group 33, and the istota user is in group www-data, so it can write
-# what Nextcloud wrote. Moved here from entrypoint.sh because the chown needs
-# CAP_CHOWN, which the unprivileged phase no longer has.
-shared_volume_convention() {
-    [ -d "$WORKSPACE" ] || return 0
-    [ "$(stat -c %u "$WORKSPACE")" = "$BUNDLED_NEXTCLOUD_UID" ] || return 0
-    local d
-    for d in "$WORKSPACE/Users" "$WORKSPACE/Channels"; do
-        if [ -d "$d" ]; then
-            chown -R "$BUNDLED_NEXTCLOUD_UID:$BUNDLED_NEXTCLOUD_UID" "$d" 2>/dev/null || true
-            find "$d" -type d -exec chmod 2775 {} + 2>/dev/null || true
-            find "$d" -type f -exec chmod 664 {} + 2>/dev/null || true
-        fi
-    done
 }
 
 grant_refusal() {
@@ -187,7 +162,6 @@ main() {
         log "WARNING: could not delegate ${CGROUP_MOUNT}; tasks will run without per-task limits (security.task_cgroups reports FAIL)"
     fi
     fix_ownership
-    shared_volume_convention
     probe_grant || exit $?
     exec istota-drop "$@"
 }

@@ -50,11 +50,11 @@ from testbed.services.model_endpoint import ERROR_PREFIX
 
 pytestmark = pytest.mark.smoke
 
-#: `db_path` is `/data/db/istota.db` and `workspace_path` is `/mnt/shared` on
+#: `db_path` is `/data/db/istota.db` and `workspace_path` is `/data/workspace` on
 #: the lean shape (`testbed.stack.LEAN_BASE_CONFIG`), the same literals
 #: `test_sandbox_in_stack.py` and `test_sandbox_shared_room.py` restate.
 DB_DIR = "/data/db"
-WORKSPACE = "/mnt/shared/Users/testuser"
+WORKSPACE = "/data/workspace/Users/testuser"
 
 #: Content no other path in the stack carries. The workspace and database ones
 #: are written by the fixture through `docker compose exec`; the tree one is

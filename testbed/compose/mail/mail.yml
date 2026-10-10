@@ -4,10 +4,8 @@
 # A harness *addition* rather than a concession — unlike `testbed/compose/
 # testbed.yml`, which changes how the shipped deployment behaves. This adds a
 # service the deployment never has, and the only thing it changes about istota
-# is which certificate authority that container trusts. Merged over either
-# shape: `docker-compose.test.yml` for the lean `mail` profile,
-# `docker-compose.yml` (plus `testbed.yml`) for the full one. It goes on before
-# `testbed.yml` so nothing here can undo the seccomp grant.
+# is which certificate authority that container trusts. Merged over the
+# shipped `docker-compose.yml` on either shape, before `testbed.yml`.
 #
 # Maddy, not a stub, and the reasoning is in `testbed/services/mail.py`. What
 # matters at this level is the port pairing: istota picks its TLS mode by port
@@ -18,8 +16,8 @@
 # Every path here arrives through the compose env-file. Compose resolves a
 # relative bind against the *first* `-f` file's directory, which is `docker/`,
 # not this package — so a relative path would silently point somewhere else.
-# `MailService.compose_env()` is what writes them; `docker-compose.test.yml`
-# already handles the rendered config directory the same way.
+# `MailService.compose_env()` is what writes them; `testbed.yml` handles the
+# config directory the same way.
 
 services:
   mail:

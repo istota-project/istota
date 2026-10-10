@@ -75,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Docker stack picks how it is reached.** nginx now serves one of three ingress modes: `local` (loopback, the default), `proxied` (behind your own reverse proxy, accepting connections only from it) or `direct` (terminating TLS itself, with a certificate from certbot or from files). `istota setup` asks which and writes the matching ports; the container refuses to start when the public hostname in the config and the stack's name disagree behind TLS, and `istota doctor` reports whether the certificate is valid.
+
 - **The Docker stack's configuration is now a file you own, written once by `istota setup`.** Run inside the image, the wizard asks about your Nextcloud (or none), the model backend, email, modules and optional containers, and writes `config.toml`, the admins file and the master key; credentials go to one file each under `docker/secrets/` instead of `.env`, so they no longer show in `docker inspect`. Nothing rewrites the config on boot any more, and `docker/init.sh` is gone.
 
   **Upgrade note:** An existing install keeps its current `config.toml` as-is, and the new container starts from it. Move your credentials from `.env` into `docker/secrets/` (create an empty file for each name the compose file declares), or set them in `config.toml`, before recreating the stack. Settings you changed through `.env` now go in `config.toml`.
@@ -137,6 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Upgrade note:** `istota init` retires every user's `{bot_dir}/config/PERSONA.md`: a copy matching any shipped version is deleted, an edited one is renamed `PERSONA.md.retired`, stops being read, and its owner gets one notification. If a user's copy holds a role or standing instructions rather than character, move that text into their `USER.md` first, under one `## ` heading marked `<!-- pinned -->` with `### ` for subsections. `python -m istota.maintenance.persona_retire --list` shows what the retirement will do without changing anything.
 
 ### Removed
+
+- **The Docker stack no longer runs its own Nextcloud.** The workspace is a local directory by default, and full Nextcloud integration now points istota at a Nextcloud you run yourself, mounted on the VM. A stack running full integration refuses to start until that mount is up, so nothing is written into an unmounted folder.
+
+  **Upgrade note:** An install that ran the bundled Nextcloud is refused at boot until you choose: move that Nextcloud into a compose project of its own, which keeps Talk rooms and files, or copy the workspace into local storage. The deployment docs' page on moving the bundled Nextcloud walks through both.
 
 - **`email_reply_routing` is gone**, with the routing it chose: a reply to mail the bot sent no longer goes back to the room the send came from, since it lands in the thread's own room. **Upgrade note:** the setting's database column is dropped on first start. A `[users.<id>] email_reply_routing` line in `config.toml` is ignored with a warning, the Ansible role ignores `email_reply_routing` in `istota_users`, and `istota user ensure --email-reply-routing` no longer exists, so remove it from any script that passes it.
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.

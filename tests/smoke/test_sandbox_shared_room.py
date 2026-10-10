@@ -34,7 +34,7 @@ pytestmark = pytest.mark.smoke
 #: the testbed's config: `workspace_path`, `temp_dir`, and the user and bot name
 #: the lean profile renders. Restated so a scenario reads as one thing; the
 #: control below fails if any of them is not where the daemon put it.
-WORKSPACE = "/mnt/shared"
+WORKSPACE = "/data/workspace"
 TEMP = "/data/tmp"
 USER = "testuser"
 BOT_DIR = "istota"

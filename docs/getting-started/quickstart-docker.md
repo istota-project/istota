@@ -1,6 +1,6 @@
 # Docker quickstart
 
-The Docker setup spins up a complete stack: Postgres, Redis, a fresh Nextcloud instance, and the Istota scheduler. If you already have a Nextcloud instance, use [bare metal](quickstart-bare-metal.md) instead -- Docker Compose creates its own Nextcloud.
+The Docker setup runs the Istota scheduler, its web app and nginx. It ships no Nextcloud: the workspace is a local directory by default, and `istota setup` can connect it to a Nextcloud you already run (full integration, with Talk). See [Storage](../deployment/docker.md#storage).
 
 ## Install
 
@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 
 The one-liner clones the repo to `~/istota` and prints the remaining steps. Requires Docker with the `docker compose` plugin. In short, from `~/istota/docker`:
 
-1. `cp .env.example .env` and fill in the bundled Nextcloud's passwords and your user name there.
+1. `cp .env.example .env`.
 2. `docker compose build istota`.
 3. Give the image's uid 10001 the stack's `.env`, `vm.env` and `secrets/` directory, with an empty file per secret (compose refuses to run a service whose secret file is missing; the installer prints the exact commands).
 4. Run the wizard inside the image:
@@ -23,11 +23,11 @@ The one-liner clones the repo to `~/istota` and prints the remaining steps. Requ
 
 `istota setup` asks for the first admin's user id, the public hostname and how the stack is reached, whether to connect to a Nextcloud (its URL, the bot's user and app password, the folder the workspace lives in, an OAuth2 client for web login), the model backend and its credential, email, a CalDAV server when there is no Nextcloud, GPS location, the modules (feeds, money, health, briefings), the developer skill, and the optional containers. It writes `/data/config/config.toml`, the admins file and the master key, sets `COMPOSE_PROFILES` in `.env`, and writes each credential to a file under `secrets/`.
 
-**The signaling server has a one-shot window.** Registering it with Talk happens in a Nextcloud post-installation hook, which the image runs only on a genuinely fresh instance -- so `ISTOTA_TALK_SIGNALING_SERVER` and its secret have to be in `.env` before the *first* `docker compose up`. Missing it is recoverable, by running `occ talk:signaling:add` by hand inside the Nextcloud container, but nothing else will do it for you. See [Talk over the signaling server](../deployment/docker.md#talk-over-the-signaling-server).
+**The signaling server is registered on your Nextcloud.** With the `signaling` profile, run `occ talk:signaling:add` there, pointing at this stack's `/standalone-signaling/` path. See [Talk over the signaling server](../deployment/docker.md#talk-over-the-signaling-server).
 
 Answering no to a module records it in your user's `disabled_modules`, which seeds your profile the first time the stack boots. After that the stored profile wins, so change it in the web settings.
 
-First start takes a few minutes: Nextcloud initializes the database, creates user accounts, installs apps (Talk, Calendar, External Storage) and sets up shared folders, then istota creates your Talk rooms -- private group rooms, not public ones.
+With Talk configured, the first start creates your Talk rooms on your Nextcloud -- private group rooms, not public ones.
 
 When it's up, open `http://localhost:8080`, log in, and start chatting.
 

@@ -100,6 +100,7 @@ class TestEveryAnswerReachesItsKey:
         assert config.bot_name == "Zed"
         assert str(config.db_path) == "/data/db/istota.db"
         assert str(config.workspace_path) == "/mnt/shared"
+        assert str(config.nextcloud_mount_path) == "/mnt/shared"
         assert config.security.sandbox_enabled is True
         assert config.security.skill_proxy_enabled is True
 
@@ -391,6 +392,71 @@ class TestTheStackFiles:
         values = dict(line.split("=", 1) for line in text.splitlines() if "=" in line and not line.startswith("#"))
         assert values == {
             "STORAGE": "nextcloud", "INGRESS": "proxied", "DOMAIN": "bot.example.test",
-            "TLS_CERT_SOURCE": "acme", "UPSTREAM_PROXY": "10.0.0.5",
+            "TLS_CERT_SOURCE": "", "UPSTREAM_PROXY": "10.0.0.5",
             "LISTEN_ADDR": "10.0.0.20", "LISTEN_PORT": "8080",
         }
+
+
+class TestTheLocalWorkspace:
+    """Local storage is the default, and its workspace is on the state volume."""
+
+    def test_no_nextcloud_is_local_storage_under_data(self, tmp_path, monkeypatch):
+        a = _full_answers(nextcloud_url="", oauth_client_id="")
+        config = _load(tmp_path, render_container_config(a, inline_credentials=True), monkeypatch)
+
+        assert config.storage_backend == "local"
+        assert str(config.workspace_path) == "/data/workspace"
+        assert config.nextcloud_mount_path is None
+
+
+def _env(text: str) -> dict[str, str]:
+    return dict(
+        line.split("=", 1) for line in text.splitlines()
+        if "=" in line and not line.startswith("#")
+    )
+
+
+class TestWhatNginxPublishes:
+    """The two compose port slots nginx is given, per ingress mode."""
+
+    def test_direct_publishes_both_ports_on_every_address(self):
+        a = _full_answers(ingress="direct", tls_cert_source="acme")
+        values = _env(render_stack_env(a))
+
+        assert values["NGINX_PUBLISH"] == "80:80"
+        assert values["NGINX_PUBLISH_TLS"] == "443:443"
+        assert _env(render_vm_env(a))["TLS_CERT_SOURCE"] == "acme"
+
+    def test_proxied_publishes_the_plain_slot_on_the_private_address(self):
+        values = _env(render_stack_env(_full_answers()))
+
+        assert values["NGINX_PUBLISH"] == "10.0.0.20:8080:80"
+        assert values["NGINX_PUBLISH_TLS"] == "127.0.0.1::443"
+
+    def test_proxied_with_files_publishes_the_tls_slot_instead(self):
+        a = _full_answers(tls_cert_source="files")
+        values = _env(render_stack_env(a))
+
+        assert values["NGINX_PUBLISH"] == "127.0.0.1::80"
+        assert values["NGINX_PUBLISH_TLS"] == "10.0.0.20:8080:443"
+        assert _env(render_vm_env(a))["TLS_CERT_SOURCE"] == "files"
+
+    def test_local_publishes_loopback_at_the_hostnames_port(self):
+        a = _full_answers(ingress="local", hostname="localhost:8282")
+        values = _env(render_stack_env(a))
+
+        assert values["NGINX_PUBLISH"] == "127.0.0.1:8282:80"
+        assert values["NGINX_PUBLISH_TLS"] == "127.0.0.1::443"
+        assert _env(render_vm_env(a))["TLS_CERT_SOURCE"] == ""
+
+    def test_proxied_refuses_acme(self):
+        args = SimpleNamespace(
+            yes=True, user="alice", hostname="bot.example.test", ingress="proxied",
+            upstream_proxy="10.0.0.5", listen_addr="10.0.0.20", listen_port=8080,
+            tls_cert_source="acme",
+        )
+
+        with pytest.raises(setup_wizard.SetupError, match="never ACME"):
+            setup_wizard.collect_container_answers(
+                args, input_fn=input, out=lambda *_: None, getpass_fn=None,
+            )

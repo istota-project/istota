@@ -198,13 +198,12 @@ HOST_STUBS = frozenset({"model", "gitlab", "ntfy", "feeds"})
 #:
 #: Both are real servers we control rather than ones we wrote, which is the
 #: distinction this package draws between a service and a stub. `nextcloud` is
-#: declared by the shipped compose file; `mail` is added by the profile's own
+#: declared by the fixture overlay (`compose/nextcloud.yml`); `mail` is added by the profile's own
 #: overlay. Neither opens a socket in the pytest process, so neither has a
 #: credential to publish and the credential rule does not reach them.
 #: `signaling` is here rather than in `HOST_STUBS` because the compose files
-#: run it: `docker-compose.yml` declares it behind the `signaling` profile and
-#: `docker-compose.test.yml` does the same, so on either shape this object
-#: configures a container and then attaches to it. It opens no socket of its
+#: run it: `docker-compose.yml` declares it behind the `signaling` profile, so
+#: on either shape this object configures a container and then attaches to it. It opens no socket of its
 #: own, which is why the credential rule does not reach it — the secrets it
 #: generates are the *server's*, published into the compose env-file rather
 #: than expected by a listener in this process.

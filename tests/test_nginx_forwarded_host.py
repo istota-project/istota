@@ -42,7 +42,8 @@ REPO = Path(__file__).resolve().parent.parent
 #: get deployed; two are documentation an operator copies into their own nginx,
 #: which is a source of the same defect in a deployment this repo never sees.
 HOST_HEADER_SOURCES = {
-    "docker": REPO / "docker" / "nginx" / "default.conf.template",
+    "docker": REPO / "docker" / "nginx" / "istota.conf.template",
+    "testbed-nextcloud": REPO / "testbed" / "compose" / "nextcloud-locations.conf",
     "ansible": REPO / "deploy" / "ansible" / "templates" / "istota.conf.j2",
     "docs-web": REPO / "docs" / "features" / "web-interface.md",
     "docs-location": REPO / "docs" / "features" / "location.md",
@@ -73,6 +74,8 @@ class TestTheProxiesForwardThePort:
         take it with the rest."""
         text = HOST_HEADER_SOURCES["ansible"].read_text()
         assert "return 301 https://$host$request_uri;" in text
+        direct = (REPO / "docker" / "nginx" / "direct-http.conf").read_text()
+        assert "return 301 https://$host$request_uri;" in direct
 
 
 try:

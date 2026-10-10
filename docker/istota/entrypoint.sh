@@ -10,7 +10,8 @@
 # config.toml is an input. `istota setup` writes it once and the operator owns
 # it after that; this script reads it and never writes it. What it does:
 #
-#   1. refuses to start without a config;
+#   1. refuses to start without a config, or with one it must not run
+#      (see the preflight below);
 #   2. resolves the secrets store's master key and the web-only token key;
 #   3. runs `istota init`, the only migration runner;
 #   4. ensures the first admin when there are no users at all;
@@ -41,6 +42,62 @@ if [ ! -f "$CONFIG_FILE" ]; then
     echo "[istota]   docker compose run --rm --entrypoint istota-drop istota istota setup" >&2
     exit 78
 fi
+
+# --- Preflight: a config this stack must not run ---
+#
+# Before anything is written. Three refusals, each naming the fix:
+#   - it names the compose Nextcloud (`http://nextcloud`), which the shipped
+#     compose file no longer runs, and no such host resolves;
+#   - full Nextcloud integration, and the workspace is not the VM's rclone
+#     mount: a daemon writing into an unmounted /mnt/shared writes into the
+#     container, and those files never reach Nextcloud (parity row 9);
+#   - behind TLS, `[site] hostname` is not the stack's DOMAIN, which is a login
+#     that fails its origin check.
+# ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE is the full test tier's concession: its
+# Nextcloud shares a Docker volume with this container rather than an rclone
+# mount, so a mount point of any type passes. Nothing an operator runs sets it.
+python3 - "$CONFIG_FILE" <<'PY' || exit 78
+import os, re, socket, sys
+from pathlib import Path
+from urllib.parse import urlsplit
+from istota.config import load_config
+
+config = load_config(Path(sys.argv[1]))
+refusals = []
+url = config.nextcloud.url
+if url and urlsplit(url).hostname == "nextcloud":
+    try:
+        socket.getaddrinfo("nextcloud", None)
+    except OSError:
+        refusals.append(
+            f"config.toml names the bundled Nextcloud ({url}), which this compose file no longer runs. "
+            "Move it, unchanged, into a compose project of its own and point [nextcloud] url at it, or "
+            "switch to local storage; see docs/deployment/moving-the-bundled-nextcloud.md.")
+if config.storage_is_nextcloud and config.workspace_path is not None:
+    workspace = os.path.normpath(str(config.workspace_path))
+    mountpoint, fstype = "/", "unknown"
+    with open(os.environ.get("ISTOTA_MOUNTINFO", "/proc/self/mountinfo")) as mounts:
+        for line in mounts:
+            fields = line.split()
+            point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4])
+            within = workspace == point or workspace.startswith(point.rstrip("/") + "/")
+            if within and len(point) >= len(mountpoint):
+                mountpoint, fstype = point, fields[fields.index("-") + 1]
+    concession = os.environ.get("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE") == "1"
+    if not (fstype == "fuse.rclone" or (concession and mountpoint == workspace)):
+        refusals.append(
+            f"the workspace {workspace} is on {mountpoint} ({fstype}), not the VM's rclone mount "
+            "(fuse.rclone). Start mount-nextcloud.service on the VM before the stack; nothing is "
+            "written into an unmounted store.")
+ingress, domain = os.environ.get("INGRESS", ""), os.environ.get("DOMAIN", "")
+if ingress in ("direct", "proxied") and config.site.hostname != domain:
+    refusals.append(
+        f"[site] hostname is {config.site.hostname!r} and the stack's DOMAIN is {domain!r}; "
+        "behind TLS they must be the same name, or every login fails its origin check.")
+for refusal in refusals:
+    print(f"[istota] REFUSE: {refusal}", file=sys.stderr)
+sys.exit(1 if refusals else 0)
+PY
 
 # --- The secrets store's master key ---
 #
@@ -157,11 +214,6 @@ json.dump({"claudeAiOauth": {"accessToken": os.environ["CLAUDE_CODE_OAUTH_TOKEN"
 ' > "${HOME}/.claude/.credentials.json" )
     log "Claude Code OAuth token configured."
 fi
-
-# Group-writable files on the workspace, for the bundled Nextcloud's www-data
-# (the root phase applies the matching setgid directories). Goes with the
-# bundled Nextcloud in Stage 4 of the one-deployment-shape spec.
-umask 002
 
 # From the venv, never through `uv run`, which would try to sync the read-only
 # root. The image puts /app/.venv/bin first on PATH.

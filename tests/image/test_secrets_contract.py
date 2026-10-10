@@ -46,18 +46,6 @@ HEALTHY_TIMEOUT = 240
 #: mechanism `ISTOTA_TESTBED_CONTROL_OVERLAYS` is for the smoke tier.
 CONTROL_OVERLAYS_ENV = "ISTOTA_SECRETS_CONTROL_OVERLAYS"
 
-#: The bundled Nextcloud's `${…:?}` variables, which compose interpolates on
-#: every subcommand even for a service that does not depend on them. Values
-#: nothing reads: `--no-deps` starts no Nextcloud.
-BUNDLED_NEXTCLOUD_ENV = {
-    "POSTGRES_PASSWORD": "unused-by-this-test",
-    "ADMIN_PASSWORD": "unused-by-this-test",
-    "BOT_PASSWORD": "unused-by-this-test",
-    "USER_NAME": "alice",
-    "USER_PASSWORD": "unused-by-this-test",
-}
-
-
 @dataclass(frozen=True)
 class SecretsBoot:
     native_key: str
@@ -96,9 +84,13 @@ def secrets_boot(istota_image, tmp_path_factory) -> SecretsBoot:
 
     native_key = f"row12-native-{secrets.token_hex(8)}"
     overlay = work / "image.yml"
+    # The full-integration workspace bind is `rslave`, which Docker Desktop
+    # refuses for a macOS path; this stack stores locally and never reads it.
     overlay.write_text(
         "services:\n  istota:\n    build: !reset null\n"
         f"    image: {istota_image.tag}\n"
+        "    volumes:\n      - row12_mount:/mnt/shared\n"
+        "volumes:\n  row12_mount:\n"
     )
     overlays = [overlay] + [
         Path(part) for part in os.environ.get(CONTROL_OVERLAYS_ENV, "").split(os.pathsep) if part
@@ -106,7 +98,6 @@ def secrets_boot(istota_image, tmp_path_factory) -> SecretsBoot:
     env_file = work / "compose.env"
     env_file.write_text("".join(
         f"{key}={value}\n" for key, value in {
-            **BUNDLED_NEXTCLOUD_ENV,
             "ISTOTA_SECRETS_DIR": str(secrets_dir),
             # Read only by the negative control's overlay.
             "ISTOTA_ROW12_LEAKED_VALUE": native_key,

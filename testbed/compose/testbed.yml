@@ -1,53 +1,59 @@
-# Harness concessions for the full shape. NOT a deployment recipe.
+# Harness concessions for every stack this tier boots. NOT a deployment recipe.
 #
-# `docker/docker-compose.yml` is a production artifact whose defaults are tuned
-# for production. This overlay is the complete list of places where the stack
-# the `full` tier boots differs from the stack an operator boots, and each entry
-# carries the reason inline — the same habit `docker/docker-compose.test.yml`
-# keeps. A new concession goes here, where it gets read and reviewed, rather
-# than into a fragment assembled in Python.
+# There is one stack shape (the one-deployment-shape spec's Stage 4): the
+# shipped `docker/docker-compose.yml`, run as an operator runs it, entrypoint
+# and all, plus this file. The full shape adds `nextcloud.yml` after it for the
+# Nextcloud fixture. This file is the complete list of places where a stack the
+# tier boots differs from the stack an operator boots, each with its reason
+# inline. A new concession goes here, where it gets read and reviewed.
 #
 # What is deliberately *not* here: anything that varies per session. The
-# generated passwords, the OAuth2 client, the ephemeral `NC_PORT` and its
-# matching `ISTOTA_WEB_CALLBACK_URL`, and the two directories below are written
-# into the compose env-file that `StackPool` owns, and istota's own config is a
-# `config.toml` the testbed writes, because a file in the repository cannot
-# hold a value that is invented at boot.
+# image tag, the config and secrets directories, the published ports and the
+# fixture's passwords are written into the compose env-file `StackPool` owns,
+# and istota's own config is a `config.toml` the testbed writes, because a file
+# in the repository cannot hold a value that is invented at boot.
 #
-# Used as `-f docker/docker-compose.yml -f testbed/compose/testbed.yml`.
+# Used as `-f docker/docker-compose.yml [-f <profile overlays>] -f
+# testbed/compose/testbed.yml [-f testbed/compose/nextcloud.yml]`.
 # `testbed/stack.py` assembles the invocation; this file is never run by hand.
+
+# One image for every service built from the istota Dockerfile, tagged per
+# checkout by the harness. Left to itself compose tags a built image
+# `<project>-<service>`, and every stack is a fresh project, so each boot would
+# leave three more permanent tags. With a `build:` and an `image:` together,
+# `up --build` builds once and tags the result; `up` without it runs the tag as
+# it is, which is how a negative control's prebuilt image is run. The pool only
+# passes `--build` on the session's first boot of the checkout's own image.
+x-test-image: &test_image ${ISTOTA_TEST_IMAGE:?the harness must export ISTOTA_TEST_IMAGE}
 
 services:
   istota:
+    image: *test_image
+
     # `host.docker.internal` is built in on Docker Desktop and absent on Docker
-    # Engine, and `docker-compose.yml` does not declare it because nothing in a
-    # deployment reaches the host. The scripted model endpoint runs in the
-    # pytest process on the host, so every full-shape task depends on this.
-    #
-    # It reaches inside the sandbox too, which is the obvious worry and is
-    # unfounded: the testbed's config writes `[security.network] enabled =
-    # false` (`testbed.stack.CONCESSIONS`), so `executor.py` builds no CONNECT
-    # proxy and appends no `--unshare-net`, and `/etc/hosts` is bound into the
-    # bwrap namespace. A profile that turns the CONNECT allowlist on would have
-    # to allowlist each stub's host:port.
+    # Engine, and the shipped file does not declare it because nothing in a
+    # deployment reaches the host. Every host-side stub (the scripted model
+    # endpoint above all) is reached by this name. Inside a task's sandbox it
+    # is reached only through the CONNECT proxy, and only for a stub whose
+    # host:port the stack's config allowlists.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-    # No `security_opt` here. The shipped file carries the sandbox grant itself
-    # (the seccomp and AppArmor profiles and systempaths=unconfined), so this
-    # stack runs the run contract an operator runs. Docker Desktop has no
-    # AppArmor and ignores `apparmor=istota`.
 
     # The config the testbed wrote, where `istota setup` would have written it.
     # A bind rather than the state volume, because the harness has to write the
     # file before the container starts and a named volume has no host path to
     # write it through. Read-only, as the container never writes it.
+    #
+    # And /mnt/shared, the full-integration workspace bind, replaced by an
+    # empty volume: the shipped bind's `rslave` is refused on Docker Desktop
+    # for a macOS path, and the lean shape stores locally under /data anyway.
+    # nextcloud.yml replaces it again with the fixture's shared volume.
     volumes:
       - ${ISTOTA_TEST_CONFIG_DIR:?the harness must export ISTOTA_TEST_CONFIG_DIR}:/data/config:ro
+      - testbed_mount:/mnt/shared
 
-    # The shipped `istota` service has the same `tasks` healthcheck; this one
-    # differs only in timing, since a cold Nextcloud install (which `istota`
-    # waits on) and the image build share the boot's budget.
+    # The shipped healthcheck, polled faster: a test waits on it at every
+    # boot. The command is the shipped one, through `istota-drop`.
     healthcheck:
       test:
         - CMD-SHELL
@@ -56,13 +62,32 @@ services:
           sys.exit(0 if sqlite3.connect('file:/data/db/istota.db?mode=ro', uri=True)
           .execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'\")
           .fetchone() else 1)"
-      interval: 5s
+      interval: 2s
       timeout: 5s
-      retries: 180
-      start_period: 10s
+      retries: 600
+      start_period: 5s
 
   web:
-    # The same config, for the same reason. `web` symlinks it into its working
-    # directory and reads it on every request it authenticates.
+    image: *test_image
+    # The same config, for the same reason.
     volumes:
       - ${ISTOTA_TEST_CONFIG_DIR:?the harness must export ISTOTA_TEST_CONFIG_DIR}:/data/config:ro
+      - testbed_mount:/mnt/shared
+
+  webhooks:
+    image: *test_image
+    volumes:
+      - testbed_mount:/mnt/shared
+
+  # The shipped service has a fixed `container_name`, which two stacks on one
+  # machine cannot both hold. Without it the container is reached by its
+  # service name, `browser`, which the browser profile's config names.
+  browser:
+    container_name: !reset null
+    # Built once by the image tier's rule and run as a tag: the amd64 Chrome
+    # image under emulation outlasts `up`'s timeout when compose builds it.
+    build: !reset null
+    image: ${ISTOTA_TEST_BROWSER_IMAGE:-istota-test/browser:unbuilt}
+
+volumes:
+  testbed_mount:

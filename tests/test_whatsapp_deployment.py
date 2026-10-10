@@ -60,7 +60,7 @@ def derive_media_dir(session_dir: str) -> str:
     )
     assert result.returncode == 0, result.stderr
     return result.stdout
-DOCKER_NGINX = REPO / "docker" / "nginx" / "default.conf.template"
+DOCKER_NGINX = REPO / "docker" / "nginx" / "istota.conf.template"
 ENV_EXAMPLE = REPO / "docker" / ".env.example"
 ANSIBLE = REPO / "deploy" / "ansible"
 ANSIBLE_NGINX = ANSIBLE / "templates" / "istota.conf.j2"

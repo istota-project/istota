@@ -9,13 +9,11 @@ stack, for the arithmetic — a per-test `up`/`down --volumes` is about twelve
 seconds on the lean shape and minutes on the full one, and six subsystems on
 that model produces a tier nobody runs.
 
-There is no `backend` field and no `LOCAL` profile. The two storage backends
-differ in exactly three things — the prompt's storage vocabulary, the skill
-menu, and whether `runtime.mount_liveness` runs — and all three are pure
-functions of a `Config`, so they are witnessed by the prompt goldens and two
-unit tests rather than by any stack. Naming the axis here anyway is what stops
-someone adding a Nextcloud stub to the lean shape for an unrelated reason and
-silently deleting that coverage.
+There is no `backend` field. The storage mode follows the shape: every lean
+profile boots local storage (`/data/workspace`), the shipped default, and the
+full profile boots full Nextcloud integration against the fixture. So a lean
+stack is also the booted witness for the Nextcloud-free install, and adding a
+Nextcloud stub to the lean shape for an unrelated reason would delete that.
 """
 
 from __future__ import annotations
@@ -41,13 +39,14 @@ class Profile:
     """The pool key. Two profiles sharing a name would share a stack."""
 
     shape: Literal["lean", "full"] = "lean"
-    """Which compose file the stack boots from.
+    """Whether the stack carries the Nextcloud fixture.
 
-    `lean` is one container, no Nextcloud, entrypoint bypassed: about thirty
-    seconds to healthy. `full` is the deployment as shipped — postgres, redis,
-    nextcloud, istota, web, nginx — booted through `entrypoint.sh`, and a minute
-    or so to healthy on a cold volume set. Both boot from a `config.toml` the
-    testbed writes, since the config is an input on every shape.
+    Both are the shipped compose file plus `testbed/compose/testbed.yml`, booted
+    through the shipped entrypoint from a `config.toml` the testbed writes.
+    `lean` stops there: istota, web and nginx, local storage, seconds to
+    healthy. `full` adds `testbed/compose/nextcloud.yml` (postgres, redis and a
+    provisioned Nextcloud 30) and runs istota in full Nextcloud integration
+    against it: a minute or so to healthy on a cold volume set.
     """
 
     services: tuple[str, ...] = ("model",)
@@ -89,6 +88,21 @@ class Profile:
     leaves a running container that `down` does not know to remove.
     """
 
+    browser_image: str = ""
+    """A prebuilt browser image tag, for a profile that starts the `browser`
+    compose profile. Filled in by the fixture that builds it (the amd64 Chrome
+    image takes long enough under emulation that compose's own build would run
+    past `up`'s timeout), the way `no-forge`'s image is."""
+
+    web: bool = False
+    """Whether a lean stack starts the shipped `web` and `nginx` services.
+
+    Off by default: no lean scenario reads the web app, and two more containers
+    per session-scoped stack cost boot time and memory across nine stacks. The
+    file booted is the shipped one either way; the full shape always starts
+    both, since its scenarios sign in through them.
+    """
+
 
 #: Both mail profiles poll every five seconds rather than every sixty, which
 #: would otherwise put a minute of dead wait into every mail scenario on a
@@ -108,7 +122,19 @@ MAIL_CONFIG: dict = {
 }
 
 BASE = Profile("base")
-FORGE = Profile("forge", services=("model", "gitlab"))
+#: The forge profiles run with the network sandbox off, and only they do. The
+#: forge stub speaks plain HTTP, and the CONNECT proxy carries only tunnels, so
+#: git's absolute-form `GET http://…` through it is refused (405) where a real
+#: forge, reached over https, is tunnelled. The `network` profile below is the
+#: same services with the sandbox on, for the network witness.
+FORGE_CONFIG: dict = {"security": {"network": {"enabled": False}}}
+
+FORGE = Profile("forge", services=("model", "gitlab"), config=FORGE_CONFIG)
+
+#: Parity rows 2 and 3: the forge stub is the allowlisted host (the developer
+#: skill allowlists a configured forge's URL), the scripted model endpoint the
+#: host that is not, and the network sandbox is on as `istota setup` leaves it.
+NETWORK = Profile("network", services=("model", "gitlab"))
 
 # ntfy needs no config at all: it is a per-user connected service in the
 # encrypted secrets store rather than a config block, so the scenario points
@@ -142,11 +168,23 @@ SIGNALING = Profile(
     compose_profiles=("signaling",),
 )
 
+#: The shipped `browser` service on its own network (parity row 17), with the
+#: signaling server up beside it so the witness has every neighbour the browser
+#: must not reach. The signaling service supplies that container's secrets; the
+#: daemon does not use either container here, and nothing in config turns
+#: them on.
+BROWSER = Profile(
+    "browser",
+    services=("model", "signaling"),
+    compose_profiles=("browser", "signaling"),
+    web=True,
+)
+
 # The negative control: the same profile on an image with the forge binaries
 # removed, reproducing ISSUE-263. The tag is empty here and filled in by the
 # fixture that builds the control, because it is derived from whatever the
 # session's real image turned out to be — there is no constant to write down.
-NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
+NO_FORGE = Profile("no-forge", services=("model", "gitlab"), config=FORGE_CONFIG)
 
 # There is no `cache` profile, and the reason it went is the reason it existed.
 # It was `forge` plus `ISTOTA_SECURITY_SANDBOX_CACHE_DIR`, kept separate so the
@@ -269,12 +307,14 @@ ALL: tuple[Profile, ...] = (
     BASE,
     FORGE,
     NO_FORGE,
+    NETWORK,
     NOTIFY,
     FEEDS,
     MAIL,
     EMAIL,
     EMAIL_HOLD_ALL,
     SIGNALING,
+    BROWSER,
     FULL,
 )
 

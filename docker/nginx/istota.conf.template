@@ -1,0 +1,155 @@
+# The body every istota server block shares, in every ingress mode.
+#
+# Rendered by istota-ingress.sh to /etc/nginx/istota/server.conf and included
+# by the mode's server block (listen-local.conf, listen-proxied.conf,
+# listen-direct.conf), which sets `$forwarded_proto` before the include. The
+# location blocks exist only here.
+#
+# Substituted at container start, and only these names are (the script passes
+# envsubst an explicit list, so nginx's own `$host`, `$remote_addr` and the rest
+# pass through):
+#   ${DOMAIN}                       server_name
+#   ${WEB_PORT}                     the web service's port
+#   ${WEBHOOKS_PORT}                the webhook receiver's port
+#   ${NGINX_CLIENT_MAX_BODY_SIZE}   the upload cap
+
+server_name ${DOMAIN};
+client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
+charset utf-8;
+
+# Not for search engines.
+add_header X-Robots-Tag "noindex, nofollow" always;
+
+# Long-poll friendliness for Talk and the web UI.
+proxy_read_timeout 600s;
+proxy_send_timeout 600s;
+
+# Re-resolve service names through Docker's embedded DNS on every request
+# window, not at config load. Without this nginx caches the IP for `web` once
+# at startup; recreating that container gives it a new IP and nginx keeps
+# 502'ing until it is restarted itself. The variables also let nginx start when
+# an optional upstream (webhooks, signaling) is not running at all.
+resolver 127.0.0.11 valid=30s ipv6=off;
+set $upstream_web       web:${WEB_PORT};
+set $upstream_signaling signaling:8080;
+set $upstream_webhooks  webhooks:${WEBHOOKS_PORT};
+
+# Every location below forwards `Host: $http_host`, not `$host`. `$host` is
+# normalized with the port stripped, so a stack published on anything but the
+# scheme's default port hands the upstream a bare hostname and every absolute
+# URL the upstream builds from the Host header loses the port (Starlette's
+# directory redirect, `/istota/chat` to `/istota/chat/`, is the visible case).
+#
+# `X-Forwarded-Proto` is `$forwarded_proto`, which the mode's server block
+# sets: `$scheme` where this nginx is the edge, the upstream's header where a
+# reverse proxy in front of it terminated TLS. Nothing the app decides about
+# security reads it.
+
+# Task event SSE stream: must stream, not buffer. Longest-prefix match wins
+# over /istota/. The web app also sets `X-Accel-Buffering: no`; this turns
+# buffering off explicitly and lifts the read timeout so a long idle gap
+# between events doesn't drop the stream.
+location /istota/api/chat/ {
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+}
+
+# Email login tokens are credentials; keep their query strings out of logs.
+location = /istota/auth/set-password {
+    access_log off;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+}
+
+# The web UI. The SvelteKit build is served under base /istota, so proxy_pass
+# carries no path component and the URI is kept.
+location /istota/ {
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+}
+
+# Meta's Cloud API webhook, an exact-match location, so nginx picks it before
+# the /webhooks/ prefix block below. It differs from its neighbours in two ways
+# nginx has to hold, because the application cannot.
+#
+# The verify token is a shared secret and Meta sends it as a query value on the
+# GET subscription handshake, so the default `combined` format's $request would
+# write it into access.log verbatim. A log_format naming $uri instead would
+# keep the line, but log_format is only valid at http level, so the access log
+# for this path goes. The application logs the handshake itself, with a stable
+# event name and no token. `off` takes the signed POST's line with it; the
+# receiver records every refusal under its own event names, so what is lost is
+# the request rate on this path.
+#
+# The body limit sits above istota's own 256 KiB cap and far below the 10m
+# below, so an oversized POST is answered by the application (413) rather than
+# by nginx with an HTML page Meta would retry against.
+location = /webhooks/whatsapp {
+    access_log off;
+    proxy_pass http://$upstream_webhooks;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+    client_max_body_size 512k;
+}
+
+# Provider callbacks and location pings share one receiver.
+location /webhooks/ {
+    proxy_pass http://$upstream_webhooks;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+    client_max_body_size 10m;
+}
+
+# The Talk standalone signaling server, behind the `signaling` compose profile.
+# Proxied here because Talk stores exactly one URL for it and two clients use
+# that URL: a browser, and Nextcloud's own PHP. A path on this front end is the
+# address both resolve. `rewrite ... break` strips the prefix, which proxy_pass
+# cannot do once its upstream is a variable. Buffering off and a long read
+# timeout because `/spreed` is a websocket that stays open for a session.
+#
+# `absolute_redirect off`: a request for the prefix without its trailing slash
+# gets nginx's own 301, built from `$host` and `$scheme`, which loses the port
+# and says http even behind TLS. A relative `Location` cannot be wrong.
+location /standalone-signaling/ {
+    absolute_redirect off;
+    rewrite ^/standalone-signaling/(.*)$ /$1 break;
+    proxy_pass http://$upstream_signaling;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+
+# Everything else: root-locations.conf, which sends `/` to the web UI and
+# answers 404 for the rest. The stack serves no Nextcloud; the full test tier
+# replaces this file with its fixture's locations.
+include /etc/nginx/istota/root.conf;

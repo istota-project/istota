@@ -6,8 +6,8 @@ the client reads the server's advertised feature list before it decides which
 hello version to send and whether to expect a relayed comment or a bare
 refresh. A stub answering that wrongly steers the daemon down a path no test
 chose. So this service starts nothing of its own — it configures and then
-attaches to the `signaling` container `docker-compose.yml` and
-`docker-compose.test.yml` both declare behind a compose profile, the same
+attaches to the `signaling` container `docker-compose.yml` declares behind a
+compose profile, the same
 `strukturag/nextcloud-spreed-signaling` image the estate runs and that Nextcloud
 All-in-One builds from.
 

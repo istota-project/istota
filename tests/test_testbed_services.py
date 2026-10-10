@@ -364,8 +364,8 @@ class TestServiceConfigNamesOnlyRealKeys:
         # reach the model for no stated reason.
         assert "host.docker.internal" in brain["native"]["base_url"]
 
-    def test_the_signaling_image_tag_matches_both_shipped_compose_defaults(self):
-        """One version, written in three places and held equal by nothing else.
+    def test_the_signaling_image_tag_matches_the_shipped_compose_default(self):
+        """One version, written in two places and held equal by nothing else.
 
         The harness passes `ISTOTA_TALK_SIGNALING_IMAGE_TAG` explicitly, so a
         compose default is only what an *operator* gets — and a bump in one
@@ -377,7 +377,7 @@ class TestServiceConfigNamesOnlyRealKeys:
             r"strukturag/nextcloud-spreed-signaling:\$\{ISTOTA_TALK_SIGNALING_IMAGE_TAG"
             r":-([0-9][^}]*)\}"
         )
-        for path in (FULL_COMPOSE, REPO / "docker" / "docker-compose.test.yml"):
+        for path in (FULL_COMPOSE,):
             found = pattern.findall(path.read_text())
             assert found == [signaling.IMAGE_TAG], (
                 f"{path.name} defaults the signaling image to {found}, and "

@@ -1291,9 +1291,11 @@ CONTAINER_DATA_DIR = Path("/data")
 CONTAINER_DB_PATH = "/data/db/istota.db"
 CONTAINER_TEMP_DIR = "/data/tmp"
 CONTAINER_REPOS_DIR = "/data/repos"
-#: The workspace. The compose volume (or, in full Nextcloud integration, the
-#: VM's rclone mount) is bound here.
-CONTAINER_WORKSPACE = "/mnt/shared"
+#: The workspace in local storage mode: a directory on the state volume.
+CONTAINER_LOCAL_WORKSPACE = "/data/workspace"
+#: The workspace in full Nextcloud integration: the VM's rclone mount of the
+#: bot's files, bound here. The entrypoint refuses to start unless it is one.
+CONTAINER_NEXTCLOUD_WORKSPACE = "/mnt/shared"
 #: Where the image installs the real forge binaries, off PATH.
 CONTAINER_FORGE_DIR = "/usr/local/lib/istota_forge"
 #: The `browser` service's container name and API port.
@@ -1471,10 +1473,16 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
     doc: dict = {
         "bot_name": a.bot_name,
         "db_path": CONTAINER_DB_PATH,
-        "workspace_path": CONTAINER_WORKSPACE,
+        "workspace_path": (
+            CONTAINER_NEXTCLOUD_WORKSPACE if a.uses_nextcloud else CONTAINER_LOCAL_WORKSPACE
+        ),
         "temp_dir": CONTAINER_TEMP_DIR,
         "security": {"sandbox_enabled": True, "skill_proxy_enabled": True},
     }
+    if a.uses_nextcloud:
+        # A real mount, so `runtime.mount_liveness` and the backup's mount
+        # guard have something to check.
+        doc["nextcloud_mount_path"] = CONTAINER_NEXTCLOUD_WORKSPACE
 
     brain: dict = {"kind": a.brain_kind}
     if a.brain_kind == "native":
@@ -1597,25 +1605,64 @@ def render_container_config(a: ContainerAnswers, *, inline_credentials: bool) ->
     return header + tomli_w.dumps(container_config_document(a, inline_credentials=inline_credentials))
 
 
+#: What compose publishes for a port slot nginx does not listen on in this
+#: mode: an ephemeral port on loopback, since compose has no way to leave one of
+#: the two `ports:` entries out.
+UNUSED_PUBLISH = "127.0.0.1::{port}"
+
+
+def tls_cert_source(a: ContainerAnswers) -> str:
+    """Where nginx's certificate comes from: `acme` or `files` for `direct`,
+    `files` or nothing for `proxied`, nothing for `local`."""
+    if a.ingress == "direct":
+        return a.tls_cert_source
+    if a.ingress == "proxied" and a.tls_cert_source == "files":
+        return "files"
+    return ""
+
+
+def nginx_publish(a: ContainerAnswers) -> tuple[str, str]:
+    """The two compose port specs for nginx: the plain-HTTP slot and the TLS slot.
+
+    `direct` listens on both, on every address. `proxied` listens on one
+    private address, on the TLS slot when it terminates TLS itself (files) and
+    the plain slot otherwise. `local` listens on loopback at the hostname's port.
+    """
+    if a.ingress == "direct":
+        return "80:80", "443:443"
+    if a.ingress == "proxied":
+        listen = f"{a.listen_addr}:{a.listen_port or 8080}"
+        if tls_cert_source(a) == "files":
+            return UNUSED_PUBLISH.format(port=80), f"{listen}:443"
+        return f"{listen}:80", UNUSED_PUBLISH.format(port=443)
+    _, _, port = a.hostname.rpartition(":")
+    port = port if port.isdigit() else "8080"
+    return f"127.0.0.1:{port}:80", UNUSED_PUBLISH.format(port=443)
+
+
 def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
     """The compose ``.env`` keys the wizard owns: stack-level, never istota config."""
+    plain, tls = nginx_publish(a)
     return {
         "COMPOSE_PROJECT_NAME": "istota",
         "COMPOSE_PROFILES": ",".join(a.compose_profiles),
         "DOMAIN": a.hostname,
         "ISTOTA_SECRETS_DIR": "./secrets",
+        "NGINX_PUBLISH": plain,
+        "NGINX_PUBLISH_TLS": tls,
         # Plain http on loopback needs it: a Secure cookie is never sent back.
         "ISTOTA_WEB_INSECURE_COOKIES": "1" if a.ingress == "local" else "0",
     }
 
 
 def vm_env_values(a: ContainerAnswers) -> dict[str, str]:
-    """The ``vm.env`` keys: what the VM's provisioning reads."""
+    """The ``vm.env`` keys: what the VM's provisioning reads, and what the nginx
+    and istota containers read for the ingress mode."""
     return {
         "STORAGE": "nextcloud" if a.uses_nextcloud else "local",
         "INGRESS": a.ingress,
         "DOMAIN": a.hostname,
-        "TLS_CERT_SOURCE": a.tls_cert_source if a.ingress != "local" else "",
+        "TLS_CERT_SOURCE": tls_cert_source(a),
         "UPSTREAM_PROXY": a.upstream_proxy,
         "LISTEN_ADDR": a.listen_addr,
         "LISTEN_PORT": str(a.listen_port or ""),
@@ -1762,6 +1809,15 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
         if interactive:
             out("  The hop from the proxy to this VM is plain HTTP unless you set up")
             out("  certificates here too; that is only acceptable on a network you control.")
+        # No ACME here: the public name points at the upstream, not this VM.
+        source = flag("tls_cert_source")
+        if source is None and interactive:
+            source = "files" if _ask_yes_no(
+                input_fn, "Terminate TLS here too, from certificate files?", False, out=out,
+            ) else ""
+        if source not in (None, "", "files"):
+            raise SetupError("Proxied ingress takes certificates from files or none, never ACME.")
+        a.tls_cert_source = source or ""
     if a.ingress == "direct":
         a.tls_cert_source = _ask_choice(
             input_fn, "Certificates from", ("acme", "files"), "acme", out=out,

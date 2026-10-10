@@ -132,9 +132,8 @@ class ScriptedEndpoint(HttpStub):
         """Point the daemon's native brain at this endpoint.
 
         A `config.toml` fragment, merged over the stack's base config. The API
-        key is not here: the lean compose file passes a fixed placeholder and
-        the full shape writes it to the secret file, since the endpoint ignores
-        the Authorization header entirely.
+        key is not here: both shapes write a fixed placeholder to its secret
+        file, since the endpoint ignores the Authorization header entirely.
         """
         return {
             "brain": {

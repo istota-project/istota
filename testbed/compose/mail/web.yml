@@ -1,6 +1,7 @@
 # The full shape's web process sends authentication mail itself. Trust the
 # same generated Maddy certificate as the daemon, with hostname verification.
-# Kept separate from mail.yml because the lean shape has no web service.
+# Kept separate from mail.yml because only the full profile reads mail from
+# the web process.
 services:
   web:
     volumes:
