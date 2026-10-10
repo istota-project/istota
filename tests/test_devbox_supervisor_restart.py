@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 SUPERVISOR = REPO / "docker" / "devbox" / "scripts" / "istota-exec-run"
 
 
-def _start(tmp_path: Path, server_exit: int) -> subprocess.Popen:
+def _start(tmp_path: Path, server_exit: int, *, stderr=subprocess.PIPE) -> subprocess.Popen:
     stub = tmp_path / "stub-server"
     stub.write_text(f"#!/bin/sh\nexit {server_exit}\n")
     stub.chmod(0o755)
@@ -42,7 +42,7 @@ def _start(tmp_path: Path, server_exit: int) -> subprocess.Popen:
         'echo "MAIN_RETURNED $?"\n'
     )
     return subprocess.Popen(
-        ["sh", str(driver)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ["sh", str(driver)], stdout=subprocess.PIPE, stderr=stderr,
         text=True, env=dict(os.environ),
     )
 
@@ -57,14 +57,21 @@ def test_the_restart_status_makes_the_supervisor_exit(tmp_path):
 
 
 def test_any_other_status_is_respawned(tmp_path):
-    proc = _start(tmp_path, 1)
-    try:
-        time.sleep(2)
-        assert proc.poll() is None, "the supervisor exited on an ordinary crash"
-    finally:
-        proc.kill()
-        _, err = proc.communicate(timeout=10)
-    assert "exited with status 1" in err
+    log = tmp_path / "supervisor.log"
+    with open(log, "w") as handle:
+        proc = _start(tmp_path, 1, stderr=handle)
+        try:
+            # Polled rather than slept: under a loaded xdist run the first
+            # server exit can take longer than any fixed pause.
+            deadline = time.monotonic() + 30
+            while "exited with status 1" not in log.read_text():
+                assert proc.poll() is None, "the supervisor exited on an ordinary crash"
+                assert time.monotonic() < deadline, log.read_text()
+                time.sleep(0.1)
+            assert proc.poll() is None, "the supervisor exited on an ordinary crash"
+        finally:
+            proc.kill()
+            proc.communicate(timeout=10)
 
 
 def test_the_supervisor_names_the_same_status_as_the_protocol():

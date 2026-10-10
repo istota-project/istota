@@ -16,7 +16,7 @@
 # It covers both halves of the tier:
 #
 #   * the istota image, via docker/test/Dockerfile.no-forge;
-#   * the devbox image, via ten controls, because that file asserts that many
+#   * the devbox image, via eleven controls, because that file asserts that many
 #     separable things and no single broken image reaches all of them. The
 #     forge-less image alone left four of the original thirteen assertions
 #     green, since /usr/local/bin/gh is a *copy* of the wrapper rather than a
@@ -24,7 +24,8 @@
 #     closed those. The last six arrived with the exec transport: the uid the
 #     container runs as, the ownership of /home/dev, the vendored protocol
 #     module, whether the transport comes *up*, the /home/dev repair, and the
-#     absence of /workspace. Read each Dockerfile.devbox-* file's note about
+#     absence of /workspace. The eleventh is the supervisor's half of
+#     `devbox reset` over the exec transport. Read each Dockerfile.devbox-* file's note about
 #     what it deliberately does *not* break — several turn a neighbour's
 #     assertion red for the wrong reason, which is exactly what a second
 #     control exists to separate.
@@ -41,6 +42,7 @@
 #   scripts/test-image-negative-control.sh run-contract
 #   scripts/test-image-negative-control.sh secrets
 #   scripts/test-image-negative-control.sh rendered-config
+#   scripts/test-image-negative-control.sh devbox
 #
 # The second form runs only the third half, the istota container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -56,6 +58,7 @@
 # `docker inspect` then shows (tests/image/test_secrets_contract.py). The
 # fourth runs the upgrade case that boots the new entrypoint over a config an
 # old release rendered, against an image whose entrypoint appends to that file.
+# The fifth runs only the devbox half, for a change that touches nothing else.
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -77,6 +80,11 @@ fi
 only_rendered_config=""
 if [ "$platform" = "rendered-config" ]; then
     only_rendered_config=1
+    platform=""
+fi
+only_devbox=""
+if [ "$platform" = "devbox" ]; then
+    only_devbox=1
     platform=""
 fi
 control_tag="istota-test/no-forge:control"
@@ -340,6 +348,7 @@ if [ -n "$only_secrets" ]; then
     exit 0
 fi
 
+istota_half() {
 # The tier's own tag scheme is the authority. Reproducing it in shell would be a
 # second copy of a rule that already exists, and it would drift.
 base_tag="$(
@@ -421,6 +430,11 @@ if ! grep -Fq "FAILED ${no_drop_node}" "$no_drop_out"; then
 fi
 rm -f "$no_drop_out"
 echo "[control] OK: the drop witness failed on the no-drop image."
+}
+
+if [ -z "$only_devbox" ]; then
+    istota_half
+fi
 
 
 # --------------------------------------------------------------------------
@@ -662,6 +676,14 @@ run_devbox_control \
     "the transport comes up normally and never chowns /home/dev" \
     "${DEVBOX_TESTS}::TestTheSupervisorStartsTheTransport::test_the_supervisor_repairs_a_home_directory_with_the_wrong_owner"
 
+# The supervisor's half of `devbox reset`: the server still answers and exits
+# with the restart status, and the supervisor respawns it instead of exiting.
+run_devbox_control \
+    "devbox-restart-respawns" \
+    "Dockerfile.devbox-restart-respawns" \
+    "the supervisor treats the restart status as a crash and respawns the server" \
+    "${DEVBOX_TESTS}::TestTheSupervisorStartsTheTransport::test_a_restart_request_stops_the_supervisor"
+
 run_devbox_control \
     "devbox-workspace-present" \
     "Dockerfile.devbox-workspace-present" \
@@ -669,14 +691,18 @@ run_devbox_control \
     "${DEVBOX_TESTS}::TestTheWorkspaceTmpfsIsGone::test_the_image_has_no_workspace_directory"
 
 echo
-echo "[control] OK: both halves of the image tier can see a broken artifact,"
+if [ -n "$only_devbox" ]; then
+    echo "[control] OK: the devbox half of the image tier can see a broken artifact,"
+else
+    echo "[control] OK: both halves of the image tier can see a broken artifact,"
+fi
 echo "[control] and every assertion in the devbox file that could pass"
 echo "[control] vacuously has one that reaches it."
 echo "[control] The five without one all fail closed; the header says which."
 
 # The run-contract half runs the lean smoke stack, which builds natively; an
 # amd64 run of this script leaves it to the native one. So does row 12's.
-if [ -z "$platform" ]; then
+if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     run_contract_half
     secrets_half
     rendered_config_half

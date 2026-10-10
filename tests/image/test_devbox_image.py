@@ -605,10 +605,22 @@ print("ACK", p.decode_ack(line)["status"])
 frames = [p.decode_control(payload) for _, payload in p.FrameDecoder().feed(rest)]
 print("RESTARTING", frames[0].get("restarting"))
 PY
-set +e
-wait "$supervisor"
-echo "SUPERVISOR_EXIT $?"
-set -e
+# Bounded, so a supervisor that respawns instead of exiting is a failed
+# assertion rather than a hang.
+waited=0
+while kill -0 "$supervisor" 2>/dev/null && [ "$waited" -lt $((PROBE_BUDGET_SECONDS * 10)) ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+done
+if kill -0 "$supervisor" 2>/dev/null; then
+    echo "RUNNER_EXIT still-running"
+    kill "$supervisor" || true
+else
+    set +e
+    wait "$supervisor"
+    echo "RUNNER_EXIT $?"
+    set -e
+fi
 grep -c 'restart requested over the exec transport' /tmp/supervisor.log | sed 's/^/LOGGED /'
 """
             ),
@@ -617,7 +629,7 @@ grep -c 'restart requested over the exec transport' /tmp/supervisor.log | sed 's
 
         assert _field(out, "ACK") == "ok"
         assert _field(out, "RESTARTING") == "True"
-        assert _field(out, "SUPERVISOR_EXIT") == "0", (
+        assert _field(out, "RUNNER_EXIT") == "0", (
             "the supervisor did not exit cleanly after a restart, so the "
             "container would keep running and the reset would do nothing"
         )
