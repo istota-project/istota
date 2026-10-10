@@ -24,9 +24,9 @@ Controls (`scripts/test-vm-negative-control.sh`):
   VM provisioned without it;
 - `every-cred-volume-everywhere`: the rendered compose file mounts every
   user's credential volume into every devbox;
-- `exec-socket-symlink`: the skill's no-follow open is neutered in the running
-  istota container, so a planted link at one devbox's socket is followed into
-  another's.
+- `exec-socket-symlink`: the skill's no-follow open is replaced, in the skill's
+  own process, by a plain `connect(path)`, so a planted link at one devbox's
+  socket is followed into another's.
 """
 
 from __future__ import annotations
@@ -137,30 +137,6 @@ istota-stack compose up -d
             vm.run(f"cp {lima.SCRATCH}/compose.devbox.yml.orig {DEVBOX_COMPOSE} && istota-stack compose up -d",
                    timeout=900)
         return
-    if name == "exec-socket-symlink":
-        # Neuter the no-follow open in the running istota container, so the
-        # skill (a fresh process per call) follows a planted link. The module
-        # is a leaf; a plain `connect(path)` is the pre-fix behaviour.
-        cid = lima.container(vm, "istota")
-        src = "/app/src/istota/lib/unix_connect.py"
-        vm.run(
-            f"docker exec {cid} python3 - {src} <<'PY'\n"
-            "import sys\n"
-            "p = sys.argv[1]\n"
-            "body = (\n"
-            '    "import socket\\n"\n'
-            '    "def connect_no_follow(sock, path):\\n"\n'
-            '    "    sock.connect(path)\\n"\n'
-            ")\n"
-            "open(p, 'w').write(body)\n"
-            "PY"
-        )
-        try:
-            yield vm
-        finally:
-            vm.run(f"docker cp {lima.STACK}/src/src/istota/lib/unix_connect.py "
-                   f"{cid}:/app/src/istota/lib/unix_connect.py")
-        return
     yield vm
 
 
@@ -168,6 +144,24 @@ istota-stack compose up -d
 # names them. devbox-<user> sees its own at /run/istota-exec/exec.sock.
 def _istota_exec_socket(user: str) -> str:
     return f"/data/devbox/exec/{user}/exec.sock"
+
+
+# Read at import: tests/conftest.py scrubs every ISTOTA_* variable before each
+# test body runs, so lima.control() there always answers "".
+_CONTROL = lima.control()
+
+
+def _skill_command() -> str:
+    """How the witness runs the devbox skill. Under `exec-socket-symlink` the
+    no-follow open is replaced, in the skill's own process, by the plain
+    `connect(path)` it replaced, before the skill imports it; the container's
+    root is read-only, so this is the one place the control can act."""
+    if _CONTROL != "exec-socket-symlink":
+        return f"{VENV_PYTHON} -m istota.skills.devbox"
+    patch = ("import runpy, istota.lib.unix_connect as u; "
+             "u.connect_no_follow = lambda sock, path: sock.connect(path); "
+             "runpy.run_module('istota.skills.devbox', run_name='__main__')")
+    return f"{VENV_PYTHON} -c {shlex.quote(patch)}"
 
 
 @parity.witness(11)
@@ -195,7 +189,7 @@ class TestAPlantedSocketSymlinkDoesNotReachAnotherDevbox:
         try:
             result = lima.stack_exec(
                 stack,
-                f"ISTOTA_USER_ID={lima.USER} {VENV_PYTHON} -m istota.skills.devbox "
+                f"ISTOTA_USER_ID={lima.USER} {_skill_command()} "
                 f"exec 'cat /home/dev/{self.MARKER}'",
                 check=False,
             )
