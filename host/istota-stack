@@ -1,0 +1,407 @@
+#!/bin/bash
+# istota-stack: the VM's command for the one istota stack on it. Run as root.
+#
+#   istota-stack update <tag>   verify a signed release tag, build it, switch to it
+#   istota-stack rollback       back to the previous tag, if its image can run the database
+#   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
+#   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
+#   istota-stack up | down      start or stop the stack (istota-stack.service)
+#   istota-stack exec <cmd...>  run a command in the istota container as uid 10001
+#   istota-stack compose <...>  docker compose, with this stack's files and settings
+#
+# --- end usage ---
+#
+# The layout is /srv/istota (ISTOTA_STACK_DIR overrides it, for the tests):
+#
+#   src/              a git checkout of the repository, at the deployed tag
+#   allowed_signers   the release key, written by provision.sh from host.env
+#   .env              compose settings: the wizard's keys, ISTOTA_TAG, ISTOTA_PREVIOUS_TAG
+#   host.env          host settings, read by provision.sh and the units
+#   config/           bound at /data/config, read-only to every running service
+#   secrets/          one file per credential, 0400, owned by uid 10001
+#   mount/            the rclone mount, in full Nextcloud integration
+#   certs/ letsencrypt/ acme/   nginx's certificate sources and the ACME webroot
+#
+# The compose file is the checkout's own (src/docker/docker-compose.yml), so the
+# compose file, the seccomp and AppArmor profiles and the images always come
+# from the same verified tag. Paths that belong to this VM are passed to compose
+# in the environment, which outranks .env.
+#
+# Release trust is a signed git tag, checked with `git verify-tag` against
+# allowed_signers alone: git's global and system configuration are not read,
+# OpenPGP and X.509 verification are switched off, and the tag object has to
+# carry an SSH signature and name itself. A branch, a lightweight tag, an
+# unsigned tag and a tag signed by any other key are refused before anything
+# moves. tests/test_istota_stack.py holds each refusal.
+set -euo pipefail
+
+STACK="${ISTOTA_STACK_DIR:-/srv/istota}"
+SRC="${STACK}/src"
+ALLOWED_SIGNERS="${STACK}/allowed_signers"
+ENV_FILE="${STACK}/.env"
+HOST_ENV="${STACK}/host.env"
+CONFIG_DIR="${STACK}/config"
+SECRETS_DIR="${STACK}/secrets"
+DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
+ISTOTA_UID=10001
+PROJECT=istota
+# A scratch directory a command removes on exit.
+staging=""
+# Exit codes: 1 a failure, 2 `apply` changed something, 3 the older image
+# refused the database (rollback), 64 usage, 65 a tag refused.
+EXIT_REFUSED_TAG=65
+
+log() { echo "[istota-stack] $*"; }
+die() { echo "[istota-stack] $*" >&2; exit 1; }
+refuse_tag() { echo "[istota-stack] REFUSE: $*" >&2; exit "$EXIT_REFUSED_TAG"; }
+
+usage() {
+    sed -n '2,/^# --- end usage ---$/p' "$0" | grep -v '^# --- end usage ---$' | sed 's/^# \{0,1\}//'
+}
+
+# --- .env and host.env -------------------------------------------------------
+
+env_get() {
+    local file="$1" key="$2"
+    [ -f "$file" ] || return 0
+    awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { if (v != "") print v }' "$file"
+}
+
+# Set KEY=VALUE pairs in .env, keeping every other line, through a rename so a
+# reader never sees half a file.
+env_set() {
+    local tmp
+    tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
+    if [ -f "$ENV_FILE" ]; then cat "$ENV_FILE" > "$tmp"; fi
+    while [ "$#" -gt 0 ]; do
+        local key="${1%%=*}" value="${1#*=}"
+        case "$value" in *$'\n'*) rm -f "$tmp"; die "a value for ${key} holds a newline" ;; esac
+        awk -F= -v k="$key" -v v="$value" '
+            $1 == k { if (!done) { print k "=" v; done = 1 }; next }
+            { print }
+            END { if (!done) print k "=" v }' "$tmp" > "${tmp}.new"
+        mv "${tmp}.new" "$tmp"
+        shift
+    done
+    chmod 0644 "$tmp"
+    mv "$tmp" "$ENV_FILE"
+}
+
+# --- compose -----------------------------------------------------------------
+
+compose() {
+    local files=(-f "${SRC}/docker/docker-compose.yml")
+    if [ -s "$DEVBOX_COMPOSE" ]; then files+=(-f "$DEVBOX_COMPOSE"); fi
+    local certs="${STACK}/certs"
+    if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
+    ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
+    ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
+    ISTOTA_MOUNT_DIR="${STACK}/mount" \
+    ISTOTA_HOST_ENV="$HOST_ENV" \
+    CERTS_DIR="$certs" \
+    ACME_WEBROOT="${STACK}/acme" \
+    CLAUDE_CODE_VERSION="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)" \
+        docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" "${files[@]}" "$@"
+}
+
+# A one-shot container from the istota image, dropped to uid 10001 before
+# anything runs: the root phase is bypassed, and `istota-drop` empties every
+# capability set. ISTOTA_CONFIG_READ_ONLY=false makes /data/config writable for
+# this container only.
+oneshot() {
+    local tty=(-T)
+    if [ -t 0 ] && [ -t 1 ]; then tty=(); fi
+    compose run --rm --no-deps "${tty[@]}" --entrypoint istota-drop "$@"
+}
+
+# `docker compose exec` into the running istota container, through `istota-drop`:
+# an exec starts as uid 0 with the cap_add set, not from the daemon's state.
+# ISTOTA_STACK_EXEC replaces the `compose exec istota` prefix, so the image tier
+# can point this at a container it started; the drop is not part of it.
+stack_exec() {
+    if [ -n "${ISTOTA_STACK_EXEC:-}" ]; then
+        # Word-split on purpose: a command prefix.
+        # shellcheck disable=SC2086
+        ${ISTOTA_STACK_EXEC} istota-drop "$@"
+        return
+    fi
+    local tty=(-T)
+    if [ -t 0 ] && [ -t 1 ]; then tty=(); fi
+    compose exec "${tty[@]}" istota istota-drop "$@"
+}
+
+# --- release tags ------------------------------------------------------------
+
+# git against the checkout, reading no configuration but this.
+verified_git() {
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$SRC" \
+        -c gpg.format=ssh \
+        -c "gpg.ssh.allowedSignersFile=${ALLOWED_SIGNERS}" \
+        -c gpg.openpgp.program=false \
+        -c gpg.x509.program=false \
+        "$@"
+}
+
+check_tag_name() {
+    case "$1" in
+        ""|-*|*[!A-Za-z0-9._-]*|*..*) refuse_tag "'$1' is not a release tag name." ;;
+    esac
+}
+
+# Print the object id of a release tag that passes every check, or refuse.
+verify_release_tag() {
+    local tag="$1" object kind named
+    check_tag_name "$tag"
+    if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
+        refuse_tag "${tag} is not a tag in the checkout. Only a signed release tag is deployed, never a branch or a commit."
+    fi
+    kind="$(verified_git cat-file -t "$object")"
+    if [ "$kind" != "tag" ]; then
+        refuse_tag "${tag} is a lightweight tag; a release tag is annotated and signed."
+    fi
+    named="$(verified_git cat-file tag "$object" | awk '/^tag / { print $2; exit } /^$/ { exit }')"
+    if [ "$named" != "$tag" ]; then
+        refuse_tag "the ref ${tag} points at a tag object named '${named}'."
+    fi
+    if ! verified_git cat-file tag "$object" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+        refuse_tag "${tag} carries no SSH signature."
+    fi
+    if [ ! -s "$ALLOWED_SIGNERS" ]; then
+        refuse_tag "${ALLOWED_SIGNERS} is missing or empty; provision.sh writes it from RELEASE_SIGNING_KEY."
+    fi
+    if ! verified_git verify-tag "$object" >/dev/null 2>&1; then
+        refuse_tag "${tag} is not signed by the key in ${ALLOWED_SIGNERS}."
+    fi
+    echo "$object"
+}
+
+# --- builds and images -------------------------------------------------------
+
+# Whether config.toml names a brain that runs Claude Code. With no config yet,
+# no: `istota-stack setup` says so when the answers need it.
+needs_claude_code() {
+    [ -f "${CONFIG_DIR}/config.toml" ] || { echo 0; return; }
+    python3 - "${CONFIG_DIR}/config.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    brain = tomllib.load(f).get("brain", {})
+kinds = {brain.get("kind", "claude_code"), brain.get("fallback", "")}
+kinds |= set((brain.get("source_type_overrides") or {}).values())
+kinds |= set(brain.get("room_selectable") or [])
+print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
+PY
+}
+
+# The services this stack builds. web and webhooks run the istota service's
+# image, so building them again would only repeat it.
+build_services() {
+    compose config --services | grep -vxE 'web|webhooks|nginx|signaling' || true
+}
+
+build_images() {
+    local tag="$1" services
+    services="$(ISTOTA_TAG="$tag" build_services)"
+    # shellcheck disable=SC2086
+    ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="$(needs_claude_code)" compose build $services
+}
+
+# Keep the current and the previous tag's images, remove every other istota-*.
+prune_images() {
+    local keep_current="$1" keep_previous="$2" ref tag
+    docker image ls --format '{{.Repository}}:{{.Tag}}' | while read -r ref; do
+        case "$ref" in istota-*:*) ;; *) continue ;; esac
+        tag="${ref##*:}"
+        if [ "$tag" = "$keep_current" ] || [ "$tag" = "$keep_previous" ]; then continue; fi
+        docker image rm "$ref" >/dev/null 2>&1 || log "could not remove ${ref}; in use?"
+    done
+}
+
+render_devbox_compose() {
+    local tag="$1" tmp
+    [ -f "${CONFIG_DIR}/config.toml" ] || return 0
+    tmp="$(mktemp)"
+    if ! ISTOTA_TAG="$tag" oneshot istota istota devbox compose-file > "$tmp"; then
+        rm -f "$tmp"
+        log "istota devbox compose-file failed"
+        return 1
+    fi
+    if [ -n "$(python3 -c 'import json,sys; t=open(sys.argv[1]).read(); j=t[t.find("{"):] if "{" in t else "{}"; print("x" if json.loads(j).get("services") else "")' "$tmp")" ]; then
+        install -m 0644 "$tmp" "$DEVBOX_COMPOSE"
+    else
+        rm -f "$DEVBOX_COMPOSE"
+    fi
+    rm -f "$tmp"
+}
+
+# Load the AppArmor profile the checkout ships, where the host has AppArmor.
+load_apparmor() {
+    local profile="${SRC}/docker/istota/apparmor-istota"
+    if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
+        install -m 0644 "$profile" /etc/apparmor.d/istota
+        apparmor_parser -r /etc/apparmor.d/istota
+    fi
+}
+
+# --- commands ----------------------------------------------------------------
+
+cmd_update() {
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    local tag="$1" object current previous before
+    check_tag_name "$tag"
+    [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
+    current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    verified_git fetch --quiet --tags origin || die "git fetch failed; nothing was changed."
+    object="$(verify_release_tag "$tag")"
+    before="$(verified_git rev-parse HEAD)"
+
+    # From here until .env is written, a failure puts the checkout back, so .env,
+    # the checkout and the running stack all stay as they were.
+    verified_git checkout --quiet --detach "${object}^{commit}"
+    log "building ${tag}"
+    if ! build_images "$tag" || ! render_devbox_compose "$tag"; then
+        verified_git checkout --quiet --detach "$before" || true
+        die "building ${tag} failed; .env, the checkout and the running stack are unchanged."
+    fi
+
+    previous="$current"
+    if [ "$current" = "$tag" ]; then previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"; fi
+    env_set "ISTOTA_TAG=${tag}" "ISTOTA_PREVIOUS_TAG=${previous}"
+    load_apparmor
+    if [ -f "${CONFIG_DIR}/config.toml" ]; then
+        compose up -d --remove-orphans
+    else
+        log "no config yet: run \`istota-stack setup\`, then \`systemctl enable --now istota-stack\`."
+    fi
+    prune_images "$tag" "$previous"
+    log "now on ${tag} (previous: ${previous:-none})"
+}
+
+cmd_rollback() {
+    local current previous object rc=0
+    current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"
+    [ -n "$previous" ] || die "no previous tag in ${ENV_FILE}; nothing to roll back to."
+    docker image inspect "istota-istota:${previous}" >/dev/null 2>&1 \
+        || die "the image istota-istota:${previous} is gone; run \`istota-stack update ${previous}\`."
+    object="$(verify_release_tag "$previous")"
+
+    # Ask the older image whether it can run this database before switching to
+    # it: a newer release's migration may have been one-way.
+    ISTOTA_TAG="$previous" oneshot istota istota init --check-schema || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        echo "[istota-stack] REFUSE: ${previous} cannot run this database: a newer release migrated it. ${ENV_FILE} still names ${current}." >&2
+        exit 3
+    elif [ "$rc" -ne 0 ]; then
+        die "${previous} could not check the database (exit ${rc}); ${ENV_FILE} still names ${current}."
+    fi
+
+    verified_git checkout --quiet --detach "${object}^{commit}"
+    env_set "ISTOTA_TAG=${previous}" "ISTOTA_PREVIOUS_TAG=${current}"
+    load_apparmor
+    compose up -d --remove-orphans
+    log "rolled back to ${previous} (previous: ${current})"
+}
+
+# Every credential file compose declares, empty where it does not exist yet:
+# compose refuses to start a service whose secret file is missing, before
+# anything in a container could write one.
+ensure_secret_files() {
+    local name
+    install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$SECRETS_DIR"
+    # Names are [a-z0-9_] only; the single quotes are sed's, not the shell's.
+    # shellcheck disable=SC2013,SC2016
+    for name in $(sed -n 's|^ *file: \${ISTOTA_SECRETS_DIR:-\./secrets}/\([a-z0-9_]*\)$|\1|p' "${SRC}/docker/docker-compose.yml"); do
+        if [ ! -e "${SECRETS_DIR}/${name}" ]; then
+            install -m 0400 -o "$ISTOTA_UID" -g "$ISTOTA_UID" /dev/null "${SECRETS_DIR}/${name}"
+        fi
+    done
+}
+
+# An install upgraded from the Docker shape keeps its config on the state
+# volume, which the host bind now hides. Copy it out once.
+copy_out_config() {
+    local tag volume="${PROJECT}_istota_data"
+    [ -e "${CONFIG_DIR}/config.toml" ] && return 0
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || return 0
+    log "copying config.toml and admins out of the ${volume} volume, once"
+    docker run --rm --network none --user "${ISTOTA_UID}:${ISTOTA_UID}" --entrypoint /bin/sh \
+        -v "${volume}:/old:ro" -v "${CONFIG_DIR}:/new" "istota-istota:${tag}" -c \
+        'for f in config.toml admins; do [ ! -f "/old/config/$f" ] || cp -p "/old/config/$f" /new/; done'
+}
+
+cmd_setup() {
+    local tag
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$CONFIG_DIR"
+    install -d -m 0755 "${STACK}/mount" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+    ensure_secret_files
+    copy_out_config
+
+    # The wizard runs as uid 10001 and writes .env, host.env and secrets/ in its
+    # --vm-dir, so it gets a staging directory it owns; the files are moved into
+    # place as root afterwards.
+    staging="$(mktemp -d "${STACK}/.setup.XXXXXX")"
+    trap 'rm -rf "${staging:-}"' EXIT
+    for f in .env host.env; do
+        if [ -f "${STACK}/${f}" ]; then cp "${STACK}/${f}" "${staging}/${f}"; fi
+    done
+    chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"
+    ISTOTA_CONFIG_READ_ONLY=false oneshot \
+        -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
+        istota istota setup --vm-dir /vm "$@"
+    install -m 0644 -o root -g root "${staging}/.env" "$ENV_FILE"
+    install -m 0644 -o root -g root "${staging}/host.env" "$HOST_ENV"
+    # The wizard owns .env's keys but not this script's.
+    env_set "ISTOTA_TAG=${tag}"
+    if [ "$(needs_claude_code)" = 1 ] && [ "$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "istota-istota:${tag}" | sed -n 's/^ISTOTA_CLAUDE_CODE_INSTALLED=//p')" != 1 ]; then
+        log "this config runs Claude Code, which the ${tag} image was built without: run \`istota-stack update ${tag}\`."
+    fi
+    render_devbox_compose "$tag"
+    log "written. Re-run provision.sh to pick up host.env, then \`systemctl enable --now istota-stack\`."
+}
+
+cmd_apply() {
+    [ "$#" -ge 1 ] || { usage >&2; exit 64; }
+    local plan="$1" name rc=0
+    shift
+    [ -f "$plan" ] || die "no plan at ${plan}"
+    staging="$(mktemp -d)"
+    trap 'rm -rf "${staging:-}"' EXIT
+    name="$(basename "$plan")"
+    # Readable by uid 10001 alone: a plan can hold credentials.
+    install -m 0400 "$plan" "${staging}/${name}"
+    if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/plan:ro" \
+        istota istota apply -f "/plan/${name}" "$@" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        case " $* " in
+            *" --dry-run "*) ;;
+            *) log "the config changed; restarting the stack"; compose restart ;;
+        esac
+    fi
+    return "$rc"
+}
+
+main() {
+    local command="${1:-}"
+    [ "$#" -gt 0 ] && shift
+    case "$command" in
+        update) cmd_update "$@" ;;
+        rollback) cmd_rollback "$@" ;;
+        setup) cmd_setup "$@" ;;
+        apply) cmd_apply "$@" ;;
+        up) load_apparmor; compose up -d --remove-orphans ;;
+        down) compose down ;;
+        exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
+        compose) compose "$@" ;;
+        -h|--help|help) usage ;;
+        *) usage >&2; exit 64 ;;
+    esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

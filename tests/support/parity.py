@@ -67,7 +67,6 @@ PENDING: dict[int, str] = {
     9: "Stage 7",
     10: "Stage 7",
     11: "Stage 7",
-    13: "Stage 6",
     15: "Stage 7",
     18: "Stage 7",
     19: "Stage 7",
