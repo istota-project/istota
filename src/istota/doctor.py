@@ -9281,6 +9281,61 @@ def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult
     )
 
 
+def check_bare_metal_import(config: "Config", probe: bool) -> CheckResult:
+    """Whether this install was imported from a bare-metal one, and as what.
+
+    ``istota migrate import-bare-metal`` records the source host, its release,
+    the export and import times and whether the import was a rehearsal, in the
+    reserved ``_migration`` namespace. A rehearsal copy holds production
+    credentials and every user's data with its pollers switched off, so it is
+    a WARN on every run: the one place an operator looking at the install sees
+    that it must never take traffic and must be deleted afterwards. Hostnames
+    are in the detail on purpose; the audience is an operator. Reads only.
+    """
+    import sqlite3
+
+    from istota.maintenance import bare_metal_import as bmi
+
+    name = "runtime.bare_metal_import"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(name, SKIP, f"no framework database at {db_path}", scope=DEPLOYMENT)
+    try:
+        record = bmi.read_record(db_path)
+    except (sqlite3.Error, ValueError) as exc:
+        return CheckResult(
+            name, WARN, f"could not read the import record: {exc}",
+            remedy=(
+                "Check `runtime.framework_db`. The record is the "
+                f"`{bmi.MIGRATION_NAMESPACE}`/`{bmi.RECORD_KEY}` row in `shared_kv`."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if record is None:
+        return CheckResult(name, SKIP, "not imported from a bare-metal install", scope=DEPLOYMENT)
+
+    def field(key: str) -> str:
+        return " ".join(str(record.get(key) or "?").split())[:120]
+
+    source = (
+        f"from {field('source_host')} ({field('source_release')}, "
+        f"{field('export_mode')} export at {field('exported_at')}), "
+        f"imported at {field('imported_at')}"
+    )
+    if record.get("rehearsal") is True:
+        return CheckResult(
+            name, WARN, f"a rehearsal copy {source}",
+            remedy=(
+                "This install holds the source's credentials and data with its "
+                "pollers and transports switched off. Never point the upstream "
+                "proxy or a webhook at it, and delete it when the rehearsal is done. "
+                "The real cutover imports a fresh export without --rehearsal."
+            ),
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(name, OK, f"imported {source}", scope=DEPLOYMENT)
+
+
 def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
     """Which persona is in force, and whether anything about it needs a hand.
 
@@ -9459,6 +9514,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.mount_liveness", check_mount_liveness),
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.task_control_dir", check_task_control_dir),
+    ("runtime.bare_metal_import", check_bare_metal_import),
     ("runtime.subscription_usage", check_subscription_usage),
     ("runtime.model_execution", check_model_execution),
     ("security.skill_proxy", check_skill_proxy),
@@ -9657,6 +9713,8 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it reads the file root and the configured users' folders,
     # which a bare `docker run` has none of.
     "config.operator_persona": DEPLOYMENT,
+    # Deployment: it reads the install's own import record.
+    "runtime.bare_metal_import": DEPLOYMENT,
     # Deployment: it reads the install's own user tables.
     "users.email_address_uniqueness": DEPLOYMENT,
     "email.confirmation_answers": DEPLOYMENT,
