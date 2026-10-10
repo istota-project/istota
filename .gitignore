@@ -102,6 +102,6 @@ src/istota/web_static/
 .private-data-local
 
 
-# The stack directory a checkout doubles as: VM settings and the mount point.
-/docker/vm.env
+# The stack directory a checkout doubles as: host settings and the mount point.
+/docker/host.env
 /docker/mount/

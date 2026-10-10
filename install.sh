@@ -217,9 +217,9 @@ Next, in $REPO_ROOT/docker:
 
   1. cp .env.example .env
   2. docker compose build istota
-  3. Let the image's uid 10001 write .env, vm.env and secrets/. Compose refuses
+  3. Let the image's uid 10001 write .env, host.env and secrets/. Compose refuses
      to run a service whose secret file is missing, so each starts empty:
-       touch vm.env && sudo chown 10001:10001 .env vm.env
+       touch host.env && sudo chown 10001:10001 .env host.env
        sudo install -d -o 10001 -g 10001 -m 0700 secrets
        for n in \$(docker compose config --format json | python3 -c 'import json,sys; print(*json.load(sys.stdin)["secrets"])'); do
            sudo install -o 10001 -g 10001 -m 0400 /dev/null "secrets/\$n"; done

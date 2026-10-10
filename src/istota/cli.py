@@ -4729,7 +4729,7 @@ def main():
         help="Which install to set up (default: container inside the image, else standalone)",
     )
     setup_parser.add_argument(
-        "--vm-dir", help="Also write the stack's .env, vm.env and secrets/ here (container)",
+        "--vm-dir", help="Also write the stack's .env, host.env and secrets/ here (container)",
     )
     setup_parser.add_argument("--data-dir", help="The state volume (container; default /data)")
     setup_parser.add_argument("--bot-name", help="User-facing bot name (container)")

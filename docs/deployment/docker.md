@@ -24,7 +24,7 @@ istota's configuration is `/data/config/config.toml` on the state volume. `istot
 cd docker
 cp .env.example .env
 docker compose build istota
-touch vm.env && sudo chown 10001:10001 .env vm.env
+touch host.env && sudo chown 10001:10001 .env host.env
 sudo install -d -o 10001 -g 10001 -m 0700 secrets
 for n in $(docker compose config --format json | python3 -c 'import json,sys; print(*json.load(sys.stdin)["secrets"])'); do
     sudo install -o 10001 -g 10001 -m 0400 /dev/null "secrets/$n"; done
@@ -210,7 +210,7 @@ Workspace files have no versions or trash in either mode.
 
 ## Ingress and TLS
 
-The compose `nginx` is the only listener the stack publishes. The mode is `INGRESS` in `vm.env`, which `istota setup --vm-dir` writes beside the compose file and which both `nginx` and `istota` read:
+The compose `nginx` is the only listener the stack publishes. The mode is `INGRESS` in `host.env`, which `istota setup --vm-dir` writes beside the compose file and which both `nginx` and `istota` read:
 
 | `INGRESS` | nginx listens on | TLS |
 |---|---|---|

@@ -24,7 +24,7 @@ from istota.setup_wizard import (
     container_secret_values,
     render_container_config,
     render_stack_env,
-    render_vm_env,
+    render_host_env,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -284,7 +284,7 @@ class TestTheRun:
         assert "native-key" not in config.read_text()
         env = (vm / ".env").read_text()
         assert "COMPOSE_PROFILES=" in env and "ISTOTA_SECRETS_DIR=./secrets" in env
-        assert "STORAGE=local" in (vm / "vm.env").read_text()
+        assert "STORAGE=local" in (vm / "host.env").read_text()
 
     def test_an_existing_config_is_refused_without_force(self, tmp_path):
         setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
@@ -387,8 +387,8 @@ class TestTheStackFiles:
         assert "COMPOSE_PROFILES=browser,signaling,location,whatsapp-baileys" in text
         assert "ISTOTA_SECRETS_DIR=./secrets" in text
 
-    def test_the_vm_env_carries_the_ingress_choices(self):
-        text = render_vm_env(_full_answers())
+    def test_the_host_env_carries_the_ingress_choices(self):
+        text = render_host_env(_full_answers())
         values = dict(line.split("=", 1) for line in text.splitlines() if "=" in line and not line.startswith("#"))
         assert values == {
             "STORAGE": "nextcloud", "INGRESS": "proxied", "DOMAIN": "bot.example.test",
@@ -425,7 +425,7 @@ class TestWhatNginxPublishes:
 
         assert values["NGINX_PUBLISH"] == "80:80"
         assert values["NGINX_PUBLISH_TLS"] == "443:443"
-        assert _env(render_vm_env(a))["TLS_CERT_SOURCE"] == "acme"
+        assert _env(render_host_env(a))["TLS_CERT_SOURCE"] == "acme"
 
     def test_proxied_publishes_the_plain_slot_on_the_private_address(self):
         values = _env(render_stack_env(_full_answers()))
@@ -439,7 +439,7 @@ class TestWhatNginxPublishes:
 
         assert values["NGINX_PUBLISH"] == "127.0.0.1::80"
         assert values["NGINX_PUBLISH_TLS"] == "10.0.0.20:8080:443"
-        assert _env(render_vm_env(a))["TLS_CERT_SOURCE"] == "files"
+        assert _env(render_host_env(a))["TLS_CERT_SOURCE"] == "files"
 
     def test_local_publishes_loopback_at_the_hostnames_port(self):
         a = _full_answers(ingress="local", hostname="localhost:8282")
@@ -447,7 +447,7 @@ class TestWhatNginxPublishes:
 
         assert values["NGINX_PUBLISH"] == "127.0.0.1:8282:80"
         assert values["NGINX_PUBLISH_TLS"] == "127.0.0.1::443"
-        assert _env(render_vm_env(a))["TLS_CERT_SOURCE"] == ""
+        assert _env(render_host_env(a))["TLS_CERT_SOURCE"] == ""
 
     def test_proxied_refuses_acme(self):
         args = SimpleNamespace(

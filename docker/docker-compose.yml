@@ -110,10 +110,10 @@ services:
       - istota_data:/data
       - *workspace_mount
     # The ingress mode and the public name, for the entrypoint's check that
-    # `[site] hostname` is DOMAIN behind TLS. vm.env is written by `istota
+    # `[site] hostname` is DOMAIN behind TLS. host.env is written by `istota
     # setup --vm-dir` beside this file; without one the stack is `local`.
     env_file:
-      - path: ./vm.env
+      - path: ./host.env
         required: false
     # No istota configuration here. config.toml is an input: `istota setup`
     # writes /data/config/config.toml on the state volume once, and the
@@ -194,7 +194,7 @@ services:
     restart: unless-stopped
 
   # The only listener the stack publishes, in every ingress mode. INGRESS
-  # (vm.env: direct, proxied or local) picks the server blocks the start script
+  # (host.env: direct, proxied or local) picks the server blocks the start script
   # renders from docker/nginx/ (istota-ingress.sh, run by the image's own
   # entrypoint before nginx starts); the location blocks exist once, in
   # istota.conf.template. tests/image/test_nginx_ingress.py runs `nginx -t`
@@ -223,7 +223,7 @@ services:
       - ${CERTS_DIR:-./nginx/certs}:/etc/nginx/certs:ro
       - ${ACME_WEBROOT:-./nginx/acme}:/var/www/acme:ro
     env_file:
-      - path: ./vm.env
+      - path: ./host.env
         required: false
     environment:
       WEB_PORT: ${WEB_PORT:-8766}

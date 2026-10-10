@@ -1,7 +1,7 @@
 """The compose nginx's configuration, rendered and checked by nginx itself.
 
 `docker/nginx/istota-ingress.sh` renders the server blocks for the stack's
-ingress mode (`INGRESS` in vm.env) around the one location template, and the
+ingress mode (`INGRESS` in host.env) around the one location template, and the
 stock nginx image runs it before nginx starts. Nothing in the tree ran `nginx
 -t` against either nginx template before this (the Ansible one says so); a
 default-suite test reading the text cannot see a directive nginx refuses, an

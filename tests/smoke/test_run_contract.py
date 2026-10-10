@@ -158,7 +158,7 @@ class TestNoDockerApi:
 
 
 # Row 16's probe, run as a task's Bash tool call. Syscall numbers per
-# architecture; the arguments are the spike's (vm/spike/RESULTS.md).
+# architecture; the arguments are the spike's (host/spike/RESULTS.md).
 SYSCALL_PROBE = r"""
 echo SYSCALL_PROBE_BEGIN
 echo "dbdir=$(stat -f -c %T /data/db 2>&1)"

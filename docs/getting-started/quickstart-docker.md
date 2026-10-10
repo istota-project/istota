@@ -12,7 +12,7 @@ The one-liner clones the repo to `~/istota` and prints the remaining steps. Requ
 
 1. `cp .env.example .env`.
 2. `docker compose build istota`.
-3. Give the image's uid 10001 the stack's `.env`, `vm.env` and `secrets/` directory, with an empty file per secret (compose refuses to run a service whose secret file is missing; the installer prints the exact commands).
+3. Give the image's uid 10001 the stack's `.env`, `host.env` and `secrets/` directory, with an empty file per secret (compose refuses to run a service whose secret file is missing; the installer prints the exact commands).
 4. Run the wizard inside the image:
 
    ```bash

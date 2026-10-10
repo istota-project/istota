@@ -4711,7 +4711,7 @@ def check_web_tls(config: "Config", probe: bool) -> CheckResult:
 
     One TLS handshake to the stack's nginx with the public name as SNI, made
     from this container, which mounts no certificate and no key. The ingress
-    mode and the name come from the stack's vm.env (`INGRESS`, `DOMAIN`),
+    mode and the name come from the stack's host.env (`INGRESS`, `DOMAIN`),
     falling back to `[site] hostname`. Before the first certificate nginx
     serves port 80 alone, so nothing listens on 443 and this FAILs naming the
     first issuance. Opens a socket, so it needs `probe`.
@@ -4755,7 +4755,7 @@ def check_web_tls(config: "Config", probe: bool) -> CheckResult:
             name, FAIL, f"nothing answers TLS on {host}:{port} ({exc.__class__.__name__})",
             remedy=(
                 "nginx serves port 80 alone until a certificate exists. Run certbot "
-                "once (`istota-vm setup` does), or put fullchain.pem and privkey.pem "
+                "once (`istota-stack setup` does), or put fullchain.pem and privkey.pem "
                 "in /srv/istota/certs; the deploy hook restarts nginx onto port 443."
             ),
         )

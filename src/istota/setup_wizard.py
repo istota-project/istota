@@ -5,7 +5,7 @@ which sets ``ISTOTA_SETUP_SHAPE``) is how every install of the one deployment
 shape gets its config. It runs inside the istota image, as the daemon's uid,
 and writes ``/data/config/config.toml``, ``/data/config/admins`` and
 ``/data/.secret_key``; with ``--vm-dir`` it also writes the stack's ``.env``,
-``vm.env`` and one file per credential under ``secrets/``, which compose mounts
+``host.env`` and one file per credential under ``secrets/``, which compose mounts
 at ``/run/secrets`` and the entrypoint reads into the daemon's environment.
 Nothing renders ``config.toml`` after this: the operator owns it.
 
@@ -1326,7 +1326,7 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_developer_github_token",
 )
 
-#: Ingress modes, as `vm.env`'s INGRESS names them, mapped to the hop count the
+#: Ingress modes, as `host.env`'s INGRESS names them, mapped to the hop count the
 #: web app subtracts from X-Forwarded-For: one for the compose nginx, plus one
 #: for an upstream proxy in `proxied`.
 INGRESS_HOPS = {"direct": 1, "proxied": 2, "local": 1}
@@ -1655,8 +1655,8 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
     }
 
 
-def vm_env_values(a: ContainerAnswers) -> dict[str, str]:
-    """The ``vm.env`` keys: what the VM's provisioning reads, and what the nginx
+def host_env_values(a: ContainerAnswers) -> dict[str, str]:
+    """The ``host.env`` keys: what the VM's provisioning reads, and what the nginx
     and istota containers read for the ingress mode."""
     return {
         "STORAGE": "nextcloud" if a.uses_nextcloud else "local",
@@ -1675,8 +1675,8 @@ _STACK_ENV_HEADER = (
     "# /data/config/config.toml on the state volume; its credentials are the\n"
     "# files under secrets/.\n"
 )
-_VM_ENV_HEADER = (
-    "# VM settings for this install, read by vm/provision.sh for the mount,\n"
+_HOST_ENV_HEADER = (
+    "# Host settings for this install, read by host/provision.sh for the mount,\n"
     "# firewall and certificate units. `istota setup` updates the keys it owns.\n"
 )
 
@@ -1710,9 +1710,9 @@ def render_stack_env(a: ContainerAnswers, existing: str = "") -> str:
     return merge_env_text(existing, stack_env_values(a), _STACK_ENV_HEADER)
 
 
-def render_vm_env(a: ContainerAnswers, existing: str = "") -> str:
-    """``vm.env`` after this run."""
-    return merge_env_text(existing, vm_env_values(a), _VM_ENV_HEADER)
+def render_host_env(a: ContainerAnswers, existing: str = "") -> str:
+    """``host.env`` after this run."""
+    return merge_env_text(existing, host_env_values(a), _HOST_ENV_HEADER)
 
 
 def _env_credential(name: str) -> str:
@@ -2037,7 +2037,7 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
         os.chmod(secrets_dir, 0o700)
         for name, value in container_secret_values(a).items():
             _write_secret_file(secrets_dir / name, value)
-        for name, render in ((".env", render_stack_env), ("vm.env", render_vm_env)):
+        for name, render in ((".env", render_stack_env), ("host.env", render_host_env)):
             path = vm_dir / name
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
             path.write_text(render(a, existing), encoding="utf-8")
@@ -2052,6 +2052,6 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
     out(f"  Config:  {config_path} (yours to edit; nothing regenerates it)")
     out(f"  Admins:  {config_path.parent / 'admins'}")
     if vm_dir is not None:
-        out(f"  Stack:   {vm_dir / '.env'}, {vm_dir / 'vm.env'}, {secrets_dir}/")
+        out(f"  Stack:   {vm_dir / '.env'}, {vm_dir / 'host.env'}, {secrets_dir}/")
     out(f"  First admin: {a.user_id}")
     return 0

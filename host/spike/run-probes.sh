@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stage 1 spike driver. Run as root inside the spike VM, from a copy of
-# vm/spike at /srv/istota-spike, after install-engines.sh and after the
+# host/spike at /srv/istota-spike, after install-engines.sh and after the
 # current image is loaded as istota-spike/istota:<tag>.
 #
 #   run-probes.sh setup <base-image>   build the patched image, derive profiles

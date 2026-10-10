@@ -89,7 +89,7 @@ PENDING_AT_STAGE_1: frozenset[int] = frozenset(
 # to be witnessed, so this records what a witness does not yet cover rather
 # than standing in for one.
 OUTSTANDING_HALVES: dict[int, str] = {
-    5: "Stage 6: the VM's `istota` wrapper and `istota-vm setup` exec as 10001",
+    5: "Stage 6: the VM's `istota` wrapper and `istota-stack setup` exec as 10001",
     # The image tier runs on Docker Desktop, whose file sharing shows every
     # bind-mounted file as uid 0, so the mode is witnessed there and the owner
     # only where the bind keeps the writer's uid: the VM.

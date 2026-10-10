@@ -4,7 +4,7 @@
 # /docker-entrypoint.d/15-istota-ingress.sh, which the image's own entrypoint
 # runs (and stops on, if this exits non-zero) ahead of `nginx`.
 #
-# INGRESS (vm.env) picks the server blocks; the location blocks are always
+# INGRESS (host.env) picks the server blocks; the location blocks are always
 # istota.conf.template:
 #
 #   local    listen-local.conf
