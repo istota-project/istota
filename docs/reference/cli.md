@@ -153,7 +153,7 @@ istota briefings archive show -u USER --id ARCHIVE_ID
 ### Secrets (encrypted store)
 
 ```bash
-istota secret ensure -u USER --service SERVICE --key KEY --value VALUE   # value via flag, env, or stdin
+istota secret ensure -u USER --service SERVICE --key KEY --value VALUE   # or --value-stdin
 istota secret list   -u USER                                             # service/key/last_accessed; values never printed
 istota secret remove -u USER --service SERVICE --key KEY
 
@@ -163,6 +163,8 @@ istota secret vault-new    -u USER --slug SLUG [--username USER] [--url URL] [--
 ```
 
 Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are long-only (`-v` is the global verbose flag).
+
+`--value-stdin` reads the value from stdin instead (the whole input, less one trailing line ending), so it is not on the command line, where other processes on the host can read it. The Ansible management role passes every user secret this way.
 
 
 Export requires a terminal and prints a generated password once. Import prompts privately for the source passphrase, prints a preview, and imports new entries; `--include-changed` also replaces changed entries. Both use the same credential modules as Settings.

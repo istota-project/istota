@@ -1051,8 +1051,13 @@ def cmd_secret(args):
     if args.action == "ensure":
 
         value = args.value
+        if args.value_stdin:
+            if value is not None:
+                print("Error: pass --value or --value-stdin, not both", file=sys.stderr)
+                sys.exit(1)
+            value = _read_secret_stdin()
         if not value:
-            print("Error: --value is required for ensure", file=sys.stderr)
+            print("Error: --value or --value-stdin is required for ensure", file=sys.stderr)
             sys.exit(1)
         state = secrets_store.upsert_secret(
             db_path, args.user, args.service, args.key, value,
@@ -1079,6 +1084,19 @@ def cmd_secret(args):
         print(f"Secret remove for {args.user!r}: service={args.service} key={args.key}")
         print(f"STATE: {state}")
         return
+
+
+#: Above any credential the store holds; a bound, so a runaway pipe is refused.
+_SECRET_STDIN_LIMIT = 1 << 20
+
+
+def _read_secret_stdin() -> str:
+    """The whole of stdin less one line ending, as `--password-stdin` reads a line."""
+    value = sys.stdin.read(_SECRET_STDIN_LIMIT + 1)
+    if len(value) > _SECRET_STDIN_LIMIT:
+        print("Error: the value on stdin is over 1 MiB", file=sys.stderr)
+        sys.exit(1)
+    return value.removesuffix("\n").removesuffix("\r")
 
 
 def _cmd_secret_file(config, args) -> None:
@@ -5042,6 +5060,10 @@ def main():
     secret_parser.add_argument(
         "--value",
         help="Secret value (ensure only). Use `secret remove` to clear.",
+    )
+    secret_parser.add_argument(
+        "--value-stdin", action="store_true",
+        help="Read the value from stdin instead, keeping it off the command line (ensure only)",
     )
 
     # email

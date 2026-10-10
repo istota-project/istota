@@ -32,6 +32,7 @@ class _FakeArgs:
             "service": None,
             "key": None,
             "value": None,
+            "value_stdin": False,
             # Defaulted here rather than read with `getattr` in `cmd_secret`,
             # which would hide a flag the parser stopped declaring.
             "generate": False,
@@ -177,6 +178,65 @@ class TestSecretEnsureValidation:
         assert excinfo.value.code == 1
         err = capsys.readouterr().err
         assert "value" in err.lower()
+
+
+class TestSecretEnsureFromStdin:
+    """`--value-stdin`: a value on argv is in the process list, and on the VM
+    in root's docker CLI command line and dockerd's exec records."""
+
+    def _run(self, monkeypatch, cfg, text: str, **extra):
+        import io
+
+        from istota.cli import cmd_secret
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(text))
+        cmd_secret(_FakeArgs(
+            action="ensure", config=str(cfg), user="alice",
+            service="karakeep", key="api_key", value_stdin=True, **extra,
+        ))
+
+    def test_the_value_is_read_from_stdin(self, cfg_with_db, capsys, monkeypatch):
+        cfg, db_path = cfg_with_db
+        self._run(monkeypatch, cfg, "kk-from-stdin\n")
+        out = capsys.readouterr().out
+        assert "STATE: created" in out
+        assert "kk-from-stdin" not in out
+        # One line ending removed, as `auth set-password --password-stdin` does.
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") == "kk-from-stdin"
+
+    def test_a_multi_line_value_is_kept_whole(self, cfg_with_db, monkeypatch):
+        cfg, db_path = cfg_with_db
+        self._run(monkeypatch, cfg, "line one\nline two\n")
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") == "line one\nline two"
+
+    def test_an_empty_stdin_is_refused(self, cfg_with_db, capsys, monkeypatch):
+        cfg, _ = cfg_with_db
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, cfg, "\n")
+        assert excinfo.value.code == 1
+
+    def test_both_forms_at_once_are_refused(self, cfg_with_db, capsys, monkeypatch):
+        cfg, db_path = cfg_with_db
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, cfg, "a\n", value="b")
+        assert excinfo.value.code == 1
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") is None
+
+    def test_through_the_command_line(self, cfg_with_db, capsys, monkeypatch):
+        import io
+        import sys
+
+        from istota.cli import main
+
+        cfg, db_path = cfg_with_db
+        monkeypatch.setattr(sys, "stdin", io.StringIO("kk-cli\n"))
+        monkeypatch.setattr(sys, "argv", [
+            "istota", "-c", str(cfg), "secret", "ensure", "--user", "alice",
+            "--service", "karakeep", "--key", "api_key", "--value-stdin",
+        ])
+        main()
+        assert "STATE: created" in capsys.readouterr().out
+        assert secrets_store.get_secret(db_path, "alice", "karakeep", "api_key") == "kk-cli"
 
 
 class TestSecretList:

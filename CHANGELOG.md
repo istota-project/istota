@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An optional Ansible role manages a dedicated Istota VM from an estate's inventory.** It writes the host settings, the secret files and the config plan from variables, then runs the VM's own provisioning, update and apply commands. A `--check` run reports drift without changing anything. Estate values stay in the estate's own variables; the role ships generic defaults only.
 
+- **`istota secret ensure --value-stdin` reads the value from stdin**, so it is not on the command line where other processes can read it. The Ansible management role passes user secrets this way.
+
 - **`istota apply -f plan.toml` writes `config.toml` from a plan**, for installs managed by Ansible or another config manager. It prints a diff with credentials hidden, writes only when something changed, and exits 0 for no change, 2 for a change (or one `--dry-run` would make) and 1 for a refused plan, with nothing written. `istota-stack apply` restarts the stack when the config changed.
 
 - Search beside the notification bell finds messages, room names, memories, facts and records in your enabled modules. Open it with Cmd+K or Ctrl+K, choose a result to open its source, or search transactions when you need them. Older message results can load the matching history and mark the message in its room.
