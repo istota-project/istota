@@ -564,6 +564,20 @@ class TestRefusals:
         (source / "MANIFEST").unlink()
         assert bmi.main(target.args(source)) == bmi.EXIT_REFUSED
 
+    def test_a_missing_secrets_directory_refuses_before_anything_is_written(
+        self, source, target, tmp_path, capsys,
+    ):
+        before = target.snapshot()
+        args = target.args(source)
+        args[args.index("--secrets-dir") + 1] = str(tmp_path / "no-such-secrets")
+        assert bmi.main(args) == bmi.EXIT_REFUSED
+        assert target.snapshot() == before
+        assert not target.config.exists()
+        assert "no-such-secrets" in capsys.readouterr().err
+
+    def test_the_default_secrets_directory_is_where_istota_stack_mounts_it(self):
+        assert bmi.build_parser().get_default("secrets_dir") == "/secrets"
+
     def test_a_secrets_line_without_an_equals_sign_refuses(self, tmp_path, target):
         source = _export(tmp_path, secrets=SECRETS_ENV + "NOT A LINE\n")
         assert bmi.main(target.args(source)) == bmi.EXIT_REFUSED
@@ -594,6 +608,64 @@ class TestRehearsal:
         )[0][0])
         assert meta["rehearsal"] is True
         assert "ISTOTA_SMS_TELNYX_API_KEY" in capsys.readouterr().out
+
+
+class TestARehearsalReachesNobody:
+    """A rehearsal holds production state; nothing in it may reach a person or
+    a service the production install is still talking to."""
+
+    def _with_session(self, tmp_path: Path, **manifest: str) -> Path:
+        source = _export(tmp_path, secrets=SURVEYED_SECRETS_ENV)
+        session = source / "whatsapp-baileys-session"
+        session.mkdir()
+        (session / "creds.json").write_text('{"me": "synthetic"}')
+        if manifest:
+            _manifest(source, **manifest)
+        return source
+
+    def test_the_baileys_session_is_withheld_from_a_rehearsal(self, tmp_path, target, capsys):
+        """The sidecar connects with whatever session it finds, `whatsapp.enabled`
+        or not, and two connections on one session replace each other forever."""
+        source = self._with_session(tmp_path, mode="online")
+        assert bmi.main(target.args(source, "--rehearsal")) == bmi.EXIT_OK
+        assert not (target.data / "db" / "whatsapp-baileys-session").exists()
+        assert "whatsapp-baileys-session/: withheld for the rehearsal" in capsys.readouterr().out
+
+    def test_a_live_import_carries_the_baileys_session(self, tmp_path, target):
+        source = self._with_session(tmp_path)
+        assert bmi.main(target.args(source)) == bmi.EXIT_OK
+        assert (target.data / "db" / "whatsapp-baileys-session" / "creds.json").exists()
+
+    def test_an_online_export_is_refused_without_rehearsal(self, tmp_path, target, capsys):
+        source = self._with_session(tmp_path, mode="online")
+        before = target.snapshot()
+        assert bmi.main(target.args(source)) == bmi.EXIT_REFUSED
+        assert target.snapshot() == before
+        assert not target.config.exists()
+        assert "--rehearsal" in capsys.readouterr().err
+
+    def test_a_withheld_secret_the_operator_already_filled_is_emptied(self, tmp_path, target):
+        """`istota-stack setup` may have written production values already; a
+        withheld credential has to be blank, not merely left unwritten."""
+        source = _export(tmp_path)  # carries no CalDAV or Telnyx variable at all
+        for name in ("istota_nextcloud_app_password", "istota_caldav_password",
+                     "istota_sms_telnyx_api_key", "istota_web_oauth2_client_secret"):
+            (target.secrets / name).write_text("value-from-setup")
+        assert bmi.main(target.args(source, "--rehearsal")) == bmi.EXIT_OK
+        for name in ("istota_nextcloud_app_password", "istota_caldav_password",
+                     "istota_sms_telnyx_api_key", "istota_web_oauth2_client_secret"):
+            assert (target.secrets / name).read_text() == "", name
+        assert (target.secrets / "claude_code_oauth_token").read_text() == "claude-token"
+
+    def test_the_forge_tokens_are_withheld(self, tmp_path, target, capsys):
+        source = _export(tmp_path, secrets=SURVEYED_SECRETS_ENV)
+        (target.secrets / "istota_developer_github_token").write_text("value-from-setup")
+        assert bmi.main(target.args(source, "--rehearsal")) == bmi.EXIT_OK
+        assert (target.secrets / "istota_developer_gitlab_token").read_text() == ""
+        assert (target.secrets / "istota_developer_github_token").read_text() == ""
+        out = capsys.readouterr().out
+        assert "withheld for the rehearsal: ISTOTA_DEVELOPER_GITLAB_TOKEN" in out
+        assert "withheld for the rehearsal: ISTOTA_DEVELOPER_GITHUB_TOKEN" in out
 
 
 def _add_live_paths(db_path: Path) -> None:

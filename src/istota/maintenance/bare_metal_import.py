@@ -9,7 +9,8 @@ The source is what ``host/export-bare-metal.sh`` writes, unpacked: ``MANIFEST``,
 tree under ``db/``, and optionally ``repos/``, ``whatsapp-baileys-session/`` and
 ``logs/``. It runs inside the new image as uid 10001, in a one-shot container
 with the config directory and the stack's ``secrets/`` writable, before the
-stack's first start.
+stack's first start: ``istota-stack import-bare-metal``, which refuses while
+any container of the stack is running.
 
 What it does, in order, stopping at the first failure:
 
@@ -28,7 +29,8 @@ What it does, in order, stopping at the first failure:
    framework database before and after.
 4. Copies ``repos/`` and repairs the worktrees with ``repos_relocate``'s repair,
    since git records absolute paths in both directions.
-5. Copies the Baileys session and the session transcripts, when present.
+5. Copies the Baileys session and the session transcripts, when present. A
+   rehearsal does not get the Baileys session (see below).
 6. In one transaction: rebases the persisted absolute paths measured on the
    source (``tasks.attachments``, ``memory_chunks.source_id`` and
    ``metadata_json``, the ``note_resurface_*`` tables a user script keeps, the
@@ -49,9 +51,13 @@ switched off through a switch the daemon already reads, in the written config
 (``REHEARSAL_DISABLED``, ``REHEARSAL_CONFIG``, the config-seeded briefings and
 shared blocks) or in the imported database (``_rehearse_database``: scheduled
 jobs, briefings, shared blocks, ntfy credentials, the old host's queue), every
-transport credential is withheld, and the record says it was a rehearsal. The
-full list, with what each switch stops, is in
-``docs/deployment/migrating-from-bare-metal.md``.
+transport credential and both forge tokens are withheld (written empty, over
+whatever ``istota setup`` left in the file), the Baileys session is not copied,
+and the record says it was a rehearsal. The full list, with what each switch
+stops, is in ``docs/deployment/migrating-from-bare-metal.md``.
+
+An online export (``export-bare-metal.sh --no-stop``) is a copy of a bot that
+is still running, so it is refused unless ``--rehearsal`` is given.
 """
 
 from __future__ import annotations
@@ -100,7 +106,19 @@ REHEARSAL_WITHHELD_PREFIXES = (
     "ISTOTA_CALDAV_",
     "ISTOTA_GOOGLE_WORKSPACE_",
     "ISTOTA_WEB_OAUTH2_",
+    # Push and open merge requests as the production bot's forge identity.
+    "ISTOTA_DEVELOPER_GITLAB_TOKEN",
+    "ISTOTA_DEVELOPER_GITHUB_TOKEN",
 )
+
+#: The Baileys sidecar connects with the session it finds whatever
+#: ``whatsapp.enabled`` says, and a second connection on the production session
+#: replaces the first one, back and forth (ISSUE-553).
+BAILEYS_SESSION = "whatsapp-baileys-session"
+
+#: The default ``--secrets-dir``: where ``istota-stack import-bare-metal``
+#: mounts the stack's secrets directory.
+CONTAINER_SECRETS_DIR = "/secrets"
 
 REHEARSAL_DISABLED = ("talk", "email", "sms", "whatsapp", "sleep_cycle", "channel_sleep_cycle")
 
@@ -417,6 +435,12 @@ class SecretsPlan:
     files: dict[str, str] = field(default_factory=dict)
     keys: dict[str, str] = field(default_factory=dict)
     withheld: list[str] = field(default_factory=list)
+    #: Secrets files a rehearsal writes empty, whatever the source carried.
+    blanked: list[str] = field(default_factory=list)
+
+
+def _withheld(variable: str) -> bool:
+    return variable.startswith(REHEARSAL_WITHHELD_PREFIXES)
 
 
 def map_secrets(env: dict[str, str], *, rehearsal: bool) -> SecretsPlan:
@@ -425,7 +449,7 @@ def map_secrets(env: dict[str, str], *, rehearsal: bool) -> SecretsPlan:
     plan = SecretsPlan()
     unmapped = []
     for variable, value in env.items():
-        if rehearsal and variable.startswith(REHEARSAL_WITHHELD_PREFIXES):
+        if rehearsal and _withheld(variable):
             plan.withheld.append(variable)
         elif variable in KEY_FILES:
             plan.keys[KEY_FILES[variable]] = value
@@ -441,6 +465,9 @@ def map_secrets(env: dict[str, str], *, rehearsal: bool) -> SecretsPlan:
         )
     if ".secret_key" not in plan.keys:
         raise Refusal("secrets.env has no ISTOTA_SECRET_KEY; every stored credential needs it")
+    if rehearsal:
+        # The operator's `istota setup` may already have filled these files.
+        plan.blanked = [name for name in wizard.SECRET_NAMES if _withheld(name.upper())]
     return plan
 
 
@@ -820,6 +847,8 @@ def _print_secrets(plan: SecretsPlan, out) -> None:
         out(f"  /data/{name} (carried byte for byte)")
     for variable in sorted(plan.withheld):
         out(f"  withheld for the rehearsal: {variable}")
+    for name in plan.blanked:
+        out(f"  secrets/{name} (written empty for the rehearsal)")
 
 
 def _print_db_report(report: DbReport, out) -> None:
@@ -880,8 +909,15 @@ def _preflight(source: Source, target: Target) -> bool:
             f"{target.db_path} already holds tasks: this install has done work, and "
             "an import replaces its database and master key"
         )
+    if not target.secrets_dir.is_dir() or not os.access(target.secrets_dir, os.W_OK | os.X_OK):
+        raise Refusal(
+            f"{target.secrets_dir} is not a writable directory; mount the stack's "
+            "secrets directory there (istota-stack import-bare-metal does)"
+        )
     from istota.maintenance.db_restore import _daemon_running
 
+    # Sees only a scheduler sharing this /tmp, i.e. an `exec` into the running
+    # container. A one-shot container is covered by istota-stack's own refusal.
     if _daemon_running():
         raise Refusal("the scheduler daemon is running; stop the stack first")
     problems = _quick_check(source.snapshot / "framework" / "istota.db")
@@ -893,6 +929,8 @@ def _preflight(source: Source, target: Target) -> bool:
 def _write_secrets(plan: SecretsPlan, target: Target) -> None:
     for name, value in plan.files.items():
         wizard._write_secret_file(target.secrets_dir / name, value)
+    for name in plan.blanked:
+        wizard._write_secret_file(target.secrets_dir / name, "")
     for name, value in plan.keys.items():
         apply_module.write_private(target.data_dir / name, value)
 
@@ -941,11 +979,14 @@ def _import_repos(source: Source, target: Target, out) -> None:
         )
 
 
-def _import_side_trees(source: Source, target: Target, out) -> None:
+def _import_side_trees(source: Source, target: Target, out, *, rehearsal: bool) -> None:
     db_dir = target.db_path.parent
-    for name in ("whatsapp-baileys-session", "logs"):
+    for name in (BAILEYS_SESSION, "logs"):
         src = source.root / name
         if not src.is_dir():
+            continue
+        if rehearsal and name == BAILEYS_SESSION:
+            out(f"  {name}/: withheld for the rehearsal; pair the rehearsal with another number if it needs WhatsApp")
             continue
         dst = db_dir / name
         if dst.exists():
@@ -999,6 +1040,12 @@ def run(args, out, err) -> int:
         if args.list_only:
             _print_listing(source, target, out)
             return EXIT_OK
+        mode = source.manifest.get("mode", "")
+        if mode != "stopped" and not args.rehearsal:
+            raise Refusal(
+                f"the export's mode is {mode or 'unrecorded'!r}, not 'stopped': it is a copy of "
+                "a bot that was still running, and is imported only with --rehearsal"
+            )
         record = _read_record(target.db_path)
         if record is not None and not args.emit_plan:
             out(
@@ -1054,7 +1101,7 @@ def run(args, out, err) -> int:
         _restore_databases(source, target, out)
         out("files:")
         _import_repos(source, target, out)
-        _import_side_trees(source, target, out)
+        _import_side_trees(source, target, out, rehearsal=args.rehearsal)
         report = _finish_database(source, target, rewrite, args.rehearsal)
         _print_db_report(report, out)
         target.progress.unlink()
@@ -1066,7 +1113,7 @@ def run(args, out, err) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="istota migrate import-bare-metal",
         description="Import a bare-metal install's export into this container's layout.",
@@ -1081,8 +1128,8 @@ def main(argv: list[str] | None = None) -> int:
         help="The config.toml to write (default: ISTOTA_CONFIG_PATH, else /data/config/config.toml).",
     )
     parser.add_argument(
-        "--secrets-dir", default="/srv/istota/secrets",
-        help="The stack's secrets directory, mounted read-write.",
+        "--secrets-dir", default=CONTAINER_SECRETS_DIR,
+        help=f"The stack's secrets directory, mounted read-write (default: {CONTAINER_SECRETS_DIR}).",
     )
     parser.add_argument("--data-dir", default=str(wizard.CONTAINER_DATA_DIR), help=argparse.SUPPRESS)
     parser.add_argument("--rehearsal", action="store_true", help="Import as an inert copy.")
@@ -1093,6 +1140,11 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Print the plan and write nothing.")
     mode.add_argument("--list", action="store_true", dest="list_only", help="Describe the export and the target.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
