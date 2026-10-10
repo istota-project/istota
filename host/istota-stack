@@ -305,12 +305,16 @@ cmd_rollback() {
 # Every credential file compose declares, empty where it does not exist yet:
 # compose refuses to start a service whose secret file is missing, before
 # anything in a container could write one.
+secret_names() {
+    # Names are [a-z0-9_] only; the single quotes are sed's, not the shell's.
+    # shellcheck disable=SC2016
+    sed -n 's|^ *file: \${ISTOTA_SECRETS_DIR:-\./secrets}/\([a-z0-9_]*\)$|\1|p' "${SRC}/docker/docker-compose.yml"
+}
+
 ensure_secret_files() {
     local name
     install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$SECRETS_DIR"
-    # Names are [a-z0-9_] only; the single quotes are sed's, not the shell's.
-    # shellcheck disable=SC2013,SC2016
-    for name in $(sed -n 's|^ *file: \${ISTOTA_SECRETS_DIR:-\./secrets}/\([a-z0-9_]*\)$|\1|p' "${SRC}/docker/docker-compose.yml"); do
+    for name in $(secret_names); do
         if [ ! -e "${SECRETS_DIR}/${name}" ]; then
             install -m 0400 -o "$ISTOTA_UID" -g "$ISTOTA_UID" /dev/null "${SECRETS_DIR}/${name}"
         fi
@@ -349,7 +353,16 @@ cmd_setup() {
         if [ -f "${STACK}/${f}" ]; then cp "${STACK}/${f}" "${staging}/${f}"; fi
     done
     chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"
-    ISTOTA_CONFIG_READ_ONLY=false oneshot \
+    # A non-interactive run takes credentials from the environment under the
+    # names the daemon reads (ANTHROPIC_API_KEY, ISTOTA_NEXTCLOUD_APP_PASSWORD,
+    # ...). `-e NAME` hands each one through by name, so no value is on a
+    # command line.
+    local name var pass=()
+    for name in $(secret_names); do
+        var="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+        if [ -n "${!var:-}" ]; then pass+=(-e "$var"); fi
+    done
+    ISTOTA_CONFIG_READ_ONLY=false oneshot "${pass[@]}" \
         -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
         istota istota setup --vm-dir /vm "$@"
     install -m 0644 -o root -g root "${staging}/.env" "$ENV_FILE"
@@ -386,6 +399,9 @@ cmd_apply() {
 }
 
 cmd_up() {
+    # Without a config the entrypoint refuses, and the restart policy would
+    # loop on it; say what to do instead.
+    [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml yet: run \`istota-stack setup\` first."
     load_apparmor
     compose up -d --remove-orphans
     # The first certificate: nginx serves the ACME challenge on port 80 from its
