@@ -168,17 +168,17 @@ print(lean_image_tag())
     }
 
     # Row 5. The daemon started without the drop is uid 0 with the cap_add
-    # set and no CAP_DAC_OVERRIDE, so it cannot open the state it does not own
-    # and the stack never comes up: the run contract fails closed rather than
-    # running a root daemon. The uid and capability assertion itself is turned
-    # red by the image half's no-drop control above.
+    # set and no CAP_DAC_OVERRIDE, so it cannot read the state it does not own
+    # (the master key, first) and the stack never comes up: the run contract
+    # fails closed rather than running a root daemon. The uid and capability
+    # assertion itself is turned red by the image half's no-drop control above.
     docker build -q -f docker/test/Dockerfile.no-daemon-drop \
         --build-arg "BASE=$lean_tag" -t "istota-test/no-daemon-drop:$suffix" docker/test >/dev/null
     require_smoke_failures \
         "no-daemon-drop" \
         "$(image_overlay "istota-test/no-daemon-drop:$suffix" no-daemon-drop)" \
         "row 5: the root phase execs the daemon without the drop" \
-        "sqlite3.OperationalError: unable to open database file" \
+        "/data/.secret_key: Permission denied" \
         "${RUN_CONTRACT_TESTS}::TestTheDaemonIsUnprivileged::test_the_daemon_runs_as_10001_with_every_capability_set_empty" \
         "${RUN_CONTRACT_TESTS}::TestTheDaemonIsUnprivileged::test_nothing_the_daemon_wrote_is_owned_by_root"
 
