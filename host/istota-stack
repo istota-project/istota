@@ -49,6 +49,9 @@ DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
 LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
 ISTOTA_UID=10001
 PROJECT=istota
+# Overridable so tests/test_istota_stack.py can stand in for a host with AppArmor.
+APPARMOR_SYSFS="${ISTOTA_APPARMOR_SYSFS:-/sys/kernel/security/apparmor}"
+APPARMOR_DIR="${ISTOTA_APPARMOR_DIR:-/etc/apparmor.d}"
 # A scratch directory a command removes on exit.
 staging=""
 # Exit codes: 1 a failure, 2 `apply` changed something, 3 the older image
@@ -250,12 +253,21 @@ render_devbox_compose() {
 }
 
 # Load the AppArmor profile the checkout ships, where the host has AppArmor.
+# Loaded from a copy first and moved into place only once the kernel took it,
+# so a profile that fails leaves the loaded one and the file on disk as they
+# were. Returns non-zero on that failure; callers put things back.
 load_apparmor() {
-    local profile="${SRC}/docker/istota/apparmor-istota"
-    if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
-        install -m 0644 "$profile" /etc/apparmor.d/istota
-        apparmor_parser -r /etc/apparmor.d/istota
+    local profile="${SRC}/docker/istota/apparmor-istota" tmp
+    if ! command -v apparmor_parser >/dev/null 2>&1 || [ ! -d "$APPARMOR_SYSFS" ]; then
+        return 0
     fi
+    tmp="$(mktemp "${APPARMOR_DIR}/.istota.XXXXXX")" || return 1
+    if ! install -m 0644 "$profile" "$tmp" || ! apparmor_parser -r "$tmp"; then
+        rm -f "$tmp"
+        log "the AppArmor profile ${profile} did not load"
+        return 1
+    fi
+    mv "$tmp" "${APPARMOR_DIR}/istota"
 }
 
 # --- commands ----------------------------------------------------------------
@@ -278,11 +290,14 @@ cmd_update() {
         verified_git checkout --quiet --detach "$before" || true
         die "building ${tag} failed; .env, the checkout and the running stack are unchanged."
     fi
+    if ! load_apparmor; then
+        verified_git checkout --quiet --detach "$before" || true
+        die "${tag}'s AppArmor profile did not load; .env, the checkout and the running stack are unchanged."
+    fi
 
     previous="$current"
     if [ "$current" = "$tag" ]; then previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"; fi
     env_set "ISTOTA_TAG=${tag}" "ISTOTA_PREVIOUS_TAG=${previous}"
-    load_apparmor
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
         compose up -d --remove-orphans
     else
@@ -311,9 +326,14 @@ cmd_rollback() {
         die "${previous} could not check the database (exit ${rc}); ${ENV_FILE} still names ${current}."
     fi
 
+    local before
+    before="$(verified_git rev-parse HEAD)"
     verified_git checkout --quiet --detach "${object}^{commit}"
+    if ! load_apparmor; then
+        verified_git checkout --quiet --detach "$before" || true
+        die "${previous}'s AppArmor profile did not load; ${ENV_FILE} still names ${current}."
+    fi
     env_set "ISTOTA_TAG=${previous}" "ISTOTA_PREVIOUS_TAG=${current}"
-    load_apparmor
     compose up -d --remove-orphans
     log "rolled back to ${previous} (previous: ${current})"
 }
@@ -466,7 +486,7 @@ cmd_up() {
     # Without a config the entrypoint refuses, and the restart policy would
     # loop on it; say what to do instead.
     [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml yet: run \`istota-stack setup\` first."
-    load_apparmor
+    load_apparmor || die "the AppArmor profile did not load; the stack was not started."
     compose up -d --remove-orphans
     # The first certificate: nginx serves the ACME challenge on port 80 from its
     # bootstrap template until one exists, and certbot's deploy hook restarts it

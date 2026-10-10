@@ -423,3 +423,55 @@ class TestRootNeverReadsWhatUid10001Can:
         assert result.returncode == 0, result.stderr
         assert dest.read_text() == "COMPOSE_PROFILES=\nISTOTA_TAG=v0\n"
         assert (dest.stat().st_mode & 0o777) == 0o644
+
+
+class TestAProfileThatFailsToLoadChangesNothing:
+    """`.env` names a tag only once that tag's AppArmor profile is loaded.
+
+    Written the other way round, a profile the kernel refused left `.env`
+    naming the new tag while the old profile stayed loaded, and the next
+    `istota-stack up` started containers under `apparmor=istota` from a profile
+    that never matched them.
+    """
+
+    @pytest.fixture
+    def apparmor(self, fx, tmp_path):
+        sysfs = tmp_path / "apparmor-sysfs"
+        sysfs.mkdir()
+        profiles = tmp_path / "apparmor.d"
+        profiles.mkdir()
+        (profiles / "istota").write_text("profile istota old\n")
+        parser = Path(fx.env["PATH"].split(":")[0]) / "apparmor_parser"
+        parser.write_text('#!/bin/bash\necho "$*" >> "$STUB_CALLS.apparmor"\nexit "${STUB_APPARMOR_RC:-0}"\n')
+        parser.chmod(0o755)
+        fx.env.update(ISTOTA_APPARMOR_SYSFS=str(sysfs), ISTOTA_APPARMOR_DIR=str(profiles))
+        profile = fx.origin / "docker" / "istota" / "apparmor-istota"
+        profile.parent.mkdir(parents=True)
+        profile.write_text("profile istota new\n")
+        _git(fx.origin, "add", "docker/istota/apparmor-istota", env=fx.env)
+        commit = fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        return profiles, commit
+
+    def test_a_refused_profile_leaves_env_the_checkout_and_the_file(self, fx, apparmor):
+        profiles, _ = apparmor
+        env_before, head_before = fx.env_text(), fx.head()
+
+        result = fx.run("update", "v1", STUB_APPARMOR_RC="1")
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "AppArmor" in result.stderr
+        assert fx.env_text() == env_before
+        assert fx.head() == head_before
+        assert (profiles / "istota").read_text() == "profile istota old\n"
+        assert not any(" up " in f"{call} " for call in fx.docker_calls())
+
+    def test_a_loaded_profile_is_installed_before_env_names_the_tag(self, fx, apparmor):
+        profiles, commit = apparmor
+
+        result = fx.run("update", "v1")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (profiles / "istota").read_text() == "profile istota new\n"
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert fx.head() == commit
