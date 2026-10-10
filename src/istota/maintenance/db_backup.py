@@ -370,7 +370,9 @@ def _prune_old_snapshots(root: Path, keep: int) -> None:
             logger.warning("db_backup_prune_failed dir=%s err=%s", d, exc)
 
 
-def backup_databases(config, *, today: str | None = None) -> list[dict]:
+def backup_databases(
+    config, *, today: str | None = None, record_last_run: bool = True,
+) -> list[dict]:
     """Snapshot the framework DB + every user's module DBs into a dated dir.
     Never raises per DB — one failure doesn't abort the sweep. Returns per-DB
     status dicts (ok / skip_missing / vanished / suspect / error)."""
@@ -449,7 +451,10 @@ def backup_databases(config, *, today: str | None = None) -> list[dict]:
     # the clock stale so the staleness alert can eventually fire — advancing it
     # on a fully-failed run would silently suppress that safety net.
     if ok > 0:
-        _write_last_run(config, time.time())
+        # A snapshot taken for someone else (the bare-metal export) is not the
+        # install's backup and must not defer it.
+        if record_last_run:
+            _write_last_run(config, time.time())
     else:
         logger.error(
             "db_backup produced no OK snapshot (%d error) — leaving last-run "

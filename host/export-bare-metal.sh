@@ -195,7 +195,7 @@ config = load_config(Path(sys.argv[1]))
 config.scheduler.db_backup_enabled = True
 config.scheduler.db_backup_dir = sys.argv[2]
 config.scheduler.db_backup_retention = 0
-results = backup_databases(config)
+results = backup_databases(config, record_last_run=False)
 for result in results:
     print(f"[export-bare-metal]   {result['label']}: {result['status']}", file=sys.stderr)
 framework = [r for r in results if r["label"] == "framework" and r["status"] == "ok"]

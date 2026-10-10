@@ -266,6 +266,18 @@ class TestTheOnlineExport:
         assert host.leftovers() == []
 
 
+@pytest.mark.parametrize("args", [(), ("--no-stop",)], ids=["stopped", "online"])
+def test_the_export_leaves_the_install_backup_clock_alone(host, args):
+    """An online export runs beside the live scheduler, which seeds its backup
+    clock from this file; moving it would defer the install's own backup."""
+    host.disable_cron()
+    clock = host.home / "data" / ".db_backup_last_run"
+    clock.write_text("1700000000.0")
+    result = host.run(*args)
+    assert result.returncode == 0, result.stderr.decode()
+    assert clock.read_text() == "1700000000.0"
+
+
 class TestTheRoundTrip:
     def test_the_import_reads_what_the_export_wrote(self, host, tmp_path):
         host.disable_cron()
