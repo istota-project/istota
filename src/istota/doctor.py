@@ -4691,6 +4691,92 @@ def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
     return results
 
 
+#: Where `web.tls` makes its handshake: the stack's nginx, as the istota
+#: container reaches it on the compose network.
+TLS_CHECK_TARGET = ("nginx", 443)
+#: Under this many days to expiry the certificate is a WARN: certbot renews at
+#: thirty, so a certificate this close has missed at least two renewals.
+TLS_EXPIRY_WARN_DAYS = 14
+
+
+def _tls_check_context():
+    """The system trust store, which is what a browser holds the name to."""
+    import ssl
+
+    return ssl.create_default_context()
+
+
+def check_web_tls(config: "Config", probe: bool) -> CheckResult:
+    """In `direct` ingress, whether nginx serves a certificate a client accepts.
+
+    One TLS handshake to the stack's nginx with the public name as SNI, made
+    from this container, which mounts no certificate and no key. The ingress
+    mode and the name come from the stack's vm.env (`INGRESS`, `DOMAIN`),
+    falling back to `[site] hostname`. Before the first certificate nginx
+    serves port 80 alone, so nothing listens on 443 and this FAILs naming the
+    first issuance. Opens a socket, so it needs `probe`.
+    """
+    name = "web.tls"
+    ingress = os.environ.get("INGRESS", "").strip()
+    if ingress != "direct":
+        return CheckResult(
+            name, SKIP,
+            f"INGRESS is {ingress or 'unset'}; this stack's nginx terminates no public TLS",
+        )
+    if not probe:
+        return CheckResult(name, SKIP, "a TLS handshake needs probe")
+    domain = (os.environ.get("DOMAIN", "") or config.site.hostname or "").strip()
+    if not domain:
+        return CheckResult(
+            name, FAIL, "INGRESS=direct and neither DOMAIN nor [site] hostname names the stack",
+            remedy="Re-run `istota setup` with --hostname, which writes both.",
+        )
+    import socket
+    import ssl
+
+    host, port = TLS_CHECK_TARGET
+    try:
+        with socket.create_connection((host, port), timeout=5) as raw:
+            with _tls_check_context().wrap_socket(raw, server_hostname=domain) as tls:
+                certificate = tls.getpeercert() or {}
+                version = tls.version() or "unknown"
+    except ssl.SSLCertVerificationError as exc:
+        return CheckResult(
+            name, FAIL,
+            f"the certificate served for {domain} is not accepted: {exc.verify_message or exc.reason}",
+            remedy=(
+                "Check the certificate in /srv/istota/letsencrypt (acme) or "
+                "/srv/istota/certs (files) is for this name, unexpired and complete "
+                "(fullchain.pem), then `docker compose restart nginx`."
+            ),
+        )
+    except (ConnectionRefusedError, socket.timeout, TimeoutError) as exc:
+        return CheckResult(
+            name, FAIL, f"nothing answers TLS on {host}:{port} ({exc.__class__.__name__})",
+            remedy=(
+                "nginx serves port 80 alone until a certificate exists. Run certbot "
+                "once (`istota-vm setup` does), or put fullchain.pem and privkey.pem "
+                "in /srv/istota/certs; the deploy hook restarts nginx onto port 443."
+            ),
+        )
+    except (OSError, ssl.SSLError) as exc:
+        return CheckResult(
+            name, FAIL, f"the TLS handshake with {host}:{port} failed: {exc}",
+            remedy="Read `docker compose logs nginx`; the istota-ingress lines say what it rendered.",
+        )
+    expires = certificate.get("notAfter")
+    if not expires:
+        return CheckResult(name, OK, f"{domain}: certificate accepted ({version})")
+    days = int((ssl.cert_time_to_seconds(expires) - time.time()) // 86400)
+    detail = f"{domain}: certificate accepted ({version}), {days} days to expiry"
+    if days < TLS_EXPIRY_WARN_DAYS:
+        return CheckResult(
+            name, WARN, detail,
+            remedy="Renewal is overdue: check `systemctl status istota-certbot.timer` on the VM.",
+        )
+    return CheckResult(name, OK, detail)
+
+
 def check_web_static(config: "Config", probe: bool) -> CheckResult:
     """The SvelteKit build the web surface serves actually exists.
 
@@ -9317,6 +9403,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("whatsapp.pairing_relay", check_whatsapp_pairing_relay),
     ("web.auth", check_web_auth),
     ("web.static", check_web_static),
+    ("web.tls", check_web_tls),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
@@ -9454,6 +9541,8 @@ CHECK_SCOPES: dict[str, str] = {
     "whatsapp.pairing_relay": DEPLOYMENT,
     "web.auth": DEPLOYMENT,
     "web.static": IMAGE,
+    # Deployment: a handshake with the running stack's nginx.
+    "web.tls": DEPLOYMENT,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.
     "web.build_current": DEPLOYMENT,
