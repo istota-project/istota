@@ -313,7 +313,7 @@ class TestApply:
         rendered = '{"services": {"devbox-alice": {}}}'
         result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_DEVBOX_COMPOSE=rendered)
         assert result.returncode == 2, result.stdout + result.stderr
-        assert rendered in (fx.stack / "config" / "compose.devbox.yml").read_text()
+        assert rendered in (fx.stack / "compose.devbox.yml").read_text()
         calls = fx.docker_calls()
         up = next(i for i, call in enumerate(calls) if call.endswith("up -d --remove-orphans"))
         restart = next(i for i, call in enumerate(calls) if call.endswith(" restart"))
@@ -343,3 +343,83 @@ class TestExec:
         )
         assert result.returncode == 0, result.stderr
         assert fx.docker_calls()[-1].endswith("exec -T istota istota-drop istota user list")
+
+
+def _source(fx: Fixture, script: str, **extra_env: str) -> subprocess.CompletedProcess:
+    """Run `script` with istota-stack's functions defined (the main guard keeps
+    sourcing inert)."""
+    return subprocess.run(
+        ["bash", "-c", f'source "{SCRIPT}"; {script}'], capture_output=True, text=True,
+        env={**fx.env, **extra_env}, timeout=60,
+    )
+
+
+class TestRootNeverReadsWhatUid10001Can:
+    """Root on the VM must not act on a file uid 10001 can write or replace.
+
+    `/srv/istota/config` is 10001's (the one-shot setup and apply containers
+    write it), and so is the setup staging directory. A process on the VM
+    running as 10001, the rclone mount above all, can plant anything in either.
+    The devbox compose file is passed to `docker compose` by root, so a copy in
+    the config directory is a container definition 10001 chooses; and root
+    copying the wizard's `.env` out of staging follows a planted symlink into
+    whatever root can read.
+    """
+
+    def test_the_devbox_compose_file_is_rendered_outside_the_config_directory(self, fx, tmp_path):
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        rendered = '{"services": {"devbox-alice": {}}}'
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_DEVBOX_COMPOSE=rendered)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert rendered in (fx.stack / "compose.devbox.yml").read_text()
+        assert not (fx.stack / "config" / "compose.devbox.yml").exists()
+
+    def test_a_compose_file_planted_in_the_config_directory_is_never_used(self, fx):
+        (fx.stack / "config" / "compose.devbox.yml").write_text('{"services": {"devbox-evil": {}}}\n')
+        assert fx.run("compose", "ps").returncode == 0
+        assert not any("compose.devbox.yml" in call for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_a_linked_devbox_compose_file_is_refused(self, fx, tmp_path):
+        elsewhere = tmp_path / "elsewhere.yml"
+        elsewhere.write_text('{"services": {"devbox-evil": {}}}\n')
+        (fx.stack / "compose.devbox.yml").symlink_to(elsewhere)
+        result = fx.run("compose", "ps")
+        assert result.returncode != 0
+        assert "compose.devbox.yml" in result.stderr
+        assert fx.docker_calls() == []
+
+    def test_a_group_writable_devbox_compose_file_is_refused(self, fx):
+        path = fx.stack / "compose.devbox.yml"
+        path.write_text('{"services": {"devbox-alice": {}}}\n')
+        path.chmod(0o664)
+        result = fx.run("compose", "ps")
+        assert result.returncode != 0
+        assert fx.docker_calls() == []
+
+    def test_a_staged_file_that_is_a_link_is_not_followed(self, fx, tmp_path):
+        secret = tmp_path / "shadow"
+        secret.write_text("root:secret-hash:\n")
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / ".env").symlink_to(secret)
+        dest = fx.stack / ".env"
+        before = dest.read_text()
+
+        result = _source(fx, f'install_staged "{staging}/.env" "{dest}"')
+
+        assert result.returncode != 0
+        assert dest.read_text() == before
+        assert "secret-hash" not in dest.read_text()
+
+    def test_a_staged_regular_file_is_installed(self, fx, tmp_path):
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / ".env").write_text("COMPOSE_PROFILES=\nISTOTA_TAG=v0\n")
+        dest = fx.stack / ".env"
+
+        result = _source(fx, f'install_staged "{staging}/.env" "{dest}"')
+
+        assert result.returncode == 0, result.stderr
+        assert dest.read_text() == "COMPOSE_PROFILES=\nISTOTA_TAG=v0\n"
+        assert (dest.stat().st_mode & 0o777) == 0o644

@@ -41,7 +41,7 @@ from . import lima
 pytestmark = pytest.mark.vm
 
 USERS = (lima.USER, lima.SECOND_DEVBOX_USER)
-DEVBOX_COMPOSE = f"{lima.STACK}/config/compose.devbox.yml"
+DEVBOX_COMPOSE = f"{lima.STACK}/compose.devbox.yml"
 VENV_PYTHON = "/app/.venv/bin/python"
 
 CONNECT_PROBE = r"""

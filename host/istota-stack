@@ -18,6 +18,7 @@
 #   .env              compose settings: the wizard's keys, ISTOTA_TAG, ISTOTA_PREVIOUS_TAG
 #   host.env          host settings, read by provision.sh and the units
 #   config/           bound at /data/config, read-only to every running service
+#   compose.devbox.yml   the devbox services, rendered by `istota devbox compose-file`
 #   secrets/          one file per credential, 0400, owned by uid 10001
 #   mount/            the rclone mount, in full Nextcloud integration
 #   certs/ letsencrypt/ acme/   nginx's certificate sources and the ACME webroot
@@ -42,7 +43,10 @@ ENV_FILE="${STACK}/.env"
 HOST_ENV="${STACK}/host.env"
 CONFIG_DIR="${STACK}/config"
 SECRETS_DIR="${STACK}/secrets"
-DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
+# Beside .env, not in config/: root passes it to `docker compose`, and config/
+# is uid 10001's to write.
+DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
+LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
 ISTOTA_UID=10001
 PROJECT=istota
 # A scratch directory a command removes on exit.
@@ -89,9 +93,21 @@ env_set() {
 
 # --- compose -----------------------------------------------------------------
 
+# Refuse a file this script would act on as root unless it is a regular file
+# (not a link) owned by the user running this, writable by nobody else.
+require_own_file() {
+    local path="$1"
+    if [ -z "$(find -P "$path" -maxdepth 0 -type f -user "$(id -u)" ! -perm -g+w ! -perm -o+w 2>/dev/null)" ]; then
+        die "${path} is not a regular file owned by $(id -un) and writable by it alone; remove it and re-run \`istota-stack update <tag>\`."
+    fi
+}
+
 compose() {
     local files=(-f "${SRC}/docker/docker-compose.yml")
-    if [ -s "$DEVBOX_COMPOSE" ]; then files+=(-f "$DEVBOX_COMPOSE"); fi
+    if [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; then
+        require_own_file "$DEVBOX_COMPOSE"
+        if [ -s "$DEVBOX_COMPOSE" ]; then files+=(-f "$DEVBOX_COMPOSE"); fi
+    fi
     local certs="${STACK}/certs"
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
     ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
@@ -230,7 +246,7 @@ render_devbox_compose() {
     else
         rm -f "$DEVBOX_COMPOSE"
     fi
-    rm -f "$tmp"
+    rm -f "$tmp" "$LEGACY_DEVBOX_COMPOSE"
 }
 
 # Load the AppArmor profile the checkout ships, where the host has AppArmor.
@@ -338,6 +354,31 @@ copy_out_config() {
     fi
 }
 
+# Copy a file the wizard wrote in staging into place as 0644, refusing a link
+# or anything but a plain file: staging is uid 10001's, and root following a
+# link planted there would copy whatever root can read into .env.
+install_staged() {
+    python3 - "$1" "$2" <<'PY'
+import os, stat, sys
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError as exc:
+    sys.exit(f"[istota-stack] REFUSE: {src}: {exc.strerror}; setup left something other than a file there")
+with os.fdopen(fd, "rb") as fh:
+    info = os.fstat(fh.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        sys.exit(f"[istota-stack] REFUSE: {src} is not a plain file")
+    data = fh.read(1 << 20)
+tmp = f"{dst}.staged.{os.getpid()}"
+out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+with os.fdopen(out, "wb") as fh:
+    fh.write(data)
+os.chmod(tmp, 0o644)
+os.replace(tmp, dst)
+PY
+}
+
 cmd_setup() {
     local tag
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
@@ -368,8 +409,11 @@ cmd_setup() {
     ISTOTA_CONFIG_READ_ONLY=false oneshot "${pass[@]}" \
         -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
         istota istota setup --vm-dir /vm "$@"
-    install -m 0644 -o root -g root "${staging}/.env" "$ENV_FILE"
-    install -m 0644 -o root -g root "${staging}/host.env" "$HOST_ENV"
+    # Nothing running as 10001 may change staging while root reads it.
+    chown root:root "$staging"
+    chmod 0700 "$staging"
+    install_staged "${staging}/.env" "$ENV_FILE"
+    install_staged "${staging}/host.env" "$HOST_ENV"
     # The wizard owns .env's keys but not this script's.
     env_set "ISTOTA_TAG=${tag}"
     if [ "$(needs_claude_code)" = 1 ] && [ "$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "istota-istota:${tag}" | sed -n 's/^ISTOTA_CLAUDE_CODE_INSTALLED=//p')" != 1 ]; then
