@@ -1640,8 +1640,9 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
         "ISTOTA_SECRETS_DIR": "./secrets",
         "NGINX_PUBLISH": plain,
         "NGINX_PUBLISH_TLS": tls,
-        # Plain http on loopback needs it: a Secure cookie is never sent back.
-        "ISTOTA_WEB_INSECURE_COOKIES": "1" if a.ingress == "local" else "0",
+        # Secure in every mode: `local` is http://localhost, which browsers
+        # treat as a secure context. Owned here so a re-run resets an older 1.
+        "ISTOTA_WEB_INSECURE_COOKIES": "0",
     }
 
 

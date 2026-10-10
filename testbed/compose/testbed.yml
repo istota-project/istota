@@ -73,6 +73,11 @@ services:
     volumes:
       - ${ISTOTA_TEST_CONFIG_DIR:?the harness must export ISTOTA_TEST_CONFIG_DIR}:/data/config:ro
       - testbed_mount:/mnt/shared
+    # The session cookie without Secure. The tiers sign in with httpx over
+    # plain http on 127.0.0.1, and its cookie jar, unlike a browser, sends a
+    # Secure cookie back over https only.
+    environment:
+      ISTOTA_WEB_INSECURE_COOKIES: "1"
 
   webhooks:
     image: *test_image

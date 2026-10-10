@@ -169,6 +169,49 @@ def istota_service() -> tuple[Path, dict]:
     return SHIPPED_COMPOSE, _service(SHIPPED_COMPOSE)
 
 
+@pytest.mark.parametrize("name", ["web", "webhooks"])
+class TestTheServicesWithNoRootPhase:
+    """web and webhooks start as uid 0 only to run `istota-drop`.
+
+    They had Docker's default capability set, no `no-new-privileges` and a
+    writable root, and web read the master key as root before the drop that
+    reads it anyway. Now: the drop's three capabilities and no other, the
+    drop first in the entrypoint, nothing written outside /data and /tmp.
+    """
+
+    def test_only_the_drops_capabilities(self, name):
+        service = _service(SHIPPED_COMPOSE, name)
+        assert service.get("cap_drop") == ["ALL"]
+        assert set(service.get("cap_add") or []) == {"SETUID", "SETGID", "SETPCAP"}
+        assert "no-new-privileges:true" in (service.get("security_opt") or [])
+
+    def test_the_root_filesystem_is_read_only(self, name):
+        service = _service(SHIPPED_COMPOSE, name)
+        assert service.get("read_only") is True
+        assert "/tmp" in (service.get("tmpfs") or [])
+        assert (service.get("environment") or {}).get("ISTOTA_CONFIG_PATH") == "/data/config/config.toml"
+
+    def test_the_drop_runs_before_anything_else(self, name):
+        entrypoint = _service(SHIPPED_COMPOSE, name)["entrypoint"]
+        assert entrypoint[0] == "istota-drop"
+        script = entrypoint[-1]
+        assert ".secret_key" not in script, "istota-secrets reads the master key after the drop"
+        assert "istota-drop" not in script and "ln -s" not in script
+
+
+class TestTheSessionCookie:
+    def test_it_is_secure_unless_an_operator_says_otherwise(self):
+        environment = _service(SHIPPED_COMPOSE, "web")["environment"]
+        assert environment["ISTOTA_WEB_INSECURE_COOKIES"] == "${ISTOTA_WEB_INSECURE_COOKIES:-0}"
+
+    @pytest.mark.parametrize("ingress", ["local", "proxied", "direct"])
+    def test_the_wizard_writes_secure_for_every_ingress(self, ingress):
+        from istota.setup_wizard import ContainerAnswers, stack_env_values
+
+        answers = ContainerAnswers(user_id="alice", ingress=ingress, hostname="localhost:8080")
+        assert stack_env_values(answers)["ISTOTA_WEB_INSECURE_COOKIES"] == "0"
+
+
 class TestTheRunContract:
     def test_security_opt_is_the_grant_and_nothing_wider(self, istota_service):
         compose_file, service = istota_service

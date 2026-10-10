@@ -51,6 +51,19 @@ x-istota-build: &istota_build
     - INSTALL_CLAUDE_CODE
     - CLAUDE_CODE_VERSION
 
+# web and webhooks have no root phase: they start as uid 0 only to run
+# `istota-drop`, which needs SETUID, SETGID and SETPCAP (the last empties the
+# bounding set) and nothing else, then serve as 10001 with every set empty.
+# Read-only like istota: they write only under /data and /tmp.
+x-dropped-service: &dropped_service
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  cap_add: [SETUID, SETGID, SETPCAP]
+  read_only: true
+  tmpfs:
+    - /tmp
+
 x-istota-secrets: &istota_secrets
   - anthropic_api_key
   - claude_code_oauth_token
@@ -168,6 +181,7 @@ services:
   # config.toml the scheduler container generates. Depends on `istota` so the
   # config file exists before uvicorn starts.
   web:
+    <<: *dropped_service
     build: *istota_build
     image: istota-istota:${ISTOTA_TAG:-local}
     # Healthy, not started: the istota service's healthcheck is the `tasks`
@@ -190,32 +204,33 @@ services:
       WEB_PORT: ${WEB_PORT:-8766}
       # Static SPA build location (not derivable from package path under non-editable installs).
       ISTOTA_WEB_STATIC_DIR: /app/web/build
-      # Plain http on loopback needs this, or the session cookie is never sent
-      # back. `istota setup` writes 0 for any ingress that terminates TLS.
-      ISTOTA_WEB_INSECURE_COOKIES: ${ISTOTA_WEB_INSECURE_COOKIES:-1}
+      # The session cookie carries Secure unless this is 1, in every ingress
+      # mode: `local` is http://localhost, which browsers treat as a secure
+      # context. Off unless an operator sets it.
+      ISTOTA_WEB_INSECURE_COOKIES: ${ISTOTA_WEB_INSECURE_COOKIES:-0}
       # Admin allowlist (shared with the istota and webhooks services).
       ISTOTA_ADMINS_FILE: /data/config/admins
+      # The config, where the istota service reads it; the root filesystem is
+      # read-only, so nothing links it into /app/config.
+      ISTOTA_CONFIG_PATH: /data/config/config.toml
     # The web process calls a model on its own (the health OCR extractors, the
     # biomarker explainer, shared-block run-now) and talks to Nextcloud, so it
     # needs the daemon's credentials: the same files, read the same way.
     secrets: *istota_secrets
+    # Dropped first, as the daemon's uid like everything else that writes under
+    # /data: a root-owned database sidecar locks the daemon out (ISSUE-458).
+    # The drop reads the master key (istota-secrets); the web-only token key,
+    # which the istota service creates on its first boot, is read here.
+    # Healthy means both exist.
     entrypoint:
+      - istota-drop
       - /bin/sh
       - -c
       - |
-        # The secrets store's master key and the web-only token key, which the
-        # istota service creates on its first boot. Healthy means it has.
-        if [ -z "$${ISTOTA_SECRET_KEY:-}" ] && [ -f /data/.secret_key ]; then
-          export ISTOTA_SECRET_KEY=$$(cat /data/.secret_key)
-        fi
         if [ -z "$${ISTOTA_WEB_TOKEN_KEY:-}" ] && [ -f /data/.web_token_key ]; then
           export ISTOTA_WEB_TOKEN_KEY=$$(cat /data/.web_token_key)
         fi
-        mkdir -p /app/config
-        ln -sf /data/config/config.toml /app/config/config.toml
-        # As the daemon's uid, like everything else that writes under /data: a
-        # root-owned database sidecar locks the daemon out (ISSUE-458).
-        exec istota-drop /app/.venv/bin/uvicorn istota.webui.app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
+        exec /app/.venv/bin/uvicorn istota.webui.app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
     command: []
     restart: unless-stopped
 
@@ -441,6 +456,7 @@ services:
     restart: unless-stopped
 
   webhooks:
+    <<: *dropped_service
     build: *istota_build
     image: istota-istota:${ISTOTA_TAG:-local}
     profiles:
@@ -462,14 +478,14 @@ services:
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       # Admin allowlist (shared with the istota and web services).
       ISTOTA_ADMINS_FILE: /data/config/admins
+      ISTOTA_CONFIG_PATH: /data/config/config.toml
     # The SMS and WhatsApp webhook credentials it verifies callbacks with.
     secrets: *istota_secrets
     entrypoint:
+      - istota-drop
       - /bin/sh
       - -c
       - |
-        mkdir -p /app/config
-        ln -sf /data/config/config.toml /app/config/config.toml
         # --no-access-log, because one route's query string is a credential.
         # Meta sends the WhatsApp verify token as `?hub.verify_token=` on the
         # GET subscription handshake, and uvicorn's default access formatter
@@ -477,7 +493,7 @@ services:
         # would hold the token however nginx is configured. nginx is told not
         # to log that path too; this is the half nginx cannot reach. The
         # receiver logs each event itself under a stable name, without it.
-        exec istota-drop /app/.venv/bin/uvicorn istota.webui.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
+        exec /app/.venv/bin/uvicorn istota.webui.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
     command: []
     restart: unless-stopped
 

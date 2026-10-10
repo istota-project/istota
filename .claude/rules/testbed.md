@@ -154,6 +154,7 @@ Four non-obvious points:
 - `/mnt/shared` replaced by an empty volume: the shipped bind is `rslave`, which Docker Desktop refuses for a macOS path.
 - The shipped `tasks` healthcheck polled faster.
 - The browser's fixed `container_name` reset, so two stacks on one machine can both run one.
+- `ISTOTA_WEB_INSECURE_COOKIES=1` on `web`: the tiers sign in with httpx over plain http on 127.0.0.1, and its cookie jar sends a `Secure` cookie back over https only, where a browser treats `http://localhost` as secure.
 
 `testbed/compose/nextcloud.yml` is the Nextcloud fixture: postgres, redis, Nextcloud 30 provisioned by `provision-nc.sh`, a one-shot job that applies the old root phase's shared-volume convention after provisioning, the fixture's shared volume at `/mnt/shared` on istota, web and webhooks, the Nextcloud locations on the stack's nginx (`ISTOTA_NGINX_ROOT_LOCATIONS`), and `ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE=1`, which narrows the entrypoint's mount refusal to "a mount point of its own" because the workspace is a Docker volume rather than an rclone mount. No install ships that layout; the rclone mount is the vm tier's job.
 
