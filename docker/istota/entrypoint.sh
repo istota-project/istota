@@ -81,12 +81,17 @@ istota -c "$CONFIG_FILE" init
 #
 # Users live in the database, populated by `istota user ensure`. The only user
 # this script creates is the first admin, and only into an empty table, so a
-# multi-user install is never rewritten by a restart. Talk rooms are provisioned
-# for that admin on every boot; `provision-rooms` is idempotent (it reuses the
-# rooms it recorded, ISSUE-342) and a channel the user cleared stays cleared.
+# multi-user install is never rewritten by a restart. The row is seeded from the
+# admin's `[users.<id>]` block when the config has one (`ensure_profile`'s
+# `seed_from`): `user ensure` with no flags would create a row with none of
+# those values, and a row, once it exists, owns every field, so an email
+# address the wizard wrote would stop counting as the user's own. Talk rooms are
+# provisioned for that admin on every boot; `provision-rooms` is idempotent (it
+# reuses the rooms it recorded, ISSUE-342) and a channel the user cleared stays
+# cleared.
 #
-# One Python pass reads the config and the table, and prints shell assignments
-# through shlex, since the admin's name comes from a file.
+# One Python pass reads the config and the table, ensures the row, and prints
+# shell assignments through shlex, since the admin's name comes from a file.
 eval "$(python3 - "$CONFIG_FILE" "$ADMINS_FILE" <<'PY'
 import shlex
 import sys
@@ -105,23 +110,30 @@ try:
             break
 except OSError:
     pass
-try:
-    have_users = bool(user_profiles.list_profiles(Path(config.db_path)))
-except Exception:
-    have_users = True
+ensured = ""
+if admin:
+    db_path = Path(config.db_path)
+    if not user_profiles.list_profiles(db_path):
+        seed = config.users.get(admin)
+        user_profiles.ensure_profile(
+            db_path, admin,
+            display_name=getattr(seed, "display_name", "") or admin,
+            timezone=getattr(seed, "timezone", "") or "",
+            seed_from=seed,
+        )
+        ensured = "1"
 nc = config.nextcloud
 talk = bool(config.talk.enabled and nc.url and nc.username and nc.app_password)
 print(f"FIRST_ADMIN={shlex.quote(admin)}")
-print(f"HAVE_USERS={'1' if have_users else ''}")
+print(f"ENSURED={ensured}")
 print(f"TALK_CONFIGURED={'1' if talk else ''}")
 PY
 )"
 
 if [ -z "$FIRST_ADMIN" ]; then
     log "Warning: ${ADMINS_FILE} names nobody; the admin dashboard stays closed until it does."
-elif [ -z "$HAVE_USERS" ]; then
-    log "Ensuring the first admin, ${FIRST_ADMIN}."
-    istota -c "$CONFIG_FILE" user ensure --name "$FIRST_ADMIN" --seed
+elif [ -n "$ENSURED" ]; then
+    log "Ensured the first admin, ${FIRST_ADMIN}, from the config."
 fi
 
 if [ -n "$TALK_CONFIGURED" ] && [ -n "$FIRST_ADMIN" ]; then

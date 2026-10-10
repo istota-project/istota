@@ -40,6 +40,7 @@ enabled = false
 
 [users.alice]
 display_name = "Alice"
+email_addresses = ["alice@example.test"]
 """
 
 NEXTCLOUD_CONFIG = """\
@@ -161,7 +162,13 @@ class TestTheBoot:
         assert stat.S_IMODE((volume.root / ".web_token_key").stat().st_mode) == 0o600
         calls = volume.calls()
         assert calls[0].endswith(f"-c {volume.config} init")
-        assert any(c.endswith("user ensure --name alice --seed") for c in calls), calls
+        # The first admin's row exists, seeded from their [users.alice] block:
+        # a row owns every field once it exists, so an unseeded one would
+        # drop the address the config gives them.
+        profile = user_profiles.get_profile(volume.db, "alice")
+        assert profile is not None
+        assert profile.display_name == "Alice"
+        assert profile.email_addresses == ["alice@example.test"]
         assert not any("provision-rooms" in c for c in calls)
         assert f"scheduler --daemon -c {volume.config}" in calls
         # The scheduler gets the master key and never the web-only one.
@@ -176,7 +183,7 @@ class TestTheBoot:
         result = volume.run()
 
         assert result.returncode == 0, result.stdout + result.stderr
-        assert not any("user ensure" in c for c in volume.calls())
+        assert user_profiles.get_profile(volume.db, "alice") is None
 
     def test_an_existing_master_key_is_kept(self, tmp_path):
         volume = Volume(tmp_path, LOCAL_CONFIG)
@@ -210,7 +217,7 @@ class TestTheBoot:
 
         assert result.returncode == 0
         assert "names nobody" in result.stdout
-        assert not any("user ensure" in c for c in volume.calls())
+        assert user_profiles.list_profiles(volume.db) == {}
 
 
 class TestTalkRooms:
