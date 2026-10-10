@@ -79,7 +79,7 @@ Wrap a full suite run in `scripts/qtest`. Both this suite and vitest size their 
 
 Four variables tune it: `QTEST_SLOTS` (how many runs may hold the machine at once, default 1), `QTEST_TIMEOUT` (seconds to wait for a slot, default 1800), `QTEST_LOCK_DIR` (default `~/.cache/qtest`, deliberately outside any repo, because the resource being shared is the laptop) and `QTEST_DISABLE=1` to bypass the semaphore entirely.
 
-Nine marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
+Ten marker sets are deselected by default (also via `addopts`), each with a different prerequisite, so they are selectable independently:
 
 | Marker | Needs | Runner |
 |---|---|---|
@@ -91,6 +91,7 @@ Nine marker sets are deselected by default (also via `addopts`), each with a dif
 | `full` | a Docker daemon, and the network — see below | `uv run pytest -m full -n0` |
 | `testbed` | a Docker daemon, and no istota image | `uv run pytest -m testbed -n0` |
 | `deploy` | a Docker daemon, and the network | `scripts/test-deploy.sh` |
+| `vm` | `limactl` (Lima 2.x) on an Apple silicon Mac, the network, and tens of minutes on a first run; controls in `scripts/test-vm-negative-control.sh` | `scripts/test-vm.sh` |
 | `ml` | the `memory-search` or `whisper` extra | `uv sync --all-extras && uv run pytest -m ml` |
 
 **The `live` marker has two test files.** `tests/live/test_claude_code_append_system_prompt.py` checks that the CLI obeys an instruction carried only by the appended system-prompt file, and fails the run when that file is missing. **The other is the only thing that can say Claude Code turns a `Read` into sight.** `tests/live/test_claude_code_read_image.py` builds a two-colour PNG with no text, prepares it through the shipped `prepare_image_attachments`, renders the shipped directive with `build_image_prompt`, runs the argv `ClaudeCodeBrain._build_command` produces, and reads the raw `--output-format stream-json` lines for a `Read` call on that path whose tool result carries an image block. Raw lines rather than `brain._events.parse_stream_line`, deliberately: that parser returns `None` for the user frame a tool result arrives in, so a test written against it could only fall back to asserting on the path string istota itself wrote — which a model that opened nothing satisfies. It does not grade the answer's prose; whether the model names the colours is a question about the model. The JSON scanning lives in `tests/live/stream_json.py` and is tested for free in the default suite by `tests/test_live_witness_scan.py`, negative case included, since only the model call needs a credential.

@@ -1,0 +1,16 @@
+# Negative control for parity row 9 in the vm tier: an entrypoint that no
+# longer refuses a full-integration workspace that is not the VM's rclone mount.
+#
+# Only that one condition changes; the bundled-Nextcloud and DOMAIN refusals in
+# the same block stay. Built in the VM from the deployed image:
+#
+#   docker build -f docker/test/Dockerfile.no-storage-refusal \
+#       --build-arg BASE=istota-istota:<tag> -t istota-istota:<tag>-no-storage-refusal docker/test
+#
+# Expected: tests/vm/test_nextcloud.py::TestNothingIsWrittenIntoAnUnmountedStore fails.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's/^    if not (fstype == "fuse.rclone" or (concession and mountpoint == workspace)):$/    if False:/' \
+        /entrypoint.sh \
+    && grep -q '^    if False:$' /entrypoint.sh

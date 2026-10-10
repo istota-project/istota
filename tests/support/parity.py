@@ -62,17 +62,8 @@ NOT_WITNESSED: dict[int, str] = {
     14: "rootful dockerd inside a dedicated VM; parity with bare metal plus a container, closed by the rootless-podman spec",
 }
 
-PENDING: dict[int, str] = {
-    7: "Stage 7",
-    9: "Stage 7",
-    10: "Stage 7",
-    11: "Stage 7",
-    15: "Stage 7",
-    18: "Stage 7",
-    19: "Stage 7",
-    # Needs a host with AppArmor; Docker Desktop has none.
-    20: "Stage 7",
-}
+# Empty since Stage 7: the last pending rows are witnessed by the vm tier.
+PENDING: dict[int, str] = {}
 
 # The pending set as Stage 1 left it. `PENDING` may lose rows, never gain them.
 # Editing this to make room for a new pending row defeats the guard; a new row
@@ -87,12 +78,9 @@ PENDING_AT_STAGE_1: frozenset[int] = frozenset(
 # Each entry names the half still to come; the registry test requires the row
 # to be witnessed, so this records what a witness does not yet cover rather
 # than standing in for one.
-OUTSTANDING_HALVES: dict[int, str] = {
-    # The image tier runs on Docker Desktop, whose file sharing shows every
-    # bind-mounted file as uid 0, so the mode is witnessed there and the owner
-    # only where the bind keeps the writer's uid: the VM.
-    12: "Stage 7: the secret files are owned by uid 10001, read on the VM",
-}
+# Row 12's owner half, the last entry, is witnessed by the vm tier
+# (tests/vm/test_confinement.py).
+OUTSTANDING_HALVES: dict[int, str] = {}
 
 
 def witness(*rows: int) -> Callable[[T], T]:
