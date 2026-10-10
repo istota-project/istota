@@ -176,7 +176,7 @@ def _set_up(stack, email_people) -> Web:
     """
     password = secrets.token_urlsafe(24)
     added = subprocess.run(
-        stack.args + ["exec", "-T", "istota", "uv", "run", "istota", "-c",
+        stack.args + ["exec", "-T", "istota", "istota-drop", "uv", "run", "istota", "-c",
                       CONTAINER_CONFIG, "auth", "add", email_people.host_id,
                       "--email", email_people.host_address, "--password-stdin"],
         input=password + "\n", text=True, capture_output=True, timeout=120,

@@ -116,7 +116,7 @@ def test_delivered_sign_in_code_and_password_login(stack):
 
             password = secrets.token_urlsafe(24)
             changed = subprocess.run(
-                stack.args + ["exec", "-T", "istota", *command, "set-password", user_id, "--password-stdin"],
+                stack.args + ["exec", "-T", "istota", "istota-drop", *command, "set-password", user_id, "--password-stdin"],
                 input=password + "\n", text=True, capture_output=True, timeout=60,
             )
             assert changed.returncode == 0, changed.stderr

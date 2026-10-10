@@ -399,7 +399,8 @@ class TestRoomMountReconcile:
         """A committed mapping drives real MOVE; the volume only observes it."""
         old = _unique("legacy-room")
         setup = "\n" + f"""
-from istota import db, room_relocate
+from istota import db
+from istota.maintenance import room_relocate
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
 db.init_db(c.db_path)
@@ -423,7 +424,7 @@ print('NEW', new)
         # physical-path oracle even if the sweep's status claims success.
         control = "\n" + f"""
 from unittest.mock import patch
-from istota import room_relocate
+from istota.maintenance import room_relocate
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
 with patch('istota.maintenance.room_mount_reconcile._move_dav'):
@@ -434,7 +435,8 @@ assert (c.workspace_path / 'Channels' / {new!r} / 'CHANNEL.md').exists(), 'MOVE 
         assert result.returncode != 0 and 'MOVE was a no-op' in result.stderr, result
         actual = "\n" + f"""
 from unittest.mock import patch
-from istota import room_relocate, storage
+from istota import storage
+from istota.maintenance import room_relocate
 from istota.maintenance.room_mount_reconcile import dav_request
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
@@ -458,7 +460,8 @@ print('MOVE', 'verified')
         old = _unique("legacy-room")
         day = "memories/2026-10-01.md"
         setup = "\n" + f"""
-from istota import db, room_relocate
+from istota import db
+from istota.maintenance import room_relocate
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
 db.init_db(c.db_path)
@@ -476,7 +479,7 @@ print('NEW', new)
         new = _tagged(_run(stack, setup), "NEW").strip()
         sweep = "\n" + f"""
 from unittest.mock import patch
-from istota import room_relocate
+from istota.maintenance import room_relocate
 c.db_path = pathlib.Path('/tmp/{old}.db')
 c.users = {{'testuser': c.users['testuser']}}
 with patch('istota.maintenance.room_mount_reconcile.os.rename', side_effect=AssertionError('FUSE rename')):
