@@ -1,0 +1,17 @@
+# Negative control for parity row 3: every process counts as a task's root.
+#
+# Both proxies ask `PeerRoots.contains` whether the kernel-reported peer
+# descends from a pid the task registered (ISSUE-550). This control answers
+# yes for every pid, so a process no task started is served like the task.
+#
+#   docker build -f docker/test/Dockerfile.every-pid-a-root --build-arg BASE=<lean tag> \
+#       -t istota-test/every-pid-a-root:<suffix> docker/test
+#
+# Expected: tests/smoke/test_run_contract.py::TestATasksNetworkAndItsProxies
+# fails on "row 3: the skill proxy served a process outside the task".
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i '/    def contains(self, pid: int | None, \*, grace_seconds: float) -> bool:/a\        return True  # control: every pid a root' \
+        /app/src/istota/sandbox/peer_process.py \
+    && grep -q 'return True  # control: every pid a root' /app/src/istota/sandbox/peer_process.py

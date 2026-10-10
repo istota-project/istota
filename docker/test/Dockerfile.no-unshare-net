@@ -1,0 +1,17 @@
+# Negative control for parity row 2: a mount plan without `--unshare-net`.
+#
+# The CONNECT proxy is still started and still allowlists, but the task's
+# namespace now shares the container's network, so a connect that skips the
+# proxy reaches a host directly.
+#
+#   docker build -f docker/test/Dockerfile.no-unshare-net --build-arg BASE=<lean tag> \
+#       -t istota-test/no-unshare-net:<suffix> docker/test
+#
+# Expected: tests/smoke/test_run_contract.py::TestATasksNetworkAndItsProxies
+# fails on "row 2: the task reached a host without the proxy".
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's/_flag("network_isolation", "--unshare-net")/pass  # control: no --unshare-net/' \
+        /app/src/istota/sandbox/plan.py \
+    && grep -q 'pass  # control: no --unshare-net' /app/src/istota/sandbox/plan.py

@@ -63,18 +63,12 @@ NOT_WITNESSED: dict[int, str] = {
 }
 
 PENDING: dict[int, str] = {
-    2: "Stage 4",
-    3: "Stage 4",
     7: "Stage 7",
     9: "Stage 7",
     10: "Stage 7",
     11: "Stage 7",
     13: "Stage 6",
     15: "Stage 7",
-    # Stage 2 split the network in the shipped file; the runtime witness needs
-    # the browser profile booted, which the lean smoke shape cannot do until
-    # Stage 4 makes it the shipped file plus an overlay.
-    17: "Stage 4",
     18: "Stage 7",
     19: "Stage 7",
     # Needs a host with AppArmor; Docker Desktop has none.

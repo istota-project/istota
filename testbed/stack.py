@@ -2337,7 +2337,15 @@ class StackPool:
 
             build = not profile.image and not self._built
             skip = () if full or profile.web else ("web", "nginx")
-            up(args, platform=self.platform, build=build, skip=skip)
+            try:
+                up(args, platform=self.platform, build=build, skip=skip)
+            except ComposeError as exc:
+                # `up` waits on web's `depends_on: istota: service_healthy`, so
+                # an istota that refused to start fails `up` itself, and the
+                # refusal is in istota's log rather than in compose's output.
+                raise ComposeError(
+                    f"{exc}\n--- istota logs ---\n{logs(args, ISTOTA_SERVICE, tail=40)}"
+                ) from exc
             if build:
                 self._built = True
             wait_all_ready(

@@ -30,6 +30,7 @@ this container must; the reads that need uid 0 say `user="0"`.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -311,3 +312,202 @@ class TestATaskIsInItsOwnCgroup:
         assert "hog_exit=137" in observed, observed
         logs = stack.logs(400)
         assert f"task {task_id}: " in logs and "OOM-killed inside the task's own cgroup" in logs, logs
+
+
+# Rows 2 and 3, in one task: what the task's own network can reach, and whether
+# the task's two proxy sockets answer a process that is not the task's. The
+# task holds its sandbox open while the test probes the sockets from outside.
+NETWORK_PROBE = r"""
+echo NETWORK_PROBE_BEGIN
+echo "dbdir=$(stat -f -c %T /data/db 2>&1)"
+code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" 2>/dev/null; echo " rc=$?"; }
+echo "allowed=$(code --proxytunnel http://__ALLOWED__/)"
+echo "denied=$(code --proxytunnel http://__DENIED__/)"
+echo "direct=$(code --noproxy '*' http://__ALLOWED__/)"
+echo "skill=$(istota-skill kv namespaces 2>&1 | head -c 200 | tr '\n' ' ')"
+sleep 30
+echo NETWORK_PROBE_END
+"""
+
+# From outside the task: a process `docker compose exec` started, which no task
+# registered. Each proxy is asked for something it would grant its own task:
+# the skill proxy a skill call, the network proxy a tunnel to the allowlisted
+# stub.
+OUTSIDER_PROBE = r"""
+import glob, json, socket, sys
+task, allowed = sys.argv[1], sys.argv[2]
+def ask(pattern, payload, end):
+    paths = glob.glob(pattern)
+    if not paths:
+        return f"no socket {pattern}"
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(10)
+    s.connect(paths[0])
+    s.sendall(payload)
+    data = b""
+    try:
+        while end not in data:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        pass
+    return data.decode(errors="replace")[:300]
+print("SKILL=" + json.dumps(ask(f"/tmp/istota-proxy-*-{task}.sock",
+      b'{"skill": "kv", "args": ["namespaces"]}\n', b"\n")))
+print("NET=" + json.dumps(ask(f"/tmp/istota-net-*-{task}.sock",
+      f"CONNECT {allowed} HTTP/1.1\r\nHost: {allowed}\r\n\r\n".encode(), b"\r\n\r\n")))
+"""
+
+
+def _hostport(url: str) -> str:
+    return url.split("://", 1)[1].split("/", 1)[0]
+
+
+@parity.witness(2, 3)
+@pytest.mark.profile("network")
+class TestATasksNetworkAndItsProxies:
+    """Rows 2 and 3, on the shipped compose file with the network sandbox on.
+
+    Row 2: inside the task's namespace there is no route out but the CONNECT
+    proxy, and the proxy tunnels only to an allowlisted host. The forge stub is
+    allowlisted, as any configured forge is; the scripted model endpoint, on
+    the same host, is not. `direct` is the `--unshare-net` half: without the
+    proxy the allowlisted host is unreachable too.
+
+    Row 3: both proxy sockets refuse a process that is not descended from the
+    task's registered roots, while the task's own skill call is served. A
+    socket that served everyone would answer the outsider exactly as it
+    answers the task, which is what the control (every pid a root) produces.
+    """
+
+    def test_the_proxies_answer_the_task_and_refuse_everyone_else(self, stack):
+        allowed = _hostport(stack.service("gitlab").container_url)
+        denied = _hostport(stack.endpoint.container_url)
+        command = NETWORK_PROBE.replace("__ALLOWED__", allowed).replace("__DENIED__", denied)
+        stack.script([
+            {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": command}}]},
+            {"text": "I probed the network"},
+        ])
+        task_id = stack.submit("probe the network")
+
+        outsider = ""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            result = stack.exec(["python3", "-c", OUTSIDER_PROBE, str(task_id), allowed])
+            outsider = result.stdout
+            if "SKILL=" in outsider and "no socket" not in outsider:
+                break
+            time.sleep(0.5)
+
+        stack.probe.wait_for_task(status="completed", task_id=task_id, timeout=180)
+        observed = _marked(stack, "NETWORK_PROBE_BEGIN", "NETWORK_PROBE_END")
+
+        assert "dbdir=tmpfs" in observed, f"the probe did not run in the sandbox:\n{observed}"
+        # Row 2. Any HTTP status from the stub means the tunnel was made; a
+        # refused CONNECT is curl's 56 with no status at all.
+        assert re.search(r"allowed=[1-5]\d\d rc=0", observed), (
+            f"row 2: no tunnel to the allowlisted host:\n{observed}")
+        assert re.search(r"denied=000 rc=56", observed), (
+            f"row 2: the proxy tunnelled to a host off the allowlist:\n{observed}")
+        assert re.search(r"direct=000 rc=(6|7|28)", observed), (
+            f"row 2: the task reached a host without the proxy:\n{observed}")
+        # Row 3: the task's own call is served, the outsider's two are not.
+        assert "refused the connection" not in observed, (
+            f"row 3: the skill proxy refused its own task:\n{observed}")
+        assert "peer_not_in_task" in outsider, (
+            f"row 3: the skill proxy served a process outside the task: {outsider}")
+        assert 'NET="HTTP/1.1 403 Forbidden' in outsider, (
+            f"row 3: the network proxy served a process outside the task: {outsider}")
+
+
+# Row 17: TCP connects, by name and by address, each printed as reached or the
+# error. Run in both containers, so the istota side proves every target is up
+# and listening, and the browser side is the claim.
+CONNECT_PROBE = r"""
+import json, socket, sys
+out = {}
+for target in json.loads(sys.argv[1]):
+    host, port = target.rsplit(":", 1)
+    try:
+        socket.create_connection((host, int(port)), timeout=3).close()
+        out[target] = "reached"
+    except OSError as exc:
+        out[target] = type(exc).__name__
+print("CONNECT=" + json.dumps(out))
+"""
+
+# Every TCP port the istota container listens on, from /proc/net/tcp{,6}.
+LISTENING_PORTS = r"""
+ports = set()
+for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        lines = open(name).read().splitlines()[1:]
+    except OSError:
+        continue
+    for line in lines:
+        fields = line.split()
+        if fields[3] == "0A":
+            ports.add(int(fields[1].rsplit(":", 1)[1], 16))
+print(" ".join(str(p) for p in sorted(ports)))
+"""
+
+
+def _connect(stack, service: str, targets: list[str]) -> dict[str, str]:
+    result = stack.exec(["python3", "-c", CONNECT_PROBE, json.dumps(targets)], service=service)
+    line = next((row for row in result.stdout.splitlines() if row.startswith("CONNECT=")), "")
+    assert line, f"exit {result.returncode}\n{result.stdout}\n{result.stderr}"
+    return json.loads(line[len("CONNECT="):])
+
+
+@parity.witness(17)
+@pytest.mark.profile("browser")
+class TestTheBrowserIsOnItsOwnNetwork:
+    """Row 17: a page the browser renders runs attacker-chosen code, and the
+    browser container reaches none of the stack but the daemon that drives it.
+
+    The targets are the ones the matrix names: the web app, the signaling
+    server and whatever the istota container listens on. nginx is not one: it
+    is the stack's public listener, which a page can reach the way the internet
+    does. Every target is first reached from the istota container, which joins
+    both networks, so a refused connect from the browser is the network and not
+    a service that was down or a wrong port.
+
+    By name, and for the web app by address too: a name the browser cannot
+    resolve proves only DNS, an address it cannot reach is the network. Only
+    an unpublished service is probed by address, because Docker Desktop routes
+    one bridge network to another container's *published* port (measured: the
+    browser reached signaling's published 8080 and nginx's 80 by address),
+    which Docker Engine 29.9 on Debian 13 does not (measured on the spike VM:
+    a published and an unpublished port on another network both time out).
+    """
+
+    def _targets(self, stack) -> list[str]:
+        targets = ["web:8766", "signaling:8080"]
+        listening = stack.exec(["python3", "-c", LISTENING_PORTS]).stdout.split()
+        targets += [f"istota:{port}" for port in listening]
+        resolved = stack.exec(["getent", "hosts", "web"]).stdout.split()
+        assert resolved, "web does not resolve from the istota container"
+        targets.append(f"{resolved[0]}:8766")
+        return targets
+
+    def test_the_browser_reaches_nothing_the_daemon_reaches(self, stack):
+        targets = self._targets(stack)
+        from_istota = _connect(stack, "istota", [t for t in targets if not t.startswith("istota:")])
+        assert set(from_istota.values()) == {"reached"}, from_istota
+
+        from_browser = _connect(stack, "browser", targets)
+
+        reached = sorted(t for t, outcome in from_browser.items() if outcome == "reached")
+        assert reached == [], f"row 17: the browser container reached {reached}: {from_browser}"
+
+    def test_the_daemon_still_drives_the_browser(self, stack):
+        deadline = time.monotonic() + 180
+        outcome = {}
+        while time.monotonic() < deadline:
+            outcome = _connect(stack, "istota", ["browser:9223"])
+            if outcome.get("browser:9223") == "reached":
+                break
+            time.sleep(2)
+        assert outcome.get("browser:9223") == "reached", outcome

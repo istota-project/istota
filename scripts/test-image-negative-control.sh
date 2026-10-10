@@ -43,7 +43,8 @@
 #   scripts/test-image-negative-control.sh rendered-config
 #
 # The second form runs only the third half, the istota container's run
-# contract (the one-deployment-shape spec's parity rows 1, 4, 5, 6, 8 and 16).
+# contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
+# 16 and 17).
 # Its witnesses are smoke tests, because a run contract is a property of a
 # running container rather than of an image, so each control there breaks one
 # line of the contract (a compose overlay on the lean stack, or an image with
@@ -223,6 +224,34 @@ print(lean_image_tag())
         "tests/smoke/test_sandbox_in_stack.py::TestTheDatabaseMasks::test_the_database_directory_is_an_empty_read_only_tmpfs" \
         "tests/smoke/test_sandbox_repos_isolation.py::TestAnotherUsersSubtree::test_it_is_not_in_the_namespace_at_all" \
         "tests/smoke/test_sandbox_shared_room.py::TestAGuestsTurn::test_it_reaches_no_workspace_and_no_group"
+
+    # Rows 2 and 3 share a witness: one task's network and its two proxy
+    # sockets. Each control must turn it red with its own row's message.
+    network_node="${RUN_CONTRACT_TESTS}::TestATasksNetworkAndItsProxies::test_the_proxies_answer_the_task_and_refuse_everyone_else"
+    docker build -q -f docker/test/Dockerfile.no-unshare-net \
+        --build-arg "BASE=$lean_tag" -t "istota-test/no-unshare-net:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "no-unshare-net" \
+        "$(image_overlay "istota-test/no-unshare-net:$suffix" no-unshare-net)" \
+        "row 2: the mount plan drops --unshare-net, so a task reaches a host past the proxy" \
+        "row 2: the task reached a host without the proxy" \
+        "$network_node"
+
+    docker build -q -f docker/test/Dockerfile.every-pid-a-root \
+        --build-arg "BASE=$lean_tag" -t "istota-test/every-pid-a-root:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "every-pid-a-root" \
+        "$(image_overlay "istota-test/every-pid-a-root:$suffix" every-pid-a-root)" \
+        "row 3: every pid counts as a task root, so the proxies serve an outsider" \
+        "row 3: the skill proxy served a process outside the task" \
+        "$network_node"
+
+    require_smoke_failures \
+        "browser-on-default-network" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/browser-on-default-network.yml" \
+        "row 17: the browser shares the default network with web, nginx and signaling" \
+        "row 17: the browser container reached" \
+        "${RUN_CONTRACT_TESTS}::TestTheBrowserIsOnItsOwnNetwork::test_the_browser_reaches_nothing_the_daemon_reaches"
 
     rm -rf "$scratch"
     echo
