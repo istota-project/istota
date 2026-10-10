@@ -5,7 +5,7 @@ A bare-metal install is one the Ansible role converged onto a Debian host: syste
 There is no general export format. The two shapes share the database schema, the master key and the workspace, so the move is a stopped-service copy plus one rewrite step:
 
 - `host/export-bare-metal.sh`, run as root on the old host, stops the install and writes one tarball of its state.
-- `istota migrate import-bare-metal`, run in a one-shot container on the new VM, reads that tarball and lands it in the container layout: it rewrites `config.toml`, splits the secrets files, restores the databases, copies the repositories and repairs their worktrees, and rebases the host paths the database stores.
+- `istota migrate import-bare-metal`, run in a one-shot container on the new VM by `istota-stack import-bare-metal`, reads that tarball and lands it in the container layout: it rewrites `config.toml`, splits the secrets files, restores the databases, copies the repositories and repairs their worktrees, and rebases the host paths the database stores.
 
 On an install whose workspace is an external Nextcloud the workspace does not move at all: the new VM mounts the same Nextcloud.
 
@@ -18,7 +18,7 @@ On an install whose workspace is an external Nextcloud the workspace does not mo
 | Admins | `/etc/<ns>/admins` | `/srv/istota/config/admins` | copied |
 | Secrets | `/etc/<ns>/secrets.env`, `web-secrets.env` | `/srv/istota/secrets/*`, `/data/.secret_key`, `/data/.web_token_key` | one file per credential; the master key and the web token key byte for byte |
 | Developer repositories | `developer.repos_dir` | `/data/repos` | copied, then `git worktree repair` per repository |
-| Baileys session | `<data>/whatsapp-baileys-session` | `/data/db/whatsapp-baileys-session` | copied |
+| Baileys session | `<data>/whatsapp-baileys-session` | `/data/db/whatsapp-baileys-session` | copied, except by a rehearsal |
 | Session transcripts | `<data>/logs` | `/data/db/logs` | copied |
 | Browser profile | `<data>/browser-profile` | the `browser_profile` volume | optional, by hand (below) |
 | Devbox homes | per-user Docker volumes | per-user Docker volumes | optional, by hand (below) |
@@ -65,6 +65,8 @@ The rehearsal runs in a local Lima VM provisioned from `host/lima/istota.yaml`. 
    ssh root@<old-host> /path/to/export-bare-metal.sh --namespace <ns> --no-stop > rehearsal.tar
    ```
 
+   The export's `MANIFEST` records `mode=online`, and the import refuses such an export without `--rehearsal`: it is a copy of a bot that is still running.
+
 2. Point the rehearsal VM's rclone remote at a copy of the workspace, never at the production mount: `rclone sync` the users' folders into a scratch remote, and name that remote in the VM's `rclone.conf`.
 3. Unpack and import with `--rehearsal` and `--ingress local` (the import command is in step 6 of the cutover). The import switches off every loop and delivery path that can reach a person or another service, each through a switch the daemon already reads, and prints each change. The list below is what it covers.
 4. Check the import: the printed config changes and rebase counts, `istota doctor` clean apart from what the withheld credentials explain and the `runtime.bare_metal_import` warning that names the copy as a rehearsal, the web UI logging in, and one task run by hand with `istota task`, which also confirms a `claude_code` brain runs on the token alone.
@@ -100,7 +102,7 @@ In the imported database:
 | `secrets` with `service = 'ntfy'` | deleted | ntfy pushes from heartbeats, job output, alerts and finished tasks |
 | `tasks` that are `pending`, `locked`, `running` or `pending_confirmation` | `cancelled` | the old host's queue at the moment of the online export |
 
-The credentials for every transport and for Google Workspace are withheld: the Nextcloud app password, the email, SMS, WhatsApp and CalDAV credentials, the Google Workspace client secret and the Nextcloud OAuth client secret. With those gone, the remaining start-up calls to the Nextcloud (user hydration, folder setup) cannot authenticate. Alerts from `doctor`, the loop watchdog and backups still go to each admin's alert route, which then reaches only the web bell.
+The credentials for every transport, for Google Workspace and for the forges are withheld: the Nextcloud app password, the email, SMS, WhatsApp and CalDAV credentials, the Google Workspace client secret, the Nextcloud OAuth client secret, and the GitLab and GitHub tokens. Each of their secrets files is written empty, including one `istota-stack setup` had already filled. The Baileys session is not copied either: the WhatsApp sidecar connects with whatever session it finds, whether or not `whatsapp.enabled` is set, and two connections on one session keep replacing each other. With those gone, the remaining start-up calls to the Nextcloud (user hydration, folder setup) cannot authenticate. Alerts from `doctor`, the loop watchdog and backups still go to each admin's alert route, which then reaches only the web bell.
 
 Two paths stay open and are yours to watch. A newer release can add a module job that the source's database did not hold; the module sync inserts it enabled. And a job added to a user's `CRON.md` between the export and the workspace copy is inserted by the CRON.md sync. Compare `!cron` against the export if the workspace copy was taken later. A task you run by hand still uses that user's stored credentials, such as a Karakeep key; a Google Workspace token cannot refresh without the withheld client secret.
 
@@ -129,17 +131,13 @@ Every step on the old host and on the upstream proxy is a change to production. 
    ```
 
 5. **Copy `rclone.conf`** to `/srv/istota/rclone.conf` if you have not, and re-run `provision.sh` so the mount unit is in place. The new mount runs as uid 10001, the daemon's uid in the container, so the workspace is writable from inside it.
-6. **Import**, in a one-shot container with the config directory and the secrets directory writable. Look at the plan first:
+6. **Import**, with the stack stopped. `istota-stack import-bare-metal` refuses while any of the stack's containers is running, then runs the import in a one-shot container with the export read-only at `/import`, the secrets directory writable at `/secrets` and the config directory writable. Look at the plan first:
 
    ```sh
-   ISTOTA_CONFIG_READ_ONLY=false istota-stack compose run --rm --no-deps -T \
-     --entrypoint istota-drop \
-     -v /srv/istota/import:/import:ro -v /srv/istota/secrets:/secrets \
-     istota istota migrate import-bare-metal \
-       --source /import --secrets-dir /secrets --ingress proxied --dry-run
+   istota-stack import-bare-metal /srv/istota/import --ingress proxied --dry-run
    ```
 
-   Then run the same command without `--dry-run`. Add `--emit-plan /import-out/plan.json` (with a writable mount for it) to get the rewritten config as an `istota apply` plan, so the variables of a config manager can start from what this install runs.
+   Then run the same command without `--dry-run`. Add `--emit-plan /data/config/import-plan.json` to get the rewritten config as an `istota apply` plan, in `/srv/istota/config`, so the variables of a config manager can start from what this install runs. The plan carries no credentials.
 
    Exit codes: 0 done, or already imported; 1 refused, nothing written; 2 partial. A partial leaves `/data/.bare-metal-import.in-progress` naming the export, and re-running the same command with the same export finishes it. The import refuses a target whose database already holds tasks, since it replaces the database and the master key.
 

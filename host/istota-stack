@@ -5,6 +5,8 @@
 #   istota-stack rollback       back to the previous tag, if its image can run the database
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
+#   istota-stack import-bare-metal <dir> [args]
+#                               import a bare-metal export, with the stack down
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
 #   istota-stack exec <cmd...>  run a command in the istota container as uid 10001
 #   istota-stack compose <...>  docker compose, with this stack's files and settings
@@ -294,6 +296,12 @@ cmd_update() {
         verified_git checkout --quiet --detach "$before" || true
         die "${tag}'s AppArmor profile did not load; .env, the checkout and the running stack are unchanged."
     fi
+    # A secret this tag's compose file declares and setup never created: compose
+    # refuses to start a service whose secret file is missing.
+    if ! ensure_secret_files; then
+        verified_git checkout --quiet --detach "$before" || true
+        die "could not create ${tag}'s secret files in ${SECRETS_DIR}; .env and the running stack are unchanged."
+    fi
 
     previous="$current"
     if [ "$current" = "$tag" ]; then previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"; fi
@@ -348,11 +356,13 @@ secret_names() {
 }
 
 ensure_secret_files() {
-    local name
-    install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$SECRETS_DIR"
+    local name owner=()
+    # Root on the VM; the tests run as themselves.
+    if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
+    install -d -m 0700 "${owner[@]}" "$SECRETS_DIR" || return 1
     for name in $(secret_names); do
         if [ ! -e "${SECRETS_DIR}/${name}" ]; then
-            install -m 0400 -o "$ISTOTA_UID" -g "$ISTOTA_UID" /dev/null "${SECRETS_DIR}/${name}"
+            install -m 0400 "${owner[@]}" /dev/null "${SECRETS_DIR}/${name}" || return 1
         fi
     done
 }
@@ -465,6 +475,25 @@ cmd_apply() {
     return "$rc"
 }
 
+# `istota migrate import-bare-metal` in a one-shot container, with the unpacked
+# export read-only at /import and the secrets directory writable at /secrets.
+# The import replaces the database and the master key, and the daemon's own
+# lock is in a /tmp the one-shot does not share, so the refusal is here: no
+# container of the stack may be running.
+cmd_import_bare_metal() {
+    [ "$#" -ge 1 ] || { usage >&2; exit 64; }
+    local source="$1" running
+    shift
+    [ -d "$source" ] || die "no unpacked export at ${source}"
+    running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was imported."
+    if [ -n "$running" ]; then
+        die "the stack is running. Stop it first (\`systemctl stop istota-stack\`); the import replaces its database and master key."
+    fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot \
+        -v "${source}:/import:ro" -v "${SECRETS_DIR}:/secrets" \
+        istota istota migrate import-bare-metal --source /import "$@"
+}
+
 # After a config change: re-render the devbox services, since [devbox] users may
 # have changed, and bring a running stack onto both. `up -d` creates an added
 # user's devbox and recreates istota with its socket volumes; `restart` is what
@@ -509,6 +538,7 @@ main() {
         rollback) cmd_rollback "$@" ;;
         setup) cmd_setup "$@" ;;
         apply) cmd_apply "$@" ;;
+        import-bare-metal) cmd_import_bare_metal "$@" ;;
         up) cmd_up ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;

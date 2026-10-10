@@ -48,6 +48,7 @@ case "$args" in
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
     else echo '{"services": {}}'; fi ;;
   *" ps -q istota"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
+  *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
   *" istota apply "*) exit "${STUB_APPLY_RC:-0}" ;;
   *" image ls "*) printf 'istota-istota:v0\nistota-istota:v1\nistota-istota:old\nnginx:alpine\n' ;;
@@ -245,6 +246,36 @@ class TestASignedTagIsDeployed:
         assert fx.head() == head_before
         assert not any(" up " in f"{call} " for call in fx.docker_calls())
 
+    def test_a_secret_added_since_setup_exists_before_the_stack_starts(self, fx, tmp_path):
+        """compose refuses to start a service whose secret file is missing, so a
+        release that declares a new secret would leave every VM down."""
+        compose = fx.origin / "docker" / "docker-compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text(
+            "secrets:\n"
+            "  old_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/old_one\n"
+            "  new_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/new_one\n"
+        )
+        _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        secrets = fx.stack / "secrets"
+        secrets.mkdir()
+        (secrets / "old_one").write_text("kept")
+        seen = tmp_path / "secrets-at-up"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            'case "$args" in\n',
+            f'case "$args" in\n  *" up -d "*) ls "{secrets}" > "{seen}" ;;\n',
+        ))
+
+        result = fx.run("update", "v1")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert seen.read_text().split() == ["new_one", "old_one"]
+        assert (secrets / "new_one").read_text() == ""
+        assert (secrets / "old_one").read_text() == "kept"
+
     def test_native_only_builds_without_claude_code(self, fx, tmp_path):
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
@@ -327,6 +358,39 @@ class TestApply:
         assert result.returncode == 2, result.stdout + result.stderr
         calls = fx.docker_calls()
         assert not any(call.endswith(" restart") or " up " in f"{call} " for call in calls), calls
+
+
+class TestImportBareMetal:
+    """The import replaces the database and the master key, so it runs only
+    while the stack is down: the daemon's own lock is in a /tmp the one-shot
+    container does not share."""
+
+    def test_it_refuses_while_the_stack_is_up(self, fx, tmp_path):
+        export = tmp_path / "import"
+        export.mkdir()
+        result = fx.run("import-bare-metal", str(export), "--ingress", "proxied")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "running" in result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_it_runs_in_a_one_shot_with_the_export_and_secrets_mounted(self, fx, tmp_path):
+        export = tmp_path / "import"
+        export.mkdir()
+        result = fx.run(
+            "import-bare-metal", str(export), "--ingress", "proxied", "--dry-run",
+            STUB_STACK_DOWN="1",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.docker_calls()[-1].endswith(
+            f"run --rm --no-deps -T --entrypoint istota-drop "
+            f"-v {export}:/import:ro -v {fx.stack}/secrets:/secrets "
+            "istota istota migrate import-bare-metal --source /import --ingress proxied --dry-run"
+        ), fx.docker_calls()
+
+    def test_a_missing_export_directory_is_refused(self, fx, tmp_path):
+        result = fx.run("import-bare-metal", str(tmp_path / "nowhere"), STUB_STACK_DOWN="1")
+        assert result.returncode == 1
+        assert fx.docker_calls() == []
 
 
 class TestExec:
