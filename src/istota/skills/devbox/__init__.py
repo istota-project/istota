@@ -66,6 +66,7 @@ from pathlib import Path
 
 from istota.devbox import exec_client as _client
 from istota.devbox import exec_protocol as proto
+from istota.lib.unix_connect import connect_no_follow
 from istota.sandbox.host_paths import write_resolved
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, REMOTE, WRITE, host_path
@@ -406,7 +407,9 @@ def _converse(
     with sock:
         try:
             sock.settimeout(settings.connect_timeout)
-            sock.connect(path)
+            # The leaf is in a volume this user's devbox writes; a link there
+            # would reach another user's devbox.
+            connect_no_follow(sock, path)
             sock.sendall(request)
         except OSError as e:
             raise _Refused(

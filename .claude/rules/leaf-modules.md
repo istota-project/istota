@@ -270,3 +270,7 @@ The strict arm is not redundant and the order matters: a backtick run mentioned 
 Test traps: a fence case whose caller has a `{...}` fallback cannot fail, since the fallback rescues a well-formed fence, so each has a sibling whose prose carries a bracket. The timing fixture is `"```json\n" * N` (many openers, no closer); `"```json\nx" * N` holds one anchored opener and lets a quadratic expression pass.
 
 stdlib-only leaf, never raises.
+
+## lib/unix_connect.py
+
+`connect_no_follow(sock, path)`: connect to a Unix socket whose leaf somebody else can write, refusing a symlink (`ELOOP`) or anything that is not a socket (`ENOTSOCK`). A devbox's exec socket is in the `devbox-exec-<user>` volume, which that user's devbox mounts read-write, so `dev` there could replace `exec.sock` with a link to another user's socket as the istota container sees it, and the devbox skill or doctor's probe would then run commands in, or `reset`, the other user's devbox. On Linux the leaf is opened `O_PATH | O_NOFOLLOW`, checked with `fstat` and connected through `/proc/self/fd/<n>`, so the inode checked is the one connected. Without `O_PATH` (macOS) it is `lstat` then a connect by path, which leaves a swap window on a platform nothing deploys to. Only the leaf is held: the directories above it must be ones the leaf's writer cannot replace, which a volume mount point is. Callers: `skills/devbox._converse` and `doctor._exec_transport_request`. stdlib-only leaf, imports nothing from istota.

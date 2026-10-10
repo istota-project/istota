@@ -21,6 +21,7 @@ import contextlib
 import os
 import re
 import struct
+import shutil
 import signal
 import socket
 import subprocess
@@ -1810,6 +1811,24 @@ class TestTheDoctorProbeSpeaksToTheRealServer:
         assert frames == []
         assert ERR_PATH_REFUSED in error
 
+    def test_a_link_to_a_serving_socket_is_refused(self, server):
+        """The per-user socket's leaf is in a volume that user's devbox writes,
+        so it can be a symlink to another user's socket. Doctor's probe asks
+        every user's devbox, and must not be steered into somebody else's."""
+        from istota import doctor
+
+        link_dir = Path(tempfile.mkdtemp(dir="/tmp", prefix="istota-dbx-l-"))
+        try:
+            link = link_dir / "exec.sock"
+            os.symlink(server.socket_path, link)
+
+            frames, error = doctor._exec_transport_request(link, encode_ping_request(), 10.0)
+
+            assert frames == [], "the probe followed the link to a live server"
+            assert "could not connect" in error
+        finally:
+            shutil.rmtree(link_dir, ignore_errors=True)
+
     def test_a_socket_nobody_is_serving_is_reported_not_raised(self, tmp_path):
         """Doctor runs on the daemon's start-up path; an exception there turns a
         diagnostic into an outage."""
@@ -1854,9 +1873,11 @@ class TestTheDoctorProbeSpeaksToTheRealServer:
         # the derived path has to be made to match rather than assumed.
         derived = Path(server.socket_path).parent.parent / user
         derived.mkdir(exist_ok=True)
+        # A hard link: the probe refuses a symlink at the leaf, which is what a
+        # devbox could plant to reach another user's server.
         link = derived / "exec.sock"
         if not link.exists():
-            os.symlink(server.socket_path, link)
+            os.link(server.socket_path, link)
 
         results = {r.name: r for r in doctor.check_developer_container(config, probe=True)}
 

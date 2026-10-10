@@ -5472,12 +5472,13 @@ def _exec_transport_request(
     import socket as socket_module  # noqa: PLC0415 - a leaf import on a probe path
 
     from istota.devbox import exec_protocol as proto  # noqa: PLC0415
+    from istota.lib.unix_connect import connect_no_follow  # noqa: PLC0415
 
     sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     try:
         sock.settimeout(timeout)
         try:
-            sock.connect(str(socket_path))
+            connect_no_follow(sock, str(socket_path))
         except OSError as exc:
             return [], f"could not connect to {socket_path}: {exc}"
 

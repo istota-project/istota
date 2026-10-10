@@ -1556,6 +1556,48 @@ class TestTheSocketPathComesFromConfig:
             )
 
 
+class TestAPlantedSymlinkIsNotFollowed:
+    """The socket's leaf is in a volume the user's own devbox writes.
+
+    In the stack, `{exec_socket_dir}/<user>` is the `devbox-exec-<user>` volume,
+    mounted read-write into that user's devbox, so `dev` there can replace
+    `exec.sock` with a symlink naming another user's socket as the istota
+    container sees it. Followed, devbox A would run commands as B and `reset`
+    would empty B's home. A real socket serves here as B, and A's path is a
+    link to it: nothing may reach B.
+    """
+
+    def test_a_link_to_another_users_socket_is_refused(self, scripted, monkeypatch):
+        base = Path(os.environ["ISTOTA_CONFIG_PATH"]).parent
+        alice_dir = base / "sock" / "alice"
+        alice_dir.mkdir()
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.encode_control({"exit_code": 0}))
+
+        alice = _ScriptedServer(str(alice_dir / "exec.sock"), handler)
+        try:
+            os.symlink(alice_dir / "exec.sock", base / "sock" / "bob" / "exec.sock")
+
+            result = _exec("id -u")
+
+            assert result["status"] == "error", result
+            assert "exit_code" not in result, result
+            assert alice.requests == [], "bob's call reached alice's server through the link"
+        finally:
+            alice.close()
+
+    def test_a_regular_file_is_refused_without_a_connect(self, scripted):
+        base = Path(os.environ["ISTOTA_CONFIG_PATH"]).parent
+        (base / "sock" / "bob" / "exec.sock").write_text("not a socket")
+
+        result = _exec("true")
+
+        assert result["status"] == "error", result
+        assert "not a socket" in result["error"], result
+
+
 class TestExcludeSkills:
     """devbox is a plain menu skill — no selection-time exclusion.
 
