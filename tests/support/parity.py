@@ -69,11 +69,6 @@ PENDING: dict[int, str] = {
     9: "Stage 7",
     10: "Stage 7",
     11: "Stage 7",
-    # Stage 2 was to witness it. Compose refuses to start a service whose
-    # secret file is missing, and nothing writes those files until Stage 3's
-    # wizard, which also removes the environment blocks the witness's
-    # `docker inspect` half would read secrets out of.
-    12: "Stage 3",
     13: "Stage 6",
     15: "Stage 7",
     # Stage 2 split the network in the shipped file; the runtime witness needs
@@ -101,6 +96,10 @@ PENDING_AT_STAGE_1: frozenset[int] = frozenset(
 # than standing in for one.
 OUTSTANDING_HALVES: dict[int, str] = {
     5: "Stage 6: the VM's `istota` wrapper and `istota-vm setup` exec as 10001",
+    # The image tier runs on Docker Desktop, whose file sharing shows every
+    # bind-mounted file as uid 0, so the mode is witnessed there and the owner
+    # only where the bind keeps the writer's uid: the VM.
+    12: "Stage 7: the secret files are owned by uid 10001, read on the VM",
 }
 
 

@@ -39,6 +39,8 @@
 #
 #   scripts/test-image-negative-control.sh [amd64]
 #   scripts/test-image-negative-control.sh run-contract
+#   scripts/test-image-negative-control.sh secrets
+#   scripts/test-image-negative-control.sh rendered-config
 #
 # The second form runs only the third half, the istota container's run
 # contract (the one-deployment-shape spec's parity rows 1, 4, 5, 6, 8 and 16).
@@ -48,6 +50,12 @@
 # one step of the root phase removed) and names the smoke node ids that must
 # go red. See the half's own header below.
 #
+# The third form runs only parity row 12's control: the shipped compose file's
+# `istota` service with one credential passed through `environment:`, which
+# `docker inspect` then shows (tests/image/test_secrets_contract.py). The
+# fourth runs the upgrade case that boots the new entrypoint over a config an
+# old release rendered, against an image whose entrypoint appends to that file.
+#
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
 set -euo pipefail
@@ -56,8 +64,18 @@ cd "$(dirname "$0")/.."
 
 platform="${1:-}"
 only_run_contract=""
+only_secrets=""
 if [ "$platform" = "run-contract" ]; then
     only_run_contract=1
+    platform=""
+fi
+if [ "$platform" = "secrets" ]; then
+    only_secrets=1
+    platform=""
+fi
+only_rendered_config=""
+if [ "$platform" = "rendered-config" ]; then
+    only_rendered_config=1
     platform=""
 fi
 control_tag="istota-test/no-forge:control"
@@ -211,8 +229,85 @@ print(lean_image_tag())
     echo "[control] OK: every run-contract control turned its witnesses red."
 }
 
+# --------------------------------------------------------------------------
+# Row 12. The witness boots the shipped compose file's `istota` service from
+# the image the tier built; the control adds one overlay passing a credential
+# through `environment:`, and the inspect assertion must go red. The other
+# three assertions are about files and stay green, which is what tells this
+# red from a stack that did not come up.
+
+SECRETS_TESTS="tests/image/test_secrets_contract.py"
+
+secrets_half() {
+    echo
+    echo "[control] secrets: a credential in compose's environment"
+    secrets_out="$(mktemp)"
+    set +e
+    ISTOTA_SECRETS_CONTROL_OVERLAYS="$PWD/${RUN_CONTRACT_CONTROLS}/secret-in-environment.yml" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly "$SECRETS_TESTS" 2>&1 | tee "$secrets_out"
+    set -e
+    secrets_node="${SECRETS_TESTS}::TestTheCredentialsAreFilesNotEnvironment::test_docker_inspect_carries_no_credential"
+    secrets_read="${SECRETS_TESTS}::TestTheCredentialsAreFilesNotEnvironment::test_the_daemon_read_them"
+    if ! grep -Fq "FAILED ${secrets_node}" "$secrets_out"; then
+        rm -f "$secrets_out"
+        echo "[control] FAILED: secrets did not turn ${secrets_node} red."
+        exit 1
+    fi
+    if grep -Fq "FAILED ${secrets_read}" "$secrets_out" || grep -Fq "ERROR ${secrets_read}" "$secrets_out"; then
+        rm -f "$secrets_out"
+        echo "[control] FAILED: secrets broke the stack rather than the one line;"
+        echo "[control]   ${secrets_read} should still pass."
+        exit 1
+    fi
+    rm -f "$secrets_out"
+    echo "[control] OK: secrets turned the inspect witness red and left the files' witnesses green."
+}
+
+# --------------------------------------------------------------------------
+# The config is an input: the upgrade case boots the new entrypoint over a
+# config.toml an old release rendered and requires the file unchanged. The
+# control image appends a line to it at boot; only that assertion may go red,
+# and the daemon must still start.
+
+RENDERED_TESTS="tests/image/test_upgrade.py::TestTheNewEntrypointKeepsARenderedConfig"
+
+rendered_config_half() {
+    # The newest image the tier built; `docker images` lists newest first.
+    rendered_base="$(docker images --format '{{.Repository}}:{{.Tag}}' istota-test/istota | head -1)"
+    if [ -z "$rendered_base" ]; then
+        echo "[control] no istota-test/istota image yet — run \`uv run pytest -m image -n0\` first." >&2
+        exit 2
+    fi
+    echo
+    echo "[control] rendered-config: an entrypoint that rewrites the operator's config (base ${rendered_base})"
+    docker build -q -f docker/test/Dockerfile.rewrites-config \
+        --build-arg "BASE=$rendered_base" -t istota-test/rewrites-config:control docker/test >/dev/null
+    rendered_out="$(mktemp)"
+    set +e
+    ISTOTA_IMAGE_TAG=istota-test/rewrites-config:control ISTOTA_UPGRADE_SHAPES=volume \
+        ISTOTA_UPGRADE_FROM="$(grep -v '^#' scripts/upgrade-floor | grep -v '^$' | head -1)" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly "$RENDERED_TESTS" 2>&1 | tee "$rendered_out"
+    set -e
+    if ! grep -Fq "FAILED ${RENDERED_TESTS}::test_the_file_is_not_rewritten" "$rendered_out" \
+        || grep -Fq "FAILED ${RENDERED_TESTS}::test_the_daemon_starts_from_it" "$rendered_out"; then
+        rm -f "$rendered_out"
+        echo "[control] FAILED: rendered-config did not turn exactly the rewrite witness red."
+        exit 1
+    fi
+    rm -f "$rendered_out"
+    echo "[control] OK: rendered-config turned the rewrite witness red and the daemon still started."
+}
+
 if [ -n "$only_run_contract" ]; then
     run_contract_half
+    exit 0
+fi
+if [ -n "$only_rendered_config" ]; then
+    rendered_config_half
+    exit 0
+fi
+if [ -n "$only_secrets" ]; then
+    secrets_half
     exit 0
 fi
 
@@ -551,7 +646,9 @@ echo "[control] vacuously has one that reaches it."
 echo "[control] The five without one all fail closed; the header says which."
 
 # The run-contract half runs the lean smoke stack, which builds natively; an
-# amd64 run of this script leaves it to the native one.
+# amd64 run of this script leaves it to the native one. So does row 12's.
 if [ -z "$platform" ]; then
     run_contract_half
+    secrets_half
+    rendered_config_half
 fi

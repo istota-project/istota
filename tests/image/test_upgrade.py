@@ -45,11 +45,14 @@ checks actually ran.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import sqlite3
+import time
 import tomllib
+import uuid
 
 import tomli_w
 import subprocess
@@ -580,7 +583,7 @@ class TestTheRetainedVolumeStillReportsItsDrift:
         a healthy tree, because `--from` overrides the anchor for *every*
         selected shape and the floor drifts by design.
 
-        This renders today's config with the shipped `render-config.sh` and
+        This writes today's config with the current `istota setup` renderer and
         asserts the same check reports `ok` on it. Always runs, whatever was
         selected.
         """
@@ -592,9 +595,9 @@ class TestTheRetainedVolumeStillReportsItsDrift:
         assert statuses, "developer.forge_config_drift produced no results"
         assert statuses == {"ok"}, (
             "a freshly rendered config drifted, which it cannot legitimately "
-            "do: render-config.sh writes gh_bin_path at the path this image "
+            "do: istota setup writes gh_bin_path at the path this image "
             "installs. Either the image moved the binaries without moving the "
-            "render, or the drift check warns unconditionally — in which case "
+            "setup default, or the drift check warns unconditionally — in which case "
             "the assertion above proves nothing.\n"
             + "\n".join(
                 f"  {row['name']}: {row['status']} — {row.get('detail', '')}"
@@ -882,3 +885,141 @@ class TestRoomBindingUpgrade:
             assert after['unique'], 'upgraded artifact has no unique binding reference index'
             assert after['count'] == 2
             assert after['refused'], 'upgraded artifact accepted a duplicate binding reference'
+
+
+#: The shipped run contract, as `docker run` flags. The compose file is the
+#: authority (tests/test_container_security_profiles.py holds the lean file to
+#: it); this is the same set for a single container, since the case below boots
+#: the image's own ENTRYPOINT, root phase included, which needs the grant.
+_RUN_CONTRACT = [
+    "--security-opt", f"seccomp={REPO / 'docker' / 'istota' / 'seccomp-istota.json'}",
+    "--security-opt", "apparmor=istota",
+    "--security-opt", "systempaths=unconfined",
+    "--security-opt", "no-new-privileges:true",
+    "--cap-drop", "ALL",
+    "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "SETUID",
+    "--cap-add", "SETGID", "--cap-add", "SETPCAP", "--cap-add", "SYS_ADMIN",
+    "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/mnt/shared",
+    "--cgroupns", "private",
+]
+
+ENTRYPOINT_BOOT_TIMEOUT = 300
+
+
+@dataclass(frozen=True)
+class EntrypointBoot:
+    """The new image's own entrypoint, run over a rendered config's volume."""
+
+    anchor: Anchor
+    before_sha: str
+    after_sha: str
+    config_owner: str
+    marker_present: bool
+    pid1: str
+    logs: str
+
+
+def _docker(*argv: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *argv], capture_output=True, text=True, timeout=timeout)
+
+
+@pytest.fixture(scope="session")
+def entrypoint_boot(istota_image, platform, tmp_path_factory) -> EntrypointBoot:
+    """A pre-change Docker install's volume, booted by the new image as shipped.
+
+    What an existing Docker deployment has on its state volume: a `config.toml`
+    the old entrypoint rendered, owned by root because the old daemon ran as
+    root, and that release's database. The new entrypoint must treat the file as
+    the operator's own (read it, never rewrite it), fix the ownership once, and
+    start the daemon. Every other case in this file runs the image with its
+    entrypoint overridden; this one runs the root phase and `entrypoint.sh`.
+    """
+    shape = "volume" if "volume" in selected_shapes() else "code"
+    anchor = anchor_for(shape)
+    if anchor.commit == upgrade.resolve_anchor(REPO, ref="HEAD").commit:
+        pytest.skip(f"the {shape} anchor is HEAD itself; nothing was rendered by an older release")
+    env = upgrade.render_env(nextcloud_url="placeholder")
+    captured = upgrade.capture_config(
+        repo=REPO, anchor=anchor, image=istota_image.tag, env=env,
+        platform=platform, refresh=bool(os.environ.get("ISTOTA_UPGRADE_REFRESH")),
+    )
+    staging = tmp_path_factory.mktemp("upgrade-entrypoint")
+    shutil.copy2(captured, staging / "config.toml")
+    (staging / "admins").write_text(f"{env['USER_NAME']}\n")
+    upgrade.build_anchor_db(REPO, anchor.commit, staging / "istota.db")
+    before_sha = hashlib.sha256((staging / "config.toml").read_bytes()).hexdigest()
+
+    suffix = uuid.uuid4().hex[:8]
+    volume = f"istota-upgrade-entrypoint-{suffix}"
+    container = f"istota-upgrade-entrypoint-{suffix}"
+    platform_args = ["--platform", istota_image.platform] if istota_image.platform else []
+    try:
+        seeded = _docker(
+            "run", "--rm", *platform_args, "--entrypoint", "/bin/sh",
+            "-v", f"{volume}:/data", "-v", f"{staging}:/src:ro", istota_image.tag, "-c",
+            "mkdir -p /data/config /data/db && cp /src/config.toml /src/admins /data/config/"
+            " && cp /src/istota.db /data/db/ && rm -f /data/.ownership-10001"
+            " && chown -R 0:0 /data",
+        )
+        assert seeded.returncode == 0, seeded.stderr
+        started = _docker(
+            "run", "-d", *platform_args, "--name", container, *_RUN_CONTRACT,
+            "-v", f"{volume}:/data", istota_image.tag,
+        )
+        assert started.returncode == 0, started.stderr
+
+        deadline = time.monotonic() + ENTRYPOINT_BOOT_TIMEOUT
+        pid1 = ""
+        while time.monotonic() < deadline:
+            state = _docker("inspect", "-f", "{{.State.Running}}", container)
+            if state.stdout.strip() != "true":
+                break
+            probe = _docker("exec", container, "sh", "-c", "tr '\\0' ' ' </proc/1/cmdline")
+            pid1 = probe.stdout.strip()
+            if "istota-scheduler" in pid1:
+                break
+            time.sleep(2)
+        after = _docker("exec", container, "sha256sum", "/data/config/config.toml")
+        owner = _docker("exec", container, "stat", "-c", "%u", "/data/config/config.toml")
+        marker = _docker("exec", container, "test", "-e", "/data/.ownership-10001")
+        logs = _docker("logs", container)
+        return EntrypointBoot(
+            anchor=anchor,
+            before_sha=before_sha,
+            after_sha=(after.stdout.split() or [""])[0],
+            config_owner=owner.stdout.strip(),
+            marker_present=marker.returncode == 0,
+            pid1=pid1,
+            logs=upgrade._scrub(logs.stdout + logs.stderr, env),
+        )
+    finally:
+        _docker("rm", "-f", container)
+        _docker("volume", "rm", "-f", volume)
+
+
+class TestTheNewEntrypointKeepsARenderedConfig:
+    """The upgrade-tier case for the one-deployment-shape spec's Stage 3.
+
+    The old entrypoint rendered `config.toml` from the environment on every
+    boot. The new one never writes it, so the file an existing install already
+    has becomes the operator's, unchanged, and the boot goes on from it.
+    """
+
+    def test_the_daemon_starts_from_it(self, entrypoint_boot):
+        assert "istota-scheduler" in entrypoint_boot.pid1, (
+            f"pid 1 is {entrypoint_boot.pid1!r}, not the scheduler, over "
+            f"{entrypoint_boot.anchor.ref}'s rendered config\n{entrypoint_boot.logs[-4000:]}"
+        )
+
+    def test_the_file_is_not_rewritten(self, entrypoint_boot):
+        assert entrypoint_boot.after_sha == entrypoint_boot.before_sha, (
+            "the new entrypoint changed a config.toml it should treat as input\n"
+            + entrypoint_boot.logs[-4000:]
+        )
+
+    def test_the_root_owned_volume_is_handed_to_the_daemon_once(self, entrypoint_boot):
+        assert entrypoint_boot.config_owner == "10001", entrypoint_boot.logs[-4000:]
+        assert entrypoint_boot.marker_present
+
+    def test_nothing_was_refused(self, entrypoint_boot):
+        assert "REFUSE" not in entrypoint_boot.logs, entrypoint_boot.logs[-4000:]

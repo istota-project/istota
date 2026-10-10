@@ -1,0 +1,7 @@
+# Negative control for tests/image/test_upgrade.py::TestTheNewEntrypointKeepsARenderedConfig:
+# the real image with an entrypoint that appends to the config it should treat
+# as input. `test_the_file_is_not_rewritten` must turn red against it.
+ARG BASE
+FROM ${BASE}
+RUN sed -i 's|^log "Initializing database..."$|printf "# rewritten\\n" >> "$CONFIG_FILE"; log "Initializing database..."|' /entrypoint.sh \
+    && grep -q '# rewritten' /entrypoint.sh
