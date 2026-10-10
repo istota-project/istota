@@ -39,6 +39,7 @@ if old not in text:
     sys.exit(f"control mutation does not apply: {old!r}")
 open(dest, "w").write(text.replace(old, new, 1))
 PY
+    chmod +x "$copy"
     echo "$copy"
 }
 
@@ -106,9 +107,12 @@ no_drop() {
 ${ISTOTA_STACK_EXEC} "$@"')"
     ISTOTA_STACK_SCRIPT="$copy" uv run pytest -m image -n0 tests/image/test_stack_wrapper.py \
         -q --no-header -rf -p no:randomly > "$output" 2>&1 || true
+    # Only the uid witness: a root CLI call on this volume reuses the daemon's
+    # existing database sidecars, so the root-owned sweep has nothing new to
+    # find and stays green under this control. It fails closed (it can only
+    # report files that exist).
     require_red no-drop "$output" \
-        "tests/image/test_stack_wrapper.py::TestTheVmWrapperExecsAsTheDaemon::test_the_wrapper_runs_as_10001_with_no_capabilities" \
-        "tests/image/test_stack_wrapper.py::TestTheVmWrapperExecsAsTheDaemon::test_nothing_under_data_is_root_owned_after_wrapper_calls"
+        "tests/image/test_stack_wrapper.py::TestTheVmWrapperExecsAsTheDaemon::test_the_wrapper_runs_as_10001_with_no_capabilities"
 }
 
 rollback() {

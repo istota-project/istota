@@ -60,7 +60,11 @@ class WrapperRun:
 @pytest.fixture(scope="module")
 def wrapper_run(istota_image, tmp_path_factory) -> WrapperRun:
     work = tmp_path_factory.mktemp("row5-exec")
-    with boot_shipped_stack(istota_image.tag, work, setup_env={}, project_prefix="istota-row5") as stack:
+    with boot_shipped_stack(
+        istota_image.tag, work,
+        setup_env={"ISTOTA_BRAIN_NATIVE_API_KEY": "row5-unused-key"},
+        project_prefix="istota-row5",
+    ) as stack:
         env = {
             **os.environ,
             "ISTOTA_STACK_BIN": str(SCRIPT),
@@ -82,7 +86,13 @@ def wrapper_run(istota_image, tmp_path_factory) -> WrapperRun:
         health = stack.exec("sh", "-c", f"{prefix} sh -c \"{STATUS}\"")
         assert health.returncode == 0, health.stderr
 
-        owned = stack.exec("find", "/data", "-xdev", "-uid", "0", user="0")
+        # The state volume. /data/config is a host bind, which Docker Desktop
+        # shows as uid 0 whoever owns it (on the VM it is 10001), and nothing
+        # the wrapper runs can write there: it is read-only.
+        owned = stack.exec(
+            "find", "/data", "-xdev", "-path", "/data/config", "-prune", "-o", "-uid", "0", "-print",
+            user="0",
+        )
         return WrapperRun(
             wrapper_status=_status(status.stdout),
             healthcheck_status=_status(health.stdout),
