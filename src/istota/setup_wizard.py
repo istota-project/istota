@@ -1291,6 +1291,11 @@ CONTAINER_DATA_DIR = Path("/data")
 CONTAINER_DB_PATH = "/data/db/istota.db"
 CONTAINER_TEMP_DIR = "/data/tmp"
 CONTAINER_REPOS_DIR = "/data/repos"
+#: The devbox socket directories, one per-user volume mounted under each. Under
+#: /data because the root phase hands writable mounts there to uid 10001, and a
+#: fresh volume is root-owned (`devbox/compose_file.py` refuses anywhere else).
+CONTAINER_DEVBOX_EXEC_DIR = "/data/devbox/exec"
+CONTAINER_DEVBOX_CRED_DIR = "/data/devbox/cred"
 #: The workspace in local storage mode: a directory on the state volume.
 CONTAINER_LOCAL_WORKSPACE = "/data/workspace"
 #: The workspace in full Nextcloud integration: the VM's rclone mount of the
@@ -1540,6 +1545,8 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
             "repos_dir": CONTAINER_REPOS_DIR,
             "gh_bin_path": f"{CONTAINER_FORGE_DIR}/gh",
             "glab_bin_path": f"{CONTAINER_FORGE_DIR}/glab",
+            "devbox_proxy_socket_dir": CONTAINER_DEVBOX_CRED_DIR,
+            "container": {"exec_socket_dir": CONTAINER_DEVBOX_EXEC_DIR},
         }
         if credential("istota_developer_gitlab_token"):
             developer["gitlab_token"] = secret["istota_developer_gitlab_token"]

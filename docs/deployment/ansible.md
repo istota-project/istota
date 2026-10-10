@@ -222,7 +222,7 @@ This needs both `Delegate=memory pids cpu` and `DelegateSubgroup=supervisor` on 
 
 ## The dev container
 
-`istota_devbox_enabled` brings up one container per entry in `istota_devbox_users`, from `deploy/ansible/templates/docker-compose.devbox.yml.j2`. It is the only devbox definition in the tree; the Docker compose stack ships none.
+`istota_devbox_enabled` brings up one container per entry in `istota_devbox_users`, from `deploy/ansible/templates/docker-compose.devbox.yml.j2`. The Docker compose stack renders its own with `istota devbox compose-file` (see the Docker page); this template is deleted with the role.
 
 | Variable | Default | Purpose |
 |---|---|---|

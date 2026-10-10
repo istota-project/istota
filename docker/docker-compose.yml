@@ -501,21 +501,14 @@ services:
     # and to WhatsApp outbound, and nothing ever dials it.
     restart: unless-stopped
 
-  # No devbox service here, deliberately. The bot could never reach one in
-  # this shape: the skill CLI shells in with `docker exec` and runs inside
-  # the istota container, which installs no docker client and mounts no
-  # docker socket, and `istota setup` writes no [devbox] section so
-  # devbox.enabled is always false. Mounting the host socket into istota is
-  # not the repair — the filesystem sandbox does not run here, so it would
-  # hand every task control of the host's Docker. What shipped instead was a
-  # container nothing could use, whose only working consequence was that
-  # every Ansible-side devbox change had to be mirrored into it. Devbox work
-  # goes through the Ansible deployment, which renders one service per user
-  # from docker/devbox/Dockerfile via
-  # deploy/ansible/templates/docker-compose.devbox.yml.j2. See
-  # docs/deployment/docker.md, and TestTheComposeShapeShipsNoDevbox in
-  # tests/test_devbox_deployment_shape.py, which fails if one comes back
-  # without that page following.
+  # The devboxes are not in this file. Compose cannot loop over users, so
+  # `istota devbox compose-file` renders them from [devbox] users into a
+  # second file, compose.devbox.yml, passed as a second -f: one devbox-<user>
+  # service each, plus this service's mounts of every user's devbox-exec-<user>
+  # and devbox-cred-<user> volumes. Each devbox mounts only its own pair; that
+  # is what identifies a credential-proxy client (src/istota/devbox/proxy.py).
+  # No Docker socket is mounted here or there. See docs/deployment/docker.md
+  # and tests/test_devbox_compose_file.py.
 
 networks:
   default:

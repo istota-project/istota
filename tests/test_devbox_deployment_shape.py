@@ -1,25 +1,16 @@
-"""The devbox as a deployed thing: one shape, and the guards on the other one.
+"""The devbox as a deployed thing, in two shapes until the role is deleted.
 
-The devbox shipped in two shapes from one Dockerfile, and this file used to hold
-them against each other — `docker/docker-compose.yml` defined a single-user
-service, `deploy/ansible/templates/docker-compose.devbox.yml.j2` renders one per
-user, a comment in the first said "keep this entry in sync with" the second, and
-until ISSUE-282 nothing enforced it. That is how the compose shape ended up with
-no credential socket while `skill.md` promised the capability unconditionally.
+The one deployment shape renders its devboxes with `istota devbox compose-file`
+(`src/istota/devbox/compose_file.py`, held by `tests/test_devbox_compose_file.py`).
+The Ansible role still renders its own from
+`deploy/ansible/templates/docker-compose.devbox.yml.j2` until Stage 9 of the
+one-deployment-shape spec deletes it, and this file keeps holding that template
+to the properties its users depend on.
 
-The compose service is gone now, and the parity comparison went with it. The bot
-could never reach that container: the skill CLI shells in with `docker exec` from
-inside the `istota` container, which installs no docker client and mounts no
-docker socket, and `istota setup` writes no `[devbox]` section so
-`devbox.enabled` is always false there. What the service did do was oblige every
-Ansible-side change to be mirrored into something nobody could use, which is the
-mechanism that produced ISSUE-282 rather than a defence against it.
-
-So this file is now two halves. The Ansible service must carry the properties its
-users depend on, none of which a comparison was ever checking. And the compose
-shape must keep shipping no devbox, with `docs/deployment/docker.md` saying so —
-because a devbox reappearing there, or a docker socket appearing in the `istota`
-service, would make that page a lie in the same way ISSUE-282 did.
+The other half is the shipped compose file: it declares no devbox service of its
+own (they come from the generated second file), and no route to the host's
+Docker in the `istota` service or the image, which the credential proxy's
+identity-by-mount design depends on.
 
 What this does not check: that the Ansible template is *correct*. It checks the
 handful of properties whose violation is silent.
@@ -230,18 +221,11 @@ class TestTheSkillBodyMatchesTheDeployedShapes:
     def body(self) -> str:
         return (REPO / "src" / "istota" / "skills" / "devbox" / "skill.md").read_text()
 
-    def test_it_says_the_compose_shape_has_no_devbox(self, body):
-        """One sentence has to carry both halves. Two whole-document searches
-        pass on a page that says "docker compose" in one paragraph and "no
-        devbox" about something else in another, which is the weakness the
-        class this replaced also had."""
+    def test_it_no_longer_says_the_compose_shape_has_no_devbox(self, body):
+        """The stack runs devboxes now. A body still telling the model the
+        compose deployment has none would be ISSUE-282's shape in reverse."""
         sentences = [s.strip().lower() for s in re.split(r"(?<=[.!?])\s+", body)]
-        assert any("docker compose" in s and "no devbox" in s for s in sentences), (
-            "no single sentence in skill.md tells the model that the docker "
-            "compose deployment ships no devbox. It used to say the box was "
-            "there and only the forge commands failed, which is the wrong shape "
-            "of wrong: a model reading that will try to use it"
-        )
+        assert not any("docker compose" in s and "no devbox" in s for s in sentences)
 
     def test_it_still_explains_the_credential_free_case(self, body):
         """Not made moot by the removal: `istota_devbox_proxy_enabled` is an
@@ -258,14 +242,15 @@ class TestTheWrapperRefusalNamesTheShape:
     """The other half: a refusal that prints a socket path tells the reader
     nothing about why it is missing."""
 
-    def test_the_no_proxy_message_names_both_deployments(self):
+    def test_the_no_proxy_message_names_what_provides_the_socket(self):
         from istota.sandbox.forge_cli import NoProxyError, fetch_forge_credentials
 
         with pytest.raises(NoProxyError) as excinfo:
             fetch_forge_credentials("github", {}, {})
         message = str(excinfo.value).lower()
+        assert "[devbox] users" in message
         assert "ansible" in message
-        assert "docker-compose" in message or "docker compose" in message
+        assert "ships no devbox" not in message
 
     def test_it_does_not_lead_with_a_bare_socket_path(self):
         from istota.sandbox.forge_cli import NoProxyError, fetch_forge_credentials
@@ -753,45 +738,23 @@ class TestTheImageToolchainOutlivesTheHomeVolume:
         )
 
 
-class TestTheComposeShapeShipsNoDevbox:
-    """The other half. `docs/deployment/docker.md` tells an operator that this
-    stack has no devbox and that the skill cannot be enabled on it. Four
-    mechanisms make that true, and each is one line away from not being.
+class TestTheShippedComposeFile:
+    """The devboxes come from the generated second file, not this one, and
+    nothing here is a route to the host's Docker."""
 
-    Reintroducing any of them without rewriting that page is the ISSUE-282
-    failure again: a shape promising a capability it does not have, or in the
-    socket's case a page denying a route that exists.
-    """
-
-    DOC = REPO / "docs" / "deployment" / "docker.md"
     ISTOTA_DOCKERFILE = REPO / "docker" / "istota" / "Dockerfile"
-    ANCHOR = "#the-devbox-is-ansible-only"
-    HEADING = "### The devbox is Ansible-only"
 
     @pytest.fixture(scope="class")
     def compose(self) -> dict:
-        # `${USER_NAME}` and friends are compose-time interpolation, not YAML,
-        # so the document parses as-is.
         return yaml.safe_load(COMPOSE.read_text())
 
-    def test_there_is_no_devbox_service(self, compose):
+    def test_there_is_no_devbox_service_of_its_own(self, compose):
         assert compose["services"], "the compose file parsed to no services at all"
         offending = sorted(n for n in compose["services"] if "devbox" in n)
         assert not offending, (
-            f"docker/docker-compose.yml declares {offending}. Nothing in this "
-            f"shape can reach a devbox — if that changed, rewrite the devbox "
-            f"section of docs/deployment/docker.md, which says the stack has none"
-        )
-
-    def test_no_devbox_volume_or_network_survives(self, compose):
-        leftovers = sorted(
-            name for group in ("volumes", "networks")
-            for name in (compose.get(group) or {})
-            if "devbox" in name
-        )
-        assert not leftovers, (
-            f"the devbox service is gone but {leftovers} remain, so compose "
-            f"still creates them for nothing"
+            f"docker/docker-compose.yml declares {offending}. Devboxes are per "
+            f"user and rendered by `istota devbox compose-file`; a static one "
+            f"here would carry no per-user socket volumes"
         )
 
     #: Naming the socket alone is not enough: bind its *directory* and the
@@ -817,10 +780,9 @@ class TestTheComposeShapeShipsNoDevbox:
             ):
                 offending.append(entry)
         assert not offending, (
-            f"the istota service now mounts {offending}. That is a route to the "
-            f"host's Docker, in a shape whose tasks run unsandboxed — if it is "
-            f"deliberate, rewrite the devbox section of "
-            f"docs/deployment/docker.md, which tells operators there is none"
+            f"the istota service now mounts {offending}. That is root of the VM "
+            f"for the daemon and every task; the credential proxy identifies a "
+            f"devbox by its socket volume precisely so it needs none"
         )
 
     #: How a docker client could arrive. The package names are the obvious
@@ -842,9 +804,9 @@ class TestTheComposeShapeShipsNoDevbox:
     )
 
     def test_the_istota_image_installs_no_docker_client(self):
-        """The other half of "the daemon has no way in": the skill CLI resolves
-        its binary with `shutil.which("docker")`, so a client in the image is
-        half the route even with no socket mounted."""
+        """Nothing in istota speaks Docker any more (`devbox reset` is an exec
+        request, the proxy has no peer inspection), so a client in the image
+        could only be a way in for a task."""
         dockerfile = self.ISTOTA_DOCKERFILE.read_text()
         assert "FROM " in dockerfile, (
             "docker/istota/Dockerfile does not look like a Dockerfile, so this "
@@ -852,35 +814,24 @@ class TestTheComposeShapeShipsNoDevbox:
         )
         lowered = dockerfile.lower()
         found = [marker for marker in self.DOCKER_CLIENT_MARKERS if marker in lowered]
-        assert not found, (
-            f"docker/istota/Dockerfile now carries {found}; "
-            f"docs/deployment/docker.md says the image has no docker client"
-        )
+        assert not found, f"docker/istota/Dockerfile now carries {found}"
 
-    def test_the_written_config_has_no_devbox_section(self):
+    def test_the_written_config_leaves_the_devbox_to_the_operator(self):
+        """`istota setup` places the socket directories where the render
+        accepts them, and enables nothing: which users get a box is the
+        operator's call."""
         import tomllib
 
         from istota.setup_wizard import ContainerAnswers, render_container_config
 
         answers = ContainerAnswers(user_id="alice", developer_enabled=True, session_secret="s" * 64)
         written = tomllib.loads(render_container_config(answers, inline_credentials=False))
-        assert "developer" in written, "the container setup no longer writes [developer]"
-        assert "devbox" not in written, (
-            "`istota setup` now writes a [devbox] section, so the skill can be "
-            "switched on in the compose shape. docs/deployment/docker.md says it "
-            "cannot — update the page with whatever is now true"
-        )
+        assert "devbox" not in written
+        assert written["developer"]["devbox_proxy_socket_dir"].startswith("/data/")
+        assert written["developer"]["container"]["exec_socket_dir"].startswith("/data/")
 
-    def test_the_docs_carry_the_heading_the_links_point_at(self):
-        """Pinned on the heading rather than the sentence: a link further down
-        that page targets the slug this heading generates, and demoting it to
-        body text would leave the prose intact and the link broken."""
-        doc = self.DOC.read_text()
-        assert self.HEADING in doc, (
-            f"docs/deployment/docker.md no longer carries {self.HEADING!r}, the "
-            f"section explaining that the compose shape ships no devbox"
-        )
-        assert doc.count(self.ANCHOR) >= 1, (
-            f"nothing links to {self.ANCHOR} any more; either the anchor moved "
-            f"or the pointers into it were dropped"
-        )
+    def test_the_docs_describe_the_rendered_devboxes(self):
+        doc = (REPO / "docs" / "deployment" / "docker.md").read_text()
+        assert "### Devboxes" in doc
+        assert "#devboxes" in doc
+        assert "istota devbox compose-file" in doc

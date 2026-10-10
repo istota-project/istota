@@ -3746,6 +3746,34 @@ def cmd_nextcloud_capabilities(args):
     print(json.dumps(caps_mod.summarize(payload, account), indent=2, default=str))
 
 
+def cmd_devbox_compose_file(args) -> int:
+    """Print the stack's devbox compose file to stdout.
+
+    Stdout, not a path: the config directory is read-only to the daemon, so
+    `istota-stack` writes the output on the host. Each user's repos directory is
+    created first (as the daemon's uid, through the exec path), because the
+    devbox mounts it as a `subpath` of the state volume and Docker refuses a
+    subpath that does not exist.
+    """
+    from istota.devbox import compose_file
+
+    config = load_config(Path(args.config) if args.config else None)
+    try:
+        text = compose_file.render_devbox_compose(config)
+        repos = compose_file.repos_dirs_to_create(config)
+    except compose_file.ComposeFileError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    for path in repos:
+        try:
+            Path(path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"Error: could not create {path}: {exc}", file=sys.stderr)
+            return 1
+    sys.stdout.write(text)
+    return 0
+
+
 def cmd_nextcloud_provision_rooms(args):
     """Create the user's default Talk rooms and seed their channel tokens.
 
@@ -5405,6 +5433,14 @@ def main():
     from istota import cli_money
     cli_money.add_subparser(subparsers)
 
+    # devbox (with subparsers)
+    devbox_parser = subparsers.add_parser("devbox", help="The per-user development containers")
+    devbox_subparsers = devbox_parser.add_subparsers(dest="devbox_action", required=True)
+    devbox_subparsers.add_parser(
+        "compose-file",
+        help="Print compose.devbox.yml: one devbox service per [devbox] users entry",
+    )
+
     # nextcloud (with subparsers)
     nc_parser = subparsers.add_parser("nextcloud", help="Nextcloud server operations")
     nc_subparsers = nc_parser.add_subparsers(dest="nextcloud_action", required=True)
@@ -5628,6 +5664,13 @@ def main():
         chat_commands[args.chat_action](args)
     elif args.command == "money":
         rc = cli_money.dispatch(args, config)
+        if rc:
+            sys.exit(rc)
+    elif args.command == "devbox":
+        devbox_commands = {
+            "compose-file": cmd_devbox_compose_file,
+        }
+        rc = devbox_commands[args.devbox_action](args)
         if rc:
             sys.exit(rc)
     elif args.command == "nextcloud":

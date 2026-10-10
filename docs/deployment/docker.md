@@ -165,33 +165,37 @@ There is no secret to configure on istota's side. It authenticates as its own Ne
 
 `[talk.signaling] payload_direct = true` goes one step further and ingests the message the server relays instead of refetching it. Leave it off unless you have a reason: it is the only part of this path that can be wrong about message content rather than about timing, and Talk only relays a message at all from roughly Talk 21 — below that every event is a bare notification and the setting changes nothing.
 
-### The devbox is Ansible-only
+### Devboxes
 
-This stack ships no devbox service, and the `devbox` skill cannot be used on it. That is a decision rather than a gap. Three separate reasons, any one of which is enough on its own:
+A devbox is a persistent per-user Linux container, built from `docker/devbox/Dockerfile` at uid 10001, the daemon's own. Compose cannot loop over users, so the services live in a second compose file that istota renders from `config.toml`:
 
-- **The skill cannot be switched on.** `devbox.enabled` defaults to false and `istota setup` writes no `[devbox]` section.
-- **The daemon has no way in.** The skill CLI reaches a devbox over a Unix socket into a server running inside it, and nothing in this shape publishes that socket to both sides — the container is not in the compose file, so there is no bind mount or named volume connecting them. That was true of the older `docker exec` route too, and more bluntly: the CLI runs inside the `istota` container, which installs no docker client and mounts no docker socket. Mounting the host socket there was never the fix either, since the filesystem sandbox does not run in this shape (see below).
-- **No credential proxy.** Even given a way in, `gh`, `glab` and `git push` would fail inside the container, because the credential daemon is a host process rather than a service in the stack. See ISSUE-282.
-
-Earlier releases did ship a `devbox` profile here. Nothing could reach it, and its only working consequence was that every change to the Ansible devbox had to be mirrored into a service nobody could use — which is how it drifted into having no credential socket in the first place. Devbox work goes through the Ansible deployment, which renders one container per user from the same `docker/devbox/Dockerfile`.
-
-**Upgrading from a release that had the profile:** the service going away does not itself remove the container, but the next `./rebuild.sh` will. That script runs `docker compose down --remove-orphans`, and a container whose service is no longer in the file is precisely what that removes. Everything the box accumulated — installed packages, build output, anything outside `/home/dev` — is in its writable layer rather than in the volume, so it goes too. Copy out or `docker commit` whatever you want to keep before the next rebuild.
-
-The volume and the network outlive the change either way, including `down --volumes`, because compose no longer declares them. Remove all three by hand when you are done with them:
-
-```bash
-docker rm -f devbox-$USER_NAME
-docker volume rm docker_devbox_home     # after checking what is in it
-docker network rm docker_devbox-net
+```toml
+[devbox]
+enabled = true
+users = ["alice"]
 ```
 
-The `docker_` prefix on those two is the compose project name, which defaults to the directory the compose file sits in. If you set `COMPOSE_PROJECT_NAME`, use yours.
-
-If you want the workbench itself, build and run it by hand — the image is not istota-specific:
-
 ```bash
-docker build -t istota-devbox:latest docker/devbox
+docker compose exec istota istota-drop istota devbox compose-file > compose.devbox.yml
+docker compose -f docker-compose.yml -f compose.devbox.yml up -d
 ```
+
+The verb prints one `devbox-<user>` service per entry, plus the `istota` service's mounts of each user's two socket volumes, and creates each user's repos directory first. On the VM, `istota-stack` does both steps and passes the file as a second `-f` whenever it exists. Re-render after changing `users`; `up -d --remove-orphans` removes the service of a user taken out, and keeps their home volume.
+
+What each devbox gets, and nothing else:
+
+- `devbox-home-<user>` at `/home/dev`, its persistent home.
+- `devbox-exec-<user>` at `/run/istota-exec`: the exec transport's socket, which the server inside the box creates and the istota container reaches at `[developer.container] exec_socket_dir`/`<user>`.
+- `devbox-cred-<user>` at `/run/istota-cred`: the credential proxy's socket, which istota creates at `[developer] devbox_proxy_socket_dir`/`<user>`. The proxy answers on that socket as that user, whoever connects, so it matters that no other container mounts it and no task sandbox binds any credential socket directory.
+- Its own subdirectory of the state volume, `/data/repos/<user>`, at the same path on both sides.
+
+`istota setup` writes both socket directories under `/data/devbox/` when the developer skill is on; the render refuses socket directories outside `/data`, because only mounts there are handed to uid 10001 when the istota container starts.
+
+`istota-skill devbox reset` needs no Docker CLI: it is a request on the exec transport. The server empties `/home/dev` if it is a mount point, answers, and exits, and the service's `restart: unless-stopped` brings the box back.
+
+**Egress filtering is the VM's.** The devbox network has a fixed subnet (`[devbox] network_subnet`, `172.30.0.0/24` by default), and `host/istota-devbox-egress.service` on the VM drops traffic from it to link-local and cloud metadata, RFC 1918 and CGNAT addresses. On a Docker host without that unit a devbox reaches the local network.
+
+**Upgrading from a release that had a `devbox` profile in this file:** that container is not the one rendered here. Copy out or `docker commit` what you want from it, then remove it, its `docker_devbox_home` volume and its `docker_devbox-net` network by hand.
 
 ## Storage
 
@@ -261,7 +265,7 @@ The noVNC console is for operators only. Reach `/instances.html` on the existing
 - **The filesystem sandbox runs here**, under the run contract the `istota` service carries. See below
 - **Skill proxy**: enabled by default and works inside the container. It is what keeps credentials out of the model's environment
 - **All extras installed**: every optional dependency included in the image
-- **No devbox**: this stack ships no devbox service and the skill cannot be enabled on it. [Details above](#the-devbox-is-ansible-only)
+- **Devboxes are rendered per user** into a second compose file, and each one's credential socket is a volume only it and istota mount. [Details above](#devboxes)
 
 ### Running tasks sandboxed
 
