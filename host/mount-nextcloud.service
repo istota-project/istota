@@ -14,11 +14,17 @@ Type=notify
 User=10001
 Group=10001
 EnvironmentFile=-/srv/istota/host.env
+# The VFS cache, owned by the uid above. rclone's default is $HOME/.cache, and
+# this user's home is /srv/istota, which it cannot write: rclone then disables
+# the cache and writes needing it fail ("can't open file - writer failed").
+CacheDirectory=istota-rclone
+CacheDirectoryMode=0700
 # Self-heal a dead endpoint ("Transport endpoint is not connected") first.
 ExecStartPre=-/bin/fusermount3 -uz /srv/istota/mount
 ExecStart=/usr/bin/rclone mount \
   --config /srv/istota/rclone.conf \
   --allow-other \
+  --cache-dir /var/cache/istota-rclone \
   --vfs-cache-mode full \
   --vfs-cache-max-age 1h \
   --dir-cache-time 30s \

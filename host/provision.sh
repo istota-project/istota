@@ -221,9 +221,13 @@ install -m 0755 "${HERE}/istota" /usr/local/bin/istota
 install -m 0755 "${HERE}/istota-devbox-egress.sh" /usr/local/sbin/istota-devbox-egress
 install -m 0755 "${HERE}/istota-browser-watchdog.sh" /usr/local/sbin/istota-browser-watchdog
 install -m 0755 "${HERE}/istota-certbot" /usr/local/sbin/istota-certbot
+mount_unit_changed=""
 for unit in istota-stack.service istota-devbox-egress.service \
         istota-browser-watchdog.service istota-browser-watchdog.timer \
         istota-certbot.service istota-certbot.timer mount-nextcloud.service; do
+    if [ "$unit" = mount-nextcloud.service ] && ! cmp -s "${HERE}/${unit}" "${UNITS}/${unit}"; then
+        mount_unit_changed=1
+    fi
     install -m 0644 "${HERE}/${unit}" "${UNITS}/${unit}"
 done
 
@@ -262,7 +266,15 @@ After=mount-nextcloud.service
 EOF
 )" || true
     systemctl daemon-reload
-    if [ -f "${STACK}/rclone.conf" ]; then systemctl enable --now mount-nextcloud.service; fi
+    if [ -f "${STACK}/rclone.conf" ]; then
+        systemctl enable --now mount-nextcloud.service
+        # A running mount keeps the flags it started with. Restarting it
+        # restarts the stack too (Requires=), so only on a changed unit.
+        if [ -n "$mount_unit_changed" ]; then
+            log "mount-nextcloud.service changed; restarting it"
+            systemctl restart mount-nextcloud.service
+        fi
+    fi
 else
     rm -f "${dropin}/mount.conf"
     systemctl daemon-reload

@@ -298,6 +298,13 @@ class TestProvision:
         assert mount["Service"]["User"] == "10001"
         assert "--config /srv/istota/rclone.conf" in mount["Service"]["ExecStart"]
 
+    def test_the_vfs_cache_is_somewhere_the_mount_user_can_write(self):
+        """The user's home is /srv/istota, root's; rclone's default cache there is
+        refused and the cache silently disabled (the vm tier found it)."""
+        mount = _unit(HOST / "mount-nextcloud.service")
+        assert mount["Service"]["CacheDirectory"] == "istota-rclone"
+        assert "--cache-dir /var/cache/istota-rclone" in mount["Service"]["ExecStart"]
+
 
 class TestTheStackUnit:
     def test_it_runs_istota_stack(self):
