@@ -45,3 +45,18 @@ def test_nothing_is_pushed_or_logged_into():
     assert "push: true" not in text
     assert "docker/login-action" not in text and "docker login" not in text
     assert "cosign" not in text
+
+
+def test_no_expression_is_interpolated_into_a_script():
+    """`${{ inputs.tag }}` inside `run:` is pasted into the shell text before
+    it runs, so whoever dispatches the workflow chooses a command. Every
+    expression reaches a script through `env:` instead."""
+    scripts = [
+        step["run"]
+        for job in WORKFLOW["jobs"].values()
+        for step in job.get("steps", [])
+        if "run" in step
+    ]
+    assert scripts
+    offenders = [script.splitlines()[0] for script in scripts if "${{" in script]
+    assert offenders == [], offenders
