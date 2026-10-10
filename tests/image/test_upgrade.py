@@ -54,12 +54,13 @@ import time
 import tomllib
 import uuid
 
-import tomli_w
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+from istota.lib import toml_write
 
 from ..support import upgrade
 from ..support.upgrade import Anchor
@@ -801,7 +802,7 @@ class TestRoomIdentityUpgrade:
         config["workspace_path"] = "/mnt/shared"
         config.pop("nextcloud_mount_path", None)
         config["nextcloud"]["url"] = ""
-        config_file.write_text(tomli_w.dumps(config))
+        config_file.write_text(toml_write.dumps(config))
         db_dir = tmp_path / "db"
         path = upgrade.build_anchor_db(REPO, volume_upgrade.anchor.commit, db_dir / "istota.db")
         with sqlite3.connect(path) as conn:

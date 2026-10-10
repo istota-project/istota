@@ -81,10 +81,11 @@ _OTHER_DOCUMENTS = {
 
 
 def test_no_second_writer_for_a_config():
-    """Test fixtures may write TOML however they like; product code and the
-    testbed, which writes the stacks' config.toml, may not grow a second writer."""
+    """Test fixtures may write TOML however they like; product code, the
+    testbed, and the harnesses that write a config.toml an image boots (the
+    upgrade tier's) may not grow a second writer."""
     offenders = []
-    for root in ("src", "testbed"):
+    for root in ("src", "testbed", "tests/support", "tests/image"):
         for path in (REPO / root).rglob("*.py"):
             rel = path.relative_to(REPO).as_posix()
             if rel in _OTHER_DOCUMENTS or rel == "src/istota/lib/toml_write.py":

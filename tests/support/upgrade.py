@@ -702,8 +702,7 @@ def render_current_config(destination: Path) -> Path:
     and nothing else. Credentials inline, as a run without `--vm-dir` writes
     them, since this config is read with no secrets directory.
     """
-    import tomli_w
-
+    from istota.lib import toml_write
     from istota.setup_wizard import ContainerAnswers, container_config_document
 
     base = render_env(nextcloud_url="http://nextcloud")
@@ -726,7 +725,7 @@ def render_current_config(destination: Path) -> Path:
     })
     destination.mkdir(parents=True, exist_ok=True)
     config_file = destination / "config.toml"
-    config_file.write_text(tomli_w.dumps(document))
+    config_file.write_text(toml_write.dumps(document))
     return config_file
 
 
