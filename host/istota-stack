@@ -13,7 +13,7 @@
 #
 # --- end usage ---
 #
-# The layout is /srv/istota (ISTOTA_STACK_DIR overrides it, for the tests):
+# The layout is /srv/app/istota (ISTOTA_STACK_DIR overrides it, for the tests):
 #
 #   src/              a git checkout of the repository, at the deployed tag
 #   allowed_signers   the release key, written by provision.sh from host.env
@@ -22,8 +22,11 @@
 #   config/           bound at /data/config, read-only to every running service
 #   compose.devbox.yml   the devbox services, rendered by `istota devbox compose-file`
 #   secrets/          one file per credential, 0400, owned by uid 10001
-#   mount/            the rclone mount, in full Nextcloud integration
 #   certs/ letsencrypt/ acme/   nginx's certificate sources and the ACME webroot
+#
+# The rclone mount, in full Nextcloud integration, is outside it at
+# /srv/mount/nextcloud/content (ISTOTA_MOUNT_DIR, for the tests), the path the
+# bare-metal installs use; mount-nextcloud.service names it too.
 #
 # The compose file is the checkout's own (src/docker/docker-compose.yml), so the
 # compose file, the seccomp and AppArmor profiles and the images always come
@@ -38,7 +41,8 @@
 # moves. tests/test_istota_stack.py holds each refusal.
 set -euo pipefail
 
-STACK="${ISTOTA_STACK_DIR:-/srv/istota}"
+STACK="${ISTOTA_STACK_DIR:-/srv/app/istota}"
+MOUNT_DIR="${ISTOTA_MOUNT_DIR:-/srv/mount/nextcloud/content}"
 SRC="${STACK}/src"
 ALLOWED_SIGNERS="${STACK}/allowed_signers"
 ENV_FILE="${STACK}/.env"
@@ -117,7 +121,7 @@ compose() {
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
     ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
     ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
-    ISTOTA_MOUNT_DIR="${STACK}/mount" \
+    ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
     ISTOTA_HOST_ENV="$HOST_ENV" \
     CERTS_DIR="$certs" \
     ACME_WEBROOT="${STACK}/acme" \
@@ -414,7 +418,7 @@ cmd_setup() {
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
     install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$CONFIG_DIR"
-    install -d -m 0755 "${STACK}/mount" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+    install -d -m 0755 "$MOUNT_DIR" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
     ensure_secret_files
     copy_out_config
 

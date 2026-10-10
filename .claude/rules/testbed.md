@@ -150,7 +150,7 @@ Four non-obvious points:
 
 - `image: ${ISTOTA_TEST_IMAGE}` on istota, web and webhooks: one tag per checkout, built on the session's first boot and run as it is after; a negative control's prebuilt image goes through the same variable with no `--build`, which is what replaced `docker-compose.test.prebuilt.yml`.
 - `extra_hosts: host.docker.internal:host-gateway`: built in on Docker Desktop, absent on Docker Engine.
-- The config directory the testbed wrote, bound read-only at `/data/config` on `istota` and `web`. The shipped file binds a host directory there too (`ISTOTA_CONFIG_DIR`, `/srv/istota/config` on the VM); compose merges the two by target, so only the source differs.
+- The config directory the testbed wrote, bound read-only at `/data/config` on `istota` and `web`. The shipped file binds a host directory there too (`ISTOTA_CONFIG_DIR`, `/srv/app/istota/config` on the VM); compose merges the two by target, so only the source differs.
 - `/mnt/shared` replaced by an empty volume: the shipped bind is `rslave`, which Docker Desktop refuses for a macOS path.
 - The shipped `tasks` healthcheck polled faster.
 - The browser's fixed `container_name` reset, so two stacks on one machine can both run one.

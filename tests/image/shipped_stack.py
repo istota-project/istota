@@ -2,7 +2,7 @@
 
 Shared by the row 12 witness (credentials are files) and the row 5 wrapper
 witness (every exec path drops to uid 10001). The stack directory is laid out
-as `/srv/istota` is: `config/` bound read-only at `/data/config`, `secrets/`
+as `/srv/app/istota` is: `config/` bound read-only at `/data/config`, `secrets/`
 holding one file per credential. `istota setup --vm-dir` runs as uid 10001 in a
 one-shot container with the config directory opened (ISTOTA_CONFIG_READ_ONLY),
 as `istota-stack setup` runs it; then `docker compose up` starts the service

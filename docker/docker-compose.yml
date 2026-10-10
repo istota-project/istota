@@ -11,7 +11,8 @@
 # on the VM shows through without restarting the containers. Docker Desktop
 # refuses `rslave` on a macOS path ("not a shared or slave mount"), which is one
 # reason this file runs in a VM; the test tiers replace the mount.
-# ISTOTA_MOUNT_DIR defaults to ./mount, which is /srv/istota/mount on the VM.
+# ISTOTA_MOUNT_DIR defaults to ./mount; on the VM `istota-stack` sets it to
+# /srv/mount/nextcloud/content, outside the stack directory.
 x-workspace-mount: &workspace_mount
   type: bind
   source: ${ISTOTA_MOUNT_DIR:-./mount}
@@ -26,7 +27,7 @@ x-workspace-mount: &workspace_mount
 # since compose refuses to start a service whose secret file is missing), 0400
 # and owned by uid 10001. `setup_wizard.SECRET_NAMES` is the same list, and
 # tests/test_setup_container.py holds the two equal.
-# The config directory: /srv/istota/config on the VM, bound at /data/config.
+# The config directory: /srv/app/istota/config on the VM, bound at /data/config.
 # Read-only for every running service, so the daemon cannot rewrite its own
 # config. `istota setup` and `istota apply` write it from a one-shot container
 # that `istota-stack` starts with ISTOTA_CONFIG_ACCESS=rw.
@@ -154,7 +155,7 @@ services:
       - *workspace_mount
     # The ingress mode and the public name, for the entrypoint's check that
     # `[site] hostname` is DOMAIN behind TLS. host.env is written by `istota
-    # setup --vm-dir`; `istota-stack` names /srv/istota/host.env. Without one
+    # setup --vm-dir`; `istota-stack` names /srv/app/istota/host.env. Without one
     # the stack is `local`.
     env_file:
       - path: ${ISTOTA_HOST_ENV:-./host.env}
@@ -252,9 +253,9 @@ services:
   # leave a `ports:` entry out, so a slot a mode does not use is an ephemeral
   # loopback port with nothing listening behind it.
   #
-  # Certificates: CERTS_DIR is /srv/istota/letsencrypt (TLS_CERT_SOURCE=acme,
-  # written by certbot on the VM) or /srv/istota/certs (files), and ACME_WEBROOT
-  # is /srv/istota/acme. Neither is mounted into any istota container.
+  # Certificates: CERTS_DIR is /srv/app/istota/letsencrypt (TLS_CERT_SOURCE=acme,
+  # written by certbot on the VM) or /srv/app/istota/certs (files), and ACME_WEBROOT
+  # is /srv/app/istota/acme. Neither is mounted into any istota container.
   nginx:
     image: nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
     depends_on:
@@ -564,7 +565,7 @@ networks:
   # The browser container and the daemon that drives it, nothing else.
   browser:
 
-# One file per credential, in the stack's secrets directory (/srv/istota/secrets
+# One file per credential, in the stack's secrets directory (/srv/app/istota/secrets
 # on the VM, docker/secrets in a checkout). Compose bind-mounts each as it is on
 # disk and does not apply a secret's uid, gid or mode outside Swarm, so the
 # 0400 and uid 10001 are the writer's job: `istota setup --vm-dir`, run in the

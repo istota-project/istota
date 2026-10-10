@@ -7,16 +7,17 @@ There is no general export format. The two shapes share the database schema, the
 - `host/export-bare-metal.sh`, run as root on the old host, stops the install and writes one tarball of its state.
 - `istota migrate import-bare-metal`, run in a one-shot container on the new VM by `istota-stack import-bare-metal`, reads that tarball and lands it in the container layout: it rewrites `config.toml`, splits the secrets files, restores the databases, copies the repositories and repairs their worktrees, and rebases the host paths the database stores.
 
-On an install whose workspace is an external Nextcloud the workspace does not move at all: the new VM mounts the same Nextcloud.
+On an install whose workspace is an external Nextcloud the workspace does not move at all: the new VM mounts the same Nextcloud, at the same path.
 
 ## What moves
 
 | State | Old host | New VM | How |
 |---|---|---|---|
+| Nextcloud workspace | the rclone mount at `/srv/mount/nextcloud/content` | the rclone mount at `/srv/mount/nextcloud/content`, bound at `/mnt/shared` in the containers | not moved; the new VM mounts the same Nextcloud. Stored paths under the mount are rebased to `/mnt/shared` (below) |
 | Framework and module databases | `/srv/app/<ns>/data/` | `/data/db/` in the state volume | `db_backup` snapshot on the old host, `db_restore` on the new one, `quick_check` on both sides |
-| `config.toml` | the role's render | `/srv/istota/config/config.toml` | rewritten by the import; every change is printed |
-| Admins | `/etc/<ns>/admins` | `/srv/istota/config/admins` | copied |
-| Secrets | `/etc/<ns>/secrets.env`, `web-secrets.env` | `/srv/istota/secrets/*`, `/data/.secret_key`, `/data/.web_token_key` | one file per credential; the master key and the web token key byte for byte |
+| `config.toml` | the role's render | `/srv/app/istota/config/config.toml` | rewritten by the import; every change is printed |
+| Admins | `/etc/<ns>/admins` | `/srv/app/istota/config/admins` | copied |
+| Secrets | `/etc/<ns>/secrets.env`, `web-secrets.env` | `/srv/app/istota/secrets/*`, `/data/.secret_key`, `/data/.web_token_key` | one file per credential; the master key and the web token key byte for byte |
 | Developer repositories | `developer.repos_dir` | `/data/repos` | copied, then `git worktree repair` per repository |
 | Baileys session | `<data>/whatsapp-baileys-session` | `/data/db/whatsapp-baileys-session` | copied, except by a rehearsal |
 | Session transcripts | `<data>/logs` | `/data/db/logs` | copied |
@@ -25,7 +26,7 @@ On an install whose workspace is an external Nextcloud the workspace does not mo
 
 Not carried: the credential broker's CA (regenerated, and each task gets the current one), the WhatsApp media staging and inbound spool, temp and control directories, the role's own backups under `data/backups`, superseded Baileys sessions, Claude Code's home directory (a `claude_code` brain authenticates from `CLAUDE_CODE_OAUTH_TOKEN`), the update cron's clone token, and the CLI configuration of the forge tools (they read their token from the environment).
 
-The rclone configuration is the operator's input to `provision.sh` on the new VM. Copy `~/.config/rclone/rclone.conf` from the old service user's home to `/srv/istota/rclone.conf` by hand; it is not in the tarball.
+The rclone configuration is the operator's input to `provision.sh` on the new VM. Copy `~/.config/rclone/rclone.conf` from the old service user's home to `/srv/app/istota/rclone.conf` by hand; it is not in the tarball.
 
 ## What the import rewrites
 
@@ -125,19 +126,19 @@ Every step on the old host and on the upstream proxy is a change to production. 
 4. **Copy the tarball** to the new VM and unpack it where only root and uid 10001 can read it:
 
    ```sh
-   install -d -m 0700 -o 10001 -g 10001 /srv/istota/import
-   tar -xf export.tar -C /srv/istota/import
-   chown -R 10001:10001 /srv/istota/import
+   install -d -m 0700 -o 10001 -g 10001 /srv/app/istota/import
+   tar -xf export.tar -C /srv/app/istota/import
+   chown -R 10001:10001 /srv/app/istota/import
    ```
 
-5. **Copy `rclone.conf`** to `/srv/istota/rclone.conf` if you have not, and re-run `provision.sh` so the mount unit is in place. The new mount runs as uid 10001, the daemon's uid in the container, so the workspace is writable from inside it.
+5. **Copy `rclone.conf`** to `/srv/app/istota/rclone.conf` if you have not, and re-run `provision.sh` so the mount unit is in place. The new mount runs as uid 10001, the daemon's uid in the container, so the workspace is writable from inside it.
 6. **Import**, with the stack stopped. `istota-stack import-bare-metal` refuses while any of the stack's containers is running, then runs the import in a one-shot container with the export read-only at `/import`, the secrets directory writable at `/secrets` and the config directory writable. Look at the plan first:
 
    ```sh
-   istota-stack import-bare-metal /srv/istota/import --ingress proxied --dry-run
+   istota-stack import-bare-metal /srv/app/istota/import --ingress proxied --dry-run
    ```
 
-   Then run the same command without `--dry-run`. Add `--emit-plan /data/config/import-plan.json` to get the rewritten config as an `istota apply` plan, in `/srv/istota/config`, so the variables of a config manager can start from what this install runs. The plan carries no credentials.
+   Then run the same command without `--dry-run`. Add `--emit-plan /data/config/import-plan.json` to get the rewritten config as an `istota apply` plan, in `/srv/app/istota/config`, so the variables of a config manager can start from what this install runs. The plan carries no credentials.
 
    Exit codes: 0 done, or already imported; 1 refused, nothing written; 2 partial. A partial leaves `/data/.bare-metal-import.in-progress` naming the export, and re-running the same command with the same export finishes it. The import refuses a target whose database already holds tasks, since it replaces the database and the master key.
 
@@ -145,11 +146,11 @@ Every step on the old host and on the upstream proxy is a change to production. 
 8. **Start the stack**: `systemctl enable --now istota-stack`, then `istota doctor` through the VM's `istota` wrapper.
 9. **Switch the upstream.** In this hostname's server block, change the `server` address and port to the new VM's `LISTEN_ADDR:LISTEN_PORT`, and `https://` to `http://` in `proxy_pass` (unless the stack serves TLS from files). Reload the proxy.
 10. **Lift the maintenance switch**, log in, and send the bot a message.
-11. **Delete `/srv/istota/import`.** It holds every credential and a copy of every database.
+11. **Delete `/srv/app/istota/import`.** It holds every credential and a copy of every database.
 
 ### Optional state
 
-- **Browser profile.** With `--with-browser-profile` the tarball holds `browser-profile/`. The import does not place it, because the istota container does not mount the browser's volume. Copy it in with the stack stopped: `docker run --rm -v istota_browser_profile:/v -v /srv/istota/import/browser-profile:/src:ro debian:trixie-slim sh -c 'cp -a /src/. /v/'`, and give it the browser image's user. Without it, users sign in to their sites again.
+- **Browser profile.** With `--with-browser-profile` the tarball holds `browser-profile/`. The import does not place it, because the istota container does not mount the browser's volume. Copy it in with the stack stopped: `docker run --rm -v istota_browser_profile:/v -v /srv/app/istota/import/browser-profile:/src:ro debian:trixie-slim sh -c 'cp -a /src/. /v/'`, and give it the browser image's user. Without it, users sign in to their sites again.
 - **Devbox homes.** The repositories live in `repos_dir`, not in the devbox home, so this is optional. Copy a home with `docker run --rm -v <volume>:/v … tar` on each side.
 - **Baileys session.** The import copies it. Never run both WhatsApp sidecars at once, which is a replaced-connection loop; the old one is stopped by the export. Re-pairing on the new side is the alternative.
 

@@ -4767,8 +4767,8 @@ def check_web_tls(config: "Config", probe: bool) -> CheckResult:
             name, FAIL,
             f"the certificate served for {domain} is not accepted: {exc.verify_message or exc.reason}",
             remedy=(
-                "Check the certificate in /srv/istota/letsencrypt (acme) or "
-                "/srv/istota/certs (files) is for this name, unexpired and complete "
+                "Check the certificate in /srv/app/istota/letsencrypt (acme) or "
+                "/srv/app/istota/certs (files) is for this name, unexpired and complete "
                 "(fullchain.pem), then `docker compose restart nginx`."
             ),
         )
@@ -4778,7 +4778,7 @@ def check_web_tls(config: "Config", probe: bool) -> CheckResult:
             remedy=(
                 "nginx serves port 80 alone until a certificate exists. Run certbot "
                 "once (`istota-stack setup` does), or put fullchain.pem and privkey.pem "
-                "in /srv/istota/certs; the deploy hook restarts nginx onto port 443."
+                "in /srv/app/istota/certs; the deploy hook restarts nginx onto port 443."
             ),
         )
     except (OSError, ssl.SSLError) as exc:
@@ -6105,7 +6105,7 @@ def _devbox_egress_probe(config: "Config", users: list[str], probe: bool) -> Che
             "a devbox opened a connection it must not: " + "; ".join(reached),
             remedy=(
                 "On the VM: `systemctl restart istota-devbox-egress`, and check that "
-                "ISTOTA_DEVBOX_SUBNET in /srv/istota/host.env is [devbox] network_subnet."
+                "ISTOTA_DEVBOX_SUBNET in /srv/app/istota/host.env is [devbox] network_subnet."
             ),
         )
     if unasked:

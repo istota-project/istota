@@ -9,10 +9,10 @@
 # Ported from the Ansible role's host tasks (Docker Engine, the userns sysctl,
 # zram, the journald cap, the auditd bound, the rclone mount unit, the devbox
 # egress rules, the browser watchdog), with the role's values. It installs
-# plain files from host/; the units read /srv/istota/host.env for the few
+# plain files from host/; the units read /srv/app/istota/host.env for the few
 # values that differ per machine, so nothing here is a template.
 #
-# The machine's choices come from /srv/istota/host.env, written by
+# The machine's choices come from /srv/app/istota/host.env, written by
 # `istota setup --vm-dir`:
 #
 #   STORAGE              local | nextcloud (the rclone mount)
@@ -21,13 +21,16 @@
 #   RELEASE_SIGNING_KEY  the release key, one line of an SSH public key
 #   CLAUDE_CODE_VERSION  the Claude Code pin a build uses, when it uses one
 #   ACME_EMAIL, ACME_SERVER   optional, for certbot in direct mode
-#   RCLONE_REMOTE        the rclone remote name in /srv/istota/rclone.conf
+#   RCLONE_REMOTE        the rclone remote name in /srv/app/istota/rclone.conf
 #   ZRAM_ENABLED         0 to leave swap alone
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
-STACK="${ISTOTA_STACK_DIR:-/srv/istota}"
+STACK="${ISTOTA_STACK_DIR:-/srv/app/istota}"
+# The Nextcloud mount, outside the stack directory at the path the bare-metal
+# installs use. mount-nextcloud.service names it too; the override is the tests'.
+MOUNT_DIR="${ISTOTA_MOUNT_DIR:-/srv/mount/nextcloud/content}"
 HOST_ENV="${STACK}/host.env"
 ISTOTA_UID=10001
 UNITS=/etc/systemd/system
@@ -186,8 +189,8 @@ getent group "$ISTOTA_UID" >/dev/null || groupadd -g "$ISTOTA_UID" istota
 getent passwd "$ISTOTA_UID" >/dev/null \
     || useradd -u "$ISTOTA_UID" -g "$ISTOTA_UID" -M -d "$STACK" -s /usr/sbin/nologin istota
 
-# --- /srv/istota -------------------------------------------------------------
-install -d -m 0755 "$STACK" "${STACK}/mount" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+# --- /srv/app/istota ---------------------------------------------------------
+install -d -m 0755 "$STACK" "$MOUNT_DIR" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
 install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/config"
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/secrets"
 [ -f "${STACK}/.env" ] || install -m 0644 /dev/null "${STACK}/.env"
@@ -257,7 +260,7 @@ if [ "$(host_env STORAGE)" = "nextcloud" ]; then
     else
         log "STORAGE=nextcloud: put the rclone remote's config at ${STACK}/rclone.conf (written by you, never on a command line), then re-run this."
     fi
-    chown "$ISTOTA_UID:$ISTOTA_UID" "${STACK}/mount"
+    chown "$ISTOTA_UID:$ISTOTA_UID" "$MOUNT_DIR"
     # Never write into an unmounted path: the stack requires the mount.
     changed_file "${dropin}/mount.conf" "$(cat <<'EOF'
 [Unit]

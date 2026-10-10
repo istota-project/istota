@@ -38,7 +38,7 @@ The old services used five named volumes, prefixed with the old compose project 
 
 2. Start it (`docker compose up -d` in `/srv/nextcloud`) and check you can log in.
 
-3. On the istota VM, mount the bot's `Shared Files` folder over WebDAV with rclone, as the VM's `mount-nextcloud.service` does: the remote is the bot user's WebDAV root with the app password istota already uses, and the mount is rooted at `Shared Files`, not at the bot's whole tree. Mounted at `/srv/istota/mount`, compose binds it into the containers at `/mnt/shared`, which is where the workspace was before. No stored path changes, and nothing needs rebasing.
+3. On the istota VM, mount the bot's `Shared Files` folder over WebDAV with rclone, as the VM's `mount-nextcloud.service` does: the remote is the bot user's WebDAV root with the app password istota already uses, and the mount is rooted at `Shared Files`, not at the bot's whole tree. Mounted at `/srv/mount/nextcloud/content`, compose binds it into the containers at `/mnt/shared`, which is where the workspace was before. No stored path changes, and nothing needs rebasing.
 
 4. Edit `/data/config/config.toml`:
 

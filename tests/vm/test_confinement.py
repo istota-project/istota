@@ -120,7 +120,7 @@ class TestTheDaemonCannotSeeTheMachine:
         cid = lima.container(stack, "istota")
         mounts = json.loads(stack.out(f"docker inspect -f '{{{{json .Mounts}}}}' {cid}"))
         binds = sorted(m["Source"] for m in mounts if m["Type"] == "bind")
-        allowed = (f"{lima.STACK}/config", f"{lima.STACK}/mount", f"{lima.STACK}/secrets/")
+        allowed = (f"{lima.STACK}/config", lima.MOUNT, f"{lima.STACK}/secrets/")
         strays = [b for b in binds if not (b in allowed[:2] or b.startswith(allowed[2]))]
         assert strays == [], f"row 7: the istota container binds {strays}"
         assert f"{lima.STACK}/config" in binds, binds

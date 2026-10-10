@@ -206,7 +206,7 @@ Two modes, chosen by `[nextcloud] url` in `config.toml`, which `istota setup` wr
 | Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume |
 | Full Nextcloud integration | `url` names your Nextcloud | the VM's rclone mount of the bot's files, bound at `/mnt/shared` |
 
-In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/istota/mount` (`mount-nextcloud.service`), and compose binds the mount into `istota`, `web` and `webhooks` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
+In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `istota`, `web` and `webhooks` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
 
 The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason this file runs in a VM.
 

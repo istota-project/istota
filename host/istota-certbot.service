@@ -5,5 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/srv/istota/host.env
+EnvironmentFile=-/srv/app/istota/host.env
 ExecStart=/usr/local/sbin/istota-certbot

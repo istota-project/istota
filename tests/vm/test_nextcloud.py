@@ -12,7 +12,7 @@ Row 9: never write into an unmounted store. `istota-stack.service` requires
 and follows the mount unit (provision.sh's drop-in), so stopping the mount
 stops the stack; and the entrypoint refuses a workspace that is not a
 `fuse.rclone` mount, so the istota service started by hand with the mount
-down does not start, and nothing lands in `/srv/istota/mount`.
+down does not start, and nothing lands in `/srv/mount/nextcloud/content`.
 
 Control `no-storage-refusal`: the istota service is started from an image whose
 entrypoint has the refusal removed (`docker/test/Dockerfile.no-storage-refusal`).
@@ -32,7 +32,7 @@ from . import lima
 
 pytestmark = pytest.mark.vm
 
-MOUNT = f"{lima.STACK}/mount"
+MOUNT = lima.MOUNT
 
 
 def _webdav(vm: lima.Vm, fixture: dict, method: str, name: str, *, data: str = "") -> str:

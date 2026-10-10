@@ -7,12 +7,12 @@ CA, a Nextcloud). It imports no pytest; `tests/vm/conftest.py` holds the
 fixtures, so a failure here is a raised `VmError` with the command's output.
 
 **The release.** `istota-stack update` deploys only a tag signed by the key in
-`/srv/istota/allowed_signers`, so the tier makes one: a git repository under
+`/srv/app/istota/allowed_signers`, so the tier makes one: a git repository under
 `ISTOTA_VM_WORKDIR` (default `~/.cache/istota-vmtier`) holding a snapshot of
 this checkout's working tree, committed and tagged `vmtier-<tree>` with an SSH
 key made there on first use. Lima mounts that repository read-only at
 `/mnt/istota-repo` (`host/lima/istota.yaml`), `provision.sh` clones it to
-`/srv/istota/src`, and `istota-stack update` fetches the tag from it, verifies
+`/srv/app/istota/src`, and `istota-stack update` fetches the tag from it, verifies
 it and builds. The tag is named for the tree, so an unchanged tree reuses the
 images the last session built.
 
@@ -47,7 +47,9 @@ REPO = Path(__file__).resolve().parents[2]
 TEMPLATE = REPO / "host" / "lima" / "istota.yaml"
 
 DEFAULT_NAME = "istota-vmtier-1"
-STACK = "/srv/istota"
+STACK = "/srv/app/istota"
+#: The Nextcloud rclone mount, outside the stack directory (provision.sh's default).
+MOUNT = "/srv/mount/nextcloud/content"
 #: What the tier keeps in the VM beside the stack: fixture configs, the Pebble
 #: root, markers. Never read by the stack.
 SCRATCH = "/srv/istota-vmtier"

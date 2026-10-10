@@ -1,7 +1,7 @@
 """Release tags are signed, and the release workflow builds the images as a check.
 
 `host/istota-stack update` refuses any tag that is not SSH-signed by the key in
-`/srv/istota/allowed_signers` (parity row 13), so `scripts/release.sh` must make
+`/srv/app/istota/allowed_signers` (parity row 13), so `scripts/release.sh` must make
 exactly that kind of tag, and the release workflow must build each image on each
 architecture without pushing anything anywhere.
 """

@@ -160,6 +160,7 @@ def fx(tmp_path) -> Fixture:
     (stack / "config" / "config.toml").write_text('[brain]\nkind = "native"\n')
     _git(stack / "src", "checkout", "-q", "--detach", "v0", env=env)
     fixture.env["ISTOTA_STACK_DIR"] = str(stack)
+    fixture.env["ISTOTA_MOUNT_DIR"] = str(tmp_path / "mount")
     return fixture
 
 
@@ -418,10 +419,17 @@ def _source(fx: Fixture, script: str, **extra_env: str) -> subprocess.CompletedP
     )
 
 
+class TestTheMount:
+    def test_compose_binds_the_mount_from_outside_the_stack_directory(self, fx):
+        result = _source(fx, 'docker() { echo "mount=${ISTOTA_MOUNT_DIR}"; }; compose ps')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"mount={fx.root / 'mount'}"
+
+
 class TestRootNeverReadsWhatUid10001Can:
     """Root on the VM must not act on a file uid 10001 can write or replace.
 
-    `/srv/istota/config` is 10001's (the one-shot setup and apply containers
+    `/srv/app/istota/config` is 10001's (the one-shot setup and apply containers
     write it), and so is the setup staging directory. A process on the VM
     running as 10001, the rclone mount above all, can plant anything in either.
     The devbox compose file is passed to `docker compose` by root, so a copy in

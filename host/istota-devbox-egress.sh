@@ -16,7 +16,7 @@
 #     ordered after docker.service, so the xtables lock is contended here.
 #
 # Plain file, not a template: the subnet comes from the environment
-# (ISTOTA_DEVBOX_SUBNET, from /srv/istota/host.env through the unit), and
+# (ISTOTA_DEVBOX_SUBNET, from /srv/app/istota/host.env through the unit), and
 # defaults to `[devbox] network_subnet`'s default. The two must agree, or
 # every rule here is scoped to a range no container uses.
 set -euo pipefail

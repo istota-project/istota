@@ -5,5 +5,5 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/srv/istota/host.env
+EnvironmentFile=-/srv/app/istota/host.env
 ExecStart=/usr/local/sbin/istota-browser-watchdog check

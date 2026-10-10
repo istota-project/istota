@@ -1,6 +1,6 @@
 [Unit]
 Description=Istota stack (docker compose, from the deployed release tag)
-Documentation=file:///srv/istota/src/docs/deployment/
+Documentation=file:///srv/app/istota/src/docs/deployment/
 # The AppArmor profile the istota service names has to be loaded first, and the
 # egress rules in DOCKER-USER have to be in place before a devbox starts. In
 # full Nextcloud integration provision.sh adds a drop-in requiring

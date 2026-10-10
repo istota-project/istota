@@ -4,11 +4,11 @@
 #   limactl start istota
 #   limactl shell istota sudo istota-stack update <tag>
 #   limactl shell istota sudo istota-stack setup --hostname localhost:8080 ...
-#   limactl shell istota sudo /srv/istota/src/host/provision.sh
+#   limactl shell istota sudo /srv/app/istota/src/host/provision.sh
 #   limactl shell istota sudo systemctl start istota-stack
 #
 # The checkout at ISTOTA_REPO is mounted read-only and host/provision.sh runs
-# from it as root on first boot; /srv/istota/src is a clone of it, and
+# from it as root on first boot; /srv/app/istota/src is a clone of it, and
 # `istota-stack update` fetches release tags from that origin. Ingress is
 # `local`: nginx publishes on the VM's loopback and Lima forwards that port to
 # the Mac's loopback. The browser profile's amd64 image runs under Rosetta.

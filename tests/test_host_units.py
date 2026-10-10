@@ -120,7 +120,7 @@ class TestTheEgressRules:
         assert unit["Service"]["Type"] == "oneshot"
         assert unit["Service"]["RemainAfterExit"] == "yes"
         assert unit["Service"]["ExecStart"].endswith("istota-devbox-egress")
-        assert unit["Service"]["EnvironmentFile"] == "-/srv/istota/host.env"
+        assert unit["Service"]["EnvironmentFile"] == "-/srv/app/istota/host.env"
         assert unit["Install"]["WantedBy"] == "multi-user.target"
 
 
@@ -140,6 +140,7 @@ class TestTheBrowserWatchdog:
             os.environ,
             PATH=f"{bindir}:{os.environ['PATH']}",
             ISTOTA_STACK_DIR=str(stack),
+            ISTOTA_MOUNT_DIR=str(tmp_path / "mount"),
             ISTOTA_STACK_BIN=str(HOST / "istota-stack"),
             ISTOTA_BROWSER_WATCHDOG_STATE_DIR=str(tmp_path / "state"),
             ISTOTA_BROWSER_WATCHDOG_LOG=str(tmp_path / "log" / "health.log"),
@@ -296,14 +297,86 @@ class TestProvision:
         mount = _unit(HOST / "mount-nextcloud.service")
         assert mount["Service"]["Type"] == "notify"
         assert mount["Service"]["User"] == "10001"
-        assert "--config /srv/istota/rclone.conf" in mount["Service"]["ExecStart"]
+        assert "--config /srv/app/istota/rclone.conf" in mount["Service"]["ExecStart"]
 
     def test_the_vfs_cache_is_somewhere_the_mount_user_can_write(self):
-        """The user's home is /srv/istota, root's; rclone's default cache there is
+        """The user's home is /srv/app/istota, root's; rclone's default cache there is
         refused and the cache silently disabled (the vm tier found it)."""
         mount = _unit(HOST / "mount-nextcloud.service")
         assert mount["Service"]["CacheDirectory"] == "istota-rclone"
         assert "--cache-dir /var/cache/istota-rclone" in mount["Service"]["ExecStart"]
+
+
+STACK_DIR = "/srv/app/istota"
+MOUNT_DIR = "/srv/mount/nextcloud/content"
+
+
+class TestTheHostLayout:
+    """The estate's layout: the stack under /srv/app/istota, and the Nextcloud
+    mount at the path the bare-metal installs already use, outside the stack."""
+
+    def test_provision_defaults_to_the_estate_paths(self):
+        text = PROVISION.read_text()
+        assert f'STACK="${{ISTOTA_STACK_DIR:-{STACK_DIR}}}"' in text
+        assert f'MOUNT_DIR="${{ISTOTA_MOUNT_DIR:-{MOUNT_DIR}}}"' in text
+        assert '"${STACK}/mount"' not in text
+
+    def test_istota_stack_defaults_to_the_estate_paths(self):
+        result = subprocess.run(
+            ["bash", "-c", f'source "{HOST / "istota-stack"}"; echo "$STACK"; echo "$MOUNT_DIR"'],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": os.environ["PATH"]},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [STACK_DIR, MOUNT_DIR]
+
+    def test_the_mount_unit_mounts_the_estate_path(self):
+        service = _unit(HOST / "mount-nextcloud.service")["Service"]
+        assert service["ExecStartPre"] == f"-/bin/fusermount3 -uz {MOUNT_DIR}"
+        assert service["ExecStart"].split()[-1] == MOUNT_DIR
+        assert service["ExecStop"] == f"/bin/fusermount3 -u {MOUNT_DIR}"
+        assert f"--config {STACK_DIR}/rclone.conf" in service["ExecStart"]
+
+    @pytest.mark.parametrize("unit", sorted(p.name for p in HOST.glob("*.service")))
+    def test_every_unit_reads_the_stacks_host_env(self, unit):
+        service = _unit(HOST / unit)["Service"]
+        if "EnvironmentFile" in service:
+            assert service["EnvironmentFile"] == f"-{STACK_DIR}/host.env"
+
+
+def _functions_setting(tree, name: str):
+    import ast
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names = set()
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                names.add(inner.value)
+            elif isinstance(inner, ast.keyword) and inner.arg:
+                names.add(inner.arg)
+        if name in names:
+            yield node, names
+
+
+def test_no_test_runs_a_host_script_against_the_real_mount_path():
+    """provision.sh and `istota-stack setup` create the mount directory, which
+    is outside the stack directory. A test that points the stack at a temporary
+    directory must point the mount there too, or it creates /srv/mount/... on
+    the machine running the suite (or fails to, as a user). The vm tier runs on
+    its own VM and wants the real paths."""
+    import ast
+
+    offenders = []
+    for path in sorted((REPO / "tests").rglob("*.py")):
+        if "vm" in path.relative_to(REPO / "tests").parts[:1]:
+            continue
+        tree = ast.parse(path.read_text())
+        for func, names in _functions_setting(tree, "ISTOTA_STACK_DIR"):
+            if "ISTOTA_MOUNT_DIR" not in names:
+                offenders.append(f"{path.relative_to(REPO)}:{func.lineno} {func.name}")
+    assert offenders == [], f"sets ISTOTA_STACK_DIR without ISTOTA_MOUNT_DIR: {offenders}"
 
 
 class TestTheStackUnit:
@@ -323,7 +396,8 @@ class TestCertbot:
         return subprocess.run(
             ["bash", str(HOST / "istota-certbot")], capture_output=True, text=True, timeout=30,
             env=dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
-                     ISTOTA_STACK_DIR="/srv/istota", **env),
+                     ISTOTA_STACK_DIR="/srv/app/istota",
+                     ISTOTA_MOUNT_DIR=str(tmp_path / "mount"), **env),
         )
 
     def test_webroot_issuance_with_the_restart_hook(self, tmp_path):
@@ -332,8 +406,8 @@ class TestCertbot:
         assert result.returncode == 0, result.stderr
         args = (tmp_path / "args").read_text().splitlines()
         assert args[0] == "certonly" and "--webroot" in args
-        assert args[args.index("-w") + 1] == "/srv/istota/acme"
-        assert args[args.index("--config-dir") + 1] == "/srv/istota/letsencrypt"
+        assert args[args.index("-w") + 1] == "/srv/app/istota/acme"
+        assert args[args.index("--config-dir") + 1] == "/srv/app/istota/letsencrypt"
         assert args[args.index("--deploy-hook") + 1].endswith("compose restart nginx")
         assert args[args.index("--server") + 1] == "https://pebble:14000/dir"
         assert "--register-unsafely-without-email" in args

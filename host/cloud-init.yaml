@@ -9,13 +9,13 @@
 #
 #   istota-stack update <tag>     # builds the images from the verified tag
 #   istota-stack setup            # the wizard: config.toml, secrets, host.env
-#   /srv/istota/src/host/provision.sh   # picks up host.env
+#   /srv/app/istota/src/host/provision.sh   # picks up host.env
 #   systemctl start istota-stack
 #
 # Nothing here is pulled from a registry: the images are built on the machine.
 
 write_files:
-  - path: /srv/istota/host.env
+  - path: /srv/app/istota/host.env
     permissions: "0644"
     content: |
       # Fill in: the release signing key, one line of an SSH public key. Every
@@ -30,8 +30,8 @@ write_files:
       REPO_URL="https://gitlab.com/cynium/istota.git"
       TAG="vX.Y.Z"
 
-      SRC=/srv/istota/src
-      ALLOWED_SIGNERS=/srv/istota/allowed_signers
+      SRC=/srv/app/istota/src
+      ALLOWED_SIGNERS=/srv/app/istota/allowed_signers
       refuse_tag() { echo "[istota-bootstrap] REFUSE: $*" >&2; exit 65; }
 
       # Copied from host/istota-stack, which is authoritative: nothing from the
@@ -84,7 +84,7 @@ write_files:
 
       apt-get update -qq
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
-      key="$(sed -n 's/^RELEASE_SIGNING_KEY=//p' /srv/istota/host.env)"
+      key="$(sed -n 's/^RELEASE_SIGNING_KEY=//p' /srv/app/istota/host.env)"
       # The file provision.sh writes from host.env, in the same form.
       printf 'releases namespaces="git" %s\n' "$key" > "$ALLOWED_SIGNERS"
       chmod 0644 "$ALLOWED_SIGNERS"

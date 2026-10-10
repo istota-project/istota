@@ -18,7 +18,7 @@
 # drive a healthy Chrome is the one only a container restart clears.
 #
 # Run every minute by istota-browser-watchdog.timer. Plain file, not a
-# template: settings come from /srv/istota/host.env through the unit.
+# template: settings come from /srv/app/istota/host.env through the unit.
 set -euo pipefail
 
 CONTAINER="${ISTOTA_BROWSER_CONTAINER:-istota-browser}"

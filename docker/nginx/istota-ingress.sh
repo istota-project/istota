@@ -101,7 +101,7 @@ case "$INGRESS" in
         done
         case "$TLS_CERT_SOURCE" in
             files)
-                have_cert || refuse "TLS_CERT_SOURCE=files and there is no fullchain.pem and privkey.pem in /srv/istota/certs."
+                have_cert || refuse "TLS_CERT_SOURCE=files and there is no fullchain.pem and privkey.pem in /srv/app/istota/certs."
                 PROXIED_LISTEN="listen 443 ssl default_server; include ${OUT}/tls.conf;"
                 ;;
             "") PROXIED_LISTEN="listen 80 default_server;" ;;
