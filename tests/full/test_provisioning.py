@@ -2,21 +2,24 @@
 
 This is the coverage the full shape buys, and it is why the shape is asserted
 first: `provision-nc.sh` is executed by nothing anywhere else in the repo —
-`docker-compose.yml:48` mounts it as a Nextcloud post-install hook and that is
-its only invocation — and `entrypoint.sh` is executed only as far as the
-config-write marker, by the upgrade tier, against a stub that makes every room
-take the *create* branch. So the room find-and-reuse path, the workspace
-seeding, the OAuth2 registration and the exec into the scheduler have had no
-witness at all.
+`docker-compose.yml` mounts it as a Nextcloud post-install hook and that is
+its only invocation — and the entrypoint's Talk room provisioning (`istota
+nextcloud provision-rooms`, run for the first admin) meets a real Talk only
+here. So the room find-and-reuse path, the OAuth2 registration and the exec
+into the scheduler have their only witness in this file.
+
+**The config is an input on this shape, as on every other.** The testbed
+writes `config.toml` and the admins file the way `istota setup` would, and the
+entrypoint reads them and writes neither. What the boot itself does is the
+master key, `istota init`, the first admin's profile row, and the rooms.
 
 **Everything here is an outcome assertion, and that is not a style preference.**
-Every `occ` call in `provision-nc.sh` is `|| true` (`:25`, `:29`, `:34-36`,
-`:56-57`, `:73-74`), and so is the OAuth PHP block (`:113`). The script writes
-`/mnt/shared/.istota-provisioned` and reports success having done nothing at
-all. The flag proves the script ran; only the outcomes prove it worked. That is
-defensible production resilience — an operator would rather have a bot with no
-calendar app than no bot — and it means this file is the only thing standing
-between "provisioned" and "silently empty".
+Every `occ` call in `provision-nc.sh` is `|| true`, and so is the OAuth PHP
+block. The script writes `/mnt/shared/.istota-provisioned` and reports success
+having done nothing at all. The flag proves the script ran; only the outcomes
+prove it worked. That is defensible production resilience — an operator would
+rather have a bot with no calendar app than no bot — and it means this file is
+the only thing standing between "provisioned" and "silently empty".
 
 **One cold boot, not one per assertion.** The module-scoped `provisioned`
 fixture takes a private stack (`fresh=True`) and every test in the file shares
@@ -29,9 +32,9 @@ the step that genuinely depends on order — the restart — captures its own
 "before" rather than trusting an earlier test's, and nothing else in the file
 reads task rows or endpoint state. `provision-nc.sh` does not re-run on an
 installed instance, so the users, apps, mounts and OAuth2 row are fixed from the
-first boot onwards, and the rooms are recovered by name rather than recreated.
-A test added here that asserts on a task or on the scripted endpoint breaks that
-and needs a per-test reset.
+first boot onwards, and the rooms are recovered by record or by name rather than
+recreated. A test added here that asserts on a task or on the scripted endpoint
+breaks that and needs a per-test reset.
 """
 
 from __future__ import annotations
@@ -56,34 +59,40 @@ from ..smoke.test_sandbox_in_stack import (
 
 pytestmark = pytest.mark.full
 
-#: Where `entrypoint.sh` persists the tokens it provisioned. Deleting it is how
-#: the recovery-by-name path is reached.
-API_PROVISION_FLAG = "/data/config/.api-provisioned"
-
-#: Where `entrypoint.sh:32-38` seeds the web admin allowlist.
+#: Where `istota setup` writes the admin allowlist, and where the testbed does.
 ADMINS_FILE = "/data/config/admins"
 
-#: The three group rooms `entrypoint.sh` creates, by display name. Not
-#: user-prefixed: `find_room_by_name` scopes lookups by USER_NAME participation
-#: instead, so each user gets their own set of identically-named rooms.
+#: The three group rooms `istota nextcloud provision-rooms` creates, by display
+#: name. Not user-prefixed: lookups are scoped by the user's participation, so
+#: each user gets their own set of identically-named rooms.
 GROUP_ROOMS = ("general", "logs", "alerts")
 
-#: Talk's room types. 1 is a one-to-one, 2 is a group room, 3 is public — and
-#: the distinction is the point of one assertion below: #logs carries the
-#: execution log and #alerts carries confirmations, and a public room is
-#: joinable by anyone holding its token.
-ROOM_TYPE_ONE_TO_ONE = 1
+#: Talk's room types. 2 is a group room, 3 is public — and the distinction is
+#: the point of one assertion below: #logs carries the execution log and
+#: #alerts carries confirmations, and a public room is joinable by anyone
+#: holding its token.
 ROOM_TYPE_GROUP = 2
 
-#: The three variables that would carry a real model credential if the overlay
-#: interpolated them instead of hardcoding them, mapped to the literal it sets.
-#: `docker-compose.yml` passes all three to this container and `entrypoint.sh`
-#: writes the OAuth one into `~/.claude/.credentials.json`.
+#: What the testbed writes as the scripted endpoint's key, the one non-empty
+#: brain credential in this tier.
 BRAIN_CREDENTIALS = {
     "ANTHROPIC_API_KEY": "",
     "CLAUDE_CODE_OAUTH_TOKEN": "",
-    "ISTOTA_BRAIN_NATIVE_API_KEY": "unused-by-the-scripted-endpoint",
+    "ISTOTA_BRAIN_NATIVE_API_KEY": compose_support.SCRIPTED_ENDPOINT_KEY,
 }
+
+#: Clears what provisioning recorded, so the next boot takes the name path.
+#: The record lives in a reserved `istota_kv` namespace the CLI refuses, so it
+#: goes through SQLite, as the daemon's uid. The two channel columns are
+#: cleared too: with them set, `provision-rooms` would not look `logs` and
+#: `alerts` up at all.
+FORGET_ROOMS = """
+import sqlite3
+conn = sqlite3.connect('/data/db/istota.db')
+conn.execute("DELETE FROM istota_kv WHERE user_id = 'testuser' AND namespace = '_provisioned_rooms'")
+conn.execute("UPDATE user_profiles SET log_channel = '', alerts_channel = '' WHERE user_id = 'testuser'")
+conn.commit()
+"""
 
 
 @pytest.fixture(scope="module")
@@ -105,8 +114,20 @@ def _nextcloud(stack):
     return stack.service("nextcloud")
 
 
+def _recorded_rooms(stack) -> dict[str, str]:
+    rows = stack.probe.query(
+        "SELECT key, value FROM istota_kv WHERE user_id = ? AND namespace = ?",
+        ["testuser", "_provisioned_rooms"],
+    )
+    recorded = {}
+    for row in rows:
+        value = json.loads(row["value"])
+        recorded[row["key"]] = value.get("token") if isinstance(value, dict) else value
+    return recorded
+
+
 class TestFirstInstallProvisioning:
-    """What `provision-nc.sh` and `entrypoint.sh` left behind on a cold volume set."""
+    """What `provision-nc.sh` and the entrypoint left behind on a cold volume set."""
 
     @pytest.mark.parametrize("service", ["istota", "web"])
     def test_both_login_methods_are_enabled(self, provisioned, service):
@@ -282,28 +303,42 @@ class TestFirstInstallProvisioning:
 
         assert len(istota_clients) == 1, clients
         assert istota_clients[0]["redirect_uri"] == expected
+        # And it is the client the daemon's config names: the pair is handed to
+        # `provision-nc.sh` and to the config alike, the route an operator takes
+        # with `istota setup`, since nothing copies a minted client any more.
+        config = provisioned.exec(["cat", "/data/config/config.toml"]).stdout
+        assert f'oauth2_client_id = "{istota_clients[0]["client_identifier"]}"' in config
 
-    def test_the_admin_allowlist_was_seeded_with_the_human_user(self, provisioned):
-        """`entrypoint.sh:32-38`, before anything else it does.
+    def test_the_first_admin_was_ensured_from_the_allowlist(self, provisioned):
+        """The entrypoint's one user bootstrap: with an empty profile table it
+        ensures the first id in the admins file, the file `istota setup`
+        writes. Nothing else creates a user, so a multi-user install is never
+        rewritten by a restart."""
+        admins = provisioned.exec(["cat", ADMINS_FILE])
+        assert admins.returncode == 0, admins.stderr
+        assert admins.stdout.split() == ["testuser"], admins.stdout
 
-        Up front deliberately: the web service polls for `config.toml` to start
-        serving, so an admins file landing *after* it would let web cache an
-        empty allowlist and 403 the dashboard until restart. `_user_is_web_admin`
-        fails closed on an empty allowlist.
-        """
-        result = provisioned.exec(["cat", ADMINS_FILE])
+        rows = provisioned.probe.query("SELECT user_id FROM user_profiles")
+        assert [row["user_id"] for row in rows] == ["testuser"]
 
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.split() == ["testuser"], result.stdout
+    def test_the_config_is_the_one_the_testbed_wrote(self, provisioned):
+        """The config is an input: the boot reads it and never writes it.
+        Compared against the bound file's bytes, since the daemon reading a
+        config it had rewritten would pass every other assertion here."""
+        written = (provisioned.config_dir / "config.toml").read_text()
+        in_container = provisioned.exec(["cat", "/data/config/config.toml"])
+
+        assert in_container.returncode == 0, in_container.stderr
+        assert in_container.stdout == written
 
     def test_the_default_talk_rooms_exist_as_group_rooms(self, provisioned):
-        """Three group rooms plus the one-to-one, with both users in each group.
+        """Three group rooms, with both users in each, recorded and seeded.
 
         `roomType=2`, not 3: #logs carries the daemon's execution log and
         #alerts carries confirmations and security alerts, and a public room is
-        joinable by anyone holding its token. `rooms/provision.py` is the
-        Ansible path's implementation of the same rule, and it is asserted
-        against `MagicMock`.
+        joinable by anyone holding its token. `istota nextcloud provision-rooms`
+        makes them, run by the entrypoint for the first admin; elsewhere it is
+        asserted against `MagicMock`.
         """
         nextcloud = _nextcloud(provisioned)
         rooms = nextcloud.rooms()
@@ -317,9 +352,15 @@ class TestFirstInstallProvisioning:
             assert "istota" in participants, (name, participants)
             assert "testuser" in participants, (name, participants)
 
-        assert any(
-            room.get("type") == ROOM_TYPE_ONE_TO_ONE for room in rooms
-        ), f"no 1:1 room among {[(r.get('displayName'), r.get('type')) for r in rooms]}"
+        recorded = _recorded_rooms(provisioned)
+        assert {name: by_name[name]["token"] for name in GROUP_ROOMS} == recorded
+        channels = provisioned.probe.query(
+            "SELECT log_channel, alerts_channel FROM user_profiles WHERE user_id = ?",
+            ["testuser"],
+        )
+        assert channels == [{
+            "log_channel": recorded["logs"], "alerts_channel": recorded["alerts"],
+        }]
 
 
 class TestReprovisioningIsIdempotent:
@@ -337,9 +378,10 @@ class TestReprovisioningIsIdempotent:
             room["token"]: room.get("displayName", "") for room in nextcloud.rooms()
         }
         before_clients = _oauth_names(nextcloud)
-        before_flag = provisioned.exec(["cat", API_PROVISION_FLAG]).stdout
+        before_record = _recorded_rooms(provisioned)
+        assert set(before_record) == set(GROUP_ROOMS), before_record
 
-        # --- a plain restart: the flag is present, so provisioning short-circuits
+        # --- a plain restart: the record names every room, so they are reused.
         provisioned.restart()
         provisioned.wait_healthy()
 
@@ -348,14 +390,13 @@ class TestReprovisioningIsIdempotent:
         )
         assert _oauth_names(nextcloud) == before_clients
 
-        # --- the flag is gone: every token is missing, so the whole API
-        # provisioning block re-runs and has to find the rooms by name rather
-        # than create a second set. This is the path `entrypoint.sh`'s helper
-        # comments describe and nothing has executed — the upgrade tier's stub
-        # returns one canned room, so `find_room_by_name` never matches there
-        # and every room takes the create branch.
-        removed = provisioned.exec(["rm", "-f", API_PROVISION_FLAG])
-        assert removed.returncode == 0, removed.stderr
+        # --- the record and the channel columns are gone, so every room is
+        # looked up again and has to be found by name rather than created. This
+        # is the path `rooms/provision.py` takes on a first provision against a
+        # Nextcloud that already has the rooms.
+        forgot = provisioned.exec(["python3", "-c", FORGET_ROOMS])
+        assert forgot.returncode == 0, forgot.stderr
+        assert _recorded_rooms(provisioned) == {}
 
         provisioned.restart()
         provisioned.wait_healthy()
@@ -371,11 +412,8 @@ class TestReprovisioningIsIdempotent:
         assert _oauth_names(nextcloud) == before_clients, (
             "a re-provisioning boot registered a second OAuth2 client"
         )
-
-        rewritten = provisioned.exec(["cat", API_PROVISION_FLAG])
-        assert rewritten.returncode == 0, rewritten.stderr
-        assert _tokens_of(rewritten.stdout) == _tokens_of(before_flag), (
-            "the rewritten provisioning flag names different room tokens"
+        assert _recorded_rooms(provisioned) == before_record, (
+            "the rewritten record names different room tokens"
         )
 
 
@@ -416,16 +454,14 @@ class TestTheDaemonTheDeploymentActuallyStarts:
     """Two properties of the booted container, both cheap and neither doctorable."""
 
     def test_a_bash_tool_call_succeeds_inside_a_task(self, provisioned):
-        """The real sandbox witness, and the reason the overlay grants seccomp.
+        """A task that runs a command, on the shape with a real boot behind it.
 
-        `render-config.sh:230` renders `sandbox_enabled` true and
-        `docker-compose.yml:168` leaves it true, so every filesystem-touching
-        task on this shape goes through bubblewrap. Without
-        `seccomp:unconfined`, Docker's default profile blocks the
-        `unshare(CLONE_NEWUSER)` bwrap needs and every one of them fails —
-        measured directly while this stage was written: `bwrap --unshare-user
-        --ro-bind / / -- /bin/true` inside the shipped image exits 1 with "No
-        permissions to create new namespace" without the grant and 0 with it.
+        The config writes `sandbox_enabled = true`, so every filesystem-touching
+        task here goes through bubblewrap, under the shipped seccomp profile.
+        Without the grant Docker's default profile blocks the
+        `unshare(CLONE_NEWUSER)` bwrap needs: `bwrap --unshare-user --ro-bind /
+        / -- /bin/true` inside the shipped image exits 1 with "No permissions to
+        create new namespace" without it and 0 with it.
 
         `doctor` cannot tell you this. It reports what is configured, and the
         configuration is identical either way; the only thing that knows is a
@@ -493,7 +529,7 @@ class TestTheDaemonTheDeploymentActuallyStarts:
             f"{CONTAINER_DB_DIR} inside the task is not a tmpfs, so this "
             "deployment is running its tasks unsandboxed. Check the daemon log "
             "for `Sandbox enabled but bubblewrap unavailable`, and check that "
-            "both `seccomp:unconfined` and `systempaths=unconfined` reached the "
+            "the seccomp profile and `systempaths=unconfined` reached the "
             f"container.\n--- probe ---\n{observed}\n"
             + provisioned.diagnostics(task)
         )
@@ -505,19 +541,16 @@ class TestTheDaemonTheDeploymentActuallyStarts:
         )
 
     def test_no_real_brain_credential_reaches_the_container(self, provisioned):
-        """Read the container, not the env-file, because the env-file loses.
+        """Read the dropped process's environment, which is what a task's
+        parent sees.
 
-        Compose lets the *process* environment outrank an `--env-file`, so a
-        developer with `ANTHROPIC_API_KEY` exported in the shell that started
-        pytest would beat anything `StackPool` writes into a file. The overlay
-        hardcodes all three as literals for exactly that reason, and this is
-        what proves the literals win — an assertion against the env-file could
-        not see the thing that outranks the env-file.
-
-        Values are compared against what the overlay sets rather than merely
-        checked for emptiness: `ISTOTA_BRAIN_NATIVE_API_KEY` is deliberately
-        non-empty (the daemon sends *something* to the scripted endpoint), so
-        "not empty" would pass on a real key too.
+        The credentials are secret files now, read into the environment by
+        `istota-secrets` after the drop, so nothing a developer exports in the
+        shell that started pytest can reach the container. Compared against
+        what the testbed wrote rather than merely checked for emptiness:
+        `ISTOTA_BRAIN_NATIVE_API_KEY` is deliberately non-empty (the daemon
+        sends *something* to the scripted endpoint), so "not empty" would pass
+        on a real key too.
         """
         result = provisioned.exec(["printenv"])
         assert result.returncode == 0, result.stderr
@@ -529,12 +562,12 @@ class TestTheDaemonTheDeploymentActuallyStarts:
 
         for variable, expected in BRAIN_CREDENTIALS.items():
             assert seen.get(variable, "") == expected, variable
-        # The credentials file `entrypoint.sh:690-700` writes when the OAuth
-        # token is non-empty. Its absence is the second half of the claim: a
-        # marker value rather than the empty string would have had the boot
-        # write a fake credential and log that Claude Code was configured.
+        # The credentials file the entrypoint writes when the OAuth token is
+        # non-empty. Its absence is the second half of the claim: a marker value
+        # rather than an empty file would have had the boot write a fake
+        # credential and log that Claude Code was configured.
         assert provisioned.exec(
-            ["test", "-e", "/root/.claude/.credentials.json"]
+            ["test", "-e", "/data/home/.claude/.credentials.json"]
         ).returncode != 0
 
 
@@ -544,27 +577,3 @@ def _room_names(nextcloud) -> list[str]:
 
 def _oauth_names(nextcloud) -> list[str]:
     return sorted(row.get("name", "") for row in nextcloud.oauth_clients())
-
-
-def _tokens_of(flag_body: str) -> dict[str, str]:
-    """The room-token lines out of `.api-provisioned`.
-
-    Only the token lines. That file also carries `APP_PASSWORD`, which is a
-    credential and has no business in a comparison whose failure message prints
-    both sides.
-
-    `LOCATION_INGEST_TOKEN` comes back with the rest and is empty on this
-    profile, because `FULL_MODULE_SWITCHES` leaves `ISTOTA_LOCATION_ENABLED`
-    false and `entrypoint.sh` only generates the value when it is true. An
-    earlier version filtered it out, which was inert and hid something real:
-    with location on, deleting `.api-provisioned` regenerates that token, but
-    the config render is gated on `config.toml` not existing — so `config.toml`
-    keeps the old value and the flag records one nothing reads. Noted rather
-    than fixed; it is a defect in `entrypoint.sh`, not in this comparison.
-    """
-    values = {}
-    for line in flag_body.splitlines():
-        key, _, value = line.partition("=")
-        if key.endswith("_TOKEN"):
-            values[key] = value
-    return values

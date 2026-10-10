@@ -6,7 +6,7 @@ it deliberately covers nothing about the deployment: no container, no scheduler,
 no config produced by the shipped generator, and no outbound path at all.
 
 This file is the other half. The daemon in the shipped image polls a real IMAP
-server it was pointed at by `render-config.sh`, ingests a message, runs it
+server its config points it at, ingests a message, runs it
 against the scripted model, and sends the answer back out over SMTP — and the
 assertion is on what arrives in the correspondent's mailbox. Between the two
 tiers, the only part of the inbound email path with no witness is the attachment
@@ -14,7 +14,7 @@ upload, which needs a Nextcloud and lives in `tests/full/`.
 
 **Every scenario invents its own sender**, and that is not decoration.
 `email_sender_rate_limit_messages` is twenty an hour per `(user, sender)`, and
-the setting is not one `render-config.sh` reads — so a profile cannot turn it
+the setting is not a config key — so a profile cannot turn it
 off without a second product change this stage did not scope. Distinct senders
 keep every scenario's count at one or two, which is what the limit is for.
 """
@@ -270,7 +270,7 @@ class TestAttachmentsWithoutNextcloud:
 
     **The spec expected the fallback branch here and that is not what happens.**
     `upload_file_to_inbox_v2` branches on `config.has_workspace`, not on the storage
-    backend, and `render-config.sh` writes `workspace_path` as the literal
+    backend, and the config names `workspace_path` as the literal
     `/mnt/shared` on every profile — so the "upload" is a `shutil.copy2` onto a
     directory, and it succeeds whether or not a Nextcloud exists to serve it.
     The local-path fallback is only reached when that copy *fails*, which on

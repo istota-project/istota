@@ -75,6 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Docker stack's configuration is now a file you own, written once by `istota setup`.** Run inside the image, the wizard asks about your Nextcloud (or none), the model backend, email, modules and optional containers, and writes `config.toml`, the admins file and the master key; credentials go to one file each under `docker/secrets/` instead of `.env`, so they no longer show in `docker inspect`. Nothing rewrites the config on boot any more, and `docker/init.sh` is gone.
+
+  **Upgrade note:** An existing install keeps its current `config.toml` as-is, and the new container starts from it. Move your credentials from `.env` into `docker/secrets/` (create an empty file for each name the compose file declares), or set them in `config.toml`, before recreating the stack. Settings you changed through `.env` now go in `config.toml`.
+
 - Search filters now use a dropdown beside the search field, with an X beside the Search title to close the dialog. The top navigation collapses into its menu at 800px.
 
 - Credentials now live in Istota's encrypted store. Import selected entries from KeePass, download a fresh password-protected copy, or register an age recipient for scheduled backups. Replaced and deleted values have bounded history, and sensitive actions require an emailed confirmation code. Imported entries remain editable even without a password, and their custom fields follow the entry’s access rules.

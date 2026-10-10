@@ -10,12 +10,11 @@ member that is a real server.
 Two consequences of it being real rather than a stub, both stated rather than
 worked around:
 
-- `config_env()` is **empty**, and that is not an oversight. `docker-compose.yml`
-  already points the daemon at `http://nextcloud` and `entrypoint.sh` derives
-  the app password from `BOT_PASSWORD`. A service inventing an `ISTOTA_*`
-  variable to announce its own presence would be the fixture side-loading
-  config, which is the property this tier is built to keep. What does vary with
-  the profile — whether Talk is on at all — is `FULL_MODULE_SWITCHES`' job.
+- `config()` is **empty**, and that is not an oversight. The full config
+  names `http://nextcloud`, the bot and its `Shared Files` mount in its base
+  (`stack.full_config`), because a full stack is a Nextcloud install by
+  definition. What does vary with the profile — whether Talk is on at all — is
+  `FULL_MODULE_SWITCHES`' job.
 - `reset()` deletes the Talk rooms this object created, and claims nothing
   else. A real server cannot be restored to a byte-identical state the way a
   truncate would, and a `reset` that attempts completeness and half-succeeds is
@@ -190,7 +189,7 @@ class NextcloudService:
         """`http://nextcloud` — the compose service name, not the host port."""
         return CONTAINER_URL
 
-    def config_env(self) -> dict[str, str]:
+    def config(self) -> dict:
         """Nothing. See the module docstring; this is deliberate."""
         return {}
 
@@ -210,11 +209,11 @@ class NextcloudService:
         the way a truncate would, and a `reset` that attempts completeness and
         half-succeeds is worse than one whose limits are written down.
 
-        - *The four rooms the boot made.* `entrypoint.sh:229-315` creates a 1:1
-          plus `#general`, `#logs` and `#alerts`, seeds `CHANNEL.md` for
-          `#general`, and posts an intro message into `#alerts`. Talk adds two
-          of its own per account (`Talk updates`, `Note to self`). All of it is
-          the profile's **baseline**: the daemon polls those four for the whole
+        - *The three rooms the boot made.* The entrypoint runs `istota
+          nextcloud provision-rooms` for the first admin, which creates
+          `#general`, `#logs` and `#alerts` as group rooms. Talk adds two of
+          its own per account (`Talk updates`, `Note to self`). All of it is
+          the profile's **baseline**: the daemon polls those rooms for the whole
           session and writes its execution log and confirmation traffic into two
           of them, so `rooms()` and `messages()` see a great deal no scenario
           created. A scenario asserts on a room it made, never on a count.
@@ -906,8 +905,9 @@ class NextcloudService:
         against the QueryBuilder, and so does this — the same workaround on the
         read side, which is the honest way to assert on what that one wrote.
 
-        Only `name` and `redirect_uri` come back. `client_identifier` is not an
-        assertion any scenario needs and `secret` is a credential; a reader that
+        `name`, `redirect_uri` and `client_identifier` come back, the last so
+        the provisioning suite can check it is the client the daemon's config
+        names. `secret` never does: it is a credential, and a reader that
         returns one puts it in a pytest failure report.
         """
         raw = self._exec(["php", "-r", _OAUTH_CLIENTS_PHP])
@@ -930,7 +930,7 @@ require '/var/www/html/lib/base.php';
 \\OC_App::loadApp('oauth2');
 $db = \\OC::$server->get(\\OCP\\IDBConnection::class);
 $qb = $db->getQueryBuilder();
-$rows = $qb->select('name', 'redirect_uri')->from('oauth2_clients')
+$rows = $qb->select('name', 'redirect_uri', 'client_identifier')->from('oauth2_clients')
     ->executeQuery()->fetchAll();
 echo "\\n" . json_encode(array_values($rows)) . "\\n";
 """

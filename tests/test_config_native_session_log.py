@@ -326,19 +326,23 @@ class TestResolveSessionLogDir:
         knobs and runs whatever this resolves to, so the comment has to name
         the real directory.
 
-        The ``db_path`` is read out of ``render-config.sh`` rather than written
-        here. An earlier version of this test asserted ``/data/istota.db`` ->
-        ``/data/logs``, a shape the deployment never produces: the generator
-        writes ``/data/db/istota.db``, so the real answer is ``/data/db/logs``.
-        It passed and confirmed a fabrication, and the documentation it was
-        standing behind was wrong in a way that matters — ``/data/logs`` is a
-        sibling of ``db_path.parent`` and would sit outside the mask that
-        ``/data/db/logs`` is inside.
+        The ``db_path`` is read out of what ``istota setup`` writes rather than
+        written here. An earlier version of this test asserted
+        ``/data/istota.db`` -> ``/data/logs``, a shape the deployment never
+        produces: the container config names ``/data/db/istota.db``, so the
+        real answer is ``/data/db/logs``. ``/data/logs`` is a sibling of
+        ``db_path.parent`` and would sit outside the mask that ``/data/db/logs``
+        is inside.
         """
-        render = (REPO / "docker" / "istota" / "render-config.sh").read_text()
-        match = re.search(r'^db_path\s*=\s*"([^"]+)"', render, re.M)
-        assert match, "render-config.sh no longer writes a literal db_path; re-read it"
-        db_path = Path(match.group(1))
+        import tomllib
+
+        from istota.setup_wizard import ContainerAnswers, render_container_config
+
+        written = tomllib.loads(render_container_config(
+            ContainerAnswers(user_id="alice", session_secret="s" * 64),
+            inline_credentials=False,
+        ))
+        db_path = Path(written["db_path"])
         resolved = session_log.resolve_session_log_dir(db_path, "")
         assert resolved == db_path.parent / "logs"
         # And the example config names that directory rather than another one.
@@ -518,18 +522,10 @@ class TestTheExampleConfigDocumentsIt:
             "They work and there is no way to learn they exist."
         )
 
-    def test_the_docker_decision_is_written_down(self):
-        """Resolved before implementation, item 2: Docker gets no knobs.
-
-        Recorded as a comment rather than left implicit, because the
-        half-wired version — a variable the generator reads and compose never
-        passes — is the documented defect class, and an implicit decision is
-        one the next person re-makes badly. The repo-wide invariant is held by
-        ``test_render_config.py``'s passthrough guard, which already scans
-        every ``ISTOTA_*`` name; this only pins that the reasoning stays where
-        somebody will find it.
-        """
+    def test_the_docker_note_names_the_real_directory(self):
+        """The container's config is the operator's own now, so these keys are
+        set in it like any other; the note says where the default lands."""
         text = EXAMPLE_CONFIG.read_text()
         block = text.split("[brain.native.session_log]", 1)[0].rsplit("# [brain.native]", 1)[-1]
         assert "DOCKER" in block
-        assert "render-config.sh" in block and "docker-compose.yml" in block
+        assert "istota setup" in block and "/data/db/logs" in block

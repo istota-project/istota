@@ -155,7 +155,7 @@ class MailServer:
     """Where a *host* process reaches the mail server.
 
     Never the container-side address: inside the compose network the server is
-    `mail` on the standard ports, and that pairing is `MailService.config_env`'s
+    `mail` on the standard ports, and that pairing is `MailService.config`'s
     to state. This is the other end — a published port on loopback, whichever
     one Docker picked.
     """
@@ -851,58 +851,51 @@ class MailService:
 
         A bare hostname rather than a URL, and it is the one member of the
         protocol that does not fit this service cleanly: mail is two protocols
-        on four ports and has no single address. `config_env()` is what actually
+        on four ports and has no single address. `config()` is what actually
         wires the daemon up; this exists so `diagnostics` and the fixture need
         no special case.
         """
         return SERVICE_NAME
 
-    def config_env(self) -> dict[str, str]:
-        """The `ISTOTA_EMAIL_*` variables the shipped generator reads.
+    def config(self) -> dict:
+        """The `[email]` block that points the daemon at this server.
 
-        Every one of these is read by `docker/istota/render-config.sh` *and*
-        passed through by `docker/docker-compose.yml`, which is the two-file
-        rule. Two of them — `ISTOTA_EMAIL_AUTHSERV_ID` and
-        `ISTOTA_EMAIL_CONFIRM_SENDER_MATCH` — were read by the generator and not
-        passed by compose until this service needed them; adding them was a
-        reviewed product change, not a fixture working around the gap.
-
-        There is no `ISTOTA_EMAIL_SMTP_USER` or `..._PASSWORD`, and there does
-        not need to be: `Config.effective_smtp_user` and
-        `effective_smtp_password` fall back to the IMAP credentials, and this
-        rig uses one bot account for both. That is the kind of thing a "no
-        product change" claim rests on, so it is stated rather than assumed.
+        There is no `smtp_user` or `smtp_password`, and there does not need to
+        be: `Config.effective_smtp_user` and `effective_smtp_password` fall back
+        to the IMAP credentials, and this rig uses one bot account for both.
 
         `authserv_id` is `mail`, which is the server's own hostname. The DMARC
         canary only reads a verdict from a header stamped by an authserv-id it
         was told to trust, so a scenario that wants a verdict seen writes
         `Authentication-Results: mail; …` — and one that wants it ignored writes
-        any other id.
+        any other id. `confirm_sender_match` is the shipped default, `off`; the
+        profiles that exercise `verify` set it themselves.
         """
         return {
-            "ISTOTA_EMAIL_ENABLED": "true",
-            "ISTOTA_EMAIL_IMAP_HOST": SERVICE_NAME,
-            "ISTOTA_EMAIL_IMAP_PORT": str(IMAP_TLS_PORT),
-            "ISTOTA_EMAIL_IMAP_USER": BOT_ADDRESS,
-            "ISTOTA_EMAIL_IMAP_PASSWORD": MAIL_PASSWORD,
-            "ISTOTA_EMAIL_SMTP_HOST": SERVICE_NAME,
-            "ISTOTA_EMAIL_SMTP_PORT": str(SMTP_TLS_PORT),
-            "ISTOTA_EMAIL_POLL_FOLDER": "INBOX",
-            "ISTOTA_EMAIL_BOT_ADDRESS": BOT_ADDRESS,
-            "ISTOTA_EMAIL_AUTHSERV_ID": SERVICE_NAME,
-            "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "off",
+            "email": {
+                "enabled": True,
+                "imap_host": SERVICE_NAME,
+                "imap_port": IMAP_TLS_PORT,
+                "imap_user": BOT_ADDRESS,
+                "imap_password": MAIL_PASSWORD,
+                "smtp_host": SERVICE_NAME,
+                "smtp_port": SMTP_TLS_PORT,
+                "poll_folder": "INBOX",
+                "bot_email": BOT_ADDRESS,
+                "authserv_id": SERVICE_NAME,
+                "confirm_sender_match": "off",
+            },
         }
 
     def compose_env(self) -> dict[str, str]:
         """Interpolation variables the mail overlay needs, which are not config.
 
-        Distinct from `config_env()` and held to a different rule. Those point
-        the *daemon* at a service and may only name variables the shipped
-        generator reads; these are host paths a compose file binds, and compose
-        resolves a relative bind against the first `-f` file's directory — which
-        is `docker/`, not this package. An absolute path passed through the
-        env-file is how `docker-compose.test.yml` already handles the rendered
-        config directory, and this is the same mechanism.
+        Distinct from `config()`, which points the *daemon* at a service
+        through `config.toml`; these are host paths a compose file binds, and
+        compose resolves a relative bind against the first `-f` file's
+        directory — which is `docker/`, not this package. An absolute path
+        passed through the env-file is how both shapes receive the config
+        directory, and this is the same mechanism.
         """
         return {
             "ISTOTA_TESTBED_MAIL_CONF": str(CONF_DIR),

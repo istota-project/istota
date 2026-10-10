@@ -257,7 +257,7 @@ The CLI brains have their own JSONL (bound into the sandbox on purpose); istota'
 - **Operator `dir` is trusted** (like `sandbox_cache_dir`); `/`, `.`, `..` and null bytes refused; the sweep unlinks `*.jsonl` at any depth under it.
 - **Retention** (step 7b): `retention_days` or `max_total_gb`, gated on `enabled`, so **`enabled = false` stops the sweep too** (open question). Evict largest user first, then oldest; never inside `LIVE_WINDOW_SECONDS`.
 - **Reading** via `session/session_log_read.py` (one parser for `istota session …` and `istota-skill tasks transcript`; see `.claude/rules/skills.md`).
-- No Docker env knobs or Ansible block, deliberately; adding one needs `render-config.sh` and compose both.
+- No Ansible block, deliberately; on the container the operator sets them in their own config.
 
 ## TmuxClaudeBrain (`brain/tmux_claude.py`)
 

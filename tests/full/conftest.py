@@ -1,10 +1,9 @@
 """The full shape: the deployment as shipped, booted through its own entrypoint.
 
 `docker/docker-compose.yml` plus `testbed/compose/testbed.yml` — postgres,
-redis, nextcloud, istota, web and nginx. Nothing is rendered on the host: the
-container runs `render-config.sh` itself, from the environment compose passed
-it, exactly as in production. That is the whole reason this shape exists, and it
-is what makes `entrypoint.sh` and `provision-nc.sh` witnessable at all.
+redis, nextcloud, istota, web and nginx, booted through the shipped entrypoint
+from a `config.toml` the testbed writes, the way `istota setup` would. It is
+what makes `entrypoint.sh` and `provision-nc.sh` witnessable at all.
 
 Everything the shape shares with the lean one lives in `tests/conftest.py` — the
 `stacks` and `stack` fixtures, the xdist guards, the sweep. What is here is the
@@ -31,12 +30,10 @@ flag file.
 from __future__ import annotations
 
 import os
-import re
 
 import pytest
 
 from testbed import stack as stack_support
-from testbed.stack import CONTAINER_CONFIG
 
 from ..support import email_flow
 from ..support import email_people as email_people_support
@@ -72,19 +69,22 @@ def _refuse_keep_for_the_full_tier():
 
 
 def alerts_token(stack) -> str:
-    """The host's Talk alerts room, as the container rendered it.
+    """The host's Talk alerts room, as the boot provisioned it.
 
-    `entrypoint.sh` provisions `#alerts` and `render-config.sh` writes its token
-    as testuser's `alerts_channel`, which is the default route an `alert` push
+    The entrypoint runs `istota nextcloud provision-rooms` for the first admin,
+    which creates `#alerts` and seeds its token into testuser's
+    `alerts_channel` profile column. That is the default route an `alert` push
     takes on this shape.
     """
-    rendered = stack.exec(["cat", CONTAINER_CONFIG])
-    found = re.search(r'^alerts_channel = "([^"]+)"', rendered.stdout, re.M)
-    if rendered.returncode != 0 or found is None:
+    rows = stack.probe.query(
+        "SELECT alerts_channel FROM user_profiles WHERE user_id = ?", ["testuser"],
+    )
+    token = (rows[0].get("alerts_channel") or "") if rows else ""
+    if not token:
         raise stack_support.StackError(
-            f"no alerts_channel in the rendered config:\n{rendered.stdout}"
+            f"testuser has no alerts_channel; the boot provisioned no #alerts: {rows}"
         )
-    return found.group(1)
+    return token
 
 
 @pytest.fixture

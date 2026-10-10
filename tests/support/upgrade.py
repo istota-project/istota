@@ -590,7 +590,7 @@ def capture_config(
             )
 
         # Written through a `.partial` sibling and `os.replace`d into place, for
-        # the same reason `render-config.sh` does it with the real config: the
+        # the same reason the old entrypoint's render did it with the real config: the
         # only cache-validity test here is `cached.exists()`, so a Ctrl-C or a
         # full disk part-way through the copy leaves a truncated file that is
         # indistinguishable from a good one and gets served to every later run.
@@ -687,11 +687,8 @@ def _scrub(text: str, env: dict[str, str]) -> str:
     return text
 
 
-RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
-
-
 def render_current_config(destination: Path) -> Path:
-    """Today's `config.toml`, from the shipped render script on the host.
+    """Today's `config.toml`, as the current `istota setup` writes it.
 
     The drift check's control needs a config that *should not* drift, and it
     must not come from an anchor: tying it to the code shape made it skip on
@@ -699,41 +696,37 @@ def render_current_config(destination: Path) -> Path:
     volume`), and made `--from-floor --shape both` red by construction, because
     the override then anchors the code shape at the floor too.
 
-    Rendered by the same script the container would run, as
-    `tests/smoke/conftest.py` does, so the control is a real current config
-    rather than a fixture's idea of one. The `[developer]` inputs mirror
+    Written by the wizard's own renderer, so the control is a real current
+    config rather than a fixture's idea of one. The `[developer]` values mirror
     `render_env`'s so the two configs differ in the release that produced them
-    and nothing else.
+    and nothing else. Credentials inline, as a run without `--vm-dir` writes
+    them, since this config is read with no secrets directory.
     """
+    import tomli_w
+
+    from istota.setup_wizard import ContainerAnswers, container_config_document
+
+    base = render_env(nextcloud_url="http://nextcloud")
+    answers = ContainerAnswers(
+        user_id=base["USER_NAME"],
+        display_name=base["USER_DISPLAY_NAME"],
+        user_email=base["USER_EMAIL"],
+        nextcloud_url="http://nextcloud",
+        nextcloud_username=base["BOT_USER"],
+        nextcloud_app_password=base["BOT_PASSWORD"],
+        developer_enabled=True,
+        gitlab_token=base["ISTOTA_DEVELOPER_GITLAB_TOKEN"],
+        session_secret="upgrade-harness-session-secret-" + "0" * 32,
+    )
+    document = container_config_document(answers, inline_credentials=True)
+    document["developer"].update({
+        "gitlab_url": base["ISTOTA_DEVELOPER_GITLAB_URL"],
+        "gitlab_username": base["ISTOTA_DEVELOPER_GITLAB_USERNAME"],
+        "gitlab_default_namespace": base["ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE"],
+    })
     destination.mkdir(parents=True, exist_ok=True)
     config_file = destination / "config.toml"
-    base = render_env(nextcloud_url="http://nextcloud")
-    environment = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "CONFIG_FILE": str(config_file),
-        "USER_NAME": base["USER_NAME"],
-        "NC_URL": "http://nextcloud",
-        "APP_PASSWORD": base["BOT_PASSWORD"],
-        "BOT_USER": base["BOT_USER"],
-        "USER_TIMEZONE": "UTC",
-    }
-    for key, value in base.items():
-        if key.startswith("ISTOTA_DEVELOPER_"):
-            environment[key] = value
-
-    result = subprocess.run(
-        ["bash", str(RENDER_CONFIG)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=environment,
-    )
-    if result.returncode != 0 or not config_file.exists():
-        raise UpgradeHarnessError(
-            f"render-config.sh exited {result.returncode} and the control has no "
-            f"current config to compare against\n--- stdout ---\n{result.stdout}\n"
-            f"--- stderr ---\n{_scrub(result.stderr, environment)}"
-        )
+    config_file.write_text(tomli_w.dumps(document))
     return config_file
 
 

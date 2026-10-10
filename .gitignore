@@ -52,6 +52,8 @@ config/config.dev.toml
 /tmp/istota/
 .env
 .env.*
+# The compose stack's credential files, one per secret, written by `istota setup`.
+/docker/secrets/
 # Scratch portfolio/brokerage CSVs dropped at the repo root while working on the
 # money module. Ignored by shape rather than by name: this repo is public, and a
 # broker export is exactly the file that carries an account number if the next

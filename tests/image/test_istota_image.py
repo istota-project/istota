@@ -20,16 +20,16 @@ a **literal here** — not imported from `istota`, not parsed out of the
 Dockerfile. A witness whose oracle vanishes along with its subject is not a
 witness.
 
-**Group C — the generated config.** `render-config.sh` under three fabricated
-environments, one of which exists specifically to make Group A's forge checks
-run rather than skip.
+**Group C — the written config.** The image's own `istota setup`, run
+non-interactively for three fabricated installs, one of which exists
+specifically to make Group A's forge checks run rather than skip.
 
 Two traps this file is built around, both found by reviewing an earlier draft of
 the spec against the bug it was written to catch:
 
-*The skip trap.* The compose defaults leave `repos_dir` and both tokens empty,
-so the forge checks `skip` — and "no fail under the compose defaults" is green
-on the exact pre-fix image that shipped ISSUE-263. Group A therefore names the
+*The skip trap.* A setup without the developer skill leaves `repos_dir` and both
+tokens empty, so the forge checks `skip` — and "no fail" there is green on the
+exact pre-fix image that shipped ISSUE-263. Group A therefore names the
 environment that makes the checks it cares about actually run, and asserts they
 came back `ok` rather than merely not-failing. An assertion that tolerates
 `skip` is not an assertion.
@@ -115,7 +115,7 @@ EXTRA_WITNESSES = {
     "istota": "the project itself",
 }
 WEB_INDEX = "/app/web/build/index.html"
-RENDER_CONFIG = "/render-config.sh"
+ISTOTA_SECRETS = "/usr/local/bin/istota-secrets"
 ENTRYPOINT = "/entrypoint.sh"
 ROOT_PHASE = "/usr/local/sbin/istota-root-phase"
 ISTOTA_DROP = "/usr/local/bin/istota-drop"
@@ -134,37 +134,38 @@ def _dockerfile_arg(name: str) -> str:
     return match.group(1)
 
 
-# --- Group C's three environments, which Group A also consumes. ---------------
+# --- Group C's three setups, which Group A also consumes. ---------------------
+
+#: Where each setup writes, inside a volume-less container.
+SETUP_DATA_DIR = "/tmp/data"
+SETUP_CONFIG = f"{SETUP_DATA_DIR}/config/config.toml"
+SETUP_BASE = (
+    f"istota setup --yes --data-dir {SETUP_DATA_DIR} --user testuser"
+    " --nextcloud-url http://nextcloud:80 --nextcloud-user istota --brain claude_code"
+)
 
 
-def _base_env(**extra: str) -> dict[str, str]:
-    """The inputs render-config.sh needs, plus whatever the shape adds."""
-    return {
-        "CONFIG_FILE": "/tmp/rendered.toml",
-        "USER_NAME": "testuser",
-        "NC_URL": "http://nextcloud:80",
-        "APP_PASSWORD": "app-password-value",
-        "BOT_USER": "istota",
-        **extra,
-    }
+def _setup(argv: str = "", **credentials: str) -> tuple[str, dict[str, str]]:
+    """One non-interactive `istota setup` in the container, and its environment.
+
+    Credentials ride in the environment under the names the daemon reads, which
+    is how a `--yes` run takes them, never argv.
+    """
+    env = {"ISTOTA_NEXTCLOUD_APP_PASSWORD": "app-password-value", **credentials}
+    return f"{SETUP_BASE} {argv}".strip(), env
 
 
 # The third shape is the one with teeth. Without a token the forge checks skip,
 # and a skipping check cannot fail on a broken image.
 ENVIRONMENTS = {
-    "developer-off": _base_env(),
-    "developer-no-token": _base_env(
-        ISTOTA_DEVELOPER_ENABLED="true",
-        ISTOTA_DEVELOPER_REPOS_DIR="/data/repos",
-    ),
+    "developer-off": _setup(),
+    "developer-no-token": _setup("--developer"),
     # The token values carry no real forge prefix on purpose: the checks that
     # consume them only ask whether a token is configured, and a fixture shaped
     # like a real credential trips the repo's own secret scanner.
-    "developer-with-token": _base_env(
-        ISTOTA_DEVELOPER_ENABLED="true",
-        ISTOTA_DEVELOPER_REPOS_DIR="/data/repos",
+    "developer-with-token": _setup(
+        "--developer",
         ISTOTA_DEVELOPER_GITLAB_TOKEN="fabricated-gitlab-token-for-tests",
-        ISTOTA_DEVELOPER_GITLAB_URL="http://gitlab.test",
         ISTOTA_DEVELOPER_GITHUB_TOKEN="fabricated-github-token-for-tests",
     ),
 }
@@ -175,24 +176,25 @@ ENVIRONMENTS = {
 FORGE_ENVIRONMENTS = ("developer-with-token",)
 
 
-def _render_and_doctor(image, env: dict[str, str]) -> tuple[list[dict], int]:
-    """Render a config in the container, then run doctor against it.
+def _then(shape: str, script: str) -> tuple[str, dict[str, str]]:
+    """Run `istota setup` for `shape`, then `script`, in one container.
 
-    One `docker run`, not two: the rendered file lives in the container's
-    filesystem and a second `--rm` run would not see it.
+    One `docker run`, not two: the written file lives in the container's
+    filesystem and a second `--rm` run would not see it. Setup's own output is
+    discarded, so `script`'s stdout is what the caller parses.
+    """
+    command, env = ENVIRONMENTS[shape]
+    return f"{command} >/dev/null && {script}", env
+
+
+def _setup_and_doctor(image, shape: str) -> tuple[list[dict], int]:
+    """Write a config with the image's own `istota setup`, then run doctor on it.
 
     Returns the parsed results *and* the exit code. Doctor exits 1 on any FAIL,
-    which the spec asks Group A to assert directly — an earlier version threw
-    the `CompletedProcess` away and left a docstring claiming the exit code was
-    checked somewhere below, where nothing could reach it.
+    which Group A asserts directly.
     """
-    config = env["CONFIG_FILE"]
-    result = sh(
-        image,
-        # `-c` is a global option and goes before the subcommand.
-        f"{RENDER_CONFIG} >/dev/null && istota -c {config} doctor --json --scope image",
-        env=env,
-    )
+    script, env = _then(shape, f"istota -c {SETUP_CONFIG} doctor --json --scope image")
+    result = sh(image, script, env=env)
     assert result.stdout.strip(), (
         f"no doctor output\n--- stdout ---\n{result.stdout}\n"
         f"--- stderr ---\n{result.stderr}"
@@ -220,7 +222,7 @@ class TestGroupATheDoctorUmbrella:
         status this file does not know about is a failure rather than a filter
         that silently selects nothing.
         """
-        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _setup_and_doctor(istota_image, shape)
 
         observed = {r["status"] for r in results}
         assert observed, "doctor reported no checks at all"
@@ -232,7 +234,7 @@ class TestGroupATheDoctorUmbrella:
 
     @pytest.mark.parametrize("shape", sorted(ENVIRONMENTS))
     def test_no_check_fails(self, istota_image, shape):
-        results, exit_code = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, exit_code = _setup_and_doctor(istota_image, shape)
 
         failed = [r for r in results if r["status"] == STATUS_FAIL]
         assert not failed, "\n".join(
@@ -249,20 +251,20 @@ class TestGroupATheDoctorUmbrella:
         # Guard on the umbrella. A `--scope image` that filtered everything out
         # would make the assertion above vacuously true, and the failure mode
         # looks identical to a healthy image.
-        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _setup_and_doctor(istota_image, shape)
 
         assert len(results) >= 5, f"only {len(results)} checks ran: {results}"
 
     @pytest.mark.parametrize("shape", FORGE_ENVIRONMENTS)
     def test_the_forge_checks_ran_and_passed(self, istota_image, shape):
-        # The whole reason this environment exists. Under the compose defaults
-        # these checks skip, and "no FAIL" is then green on the pre-fix image
+        # The whole reason this environment exists. Without a token these
+        # checks skip, and "no FAIL" is then green on the pre-fix image
         # that shipped ISSUE-263.
         #
         # Asserted positively — every forge check reported `ok` — rather than as
         # "did not skip". Verified against the negative control: on an image
         # with /usr/local/lib/istota_forge removed, this reports `fail` on both.
-        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _setup_and_doctor(istota_image, shape)
         forge = [r for r in results if r["name"].startswith("developer.forge_binaries")]
 
         assert forge, "no developer.forge_binaries check ran at all"
@@ -277,7 +279,7 @@ class TestGroupATheDoctorUmbrella:
     def test_every_warning_carries_a_remedy(self, istota_image, shape):
         # A WARN an operator cannot act on is a line of noise that trains them
         # to ignore the next one.
-        results, _ = _render_and_doctor(istota_image, ENVIRONMENTS[shape])
+        results, _ = _setup_and_doctor(istota_image, shape)
         mute = [r for r in results if r["status"] == STATUS_WARN and not r["remedy"]]
 
         assert not mute, [r["name"] for r in mute]
@@ -449,14 +451,14 @@ class TestGroupBTheRuntime:
             f"import {module} (the [{extra}] extra)",
         )
 
-    @pytest.mark.parametrize("script", [ENTRYPOINT, RENDER_CONFIG, ROOT_PHASE])
+    @pytest.mark.parametrize("script", [ENTRYPOINT, ROOT_PHASE, ISTOTA_SECRETS])
     def test_the_shell_script_parses(self, istota_image, script):
         # `bash -n`, not `sh -n`: both files are #!/bin/bash, /bin/sh in this
         # image is dash, and dash would check the wrong grammar — giving a
         # different verdict here than the same check run on a macOS host.
         assert_ok(sh(istota_image, f"bash -n {script}"), f"bash -n {script}")
 
-    @pytest.mark.parametrize("script", [ENTRYPOINT, RENDER_CONFIG, ROOT_PHASE, ISTOTA_DROP])
+    @pytest.mark.parametrize("script", [ENTRYPOINT, ROOT_PHASE, ISTOTA_DROP, ISTOTA_SECRETS])
     def test_the_shell_script_is_executable(self, istota_image, script):
         assert_ok(sh(istota_image, f"test -x {script}"), f"{script} is not executable")
 
@@ -512,8 +514,8 @@ class TestTheDropToTheDaemonsUser:
         )
 
 
-class TestGroupCTheGeneratedConfig:
-    """render-config.sh runs in the container and produces a loadable config.
+class TestGroupCTheWrittenConfig:
+    """`istota setup` runs in the container and writes a loadable config.
 
     The path assertions are an explicit short list, not a sweep. An earlier
     draft said "every filesystem path the resulting Config names either exists
@@ -536,24 +538,35 @@ class TestGroupCTheGeneratedConfig:
     """
 
     @pytest.mark.parametrize("shape", sorted(ENVIRONMENTS))
-    def test_the_render_succeeds(self, istota_image, shape):
-        env = ENVIRONMENTS[shape]
-        result = sh(istota_image, f"{RENDER_CONFIG} && test -s {env['CONFIG_FILE']}", env=env)
+    def test_setup_writes_the_files(self, istota_image, shape):
+        script, env = _then(
+            shape,
+            f"test -s {SETUP_CONFIG} && test -s {SETUP_DATA_DIR}/.secret_key"
+            f" && grep -qx testuser {SETUP_DATA_DIR}/config/admins",
+        )
 
-        assert_ok(result, f"render-config.sh under {shape}")
+        assert_ok(sh(istota_image, script, env=env), f"istota setup under {shape}")
+
+    def test_the_image_selects_the_container_half(self, istota_image):
+        """`ISTOTA_SETUP_SHAPE=container` in the image is what makes a bare
+        `istota setup` write the container's config rather than a standalone
+        install's under the root user's home."""
+        assert_ok(
+            sh(istota_image, "env | grep -x ISTOTA_SETUP_SHAPE=container"),
+            "ISTOTA_SETUP_SHAPE in the image environment",
+        )
 
     @pytest.mark.parametrize("shape", sorted(ENVIRONMENTS))
     def test_load_config_accepts_the_result(self, istota_image, shape):
-        env = ENVIRONMENTS[shape]
         # load_config takes a Path, not a str — it calls `.exists()` on it.
-        script = (
-            f"{RENDER_CONFIG} >/dev/null && python -c "
-            f"'from pathlib import Path; from istota.config import load_config; "
-            f'c = load_config(Path("{env["CONFIG_FILE"]}")); print(sorted(c.users))\''
+        script, env = _then(
+            shape,
+            "python -c 'from pathlib import Path; from istota.config import load_config; "
+            f'c = load_config(Path("{SETUP_CONFIG}")); print(sorted(c.users))\'',
         )
         result = sh(istota_image, script, env=env)
 
-        assert_ok(result, f"load_config on the config rendered under {shape}")
+        assert_ok(result, f"load_config on the config setup wrote under {shape}")
         assert "testuser" in result.stdout
 
     def test_the_forge_paths_the_config_names_exist(self, istota_image):
@@ -564,20 +577,19 @@ class TestGroupCTheGeneratedConfig:
         what `30bb7c83` added for upgraded containers. It also means an
         assertion that only checks the resolver's output is blind to exactly one
         value: `/usr/local/bin/gh`, which is the value ISSUE-263 shipped.
-        Measured — a control image whose render wrote that path passed the whole
-        tier.
+        Measured — a control image whose config named that path passed the
+        whole tier.
 
         So both are asserted. The raw path is what the config actually says; the
         resolved path is what a task actually execs.
         """
-        env = ENVIRONMENTS["developer-with-token"]
-        script = (
-            f"{RENDER_CONFIG} >/dev/null && python -c "
-            f"'from pathlib import Path; from istota.config import load_config; "
-            f"from istota.sandbox.forge_bin import resolve_real_bin; "
-            f'c = load_config(Path("{env["CONFIG_FILE"]}")).developer; '
-            f'print(c.gh_bin_path, resolve_real_bin(c.gh_bin_path, "gh")); '
-            f'print(c.glab_bin_path, resolve_real_bin(c.glab_bin_path, "glab"))\''
+        script, env = _then(
+            "developer-with-token",
+            "python -c 'from pathlib import Path; from istota.config import load_config; "
+            "from istota.sandbox.forge_bin import resolve_real_bin; "
+            f'c = load_config(Path("{SETUP_CONFIG}")).developer; '
+            'print(c.gh_bin_path, resolve_real_bin(c.gh_bin_path, "gh")); '
+            'print(c.glab_bin_path, resolve_real_bin(c.glab_bin_path, "glab"))\'',
         )
         result = sh(istota_image, script, env=env)
         assert_ok(result, "resolving the configured forge paths")

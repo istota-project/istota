@@ -31,7 +31,7 @@ from tests.support import parity
 
 pytestmark = pytest.mark.smoke
 
-#: `render-config.sh`: `workspace_path`, `temp_dir`, and the user and bot name
+#: the testbed's config: `workspace_path`, `temp_dir`, and the user and bot name
 #: the lean profile renders. Restated so a scenario reads as one thing; the
 #: control below fails if any of them is not where the daemon put it.
 WORKSPACE = "/mnt/shared"
@@ -58,7 +58,8 @@ PRIVATE = "sr-private"
 SEED = f"""
 import json, sys
 from pathlib import Path
-from istota import db, room_policy
+from istota import db
+from istota.rooms import policy as room_policy
 from istota.config import load_config
 
 config = load_config(Path({CONFIG!r}))

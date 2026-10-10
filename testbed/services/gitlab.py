@@ -132,15 +132,15 @@ class GitLabService(HttpStub):
     name = "gitlab"
 
     #: Container-side directories this service's scenarios write into, cleared
-    #: by `Stack.reset`. `/data/repos` is what `config_env` points
-    #: `ISTOTA_DEVELOPER_REPOS_DIR` at, and it is the checkout the model clones
+    #: by `Stack.reset`. `/data/repos` is what `config` points
+    #: `[developer] repos_dir` at, and it is the checkout the model clones
     #: into — so under a session-scoped stack the second scenario's
     #: `git clone <url> project` fails with "destination path already exists",
     #: never reaches the listener, and reports itself as a forge that was never
     #: called. Found by running the tier, not by reading it.
     #:
     #: Declared on the service rather than on the profile so it cannot drift
-    #: from the variable in `config_env` that put the daemon there.
+    #: from the key in `config` that put the daemon there.
     container_state_paths: tuple[str, ...] = (CONTAINER_REPOS_DIR,)
 
     def __init__(
@@ -219,24 +219,29 @@ class GitLabService(HttpStub):
 
     # -- the `Service` members --------------------------------------------
 
-    def config_env(self) -> dict[str, str]:
+    def config(self) -> dict:
         """Turn the `[developer]` block on and point it at this stub.
 
-        All six are read by `docker/istota/render-config.sh` and passed through
-        by `docker/docker-compose.yml`. The block is therefore produced by the
-        shipped generator rather than written by a fixture, so a change that
-        breaks that generation fails in this tier rather than in production.
+        The same keys the container's `istota setup` writes for the developer
+        skill (the repos directory and the two forge binaries' paths), plus the
+        forge this stub is. The token is inline: the lean stack has no secrets
+        directory, and the secret-isolation scenario is about the token never
+        reaching a task, which holds wherever the daemon read it from.
         """
         return {
-            "ISTOTA_DEVELOPER_ENABLED": "true",
-            # A tmpfs the compose file already declares. The developer skill
-            # binds it read-write into the sandbox, which is where the scenarios
-            # clone.
-            "ISTOTA_DEVELOPER_REPOS_DIR": CONTAINER_REPOS_DIR,
-            "ISTOTA_DEVELOPER_GITLAB_URL": self.container_url,
-            "ISTOTA_DEVELOPER_GITLAB_TOKEN": self.token,
-            "ISTOTA_DEVELOPER_GITLAB_USERNAME": STUB_USER["username"],
-            "ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE": self.project.split("/")[0],
+            "developer": {
+                "enabled": True,
+                # A tmpfs the compose file already declares. The developer skill
+                # binds it read-write into the sandbox, which is where the
+                # scenarios clone.
+                "repos_dir": CONTAINER_REPOS_DIR,
+                "gh_bin_path": "/usr/local/lib/istota_forge/gh",
+                "glab_bin_path": "/usr/local/lib/istota_forge/glab",
+                "gitlab_url": self.container_url,
+                "gitlab_token": self.token,
+                "gitlab_username": STUB_USER["username"],
+                "gitlab_default_namespace": self.project.split("/")[0],
+            },
         }
 
     @contextmanager
@@ -850,7 +855,7 @@ def serve(
     path", which `HttpStub.start` allows only on a loopback bind.
     """
     repo_root.mkdir(parents=True, exist_ok=True)
-    # Resolved once, so `self.token` (what `config_env` advertises to the
+    # Resolved once, so `self.token` (what `config` advertises to the
     # daemon) and `credential` (what the git path challenges for) cannot end up
     # holding different values. They did when the default was applied in one
     # place and not the other, and the symptom was the daemon's own push being

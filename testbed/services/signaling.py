@@ -128,30 +128,28 @@ class SignalingService:
         """What a process inside the istota container reaches the server on."""
         return f"http://{CONTAINER_SERVICE}:{CONTAINER_PORT}"
 
-    def config_env(self) -> dict[str, str]:
+    def config(self) -> dict:
         """Point the daemon straight at the container, rather than at Talk's answer.
 
         `[talk.signaling] url` is the operator's override for "the daemon must
         reach the HPB by a different route than the one Nextcloud advertises to
-        browsers", and a compose deployment is exactly that shape: Talk hands
-        out whatever public URL a browser uses while the daemon sits on the
-        container network beside the server. Setting it here also means a
-        scenario does not depend on which URL `provision-nc.sh` happened to
-        register.
+        browsers", and a compose deployment is exactly that shape. Setting it
+        here also means a scenario does not depend on which URL
+        `provision-nc.sh` happened to register.
 
-        What it deliberately does *not* set is `ISTOTA_TALK_SIGNALING_ENABLED`.
-        That is a module switch, so it lives in `stack.FULL_MODULE_SWITCHES`
-        beside the other eight — and it must stay off on the lean shape, where
-        there is no Nextcloud to report `signalingMode` and the daemon's
-        `require_hpb` refusal would stop the container booting at all.
+        What it deliberately does *not* set is `enabled`. That is a subsystem
+        switch, so it lives in `stack.FULL_MODULE_SWITCHES` — and it must stay
+        off on the lean shape, where there is no Nextcloud to report
+        `signalingMode` and the daemon's `require_hpb` refusal would stop the
+        container booting at all.
         """
-        return {"ISTOTA_TALK_SIGNALING_URL": self.container_url}
+        return {"talk": {"signaling": {"url": self.container_url}}}
 
     def compose_env(self) -> dict[str, str]:
         """What the compose files need to run and reach the container.
 
-        These configure the *container*, not the daemon, so the two-file rule
-        that governs `config_env()` does not reach them — see `stack.compose_env`.
+        These configure the *container*, not the daemon, so they are not
+        `config()` keys — see `stack.compose_env`.
         Both shapes read the same names, because both declare the service from
         the same set of variables.
 

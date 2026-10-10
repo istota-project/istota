@@ -12,10 +12,11 @@ fixture under xdist is per-*worker* — N workers would each race to ``docker
 build`` the same tag. The guard below fails the session with the reason rather
 than leaving that to be diagnosed from interleaved output.
 
-**The image's own ENTRYPOINT is unusable here.** It waits up to 600s for
-``/mnt/shared/.istota-provisioned`` and then exits 1, so every ``docker run`` in
-this tier overrides it. That is also why Group C runs ``render-config.sh``
-directly: in a volume-less container there is nothing to provision against.
+**The image's own ENTRYPOINT is not what this tier runs.** It is the root
+phase, which needs the run contract's grant, and then a daemon; a check of what
+the image *contains* overrides it, and Group C runs the image's own ``istota
+setup`` directly to write the config it inspects. The upgrade tier is where the
+entrypoint itself runs (``tests/image/test_upgrade.py``).
 
 Skips happen at *setup*, never at import. Collection must not require a Docker
 daemon, so a developer without one running still collects a clean session.
@@ -231,9 +232,9 @@ def scrub(text: str, env: dict[str, str] | None) -> str:
     a token has no universal shape, and the one thing we do reliably know here
     is which variables we ourselves put in the environment.
 
-    Both the raw value and its TOML-escaped form, because `render-config.sh`
+    Both the raw value and its TOML-escaped form, because `istota setup`
     escapes `"` and `\\` before writing a credential into config.toml — so a
-    token containing either appears in the rendered file, and therefore in a
+    token containing either appears in the written file, and therefore in a
     failing Group C assertion, in a form a literal replace would walk straight
     past.
     """

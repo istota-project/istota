@@ -4,9 +4,9 @@ paths:
   - "src/istota/updater.py"
 ---
 
-# The standalone install
+# The standalone install, and the container's setup
 
-The local single-user shape: what the wizard writes and what the updater does with it.
+The local single-user shape: what the wizard writes and what the updater does with it. The container half of the same wizard is at the end.
 
 ## setup_wizard.py
 
@@ -15,3 +15,7 @@ Interactive first-run installer (`istota setup`) for the local single-user shape
 ## updater.py
 
 `istota update` — self-update for the standalone install: reads install.json provenance, git fetch/reset the recorded checkout (stable channel = latest release tag, main channel = branch tip), `uv tool install --reinstall`, fresh-code migrations. Refuses on the server shape and while the scheduler/serve process holds its lock. Stop separate web and webhook processes too. The fresh CLI runs `init --relocate-rooms` before the operator restarts the local server; room or workspace refusals fail the update and leave it retryable.
+
+## setup_wizard.py, the container half
+
+`istota setup` inside the image (`ISTOTA_SETUP_SHAPE=container`, or `--shape container`, or `--vm-dir`) is the one deployment shape's wizard, replacing `docker/init.sh` and the per-boot `render-config.sh`. It runs as uid 10001 (`docker compose run --rm --no-deps --entrypoint istota-drop istota istota setup --vm-dir /vm`) and writes `/data/config/config.toml` (0600, from `container_config_document` through `tomli_w`, only what the answers decide plus the container layout; every other key is left to the dataclass default), `/data/config/admins` (created, never modified, as above) and `/data/.secret_key` (created only if absent; an existing unusable file is a refusal, never a replacement). With `--vm-dir` it also writes `secrets/<name>` for every `SECRET_NAMES` entry (0400, empty when unused, because compose refuses a missing secret file) and merges its own keys into the stack's `.env` and `vm.env`, keeping every other line. Without `--vm-dir` a credential with a config key is written into the 0600 config instead, and the two Claude Code credentials, which have none, are not written. A `--yes` run takes credentials from the environment under the names the daemon reads (`ISTOTA_NEXTCLOUD_APP_PASSWORD`, `ANTHROPIC_API_KEY`, …), never from argv. A re-run needs `--force` and keeps the web session key. It refuses proxied ingress without an upstream address or with a wildcard listener. Tests: `tests/test_setup_container.py`; the image tier runs it in the built image (`tests/image/test_istota_image.py::TestGroupCTheWrittenConfig`).

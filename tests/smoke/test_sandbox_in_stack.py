@@ -48,7 +48,7 @@ SANDBOX_SCRIPT = [
 ]
 
 #: `db_path` is `/data/db/istota.db` on both container shapes
-#: (`render-config.sh:121`), so the directory `build_bwrap_cmd` masks is this.
+#: (`istota setup`, and so the testbed's base config), so the directory `build_bwrap_cmd` masks is this.
 #: `module_db_root()` derives as `{db_path.parent}/modules` and is therefore
 #: already covered — `_mask_dir` skips a candidate an earlier mask contains,
 #: because a nested mask makes bwrap fail every task rather than one directory.
@@ -254,7 +254,7 @@ class TestTheDatabaseMasks:
 # --------------------------------------------------------------------------
 
 #: `temp_dir` is the literal `/data/tmp` on both container shapes
-#: (`render-config.sh:130`) and `Stack.submit` submits as `testuser`, so the
+#: (the testbed's base config) and `Stack.submit` submits as `testuser`, so the
 #: task temp dir — `ISTOTA_DEFERRED_DIR`, a read-write bind and therefore a
 #: `native_fs_roots` write root — is this. It is also the sandbox's `--chdir`
 #: target *on this stack*, which is a narrower claim than it looks:

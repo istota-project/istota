@@ -4,22 +4,15 @@
 # for production. This overlay is the complete list of places where the stack
 # the `full` tier boots differs from the stack an operator boots, and each entry
 # carries the reason inline — the same habit `docker/docker-compose.test.yml`
-# keeps, which is why that file's shape survived review with so little wrong
-# with it. A sixth concession goes here, where it gets read and reviewed, rather
+# keeps. A new concession goes here, where it gets read and reviewed, rather
 # than into a fragment assembled in Python.
 #
 # What is deliberately *not* here: anything that varies per session. The
-# generated `*_PASSWORD` values, the `ISTOTA_*_ENABLED` map derived from
-# `Profile.services`, the ephemeral `NC_PORT` and its matching
-# `ISTOTA_WEB_CALLBACK_URL` are written into the compose env-file that
-# `StackPool` owns, because a file in the repository cannot hold a value that
-# is invented at boot.
-#
-# The one exception to that split is the three credential-shaped brain
-# variables below, and the exception is forced: compose lets the *process*
-# environment outrank an `--env-file`, so a developer with `ANTHROPIC_API_KEY`
-# exported wins over anything the harness writes into a file. A literal in a
-# compose file does not lose that contest.
+# generated passwords, the OAuth2 client, the ephemeral `NC_PORT` and its
+# matching `ISTOTA_WEB_CALLBACK_URL`, and the two directories below are written
+# into the compose env-file that `StackPool` owns, and istota's own config is a
+# `config.toml` the testbed writes, because a file in the repository cannot
+# hold a value that is invented at boot.
 #
 # Used as `-f docker/docker-compose.yml -f testbed/compose/testbed.yml`.
 # `testbed/stack.py` assembles the invocation; this file is never run by hand.
@@ -32,43 +25,29 @@ services:
     # pytest process on the host, so every full-shape task depends on this.
     #
     # It reaches inside the sandbox too, which is the obvious worry and is
-    # unfounded: `render-config.sh` writes `[security.network] enabled = false`
-    # unconditionally, so `executor.py` builds no CONNECT proxy and appends no
-    # `--unshare-net`, and `/etc/hosts` is bound into the bwrap namespace. A
-    # future profile that turns the CONNECT allowlist on would have to
-    # allowlist each stub's host:port.
+    # unfounded: the testbed's config writes `[security.network] enabled =
+    # false` (`testbed.stack.CONCESSIONS`), so `executor.py` builds no CONNECT
+    # proxy and appends no `--unshare-net`, and `/etc/hosts` is bound into the
+    # bwrap namespace. A profile that turns the CONNECT allowlist on would have
+    # to allowlist each stub's host:port.
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-    # No `security_opt` here any more. The shipped file carries the sandbox
-    # grant itself now (the seccomp and AppArmor profiles and
-    # systempaths=unconfined), so this stack runs the run contract an operator
-    # runs rather than the wider `seccomp:unconfined` this overlay used to add.
-    # Docker Desktop has no AppArmor and ignores `apparmor=istota`.
+    # No `security_opt` here. The shipped file carries the sandbox grant itself
+    # (the seccomp and AppArmor profiles and systempaths=unconfined), so this
+    # stack runs the run contract an operator runs. Docker Desktop has no
+    # AppArmor and ignores `apparmor=istota`.
 
-    environment:
-      # Fixed literals, NOT `${ANTHROPIC_API_KEY:-}` as the base file has them.
-      # All three reach this container in a deployment and `entrypoint.sh`
-      # writes the OAuth token into `~/.claude/.credentials.json`. Interpolating
-      # would ship a developer's real credential into a test container that then
-      # POSTs to a listener on their own machine. Nothing in this tier can use a
-      # real one: the brain is the scripted endpoint, which ignores the
-      # Authorization header entirely.
-      #
-      # The empty string rather than a marker for the two the daemon branches
-      # on: `entrypoint.sh:690-700` writes a credentials file when
-      # `CLAUDE_CODE_OAUTH_TOKEN` is non-empty, so a marker value would have it
-      # write a fake credential and log that Claude Code is configured.
-      ANTHROPIC_API_KEY: ""
-      CLAUDE_CODE_OAUTH_TOKEN: ""
-      ISTOTA_BRAIN_NATIVE_API_KEY: unused-by-the-scripted-endpoint
+    # The config the testbed wrote, where `istota setup` would have written it.
+    # A bind rather than the state volume, because the harness has to write the
+    # file before the container starts and a named volume has no host path to
+    # write it through. Read-only, as the container never writes it.
+    volumes:
+      - ${ISTOTA_TEST_CONFIG_DIR:?the harness must export ISTOTA_TEST_CONFIG_DIR}:/data/config:ro
 
-    # The shipped `istota` service has the same `tasks` healthcheck now; this
-    # one differs only in timing. `retries` and `start_period` are the full
-    # shape's, not the lean shape's:
-    # this container spends up to 600 seconds waiting on Nextcloud provisioning
-    # before it renders a config, so a 30-retry probe would mark it unhealthy
-    # long before it had a chance to be wrong.
+    # The shipped `istota` service has the same `tasks` healthcheck; this one
+    # differs only in timing, since a cold Nextcloud install (which `istota`
+    # waits on) and the image build share the boot's budget.
     healthcheck:
       test:
         - CMD-SHELL
@@ -83,9 +62,7 @@ services:
       start_period: 10s
 
   web:
-    environment:
-      # `docker-compose.yml:398` passes the same variable to this service, for
-      # the web chat surface's own use of the native brain. Same reasoning as
-      # above; a container the tier never drives is still a container that would
-      # hold a developer's key.
-      ISTOTA_BRAIN_NATIVE_API_KEY: unused-by-the-scripted-endpoint
+    # The same config, for the same reason. `web` symlinks it into its working
+    # directory and reads it on every request it authenticates.
+    volumes:
+      - ${ISTOTA_TEST_CONFIG_DIR:?the harness must export ISTOTA_TEST_CONFIG_DIR}:/data/config:ro

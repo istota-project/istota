@@ -10,7 +10,7 @@ no credential socket while `skill.md` promised the capability unconditionally.
 The compose service is gone now, and the parity comparison went with it. The bot
 could never reach that container: the skill CLI shells in with `docker exec` from
 inside the `istota` container, which installs no docker client and mounts no
-docker socket, and `render-config.sh` writes no `[devbox]` section so
+docker socket, and `istota setup` writes no `[devbox]` section so
 `devbox.enabled` is always false there. What the service did do was oblige every
 Ansible-side change to be mirrored into something nobody could use, which is the
 mechanism that produced ISSUE-282 rather than a defence against it.
@@ -764,7 +764,6 @@ class TestTheComposeShapeShipsNoDevbox:
     """
 
     DOC = REPO / "docs" / "deployment" / "docker.md"
-    RENDER = REPO / "docker" / "istota" / "render-config.sh"
     ISTOTA_DOCKERFILE = REPO / "docker" / "istota" / "Dockerfile"
     ANCHOR = "#the-devbox-is-ansible-only"
     HEADING = "### The devbox is Ansible-only"
@@ -858,11 +857,16 @@ class TestTheComposeShapeShipsNoDevbox:
             f"docs/deployment/docker.md says the image has no docker client"
         )
 
-    def test_the_generated_config_has_no_devbox_section(self):
-        rendered = self.RENDER.read_text()
-        assert "[developer]" in rendered, "render-config.sh no longer looks like itself"
-        assert "[devbox]" not in rendered, (
-            "render-config.sh now emits a [devbox] section, so the skill can be "
+    def test_the_written_config_has_no_devbox_section(self):
+        import tomllib
+
+        from istota.setup_wizard import ContainerAnswers, render_container_config
+
+        answers = ContainerAnswers(user_id="alice", developer_enabled=True, session_secret="s" * 64)
+        written = tomllib.loads(render_container_config(answers, inline_credentials=False))
+        assert "developer" in written, "the container setup no longer writes [developer]"
+        assert "devbox" not in written, (
+            "`istota setup` now writes a [devbox] section, so the skill can be "
             "switched on in the compose shape. docs/deployment/docker.md says it "
             "cannot — update the page with whatever is now true"
         )

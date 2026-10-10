@@ -39,7 +39,7 @@ from ..httpstub import FROM_CONTAINER, LOOPBACK, HttpStub
 TEXT_CHUNK = 4
 ARGS_CHUNK = 8
 
-# What `config_env` renders as the model name and the turn ceiling. Named
+# What `config` writes as the model name and the turn ceiling. Named
 # because a scenario asserts on the first (`test_lean_stack.py` checks the
 # request carried it) and because the second is a bound the agent loop is
 # supposed to hit loudly rather than grind past.
@@ -128,23 +128,26 @@ class ScriptedEndpoint(HttpStub):
 
     # -- the `Service` members --------------------------------------------
 
-    def config_env(self) -> dict[str, str]:
+    def config(self) -> dict:
         """Point the daemon's native brain at this endpoint.
 
-        All four are read by `docker/istota/render-config.sh` and passed
-        through by `docker/docker-compose.yml`, which is the rule every service
-        is held to. They were hardcoded in the smoke fixture's render
-        environment; on the service is where they belong, and moving them
-        leaves that environment with nothing subsystem-specific in it.
+        A `config.toml` fragment, merged over the stack's base config. The API
+        key is not here: the lean compose file passes a fixed placeholder and
+        the full shape writes it to the secret file, since the endpoint ignores
+        the Authorization header entirely.
         """
         return {
-            "ISTOTA_BRAIN_KIND": "native",
-            "ISTOTA_BRAIN_NATIVE_BASE_URL": self.container_url,
-            "ISTOTA_BRAIN_NATIVE_MODEL": SCRIPTED_MODEL,
-            # A handful of turns is all a scripted scenario has; a loop that
-            # asked for more should fail loudly rather than grind through a
-            # hundred attempts.
-            "ISTOTA_BRAIN_NATIVE_MAX_TURNS": str(MAX_TURNS),
+            "brain": {
+                "kind": "native",
+                "native": {
+                    "base_url": self.container_url,
+                    "model": SCRIPTED_MODEL,
+                    # A handful of turns is all a scripted scenario has; a loop
+                    # that asked for more should fail loudly rather than grind
+                    # through a hundred attempts.
+                    "max_turns": MAX_TURNS,
+                },
+            },
         }
 
     def reset(self) -> None:

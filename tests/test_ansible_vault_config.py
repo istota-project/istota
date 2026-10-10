@@ -17,9 +17,9 @@ the settings page, and neither of those is a config key — which is why this fi
 is much smaller than it was: `vault_services` and everything about eligibility
 went with the service mapping.
 
-This file is the Ansible half. The Docker half lives in
-`tests/test_render_config.py::TestTheCredentialVault`, beside the rest of that
-generator's coverage.
+This file is the Ansible half. On the container shape the config is the
+operator's own file now, so `vault_path` is a key they write there and nothing
+regenerates it.
 
 **What the template owes, and what it does not.** Its job is fidelity: emit what
 the operator wrote, escaped so the file parses. Judging the path is

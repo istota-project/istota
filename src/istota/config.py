@@ -321,8 +321,8 @@ class ConversationConfig:
 
 #: The shipped `[speech_gate.ack_reactions]`. No ``default`` entry, so
 #: ``ack_reaction`` still answers an ack of no named kind. Ansible's
-#: ``istota_speech_gate_ack_reactions`` and Docker's render-config defaults
-#: restate it; tests hold the three equal.
+#: ``istota_speech_gate_ack_reactions`` restates it; a test holds the two
+#: equal.
 DEFAULT_ACK_REACTIONS: dict[str, tuple[str, ...]] = {
     "thanks": ("👍", "🐙"),
     "agreement": ("👌",),
@@ -3689,10 +3689,10 @@ and doctor reporting OK about it. Where the value sits is a spelling; that it
 is a Meta identifier is the fact.
 
 **Non-empty values, never key presence, and the difference decides whether the
-default flip breaks every existing deployment.** ``config.toml.j2`` and
-``render-config.sh`` both render the whole flat block unconditionally — a
-deployment that has never heard of WhatsApp still gets ``waba_id = ""`` — so a
-presence test reads every shipped render as a Cloud deployment, for ever,
+default flip breaks every existing deployment.** ``config.toml.j2`` renders
+the whole flat block unconditionally, and Docker's old entrypoint did too — a
+deployment that has never heard of WhatsApp still has ``waba_id = ""`` — so a
+presence test reads every such render as a Cloud deployment, for ever,
 including the Baileys ones this spec is for. That is also why the nested read
 above cannot misfire: an operator who wants Baileys while keeping a populated
 Cloud block through a switch writes ``provider`` explicitly, and an explicit
@@ -3804,11 +3804,11 @@ def normalize_legacy_document(data: dict) -> None:
 
     One named step rather than a call buried in the loader, because two kinds
     of caller have to agree on it. The loader is the first. The second is the
-    drift guards over the two deployment generators
-    (``tests/test_render_config.py``, ``tests/test_ansible_config_template.py``),
-    which answer "does the loader read every key this file renders" by driving
-    ``apply_section`` themselves — so a rewrite the loader does and they do not
-    reads to them as a rendered key nothing consumes, which is the opposite of
+    drift guard over the Ansible generator
+    (``tests/test_ansible_config_template.py``),
+    which answers "does the loader read every key this file renders" by driving
+    ``apply_section`` itself — so a rewrite the loader does and it does not
+    reads to it as a rendered key nothing consumes, which is the opposite of
     what it is.
 
     Mutates ``data`` in place, like the walk it feeds. A caller that needs the

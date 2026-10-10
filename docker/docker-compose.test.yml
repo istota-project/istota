@@ -9,7 +9,7 @@
 # thirty seconds, which is what makes it usable in a test.
 #
 # It is driven by tests/smoke/, never by hand — the config it needs does not
-# exist until the harness renders it. `testbed/stack.py` holds the
+# exist until the harness writes it. `testbed/stack.py` holds the
 # invocation.
 
 services:
@@ -37,10 +37,9 @@ services:
     image: ${ISTOTA_TEST_LEAN_IMAGE:-istota-test/lean:local}
 
     # The root phase, then the command the shipped entrypoint execs. Bypassing
-    # entrypoint.sh is the whole point: everything it does before its last two
-    # lines is Nextcloud provisioning, and the config it would generate has
-    # already been rendered on the host by the same render-config.sh the
-    # container ships. The root phase is *not* bypassed: it is what delegates
+    # entrypoint.sh keeps this shape to one container and seconds; the config
+    # it would read is the one the harness wrote, bound below. The root phase
+    # is *not* bypassed: it is what delegates
     # the cgroup, fixes ownership and drops to uid 10001, and the smoke tier's
     # parity witnesses are about exactly that.
     #
@@ -85,9 +84,9 @@ services:
     cgroup: private
 
     environment:
-      # Config generation already happened on the host, so almost nothing is
-      # needed here. What remains is what the daemon reads from the environment
-      # at load time rather than from the file.
+      # The config is the file the harness wrote, so almost nothing is needed
+      # here. What remains is what the daemon reads from the environment at
+      # load time rather than from the file.
       # A fixed literal, NOT `${ISTOTA_BRAIN_NATIVE_API_KEY:-…}`. Interpolating
       # from the ambient environment would ship a developer's real key into a
       # test container that then POSTs to a listener on their own machine.
@@ -114,7 +113,7 @@ services:
       # The state volume, as the shipped file has one: the root filesystem is
       # read-only, and the daemon's home and the ownership marker live here.
       - istota_test_data:/data
-      # The rendered config, from a host directory the harness owns. A bind
+      # The config, from a host directory the harness owns. A bind
       # mount rather than a named volume because the harness has to write the
       # file *before* the container starts, and a named volume has no host path
       # to write it through.

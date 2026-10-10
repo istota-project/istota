@@ -9,7 +9,7 @@ and are deselected by default. This file runs the same code inside the shipped
 container, against the server the shipped `provision-nc.sh` set up.
 
 **The one thing to understand before reading any assertion below.** On this
-shape `storage.py` never speaks WebDAV. `render-config.sh:119` writes
+shape `storage.py` never speaks WebDAV. The config writes
 `workspace_path = "/mnt/shared"` unconditionally, so `Config.has_workspace` is
 true and every write is an ordinary POSIX write onto a Docker volume. Nextcloud
 reaches the same bytes through two `files_external` *local* mounts that

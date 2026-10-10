@@ -71,21 +71,14 @@ class FeedsService(HttpStub):
 
     # -- the `Service` members --------------------------------------------
 
-    def config_env(self) -> dict[str, str]:
+    def config(self) -> dict:
         """Nothing, and that is not an omission.
 
         A feed's URL is a *row* — `feeds.url` in the user's own
-        `modules/{user}/feeds.db` — not a config value, so there is no variable
-        for `render-config.sh` to read that could point the daemon here. The
-        scenario seeds the rows through the shipped `feeds add` CLI inside the
-        container, against `container_url`.
-
-        The module switch is not here either, and that is deliberate rather
-        than an oversight in the other direction: `ISTOTA_FEEDS_ENABLED` says
-        the *module* is on, which is a property of the profile and not of this
-        server, and it is what `FULL_MODULE_SWITCHES` already derives from a
-        profile's service list on the other shape. The `feeds` profile carries
-        it in `Profile.config`, where the two-file rule still checks it.
+        `modules/{user}/feeds.db` — not a config value, so there is no key that
+        could point the daemon here. The scenario seeds the rows through the
+        shipped `feeds add` CLI inside the container, against `container_url`.
+        The module is on by default, so nothing switches it on either.
         """
         return {}
 

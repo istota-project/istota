@@ -55,7 +55,7 @@ BODY = "the scripted push"
 def _seed_ntfy_secret(stack) -> None:
     """Point the stack's one user at the stub, through the shipped CLI.
 
-    Not `config_env()`, because there is no such variable: ntfy is a per-user
+    Not `config()`, because there is no such key: ntfy is a per-user
     connected service in the encrypted `secrets` table, so this is how an
     operator would configure it and therefore how the tier does.
 

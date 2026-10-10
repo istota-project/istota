@@ -12,10 +12,9 @@ from jinja2 import Environment
 from istota import db, doctor, user_profiles
 from istota.webui import auth as web_auth
 from istota.config import Config, WebConfig
+from istota.setup_wizard import ContainerAnswers, render_container_config
 from testbed import profiles
-from testbed.stack import render_config
-from tests.test_render_config import REQUIRED, render
-from tests.test_entrypoint_config_stage import boot
+from testbed.stack import lean_config
 from tests.test_ansible_config_template import render as render_ansible
 
 REPO = Path(__file__).resolve().parent.parent
@@ -27,31 +26,27 @@ LAUNCHERS = ("docker/docker-compose.yml", "deploy/ansible/templates/istota-web.s
 
 
 @pytest.mark.parametrize("nc_url", ["", "http://nextcloud:80"])
-@pytest.mark.parametrize("auth", [None, "email", "nextcloud,email"])
-def test_web_render_without_oauth(tmp_path, nc_url, auth):
-    env = {**REQUIRED, "NC_URL": nc_url}
-    if auth:
-        env["ISTOTA_WEB_AUTH"] = auth
-    rendered = tomllib.loads(render(tmp_path, **env).read_text())
-    assert rendered["web"]["auth"] == (auth.split(",") if auth else ["nextcloud"])
-    assert rendered["web"]["enabled"] is True
-    assert len(rendered["web"]["session_secret_key"]) >= 32
-    assert "oauth2_client_id" not in rendered["web"]
-
-
-def test_email_secret_survives_entrypoint_rerender(tmp_path):
-    first = boot(tmp_path, NC_URL="", ISTOTA_WEB_AUTH="email")
-    second = boot(tmp_path, NC_URL="", ISTOTA_WEB_AUTH="email")
-    assert first["web"]["session_secret_key"] == second["web"]["session_secret_key"]
-    assert (tmp_path / ".web_session_secret").stat().st_mode & 0o777 == 0o600
+@pytest.mark.parametrize("oauth", [False, True])
+def test_the_container_config_without_oauth_still_signs_in(nc_url, oauth):
+    """Email sign-in is always written when Nextcloud login cannot be: a
+    config with no usable method would lock every user out."""
+    answers = ContainerAnswers(
+        user_id="alice", nextcloud_url=nc_url, session_secret="s" * 64,
+        oauth_client_id="client" if oauth else "", oauth_client_secret="secret" if oauth else "",
+    )
+    written = tomllib.loads(render_container_config(answers, inline_credentials=True))
+    expected = ["nextcloud", "email"] if (nc_url and oauth) else ["email"]
+    assert written["web"]["auth"] == expected
+    assert written["web"]["enabled"] is True
+    assert len(written["web"]["session_secret_key"]) >= 32
+    assert ("oauth2_client_id" in written["web"]) == bool(nc_url and oauth)
 
 
 @pytest.mark.parametrize("profile", [p for p in profiles.ALL if p.shape == "lean"], ids=lambda p: p.name)
-def test_lean_profiles_keep_nextcloud_auth(tmp_path, profile):
-    path = render_config(REPO / "docker/istota/render-config.sh", tmp_path, {}, extra=profile.config)
-    rendered = tomllib.loads(path.read_text())
-    assert rendered["web"]["auth"] == ["nextcloud"]
-    config = Config(web=WebConfig(**{k: rendered["web"][k] for k in ("auth", "session_secret_key")}))
+def test_lean_profiles_keep_nextcloud_auth(profile):
+    written = lean_config(profile, {})
+    assert written["web"]["auth"] == ["nextcloud"]
+    config = Config(web=WebConfig(**{k: written["web"][k] for k in ("auth", "session_secret_key")}))
     assert all(r.status == doctor.SKIP for r in doctor.check_web_auth(config, False)[1:])
 
 
@@ -191,9 +186,3 @@ def test_doctor_empty_methods_and_database_failure(auth_config):
     found = results(auth_config)
     assert found["identities"].status == doctor.FAIL
     assert found["admins"].status == doctor.FAIL
-
-
-def test_auth_override_reaches_both_compose_services():
-    services = yaml.safe_load((REPO / "docker/docker-compose.yml").read_text())["services"]
-    for name in ("istota", "web"):
-        assert services[name]["environment"]["ISTOTA_WEB_AUTH"] == "${ISTOTA_WEB_AUTH:-nextcloud}"

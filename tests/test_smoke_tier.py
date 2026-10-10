@@ -949,8 +949,7 @@ class TestStackPool:
             workdir=tmp_path,
             lean=compose_support.LeanShape(
                 compose_file=COMPOSE_FILE,
-                render_script=Path("/nonexistent/render-config.sh"),
-                image="istota-test/lean:unit",
+                    image="istota-test/lean:unit",
                 prebuilt_overlay=PREBUILT_OVERLAY,
             ),
         )
@@ -1068,8 +1067,7 @@ class TestStackPool:
             workdir=tmp_path,
             lean=compose_support.LeanShape(
                 compose_file=COMPOSE_FILE,
-                render_script=Path("/nonexistent/render-config.sh"),
-                image="istota-test/lean:unit",
+                    image="istota-test/lean:unit",
                 prebuilt_overlay=PREBUILT_OVERLAY,
             ),
         )
@@ -1082,8 +1080,7 @@ class TestStackPool:
             workdir=tmp_path,
             lean=compose_support.LeanShape(
                 compose_file=COMPOSE_FILE,
-                render_script=Path("/nonexistent/render-config.sh"),
-                image="istota-test/lean:unit",
+                    image="istota-test/lean:unit",
                 prebuilt_overlay=PREBUILT_OVERLAY,
             ),
         )
@@ -1093,57 +1090,90 @@ class TestStackPool:
             pool.get(nonsense)
 
 
-class TestRenderConfig:
-    """The lean shape's config comes out of the shipped generator, on the host.
+class TestTheLeanConfig:
+    """The lean shape boots from a `config.toml` the testbed writes.
 
-    That is the property making the shortcut legitimate, so the failure paths
-    are worth holding down: a generator that exited non-zero used to be
-    reported as "the daemon never became ready" 120 seconds later.
+    The config is an input on every shape now, so there is no generator to run
+    on the host: the base is what `istota setup` writes for the stack's one user
+    (`tests/test_testbed_config.py` holds that equality), and each service and
+    the profile add their fragment.
     """
 
-    def test_two_services_claiming_one_variable_is_refused(self, tmp_path):
+    def test_two_services_claiming_one_key_is_refused(self):
         """Silent last-wins would boot a stack from a config naming the wrong
         service's port, with dict order deciding which."""
-        first = _FakeService("first", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://a"})
-        second = _FakeService("second", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://b"})
+        first = _FakeService("first", {"brain": {"native": {"base_url": "http://a"}}})
+        second = _FakeService("second", {"brain": {"native": {"base_url": "http://b"}}})
 
-        with pytest.raises(compose_support.StackError, match="BASE_URL"):
-            compose_support.render_config(
-                Path("/nonexistent/render-config.sh"),
-                tmp_path,
-                {"first": first, "second": second},
+        with pytest.raises(compose_support.StackError, match="base_url"):
+            compose_support.lean_config(profiles.BASE, {"first": first, "second": second})
+
+    def test_the_lean_config_claims_no_nextcloud(self):
+        """An empty `url` is what makes the lean daemon local-backed, which is a
+        shipped install shape. `http://nextcloud` would claim Nextcloud-backed
+        storage at a hostname the lean compose file resolves to nothing: a third
+        configuration nobody ships."""
+        document = compose_support.lean_config(profiles.BASE, {})
+
+        assert document.get("nextcloud", {}).get("url", "") == ""
+        assert document["talk"]["enabled"] is False
+
+    def test_every_lean_profile_writes_a_config_the_loader_accepts(
+        self, tmp_path, monkeypatch,
+    ):
+        """Loaded, because the loader is the reader that decides: an unknown key
+        is a warning, and a bad value fails the boot rather than this test."""
+        from istota.config import load_config
+
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
+        for profile in profiles.ALL:
+            if profile.shape != "lean":
+                continue
+            directory = tmp_path / profile.name
+            # The `verify` profiles need the mail service's `authserv_id`.
+            services = {}
+            if "mail" in profile.services:
+                services["mail"] = _FakeService(
+                    "mail", {"email": {"enabled": True, "authserv_id": "mail"}},
+                )
+            path = compose_support.write_config(
+                directory, compose_support.lean_config(profile, services),
             )
+            config = load_config(path)
+            assert config.users["testuser"], profile.name
+            assert (directory / "admins").read_text().split() == ["testuser"]
 
-    def test_a_generator_that_failed_is_reported_with_its_output(self, tmp_path):
-        script = tmp_path / "render.sh"
-        script.write_text('echo "missing required input" >&2\nexit 2\n')
+    def test_each_write_mints_its_own_session_key(self):
+        one = compose_support.lean_config(profiles.BASE, {})
+        two = compose_support.lean_config(profiles.BASE, {})
 
-        with pytest.raises(compose_support.StackError, match="missing required input"):
-            compose_support.render_config(script, tmp_path, {})
+        assert one["web"]["session_secret_key"] != two["web"]["session_secret_key"]
+        assert len(one["web"]["session_secret_key"]) >= 32
 
-    def test_the_lean_render_environment_claims_no_nextcloud(self):
-        """`NC_URL` and `APP_PASSWORD` are *set and empty*, not absent.
 
-        `render-config.sh` preflights with `[ -n "${NC_URL+x}" ]`, which tests
-        whether the variable is set rather than whether it has a value — so
-        unset fails the render outright, and empty is what makes the lean
-        daemon local-backed. It used to be `http://nextcloud`, which rendered a
-        config claiming Nextcloud-backed storage and pointed it at a hostname
-        the lean compose file resolves to nothing: a third configuration nobody
-        ships.
-        """
-        assert compose_support.DEFAULT_RENDER_ENV["NC_URL"] == ""
-        assert compose_support.DEFAULT_RENDER_ENV["APP_PASSWORD"] == ""
+class TestTheTomlWriter:
+    """The testbed's own TOML writer: the standard library reads TOML but does
+    not write it, and this package takes no dependency beyond `cryptography`."""
 
-    def test_the_preflight_really_tests_for_set_rather_than_non_empty(self):
-        """Asserted against the shipped script, because the whole mechanism
-        rests on which of the two spellings it uses."""
-        body = (REPO / "docker" / "istota" / "render-config.sh").read_text()
+    def test_a_nested_document_round_trips(self):
+        import tomllib
 
-        assert "${NC_URL+x}" in body, (
-            "the generator no longer preflights NC_URL with the set-test "
-            "spelling, so an empty value may no longer render"
-        )
+        document = {
+            "a": 1,
+            "f": 1.5,
+            "flag": True,
+            "s": 'quote " backslash \\ newline \n escape \x1b tab \t end',
+            "list": ["x", "y"],
+            "t": {"inner": {"deep": "v"}, "k": False},
+            "users": {"with space": {"name": "n"}},
+            "empty": {},
+        }
+
+        assert tomllib.loads(compose_support.toml_dumps(document)) == document
+
+    def test_an_unsupported_value_is_refused_rather_than_stringified(self):
+        with pytest.raises(compose_support.StackError, match="no form for"):
+            compose_support.toml_dumps({"x": object()})
 
 
 class _FakeService:
@@ -1154,7 +1184,7 @@ class _FakeService:
         #: the rest of the sequence; left alone otherwise.
         self.order: list | None = None
 
-    def config_env(self) -> dict:
+    def config(self) -> dict:
         return dict(self._env)
 
     def reset(self) -> None:
@@ -1184,13 +1214,11 @@ class TestContainerSideState:
         )
 
     def test_the_forge_declares_the_directory_it_configured(self):
-        """Declared on the service, so it cannot drift from the `config_env`
-        variable that pointed the daemon there."""
+        """Declared on the service, so it cannot drift from the `config()` key
+        that pointed the daemon there."""
         forge = gitlab.GitLabService(Path("/tmp/unused"))
 
-        assert forge.container_state_paths == (
-            forge.config_env()["ISTOTA_DEVELOPER_REPOS_DIR"],
-        )
+        assert forge.container_state_paths == (forge.config()["developer"]["repos_dir"],)
 
     def test_a_service_with_nothing_to_clear_costs_no_exec(self, monkeypatch):
         """Every test pays for this, so the no-op path must not shell out."""
@@ -1648,7 +1676,7 @@ class _FakeEndpoint:
     def reset(self) -> None:
         self.order.append("model.reset")
 
-    def config_env(self) -> dict:
+    def config(self) -> dict:
         return {}
 
     def close(self) -> None:

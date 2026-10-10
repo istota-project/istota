@@ -708,7 +708,6 @@ from testbed import stack as stack_support  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 LEAN_COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
-RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
 LEAN_PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
 FULL_COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
 TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
@@ -938,7 +937,6 @@ def stacks(pytestconfig, tmp_path_factory, _sweep_leftover_stacks, _measure_prob
         workdir=tmp_path_factory.mktemp("testbed"),
         lean=stack_support.LeanShape(
             compose_file=LEAN_COMPOSE_FILE,
-            render_script=RENDER_CONFIG,
             image=lean_image_tag(),
             prebuilt_overlay=LEAN_PREBUILT_OVERLAY,
             ready_timeout=LEAN_READY_TIMEOUT,

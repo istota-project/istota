@@ -7,7 +7,7 @@ paths:
   - "tests/support/**"
   - "tests/test_prompt_golden.py"
   - "docker/docker-compose*.yml"
-  - "docker/istota/render-config.sh"
+  - "src/istota/setup_wizard.py"
 ---
 
 # Testbed
@@ -25,13 +25,13 @@ The developer-facing version is `docs/development/testing.md`: which tier to run
 | Compose | `docker/docker-compose.test.yml` | `docker/docker-compose.yml` + `testbed/compose/testbed.yml` |
 | Containers | one | postgres, redis, nextcloud, istota, web, nginx |
 | Entrypoint | bypassed; `init` then the scheduler | the shipped `entrypoint.sh`, in full |
-| Config | rendered on the host by `testbed.stack.render_config` and bind-mounted | rendered by `render-config.sh` inside the container, from the compose env-file |
+| Config | written by the testbed (`lean_config`), bound at `/data/config` | written by the testbed (`full_config`), bound at `/data/config`; credentials as secret files |
 | Boot | seconds | 50 to 84 seconds to both healthchecks on warm base images |
 | Marker | `smoke` | `full` |
 
-Same fixtures either way. `Profile.shape` picks, and `StackPool` boots both. The full shape is the only thing in the repository that executes `provision-nc.sh`, the half of `entrypoint.sh` past the config write, or the room find-and-reuse branch.
+Same fixtures either way. `Profile.shape` picks, and `StackPool` boots both. The full shape is the only thing in the repository that executes `provision-nc.sh`, the shipped `entrypoint.sh`, or `provision-rooms` against a real Talk.
 
-Where the config is rendered is the difference that reaches the code. On the lean shape a service's `config_env()` is merged into the render environment; on the full shape it is written into the compose env-file and the container's own generator reads it. Same map, two destinations.
+**The config is an input on both shapes**, as it is for an operator (the one-deployment-shape spec's Stage 3). The testbed writes `config.toml` and the admins file from layers merged in order: a base that is what `istota setup` writes for the stack's one user (`stack.LEAN_BASE_CONFIG`), `stack.CONCESSIONS` (the network sandbox off, memory search off, `web.auth` at the dataclass default), each service's `config()` fragment, then the profile's own `config`. `tests/test_testbed_config.py` holds the base equal to `setup_wizard.render_container_config`, since this package may not import istota. The full shape adds full Nextcloud integration against the bundled Nextcloud (`dav_prefix = "Shared Files"`, `auto_share_bot_dir = false`, the OAuth2 client the testbed generated and handed to `provision-nc.sh`) and writes the credentials as secret files in a scratch directory the shipped `secrets:` read. `toml_dumps` is a small writer of its own, because the testbed's dependencies are the standard library and `cryptography`.
 
 ## Profiles
 
@@ -94,11 +94,11 @@ A **service** is anything the daemon talks to that is not the daemon, real or wr
 - `HOST_STUBS`: `model`, `gitlab`, `ntfy`, `feeds`. `ThreadingHTTPServer` in the pytest process, on an ephemeral port bound to all interfaces, reachable as `host.docker.internal`. `HttpStub` is the shared base.
 - `ATTACHED`: `nextcloud`, `mail`, `signaling`. Real servers a compose file already runs. `nextcloud.attach` starts nothing and returns a `Service` over the running container, so the fixture, the profile list and `diagnostics` need no special case. `signaling` is attached for rule 4's reason: `welcome`/`hello` feature negotiation is a client negotiating with a server.
 
-The protocol's **required** members are `name`, `container_url`, `config_env()`, `reset()` and `close()`. Call recording is deliberately not on it: a mail server speaks IMAP and Nextcloud is asserted through its own API.
+The protocol's **required** members are `name`, `container_url`, `config()`, `reset()` and `close()`. Call recording is deliberately not on it: a mail server speaks IMAP and Nextcloud is asserted through its own API.
 
 Four more are **optional**, resolved by `getattr`, each implemented by only one or two services:
 
-- `compose_env()` (`mail`, `signaling`): variables that configure the compose *stack* rather than the daemon, such as host paths and image tags an overlay binds, and container secrets a shipped service is declared from (`signaling.compose_env()` names `ISTOTA_TALK_SIGNALING_SECRET` and neighbours, read by `docker-compose.yml` and not by `render-config.sh`). The rule is which side of the generator a variable lands on: anything reaching istota's own config goes through `config_env()` and the two-file rule; nothing in `compose_env()` does. This is the likeliest place to think you have found a loophole.
+- `compose_env()` (`mail`, `signaling`): variables that configure the compose *stack* rather than the daemon, such as host paths and image tags an overlay binds, and container secrets a shipped service is declared from (`signaling.compose_env()` names `ISTOTA_TALK_SIGNALING_SECRET` and neighbours, read by `docker-compose.yml` for the signaling container). Nothing istota reads as configuration goes through it: compose passes istota none, so a variable smuggled in here reaches no reader.
 - `container_state_paths` (`gitlab`): container-side directories a service's use dirties. Validated against `PROTECTED_CONTAINER_PATHS`, which refuses `..`, relative paths and anything at or containing `/data/db` or `/data/config`, because the mechanism is `rm -rf` as root inside a container.
 - `bind_stack(stack)` (`nextcloud`, `mail`): why an attached service can exist at all.
 - `describe()`: what makes `Stack.diagnostics` generic, rather than reaching into `stub.calls`.
@@ -111,7 +111,7 @@ Two package properties behave like rules. `testbed/pyproject.toml` keeps an expl
 
 ## The four rules
 
-**1. A service may only be wired in through a variable `docker/istota/render-config.sh` reads *and* `docker/docker-compose.yml` passes through.** Two files, not automatically in sync: `ISTOTA_EMAIL_AUTHSERV_ID` and `ISTOTA_EMAIL_CONFIRM_SENDER_MATCH` were read by the generator and passed by neither, so `verify` in `docker/.env` silently became `off`. A missing variable is added to both as a reviewed product change, never side-loaded from the fixture. It applies to `Profile.config` as well as to `config_env()`. The testbed half is enforced by `tests/test_testbed_services.py` against both shipped files, for every profile's `Profile.config` and every variable of every service in its `services` fixture. That fixture is a hand-maintained list of four (`model`, `gitlab`, `mail`, `signaling`); `ntfy`, `feeds` and `nextcloud` are absent because their `config_env()` is empty, so add one when it grows a variable. The product half is a blanket scan: `tests/test_render_config.py` checks every `ISTOTA_*` variable the renderer reads against compose passthrough. Settable compose variables must also have a line in `docker/.env.example`.
+**1. Every key a service's `config()` or a profile's `config` writes must be one `load_config` reads.** The config is an input now, so there is no generator for a fixture to side-load around; the rule is that the testbed writes nothing an operator's `istota setup` output could not hold, and an unknown key is only a warning at load, which would boot a stack silently ignoring the setting a profile asked for. `tests/test_testbed_services.py` loads every service fragment and every profile's `config` and fails on the loader's unknown-key warning. Its `services` fixture is a hand-maintained list of four (`model`, `gitlab`, `mail`, `signaling`); `ntfy`, `feeds` and `nextcloud` return nothing, so add one when it grows a key. Two services setting the same key is refused by `merge_config`; the profile may override a service.
 
 **2. A stub bound to anything but loopback must be given a credential to expect.** `HttpStub.start` raises otherwise. Both compose tiers bind all interfaces, which on a shared network is an open listener, and for the forge stub one running `git http-backend` with `GIT_HTTP_EXPORT_ALL`. The credential also gives the secret-isolation scenario the name of every secret the session published.
 
@@ -135,8 +135,8 @@ Four non-obvious points:
 
 - **Nothing is truncated.** Deleting rows under a running dispatcher is a race. The three exceptions above are forced: a parked `pending_confirmation` blocks its room for two hours, a retry row can fire mid-test and take a scripted turn the barrier cannot see, and a trusted sender changes what later scenarios mean.
 - **The retry ladder wedges a naive quiesce.** A failed task is rewritten `pending` with `scheduled_for` one, four, then sixteen minutes out, so a status-only quiesce waits out a backoff. The barrier's refusal is a 403 rather than 409 for the same reason: 409 is in neither the transient nor the permanent status set, so the daemon retried it and created the wedging row.
-- **The daemon writes inside the container too.** A host-side stub cannot reach `/data/repos`, where the model cloned on the previous test, so each service declares its dirtied container directories beside the `config_env()` variable that put the daemon there.
-- **`/mnt/shared` is never cleared.** `.istota-provisioned` lives there and the entrypoint sources it at every boot. A storage scenario writes under a generated name and asserts on that name.
+- **The daemon writes inside the container too.** A host-side stub cannot reach `/data/repos`, where the model cloned on the previous test, so each service declares its dirtied container directories beside the `config()` key that put the daemon there.
+- **`/mnt/shared` is never cleared.** `.istota-provisioned` lives there, and the bundled Nextcloud's healthcheck (which `istota` waits on) requires it. A storage scenario writes under a generated name and asserts on that name.
 
 `nextcloud.reset()` deletes only the rooms this object created. The boot leaves baseline rooms (the entrypoint's 1:1, `#general`, `#logs`, `#alerts`, plus Talk's own `Talk updates` and `Note to self` per account), so a scenario asserts on a room it made, never on a count.
 
@@ -145,10 +145,12 @@ Four non-obvious points:
 `testbed/compose/testbed.yml` is a harness concession file, not a deployment recipe. It is the complete list of ways the `full` stack differs from what an operator boots, each with its reason inline:
 
 - `extra_hosts: host.docker.internal:host-gateway`: built in on Docker Desktop, absent on Docker Engine.
-- Three credential-shaped brain variables as fixed literals on `istota` and `web`, because the process environment outranks an `--env-file` and a developer's exported `ANTHROPIC_API_KEY` would otherwise reach a test container posting to a listener on their machine.
-- Longer timings on the `tasks` healthcheck the shipped `istota` service now carries: the full shape waits up to 600 seconds on Nextcloud provisioning before it renders a config.
+- The config directory the testbed wrote, bound read-only at `/data/config` on `istota` and `web`, where `istota setup` would have written it.
+- Longer timings on the `tasks` healthcheck the shipped `istota` service carries, since a cold Nextcloud install (which `istota` waits on) shares the boot's budget.
 
-Per-session values go in the env-file `StackPool` writes: generated passwords, the `ISTOTA_*_ENABLED` map derived from `Profile.services`, and the ephemeral `NC_PORT` with a matching explicit `ISTOTA_WEB_CALLBACK_URL` (which `provision-nc.sh` bakes irreversibly into `oauth2_clients` at first install).
+No brain credential is interpolated any more: the shipped file reads credentials from secret files, so a developer's exported `ANTHROPIC_API_KEY` cannot reach a test container.
+
+Per-session values go in the env-file `StackPool` writes: generated passwords and the OAuth2 pair for the bundled Nextcloud's provisioning, the config and secrets directories, and the ephemeral `NC_PORT` with a matching explicit `ISTOTA_WEB_CALLBACK_URL` (which `provision-nc.sh` bakes irreversibly into `oauth2_clients` at first install). Which subsystems a full profile runs is `FULL_MODULE_SWITCHES`, written into the config.
 
 **The sandbox grant is the shipped file's, on both shapes.** `docker/docker-compose.yml`'s `istota` service carries the run contract (the one-deployment-shape spec's Stage 2): `seccomp=./istota/seccomp-istota.json`, `apparmor=istota`, `systempaths=unconfined`, `no-new-privileges:true`, `cap_drop: ALL` with the six root-phase capabilities, `read_only`, `cgroup: private`. `docker/docker-compose.test.yml` carries the same lines, held equal by `tests/test_container_security_profiles.py`, and starts the daemon through the root phase rather than bypassing it. Neither file may carry `seccomp:unconfined` or `apparmor=unconfined` (`tests/test_smoke_tier.py`). Seccomp lets bubblewrap create the user namespace and mount inside it; `systempaths=unconfined` lets it mount a procfs there; on a host with AppArmor, the `istota` profile has to be loaded first, and Docker Desktop has none and ignores the option.
 
@@ -160,7 +162,7 @@ Per-session values go in the env-file `StackPool` writes: generated passwords, t
 
 `Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped shapes: `local` is what the single-user install runs. Nextcloud is meant to become optional, so a decoupling change that breaks the Nextcloud-free install has to go red somewhere.
 
-It costs no stack. `storage.py` branches on `has_workspace`, not on the backend, and `render-config.sh` writes `workspace_path` as `/mnt/shared` on every profile. `nextcloud_mount_path` stays unset because the Docker volume is not a FUSE mount. Exactly these differ, each a pure function of a `Config`:
+It costs no stack. `storage.py` branches on `has_workspace`, not on the backend, and the testbed writes `workspace_path` as `/mnt/shared` on every profile, as `istota setup` does. `nextcloud_mount_path` stays unset because the Docker volume is not a FUSE mount. Exactly these differ, each a pure function of a `Config`:
 
 | What differs | Witness |
 |---|---|
@@ -168,7 +170,7 @@ It costs no stack. `storage.py` branches on `has_workspace`, not on the backend,
 | The skill menu, since `available_capabilities()` drops `nextcloud` on an empty URL | the same pair |
 | `runtime.mount_liveness`, `ok` under `nextcloud` and `skip` under `local` | `tests/test_doctor.py::TestMountLiveness` |
 
-Plus one deployment question in `tests/test_render_config.py`: does `NC_URL=""` render a config that loads as `storage_backend == "local"`. Set-but-empty, not unset: `render-config.sh`'s preflight is `[ -n "${NC_URL+x}" ]`, so an unset `NC_URL` fails the render with exit 2. `APP_PASSWORD` is the same. Every lean profile renders this way, which is why `runtime.mount_liveness` reports `skip` on the lean shape and why `doctor` assertions there name checks rather than comparing whole payloads.
+Plus one deployment question in `tests/test_setup_container.py`: does a setup with no Nextcloud write a config that loads as `storage_backend == "local"`. Every lean profile is written that way, which is why `runtime.mount_liveness` reports `skip` on the lean shape and why `doctor` assertions there name checks rather than comparing whole payloads.
 
 Given up, to revisit: nothing asserts that a *booted* local-backend daemon behaves, only that it is configured and prompted correctly. With those rows the whole delta, that has no consequence today.
 
@@ -225,7 +227,7 @@ No variable names the checkout a stack builds from. `LeanShape` and `FullShape` 
 | `ISTOTA_UPDATE_GOLDEN` | rewrite the prompt goldens instead of comparing |
 | `ISTOTA_TESTBED_CONTROL_OVERLAYS` | extra compose overlays on every lean stack; how the run-contract negative controls break one line |
 
-`KEEP` does **not** wipe `shared_files`: that volume holds `/mnt/shared/.istota-provisioned`, which `provision-nc.sh` never rewrites, because it is a `post-installation` hook and `nextcloud:30-apache` runs those only when the installed version is `0.0.0.0`. Wiping it leaves `entrypoint.sh` waiting 600 seconds for a flag nothing writes, exiting 1, and restarting forever. The host port is also pinned across kept sessions, since the OAuth2 redirect URI is baked at first install. `KEEP` is unit-tested but has never been exercised across two real sessions; the measured cold boot makes it unnecessary rather than unproven.
+`KEEP` does **not** wipe `shared_files`: that volume holds `/mnt/shared/.istota-provisioned`, which `provision-nc.sh` never rewrites, because it is a `post-installation` hook and `nextcloud:30-apache` runs those only when the installed version is `0.0.0.0`. Wiping it leaves the Nextcloud healthcheck waiting for a flag nothing writes, so `istota`, which depends on it being healthy, never starts. The host port is also pinned across kept sessions, since the OAuth2 redirect URI is baked at first install. `KEEP` is unit-tested but has never been exercised across two real sessions; the measured cold boot makes it unnecessary rather than unproven.
 
 ## Costs, measured
 

@@ -345,7 +345,7 @@ def _default_env_file(args) -> Path:
 
 
 def cmd_setup(args):
-    """Interactive first-run installer for the local single-user shape."""
+    """First-run installer: the container shape, or the standalone install."""
     from . import setup_wizard
 
     try:
@@ -4689,7 +4689,7 @@ def main():
 
     # setup (interactive first-run installer for the local single-user shape)
     setup_parser = subparsers.add_parser(
-        "setup", help="Interactive first-run installer (local single-user install)",
+        "setup", help="First-run installer (the container, or a standalone install)",
     )
     setup_parser.add_argument("--workspace", help="Workspace directory (default ~/.istota)")
     setup_parser.add_argument(
@@ -4722,6 +4722,54 @@ def main():
     )
     setup_parser.add_argument("--yes", action="store_true", help="Non-interactive; take defaults + flags")
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
+    # The container half (the one deployment shape). Credentials for a --yes
+    # run come from the environment, under the names the daemon reads.
+    setup_parser.add_argument(
+        "--shape", choices=["standalone", "container"],
+        help="Which install to set up (default: container inside the image, else standalone)",
+    )
+    setup_parser.add_argument(
+        "--vm-dir", help="Also write the stack's .env, vm.env and secrets/ here (container)",
+    )
+    setup_parser.add_argument("--data-dir", help="The state volume (container; default /data)")
+    setup_parser.add_argument("--bot-name", help="User-facing bot name (container)")
+    setup_parser.add_argument("--user-email", help="The first admin's email address (container)")
+    setup_parser.add_argument("--hostname", help="Public hostname browsers use (container)")
+    setup_parser.add_argument(
+        "--ingress", choices=["direct", "proxied", "local"], help="How the stack is reached (container)",
+    )
+    setup_parser.add_argument("--upstream-proxy", help="Proxied ingress: the upstream's address(es)")
+    setup_parser.add_argument("--listen-addr", help="Proxied ingress: the private address to listen on")
+    setup_parser.add_argument("--listen-port", type=int, help="Proxied ingress: the port to listen on")
+    setup_parser.add_argument(
+        "--tls-cert-source", choices=["acme", "files"], help="Direct ingress: certificate source",
+    )
+    setup_parser.add_argument("--nextcloud-url", help="Existing Nextcloud, as the stack reaches it")
+    setup_parser.add_argument("--nextcloud-public-url", help="The same Nextcloud, as browsers reach it")
+    setup_parser.add_argument("--nextcloud-user", help="The bot's Nextcloud user")
+    setup_parser.add_argument(
+        "--nextcloud-dav-prefix", help="Folder in the bot's files holding the workspace",
+    )
+    setup_parser.add_argument(
+        "--no-nextcloud-auto-share", action="store_true",
+        help="Do not share each user's bot folder back to them over OCS",
+    )
+    setup_parser.add_argument("--no-talk", action="store_true", help="Leave Nextcloud Talk off")
+    setup_parser.add_argument("--oauth-client-id", help="Nextcloud OAuth2 client id for web login")
+    setup_parser.add_argument(
+        "--no-email-login", action="store_true", help="Leave email sign-in off for the web UI",
+    )
+    setup_parser.add_argument("--imap-host", help="IMAP host (with --email)")
+    setup_parser.add_argument("--imap-user", help="IMAP user (with --email)")
+    setup_parser.add_argument("--smtp-host", help="SMTP host (with --email)")
+    setup_parser.add_argument("--bot-email", help="The bot's email address (with --email)")
+    setup_parser.add_argument("--caldav-url", help="CalDAV server, without Nextcloud (container)")
+    setup_parser.add_argument("--caldav-username", help="CalDAV username (with --caldav-url)")
+    setup_parser.add_argument("--developer", action="store_true", help="Enable the developer skill")
+    setup_parser.add_argument(
+        "--profile", action="append",
+        help="Compose profile to enable: browser, signaling, location, whatsapp-baileys (repeatable)",
+    )
 
     # serve (combined local launcher: scheduler + web in one process)
     serve_parser = subparsers.add_parser(

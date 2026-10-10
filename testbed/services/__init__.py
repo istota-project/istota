@@ -99,15 +99,13 @@ class Service(Protocol):
         name. The caller never learns which.
         """
 
-    def config_env(self) -> dict[str, str]:
-        """The `ISTOTA_*` variables that point `render-config.sh` at this service.
+    def config(self) -> dict:
+        """The `config.toml` fragment that points the daemon at this service.
 
-        Merged into the render environment (lean shape) or the compose env-file
-        (full shape) by the stack fixture. **Must name only variables the
-        shipped generator already reads _and_ `docker-compose.yml` passes
-        through.** If a subsystem has no such variable, the fix is to add one to
-        both, as a reviewed product change — never to side-load config from the
-        fixture, which is the property that makes this whole tier honest.
+        Merged over the stack's base config, on both shapes, by
+        `stack.assemble_config`. Two services setting the same key is refused.
+        A service the daemon reaches through seeded rows or a secrets-store
+        entry returns nothing, and says so in its own override.
         """
 
     def reset(self) -> None:

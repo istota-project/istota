@@ -52,7 +52,7 @@ CONTAINER_CONFIG = "/data/config/config.toml"
 # a mask that failed to unshare the pid namespace would show up here as the
 # scheduler's environment — which holds every credential in the deployment.
 #
-# `config.toml` is where `render-config.sh` writes the forge token in plaintext.
+# `config.toml` is where the testbed writes the forge token in plaintext.
 # `sandbox_ro_paths` defaults to `[]` and the config directory is never bound,
 # so this must fail to open; before that default changed, a single broad
 # read-only bind is exactly how the file used to be reachable.

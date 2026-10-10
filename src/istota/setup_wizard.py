@@ -1,14 +1,22 @@
-"""Interactive first-run installer for the local single-user shape (``istota setup``).
+"""First-run installer (``istota setup``), in two halves.
 
-Writes a working ``config.toml`` + secrets ``istota.env`` to the standard
-config search path, initializes the DB, seeds the workspace, and prints next
-steps. Idempotent and re-runnable (``--force`` to overwrite an existing
-config); a non-interactive ``--yes`` mode takes defaults + flags for scripted
-installs.
+**The container half** (``--shape container``, the default inside the image,
+which sets ``ISTOTA_SETUP_SHAPE``) is how every install of the one deployment
+shape gets its config. It runs inside the istota image, as the daemon's uid,
+and writes ``/data/config/config.toml``, ``/data/config/admins`` and
+``/data/.secret_key``; with ``--vm-dir`` it also writes the stack's ``.env``,
+``vm.env`` and one file per credential under ``secrets/``, which compose mounts
+at ``/run/secrets`` and the entrypoint reads into the daemon's environment.
+Nothing renders ``config.toml`` after this: the operator owns it.
 
-The wizard logic is split from I/O for testability: prompts go through an
-injectable ``input_fn`` and ``claude`` detection through ``which_fn``; the
-config/env renderers are pure functions over an ``Answers`` object.
+**The standalone half** (``--shape standalone``) is the local single-user
+install: ``config.toml`` plus a secrets ``istota.env`` on the standard config
+search path, a DB, a seeded workspace. Deprecated, and kept until the Mac app
+replaces it; nothing in it depends on the container half.
+
+Both keep the wizard logic apart from I/O: prompts go through an injectable
+``input_fn``, secrets through ``getpass_fn``, and the renderers are pure
+functions of an answers object.
 """
 
 from __future__ import annotations
@@ -1023,9 +1031,28 @@ def _validate(a: Answers) -> None:
             )
 
 
+def setup_shape(args) -> str:
+    """Which half runs: the flag, else ``ISTOTA_SETUP_SHAPE`` (the image sets
+    ``container``), else ``standalone``. ``--vm-dir`` only means anything to
+    the container half, so it selects it."""
+    shape = getattr(args, "shape", None) or os.environ.get("ISTOTA_SETUP_SHAPE", "")
+    if not shape and getattr(args, "vm_dir", None):
+        shape = "container"
+    shape = shape or "standalone"
+    if shape not in ("standalone", "container"):
+        raise SetupError(f"Unknown setup shape {shape!r}; use standalone or container.")
+    return shape
+
+
 def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None) -> int:
     """Run the setup wizard. Returns a process exit code (0 = success)."""
     import shutil as _shutil
+
+    if setup_shape(args) == "container":
+        return run_container_setup(
+            args, input_fn=input_fn, out=out,
+            getpass_fn=getpass_fn or getpass.getpass,
+        )
 
     if which_fn is None:
         which_fn = _shutil.which
@@ -1253,3 +1280,722 @@ def _print_next_steps(a: Answers, config_path: Path, out) -> None:
         "runs with your account's full privileges. Only give it content and "
         "instructions you trust."
     )
+
+
+# ===========================================================================
+# The container half: the one deployment shape
+# ===========================================================================
+
+#: The image's state volume, and the layout every container config names.
+CONTAINER_DATA_DIR = Path("/data")
+CONTAINER_DB_PATH = "/data/db/istota.db"
+CONTAINER_TEMP_DIR = "/data/tmp"
+CONTAINER_REPOS_DIR = "/data/repos"
+#: The workspace. The compose volume (or, in full Nextcloud integration, the
+#: VM's rclone mount) is bound here.
+CONTAINER_WORKSPACE = "/mnt/shared"
+#: Where the image installs the real forge binaries, off PATH.
+CONTAINER_FORGE_DIR = "/usr/local/lib/istota_forge"
+#: The `browser` service's container name and API port.
+CONTAINER_BROWSER_API_URL = "http://istota-browser:9223"
+#: The `signaling` service as the daemon reaches it on the stack network.
+CONTAINER_SIGNALING_URL = "http://signaling:8080"
+CONTAINER_WEB_PORT = 8766
+
+#: Every credential the container half can write, by the name of the file it
+#: becomes under ``secrets/`` (compose mounts it at ``/run/secrets/<name>``).
+#: The name is the environment variable the daemon reads it from, lowercased,
+#: and ``istota-secrets`` in the image exports it under the uppercase name. All
+#: but the two Claude Code ones are ``load_config``'s existing
+#: ``ISTOTA_<SECTION>_<FIELD>`` overrides. ``docker-compose.yml`` declares
+#: exactly this set (``tests/test_setup_container.py`` holds the two equal),
+#: and compose refuses to start a service whose secret file is missing, so the
+#: wizard writes every one of them, empty when unused.
+SECRET_NAMES: tuple[str, ...] = (
+    "anthropic_api_key",
+    "claude_code_oauth_token",
+    "istota_brain_native_api_key",
+    "istota_nextcloud_app_password",
+    "istota_web_oauth2_client_secret",
+    "istota_web_session_secret_key",
+    "istota_email_imap_password",
+    "istota_caldav_password",
+    "istota_developer_gitlab_token",
+    "istota_developer_github_token",
+)
+
+#: Ingress modes, as `vm.env`'s INGRESS names them, mapped to the hop count the
+#: web app subtracts from X-Forwarded-For: one for the compose nginx, plus one
+#: for an upstream proxy in `proxied`.
+INGRESS_HOPS = {"direct": 1, "proxied": 2, "local": 1}
+
+#: Compose profiles the wizard can turn on. `location` starts the webhook
+#: receiver; the rest start the service of the same name.
+CONTAINER_PROFILES = ("browser", "signaling", "location", "whatsapp-baileys")
+
+
+@dataclass
+class ContainerAnswers:
+    """Everything the container half asks, and what it generates."""
+
+    bot_name: str = "Istota"
+    user_id: str = ""
+    display_name: str = ""
+    timezone: str = "UTC"
+    user_email: str = ""
+    #: The public name the stack is reached by: nginx's server_name, the
+    #: OAuth redirect, `[site] hostname`.
+    hostname: str = "localhost"
+    ingress: str = "local"
+    upstream_proxy: str = ""
+    listen_addr: str = ""
+    listen_port: int = 0
+    tls_cert_source: str = "acme"
+    # Nextcloud, full integration only. Empty url = local storage.
+    nextcloud_url: str = ""
+    nextcloud_public_url: str = ""
+    nextcloud_username: str = "istota"
+    nextcloud_app_password: str = ""
+    nextcloud_dav_prefix: str = ""
+    nextcloud_auto_share_bot_dir: bool = True
+    talk_enabled: bool = True
+    oauth_client_id: str = ""
+    oauth_client_secret: str = ""
+    email_login: bool = True
+    # Brain.
+    brain_kind: str = "claude_code"
+    claude_code_oauth_token: str = ""
+    anthropic_api_key: str = ""
+    native_base_url: str = DEFAULT_ANTHROPIC_BASE_URL
+    native_model: str = ""
+    native_api_key: str = ""
+    # Email.
+    email_enabled: bool = False
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_user: str = ""
+    imap_password: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    bot_email: str = ""
+    # Calendar without Nextcloud.
+    caldav_url: str = ""
+    caldav_username: str = ""
+    caldav_password: str = ""
+    # Modules and profiles.
+    location_enabled: bool = False
+    money_enabled: bool = True
+    health_enabled: bool = True
+    feeds_enabled: bool = True
+    briefings_enabled: bool = True
+    developer_enabled: bool = False
+    gitlab_token: str = ""
+    github_token: str = ""
+    profiles: tuple[str, ...] = ()
+    # Generated, and carried forward on a re-run.
+    session_secret: str = ""
+
+    @property
+    def disabled_modules(self) -> list[str]:
+        return sorted(
+            module
+            for field_name, module, _question in _OPT_OUT_MODULES
+            if not getattr(self, field_name)
+        )
+
+    @property
+    def uses_nextcloud(self) -> bool:
+        return bool(self.nextcloud_url)
+
+    @property
+    def public_scheme(self) -> str:
+        return "http" if self.ingress == "local" else "https"
+
+    @property
+    def web_auth(self) -> list[str]:
+        methods = []
+        if self.uses_nextcloud and self.oauth_client_id:
+            methods.append("nextcloud")
+        if self.email_login or not methods:
+            methods.append("email")
+        return methods
+
+    @property
+    def compose_profiles(self) -> list[str]:
+        chosen = set(self.profiles)
+        if self.location_enabled:
+            chosen.add("location")
+        return [name for name in CONTAINER_PROFILES if name in chosen]
+
+
+def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
+    """Every file under ``secrets/``, name to content, empty when unused."""
+    values = {
+        "anthropic_api_key": a.anthropic_api_key if a.brain_kind != "native" else "",
+        "claude_code_oauth_token": (
+            a.claude_code_oauth_token if a.brain_kind != "native" else ""
+        ),
+        "istota_brain_native_api_key": a.native_api_key if a.brain_kind == "native" else "",
+        "istota_nextcloud_app_password": a.nextcloud_app_password if a.uses_nextcloud else "",
+        "istota_web_oauth2_client_secret": (
+            a.oauth_client_secret if "nextcloud" in a.web_auth else ""
+        ),
+        "istota_web_session_secret_key": a.session_secret,
+        "istota_email_imap_password": a.imap_password if a.email_enabled else "",
+        "istota_caldav_password": (
+            a.caldav_password if a.caldav_url and not a.uses_nextcloud else ""
+        ),
+        "istota_developer_gitlab_token": a.gitlab_token if a.developer_enabled else "",
+        "istota_developer_github_token": a.github_token if a.developer_enabled else "",
+    }
+    assert tuple(values) == SECRET_NAMES
+    return values
+
+
+def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) -> dict:
+    """The container ``config.toml`` as a document (pure).
+
+    Only what the answers decide, plus the container's fixed layout; every
+    other key is left to the dataclass default, which is the only default.
+
+    ``inline_credentials`` is the run without ``--vm-dir``: there is no
+    secrets directory for compose to mount, so a credential with a config key
+    is written into the file instead. The two Claude Code credentials have no
+    config key and are never inlined.
+    """
+    secret = container_secret_values(a)
+
+    def credential(name: str) -> bool:
+        return inline_credentials and bool(secret[name])
+
+    doc: dict = {
+        "bot_name": a.bot_name,
+        "db_path": CONTAINER_DB_PATH,
+        "workspace_path": CONTAINER_WORKSPACE,
+        "temp_dir": CONTAINER_TEMP_DIR,
+        "security": {"sandbox_enabled": True, "skill_proxy_enabled": True},
+    }
+
+    brain: dict = {"kind": a.brain_kind}
+    if a.brain_kind == "native":
+        native = {"base_url": a.native_base_url, "model": a.native_model}
+        if credential("istota_brain_native_api_key"):
+            native["api_key"] = secret["istota_brain_native_api_key"]
+        brain["native"] = native
+    doc["brain"] = brain
+
+    if a.uses_nextcloud:
+        nextcloud = {
+            "url": a.nextcloud_url,
+            "username": a.nextcloud_username,
+            "dav_prefix": a.nextcloud_dav_prefix,
+            "auto_share_bot_dir": a.nextcloud_auto_share_bot_dir,
+        }
+        if credential("istota_nextcloud_app_password"):
+            nextcloud["app_password"] = secret["istota_nextcloud_app_password"]
+        doc["nextcloud"] = nextcloud
+        talk: dict = {"enabled": a.talk_enabled, "bot_username": a.nextcloud_username}
+        if a.talk_enabled and "signaling" in a.compose_profiles:
+            talk["signaling"] = {"enabled": True, "url": CONTAINER_SIGNALING_URL}
+        doc["talk"] = talk
+    else:
+        doc["talk"] = {"enabled": False}
+        if a.caldav_url:
+            caldav = {"url": a.caldav_url, "username": a.caldav_username}
+            if credential("istota_caldav_password"):
+                caldav["password"] = secret["istota_caldav_password"]
+            doc["caldav"] = caldav
+
+    email: dict = {"enabled": a.email_enabled}
+    if a.email_enabled:
+        email.update({
+            "imap_host": a.imap_host,
+            "imap_port": a.imap_port,
+            "imap_user": a.imap_user,
+            "smtp_host": a.smtp_host or a.imap_host,
+            "smtp_port": a.smtp_port,
+            "bot_email": a.bot_email or a.imap_user,
+        })
+        if credential("istota_email_imap_password"):
+            email["imap_password"] = secret["istota_email_imap_password"]
+    doc["email"] = email
+
+    doc["location"] = {"enabled": a.location_enabled}
+    if "browser" in a.compose_profiles:
+        doc["browser"] = {"enabled": True, "api_url": CONTAINER_BROWSER_API_URL}
+    if "whatsapp-baileys" in a.compose_profiles:
+        doc["whatsapp"] = {"enabled": True, "provider": "baileys"}
+
+    if a.developer_enabled:
+        developer = {
+            "enabled": True,
+            "repos_dir": CONTAINER_REPOS_DIR,
+            "gh_bin_path": f"{CONTAINER_FORGE_DIR}/gh",
+            "glab_bin_path": f"{CONTAINER_FORGE_DIR}/glab",
+        }
+        if credential("istota_developer_gitlab_token"):
+            developer["gitlab_token"] = secret["istota_developer_gitlab_token"]
+        if credential("istota_developer_github_token"):
+            developer["github_token"] = secret["istota_developer_github_token"]
+        doc["developer"] = developer
+
+    web: dict = {
+        "enabled": True,
+        "port": CONTAINER_WEB_PORT,
+        "auth": a.web_auth,
+        "trusted_proxy_hops": INGRESS_HOPS[a.ingress],
+        # The web service is the only holder of its key (`/data/.web_token_key`,
+        # generated by the entrypoint), so encrypted storage costs nothing here.
+        "token_storage": "encrypted",
+    }
+    if credential("istota_web_session_secret_key"):
+        web["session_secret_key"] = secret["istota_web_session_secret_key"]
+    if "nextcloud" in a.web_auth:
+        public = (a.nextcloud_public_url or a.nextcloud_url).rstrip("/")
+        internal = a.nextcloud_url.rstrip("/")
+        web.update({
+            "oauth2_provider": public,
+            "oauth2_client_id": a.oauth_client_id,
+            "oauth2_token_endpoint": f"{internal}/index.php/apps/oauth2/api/v1/token",
+            "oauth2_userinfo_endpoint": f"{internal}/ocs/v2.php/cloud/user?format=json",
+            "oauth2_redirect_uri": f"{a.public_scheme}://{a.hostname}/istota/callback",
+        })
+        if credential("istota_web_oauth2_client_secret"):
+            web["oauth2_client_secret"] = secret["istota_web_oauth2_client_secret"]
+    doc["web"] = web
+    doc["site"] = {"hostname": a.hostname}
+
+    user: dict = {
+        "display_name": a.display_name or a.user_id,
+        "timezone": a.timezone,
+    }
+    if a.user_email:
+        user["email_addresses"] = [a.user_email]
+    if a.disabled_modules:
+        user["disabled_modules"] = a.disabled_modules
+    doc["users"] = {a.user_id: user}
+    return doc
+
+
+def render_container_config(a: ContainerAnswers, *, inline_credentials: bool) -> str:
+    """The container ``config.toml`` text (pure)."""
+    import tomli_w  # noqa: PLC0415 - only this half needs it
+
+    if inline_credentials:
+        where = "Credentials are in this file, which is why it is 0600."
+    else:
+        where = (
+            "Credentials are not in this file: each is a file under the stack's "
+            "secrets/ directory."
+        )
+    header = (
+        "# Istota configuration, written once by `istota setup` and yours to edit.\n"
+        "# Nothing regenerates it. Unknown keys warn at load; a key left out takes\n"
+        "# its default. Reference: config/config.example.toml.\n"
+        f"# {where}\n\n"
+    )
+    return header + tomli_w.dumps(container_config_document(a, inline_credentials=inline_credentials))
+
+
+def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
+    """The compose ``.env`` keys the wizard owns: stack-level, never istota config."""
+    return {
+        "COMPOSE_PROJECT_NAME": "istota",
+        "COMPOSE_PROFILES": ",".join(a.compose_profiles),
+        "DOMAIN": a.hostname,
+        "ISTOTA_SECRETS_DIR": "./secrets",
+        # Plain http on loopback needs it: a Secure cookie is never sent back.
+        "ISTOTA_WEB_INSECURE_COOKIES": "1" if a.ingress == "local" else "0",
+    }
+
+
+def vm_env_values(a: ContainerAnswers) -> dict[str, str]:
+    """The ``vm.env`` keys: what the VM's provisioning reads."""
+    return {
+        "STORAGE": "nextcloud" if a.uses_nextcloud else "local",
+        "INGRESS": a.ingress,
+        "DOMAIN": a.hostname,
+        "TLS_CERT_SOURCE": a.tls_cert_source if a.ingress != "local" else "",
+        "UPSTREAM_PROXY": a.upstream_proxy,
+        "LISTEN_ADDR": a.listen_addr,
+        "LISTEN_PORT": str(a.listen_port or ""),
+    }
+
+
+_STACK_ENV_HEADER = (
+    "# Compose settings for this stack. `istota setup` updates the keys it owns\n"
+    "# and keeps every other line. istota's own configuration is\n"
+    "# /data/config/config.toml on the state volume; its credentials are the\n"
+    "# files under secrets/.\n"
+)
+_VM_ENV_HEADER = (
+    "# VM settings for this install, read by vm/provision.sh for the mount,\n"
+    "# firewall and certificate units. `istota setup` updates the keys it owns.\n"
+)
+
+
+def merge_env_text(existing: str, owned: dict[str, str], header: str) -> str:
+    """``existing`` with each owned key set, every other line kept as it was.
+
+    The operator owns the file: a browser limit or a bundled-service password
+    they added survives a re-run. An owned key that is missing is appended.
+    """
+    if any("\n" in value or "\r" in value for value in owned.values()):
+        raise SetupError("A value for the stack's .env contains a newline.")
+    lines = existing.splitlines() if existing else header.splitlines()
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if "=" in line and not line.lstrip().startswith("#") and key in owned:
+            if key in seen:
+                continue
+            out.append(f"{key}={owned[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    out.extend(f"{key}={value}" for key, value in owned.items() if key not in seen)
+    return "\n".join(out) + "\n"
+
+
+def render_stack_env(a: ContainerAnswers, existing: str = "") -> str:
+    """The compose ``.env`` after this run."""
+    return merge_env_text(existing, stack_env_values(a), _STACK_ENV_HEADER)
+
+
+def render_vm_env(a: ContainerAnswers, existing: str = "") -> str:
+    """``vm.env`` after this run."""
+    return merge_env_text(existing, vm_env_values(a), _VM_ENV_HEADER)
+
+
+def _env_credential(name: str) -> str:
+    """A credential for a non-interactive run, from the variable the daemon
+    itself reads it from, so no secret ever has to be on the command line."""
+    return os.environ.get(name.upper(), "").strip()
+
+
+def _ask_secret_optional(getpass_fn, label: str) -> str:
+    """A credential the operator may skip: one no-echo read, Enter skips."""
+    _flush_terminal_input()
+    try:
+        return getpass_fn(f"{label} (Enter to skip): ").strip()
+    except EOFError:
+        return ""
+
+
+def _ask_choice(input_fn, prompt: str, choices: tuple[str, ...], default: str, *, out) -> str:
+    for attempt in range(3):
+        raw = _ask(input_fn, f"{prompt} ({'/'.join(choices)})", default).strip().lower()
+        if raw in choices:
+            return raw
+        if attempt < 2:
+            out(f"  Please answer one of {', '.join(choices)}.")
+    return default
+
+
+def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAnswers:
+    """Build ``ContainerAnswers`` from flags and (unless ``--yes``) prompts.
+
+    Non-interactively, credentials come from the environment under the names
+    the daemon reads them by (``ISTOTA_NEXTCLOUD_APP_PASSWORD``,
+    ``ANTHROPIC_API_KEY``, ...), never from argv.
+    """
+    interactive = not getattr(args, "yes", False)
+    a = ContainerAnswers()
+
+    def flag(name: str, default=None):
+        value = getattr(args, name, None)
+        return default if value is None else value
+
+    def text(name: str, prompt: str, default: str) -> str:
+        value = flag(name)
+        if value is None and interactive:
+            value = _ask(input_fn, prompt, default)
+        return (value if value is not None else default).strip()
+
+    def secret(name: str, label: str) -> str:
+        value = _env_credential(name)
+        if not value and interactive:
+            value = _ask_secret_optional(getpass_fn, label)
+        return value
+
+    a.bot_name = text("bot_name", "Bot name", "Istota") or "Istota"
+
+    a.user_id = text("user", "First admin's user id (their login name)", "")
+    if not a.user_id:
+        raise SetupError("A user id is required for the first admin (--user).")
+    a.display_name = text("display_name", "Display name", a.user_id) or a.user_id
+    tz = text("timezone", "Timezone (IANA, e.g. Europe/Berlin)", "UTC")
+    if not _is_valid_timezone(tz):
+        out(f"  '{tz}' is not a valid IANA timezone; using UTC.")
+        tz = "UTC"
+    a.timezone = tz
+    a.user_email = text("user_email", "Their email address (optional)", "")
+
+    # Ingress and the public name.
+    a.hostname = text("hostname", "Public hostname (as browsers reach it)", "localhost")
+    default_ingress = "local" if a.hostname.split(":")[0] in ("localhost", "127.0.0.1") else "direct"
+    ingress = flag("ingress")
+    if ingress is None and interactive:
+        out("  Ingress: direct (this VM terminates TLS), proxied (behind your own")
+        out("  reverse proxy on a private network), local (loopback, a laptop VM).")
+        ingress = _ask_choice(input_fn, "Ingress", tuple(INGRESS_HOPS), default_ingress, out=out)
+    a.ingress = ingress or default_ingress
+    if a.ingress not in INGRESS_HOPS:
+        raise SetupError(f"Unknown ingress {a.ingress!r}; use direct, proxied or local.")
+    if a.ingress == "proxied":
+        a.upstream_proxy = text(
+            "upstream_proxy", "Upstream proxy address(es) or CIDR(s), comma-separated", "",
+        )
+        if not a.upstream_proxy:
+            raise SetupError(
+                "Proxied ingress needs the upstream proxy's address (--upstream-proxy): "
+                "the listener must refuse every other source, or a client can forge "
+                "X-Forwarded-For past the login throttle."
+            )
+        a.listen_addr = text("listen_addr", "Address to listen on (the VM's private interface)", "")
+        if not a.listen_addr or a.listen_addr in ("0.0.0.0", "::"):
+            raise SetupError("Proxied ingress listens on one private address, never 0.0.0.0.")
+        a.listen_port = int(flag("listen_port") or (
+            _ask_port(input_fn, "Port to listen on", 8080, out=out) if interactive else 8080
+        ))
+        if interactive:
+            out("  The hop from the proxy to this VM is plain HTTP unless you set up")
+            out("  certificates here too; that is only acceptable on a network you control.")
+    if a.ingress == "direct":
+        a.tls_cert_source = _ask_choice(
+            input_fn, "Certificates from", ("acme", "files"), "acme", out=out,
+        ) if flag("tls_cert_source") is None and interactive else (flag("tls_cert_source") or "acme")
+
+    # Nextcloud: full integration, or none.
+    nc_url = flag("nextcloud_url")
+    if nc_url is None and interactive:
+        use_nc = _ask_yes_no(
+            input_fn, "Connect to an existing Nextcloud (files and Talk)?", False, out=out,
+        )
+        nc_url = _ask(input_fn, "Nextcloud URL as this stack reaches it", "") if use_nc else ""
+    a.nextcloud_url = (nc_url or "").strip().rstrip("/")
+    if a.uses_nextcloud:
+        a.nextcloud_public_url = text(
+            "nextcloud_public_url", "Nextcloud URL as browsers reach it", a.nextcloud_url,
+        ).rstrip("/")
+        a.nextcloud_username = text("nextcloud_user", "The bot's Nextcloud user", "istota")
+        a.nextcloud_app_password = secret("istota_nextcloud_app_password", "Its app password")
+        a.nextcloud_dav_prefix = text(
+            "nextcloud_dav_prefix",
+            "Folder in the bot's files that holds the workspace (blank for the root)", "",
+        )
+        if flag("no_nextcloud_auto_share", False):
+            a.nextcloud_auto_share_bot_dir = False
+        elif interactive:
+            a.nextcloud_auto_share_bot_dir = _ask_yes_no(
+                input_fn, "Share each user's bot folder back to them over OCS?",
+                not a.nextcloud_dav_prefix, out=out,
+            )
+        else:
+            a.nextcloud_auto_share_bot_dir = not a.nextcloud_dav_prefix
+        if flag("no_talk", False):
+            a.talk_enabled = False
+        elif interactive:
+            a.talk_enabled = _ask_yes_no(input_fn, "Use Nextcloud Talk?", True, out=out)
+        a.oauth_client_id = text(
+            "oauth_client_id", "OAuth2 client id for Nextcloud login (blank to skip)", "",
+        )
+        if a.oauth_client_id:
+            a.oauth_client_secret = secret("istota_web_oauth2_client_secret", "OAuth2 client secret")
+            if not a.oauth_client_secret:
+                out("  No client secret; Nextcloud login stays off.")
+                a.oauth_client_id = ""
+    if flag("no_email_login", False):
+        a.email_login = False
+
+    # Brain.
+    kind = flag("brain")
+    if kind is None and interactive:
+        kind = _ask_choice(input_fn, "Model backend", ("claude_code", "native"), "claude_code", out=out)
+    a.brain_kind = kind or "claude_code"
+    if a.brain_kind == "native":
+        a.native_base_url = text("native_base_url", "API base URL", DEFAULT_ANTHROPIC_BASE_URL)
+        a.native_model = text("native_model", "Model id", "claude-sonnet-4-6" if interactive else "")
+        a.native_api_key = secret("istota_brain_native_api_key", "API key")
+        if not a.native_model or not a.native_api_key:
+            raise SetupError(
+                "The native brain needs a model (--native-model) and an API key "
+                "(ISTOTA_BRAIN_NATIVE_API_KEY)."
+            )
+    else:
+        a.claude_code_oauth_token = secret("claude_code_oauth_token", "Claude Code OAuth token")
+        if not a.claude_code_oauth_token:
+            a.anthropic_api_key = secret("anthropic_api_key", "Anthropic API key")
+        if not (a.claude_code_oauth_token or a.anthropic_api_key):
+            out("  No Claude credential given; add one to secrets/ before the first task.")
+
+    # Email.
+    if flag("email", False):
+        a.email_enabled = True
+    elif interactive:
+        a.email_enabled = _ask_yes_no(input_fn, "Enable email (IMAP/SMTP)?", False, out=out)
+    if a.email_enabled:
+        a.imap_host = text("imap_host", "IMAP host", "")
+        a.imap_user = text("imap_user", "IMAP user", "")
+        a.smtp_host = text("smtp_host", "SMTP host", a.imap_host)
+        a.bot_email = text("bot_email", "The bot's email address", a.imap_user)
+        a.imap_password = secret("istota_email_imap_password", "IMAP password")
+
+    # Calendar, where there is no Nextcloud to derive it from.
+    if not a.uses_nextcloud:
+        caldav = flag("caldav_url")
+        if caldav is None and interactive and _ask_yes_no(
+            input_fn, "Point calendar at a CalDAV server?", False, out=out,
+        ):
+            caldav = _ask(input_fn, "CalDAV URL", "")
+        a.caldav_url = (caldav or "").strip()
+        if a.caldav_url:
+            a.caldav_username = text("caldav_username", "CalDAV username", "")
+            a.caldav_password = secret("istota_caldav_password", "CalDAV password")
+            if not a.caldav_password:
+                out("  No CalDAV password; leaving [caldav] out.")
+                a.caldav_url = a.caldav_username = ""
+
+    # Modules.
+    if flag("location", False):
+        a.location_enabled = True
+    elif interactive:
+        a.location_enabled = _ask_yes_no(input_fn, "Enable GPS/location tracking?", False, out=out)
+    _collect_modules(a, args, interactive=interactive, input_fn=input_fn, out=out)
+    if flag("developer", False):
+        a.developer_enabled = True
+    elif interactive:
+        a.developer_enabled = _ask_yes_no(input_fn, "Enable the developer skill?", False, out=out)
+    if a.developer_enabled:
+        a.gitlab_token = secret("istota_developer_gitlab_token", "GitLab token")
+        a.github_token = secret("istota_developer_github_token", "GitHub token")
+
+    # Compose profiles.
+    profiles = list(flag("profile", []) or [])
+    if not profiles and interactive:
+        if _ask_yes_no(input_fn, "Run the browser container?", False, out=out):
+            profiles.append("browser")
+        if a.uses_nextcloud and a.talk_enabled and _ask_yes_no(
+            input_fn, "Run the Talk signaling server?", False, out=out,
+        ):
+            profiles.append("signaling")
+        if _ask_yes_no(input_fn, "Run the WhatsApp (Baileys) sidecar?", False, out=out):
+            profiles.append("whatsapp-baileys")
+    unknown = [p for p in profiles if p not in CONTAINER_PROFILES]
+    if unknown:
+        raise SetupError(f"Unknown profile(s) {unknown}; known: {list(CONTAINER_PROFILES)}")
+    if "signaling" in profiles and not (a.uses_nextcloud and a.talk_enabled):
+        raise SetupError("The signaling profile needs Nextcloud Talk.")
+    a.profiles = tuple(profiles)
+    return a
+
+
+def _write_secret_file(path: Path, value: str) -> None:
+    """Write one credential file, 0400 from creation.
+
+    Replaced rather than rewritten, because the existing file is 0400 and
+    opening it for writing would need a chmod first. The owner is whoever runs
+    this: inside the image that is uid 10001, which is the one reader.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(value)
+
+
+def _read_secret_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _ensure_master_key(path: Path, out) -> None:
+    """Create ``/data/.secret_key`` (0600) unless a usable one is there.
+
+    Never replaced: every credential in the secrets table is encrypted under
+    it. The same rule the entrypoint applies when it finds none.
+    """
+    from istota.credentials.store import _MIN_KEY_LEN  # noqa: PLC0415
+
+    if len(_read_secret_file(path)) >= _MIN_KEY_LEN:
+        out(f"  Keeping the existing master key at {path}.")
+        return
+    if path.exists():
+        raise SetupError(
+            f"{path} exists but holds no usable key. Move it aside yourself; "
+            "setup does not replace a master key."
+        )
+    _write_private(path, secrets.token_hex(32))
+
+
+def _carry_forward_session_secret(a: ContainerAnswers, config_path: Path, secrets_dir: Path | None) -> None:
+    """Keep the web session key a previous run wrote, so a re-run does not
+    sign every user out. From the secrets file, else the config."""
+    import tomllib  # noqa: PLC0415
+
+    prior = ""
+    if secrets_dir is not None:
+        prior = _read_secret_file(secrets_dir / "istota_web_session_secret_key")
+    if not prior:
+        try:
+            with open(config_path, "rb") as fh:
+                prior = str(tomllib.load(fh).get("web", {}).get("session_secret_key") or "")
+        except (OSError, ValueError):
+            prior = ""
+    a.session_secret = prior.strip() or secrets.token_hex(32)
+
+
+def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
+    """The container half. Returns a process exit code."""
+    data_dir = Path(getattr(args, "data_dir", None) or CONTAINER_DATA_DIR)
+    vm_dir = Path(args.vm_dir) if getattr(args, "vm_dir", None) else None
+    config_path = data_dir / "config" / "config.toml"
+    secrets_dir = vm_dir / "secrets" if vm_dir is not None else None
+
+    if config_path.exists() and not getattr(args, "force", False):
+        if getattr(args, "yes", False):
+            raise SetupError(
+                f"{config_path} already exists and is yours now; edit it, or re-run "
+                "with --force to replace it."
+            )
+        if not _ask_yes_no(input_fn, f"{config_path} exists. Replace it?", False, out=out):
+            out("Setup aborted; the existing config is untouched.")
+            return 1
+
+    a = collect_container_answers(args, input_fn=input_fn, out=out, getpass_fn=getpass_fn)
+    _carry_forward_session_secret(a, config_path, secrets_dir)
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    inline = secrets_dir is None
+    _write_private(config_path, render_container_config(a, inline_credentials=inline))
+    _ensure_admins_file(config_path.parent / "admins", a.user_id, out=out)
+    _ensure_master_key(data_dir / ".secret_key", out)
+
+    if vm_dir is not None:
+        secrets_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(secrets_dir, 0o700)
+        for name, value in container_secret_values(a).items():
+            _write_secret_file(secrets_dir / name, value)
+        for name, render in ((".env", render_stack_env), ("vm.env", render_vm_env)):
+            path = vm_dir / name
+            existing = path.read_text(encoding="utf-8") if path.exists() else ""
+            path.write_text(render(a, existing), encoding="utf-8")
+    elif a.brain_kind != "native" and (a.claude_code_oauth_token or a.anthropic_api_key):
+        out(
+            "  The Claude credential has no config key; without --vm-dir it was not "
+            "written. Put it in the stack's secrets/ directory."
+        )
+
+    out("")
+    out("Setup complete.")
+    out(f"  Config:  {config_path} (yours to edit; nothing regenerates it)")
+    out(f"  Admins:  {config_path.parent / 'admins'}")
+    if vm_dir is not None:
+        out(f"  Stack:   {vm_dir / '.env'}, {vm_dir / 'vm.env'}, {secrets_dir}/")
+    out(f"  First admin: {a.user_id}")
+    return 0

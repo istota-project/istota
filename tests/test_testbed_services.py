@@ -3,8 +3,8 @@
 `testbed/` is code, and code that only runs behind a deselected marker rots.
 These are plain unit tests in the default suite, needing no Docker: the shared
 HTTP base, the profile table, and the one rule that makes the whole deployment
-tier honest — that a service points the daemon at itself only through a variable
-the shipped generator already reads.
+tier honest — that every key a service or profile writes into the stack's
+`config.toml` is one the loader reads.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from testbed.services import REGISTRY, ServiceCall, gitlab, mail, signaling
 from testbed.services.model_endpoint import serve_script
 
 REPO = Path(__file__).resolve().parents[1]
-RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
 FULL_COMPOSE = REPO / "docker" / "docker-compose.yml"
 
 #: A stand-in for what `StackPool` generates on the full shape. Fixed values, so
@@ -286,73 +285,42 @@ class TestProfiles:
         assert len(names) == len(set(names)), names
 
 
-def _reads_variable(script: str, name: str) -> bool:
-    """Whether a shell script actually *expands* `name`.
+def _unknown_keys(tmp_path, document: dict, caplog) -> str:
+    """Load `document` as a config and return the loader's unknown-key warning.
 
-    A substring search would be satisfied by a mention in a comment, which is
-    exactly the false pass this check exists to prevent — the whole point is
-    that the shipped generator does something with the variable.
+    The loader is the reader that decides: an unknown key is a warning and
+    nothing else, so a fragment naming one would boot a stack that silently
+    ignores the setting the profile or service asked for.
     """
-    return re.search(r"\$\{" + re.escape(name) + r"[:}+-]", script) is not None
+    import logging
+
+    from istota.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text(stack_support.toml_dumps(document))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        load_config(path)
+    return " ".join(r.getMessage() for r in caplog.records if "unrecognised key" in r.getMessage())
 
 
-def _passed_through(compose: str, name: str) -> bool:
-    """Whether `name` appears in `docker-compose.yml` as an indented key.
+class TestServiceConfigNamesOnlyRealKeys:
+    """Every service's `config()` is a fragment the loader understands.
 
-    Which is a proxy for "compose passes it into the container", not the thing
-    itself: the same shape would match a key under `labels:` or an `x-` block.
-    Narrow enough for what it is guarding — every `ISTOTA_*` key in that file is
-    in an `environment:` map — and stated as a proxy so nobody reads more into a
-    pass than is there.
-
-    The rule has two files in it. On the lean shape the generator runs on the
-    host, so anything it reads is reachable; on the full shape it runs *inside
-    the container*, from what compose passed it, and compose's explicit
-    `environment:` map is not a superset of what the generator reads.
+    The config is an input now, written by the testbed for every profile, so
+    the rule this tier holds is no longer "a variable two shipped files agree
+    on": it is that every key the testbed writes is a key `load_config` reads,
+    the same reader an operator's `istota setup` output goes through.
     """
-    return re.search(r"^\s+" + re.escape(name) + r":", compose, re.MULTILINE) is not None
-
-
-class TestConfigEnvNamesOnlyShippedVariables:
-    """The design constraint from the spec, enforced.
-
-    A service may only be wired in through a variable `render-config.sh` reads
-    *and* `docker-compose.yml` passes through. The alternative — letting the
-    fixture write config directly — is faster and destroys the property that
-    makes the tier honest, because the file a stack boots from would no longer
-    be one the shipped generator can produce. If a variable is missing, the fix
-    is to add it to both as a reviewed product change.
-
-    Enforced here rather than discovered at stack level: a service pointing the
-    daemon at itself through a variable the generator ignores otherwise
-    surfaces as a mysteriously misconfigured stack, minutes later.
-    """
-
-    @pytest.fixture(scope="class")
-    def script(self) -> str:
-        return RENDER_CONFIG.read_text()
-
-    @pytest.fixture(scope="class")
-    def compose(self) -> str:
-        return FULL_COMPOSE.read_text()
 
     @pytest.fixture
     def services(self, tmp_path):
-        """One of each conforming service that has a `config_env()` to check.
+        """One of each service that has a `config()` to check.
 
-        `mail` is here and costs nothing: `serve()` starts no container — the
-        profile's compose overlay does that — so it is a certificate written
-        into `tmp_path` and a dictionary. `signaling` is the same shape: the
-        compose profile runs the container and `serve()` produces the secrets it
-        is configured from. `nextcloud` is absent because its `config_env()` is
-        empty by design, the shipped compose file already pointing the daemon at
-        its own service.
-
-        Hand-maintained, and that is the cost of the guard being written this
-        way: a service whose `config_env()` is empty today is vacuously
-        conforming, and adding a variable to it later is checked by nothing
-        until the name is added here. `ntfy` and `feeds` are in exactly that
-        state.
+        `mail` costs nothing: `serve()` starts no container — the profile's
+        compose overlay does that. `signaling` is the same shape. `nextcloud`,
+        `ntfy` and `feeds` return nothing by design; their stubs' own tests say
+        so (`tests/test_testbed_stubs.py`).
         """
         endpoint = serve_script([{"text": "ok"}])
         forge = gitlab.serve(tmp_path / "repos")
@@ -371,41 +339,30 @@ class TestConfigEnvNamesOnlyShippedVariables:
             forge.close()
             endpoint.close()
 
-    def test_the_guard_itself_can_fail(self, script, compose):
-        """A check whose regex quietly stopped matching would report a clean
-        tree, so both halves get a negative control."""
-        assert not _reads_variable(script, "ISTOTA_NOT_A_REAL_VARIABLE")
-        assert not _passed_through(compose, "ISTOTA_NOT_A_REAL_VARIABLE")
+    def test_the_guard_itself_can_fail(self, tmp_path, caplog, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
+        warned = _unknown_keys(tmp_path, {"email": {"not_a_real_key": 1}}, caplog)
 
-    def test_every_variable_is_read_by_the_shipped_generator(self, services, script):
-        for name, service in services.items():
-            for variable in service.config_env():
-                assert _reads_variable(script, variable), (
-                    f"{name}.config_env() names {variable}, which "
-                    f"{RENDER_CONFIG.name} does not read"
-                )
+        assert "not_a_real_key" in warned
 
-    def test_every_variable_is_passed_through_by_the_full_compose_file(
-        self, services, compose
-    ):
-        for name, service in services.items():
-            for variable in service.config_env():
-                assert _passed_through(compose, variable), (
-                    f"{name}.config_env() names {variable}, which "
-                    f"docker-compose.yml does not pass into the container — so "
-                    f"the full shape's generator would never see it"
-                )
+    def test_every_key_is_one_the_loader_reads(self, services, tmp_path, caplog, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
+        document = stack_support.assemble_config(
+            services, base=stack_support.LEAN_BASE_CONFIG,
+        )
+
+        assert _unknown_keys(tmp_path, document, caplog) == ""
 
     def test_the_endpoint_points_the_brain_at_its_own_container_url(self, services):
         endpoint = services["model"]
-        rendered = endpoint.config_env()
+        brain = endpoint.config()["brain"]
 
-        assert rendered["ISTOTA_BRAIN_KIND"] == "native"
-        assert rendered["ISTOTA_BRAIN_NATIVE_BASE_URL"] == endpoint.container_url
+        assert brain["kind"] == "native"
+        assert brain["native"]["base_url"] == endpoint.container_url
         # `host.docker.internal`, not loopback: a container reaching its own
         # loopback finds nothing, and the symptom is a task that failed to
         # reach the model for no stated reason.
-        assert "host.docker.internal" in rendered["ISTOTA_BRAIN_NATIVE_BASE_URL"]
+        assert "host.docker.internal" in brain["native"]["base_url"]
 
     def test_the_signaling_image_tag_matches_both_shipped_compose_defaults(self):
         """One version, written in three places and held equal by nothing else.
@@ -413,9 +370,8 @@ class TestConfigEnvNamesOnlyShippedVariables:
         The harness passes `ISTOTA_TALK_SIGNALING_IMAGE_TAG` explicitly, so a
         compose default is only what an *operator* gets — and a bump in one
         place would leave the tier exercising a version the shipped file does
-        not run. The drift is silent in exactly the direction that matters:
-        `chat-relay` landed in 2.1.0 and a server without it connects fine and
-        only ever sends a bare refresh.
+        not run. `chat-relay` landed in 2.1.0 and a server without it connects
+        fine and only ever sends a bare refresh.
         """
         pattern = re.compile(
             r"strukturag/nextcloud-spreed-signaling:\$\{ISTOTA_TALK_SIGNALING_IMAGE_TAG"
@@ -433,67 +389,38 @@ class TestConfigEnvNamesOnlyShippedVariables:
         self, services
     ):
         forge = services["gitlab"]
-        rendered = forge.config_env()
+        developer = forge.config()["developer"]
 
-        assert rendered["ISTOTA_DEVELOPER_ENABLED"] == "true"
-        assert rendered["ISTOTA_DEVELOPER_GITLAB_URL"] == forge.container_url
-        assert rendered["ISTOTA_DEVELOPER_GITLAB_TOKEN"] == forge.token
-        assert rendered["ISTOTA_DEVELOPER_GITLAB_DEFAULT_NAMESPACE"] == "istota-test"
+        assert developer["enabled"] is True
+        assert developer["gitlab_url"] == forge.container_url
+        assert developer["gitlab_token"] == forge.token
+        assert developer["gitlab_default_namespace"] == "istota-test"
 
 
-class TestProfileConfigNamesOnlyShippedVariables:
-    """The same rule, applied to the other half of the render environment.
+class TestProfileConfigNamesOnlyRealKeys:
+    """The same rule for `Profile.config`, the other half of what is merged.
 
-    `Profile.config` is merged into the render environment *after* every
-    service's `config_env()`, and until Stage 7 nothing checked it — so the
-    constraint that makes this tier honest held for a variable a service named
-    and not for one a profile did. The gap is the more tempting of the two: a
-    profile is where somebody reaches when a service has no natural claim on a
-    setting, which is exactly when the temptation to side-load one is highest.
-
-    The rule is unchanged. A profile may only set a variable
-    `render-config.sh` reads *and* `docker-compose.yml` passes through; if a
-    setting has no such variable, the fix is to add one to both as a reviewed
-    product change. `testbed.profiles.MAIL_CONFIG` names one that is not
-    `ISTOTA_`-prefixed (`USER_EMAIL`), which is why this checks the names a
-    profile actually declares rather than sweeping by prefix.
+    A profile is where somebody reaches when a service has no natural claim on
+    a setting, so it is checked the same way: every key it writes must be one
+    the loader reads.
     """
 
-    @pytest.fixture(scope="class")
-    def script(self) -> str:
-        return RENDER_CONFIG.read_text()
-
-    @pytest.fixture(scope="class")
-    def compose(self) -> str:
-        return FULL_COMPOSE.read_text()
-
     def test_the_guard_covers_at_least_one_real_profile(self):
-        """Otherwise the two assertions below iterate over nothing."""
-        configured = [p.name for p in profiles.ALL if p.config]
+        """Otherwise the assertion below iterates over nothing."""
+        assert [p.name for p in profiles.ALL if p.config]
 
-        assert configured, (
-            "no profile sets any config, so the checks below are vacuous"
-        )
-
-    def test_every_variable_is_read_by_the_shipped_generator(self, script):
+    def test_every_key_is_one_the_loader_reads(self, tmp_path, caplog, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
         for profile in profiles.ALL:
-            for variable in profile.config:
-                assert _reads_variable(script, variable), (
-                    f"profile {profile.name!r} sets {variable}, which "
-                    f"{RENDER_CONFIG.name} does not read — so the stack would "
-                    "boot from a config that does not carry it"
-                )
-
-    def test_every_variable_is_passed_through_by_the_full_compose_file(
-        self, compose
-    ):
-        for profile in profiles.ALL:
-            for variable in profile.config:
-                assert _passed_through(compose, variable), (
-                    f"profile {profile.name!r} sets {variable}, which "
-                    "docker-compose.yml does not pass into the container — so "
-                    "the full shape's generator would never see it"
-                )
+            if not profile.config:
+                continue
+            document = stack_support.assemble_config(
+                {}, base=stack_support.LEAN_BASE_CONFIG, extra=profile.config,
+            )
+            # `verify` needs the mail service's `authserv_id`, which this
+            # profile-only document does not have.
+            document.setdefault("email", {})["authserv_id"] = "mail"
+            assert _unknown_keys(tmp_path, document, caplog) == "", profile.name
 
 
 class TestTheEmailProfiles:
@@ -508,23 +435,19 @@ class TestTheEmailProfiles:
             assert profile.shape == "lean"
             assert set(profile.services) == {"model", "mail", "ntfy"}
             assert profile.compose_overlays == (profiles.MAIL_OVERLAY,)
-            assert profile.config["ISTOTA_EMAIL_CONFIRM_SENDER_MATCH"] == "verify"
+            assert profile.config["email"]["confirm_sender_match"] == "verify"
 
     def test_only_hold_all_raises_the_outbound_floor(self):
-        assert "ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR" not in profiles.EMAIL.config
-        assert (profiles.EMAIL_HOLD_ALL.config["ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR"]
-                == "all")
+        assert "outbound_approval_floor" not in profiles.EMAIL.config["email"]
+        assert profiles.EMAIL_HOLD_ALL.config["email"]["outbound_approval_floor"] == "all"
 
-    def test_every_variable_they_set_is_wired_through_both_files(self):
-        """The two-file rule, named for these profiles: the sweep above covers
-        them only because they are in `profiles.ALL`."""
-        script = RENDER_CONFIG.read_text()
-        compose = FULL_COMPOSE.read_text()
+    def test_both_carry_the_mail_profiles_poll_interval_and_address(self):
         for profile in (profiles.EMAIL, profiles.EMAIL_HOLD_ALL):
             assert profile in profiles.ALL
-            for variable in profile.config:
-                assert _reads_variable(script, variable), variable
-                assert _passed_through(compose, variable), variable
+            assert profile.config["scheduler"]["email_poll_interval"] == 5
+            assert profile.config["users"]["testuser"]["email_addresses"] == [
+                "testuser@ext.test"
+            ]
 
 
 class TestTheForgeGuardsItsOwnListener:
@@ -557,7 +480,7 @@ class TestTheForgeGuardsItsOwnListener:
     ):
         """Two names for one value, and they used to be able to disagree.
 
-        `config_env()` advertises `token` to the daemon while the git path
+        `config()` advertises `token` to the daemon while the git path
         compares against `credential`. Resolving the default in one place and
         not the other rejected the daemon's own push while accepting anyone
         else's — a failure that reads as a broken credential helper.
@@ -567,7 +490,7 @@ class TestTheForgeGuardsItsOwnListener:
             assert forge.token == "a-token-to-expect"
             assert forge.expect_git_password == "a-token-to-expect"
             assert (
-                forge.config_env()["ISTOTA_DEVELOPER_GITLAB_TOKEN"]
+                forge.config()["developer"]["gitlab_token"]
                 == forge.expect_git_password
             )
         finally:

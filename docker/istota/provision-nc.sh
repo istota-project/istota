@@ -155,7 +155,13 @@ OAUTH_CLIENT_SECRET=""
 
 echo "[istota-provision] Registering OAuth2 client '${OAUTH_CLIENT_NAME}' -> ${OAUTH_REDIRECT_URI}"
 
+# A pair handed in is registered as given, so the operator (or the testbed) can
+# give the same pair to `istota setup`: istota's config is an input, and
+# nothing copies a minted client into it any more. With neither set, one is
+# minted and recorded in the flag below, as before.
 OAUTH_OUT=$(OAUTH_NAME="$OAUTH_CLIENT_NAME" OAUTH_REDIRECT="$OAUTH_REDIRECT_URI" \
+    OAUTH_GIVEN_ID="${ISTOTA_WEB_OAUTH2_CLIENT_ID:-}" \
+    OAUTH_GIVEN_SECRET="${ISTOTA_WEB_OAUTH2_CLIENT_SECRET:-}" \
     php <<'PHP' 2>&1 || true
 <?php
 $name = getenv('OAUTH_NAME');
@@ -186,9 +192,13 @@ foreach ($rows as $row) {
 // Match SettingsController::addClient() exactly: 64 chars from the same alphabet,
 // HMAC-hashed secret stored hex-encoded.
 $validChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-$plain = $random->generate(64, $validChars);
+$plain = getenv('OAUTH_GIVEN_SECRET') ?: '';
+$cid = getenv('OAUTH_GIVEN_ID') ?: '';
+if ($plain === '' || $cid === '') {
+    $plain = $random->generate(64, $validChars);
+    $cid = $random->generate(64, $validChars);
+}
 $hash = bin2hex($crypto->calculateHMAC($plain));
-$cid = $random->generate(64, $validChars);
 
 $qb = $db->getQueryBuilder();
 $qb->insert('oauth2_clients')->values([

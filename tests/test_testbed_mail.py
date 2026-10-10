@@ -14,8 +14,8 @@ own wiring is only checked behind a marker rots.
 
 from __future__ import annotations
 
+import dataclasses
 import os
-import re
 import subprocess
 from pathlib import Path
 
@@ -355,43 +355,26 @@ class TestTheSessionReadsTheFolderItWasOpenedOn:
         assert session.folder == "Archive"
 
 
-class TestComposeEnvIsSeparateFromConfigEnv:
-    """Two maps, two rules, and conflating them would cost the tier its honesty.
+class TestComposeEnvIsSeparateFromConfig:
+    """Two maps, and conflating them would put istota config back in compose.
 
-    `config_env()` points the *daemon* at a service and may name only variables
-    the shipped generator reads and `docker-compose.yml` passes through.
+    `config()` points the *daemon* at a service through `config.toml`.
     `compose_env()` names host paths an overlay binds, which configure nothing
-    about istota and appear in no shipped file. The guards below are what keep
-    one from being smuggled in as the other.
+    about istota. The config is an input now and compose passes istota none of
+    it, so a variable smuggled through `compose_env()` into the env-file would
+    reach no reader at all.
     """
 
-    def test_no_compose_env_name_is_one_either_shipped_file_knows(self, tmp_path):
-        """The other direction of the two-file rule, which nothing checked.
+    def test_no_compose_env_name_is_passed_to_the_istota_service(self, tmp_path):
+        """Nothing the mail overlay needs is in the istota service's
+        `environment:`, which carries only three container facts now."""
+        import yaml
 
-        `TestConfigEnvNamesOnlyShippedVariables` requires every `config_env()`
-        name to be read by `render-config.sh` *and* passed by
-        `docker-compose.yml`. Nothing stopped the inverse: a name placed in
-        `compose_env()` also lands in the full shape's env-file, where compose
-        interpolates it into the container just as effectively — so a config
-        variable smuggled through that map would reach the daemon while skipping
-        the check that makes the tier honest. Both halves have to hold.
-        """
         service = mail.serve(tmp_path / "mail")
-        generator = (REPO / "docker" / "istota" / "render-config.sh").read_text()
-        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+        compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
+        passed = set(compose["services"]["istota"].get("environment") or {})
 
-        for variable in service.compose_env():
-            assert not re.search(r"\$\{" + re.escape(variable) + r"[:}+-]", generator), (
-                f"{variable} is in compose_env() and the shipped generator reads "
-                "it; a variable that configures istota belongs in config_env(), "
-                "where the two-file guard can see it"
-            )
-            assert not re.search(
-                r"^\s+" + re.escape(variable) + r":", compose, re.MULTILINE
-            ), (
-                f"{variable} is in compose_env() and docker-compose.yml passes "
-                "it into the container; same reason"
-            )
+        assert not set(service.compose_env()) & passed
 
     def test_a_service_may_not_claim_a_variable_another_already_set(self, tmp_path):
         service = mail.serve(tmp_path / "mail")
@@ -409,9 +392,8 @@ class TestComposeEnvIsSeparateFromConfigEnv:
             )
 
     def test_a_service_with_nothing_to_bind_contributes_nothing(self, tmp_path):
-        """Optional on the protocol and read by `getattr`: four of the six
-        services need no overlay and would otherwise carry an empty method
-        apiece."""
+        """Optional on the protocol and read by `getattr`: most services need no
+        overlay and would otherwise carry an empty method apiece."""
         forge = gitlab.serve(tmp_path / "repos")
         try:
             assert stack_support.compose_env({"gitlab": forge}) == {}
@@ -419,23 +401,33 @@ class TestComposeEnvIsSeparateFromConfigEnv:
             forge.close()
 
     def test_the_full_env_carries_the_overlays_variables_too(self, tmp_path):
-        """`full_env` is the whole answer to "what does a full profile boot", so
-        an overlay variable missing from it is a `${…:?}` failure at `up` naming
-        a key nobody set."""
+        """An overlay variable missing from the env-file is a `${…:?}` failure
+        at `up` naming a key nobody set."""
         service = mail.serve(tmp_path / "mail")
 
-        environment = stack_support.full_env({"mail": service}, _CREDENTIALS)
+        environment = stack_support.full_env(
+            {"mail": service}, _CREDENTIALS,
+            config_dir=tmp_path / "config", secrets_dir=tmp_path / "secrets",
+        )
 
         assert environment["ISTOTA_TESTBED_MAIL_CONF"] == str(mail.CONF_DIR)
-        assert environment["ISTOTA_EMAIL_ENABLED"] == "true"
 
-    def test_a_profile_without_mail_leaves_the_email_module_off(self):
-        """The map is what makes `Profile` mean anything on the full shape:
-        `docker-compose.yml` defaults email on, so a profile that did not name
-        the service would still boot a daemon polling one."""
-        environment = stack_support.full_env({}, _CREDENTIALS)
+    def test_the_mail_service_turns_email_on_in_the_config(self, tmp_path):
+        service = mail.serve(tmp_path / "mail")
+        document, secret_values = stack_support.full_config(
+            {"mail": service}, _CREDENTIALS, profiles.FULL,
+        )
 
-        assert environment["ISTOTA_EMAIL_ENABLED"] == "false"
+        assert document["email"]["enabled"] is True
+        assert document["email"]["imap_host"] == mail.SERVICE_NAME
+
+    def test_a_profile_without_mail_leaves_email_off(self):
+        """The base config writes `[email] enabled = false`, so a profile that
+        does not name the service boots no poller."""
+        bare = dataclasses.replace(profiles.FULL, config={})
+        document, _ = stack_support.full_config({}, _CREDENTIALS, bare)
+
+        assert document["email"]["enabled"] is False
 
 
 class TestPublishedPort:

@@ -51,7 +51,7 @@ from testbed.services.model_endpoint import ERROR_PREFIX
 pytestmark = pytest.mark.smoke
 
 #: `db_path` is `/data/db/istota.db` and `workspace_path` is `/mnt/shared` on
-#: the lean shape (`docker/istota/render-config.sh`), the same literals
+#: the lean shape (`testbed.stack.LEAN_BASE_CONFIG`), the same literals
 #: `test_sandbox_in_stack.py` and `test_sandbox_shared_room.py` restate.
 DB_DIR = "/data/db"
 WORKSPACE = "/mnt/shared/Users/testuser"

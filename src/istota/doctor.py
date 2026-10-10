@@ -3605,7 +3605,7 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
     ``tests/image/test_istota_image.py::TestGroupATheDoctorUmbrella::test_no_check_fails``
     runs ``istota doctor --json --scope image`` inside a bare ``docker run``
     with no ``security_opt``, ``cmd_doctor`` passes ``probe=True``
-    unconditionally, and ``render-config.sh`` defaults ``sandbox_enabled``
+    unconditionally, and ``istota setup`` writes ``sandbox_enabled``
     true. ``DEPLOYMENT`` scope is filtered out before invocation, so the image
     tier never reaches this, and an operator running the whole registry gets
     both lines with the remedy on the one that has a repair.

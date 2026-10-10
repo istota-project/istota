@@ -40,7 +40,7 @@ import socket
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import probe as probe_support
@@ -95,13 +95,11 @@ FULL_READY_TIMEOUT = 1500
 
 #: The compose services readiness means, per shape.
 #:
-#: `web` and `nginx` are deliberately absent from the full shape's tuple, and
-#: not because they do not matter — because they restart-loop through a cold
-#: boot *by design*. `web` polls for `/data/config/.config-current` for 120
-#: seconds and exits 1 while `istota` may take up to 600 seconds to publish it,
-#: and `nginx` starts before `web` is serving (`depends_on` there is
-#: `service_started`, not `service_healthy`) so its startup resolution of the
-#: `web` upstream can fail and take it round again.
+#: `web` and `nginx` are deliberately absent from the full shape's tuple. `web`
+#: starts only once `istota` is healthy, and `nginx` starts before `web` is
+#: serving (`depends_on` there is `service_started`, not `service_healthy`) so
+#: its startup resolution of the `web` upstream can fail and take it round
+#: again. Waiting on `istota` is waiting on the part that decides.
 #:
 #: How waiting on one would fail is worth being exact about, because the first
 #: draft of this comment said "would time out" and that is wrong: `wait_ready`
@@ -640,114 +638,235 @@ def sweep_projects(prefix: str) -> None:
             continue
 
 
-# -- rendering the lean shape's config -------------------------------------
+# -- writing the stack's config ----------------------------------------------
+#
+# config.toml is an input to the container: `istota setup` writes it once and
+# nothing renders it from the environment. The testbed writes it too, for every
+# profile, from layers merged in order: the base (what `istota setup` writes
+# for the stack's one user), the concessions this tier needs, each service's
+# `config()`, then the profile's own `config`.
 
-#: What every lean profile's config is rendered from, before any service adds
-#: its own variables.
-#:
-#: **`NC_URL` and `APP_PASSWORD` are set, and empty.** Not `http://nextcloud`,
-#: which is what this used to be: `Config.storage_is_nextcloud` is
-#: `bool(nextcloud.url)`, so that rendered a config claiming Nextcloud-backed
-#: storage and pointed it at a hostname `docker-compose.test.yml` resolves to
-#: nothing. That is a third configuration — Nextcloud configured but absent —
-#: and nobody ships it. Empty makes the lean daemon local-backed, which *is* a
-#: shipped install shape and is truthful for every scenario the lean shape
-#: runs, none of which touches storage.
-#:
-#: Set-but-empty rather than unset, and the difference is load-bearing:
-#: `render-config.sh:68` preflights with `[ -n "${NC_URL+x}" ]`, which tests
-#: whether the variable is *set*. Unset fails the render with exit 2 and a
-#: "missing required input" message. `APP_PASSWORD` is required by the same
-#: preflight and takes the same treatment.
-#:
-#: One measured consequence: `/mnt/shared` is a tmpfs on the lean stack, so
-#: `runtime.mount_liveness` reported `ok` under the old value and reports
-#: `skip` under this one. Any assertion comparing a whole `doctor` payload has
-#: to become an assertion on named checks.
-DEFAULT_RENDER_ENV: dict[str, str] = {
-    "USER_NAME": "testuser",
-    "BOT_USER": "istota",
-    "USER_TIMEZONE": "UTC",
-    "NC_URL": "",
-    "APP_PASSWORD": "",
+#: The container's layout and what `istota setup` writes for the lean stack's
+#: one user, local storage, no Nextcloud. `tests/test_testbed_config.py` holds
+#: this equal to `setup_wizard.render_container_config` for the same answers,
+#: since this package may not import istota. `session_secret_key` is filled in
+#: per write.
+LEAN_BASE_CONFIG: dict = {
+    "bot_name": "Istota",
+    "db_path": "/data/db/istota.db",
+    "workspace_path": "/mnt/shared",
+    "temp_dir": "/data/tmp",
+    "security": {"sandbox_enabled": True, "skill_proxy_enabled": True},
+    "brain": {"kind": "claude_code"},
+    "talk": {"enabled": False},
+    "email": {"enabled": False},
+    "location": {"enabled": False},
+    "web": {
+        "enabled": True,
+        "port": 8766,
+        "auth": ["email"],
+        "trusted_proxy_hops": 1,
+        "token_storage": "encrypted",
+    },
+    "site": {"hostname": "localhost"},
+    "users": {"testuser": {"display_name": "testuser", "timezone": "UTC"}},
 }
 
+#: Where every stack this tier boots departs from `istota setup`'s output, each
+#: for a reason of the harness rather than of the product.
+#:
+#: - `security.network`: off, because every stub lives on the host and a task's
+#:   CONNECT allowlist would have to name each one's ephemeral port. Row 2 of
+#:   the one-deployment-shape spec's parity matrix (its Stage 4) is where the
+#:   network sandbox is witnessed.
+#: - `memory_search`: off, as the old lean render had it, so the assembled
+#:   prompt does not depend on indexing no scenario asserts on.
+#: - `web.auth`: `nextcloud`, the dataclass default the old lean render wrote.
+#:   No lean profile runs the web app, and doctor's email-auth checks then skip.
+#:   The full profile sets its own.
+CONCESSIONS: dict = {
+    "security": {"network": {"enabled": False}},
+    "memory_search": {"enabled": False},
+    "web": {"auth": ["nextcloud"]},
+}
 
-def render_config(
-    render_script: Path,
-    destination: Path,
-    services: dict[str, Service],
-    *,
-    extra: dict[str, str] | None = None,
-    base_env: dict[str, str] | None = None,
-) -> Path:
-    """Run the shipped render script on the host, into `destination`.
+#: The credential files `docker-compose.yml` declares, which compose refuses to
+#: start without. The same list as `setup_wizard.SECRET_NAMES`, restated
+#: because this package does not import istota; `tests/test_testbed_config.py`
+#: holds the two equal.
+SECRET_NAMES: tuple[str, ...] = (
+    "anthropic_api_key",
+    "claude_code_oauth_token",
+    "istota_brain_native_api_key",
+    "istota_nextcloud_app_password",
+    "istota_web_oauth2_client_secret",
+    "istota_web_session_secret_key",
+    "istota_email_imap_password",
+    "istota_caldav_password",
+    "istota_developer_gitlab_token",
+    "istota_developer_github_token",
+)
 
-    This is the property that makes the lean shortcut legitimate: the file the
-    stack boots from is produced by the same script the container would have
-    run, not by a fixture that approximates it.
+#: What the scripted endpoint is sent as a key. Nothing in this tier can use a
+#: real one: the endpoint ignores the Authorization header entirely.
+SCRIPTED_ENDPOINT_KEY = "unused-by-the-scripted-endpoint"
 
-    Each service contributes its own `config_env()` — the variables that point
-    the daemon at it — merged over the base, with `extra` (the profile's own
-    `config`) last. Every one of those is a variable the shipped generator
-    already reads, so a block it would not have produced cannot be smuggled in
-    here, and the base environment is left with nothing subsystem-specific in
-    it.
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
-    Two services claiming the same variable is refused rather than resolved.
-    Silent last-wins would boot a stack from a config naming the wrong
-    service's port, and dict order is what would decide which — a diagnosis
-    that starts from "the daemon never reached the feeds stub" and ends
-    somewhere else entirely.
 
-    The environment is explicit and **not** `os.environ`. The generator reads
-    dozens of `ISTOTA_*` variables, so inheriting the developer's shell would
-    make the config a stack boots from depend on whatever happens to be
-    exported in the terminal that started the run — the same run passing on one
-    machine and failing on another, with nothing in the repo to explain it.
-    That is reproducibility, not test isolation: it does not stop the daemon
-    queueing work of its own.
+def _toml_string(value: str) -> str:
+    out = []
+    for char in value:
+        if char == "\\":
+            out.append("\\\\")
+        elif char == '"':
+            out.append('\\"')
+        elif (char < " " and char != "\t") or char == "\x7f":
+            out.append(f"\\u{ord(char):04x}")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
 
-    Nothing carries `HOME`, `LANG` or `TMPDIR`, and that is checked rather than
-    assumed: `render-config.sh` references none of them and expands no `~`.
-    `gitlab._base_env` does pass them, because it runs `git`, which reads all
-    three. If the generator ever grows a tool that does, it goes here.
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_KEY.match(key) else _toml_string(key)
+
+
+def _toml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return _toml_string(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise StackError(f"the testbed TOML writer has no form for {type(value).__name__}")
+
+
+def toml_dumps(document: dict) -> str:
+    """A TOML document from nested dicts of strings, numbers, bools and lists.
+
+    Small on purpose: the testbed's dependency set is the standard library plus
+    `cryptography`, and `tomllib` reads but does not write. Arrays of tables are
+    not supported, since no config the tier writes has one.
     """
-    config_file = destination / "config.toml"
-    environment = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "CONFIG_FILE": str(config_file),
-        **DEFAULT_RENDER_ENV,
-        **(base_env or {}),
-    }
-    claimed: dict[str, str] = {}
-    for name, service in services.items():
-        for variable, value in service.config_env().items():
-            if variable in claimed:
-                raise StackError(
-                    f"{name} and {claimed[variable]} both set {variable}; one "
-                    "of them would silently win and the stack would boot "
-                    "pointing at the other"
-                )
-            claimed[variable] = name
-            environment[variable] = value
-    environment.update(extra or {})
+    lines: list[str] = []
 
-    result = subprocess.run(
-        ["bash", str(render_script)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=environment,
-    )
-    if result.returncode != 0:
-        raise StackError(
-            f"render-config.sh exited {result.returncode}\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
-        )
-    if not config_file.exists():
-        raise StackError("render-config.sh reported success but wrote nothing")
+    def emit(table: dict, path: tuple[str, ...]) -> None:
+        scalars = [(key, value) for key, value in table.items() if not isinstance(value, dict)]
+        tables = [(key, value) for key, value in table.items() if isinstance(value, dict)]
+        if path and (scalars or not tables):
+            lines.append("[" + ".".join(_toml_key(part) for part in path) + "]")
+        for key, value in scalars:
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+        if path and (scalars or not tables):
+            lines.append("")
+        elif scalars:
+            lines.append("")
+        for key, value in tables:
+            emit(value, (*path, key))
+
+    emit(document, ())
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def merge_config(
+    target: dict,
+    fragment: dict,
+    *,
+    owner: str,
+    owners: dict[tuple[str, ...], str] | None = None,
+    path: tuple[str, ...] = (),
+) -> dict:
+    """Merge `fragment` into `target`, refusing a leaf two services both set.
+
+    `owners` maps each leaf a *service* has set to that service's name. Two
+    services claiming one key is refused rather than resolved: silent last-wins
+    would boot a stack whose config names the wrong service's port, and dict
+    order would decide which. `owners=None` is a layer that may override.
+    """
+    for key, value in fragment.items():
+        here = (*path, key)
+        if isinstance(value, dict):
+            existing = target.get(key)
+            if existing is not None and not isinstance(existing, dict):
+                raise StackError(f"{owner} sets {'.'.join(here)} as a table over a value")
+            merge_config(
+                target.setdefault(key, {}), value, owner=owner, owners=owners, path=here,
+            )
+            continue
+        if owners is not None:
+            claimant = owners.get(here)
+            if claimant is not None and claimant != owner:
+                raise StackError(
+                    f"{owner} and {claimant} both set {'.'.join(here)}; one of them "
+                    "would silently win and the stack would boot pointing at the other"
+                )
+            owners[here] = owner
+        target[key] = value
+    return target
+
+
+def _copy(document: dict) -> dict:
+    return json.loads(json.dumps(document))
+
+
+def assemble_config(
+    services: dict[str, Service], *, base: dict, extra: dict | None = None,
+) -> dict:
+    """The base, the concessions, each service's `config()`, the profile's own."""
+    document = _copy(base)
+    merge_config(document, CONCESSIONS, owner="the testbed")
+    owners: dict[tuple[str, ...], str] = {}
+    for name, service in services.items():
+        merge_config(document, service.config(), owner=name, owners=owners)
+    merge_config(document, extra or {}, owner="the profile")
+    return document
+
+
+def lean_config(profile: Profile, services: dict[str, Service]) -> dict:
+    """The document a lean stack boots from, with a fresh session key."""
+    document = assemble_config(services, base=LEAN_BASE_CONFIG, extra=profile.config)
+    document["web"]["session_secret_key"] = secrets.token_hex(32)
+    return document
+
+
+def write_config(
+    directory: Path, document: dict, *, admins: tuple[str, ...] = ("testuser",),
+) -> Path:
+    """Write `config.toml` and the admins file into `directory`, as setup does.
+
+    0644 rather than setup's 0600: the container reads them as uid 10001
+    through a bind mount, and on a Linux host the files keep the harness's
+    owner. The directory is the harness's own scratch.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    config_file = directory / "config.toml"
+    config_file.write_text(toml_dumps(document))
+    config_file.chmod(0o644)
+    (directory / "admins").write_text("".join(f"{user}\n" for user in admins))
     return config_file
+
+
+def write_secrets(directory: Path, values: dict[str, str]) -> Path:
+    """One file per declared secret, as `istota setup --vm-dir` writes them.
+
+    Every declared name gets a file, empty when unused, because compose refuses
+    to start a service whose secret file is missing. 0444 rather than the
+    shipped 0400, for the bind-mount reason `write_config` gives.
+    """
+    unknown = sorted(set(values) - set(SECRET_NAMES))
+    if unknown:
+        raise StackError(f"no compose secret is declared for {unknown}")
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in SECRET_NAMES:
+        path = directory / name
+        if path.exists():
+            path.chmod(0o644)
+        path.write_text(values.get(name, ""))
+        path.chmod(0o444)
+    return directory
 
 
 # -- the full shape's environment ------------------------------------------
@@ -770,56 +889,34 @@ LEAN_ENV_KEYS = (
 #:
 #: Without this the guard on that map would have to accept any string, which is
 #: the same as not checking for a typo at all. It is also a ratchet: a unit test
-#: asserts this set and `REGISTRY` stay disjoint, so registering `mail` fails
-#: until the name is removed from here.
-#:
-#: Empty now that `feeds` is registered — the last name on it, and the ratchet
-#: is what made removing it compulsory rather than optional. Kept rather than
-#: deleted with its guard, because the next service the map wants to name
-#: before it exists goes here.
+#: asserts this set and `REGISTRY` stay disjoint, so registering a name fails
+#: until the name is removed from here. Empty now; kept for the next one.
 PLANNED_SERVICES: frozenset[str] = frozenset()
 
-#: Every module `docker-compose.yml` turns on by default, mapped to the service
-#: whose presence in a profile is what turns it back on. Empty means nothing in
-#: this tier turns it on.
+#: Each subsystem switch the full config writes, mapped to the service whose
+#: presence in a profile turns it on. Empty means nothing in this tier does.
 #:
-#: This map is what makes `Profile` mean anything on the full shape. The shipped
-#: file defaults them all on — Talk, email, feeds, money, location, both sleep
-#: cycles and the browser (with no browser container in the tier) — so a `full`
-#: profile declaring `services=("model", "nextcloud")` would boot a daemon
-#: polling every subsystem, which is exactly what the profile mechanism exists
-#: to prevent.
-#:
-#: One module compose defaults on is deliberately absent:
-#: `ISTOTA_MEMORY_SEARCH_ENABLED` is in-process indexing rather than a poller,
-#: and switching it off would change what the assembled prompt contains for
-#: every full-shape scenario.
-#:
-#: `ISTOTA_TALK_ENABLED` is *present* rather than being left to
-#: `nextcloud.config_env()`, because that service's `config_env()` is empty by
-#: design — the shipped compose file already points the daemon at its own
-#: `nextcloud`, and a service inventing a variable to say "I am present" would
-#: be the fixture side-loading config.
-FULL_MODULE_SWITCHES: dict[str, str] = {
-    "ISTOTA_TALK_ENABLED": "nextcloud",
-    "ISTOTA_TALK_SIGNALING_ENABLED": "signaling",
-    "ISTOTA_EMAIL_ENABLED": "mail",
-    "ISTOTA_FEEDS_ENABLED": "feeds",
-    "ISTOTA_DEVELOPER_ENABLED": "gitlab",
-    "ISTOTA_MONEY_ENABLED": "",
-    "ISTOTA_LOCATION_ENABLED": "",
-    "ISTOTA_BROWSER_ENABLED": "",
-    "ISTOTA_SLEEP_CYCLE_ENABLED": "",
-    "ISTOTA_CHANNEL_SLEEP_CYCLE_ENABLED": "",
+#: This is what makes `Profile` mean anything on the full shape: without it a
+#: `full` profile declaring `services=("model", "nextcloud")` would boot a daemon
+#: polling every subsystem the dataclass defaults leave on (Talk, both sleep
+#: cycles), which is what the profile mechanism exists to prevent. Email and the
+#: developer skill are switched on by their own services' `config()`, so they
+#: are not here. `memory_search` is the testbed's concession, off on both shapes.
+FULL_MODULE_SWITCHES: dict[tuple[str, ...], str] = {
+    ("talk", "enabled"): "nextcloud",
+    ("talk", "signaling", "enabled"): "signaling",
+    ("browser", "enabled"): "",
+    ("location", "enabled"): "",
+    ("sleep_cycle", "enabled"): "",
+    ("channel_sleep_cycle", "enabled"): "",
 }
 
 #: Identity the full stack requires by name. `docker-compose.yml` preflights
-#: `USER_NAME` with `${USER_NAME:?}`, so an absent value fails `up` during
-#: interpolation rather than at boot.
+#: `USER_NAME` with `${USER_NAME:?}` for the bundled Nextcloud's provisioning,
+#: and the config the testbed writes names the same user and bot.
 FULL_IDENTITY: dict[str, str] = {
     "USER_NAME": "testuser",
     "BOT_USER": "istota",
-    "USER_TIMEZONE": "UTC",
     "ISTOTA_BOT_NAME": "Istota",
 }
 
@@ -831,26 +928,28 @@ CREDENTIAL_KEYS = (
     "USER_PASSWORD",
 )
 
+#: The bundled Nextcloud's own name for the files_external mount it gives the
+#: bot over the shared volume (`docker-compose.yml`'s `x-shared-mount-name`).
+#: The daemon prefixes every DAV and OCS path with it.
+SHARED_MOUNT_NAME = "Shared Files"
+
 
 @dataclass(frozen=True)
 class FullCredentials:
-    """This session's generated passwords, plus the port they were bound to.
+    """This session's generated passwords and OAuth2 client, plus their ports.
 
     Generated rather than read from `docker/.env`, which on a developer machine
     is a gitignored file holding real ones. Nothing in this tier reads it.
 
     `nc_port` travels with them because it is credential-shaped state in one
-    specific sense: `provision-nc.sh:106` bakes `ISTOTA_WEB_CALLBACK_URL` —
-    which is derived from the port — into the `oauth2_clients` row at first
-    install and never revisits it. A kept volume set and a different port is a
-    stale registration, so the port is persisted alongside the passwords rather
-    than re-invented.
+    specific sense: `provision-nc.sh` bakes `ISTOTA_WEB_CALLBACK_URL`, which is
+    derived from the port, into the `oauth2_clients` row at first install and
+    never revisits it. A kept volume set and a different port is a stale
+    registration, so the port is persisted alongside the passwords.
 
     `__repr__` is redacted, and for the same reason `ServiceCall`'s is: pytest's
     assertion rewriting renders the repr of whatever a failing comparison
-    touched, and this object reaches a `Stack`. A generated password in a
-    failure report on a public repo is a password in a terminal scrollback that
-    gets pasted into an issue.
+    touched, and this object reaches a `Stack`.
     """
 
     postgres_password: str
@@ -866,17 +965,21 @@ class FullCredentials:
     and a persisted set from an earlier session has no such key —
     `_full_credentials` reserves one in that case rather than accepting the
     default, since `0` hands the choice back to Docker and that is the
-    collision `reserve_ports` exists to prevent. Unlike `nc_port` nothing bakes
-    this port into the kept volumes, so a different one each session is free.
+    collision `reserve_ports` exists to prevent.
 
     **What KEEP does not carry is the signaling *secret*.** `provision-nc.sh`
-    registers it with Talk at first install and never revisits it, exactly like
-    the OAuth2 redirect URI, while `signaling.serve()` generates a fresh one per
-    session — so a second kept session would hand the container a secret Talk
-    does not hold and every hello would be refused. `tests/full/` refuses to run
-    under KEEP for its own reasons, which is what masks this today. Putting the
-    secret on this dataclass is the fix if that ever changes.
+    registers it with Talk at first install and never revisits it, while
+    `signaling.serve()` generates a fresh one per session. `tests/full/` refuses
+    to run under KEEP for its own reasons, which is what masks this today.
     """
+
+    oauth_client_id: str = ""
+    oauth_client_secret: str = ""
+    """The web login's OAuth2 client. `provision-nc.sh` registers exactly this
+    pair at first install, and the config the testbed writes names it, which is
+    the route an operator takes with `istota setup`. Persisted under KEEP for
+    the reason `nc_port` is; a keep file from before it gets a new pair, which a
+    kept Nextcloud does not hold, so `tests/full/` refusing KEEP covers it."""
 
     def as_env(self) -> dict[str, str]:
         return {
@@ -884,11 +987,13 @@ class FullCredentials:
             "ADMIN_PASSWORD": self.admin_password,
             "BOT_PASSWORD": self.bot_password,
             "USER_PASSWORD": self.user_password,
+            "ISTOTA_WEB_OAUTH2_CLIENT_ID": self.oauth_client_id,
+            "ISTOTA_WEB_OAUTH2_CLIENT_SECRET": self.oauth_client_secret,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic
         return (
-            f"FullCredentials(<4 redacted>, nc_port={self.nc_port}, "
+            f"FullCredentials(<6 redacted>, nc_port={self.nc_port}, "
             f"signaling_port={self.signaling_port})"
         )
 
@@ -899,28 +1004,17 @@ def reserve_ports(count: int = 1) -> tuple[int, ...]:
     `docker-compose.yml` binds `${NC_PORT:-8080}:80` on nginx and
     `${ISTOTA_TALK_SIGNALING_PORT:-8081}:8080` on the signaling server — *fixed*
     host ports, unlike the lean stack which publishes nothing — so a developer's
-    own demo stack or a second worktree collides and `up` fails. Measured while
-    this was written: a demo stack was holding 8080 on the machine.
+    own demo stack or a second worktree collides and `up` fails.
 
     **All the sockets are held until every port has been read**, which is what
     makes two reservations distinct rather than merely probable. One at a time
-    the kernel is free to hand the second call the port the first just released,
-    and two services would then be told to bind the same one.
-
-    That is not hypothetical and it is not only about two reservations. Letting
-    the signaling service publish on `:0` and take Docker's own ephemeral choice
-    was measured colliding with the reserved `NC_PORT` on the first full boot
-    that ran both — Docker picked the number this function had reserved and
-    released moments earlier, the signaling container bound it, and nginx failed
-    with "address already in use" naming a port whose real claimant was in
-    another service's port map. Reserving both here means nothing is left to
-    Docker to choose.
+    the kernel is free to hand the second call the port the first just released.
+    Letting the signaling service publish on `:0` was measured colliding with
+    the reserved `NC_PORT` on the first full boot that ran both.
 
     Racy against the rest of the machine by construction, and knowingly so: the
     kernel can hand one of these to something else between the release here and
-    compose's bind. The alternative is holding the sockets open, which compose
-    then cannot bind at all. A lost race fails `up` loudly with "address already
-    in use", which is the right failure for a condition this rare.
+    compose's bind. A lost race fails `up` loudly with "address already in use".
     """
     probes = []
     try:
@@ -939,8 +1033,14 @@ def reserve_port() -> int:
     return reserve_ports(1)[0]
 
 
+def _oauth_token(length: int = 64) -> str:
+    """The alphabet Nextcloud's own admin UI mints OAuth2 clients from."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 def generate_credentials(nc_port: int, signaling_port: int = 0) -> FullCredentials:
-    """Four fresh passwords for one session.
+    """Fresh passwords and an OAuth2 client for one session.
 
     `token_urlsafe` rather than anything with punctuation in it, because these
     are written into a compose `--env-file`, which is parsed as bare
@@ -954,6 +1054,8 @@ def generate_credentials(nc_port: int, signaling_port: int = 0) -> FullCredentia
         user_password=secrets.token_urlsafe(24),
         nc_port=nc_port,
         signaling_port=signaling_port,
+        oauth_client_id=_oauth_token(),
+        oauth_client_secret=_oauth_token(),
     )
 
 
@@ -961,111 +1063,98 @@ def full_env(
     services: dict[str, Service],
     credentials: FullCredentials,
     *,
-    extra: dict[str, str] | None = None,
+    config_dir: Path,
+    secrets_dir: Path,
 ) -> dict[str, str]:
     """Everything the full shape's compose env-file carries.
 
-    A pure function of the profile's services and this session's credentials, so
-    the tier's central "what does a `full` profile actually boot" question has a
-    unit test rather than a stack behind it.
+    None of it is istota configuration: that is `config.toml`, which
+    `full_config` builds and `write_config` writes into `config_dir`. What is
+    left configures the *stack*:
 
-    Four groups, in the order they are layered:
+    1. **Identity and credentials** for the bundled Nextcloud's provisioning,
+       which `docker-compose.yml` preflights with `${…:?}`, plus the OAuth2
+       pair `provision-nc.sh` registers as given.
+    2. **`NC_PORT` and an explicit `ISTOTA_WEB_CALLBACK_URL`**. The callback URL
+       is written out rather than left to compose's four nested defaults
+       because `provision-nc.sh` bakes it irreversibly into the
+       `oauth2_clients` row at first install.
+    3. **Where the config directory and the secret files are**, for the
+       overlay's bind and the shipped file's `secrets:`.
+    4. Each service's `compose_env()`.
 
-    1. **Identity and credentials.** `docker-compose.yml` preflights five of
-       these with `${…:?}` and will not interpolate without them.
-    2. **The module switches**, every one off unless the profile names the
-       service that owns it. See `FULL_MODULE_SWITCHES`.
-    3. **`NC_PORT` and an explicit `ISTOTA_WEB_CALLBACK_URL`.** The port feeds
-       `OVERWRITEHOST`, `OVERWRITECLIURL`, `ISTOTA_WEB_NC_EXTERNAL_URL`,
-       `ISTOTA_WEB_SITE_HOSTNAME` and the callback URL through four levels of
-       nested compose defaults. The callback URL is written out rather than
-       left to that chain because `provision-nc.sh` bakes it irreversibly into
-       the `oauth2_clients` row at first install, and a value assembled by
-       four `${A:-${B:-${C:-D}}}` substitutions is not one a test can assert
-       against without re-implementing compose's interpolation.
-    4. **Each service's `config_env()`**, then the profile's own `config`.
-
-    The three credential-shaped brain variables are *not* here and must not be:
-    compose lets the process environment outrank an `--env-file`, so a developer
-    with `ANTHROPIC_API_KEY` exported would win. They are literals in
-    `testbed/compose/testbed.yml` instead, which nothing outranks.
-
-    Two claims are refused rather than resolved, on the same reasoning as
-    `render_config`: silent last-wins would boot a stack pointing at the wrong
-    thing and dict order would be what decided. Two services claiming one
-    variable is the obvious one. The other is a service — or a profile's own
-    `config` — overwriting the identity, a credential, the port or the callback
-    URL, which are this function's to set: a profile that quietly renamed
-    `USER_NAME` would leave `NextcloudService` authenticating as a user the
-    stack never created, and one that moved `NC_PORT` would leave the OAuth2
+    A service claiming a key this function owns is refused: one that quietly
+    renamed `USER_NAME` would leave `NextcloudService` authenticating as a user
+    the stack never created, and one that moved `NC_PORT` would leave the OAuth2
     redirect URI baked at a port nothing publishes.
-
-    A service *may* override a module switch, and one does: `gitlab.config_env()`
-    returns `ISTOTA_DEVELOPER_ENABLED=true` against a map that defaults it off,
-    which is the whole point of the map being a default.
     """
     environment: dict[str, str] = dict(FULL_IDENTITY)
     environment.update(credentials.as_env())
-
-    for variable, owner in FULL_MODULE_SWITCHES.items():
-        environment[variable] = "true" if owner and owner in services else "false"
-
     environment["NC_PORT"] = str(credentials.nc_port)
     environment["ISTOTA_WEB_CALLBACK_URL"] = (
         f"http://localhost:{credentials.nc_port}/istota/callback"
     )
-    # Beside `NC_PORT` and reserved for the same reason, which is not that the
-    # signaling service owns it — that service is what reads it — but that both
-    # are fixed host ports on one machine and something has to hold them apart.
-    # See `reserve_ports`: leaving this one to Docker's ephemeral choice was
-    # measured taking the number reserved for nginx.
+    # Beside `NC_PORT` and reserved for the same reason: both are fixed host
+    # ports on one machine and something has to hold them apart.
     environment["ISTOTA_TALK_SIGNALING_PORT"] = str(credentials.signaling_port)
-    # Written out for the same reason `ISTOTA_WEB_CALLBACK_URL` is, and the cost
-    # of leaving it interpolated is larger. Compose derives it through four
-    # nested defaults ending at `${DOMAIN:-localhost:${NC_PORT}}`, and `DOMAIN`
-    # is not an `ISTOTA_` name — so it survives the process-environment scrub,
-    # it is in no env-file key, and `conflicting_process_env` compares only keys
-    # that *are*, which makes it invisible to the refusal. A developer with
-    # `DOMAIN` exported would drop `http://localhost:<NC_PORT>` — the value Talk
-    # stamps on every backend request — out of the signaling server's allowlist,
-    # and the compose comment beside that key says what an unmatched backend
-    # request costs: counted as a bruteforce attempt, then `429`, then every
-    # room creation failing with a 500 that names nothing.
+    # Written out rather than interpolated, because compose derives it through
+    # nested defaults ending at `${DOMAIN:-localhost:${NC_PORT}}`, and an
+    # exported `DOMAIN` (not an `ISTOTA_` name, so the scrub keeps it) would drop
+    # the value Talk stamps on every backend request out of the allowlist.
     environment["ISTOTA_TALK_SIGNALING_BACKEND_URLS"] = (
         f"http://nextcloud,http://localhost:{credentials.nc_port}"
     )
+    environment["ISTOTA_TEST_CONFIG_DIR"] = str(config_dir)
+    environment["ISTOTA_SECRETS_DIR"] = str(secrets_dir)
 
-    reserved = set(FULL_IDENTITY) | set(CREDENTIAL_KEYS) | {
-        "NC_PORT",
-        "ISTOTA_WEB_CALLBACK_URL",
-        "ISTOTA_TALK_SIGNALING_PORT",
-        "ISTOTA_TALK_SIGNALING_BACKEND_URLS",
-    }
-    claimed: dict[str, str] = {}
-    for name, service in services.items():
-        for variable, value in service.config_env().items():
-            if variable in claimed:
-                raise StackError(
-                    f"{name} and {claimed[variable]} both set {variable}; one "
-                    "of them would silently win and the stack would boot "
-                    "pointing at the other"
-                )
-            if variable in reserved:
-                raise StackError(
-                    f"{name} sets {variable}, which the stack itself owns; a "
-                    "service cannot rename the users or move the published port"
-                )
-            claimed[variable] = name
-            environment[variable] = value
-    for variable, value in (extra or {}).items():
-        if variable in reserved:
-            raise StackError(
-                f"the profile's config sets {variable}, which the stack itself "
-                "owns; a profile cannot rename the users or move the port"
-            )
-        environment[variable] = value
-    environment.update(compose_env(services, claimed=claimed, reserved=reserved))
+    reserved = set(environment)
+    environment.update(compose_env(services, reserved=reserved))
     return environment
+
+
+def full_config(
+    services: dict[str, Service], credentials: FullCredentials, profile: Profile,
+) -> tuple[dict, dict[str, str]]:
+    """The full stack's `config.toml` and its secret files.
+
+    Full Nextcloud integration against the bundled Nextcloud, laid out the way
+    an install moved off the compose Nextcloud runs it: the workspace is the
+    shared volume, which is the bot's `Shared Files` mount, so `dav_prefix`
+    names it and the boot-time OCS share-back is off (the user already has the
+    directory as a mount of their own). Credentials go to the secret files,
+    as `istota setup --vm-dir` writes them, never into the config.
+    """
+    public = f"http://localhost:{credentials.nc_port}"
+    base = _copy(LEAN_BASE_CONFIG)
+    base["nextcloud"] = {
+        "url": "http://nextcloud",
+        "username": FULL_IDENTITY["BOT_USER"],
+        "dav_prefix": SHARED_MOUNT_NAME,
+        "auto_share_bot_dir": False,
+    }
+    base["talk"] = {"enabled": True, "bot_username": FULL_IDENTITY["BOT_USER"]}
+    base["web"].update({
+        "oauth2_provider": public,
+        "oauth2_client_id": credentials.oauth_client_id,
+        "oauth2_token_endpoint": "http://nextcloud/index.php/apps/oauth2/api/v1/token",
+        "oauth2_userinfo_endpoint": "http://nextcloud/ocs/v2.php/cloud/user?format=json",
+        "oauth2_redirect_uri": f"{public}/istota/callback",
+    })
+    base["site"] = {"hostname": f"localhost:{credentials.nc_port}"}
+    document = assemble_config(services, base=base)
+    for path, owner in FULL_MODULE_SWITCHES.items():
+        table = document
+        for part in path[:-1]:
+            table = table.setdefault(part, {})
+        table[path[-1]] = bool(owner and owner in services)
+    merge_config(document, profile.config, owner="the profile")
+    secret_values = {
+        "istota_brain_native_api_key": SCRIPTED_ENDPOINT_KEY,
+        "istota_nextcloud_app_password": credentials.bot_password,
+        "istota_web_oauth2_client_secret": credentials.oauth_client_secret,
+        "istota_web_session_secret_key": secrets.token_hex(32),
+    }
+    return document, secret_values
 
 
 def compose_env(
@@ -1076,33 +1165,22 @@ def compose_env(
 ) -> dict[str, str]:
     """Interpolation variables the profile's overlays need, from the services.
 
-    Distinct from `config_env()`, and held to a different rule. That one points
-    the *daemon* at a service and may only name variables the shipped generator
-    reads and `docker-compose.yml` passes through — the property that makes the
-    whole tier honest. These configure the compose *stack* instead: host paths
-    and image tags an overlay binds, and the container secrets and ports a
-    shipped service is declared from.
+    Distinct from `config()`, which points the *daemon* at a service through
+    `config.toml`. These configure the compose *stack* instead: host paths and
+    image tags an overlay binds, and the container secrets and ports a shipped
+    service is declared from (`signaling.compose_env()` names
+    `ISTOTA_TALK_SIGNALING_SECRET` and its neighbours, which configure the
+    signaling container and `provision-nc.sh`, not the daemon). Nothing istota
+    reads as configuration goes through here.
 
-    An earlier statement of the rule said these "appear in no shipped file", and
-    that was true of the only implementer at the time rather than being the
-    principle. `signaling.compose_env()` names `ISTOTA_TALK_SIGNALING_SECRET`
-    and its neighbours, every one of them read by `docker-compose.yml` — and
-    none of them by `render-config.sh`, because they configure the signaling
-    container and `provision-nc.sh`, not the daemon. The line that matters is
-    which side of the generator a variable lands on: anything that reaches
-    istota's own config goes through `config_env()` and is held to the two-file
-    rule, and nothing here does.
+    Compose resolves a relative bind against the first `-f` file's directory,
+    which is `docker/` rather than this package, so an overlay living here can
+    only name an absolute path handed to it. That is how both shapes receive
+    the config directory.
 
-    The mechanism half is unchanged: compose resolves a relative bind against
-    the first `-f` file's directory, which is `docker/` rather than this
-    package, so an overlay living here can only name an absolute path handed to
-    it. That is already how `docker-compose.test.yml` receives the rendered
-    config directory.
-
-    Optional on the protocol, read by `getattr`: five of the seven services need
-    no overlay and would otherwise carry an empty method apiece. The same claim
-    and reservation guards apply as for `config_env`, so an overlay variable
-    cannot silently overwrite a config one or the stack's own identity.
+    Optional on the protocol, read by `getattr`: most services need no overlay
+    and would otherwise carry an empty method apiece. Two services claiming one
+    variable, or one claiming a variable the stack owns, is refused.
     """
     claimed = {} if claimed is None else claimed
     reserved = set() if reserved is None else reserved
@@ -1177,10 +1255,9 @@ def _write_private(path: Path, body: str) -> None:
 #:
 #: By shape as well as by name, because `CREDENTIAL_KEYS` is only the four
 #: passwords `docker-compose.yml` preflights — and a *service* contributes keys
-#: too. `GitLabService.config_env()` already returns
-#: `ISTOTA_DEVELOPER_GITLAB_TOKEN`, so the first `full` profile carrying a forge
-#: would put a token on `Stack.env` in the clear. A list a future service has to
-#: remember to extend is a list that will not be extended.
+#: too, through `compose_env()`, and the OAuth2 client secret rides here as
+#: well. A list a future service has to remember to extend is a list that will
+#: not be extended.
 CREDENTIAL_SUFFIXES = ("_PASSWORD", "_TOKEN", "_SECRET", "_KEY")
 
 
@@ -1603,7 +1680,7 @@ class Stack:
         """Container-side directories the profile's services say are per-test.
 
         Read off the services rather than off the profile, so a path cannot
-        drift from the `config_env()` variable that pointed the daemon at it.
+        drift from the `config()` key that pointed the daemon at it.
 
         The guard is doing real work, because what follows is `rm -rf` inside a
         container running as root. Counting slashes is not enough: `//`,
@@ -1632,7 +1709,7 @@ class Stack:
         never called.
 
         **`/mnt/shared` is knowingly outside this**, and the omission is a
-        decision rather than an oversight. `render-config.sh` renders
+        decision rather than an oversight. The config writes
         `workspace_path` as that literal on every profile, so memory
         files, `TASKS.md` and per-user directories accumulate there for a whole
         session — and the tasks-file poller reads one of them every 30 seconds.
@@ -1965,15 +2042,12 @@ class LeanShape:
     """Everything booting a lean stack needs that the profile does not carry.
 
     One object rather than six constructor arguments on `StackPool`, because
-    all six are properties of the *shape* — which compose file, which generator,
-    which image — and the full shape in the next stage brings a different six.
+    all of them are properties of the *shape* — which compose file, which
+    image, which overlays — and the full shape brings a different set.
     """
 
     compose_file: Path
     """`docker/docker-compose.test.yml`."""
-
-    render_script: Path
-    """`docker/istota/render-config.sh`, run on the host."""
 
     image: str
     """The tag `up --build` writes, shared by every stack in the session."""
@@ -1987,20 +2061,15 @@ class LeanShape:
 
     ready_timeout: int = READY_TIMEOUT
 
-    render_env: dict[str, str] = field(default_factory=dict)
-    """Merged over `DEFAULT_RENDER_ENV`, for a caller with a house value."""
-
 
 @dataclass(frozen=True)
 class FullShape:
     """Everything booting the deployment as shipped needs.
 
-    Where `LeanShape` names a generator to run on the host, this shape names
-    none: the container runs `render-config.sh` itself, from the environment
-    compose passed it, exactly as in production. That is the whole reason the
-    shape exists, and it is why the two-file constraint bites harder here — a
-    variable the generator reads but `docker-compose.yml` does not pass through
-    is unreachable on this shape.
+    The shipped compose file with its entrypoint, run in full. The config is an
+    input on this shape as on every other: the testbed writes `config.toml` and
+    the admins file into a directory the overlay binds at `/data/config`, and
+    one file per credential into the directory the shipped `secrets:` read.
     """
 
     compose_file: Path
@@ -2139,10 +2208,10 @@ class StackPool:
         return self.workdir / f"{profile.name}-{self._booted}"
 
     def _boot_lean(self, profile: Profile) -> Stack:
-        """Start the profile's services, render, bring the stack up, wait ready.
+        """Start the profile's services, write the config, bring it up, wait ready.
 
         The order is not arrangeable: the services have to be listening before
-        the config that names their ports is rendered, and the config has to
+        the config that names their ports is written, and the config has to
         exist before the container that reads it starts.
         """
         scratch = self._scratch(profile)
@@ -2160,13 +2229,7 @@ class StackPool:
                     name, scratch=scratch, host=PUBLIC_BIND
                 )
             args = self._compose_args(profile, scratch, config_dir, services)
-            render_config(
-                self.lean.render_script,
-                config_dir,
-                services,
-                extra=profile.config,
-                base_env=self.lean.render_env,
-            )
+            write_config(config_dir, lean_config(profile, services))
             # Built once per session. A profile naming its own `image` builds
             # nothing regardless — the prebuilt overlay runs a tag someone else
             # made — so it must not be what marks the session as built.
@@ -2207,20 +2270,16 @@ class StackPool:
     def _boot_full(self, profile: Profile) -> Stack:
         """Bring up the deployment as shipped and wait for it to provision itself.
 
-        Different from the lean boot in one structural way and several
-        consequential ones. Structurally: nothing is rendered here. The container
-        runs `render-config.sh` itself, from the environment compose passed it,
-        which is what makes this shape a witness for `entrypoint.sh` and
-        `provision-nc.sh` at all. So the services' `config_env()` goes into the
-        compose env-file rather than into a render environment, and the
-        constraint that a service may only be wired in through a variable the
-        shipped generator reads gains a second half: `docker-compose.yml` has to
-        pass it through too.
+        The shipped entrypoint runs in full, which is what makes this shape a
+        witness for `entrypoint.sh` and `provision-nc.sh` at all. Its config is
+        an input, as in production: `full_config` builds it from the profile's
+        services and this session's credentials, and it is written before
+        anything starts.
 
-        Consequentially: the credentials are generated per session, the host
-        port is ephemeral because `docker-compose.yml` binds a fixed one on
-        nginx, and every module is switched off except the ones the profile
-        names. All three are `full_env`'s.
+        The credentials are generated per session, the host port is ephemeral
+        because `docker-compose.yml` binds a fixed one on nginx, and every
+        subsystem is switched off except the ones the profile names
+        (`FULL_MODULE_SWITCHES`).
 
         `--build` is unconditional here rather than once-per-session. The lean
         shape shares one tag across every stack, so a second `up --build` would
@@ -2236,6 +2295,8 @@ class StackPool:
 
         scratch = self._scratch(profile)
         scratch.mkdir(parents=True, exist_ok=True)
+        config_dir = scratch / "config"
+        secrets_dir = scratch / "secrets"
 
         services: dict[str, Service] = {}
         args: list[str] = []
@@ -2245,9 +2306,11 @@ class StackPool:
         # `services.build` opens a listening socket on every interface and the
         # boot then builds an image, so a refusal that waited for the full map
         # would pay for both before saying no. This pass sees the identity, the
-        # credentials, the port and the profile's own config; the pass after
-        # `full_env` adds whatever the services contributed.
-        self._refuse_conflicting_env(full_env({}, credentials, extra=profile.config))
+        # credentials and the port; the pass after `full_env` adds whatever the
+        # services contributed.
+        self._refuse_conflicting_env(
+            full_env({}, credentials, config_dir=config_dir, secrets_dir=secrets_dir)
+        )
 
         started = time.monotonic()
         try:
@@ -2258,7 +2321,12 @@ class StackPool:
                     host=PUBLIC_BIND,
                     credentials=credentials,
                 )
-            environment = full_env(services, credentials, extra=profile.config)
+            document, secret_values = full_config(services, credentials, profile)
+            write_config(config_dir, document)
+            write_secrets(secrets_dir, secret_values)
+            environment = full_env(
+                services, credentials, config_dir=config_dir, secrets_dir=secrets_dir,
+            )
             self._refuse_conflicting_env(environment)
             args, env_file = self._compose_args_full(profile, scratch)
             write_env_file(env_file, environment)
@@ -2273,7 +2341,8 @@ class StackPool:
                 ),
             )
             stack = Stack(
-                profile=profile, args=args, services=services, env=environment
+                profile=profile, args=args, services=services, env=environment,
+                config_dir=config_dir,
             )
             _bind_services(stack)
             # The health check answers "the tasks table exists", which
@@ -2450,13 +2519,9 @@ class StackPool:
     #:
     #: `istota_data` holds the framework database every assertion is read out
     #: of, so keeping it would make session 2's rows depend on session 1's. It
-    #: also holds `.api-provisioned`, whose absence is what makes the entrypoint
-    #: re-run room provisioning through the find-by-name recovery path. It no
-    #: longer has to go for the *config's* sake: before ISSUE-368 the entire
-    #: render was gated on `[ ! -f "$CONFIG_FILE" ]`, so a kept `istota_data`
-    #: meant session 2's env-file was never read and the daemon booted pointing
-    #: at session 1's now-dead scripted-endpoint port. The render runs every
-    #: boot now, and the two reasons above are enough on their own.
+    #: also holds the `_provisioned_rooms` record, whose absence is what puts
+    #: room provisioning back on the find-by-name path. The config is not on it:
+    #: the testbed binds a fresh one from the session's scratch directory.
     #: `redis_data` is a cache with nothing in it worth a second of boot time.
     KEEP_WIPES = ("istota_data", "redis_data")
 

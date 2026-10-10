@@ -26,7 +26,7 @@
 # Usage:
 #   install.sh [--bare | --docker | --standalone] [other flags...]
 #     --bare          Server install, native via Ansible (needs root)
-#     --docker        Server install, Docker path (docker/init.sh)
+#     --docker        Server install, Docker path (clones, then prints the setup steps)
 #     --standalone    Local single-user install (uv tool install + istota setup)
 #     --help          Show this help
 #   With no mode flag on a terminal you are asked to choose; with no mode flag
@@ -34,11 +34,11 @@
 #
 # All other flags pass through to the chosen subscript:
 #   bare metal: --headless, --update, --dry-run, --settings PATH
-#   docker:     --minimal, --force, --start, --no-start
 #   standalone: any `istota setup` flag (--yes, --force, --workspace, --port, …)
 #
-# The bare-metal and docker paths default to running an interactive wizard
-# (skip with --headless / --force). Standalone always runs `istota setup`.
+# The bare-metal path runs an interactive wizard (skip with --headless). The
+# docker path's wizard is `istota setup`, run inside the image; this prints the
+# steps. Standalone always runs `istota setup`.
 #
 # Standalone with a non-Anthropic (native) brain: `istota setup` prompts for the
 # API base URL, model id, and key interactively, or take them non-interactively:
@@ -206,10 +206,27 @@ run_docker() {
 
     : "${CLONE_DIR:=$(_default_clone_dir)}"
     ensure_repo
-    reattach_tty_if_needed
-    local target="$REPO_ROOT/docker/init.sh"
-    [ -f "$target" ] || die "docker/init.sh not found at $target"
-    exec bash "$target" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
+    # istota's config is written once, inside the image, by `istota setup`, as
+    # the daemon's uid 10001. With --vm-dir it also updates the stack's .env
+    # (keeping every line it does not own) and writes one file per credential
+    # under secrets/. The VM provisioning automates these steps.
+    ok "Repository at $REPO_ROOT"
+    cat <<EOF
+
+Next, in $REPO_ROOT/docker:
+
+  1. cp .env.example .env, and fill in the bundled Nextcloud's values there.
+  2. docker compose build istota
+  3. Let the image's uid 10001 write .env, vm.env and secrets/. Compose refuses
+     to run a service whose secret file is missing, so each starts empty:
+       touch vm.env && sudo chown 10001:10001 .env vm.env
+       sudo install -d -o 10001 -g 10001 -m 0700 secrets
+       for n in \$(docker compose config --format json | python3 -c 'import json,sys; print(*json.load(sys.stdin)["secrets"])'); do
+           sudo install -o 10001 -g 10001 -m 0400 /dev/null "secrets/\$n"; done
+  4. docker compose run --rm --no-deps -v "\$PWD:/vm" --entrypoint istota-drop istota istota setup --vm-dir /vm
+  5. docker compose up -d
+
+EOF
 }
 
 # --- Standalone (local single-user) helpers --------------------------------

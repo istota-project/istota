@@ -32,12 +32,3 @@ def test_installer_mapping_reaches_config():
     assert config.security.credential_exports_per_day == 6
     assert config.web.auth_step_up_ttl_minutes == 7
 
-
-def test_docker_credential_config(tmp_path):
-    import tomllib
-    from tests.test_render_config import render as docker_render, REQUIRED
-    config = tomllib.loads(docker_render(tmp_path, **REQUIRED,
-        ISTOTA_SCHEDULER_CREDENTIAL_BACKUP_INTERVAL="42",
-        ISTOTA_SECURITY_CREDENTIAL_BACKUP_RETENTION="4").read_text())
-    assert config["scheduler"]["credential_backup_interval"] == 42
-    assert config["security"]["credential_backup_retention"] == 4

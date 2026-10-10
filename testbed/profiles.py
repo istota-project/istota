@@ -43,11 +43,11 @@ class Profile:
     shape: Literal["lean", "full"] = "lean"
     """Which compose file the stack boots from.
 
-    `lean` is one container, no Nextcloud, entrypoint bypassed, config rendered
-    on the host: about thirty seconds to healthy. `full` is the deployment as
-    shipped — postgres, redis, nextcloud, istota, web, nginx — booted through
-    `entrypoint.sh` with the generator running inside the container where it
-    does in production, and around ten minutes to healthy on a cold volume set.
+    `lean` is one container, no Nextcloud, entrypoint bypassed: about thirty
+    seconds to healthy. `full` is the deployment as shipped — postgres, redis,
+    nextcloud, istota, web, nginx — booted through `entrypoint.sh`, and a minute
+    or so to healthy on a cold volume set. Both boot from a `config.toml` the
+    testbed writes, since the config is an input on every shape.
     """
 
     services: tuple[str, ...] = ("model",)
@@ -57,13 +57,12 @@ class Profile:
     deterministic task, and every scenario in the tier runs one.
     """
 
-    config: dict[str, str] = field(default_factory=dict)
-    """Extra `ISTOTA_*` variables, merged after every service's `config_env()`.
+    config: dict = field(default_factory=dict)
+    """A `config.toml` fragment, merged after every service's `config()`.
 
-    For an axis that is a config value rather than a service — a rate limit
-    lowered so a suite of twenty messages from one sender is not throttled, say.
-    Held to the same rule as `config_env`: only variables the shipped generator
-    reads and `docker-compose.yml` passes through.
+    For an axis that is a config value rather than a service — a poll interval
+    shortened so a mail scenario does not wait a minute, say. It may override a
+    service's key; two services may not set the same one.
     """
 
     image: str = ""
@@ -91,28 +90,21 @@ class Profile:
     """
 
 
-#: Both mail profiles poll every five seconds rather than every sixty.
+#: Both mail profiles poll every five seconds rather than every sixty, which
+#: would otherwise put a minute of dead wait into every mail scenario on a
+#: session-scoped stack.
 #:
-#: `ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL` is read by `render-config.sh` and
-#: passed through by `docker-compose.yml`, so this is a legitimate wiring rather
-#: than a fixture reaching past the generator. Sixty would put a minute of dead
-#: wait into every mail scenario, which on a session-scoped stack is a minute
-#: per test rather than one per session.
-#: And they give the stack's one user an address of their own.
-#:
-#: `USER_EMAIL` is read by `render-config.sh` and passed through by
-#: `docker-compose.yml`, so it satisfies the two-file rule like everything else
-#: here; it is not `ISTOTA_`-prefixed because it belongs to the identity block
-#: rather than to a module. Without it `config.users["testuser"]` has no address
-#: and neither the sender-match rung nor the plus-address rung can resolve —
-#: `extract_user_from_recipient` requires the tag to name a user that exists.
+#: And they give the stack's one user an address of their own. Without it
+#: `config.users["testuser"]` has no address and neither the sender-match rung
+#: nor the plus-address rung can resolve — `extract_user_from_recipient`
+#: requires the tag to name a user that exists.
 #:
 #: `@ext.test` rather than `@bot.test`: the mail server collapses every
 #: recipient at the bot's own domain into the bot mailbox, so a user address
 #: inside it would make the bot the recipient of its own replies.
-MAIL_CONFIG = {
-    "ISTOTA_SCHEDULER_EMAIL_POLL_INTERVAL": "5",
-    "USER_EMAIL": "testuser@ext.test",
+MAIL_CONFIG: dict = {
+    "scheduler": {"email_poll_interval": 5},
+    "users": {"testuser": {"email_addresses": ["testuser@ext.test"]}},
 }
 
 BASE = Profile("base")
@@ -121,33 +113,19 @@ FORGE = Profile("forge", services=("model", "gitlab"))
 # ntfy needs no config at all: it is a per-user connected service in the
 # encrypted secrets store rather than a config block, so the scenario points
 # the daemon at the stub with `istota secret ensure` inside the container. See
-# `services/ntfy.py::NtfyService.config_env` for why that is not a gap.
+# `services/ntfy.py::NtfyService.config` for why that is not a gap.
 NOTIFY = Profile("notify", services=("model", "ntfy"))
 
-#: The module switch lives here rather than in `feeds.config_env()`.
-#:
-#: `ISTOTA_FEEDS_ENABLED` says the *module* is on. That is a property of the
-#: profile — it is what `FULL_MODULE_SWITCHES` derives from a profile's service
-#: list on the other shape — and not something the document server knows or
-#: could answer for. Keeping it out of `config_env()` also keeps that method's
-#: promise true: the feeds stub is pointed at by seeded DB rows and by nothing
-#: the generator reads.
-#:
-#: The two-file rule still applies and still holds: `render-config.sh:534`
-#: reads it and `docker-compose.yml:333` passes it through, which the
-#: `Profile.config` guard in `tests/test_testbed_services.py` checks.
-FEEDS = Profile(
-    "feeds",
-    services=("model", "feeds"),
-    config={"ISTOTA_FEEDS_ENABLED": "true"},
-)
+#: No config: the feeds module is on by default (modules are opt-out), and the
+#: stub is pointed at by seeded DB rows rather than by anything in config.toml.
+FEEDS = Profile("feeds", services=("model", "feeds"))
 
 #: The signaling server, run for real, driven from the harness.
 #:
 #: The honest limit of this profile is that it cannot exercise istota's own
 #: authentication at all: hello-v2 needs a Nextcloud to mint and sign a JWT and
 #: to publish the public key the server verifies it against, and there is no
-#: Nextcloud on the lean shape. `ISTOTA_TALK_SIGNALING_ENABLED` is therefore
+#: Nextcloud on the lean shape. `[talk.signaling] enabled` is therefore
 #: *not* set here — the daemon's `require_hpb` refusal would stop the container
 #: booting — so the daemon in this stack is a bystander and the scenario drives
 #: istota's protocol module against the container itself.
@@ -193,18 +171,11 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 # boot of the same six containers to run one attachment scenario.
 #: And it runs the self-claim gate in `verify`, which the lean profile does not.
 #:
-#: Two reasons, and the first is about being able to fail. `render-config.sh`
-#: defaults `confirm_sender_match` to `off`, so a profile that also asked for
-#: `off` would render the same line whether or not `docker-compose.yml` passed
-#: the variable through — and the assertion that the passthrough works would
-#: hold against the reverted compose file. `verify` is a value the shell default
-#: is not.
-#:
-#: The second is that `verify` is the mode worth exercising on the shape that
-#: has a real boot behind it: it needs `authserv_id` set, refuses to start
-#: without it, and decides between a message that runs and one that is held on
-#: the strength of a header. That is two of this stage's settings interacting,
-#: which is exactly what neither could do before compose passed them.
+#: `verify` is the mode worth exercising on the shape that has a real boot
+#: behind it: it needs `authserv_id` set, refuses to start without it, and
+#: decides between a message that runs and one that is held on the strength of
+#: a header. And it is not the default, so an assertion that it reached the
+#: daemon can fail.
 #: And it reconciles rooms every 30 seconds rather than every 300.
 #:
 #: That interval is two things at once and the scenarios read it both ways. It
@@ -219,11 +190,11 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 #: Lower would be worse, not better. At 5 or 10 seconds the safety net would
 #: deliver almost as fast as the stream and no latency assertion could tell the
 #: two apart, which is the failure this tier has documented eight times.
-FULL_CONFIG = {
+FULL_CONFIG: dict = {
     **MAIL_CONFIG,
-    "ISTOTA_WEB_AUTH": "nextcloud,email",
-    "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify",
-    "ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL": "30",
+    "web": {"auth": ["nextcloud", "email"]},
+    "email": {"confirm_sender_match": "verify"},
+    "talk": {"signaling": {"room_sync_interval": 30}},
 }
 
 #: And it carries signaling, on the same arithmetic and for a reason of its own:
@@ -267,11 +238,10 @@ MAIL = Profile(
 #: stack's own user sends from their own address must carry a passing
 #: `Authentication-Results` stamp (`tests/support/email_flow.py`), or it is
 #: held. ntfy because the suite asserts what every push carries, and a profile
-#: without the stub could only count them. Both variables pass the two-file
-#: rule: `render-config.sh` reads them and `docker-compose.yml` passes them.
-EMAIL_CONFIG = {
+#: without the stub could only count them.
+EMAIL_CONFIG: dict = {
     **MAIL_CONFIG,
-    "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify",
+    "email": {"confirm_sender_match": "verify"},
 }
 EMAIL = Profile(
     "email",
@@ -285,7 +255,10 @@ EMAIL = Profile(
 EMAIL_HOLD_ALL = Profile(
     "email-hold-all",
     services=("model", "mail", "ntfy"),
-    config={**EMAIL_CONFIG, "ISTOTA_EMAIL_OUTBOUND_APPROVAL_FLOOR": "all"},
+    config={
+        **EMAIL_CONFIG,
+        "email": {**EMAIL_CONFIG["email"], "outbound_approval_floor": "all"},
+    },
     compose_overlays=(MAIL_OVERLAY,),
 )
 

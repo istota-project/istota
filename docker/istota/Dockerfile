@@ -85,9 +85,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # property for nobody and break `gh` for an operator on the box.
 #
 # The daemon cannot find an off-PATH binary by name, so it is named twice:
-# render-config.sh renders gh_bin_path / glab_bin_path into the [developer] block
-# on a first boot, and `_resolve_real_bin` probes this location for containers
-# upgraded past a config.toml that predates it.
+# `istota setup` writes gh_bin_path / glab_bin_path into the [developer] block,
+# and `_resolve_real_bin` probes this location for a config.toml that predates
+# it.
 #
 # Extracted from the .deb rather than installed with it: dpkg would put a
 # second, real `gh` at /usr/bin/gh, which is the same bypass by another route.
@@ -165,15 +165,21 @@ RUN groupadd -g 10001 istota \
 RUN mkdir -p /data/db /data/config /data/tmp /data/home \
     && chown -R 10001:10001 /data
 
-# Entrypoint. render-config.sh must land beside it — the entrypoint resolves it
-# relative to its own directory, and the image tier runs it on its own to render
-# a config in a volume-less container.
+# `istota setup` run in this image writes the container shape's config
+# (/data/config/config.toml), not the standalone install's.
+ENV ISTOTA_SETUP_SHAPE=container
+
+# Entrypoint, the root phase, and the drop every exec path goes through, which
+# reads the compose secrets into the environment (istota-secrets) as uid 10001.
+# config-diff.py is a one-time tool for an operator comparing a config the old
+# entrypoint rendered against their own; nothing runs it.
 COPY docker/istota/entrypoint.sh /entrypoint.sh
-COPY docker/istota/render-config.sh /render-config.sh
 COPY docker/istota/config-diff.py /config-diff.py
 COPY docker/istota/root-phase.sh /usr/local/sbin/istota-root-phase
 COPY docker/istota/istota-drop /usr/local/bin/istota-drop
-RUN chmod 0755 /entrypoint.sh /render-config.sh /config-diff.py \
-        /usr/local/sbin/istota-root-phase /usr/local/bin/istota-drop
+COPY docker/istota/istota-secrets /usr/local/bin/istota-secrets
+RUN chmod 0755 /entrypoint.sh /config-diff.py \
+        /usr/local/sbin/istota-root-phase /usr/local/bin/istota-drop \
+        /usr/local/bin/istota-secrets
 
 ENTRYPOINT ["/usr/local/sbin/istota-root-phase", "/entrypoint.sh"]

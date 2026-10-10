@@ -54,7 +54,7 @@ STRANGER_DOMAIN = "stranger.test"
 #: the bot's mail to anyone else lands in the catch-all, from this domain.
 BOT_DOMAIN = mail.BOT_ADDRESS.rsplit("@", 1)[1]
 
-#: The `authserv_id` `MailService.config_env` gives the daemon. A stamp naming
+#: The `authserv_id` `MailService.config` gives the daemon. A stamp naming
 #: any other server is ignored under `verify`, which is the point of setting it.
 AUTHSERV_ID = mail.SERVICE_NAME
 

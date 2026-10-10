@@ -7,5 +7,11 @@
 # `--user 10001:10001` alone leaves the bounding set full (Stage 1 measured
 # it). Needs CAP_SETUID, CAP_SETGID and CAP_SETPCAP, which only uid 0 in this
 # container holds.
+#
+# The dropped process then reads the credential files under /run/secrets into
+# its environment (`istota-secrets`) before it execs "$@". After the drop,
+# because the files are 0400 and owned by 10001, and uid 0 here holds no
+# CAP_DAC_OVERRIDE to read them with.
 export HOME=/data/home
-exec setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all -- "$@"
+exec setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all -- \
+    /usr/local/bin/istota-secrets "$@"

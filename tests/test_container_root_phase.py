@@ -117,7 +117,9 @@ class TestTheDrop:
             "--inh-caps=-all", "--bounding-set=-all",
         ):
             assert flag in text, flag
-        assert 'exec setpriv' in text and '-- "$@"' in text
+        assert 'exec setpriv' in text
+        # The dropped process reads the compose secrets, then runs the command.
+        assert '/usr/local/bin/istota-secrets "$@"' in text
 
     def test_the_root_phase_ends_by_execing_it(self):
         lines = [line.strip() for line in ROOT_PHASE.read_text().splitlines()]

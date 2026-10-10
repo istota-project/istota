@@ -13,7 +13,7 @@ The web UI at `/istota/settings` lets each user edit their own profile and add p
 
 ## Claude authentication
 
-Both installers collect a long-lived Claude Code OAuth token during setup (the bare-metal wizard's "Claude Authentication" prompt; the Docker `init.sh` `CLAUDE_CODE_OAUTH_TOKEN` prompt), and provision the credentials file for you. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
+Both installers collect a long-lived Claude Code OAuth token during setup (the bare-metal wizard's "Claude Authentication" prompt; the Docker `istota setup` "Claude Code OAuth token" prompt, which writes it to `secrets/claude_code_oauth_token`), and provision the credentials file for you. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
 
 Only if you skipped the token at install time (and aren't using `ANTHROPIC_API_KEY` or a native-brain provider key), authenticate manually:
 
