@@ -7,7 +7,9 @@ and no `provision.sh`. This tier boots a Debian 13 VM from
 signed tag of this checkout through `istota-stack update`, and witnesses the
 security parity rows that only a real VM can hold (7, 9, 10, 11, 15, 18, 19,
 20, and the halves of 12 and 17 Docker Desktop cannot see). `tests/vm/lima.py`
-is the harness and says how the release and the modes work.
+is the harness and says how the release and the modes work. The proxied and
+nextcloud modes are converged by the management role (`ansible/`) rather than
+`istota-stack setup`; that needs `ansible-playbook` on PATH, or `uvx`.
 
 Run it with `scripts/test-vm.sh`; `scripts/test-vm-negative-control.sh` runs
 the controls. Session-scoped and `-n0`, like the other artifact tiers, and it
@@ -111,6 +113,7 @@ def local_stack(vm, release, model) -> lima.Vm:
 
 @pytest.fixture(scope="module")
 def proxied_stack(vm, release, model) -> lima.Vm:
+    """Proxied ingress, converged by the management role (`ansible/`)."""
     lima.ensure_mode(vm, release, lima.proxied_mode(model.vm_url), prepare=lima.ensure_proxied_namespaces)
     return vm
 
@@ -125,5 +128,6 @@ def direct_stack(vm, release, model) -> lima.Vm:
 def nextcloud_stack(vm, release, model) -> dict:
     """Full Nextcloud integration over the VM's rclone mount of the fixture's `Shared Files`."""
     fixture = lima.ensure_nextcloud(vm)
-    lima.ensure_mode(vm, release, lima.nextcloud_mode(model.vm_url, fixture["url"], fixture["BOT_PASSWORD"]))
+    lima.ensure_mode(vm, release, lima.nextcloud_mode(
+        model.vm_url, fixture["url"], fixture["BOT_PASSWORD"], fixture["rclone_conf"]))
     return fixture

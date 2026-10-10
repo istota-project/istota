@@ -409,11 +409,16 @@ class Mode:
     config: dict = field(default_factory=dict)
     #: Rebuild after setup (profiles and devboxes add images).
     build: bool = False
+    #: Applied by the management role (`ansible/`) from the same answers,
+    #: instead of `istota-stack setup`. See `converge_role`.
+    by_role: bool = False
+    rclone_remote: str = ""
+    rclone_conf: str = ""
 
     def signature(self, tag: str) -> str:
         return json.dumps({
             "mode": self.name, "tag": tag, "args": self.setup_args,
-            "host_env": self.host_env, "config": self.config,
+            "host_env": self.host_env, "config": self.config, "by_role": self.by_role,
         }, sort_keys=True)
 
 
@@ -446,6 +451,7 @@ def proxied_mode(model_url: str) -> Mode:
             "--ingress", "proxied", "--hostname", DOMAIN, "--upstream-proxy", UPSTREAM,
             "--listen-addr", PROXIED_LISTEN, "--listen-port", str(PROXIED_PORT),
         ],
+        by_role=True,
     )
 
 
@@ -462,7 +468,7 @@ def direct_mode(model_url: str) -> Mode:
     )
 
 
-def nextcloud_mode(model_url: str, nc_url: str, bot_password: str) -> Mode:
+def nextcloud_mode(model_url: str, nc_url: str, bot_password: str, rclone_conf: str) -> Mode:
     return Mode(
         name="nextcloud",
         setup_args=common_args(model_url) + [
@@ -471,7 +477,9 @@ def nextcloud_mode(model_url: str, nc_url: str, bot_password: str) -> Mode:
             "--nextcloud-dav-prefix", "Shared Files", "--no-nextcloud-auto-share", "--no-talk",
         ],
         setup_env={"ISTOTA_NEXTCLOUD_APP_PASSWORD": bot_password},
-        host_env={"RCLONE_REMOTE": "nextcloud"},
+        by_role=True,
+        rclone_remote="nextcloud",
+        rclone_conf=rclone_conf,
     )
 
 
@@ -498,11 +506,158 @@ def apply_config(vm: Vm, delta: dict) -> int:
     return result.returncode
 
 
-def ensure_mode(vm: Vm, release: Release, mode: Mode, *, prepare=None) -> None:
-    """Bring the stack into `mode`, unless it is already there and healthy."""
+# --- the management role ----------------------------------------------------------
+
+
+@dataclass
+class RoleRun:
+    """One `ansible-playbook` run of `ansible/` against the VM."""
+
+    returncode: int
+    output: str
+    recap: dict[str, int]
+
+
+def ansible_playbook_argv() -> list[str]:
+    """`ansible-playbook` from PATH, else ansible-core through uvx, which
+    installs nothing into this project."""
+    found = shutil.which("ansible-playbook")
+    if found:
+        return [found]
+    if shutil.which("uvx"):
+        return ["uvx", "--from", "ansible-core", "ansible-playbook"]
+    raise VmError("the proxied and nextcloud modes are applied by ansible/: install ansible-core, or uv for uvx")
+
+
+def _setup_namespace(args: list[str]):
+    """`istota setup`'s flags as the namespace `collect_container_answers` reads:
+    each `--a-b` is the attribute `a_b`, a flag with no value is True, and
+    `--profile` repeats, as the CLI's own parser declares them."""
+    import argparse
+
+    namespace = argparse.Namespace()
+    index = 0
+    while index < len(args):
+        name = args[index].removeprefix("--").replace("-", "_")
+        if index + 1 < len(args) and not args[index + 1].startswith("--"):
+            value, index = args[index + 1], index + 2
+        else:
+            value, index = True, index + 1
+        if name == "profile":
+            value = [*getattr(namespace, "profile", []), value]
+        setattr(namespace, name, value)
+    return namespace
+
+
+def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
+    """The role's variables for `mode`: what `istota-stack setup` would write
+    for the same answers, through the wizard's own pure renderers."""
+    from unittest import mock
+
+    from istota import setup_wizard
+
+    credentials = {"ISTOTA_BRAIN_NATIVE_API_KEY": NATIVE_KEY, **mode.setup_env}
+    # Only the mode's credentials: a key exported in the developer's shell
+    # under a name the wizard reads must not reach the VM.
+    scrubbed = {name.upper(): "" for name in setup_wizard.SECRET_NAMES}
+    with mock.patch.dict(os.environ, {**scrubbed, **credentials}):
+        answers = setup_wizard.collect_container_answers(
+            _setup_namespace(mode.setup_args), input_fn=None, out=lambda *_: None, getpass_fn=None)
+    # Setup generates the web session key once and carries it forward; a fixed
+    # one per VM keeps a converged VM converged across sessions.
+    answers.session_secret = hashlib.sha256(f"{vm.name}:web-session".encode()).hexdigest()
+    secrets = {name: value for name, value in setup_wizard.container_secret_values(answers).items() if value}
+    config = _deep_merge(setup_wizard.container_config_document(answers, inline_credentials=False), mode.config)
+    return {
+        "istota_release": release.tag,
+        "istota_release_signing_key": release.signing_key,
+        "istota_storage": "nextcloud" if answers.uses_nextcloud else "local",
+        "istota_ingress": answers.ingress,
+        "istota_domain": answers.hostname,
+        "istota_tls_cert_source": answers.tls_cert_source,
+        "istota_upstream_proxy": answers.upstream_proxy,
+        "istota_listen_addr": answers.listen_addr,
+        "istota_listen_port": answers.listen_port or 8080,
+        "istota_rclone_remote": mode.rclone_remote,
+        "istota_rclone_conf": mode.rclone_conf,
+        "istota_compose_profiles": list(answers.compose_profiles),
+        "istota_secrets": secrets,
+        "istota_admins": [answers.user_id],
+        "istota_config": config,
+        "istota_users": {USER: {"display-name": answers.display_name}},
+        "istota_user_secrets": {USER: [
+            {"service": "karakeep", "key": "base_url", "value": "https://karakeep.example.invalid"},
+        ]},
+    }
+
+
+def converge_role(vm: Vm, variables: dict, *, check: bool = False, timeout: int = BUILD_TIMEOUT) -> RoleRun:
+    """Run `ansible/` against the VM over Lima's ssh config, as root."""
+    entry = vm.info() or {}
+    ssh_config = entry.get("sshConfigFile") or str(Path.home() / ".lima" / vm.name / "ssh.config")
+    host = entry.get("hostname") or f"lima-{vm.name}"
+    workdir = _workdir() / "ansible"
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "inventory.ini").write_text(
+        "[istota]\n"
+        f"{host} ansible_ssh_common_args={shlex.quote('-F ' + ssh_config)} "
+        "ansible_python_interpreter=/usr/bin/python3\n"
+    )
+    (workdir / "site.yml").write_text(
+        "- hosts: istota\n"
+        "  become: true\n"
+        "  roles:\n"
+        f"    - role: {REPO / 'ansible'}\n"
+    )
+    vars_file = workdir / "vars.json"
+    vars_file.write_text(json.dumps(variables))
+    vars_file.chmod(0o600)
+    argv = [*ansible_playbook_argv(), "-i", str(workdir / "inventory.ini"),
+            "-e", f"@{vars_file}", str(workdir / "site.yml")]
+    if check:
+        argv.append("--check")
+    result = subprocess.run(
+        argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+        env={**os.environ, "ANSIBLE_HOST_KEY_CHECKING": "False", "ANSIBLE_NOCOLOR": "1",
+             "ANSIBLE_RETRY_FILES_ENABLED": "False"},
+    )
+    output = result.stdout + result.stderr
+    recap: dict[str, int] = {}
+    match = re.search(rf"^{re.escape(host)}\s*:\s*(.+)$", output.split("PLAY RECAP", 1)[-1], re.M)
+    if match:
+        recap = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", match.group(1))}
+    return RoleRun(result.returncode, output, recap)
+
+
+#: The converge that applied each role mode this session, with the variables
+#: it ran with, for `tests/vm/test_management_role.py`.
+ROLE_RUNS: dict[str, tuple[RoleRun, dict]] = {}
+
+
+def ensure_mode_by_role(vm: Vm, release: Release, mode: Mode) -> RoleRun:
+    """Converge the VM into `mode` with the management role, as an estate would."""
+    variables = role_vars(vm, release, mode)
+    run = converge_role(vm, variables)
+    if run.returncode != 0 or run.recap.get("failed", 1) != 0:
+        raise VmError(f"ansible-playbook exited {run.returncode} (recap {run.recap}):\n{run.output[-8000:]}")
+    wait_healthy(vm)
+    vm.write(MODE_FILE, mode.signature(release.tag))
+    ROLE_RUNS[mode.name] = (run, variables)
+    return run
+
+
+def ensure_mode(vm: Vm, release: Release, mode: Mode, *, prepare=None) -> RoleRun | None:
+    """Bring the stack into `mode`, unless it is already there and healthy.
+
+    A mode the role applies is converged on every session: the role decides
+    what changed, and its result is what `tests/vm/test_management_role.py`
+    reads.
+    """
     signature = mode.signature(release.tag)
     if prepare is not None:
         prepare(vm)
+    if mode.by_role:
+        return ensure_mode_by_role(vm, release, mode)
     if vm.read(MODE_FILE).strip() == signature and container(vm, "istota"):
         try:
             wait_healthy(vm, timeout=300)
@@ -524,6 +679,7 @@ def ensure_mode(vm: Vm, release: Release, mode: Mode, *, prepare=None) -> None:
     vm.run("systemctl enable istota-stack.service >/dev/null; systemctl start istota-stack.service", timeout=1800)
     wait_healthy(vm)
     vm.write(MODE_FILE, signature)
+    return None
 
 
 # --- stand-ins for the world outside the VM -------------------------------------
@@ -710,7 +866,11 @@ def nextcloud_credentials(vm: Vm) -> dict[str, str]:
 
 
 def ensure_nextcloud(vm: Vm) -> dict[str, str]:
-    """The Nextcloud fixture up and provisioned, and the VM's rclone remote for it."""
+    """The Nextcloud fixture up and provisioned, and the rclone.conf for it.
+
+    The config is returned rather than placed: the management role writes it
+    to /srv/app/istota/rclone.conf, as an estate's vault would.
+    """
     credentials = nextcloud_credentials(vm)
     vm_ip = vm_address(vm)
     vm.write(f"{SCRATCH}/nextcloud.json", json.dumps(nextcloud_fixture_compose(vm_ip)))
@@ -723,8 +883,14 @@ def ensure_nextcloud(vm: Vm) -> dict[str, str]:
     # first only lets the remote's password be obscured before that run.
     vm.run("command -v rclone >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rclone fuse3 >/dev/null",
            timeout=900)
-    obscured = vm.out(f"rclone obscure {shlex.quote(credentials['BOT_PASSWORD'])}")
-    vm.write(f"{STACK}/rclone.conf", (
+    # rclone obscure is salted, so the obscured form is made once per VM and
+    # kept: a new one each session would be a changed rclone.conf every time.
+    obscured_path = f"{SCRATCH}/nextcloud.obscured"
+    obscured = vm.read(obscured_path).strip()
+    if not obscured:
+        obscured = vm.out(f"rclone obscure {shlex.quote(credentials['BOT_PASSWORD'])}")
+        vm.write(obscured_path, obscured + "\n", mode="0600")
+    rclone_conf = (
         "[ncroot]\n"
         "type = webdav\n"
         f"url = http://127.0.0.1:{NC_PORT}/remote.php/dav/files/{NC_BOT}\n"
@@ -735,8 +901,8 @@ def ensure_nextcloud(vm: Vm) -> dict[str, str]:
         "[nextcloud]\n"
         "type = alias\n"
         "remote = ncroot:Shared Files\n"
-    ), mode="0600")
-    return {**credentials, "url": f"http://{vm_ip}:{NC_PORT}"}
+    )
+    return {**credentials, "url": f"http://{vm_ip}:{NC_PORT}", "rclone_conf": rclone_conf}
 
 
 # --- probe tasks ----------------------------------------------------------------
