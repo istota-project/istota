@@ -1,0 +1,8 @@
+# Negative control for tests/image/test_upgrade.py::TestAnOlderImageRefusesANewerSchema:
+# the real image claiming a schema level far above any database, so `istota
+# init` never refuses one. Every assertion in that class must turn red.
+ARG BASE
+FROM ${BASE}
+RUN sed -i 's/^SCHEMA_VERSION = [0-9]*$/SCHEMA_VERSION = 999/' /app/src/istota/db.py \
+    && grep -q '^SCHEMA_VERSION = 999$' /app/src/istota/db.py \
+    && /app/.venv/bin/python -c "import istota.db as d; assert d.SCHEMA_VERSION == 999"

@@ -25,8 +25,6 @@ from __future__ import annotations
 import os
 import secrets
 import subprocess
-import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,16 +33,14 @@ import pytest
 from istota.setup_wizard import SECRET_NAMES
 from tests.support import parity
 
-from .conftest import REPO, require_docker
+from .shipped_stack import boot_shipped_stack
 
 pytestmark = pytest.mark.image
-
-COMPOSE = REPO / "docker" / "docker-compose.yml"
-HEALTHY_TIMEOUT = 240
 
 #: Overlays the negative control applies, `os.pathsep`-separated, the same
 #: mechanism `ISTOTA_TESTBED_CONTROL_OVERLAYS` is for the smoke tier.
 CONTROL_OVERLAYS_ENV = "ISTOTA_SECRETS_CONTROL_OVERLAYS"
+
 
 @dataclass(frozen=True)
 class SecretsBoot:
@@ -57,95 +53,30 @@ class SecretsBoot:
     logs: str
 
 
-def _compose(args: list[str], *, env_file: Path, overlays: list[Path], project: str,
-             timeout: int = 300, extra_env: dict[str, str] | None = None):
-    argv = ["docker", "compose", "-f", str(COMPOSE)]
-    for overlay in overlays:
-        argv += ["-f", str(overlay)]
-    argv += ["--project-name", project, "--env-file", str(env_file), *args]
-    return subprocess.run(
-        argv, capture_output=True, text=True, timeout=timeout,
-        env={**os.environ, **(extra_env or {})},
-    )
-
-
 @pytest.fixture(scope="module")
 def secrets_boot(istota_image, tmp_path_factory) -> SecretsBoot:
-    require_docker()
     work = tmp_path_factory.mktemp("row12")
-    vm = work / "vm"
-    secrets_dir = vm / "secrets"
-    secrets_dir.mkdir(parents=True)
-    # Compose refuses to run a service whose secret file is missing, before
-    # anything in the container could write one, so the stack directory starts
-    # with every file empty. `istota setup --vm-dir` then replaces them.
-    for name in SECRET_NAMES:
-        (secrets_dir / name).write_text("")
-
     native_key = f"row12-native-{secrets.token_hex(8)}"
-    overlay = work / "image.yml"
-    # The full-integration workspace bind is `rslave`, which Docker Desktop
-    # refuses for a macOS path; this stack stores locally and never reads it.
-    overlay.write_text(
-        "services:\n  istota:\n    build: !reset null\n"
-        f"    image: {istota_image.tag}\n"
-        "    volumes:\n      - row12_mount:/mnt/shared\n"
-        "volumes:\n  row12_mount:\n"
-    )
-    overlays = [overlay] + [
+    overlays = [
         Path(part) for part in os.environ.get(CONTROL_OVERLAYS_ENV, "").split(os.pathsep) if part
     ]
-    env_file = work / "compose.env"
-    env_file.write_text("".join(
-        f"{key}={value}\n" for key, value in {
-            "ISTOTA_SECRETS_DIR": str(secrets_dir),
-            # Read only by the negative control's overlay.
-            "ISTOTA_ROW12_LEAKED_VALUE": native_key,
-        }.items()
-    ))
-    project = f"istota-row12-{uuid.uuid4().hex[:8]}"
-    call = dict(env_file=env_file, overlays=overlays, project=project)
-    try:
-        setup = _compose([
-            "run", "--rm", "--no-deps", "-T",
-            "-e", f"ISTOTA_BRAIN_NATIVE_API_KEY={native_key}",
-            "-v", f"{vm}:/vm",
-            "--entrypoint", "istota-drop", "istota",
-            "istota", "setup", "--yes", "--vm-dir", "/vm", "--user", "alice",
-            "--brain", "native", "--native-model", "scripted-test-model",
-        ], **call)
-        assert setup.returncode == 0, setup.stdout + setup.stderr
-        session_key = (secrets_dir / "istota_web_session_secret_key").read_text()
-        assert (secrets_dir / "istota_brain_native_api_key").read_text() == native_key
-
-        up = _compose(["up", "-d", "--no-deps", "--no-build", "istota"], **call)
-        assert up.returncode == 0, up.stdout + up.stderr
-        container = _compose(["ps", "-q", "istota"], **call).stdout.strip()
-        assert container, "no istota container came up"
-
-        deadline = time.monotonic() + HEALTHY_TIMEOUT
-        health = ""
-        while time.monotonic() < deadline:
-            health = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Health.Status}}", container],
-                capture_output=True, text=True, timeout=30,
-            ).stdout.strip()
-            if health == "healthy":
-                break
-            time.sleep(2)
-        logs = _compose(["logs", "istota"], **call)
-        assert health == "healthy", f"istota is {health!r}\n{logs.stdout[-4000:]}"
+    with boot_shipped_stack(
+        istota_image.tag, work,
+        setup_env={"ISTOTA_BRAIN_NATIVE_API_KEY": native_key},
+        # Read only by the negative control's overlay.
+        env_values={"ISTOTA_ROW12_LEAKED_VALUE": native_key},
+        overlays=overlays, project_prefix="istota-row12",
+    ) as stack:
+        session_key = (stack.secrets_dir / "istota_web_session_secret_key").read_text()
+        assert (stack.secrets_dir / "istota_brain_native_api_key").read_text() == native_key
 
         def run(*argv: str) -> str:
-            result = subprocess.run(
-                ["docker", "exec", container, *argv],
-                capture_output=True, text=True, timeout=60,
-            )
+            result = stack.exec(*argv, timeout=60)
             assert result.returncode == 0, result.stderr
             return result.stdout
 
         inspect = subprocess.run(
-            ["docker", "inspect", container], capture_output=True, text=True, timeout=30,
+            ["docker", "inspect", stack.container], capture_output=True, text=True, timeout=30,
         ).stdout
         modes = {
             name: run("stat", "-c", "%a", f"/run/secrets/{name}").strip()
@@ -155,10 +86,8 @@ def secrets_boot(istota_image, tmp_path_factory) -> SecretsBoot:
         config = run("istota-drop", "cat", "/data/config/config.toml")
         return SecretsBoot(
             native_key=native_key, session_key=session_key, inspect=inspect,
-            modes=modes, daemon_env=daemon_env, config=config, logs=logs.stdout,
+            modes=modes, daemon_env=daemon_env, config=config, logs=stack.logs,
         )
-    finally:
-        _compose(["down", "--volumes", "--remove-orphans", "--timeout", "5"], **call)
 
 
 @parity.witness(12)

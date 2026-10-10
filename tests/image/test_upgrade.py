@@ -1029,3 +1029,103 @@ class TestTheNewEntrypointKeepsARenderedConfig:
 
     def test_nothing_was_refused(self, entrypoint_boot):
         assert "REFUSE" not in entrypoint_boot.logs, entrypoint_boot.logs[-4000:]
+
+
+# --- Rollback across a newer schema -------------------------------------------
+#
+# `istota-stack rollback` starts an older image over a volume a newer one has
+# migrated. Every release from the one-deployment-shape spec's Stage 6 on stamps
+# its schema level (`PRAGMA user_version`) and refuses a higher one; the floor
+# release predates the stamp and cannot refuse, so "older image" here is the
+# session's own image over a database stamped one level above it, which is
+# exactly the state the next schema bump will leave behind.
+
+ROLLBACK_EXIT_TIMEOUT = 240
+
+
+@dataclass(frozen=True)
+class RollbackBoot:
+    exit_code: int
+    logs: str
+    check_exit: int
+    check_output: str
+    stamped: int
+    after: int
+
+
+def _user_version_in(volume: str, image: BuiltImage, platform_args: list[str]) -> int:
+    probe = _docker(
+        "run", "--rm", *platform_args, "--entrypoint", "python3", "-v", f"{volume}:/data",
+        image.tag, "-c",
+        "import sqlite3; print(sqlite3.connect('file:/data/db/istota.db?mode=ro', uri=True)"
+        ".execute('PRAGMA user_version').fetchone()[0])",
+    )
+    assert probe.returncode == 0, probe.stderr
+    return int(probe.stdout.strip())
+
+
+@pytest.fixture(scope="session")
+def rollback_boot(istota_image) -> RollbackBoot:
+    from istota.db import SCHEMA_VERSION
+
+    newer = SCHEMA_VERSION + 1
+    suffix = uuid.uuid4().hex[:8]
+    volume = f"istota-upgrade-rollback-{suffix}"
+    container = f"istota-upgrade-rollback-{suffix}"
+    platform_args = ["--platform", istota_image.platform] if istota_image.platform else []
+    try:
+        seeded = _docker(
+            "run", "--rm", *platform_args, "--entrypoint", "istota-drop",
+            "-v", f"{volume}:/data", istota_image.tag, "sh", "-c",
+            "istota setup --yes --user alice --brain native --native-model scripted-test-model"
+            " >/dev/null && istota -c /data/config/config.toml init >/dev/null"
+            f" && python3 -c \"import sqlite3; c=sqlite3.connect('/data/db/istota.db');"
+            f" c.execute('PRAGMA user_version = {newer}'); c.commit()\"",
+            timeout=300,
+        )
+        assert seeded.returncode == 0, seeded.stdout + seeded.stderr
+        stamped = _user_version_in(volume, istota_image, platform_args)
+
+        check = _docker(
+            "run", "--rm", *platform_args, "--entrypoint", "istota-drop",
+            "-v", f"{volume}:/data", istota_image.tag,
+            "istota", "-c", "/data/config/config.toml", "init", "--check-schema",
+        )
+
+        started = _docker(
+            "run", "-d", *platform_args, "--name", container, *_RUN_CONTRACT,
+            "-v", f"{volume}:/data", istota_image.tag,
+        )
+        assert started.returncode == 0, started.stderr
+        waited = _docker("wait", container, timeout=ROLLBACK_EXIT_TIMEOUT)
+        logs = _docker("logs", container)
+        return RollbackBoot(
+            exit_code=int(waited.stdout.strip() or -1),
+            logs=logs.stdout + logs.stderr,
+            check_exit=check.returncode,
+            check_output=check.stdout + check.stderr,
+            stamped=stamped,
+            after=_user_version_in(volume, istota_image, platform_args),
+        )
+    finally:
+        _docker("rm", "-f", container)
+        _docker("volume", "rm", "-f", volume)
+
+
+class TestAnOlderImageRefusesANewerSchema:
+    """The upgrade-tier rollback case: refuse cleanly, change nothing."""
+
+    def test_the_boot_exits_with_the_schema_refusal(self, rollback_boot):
+        assert rollback_boot.exit_code == 3, (
+            f"exit {rollback_boot.exit_code}\n{rollback_boot.logs[-4000:]}"
+        )
+        assert "REFUSE" in rollback_boot.logs and "schema" in rollback_boot.logs
+
+    def test_the_daemon_never_started(self, rollback_boot):
+        assert "Starting scheduler daemon" not in rollback_boot.logs
+
+    def test_the_database_keeps_the_newer_stamp(self, rollback_boot):
+        assert rollback_boot.after == rollback_boot.stamped
+
+    def test_the_rollback_preflight_says_so_without_writing(self, rollback_boot):
+        assert rollback_boot.check_exit == 3, rollback_boot.check_output

@@ -8,6 +8,7 @@
 #   scripts/test-stack-negative-control.sh skip-verify
 #   scripts/test-stack-negative-control.sh user-keyring
 #   scripts/test-stack-negative-control.sh no-drop    # row 5's wrapper half, image tier
+#   scripts/test-stack-negative-control.sh rollback   # the upgrade tier's rollback case
 #
 # Row 13 (release integrity) runs in the default suite against a fixture
 # repository: tests/test_istota_stack.py. The broken copy is handed over in
@@ -110,8 +111,24 @@ ${ISTOTA_STACK_EXEC} "$@"')"
         "tests/image/test_stack_wrapper.py::TestTheVmWrapperExecsAsTheDaemon::test_nothing_under_data_is_root_owned_after_wrapper_calls"
 }
 
+rollback() {
+    # The upgrade tier's rollback case against an image that never refuses.
+    local base output="$work/rollback.out" node=tests/image/test_upgrade.py::TestAnOlderImageRefusesANewerSchema
+    base="$(docker images --format '{{.Repository}}:{{.Tag}}' istota-test/istota | head -1)"
+    [ -n "$base" ] || { echo "no istota-test/istota image yet: run the image tier first" >&2; exit 2; }
+    docker build -q -f docker/test/Dockerfile.no-schema-refusal --build-arg "BASE=$base" \
+        -t istota-test/no-schema-refusal:control docker/test >/dev/null
+    ISTOTA_IMAGE_TAG=istota-test/no-schema-refusal:control uv run pytest -m image -n0 \
+        "$node" -q --no-header -rf -p no:randomly > "$output" 2>&1 || true
+    require_red rollback "$output" \
+        "${node}::test_the_boot_exits_with_the_schema_refusal" \
+        "${node}::test_the_database_keeps_the_newer_stamp" \
+        "${node}::test_the_rollback_preflight_says_so_without_writing"
+}
+
 case "$mode" in
     row13) skip_verify; user_keyring ;;
+    rollback) rollback ;;
     skip-verify) skip_verify ;;
     user-keyring) user_keyring ;;
     no-drop) no_drop ;;
