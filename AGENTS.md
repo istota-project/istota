@@ -131,7 +131,8 @@ src/istota/
 │   ├── google_scopes.py  # The Google service ↔ OAuth scope table, bounded by the operator's configured ceiling
 │   └── broker/           # Credential grants, the broker CA and the intercepting proxy → sandbox.md
 ├── devbox/               # The development container's daemon side → devbox.md
-│   ├── proxy.py          # Per-user host-side daemon: git credentials and the forge token injected server-side
+│   ├── proxy.py          # One credential listener per devbox user, identified by its socket: git credentials and the forge token
+│   ├── compose_file.py   # `istota devbox compose-file`: the stack's per-user devbox services and socket volumes → devbox.md
 │   ├── proxy_protocol.py # Wire protocol for the devbox proxy (single-line JSON, 16 MiB cap) → devbox.md
 │   ├── exec_protocol.py  # The exec transport's wire format → devbox.md
 │   └── exec_client.py    # The other end, copied into each task's shim directory → devbox.md

@@ -75,11 +75,11 @@ No `[ntfy]` block: per-user secrets (`credentials.schema.CONNECTED_SERVICE_SCHEM
 
 ## Devbox and the container transport
 
-`DevboxConfig`: `container_prefix` (container `f"{prefix}{user_id}"`), `docker_cli` (`reset` and the devbox credential proxy's peer checks), `max_output_bytes`. `status` and `reset` speak Docker host-side with no `DOCKER_HOST`; everything else uses the exec transport.
+`DevboxConfig`: `container_prefix` (container `f"{prefix}{user_id}"`), `max_output_bytes`, and what the stack renders from: `users` (one devbox and one credential-proxy listener each; empty on the bare-metal role), `mem_limit`, `cpus`, `pids_limit`, `log_max_size`, `log_max_file`, `network_subnet` (must match the VM's egress unit). Every verb uses the exec transport; `docker_cli` is retired (`_RETIRED`, with its own warning).
 
 - Retired, kept out by `tests/test_ansible_config_template.py`: `docker_socket`, `exec_timeout_seconds`, `api_proxy_enabled`, `api_proxy_socket_dir`, `api_proxy_exec_ttl_seconds`, `api_proxy_audit_log`. The Docker-API proxy is deleted (its only consumer bound a socket into every sandbox). No exec timeout: task budget, or `--timeout`.
 - No `exec_socket_dir` here: everything uses `config.exec_socket_path`. Held by `tests/test_skills_devbox.py::TestTheSocketPathComesFromConfig::test_the_devbox_block_carries_no_second_spelling`.
-- Only the Ansible role runs a devbox; compose ships none.
+- The stack's devboxes are rendered by `istota devbox compose-file` (devbox.md); the role renders its own until Stage 9.
 
 `ContainerConfig` (`[developer.container]`): `exec_socket_dir` (`/run/istota-exec`, socket `{dir}/{user_id}/exec.sock`), timeouts, `shim_commands` (`DEFAULT_SHIM_COMMANDS`: `npm npx pnpm yarn node uv uvx pip pip3 cargo rustc rustup go bundle gem`). Whether it is used is `container_backend(config)`: `[devbox] enabled` + `developer.enabled` + `repos_dir`. Deploy-time, so the host never consumes a container-built environment. Derived from config, never availability: a stopped devbox must fail (shims exit 120), not reroute builds to the host.
 
