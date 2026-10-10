@@ -88,25 +88,23 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 # becomes permanently unreapable. Neither has an error message anywhere that
 # says "uid".
 #
-# The deploy passes the daemon's own uid and gid, read with `getent`. They
-# default to 1000 so a build with no args reproduces the image this recipe
-# built before they existed, exactly. Nothing is lost in distribution by
-# building per host: the Ansible role has always built this image on the
-# machine it runs on, and hashes the directory's contents to trigger a rebuild.
+# They default to 10001, the istota image's fixed daemon uid, so the stack's
+# devboxes (rendered by `istota devbox compose-file`, which passes 10001 as
+# well) match by construction. The Ansible role passes the bare-metal daemon's
+# own uid, read with `getent`. Nothing is lost in distribution by building per
+# host: every install builds this image on the machine it runs on.
 #
 # The uid is checked against the base image's own accounts first. Debian
 # allocates system uids from 100 upward and so does the istota role, so a
 # collision is reachable — and `useradd`'s own "UID 42 is not unique" arrives at
 # deploy time, in a build log, naming neither the arg nor the account it hit.
 #
-# One consequence is worth naming rather than discovering: the preflight also
-# refuses `DEV_UID=0`, which is the answer for a compose deployment, whose
-# istota service runs as root. Nothing here supports that yet — this ships bare
-# metal only — and reusing the existing root account rather than creating a
-# second one is a different recipe, not a different argument. The refusal is at
-# least loud, and it says which account it collided with.
-ARG DEV_UID=1000
-ARG DEV_GID=1000
+# The preflight also refuses `DEV_UID=0`: reusing the existing root account
+# rather than creating a second one is a different recipe, not a different
+# argument. The refusal is at least loud, and it says which account it
+# collided with.
+ARG DEV_UID=10001
+ARG DEV_GID=10001
 RUN set -eux; \
     if taken="$(getent passwd "${DEV_UID}")"; then \
         echo "DEV_UID=${DEV_UID} is already used by: ${taken}" >&2; \

@@ -23,8 +23,9 @@ What it asserts is the properties nothing else can see at image level:
   * the container's uid. The daemon and this container share a filesystem, so a
     uid mismatch means either the container cannot write into a worktree or the
     daemon cannot reap one — and there is no error message anywhere that says
-    "uid". `DEV_UID`/`DEV_GID` default to 1000, and a build with no args
-    reproducing that exactly is what lets the deploy pass the daemon's own.
+    "uid". `DEV_UID`/`DEV_GID` default to 10001, the istota image's daemon
+    uid, and a build with no args producing exactly that is what lets the
+    stack's devboxes match without being told.
   * the exec transport is installed and *starts*. Reading a `COPY` line tells
     you a file is at a path; it does not tell you the supervisor comes up, the
     server binds a socket, or that anything answers on it.
@@ -62,11 +63,10 @@ EXEC_PROTOCOL_SOURCE = REPO / "src" / "istota" / "devbox" / "exec_protocol.py"
 EXEC_SERVER = "/usr/local/bin/istota-exec-serve"
 EXEC_SUPERVISOR = "/usr/local/bin/istota-exec-run"
 
-# The uid a build with no args produces. Named once, because the whole point of
-# the default is that it reproduces the image this recipe built before the args
-# existed — an image whose /home/dev volume is full of files owned by 1000.
-DEFAULT_DEV_UID = "1000"
-DEFAULT_DEV_GID = "1000"
+# The uid a build with no args produces: the istota image's fixed daemon uid,
+# so the stack's devboxes and its daemon share one numeric identity.
+DEFAULT_DEV_UID = "10001"
+DEFAULT_DEV_GID = "10001"
 
 # A uid that belongs to nothing in the image, used to stand in for a volume
 # left behind by a build with different args.
@@ -351,11 +351,10 @@ def _field(stdout: str, key: str) -> str:
 class TestTheDevUidBuildArgs:
     """The uid is the invariant of the shared mount, so it is asserted here.
 
-    Not a Dockerfile grep. `ARG DEV_UID=1000` says what the recipe intends;
+    Not a Dockerfile grep. `ARG DEV_UID=10001` says what the recipe intends;
     `id -u dev` in the built image says what a build with no args produced, and
-    the second is the claim — the deploy passes the daemon's own uid, and the
-    default exists so a build without one reproduces the image whose /home/dev
-    volumes are already full of files owned by 1000.
+    the second is the claim — the istota image's daemon runs as 10001, and a
+    devbox at any other uid could not write into a worktree the daemon made.
     """
 
     def test_the_dev_account_has_the_default_uid_and_gid(self, devbox_image_under_test):
@@ -364,8 +363,8 @@ class TestTheDevUidBuildArgs:
 
         assert (uid, gid) == (DEFAULT_DEV_UID, DEFAULT_DEV_GID), (
             f"a build with no DEV_UID/DEV_GID gave dev {uid}:{gid}, not "
-            f"{DEFAULT_DEV_UID}:{DEFAULT_DEV_GID}. Every /home/dev volume in "
-            "the estate was written by an image where it was 1000."
+            f"{DEFAULT_DEV_UID}:{DEFAULT_DEV_GID}, the istota image's daemon "
+            "uid, so the shared repos mount has two owners."
         )
 
     def test_the_home_directory_belongs_to_the_dev_account(self, devbox_image_under_test):
@@ -569,6 +568,60 @@ probe_wire /tmp/exec-dir/exec.sock /tmp/supervisor.log "$first"
             f"the socket answered from pid {first} again, which is the process "
             "that was killed — nothing respawned"
         )
+
+    def test_a_restart_request_stops_the_supervisor(self, devbox_image_under_test):
+        # `devbox reset` with no Docker CLI anywhere: the server answers the
+        # request and exits with the restart status, and the supervisor, the
+        # container's command, exits on it so the restart policy can bring the
+        # container back. Driven with the image's own vendored protocol, so the
+        # server, the supervisor and the copy all have to agree.
+        result = sh(
+            devbox_image_under_test,
+            _script(
+                devbox_image_under_test,
+                """
+mkdir -p /tmp/exec-dir /tmp/repos-root
+ISTOTA_EXEC_SOCKET=/tmp/exec-dir/exec.sock \
+ISTOTA_EXEC_REPOS_ROOT=/tmp/repos-root \
+    SUPERVISOR > /tmp/supervisor.log 2>&1 &
+supervisor=$!
+probe_wire /tmp/exec-dir/exec.sock /tmp/supervisor.log > /dev/null
+python3 - <<'PY'
+import socket, sys
+sys.path.insert(0, "/usr/local/lib/istota_devbox_exec")
+import istota_devbox_exec_protocol as p
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(30)
+s.connect("/tmp/exec-dir/exec.sock")
+s.sendall(p.encode_restart_request(wipe_home=False))
+data = b""
+while True:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+line, rest = data.split(b"\\n", 1)
+print("ACK", p.decode_ack(line)["status"])
+frames = [p.decode_control(payload) for _, payload in p.FrameDecoder().feed(rest)]
+print("RESTARTING", frames[0].get("restarting"))
+PY
+set +e
+wait "$supervisor"
+echo "SUPERVISOR_EXIT $?"
+set -e
+grep -c 'restart requested over the exec transport' /tmp/supervisor.log | sed 's/^/LOGGED /'
+"""
+            ),
+        )
+        out = assert_ok(result, "a restart request under the supervisor")
+
+        assert _field(out, "ACK") == "ok"
+        assert _field(out, "RESTARTING") == "True"
+        assert _field(out, "SUPERVISOR_EXIT") == "0", (
+            "the supervisor did not exit cleanly after a restart, so the "
+            "container would keep running and the reset would do nothing"
+        )
+        assert _field(out, "LOGGED") == "1"
 
     def test_the_supervisor_repairs_a_home_directory_with_the_wrong_owner(
         self, devbox_image_under_test

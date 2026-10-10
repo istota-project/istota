@@ -628,7 +628,7 @@ fi
 require_devbox_failures \
     "devbox-wrong-uid" \
     "$wrong_uid_tag" \
-    "dev is 1234, so a build with no args did not reproduce uid 1000" \
+    "dev is 1234, so a build with no args did not produce uid 10001" \
     "${DEVBOX_TESTS}::TestTheDevUidBuildArgs::test_the_dev_account_has_the_default_uid_and_gid"
 
 run_devbox_control \
