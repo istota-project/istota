@@ -15,8 +15,11 @@
 
 minimumLimaVersion: 2.0.0
 
+# The Debian 13 image alone. `template:debian-13` also pulls in
+# `template:_default/mounts`, which mounts the whole Mac home into the VM, and a
+# `mounts:` list here is merged with it rather than replacing it.
 base:
-  - template:debian-13
+  - template:_images/debian-13
 
 vmType: vz
 cpus: 4
@@ -58,7 +61,9 @@ probes:
   - script: |
       #!/bin/bash
       set -eux -o pipefail
-      timeout 600s bash -c "until command -v istota-stack >/dev/null 2>&1; do sleep 5; done"
+      # A user probe, and /usr/local/sbin is on root's PATH only, so the path is
+      # tested rather than looked up.
+      timeout 600s bash -c "until test -x /usr/local/sbin/istota-stack; do sleep 5; done"
     hint: See /var/log/cloud-init-output.log in the guest
 
 portForwards:

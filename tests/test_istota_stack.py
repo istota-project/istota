@@ -44,7 +44,10 @@ args=" $* "
 case "$args" in
   *" config --services "*) printf 'istota\nweb\nwebhooks\nnginx\n' ;;
   *" build "*) exit "${STUB_BUILD_RC:-0}" ;;
-  *" devbox compose-file"*) echo '{"services": {}}' ;;
+  *" devbox compose-file"*)
+    if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
+    else echo '{"services": {}}'; fi ;;
+  *" ps -q istota"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
   *" istota apply "*) exit "${STUB_APPLY_RC:-0}" ;;
   *" image ls "*) printf 'istota-istota:v0\nistota-istota:v1\nistota-istota:old\nnginx:alpine\n' ;;
@@ -301,6 +304,29 @@ class TestApply:
             for call in calls
         ), calls
         assert any(call.endswith(" restart") for call in calls) is restarted
+
+    def test_an_added_devbox_user_is_rendered_and_brought_up(self, fx, tmp_path):
+        """A change to [devbox] users needs the devbox services re-rendered and
+        created, which a restart alone does not do."""
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        rendered = '{"services": {"devbox-alice": {}}}'
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_DEVBOX_COMPOSE=rendered)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert rendered in (fx.stack / "config" / "compose.devbox.yml").read_text()
+        calls = fx.docker_calls()
+        up = next(i for i, call in enumerate(calls) if call.endswith("up -d --remove-orphans"))
+        restart = next(i for i, call in enumerate(calls) if call.endswith(" restart"))
+        assert up < restart
+        assert "compose.devbox.yml" in calls[up]
+
+    def test_a_stack_that_is_down_stays_down(self, fx, tmp_path):
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_STACK_DOWN="1")
+        assert result.returncode == 2, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert not any(call.endswith(" restart") or " up " in f"{call} " for call in calls), calls
 
 
 class TestExec:

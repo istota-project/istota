@@ -351,7 +351,10 @@ class TestBootstrapFiles:
 
     def test_the_lima_template_provisions_from_the_checkout(self):
         doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
-        assert doc["base"] == ["template:debian-13"]
+        # The image alone: `template:debian-13` adds a mount of the whole Mac home
+        # (parity row 7; the vm tier found it).
+        assert doc["base"] == ["template:_images/debian-13"]
+        assert [m["location"] for m in doc["mounts"]] == ["{{.Param.ISTOTA_REPO}}"]
         assert doc["containerd"] == {"system": False, "user": False}
         assert doc["vmOpts"]["vz"]["rosetta"]["enabled"] is True
         assert doc["mounts"][0]["writable"] is False

@@ -395,10 +395,27 @@ cmd_apply() {
     if [ "$rc" -eq 2 ]; then
         case " $* " in
             *" --dry-run "*) ;;
-            *) log "the config changed; restarting the stack"; compose restart ;;
+            *) restart_for_config ;;
         esac
     fi
     return "$rc"
+}
+
+# After a config change: re-render the devbox services, since [devbox] users may
+# have changed, and bring a running stack onto both. `up -d` creates an added
+# user's devbox and recreates istota with its socket volumes; `restart` is what
+# makes every other service read the new config.toml. A stack that is down
+# stays down.
+restart_for_config() {
+    render_devbox_compose "$(env_get "$ENV_FILE" ISTOTA_TAG)" \
+        || log "the devbox services were not re-rendered; run \`istota-stack update <tag>\`"
+    if [ -z "$(compose ps -q istota 2>/dev/null)" ]; then
+        log "the config changed; the stack is not running, so nothing was restarted"
+        return 0
+    fi
+    log "the config changed; restarting the stack"
+    compose up -d --remove-orphans
+    compose restart
 }
 
 cmd_up() {
