@@ -71,7 +71,7 @@ class TestTheMarker:
 
 class TestTheControls:
     def test_the_driver_names_controls(self):
-        assert len(_control_calls()) >= 12
+        assert len(_control_calls()) >= 11
 
     def test_every_required_node_exists(self):
         for name, nodes in _control_calls():

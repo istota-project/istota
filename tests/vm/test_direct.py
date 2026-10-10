@@ -41,14 +41,19 @@ def stack(direct_stack):
     if lima.control() == "certbot-disabled":
         vm.run(f"""
 systemctl disable --now istota-certbot.timer >/dev/null 2>&1 || true
-systemctl mask istota-certbot.service >/dev/null
+# The unit file lives in /etc, so it cannot be masked; a runtime drop-in makes
+# the service, which `istota-stack up` also starts, do nothing.
+install -d /run/systemd/system/istota-certbot.service.d
+printf '[Service]\\nExecStart=\\nExecStart=/bin/true\\n' > /run/systemd/system/istota-certbot.service.d/control.conf
+systemctl daemon-reload
 rm -rf {lima.STACK}/letsencrypt/*
 istota-stack compose restart nginx >/dev/null
+istota-stack up
 """)
         try:
             yield vm
         finally:
-            vm.run("systemctl unmask istota-certbot.service >/dev/null; "
+            vm.run("rm -rf /run/systemd/system/istota-certbot.service.d; systemctl daemon-reload; "
                    "systemctl enable --now istota-certbot.timer >/dev/null")
             lima.ensure_certificate(vm)
         return

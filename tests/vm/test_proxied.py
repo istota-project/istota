@@ -19,8 +19,14 @@ Controls (`scripts/test-vm-negative-control.sh`):
 
 - `no-allow-list`: the deployed `listen-proxied.conf` without its allow and
   deny lines;
-- `no-docker-user-rule`: the proxied listener's DOCKER-USER rules removed;
-- `userland-proxy-on`: dockerd with `userland-proxy: true`.
+- `no-docker-user-rule`: the proxied listener's DOCKER-USER rules removed.
+
+The spec's third control, `userland-proxy: true`, cannot turn the nginx-peer
+witness red, and is not run. Measured on Docker Engine 29.9 in this VM: an
+upstream on another host reaches nginx through the DNAT rule in either setting
+and is logged as itself both times. The setting changes only a connection
+made from the VM itself: with it off that arrives from the bridge gateway, with
+it on from the VM's own address. provision.sh still writes it off.
 """
 
 from __future__ import annotations
@@ -63,22 +69,6 @@ def _curl_from_upstream(vm: lima.Vm, args: str) -> str:
     return vm.out(f"ip netns exec istota-upstream curl -s -m 15 -D - {args}")
 
 
-def _set_userland_proxy(vm: lima.Vm, enabled: bool) -> None:
-    vm.run(f"""
-python3 - <<'PY'
-import json
-path = "/etc/docker/daemon.json"
-conf = json.load(open(path))
-conf["userland-proxy"] = {json.dumps(enabled)}
-json.dump(conf, open(path, "w"), indent=2)
-PY
-systemctl restart docker.service
-systemctl restart istota-devbox-egress.service
-""", timeout=600)
-    lima.wait_healthy(vm)
-    lima.wait_for(lambda: bool(lima.container(vm, "nginx")), timeout=300, what="nginx to come back")
-
-
 @pytest.fixture(scope="module")
 def stack(proxied_stack):
     vm = proxied_stack
@@ -102,13 +92,6 @@ done
             yield vm
         finally:
             vm.run("systemctl restart istota-devbox-egress.service")
-        return
-    if name == "userland-proxy-on":
-        _set_userland_proxy(vm, True)
-        try:
-            yield vm
-        finally:
-            _set_userland_proxy(vm, False)
         return
     yield vm
 

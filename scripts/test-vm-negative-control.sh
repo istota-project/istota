@@ -23,7 +23,7 @@
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
-#   proxied:   no-allow-list, no-docker-user-rule, userland-proxy-on (row 18)
+#   proxied:   no-allow-list, no-docker-user-rule (row 18)
 #
 # Run scripts/test-vm.sh first: the controls reuse its VM and images. No arrays:
 # macOS ships bash 3.2.
@@ -117,9 +117,8 @@ control no-allow-list \
 control no-docker-user-rule \
     "row 18: the VM without the proxied listener's DOCKER-USER rule" \
     "$P::TestTheProxiedListenerAnswersOnlyTheUpstream::test_an_outsider_cannot_connect_and_the_upstream_can"
-control userland-proxy-on \
-    "row 18: dockerd with userland-proxy true" \
-    "$P::TestTheProxiedListenerAnswersOnlyTheUpstream::test_nginx_sees_the_upstreams_own_address"
+# No userland-proxy control: on Docker Engine 29.9 the setting does not change
+# the address an upstream on another host arrives from (tests/vm/test_proxied.py).
 
 if [ "$ran" -eq 0 ]; then
     echo "[control] no control named '${only}'" >&2
