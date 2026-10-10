@@ -314,6 +314,10 @@ def ensure_release(vm: Vm, release: Release) -> None:
     """The VM's checkout at the release tag, its images built, its host units current."""
     vm.run(f"install -d -m 0755 {SCRATCH} {STACK}")
     env_file_set(vm, f"{STACK}/host.env", {"RELEASE_SIGNING_KEY": release.signing_key})
+    # A VM left in the nextcloud mode boots with the fixture down, and
+    # provision.sh's `enable --now` of the mount then fails against it.
+    if vm.ok(f"grep -qx STORAGE=nextcloud {STACK}/host.env"):
+        ensure_nextcloud(vm)
     # From the mounted snapshot, which is this session's tree: installs this
     # tree's istota-stack and units, and writes allowed_signers.
     vm.run(f"{REPO_MOUNT}/host/provision.sh", timeout=CREATE_TIMEOUT)
@@ -587,6 +591,8 @@ def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
         "istota_users": {USER: {"display-name": answers.display_name}},
         "istota_user_secrets": {USER: [
             {"service": "karakeep", "key": "base_url", "value": "https://karakeep.example.invalid"},
+            # Skipped, as the old role skipped an empty value: ensure refuses one.
+            {"service": "karakeep", "key": "api_key", "value": ""},
         ]},
     }
 
