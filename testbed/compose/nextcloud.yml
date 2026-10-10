@@ -108,7 +108,12 @@ services:
   # What the old root phase did for the bundled Nextcloud on every boot, now
   # the fixture's: the trees provisioning made go to www-data, directories
   # setgid and group-writable, files group-writable, so the daemon (uid 10001,
-  # in group www-data) can write where Nextcloud wrote.
+  # in group www-data) can write where Nextcloud wrote. And a default ACL
+  # giving group www-data rwX on everything created later, by either side and
+  # whatever its umask: the daemon no longer runs with umask 002, and a file a
+  # `docker compose exec` writes never did, so without it Nextcloud cannot
+  # move or rewrite what the daemon made. An install's rclone mount presents
+  # the whole tree as the bot's, so none of this is a product concern.
   shared-convention:
     image: alpine:3
     depends_on:
@@ -120,12 +125,15 @@ services:
       - sh
       - -c
       - >-
+        apk add --no-cache acl >/dev/null &&
         for d in /mnt/shared/Users /mnt/shared/Channels; do
-        [ -d "$$d" ] || continue;
+        mkdir -p "$$d";
         chown -R 33:33 "$$d";
         find "$$d" -type d -exec chmod 2775 {} +;
         find "$$d" -type f -exec chmod 664 {} +;
-        done
+        done &&
+        setfacl -R -m g:33:rwX /mnt/shared &&
+        setfacl -R -d -m g:33:rwX /mnt/shared
 
   istota:
     depends_on:
