@@ -67,11 +67,32 @@ def _installed_version() -> str:
     return version_label(version=version)
 
 
+#: `istota init` refusing a database a newer release migrated. Distinct from 1,
+#: so `istota-stack rollback` can tell "this image cannot run that database"
+#: from any other failure.
+EXIT_SCHEMA_TOO_NEW = 3
+
+
+def _refuse_newer_schema(refusal) -> int:
+    print(
+        f"[istota] REFUSE: {refusal}. Run that release again, or restore a database "
+        "backup taken before it migrated.",
+        file=sys.stderr,
+    )
+    return EXIT_SCHEMA_TOO_NEW
+
+
 def cmd_init(args):
     """Initialize the database."""
     config = load_config(Path(args.config) if args.config else None)
+    if getattr(args, "check_schema", False):
+        refusal = db.check_schema_version(config.db_path)
+        return _refuse_newer_schema(refusal) if refusal is not None else 0
     config.db_path.parent.mkdir(parents=True, exist_ok=True)
-    db.init_db(config.db_path)
+    try:
+        db.init_db(config.db_path)
+    except db.SchemaTooNew as refusal:
+        return _refuse_newer_schema(refusal)
     print(f"Database initialized at {config.db_path}")
     _init_sync_operator_persona(config)
     _init_retire_user_personas(config)
@@ -342,6 +363,24 @@ def _default_env_file(args) -> Path:
     if getattr(args, "config", None):
         return Path(args.config).expanduser().parent / "istota.env"
     return Path.home() / ".config" / "istota" / "istota.env"
+
+
+def cmd_apply(args):
+    """Reconcile the config with a plan; 0 unchanged, 2 changed, 1 refused."""
+    from istota import apply
+
+    target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
+    if not target:
+        print(
+            "istota apply: name the config file to reconcile with -c "
+            "(or ISTOTA_CONFIG_PATH); nothing was written.",
+            file=sys.stderr,
+        )
+        return apply.EXIT_ERROR
+    return apply.run(
+        Path(args.file), Path(target), dry_run=args.dry_run,
+        out=print, err=lambda line: print(line, file=sys.stderr),
+    )
 
 
 def cmd_setup(args):
@@ -4661,11 +4700,30 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # apply
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Reconcile config.toml with a declarative plan (exit 0 unchanged, 2 changed, 1 refused)",
+    )
+    apply_parser.add_argument(
+        "-f", "--file", required=True,
+        help="The plan: TOML, or JSON when the name ends in .json. Its [config] table is the whole config.toml",
+    )
+    apply_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the diff and the exit code it would take; write nothing",
+    )
+
     # init
     init_parser = subparsers.add_parser("init", help="Initialize database")
     init_parser.add_argument(
         "--relocate-rooms", action="store_true",
         help="Migrate room identities and reconcile workspace files; stop all writers first",
+    )
+    init_parser.add_argument(
+        "--check-schema", action="store_true",
+        help=f"Only ask whether this release can run the database: exit 0, or "
+             f"{EXIT_SCHEMA_TOO_NEW} when a newer release migrated it. Writes nothing",
     )
     init_parser.add_argument(
         "--scheduler-stopped", action="store_true",
@@ -5573,13 +5631,14 @@ def main():
                 "--reset-whatsapp-identity"
             )
 
-    # Load config and setup logging (except for init/setup which don't need — or
+    # Load config and setup logging (except for init/setup/apply, which don't need — or
     # may pre-date — a config file).
-    if args.command not in ("init", "setup"):
+    if args.command not in ("init", "setup", "apply"):
         config = load_config(Path(args.config) if args.config else None)
         setup_logging(config, verbose=args.verbose)
 
     commands = {
+        "apply": cmd_apply,
         "init": cmd_init,
         "doctor": cmd_doctor,
         "task": cmd_task,

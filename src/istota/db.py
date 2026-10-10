@@ -1395,8 +1395,51 @@ def _migrate_messages_fts(conn: sqlite3.Connection) -> None:
         raise
 
 
+#: The schema level this code migrates a database to, stamped into the file
+#: header as `PRAGMA user_version` by `init_db`. Raise it by one in the commit
+#: that adds a migration an older release cannot run against: a rollback's older
+#: image then refuses the database rather than running its own migrations over a
+#: schema it does not know. An additive column an older reader ignores does not
+#: need a bump.
+SCHEMA_VERSION = 1
+
+
+class SchemaTooNew(Exception):
+    """The database was stamped by a newer istota than this one."""
+
+    def __init__(self, found: int, known: int) -> None:
+        self.found = found
+        self.known = known
+        super().__init__(
+            f"the database is at schema {found}, written by a newer istota; "
+            f"this one knows schema {known}"
+        )
+
+
+def _schema_refusal(conn: sqlite3.Connection) -> SchemaTooNew | None:
+    found = conn.execute("PRAGMA user_version").fetchone()[0]
+    if found > SCHEMA_VERSION:
+        return SchemaTooNew(found, SCHEMA_VERSION)
+    return None
+
+
+def check_schema_version(db_path: Path) -> SchemaTooNew | None:
+    """The refusal `init_db` would raise for this database, without migrating it.
+
+    Reads the header only, read-only, and answers None for a missing database.
+    """
+    if not database_present(db_path):
+        return None
+    with sqlite_util.connect_read_only(Path(db_path)) as conn:
+        return _schema_refusal(conn)
+
+
 def init_db(db_path: Path) -> None:
-    """Initialize database with schema."""
+    """Initialize database with schema.
+
+    Raises `SchemaTooNew`, before any migration, for a database a newer release
+    stamped.
+    """
     schema_path = _resolve_schema_path()
     # timeout=30.0 to match `get_db`, not sqlite3's 5s default. Migrations run
     # against a live daemon — the auto-update script calls this from its own
@@ -1405,6 +1448,10 @@ def init_db(db_path: Path) -> None:
     # (ISSUE-261). A 5s budget turns ordinary writer contention into a rebuild
     # that logs a warning and leaves the schema unmigrated.
     with sqlite3.connect(db_path, timeout=30.0) as conn:
+        # First, before the journal mode or anything else writes to the file.
+        refusal = _schema_refusal(conn)
+        if refusal is not None:
+            raise refusal
         # WAL is set ONCE here, not on every get_db open. journal_mode is
         # persistent in the SQLite file header, so re-issuing it per
         # connection only buys a needless write-lock acquisition that races
@@ -1423,6 +1470,8 @@ def init_db(db_path: Path) -> None:
         _migrate_room_binding_uniqueness(conn)
         _run_migrations(conn)
         conn.executescript(schema_path.read_text())
+        # Raised, never lowered: the check above has already refused a higher one.
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 @contextmanager
