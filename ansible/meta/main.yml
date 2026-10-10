@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: istota
+  author: istota
+  description: Manage one istota stack on a VM provisioned by host/provision.sh
+  license: EUPL-1.2
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions: [trixie]
+dependencies: []

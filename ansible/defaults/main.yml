@@ -1,0 +1,146 @@
+---
+# The istota management role: what an operator sets, and nothing else.
+#
+# Every value here is generic. An estate's real values (hostnames, addresses,
+# the release key, every credential) belong in its own host_vars and vault,
+# seeded from `istota migrate import-bare-metal --emit-plan` on an imported
+# install. tests/test_management_role.py holds the name lists below to the
+# code they mirror; change both sides together.
+
+# --- Where things are on the VM ----------------------------------------------
+# provision.sh's layout; the role does not move any of it.
+istota_stack_dir: /srv/app/istota
+istota_stack_command: /usr/local/sbin/istota-stack
+# The VM's `istota` wrapper: the CLI in the running container, as uid 10001.
+istota_cli_command: /usr/local/bin/istota
+istota_uid: 10001
+
+# --- The release -------------------------------------------------------------
+# The signed tag to run. Empty: the role deploys nothing and an install with no
+# tag yet stops before the config step. `istota-stack update` runs only when
+# this differs from ISTOTA_TAG in .env, so an update is a deliberate change to
+# this variable.
+istota_release: ""
+# One line of an SSH public key. Every tag is verified against it (host.env's
+# RELEASE_SIGNING_KEY, written to allowed_signers by provision.sh). Required.
+istota_release_signing_key: ""
+
+# --- host.env ----------------------------------------------------------------
+# local | nextcloud. nextcloud needs istota_rclone_remote and istota_rclone_conf.
+istota_storage: local
+# local | proxied | direct
+istota_ingress: local
+# The public name: nginx's server_name and [site] hostname in the config. In
+# local ingress its port is the one nginx publishes on the VM's loopback.
+istota_domain: "localhost:8080"
+# direct: acme | files. proxied: files, or "" for plain HTTP from the upstream.
+istota_tls_cert_source: acme
+# proxied only: the upstream's address(es) or CIDR(s), comma-separated, and the
+# one private address and port to listen on. Never 0.0.0.0.
+istota_upstream_proxy: ""
+istota_listen_addr: ""
+istota_listen_port: 8080
+# The Claude Code pin, for the claude_code and tmux_claude brains.
+istota_claude_code_version: ""
+# direct with acme only. An empty ACME server is Let's Encrypt.
+istota_acme_email: ""
+istota_acme_server: ""
+# nextcloud only: the remote's name in rclone.conf.
+istota_rclone_remote: ""
+istota_zram_enabled: true
+
+# The keys, as provision.sh documents them. Derived for the ingress mode the
+# same way `istota setup` derives them, so a role-managed host.env matches a
+# wizard-written one for the same answers.
+istota_host_env:
+  STORAGE: "{{ istota_storage }}"
+  INGRESS: "{{ istota_ingress }}"
+  DOMAIN: "{{ istota_domain }}"
+  TLS_CERT_SOURCE: "{{ istota_tls_cert_source if istota_ingress == 'direct' else ('files' if istota_ingress == 'proxied' and istota_tls_cert_source == 'files' else '') }}"
+  UPSTREAM_PROXY: "{{ istota_upstream_proxy if istota_ingress == 'proxied' else '' }}"
+  LISTEN_ADDR: "{{ istota_listen_addr if istota_ingress == 'proxied' else '' }}"
+  LISTEN_PORT: "{{ (istota_listen_port or 8080) if istota_ingress == 'proxied' else '' }}"
+  RELEASE_SIGNING_KEY: "{{ istota_release_signing_key }}"
+  CLAUDE_CODE_VERSION: "{{ istota_claude_code_version }}"
+  ACME_EMAIL: "{{ istota_acme_email }}"
+  ACME_SERVER: "{{ istota_acme_server }}"
+  RCLONE_REMOTE: "{{ istota_rclone_remote }}"
+  ZRAM_ENABLED: "{{ '1' if istota_zram_enabled | bool else '0' }}"
+# Optional keys only a unit reads (ISTOTA_DEVBOX_SUBNET, the browser watchdog's
+# ISTOTA_BROWSER_WATCHDOG_*), written beside the ones above.
+istota_host_env_extra: {}
+
+# --- The stack's .env --------------------------------------------------------
+# browser, signaling, location, whatsapp-baileys
+istota_compose_profiles: []
+# The keys `istota setup` owns in .env. istota-stack owns ISTOTA_TAG and
+# ISTOTA_PREVIOUS_TAG; every other line is left as it is.
+istota_stack_env:
+  COMPOSE_PROJECT_NAME: istota
+  COMPOSE_PROFILES: "{{ istota_compose_profiles | join(',') }}"
+  DOMAIN: "{{ istota_domain }}"
+  ISTOTA_SECRETS_DIR: ./secrets
+  NGINX_PUBLISH: "{{ '80:80' if istota_ingress == 'direct' else (('127.0.0.1::80' if istota_tls_cert_source == 'files' else istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':80') if istota_ingress == 'proxied' else '127.0.0.1:' ~ (istota_domain.rpartition(':')[2] if istota_domain.rpartition(':')[2].isdigit() else '8080') ~ ':80') }}"
+  NGINX_PUBLISH_TLS: "{{ '443:443' if istota_ingress == 'direct' else (istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':443' if istota_ingress == 'proxied' and istota_tls_cert_source == 'files' else '127.0.0.1::443') }}"
+  ISTOTA_WEB_INSECURE_COOKIES: "0"
+
+# --- Deployment secrets ------------------------------------------------------
+# One file per name under secrets/, 0400, owned by uid 10001: what compose
+# hands the containers. The same list as setup_wizard.SECRET_NAMES.
+istota_secret_names:
+  - anthropic_api_key
+  - claude_code_oauth_token
+  - istota_brain_native_api_key
+  - istota_nextcloud_app_password
+  - istota_web_oauth2_client_secret
+  - istota_web_session_secret_key
+  - istota_email_imap_password
+  - istota_caldav_password
+  - istota_developer_gitlab_token
+  - istota_developer_github_token
+  - istota_email_smtp_password
+  - istota_sms_telnyx_api_key
+  - istota_sms_telnyx_public_key
+  - istota_sms_telnyx_messaging_profile_id
+  - istota_google_workspace_client_secret
+# name: value, from the vault. A name given here is written exactly, "" included.
+# A name left out is created empty if missing and otherwise left alone, so a
+# file the wizard or the import wrote survives a play that does not manage it.
+istota_secrets: {}
+
+# nextcloud storage: the whole rclone.conf, from the vault. Written to
+# /srv/app/istota/rclone.conf (0600, uid 10001) when non-empty.
+istota_rclone_conf: ""
+
+# --- Admins and config -------------------------------------------------------
+# User ids, one per line of /srv/app/istota/config/admins. Empty leaves the
+# file alone: an empty allowlist means everyone is an admin.
+istota_admins: []
+# The whole of config.toml as a nested dict. Applied with `istota-stack apply`
+# as the plan's [config]; under --check, with --dry-run. Empty skips the step.
+istota_config: {}
+
+# --- Users, through the VM's `istota` wrapper ---------------------------------
+# Each entry is the CLI's own flags without the dashes: a list repeats the
+# flag, true passes it bare, false or null leaves it out. Until the
+# declarative-apply spec lands these loops are how users reach the database.
+#
+#   istota_users:
+#     alice: {display-name: Alice, email: [alice@example.com], managed: true}
+#   istota_user_resources:
+#     alice: [{type: folder, path: /data/shared/papers, permissions: read}]
+#   istota_user_briefings:
+#     alice: [{name: morning, cron: "0 7 * * 1-5", output: email}]
+#   istota_user_secrets:
+#     alice: [{service: karakeep, key: api_key, value: "{{ vault_alice_karakeep }}"}]
+istota_users: {}
+istota_user_resources: {}
+istota_user_briefings: {}
+istota_user_secrets: {}
+
+# --- Behaviour ---------------------------------------------------------------
+# provision.sh runs when host.env or rclone.conf changed, after an update, and
+# on a VM where istota-stack is missing. true runs it on every play.
+istota_provision_always: false
+# Seconds to wait for the istota service's healthcheck before the ensure loops.
+istota_health_timeout: 900

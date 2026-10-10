@@ -1,0 +1,328 @@
+---
+# Manage one istota stack on a dedicated VM: write the inputs provision.sh and
+# istota-stack read, then call them. Nothing here renders a unit, an nginx
+# config or a cron entry, builds an image or runs a migration; host/ owns those.
+#
+# Order matters on a first run: host.env before provision.sh (it reads the
+# release key and the storage mode from it), provision.sh before the update
+# (allowed_signers), the update before the config (`istota apply` runs in the
+# release's image), the stack up before the ensure loops (they exec into it).
+
+- name: Check the variables
+  ansible.builtin.assert:
+    that:
+      - istota_release_signing_key | length > 0
+      - istota_storage in ['local', 'nextcloud']
+      - istota_ingress in ['local', 'proxied', 'direct']
+      - istota_ingress != 'direct' or istota_tls_cert_source in ['acme', 'files']
+      - istota_ingress != 'proxied' or istota_upstream_proxy | length > 0
+      - istota_ingress != 'proxied' or (istota_listen_addr | length > 0 and istota_listen_addr not in ['0.0.0.0', '::'])
+      - istota_storage != 'nextcloud' or istota_rclone_remote | length > 0
+      - istota_secrets.keys() | difference(istota_secret_names) | length == 0
+    fail_msg: >-
+      Check istota_release_signing_key (required), istota_storage, istota_ingress
+      and the proxied listener (one private address, an upstream to allow), the
+      rclone remote for nextcloud storage, and that every key of istota_secrets
+      is one of istota_secret_names.
+    quiet: true
+
+- name: Check the VM was bootstrapped from a verified release
+  ansible.builtin.stat:
+    path: "{{ istota_stack_dir }}/src/host/provision.sh"
+  register: _istota_provision_script
+
+- name: Refuse a VM with no checkout
+  ansible.builtin.fail:
+    msg: >-
+      {{ istota_stack_dir }}/src has no host/provision.sh. Bootstrap the VM with
+      host/cloud-init.yaml, or by hand from a checkout of a verified release tag
+      (`host/provision.sh`), first: nothing runs from a checkout before its tag
+      is verified, and that bootstrap is where the first verification happens.
+  when: not _istota_provision_script.stat.exists
+
+# --- Inputs ----------------------------------------------------------------------
+
+- name: Stack directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ istota_stack_dir }}", owner: "0", mode: "0755"}
+    - {path: "{{ istota_stack_dir }}/config", owner: "{{ istota_uid }}", mode: "0750"}
+    - {path: "{{ istota_stack_dir }}/secrets", owner: "{{ istota_uid }}", mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: host.env
+  ansible.builtin.lineinfile:
+    path: "{{ istota_stack_dir }}/host.env"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ (istota_host_env | combine(istota_host_env_extra)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: _istota_host_env
+  notify: Restart the istota stack
+
+- name: The stack's .env keys
+  ansible.builtin.lineinfile:
+    path: "{{ istota_stack_dir }}/.env"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ istota_stack_env | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: Restart the istota stack
+
+- name: Secrets the vault manages
+  ansible.builtin.copy:
+    dest: "{{ istota_stack_dir }}/secrets/{{ item }}"
+    content: "{{ istota_secrets[item] }}"
+    owner: "{{ istota_uid }}"
+    group: "{{ istota_uid }}"
+    mode: "0400"
+  loop: "{{ istota_secret_names | select('in', istota_secrets) | list }}"
+  no_log: true
+  notify: Restart the istota stack
+
+# Compose refuses to start a service whose secret file is missing.
+- name: Every other secret file, created empty if missing
+  ansible.builtin.copy:
+    dest: "{{ istota_stack_dir }}/secrets/{{ item }}"
+    content: ""
+    force: false
+    owner: "{{ istota_uid }}"
+    group: "{{ istota_uid }}"
+    mode: "0400"
+  loop: "{{ istota_secret_names | reject('in', istota_secrets) | list }}"
+
+- name: rclone.conf
+  ansible.builtin.copy:
+    dest: "{{ istota_stack_dir }}/rclone.conf"
+    content: "{{ istota_rclone_conf }}"
+    owner: "{{ istota_uid }}"
+    group: "{{ istota_uid }}"
+    mode: "0600"
+  no_log: true
+  register: _istota_rclone_conf
+  when: istota_storage == 'nextcloud' and istota_rclone_conf | length > 0
+
+- name: Admins
+  ansible.builtin.copy:
+    dest: "{{ istota_stack_dir }}/config/admins"
+    content: "{{ istota_admins | join('\n') }}\n"
+    owner: "{{ istota_uid }}"
+    group: "{{ istota_uid }}"
+    mode: "0600"
+  when: istota_admins | length > 0
+  notify: Restart the istota stack
+
+# --- provision.sh ------------------------------------------------------------------
+
+- name: Is istota-stack installed
+  ansible.builtin.stat:
+    path: "{{ istota_stack_command }}"
+  register: _istota_stack_installed
+
+- name: Provision the VM
+  ansible.builtin.command:
+    argv: ["{{ istota_stack_dir }}/src/host/provision.sh"]
+  register: _istota_provisioned
+  when: >-
+    istota_provision_always | bool
+    or _istota_host_env is changed
+    or _istota_rclone_conf is changed
+    or not _istota_stack_installed.stat.exists
+
+# --- The release -------------------------------------------------------------------
+
+- name: Read the deployed tag
+  ansible.builtin.command:
+    argv: [awk, "-F=", '$1 == "ISTOTA_TAG" { v = substr($0, index($0, "=") + 1) } END { print v }', "{{ istota_stack_dir }}/.env"]
+  register: _istota_current_tag
+  changed_when: false
+  # No .env yet under --check on a fresh VM.
+  failed_when: false
+  check_mode: false
+
+- name: Report the update --check would make
+  ansible.builtin.debug:
+    msg: "would run istota-stack update {{ istota_release }} (deployed: {{ _istota_current_tag.stdout | default('none', true) }})"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - istota_release | length > 0
+    - istota_release != _istota_current_tag.stdout
+
+- name: Update to the release
+  ansible.builtin.command:
+    argv: ["{{ istota_stack_command }}", update, "{{ istota_release }}"]
+  register: _istota_updated
+  when:
+    - not ansible_check_mode
+    - istota_release | length > 0
+    - istota_release != _istota_current_tag.stdout
+
+# The release's own host/ files (istota-stack, the units, the AppArmor profile).
+- name: Provision from the new release
+  ansible.builtin.command:
+    argv: ["{{ istota_stack_dir }}/src/host/provision.sh"]
+  when: _istota_updated is changed
+
+# --- The config --------------------------------------------------------------------
+
+- name: The config step needs a release
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode or istota_release | length > 0 or _istota_current_tag.stdout | length > 0
+    fail_msg: >-
+      No release is deployed and istota_release is empty: `istota apply` runs in
+      the release's image, so set istota_release.
+    quiet: true
+  when: istota_config | length > 0
+
+- name: Apply the config
+  when: istota_config | length > 0
+  block:
+    # A temporary file, created under --check too: the dry run has to read the
+    # plan this play would apply, not the one the last play left.
+    - name: Make the plan file
+      ansible.builtin.tempfile:
+        suffix: .json
+      register: _istota_plan
+      changed_when: false
+      check_mode: false
+
+    - name: Write the plan
+      ansible.builtin.copy:
+        dest: "{{ _istota_plan.path }}"
+        content: "{{ {'config': istota_config} | to_json }}"
+        mode: "0600"
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    # Exit 2 is a change; istota-stack restarts a running stack on it itself.
+    - name: istota-stack apply
+      ansible.builtin.command:
+        argv: ["{{ istota_stack_command }}", apply, "{{ _istota_plan.path }}"]
+      register: _istota_applied
+      changed_when: _istota_applied.rc == 2
+      failed_when: _istota_applied.rc not in [0, 2]
+      when: not ansible_check_mode
+
+    # The drift answer: exit 2 is what this play would change.
+    - name: istota-stack apply --dry-run
+      ansible.builtin.command:
+        argv: ["{{ istota_stack_command }}", apply, "{{ _istota_plan.path }}", --dry-run]
+      register: _istota_drift
+      changed_when: _istota_drift.rc == 2
+      failed_when: _istota_drift.rc not in [0, 2]
+      check_mode: false
+      when: ansible_check_mode
+  always:
+    - name: Remove the plan file
+      ansible.builtin.file:
+        path: "{{ _istota_plan.path }}"
+        state: absent
+      changed_when: false
+      check_mode: false
+      when: _istota_plan.path is defined
+
+- name: Restart the stack now if an input changed
+  ansible.builtin.meta: flush_handlers
+
+# --- The running stack -----------------------------------------------------------
+
+- name: The stack is enabled and running
+  ansible.builtin.systemd_service:
+    name: istota-stack.service
+    enabled: true
+    state: started
+  when: _istota_current_tag.stdout | length > 0 or _istota_updated is changed
+
+- name: Wait for the istota service to be healthy
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cid="$(docker ps -q --filter label=com.docker.compose.project=istota --filter label=com.docker.compose.service=istota | head -1)"
+    [ -n "$cid" ] && [ "$(docker inspect -f '{{ '{{' }}.State.Health.Status{{ '}}' }}' "$cid")" = healthy ]
+  args:
+    executable: /bin/bash
+  register: _istota_health
+  until: _istota_health.rc == 0
+  retries: "{{ (istota_health_timeout | int) // 5 }}"
+  delay: 5
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - _istota_current_tag.stdout | length > 0 or _istota_updated is changed
+
+# --- Users, through the wrapper -------------------------------------------------------
+# No dry run exists for these, so they are skipped under --check.
+
+- name: Plan the ensure calls
+  ansible.builtin.set_fact:
+    _istota_ensure: "{{ _istota_ensure_json | from_json }}"
+  vars:
+    _istota_ensure_json: |-
+      {%- macro flags(entry) -%}
+      {%- set out = [] -%}
+      {%- for key, value in entry.items() -%}
+      {%- if value is sameas true -%}{%- set _ = out.append('--' ~ key) -%}
+      {%- elif value is sameas false or value is none -%}
+      {%- elif value is iterable and value is not string and value is not mapping -%}
+      {%- for one in value -%}{%- set _ = out.extend(['--' ~ key, one | string]) -%}{%- endfor -%}
+      {%- else -%}{%- set _ = out.extend(['--' ~ key, value | string]) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+      {%- endmacro -%}
+      {%- set calls = [] -%}
+      {%- for user, entry in istota_users.items() -%}
+      {%- set _ = calls.append({'label': 'user ' ~ user, 'argv': ['user', 'ensure', '--name', user] + (flags(entry) | from_json)}) -%}
+      {%- endfor -%}
+      {%- for user, entries in istota_user_resources.items() -%}{%- for entry in entries -%}
+      {%- set _ = calls.append({'label': 'resource ' ~ user ~ ' ' ~ (entry.path | default('')), 'argv': ['resource', 'ensure', '--user', user] + (flags(entry) | from_json)}) -%}
+      {%- endfor -%}{%- endfor -%}
+      {%- for user, entries in istota_user_briefings.items() -%}{%- for entry in entries -%}
+      {%- set _ = calls.append({'label': 'briefing ' ~ user ~ ' ' ~ (entry.name | default('')), 'argv': ['briefing', 'ensure', '--user', user] + (flags(entry) | from_json)}) -%}
+      {%- endfor -%}{%- endfor -%}
+      {%- set secrets = [] -%}
+      {%- for user, entries in istota_user_secrets.items() -%}{%- for entry in entries -%}
+      {%- set _ = secrets.append({'label': 'secret ' ~ user ~ ' ' ~ entry.service ~ '/' ~ entry.key, 'argv': ['secret', 'ensure', '--user', user] + (flags(entry) | from_json)}) -%}
+      {%- endfor -%}{%- endfor -%}
+      {{ {'calls': calls, 'secrets': secrets} | to_json }}
+
+- name: istota user, resource and briefing ensure
+  ansible.builtin.command:
+    argv: "{{ [istota_cli_command] + item.argv }}"
+  loop: "{{ _istota_ensure.calls }}"
+  loop_control:
+    label: "{{ item.label }}"
+  register: _istota_ensured
+  changed_when: "'STATE: noop' not in _istota_ensured.stdout"
+  # Both the scheduler and the web app read the user set at config load.
+  notify: Restart the istota stack
+  when: not ansible_check_mode
+
+- name: istota secret ensure
+  ansible.builtin.command:
+    argv: "{{ [istota_cli_command] + item.argv }}"
+  loop: "{{ _istota_ensure.secrets }}"
+  loop_control:
+    label: "{{ item.label }}"
+  register: _istota_secret_ensured
+  changed_when: "'STATE: noop' not in _istota_secret_ensured.stdout"
+  no_log: true
+  when: not ansible_check_mode
