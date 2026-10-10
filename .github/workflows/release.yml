@@ -165,3 +165,47 @@ jobs:
           else
             gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md
           fi
+
+  # A check that the tag builds, on both architectures an install runs. Nothing
+  # is pushed: every install builds its own images from the signed tag
+  # (host/istota-stack update), so no registry is involved. The browser image is
+  # amd64-only (Google Chrome's .deb); arm64 runs it under emulation.
+  build-images:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Build the istota image (with Claude Code, the default)
+        run: docker build -f docker/istota/Dockerfile -t istota-istota:check .
+
+      - name: Build the istota image without Claude Code
+        run: docker build -f docker/istota/Dockerfile --build-arg INSTALL_CLAUDE_CODE=0 -t istota-istota:check-native .
+
+      - name: Build the devbox image
+        run: docker build -t istota-devbox:check docker/devbox
+
+      - name: Build the WhatsApp Baileys sidecar
+        run: docker build -t istota-whatsapp-baileys:check docker/whatsapp-baileys
+
+      - name: Build the browser image
+        if: matrix.arch == 'amd64'
+        run: docker build -t istota-browser:check docker/browser

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cut a new release: move CHANGELOG [Unreleased] to a versioned section,
-# bump pyproject.toml, commit, tag with the section as the annotation body,
+# bump pyproject.toml, commit, sign a tag with the section as its body,
 # push to origin. The GitHub mirror's release.yml workflow creates the
 # GitHub Release from the tag annotation.
 #
@@ -33,6 +33,13 @@ if ! git diff-index --quiet HEAD --; then
 fi
 if git rev-parse "$TAG" >/dev/null 2>&1; then
   echo "tag $TAG already exists" >&2
+  exit 1
+fi
+# Release tags are signed with an SSH key: every install verifies the tag with
+# `git verify-tag` against that one key before it builds anything
+# (host/istota-stack), and refuses an unsigned tag or another signature format.
+if [ "$(git config gpg.format)" != "ssh" ] || [ -z "$(git config user.signingkey)" ]; then
+  echo "release tags are signed with an SSH key: set gpg.format=ssh and user.signingkey" >&2
   exit 1
 fi
 if ! grep -q '^## \[Unreleased\]$' CHANGELOG.md; then
@@ -197,7 +204,10 @@ git add CHANGELOG.md pyproject.toml
 # the version bump lands in this commit instead of leaving the tree dirty.
 [ -f web/vite-mock-api.ts ] && git add web/vite-mock-api.ts || true
 git commit -m "Bump version to $NEW"
-git tag -a "$TAG" --cleanup=verbatim -m "Release $TAG" -m "$NOTES"
+git tag -s "$TAG" --cleanup=verbatim -m "Release $TAG" -m "$NOTES"
+git verify-tag "$TAG" >/dev/null 2>&1 || {
+  echo "warning: git verify-tag $TAG fails locally; add your key to gpg.ssh.allowedSignersFile to check it" >&2
+}
 git push --follow-tags
 
 echo
