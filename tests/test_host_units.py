@@ -356,6 +356,25 @@ class TestBootstrapFiles:
         assert "GIT_CONFIG_GLOBAL=/dev/null" in script
         assert doc["runcmd"] == [["bash", "/root/istota-bootstrap.sh"]]
 
+    def test_cloud_init_verifies_the_tag_with_istota_stacks_own_code(self):
+        """The bootstrap runs before any verified code exists, so it cannot
+        source istota-stack from the checkout it is about to verify; it carries
+        a copy instead. istota-stack's is authoritative (row 13's refusals are
+        held against it in tests/test_istota_stack.py), and this holds the copy
+        to it byte for byte: the hand-written one had lost the tag-name check
+        (a moved ref downgrades the first provision) and the X.509 override."""
+        stack = (HOST / "istota-stack").read_text()
+        start = stack.index("# --- release tags ---")
+        end = stack.index("# --- builds and images ---")
+        section = stack[start:end].rstrip() + "\n"
+        doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
+        script = next(f["content"] for f in doc["write_files"] if f["path"] == "/root/istota-bootstrap.sh")
+
+        assert section in script
+        assert 'object="$(verify_release_tag "$TAG")"' in script
+        assert 'checkout --quiet --detach "${object}^{commit}"' in script
+        assert script.index("verify_release_tag \"$TAG\"") < script.index("host/provision.sh")
+
     def test_the_lima_template_provisions_from_the_checkout(self):
         doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
         # The image alone: `template:debian-13` adds a mount of the whole Mac home
