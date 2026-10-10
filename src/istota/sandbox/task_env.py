@@ -274,8 +274,7 @@ def build_task_runtime(
         env["BROWSER_VNC_URL"] = config.browser.vnc_url
 
     # Devbox: the agent's persistent dev container. The skill CLI speaks the
-    # exec transport to a server inside it; only `reset` still runs
-    # `docker`, host-side in the CLI's own process.
+    # exec transport to a server inside it, every verb `reset` included.
     #
     # No socket path is exported, and that is load-bearing rather than
     # tidiness (ISSUE-284, and Design 5 of the devbox transport). This
@@ -292,7 +291,6 @@ def build_task_runtime(
         env["ISTOTA_DEVBOX_CONTAINER"] = (
             f"{config.devbox.container_prefix}{task.user_id}"
         )
-        env["ISTOTA_DEVBOX_DOCKER_CLI"] = config.devbox.docker_cli
         env["ISTOTA_DEVBOX_MAX_OUTPUT_BYTES"] = str(
             config.devbox.max_output_bytes
         )

@@ -13,9 +13,8 @@ nothing in the container could see stayed green through every release
 The server is the shipped `docker/devbox/scripts/istota-exec-serve`, started on
 a socket in a tmpdir with its roots pointed there. No Docker: the server is a
 stdlib-only asyncio script, and the container is what the `integration` tier
-proves. `reset` is the one verb still spoken in Docker, and it is the one place
-`_run_docker` is still stubbed — because it recreates a container, which is a
-thing no test here can do and no server can do for it.
+proves. `reset` speaks the protocol too now (a `restart` request), so nothing
+here stubs Docker at all.
 
 The socket is reached the way the deployment reaches it: a real `config.toml`
 with an `exec_socket_dir`, resolved by `_transport_settings()` through
@@ -158,7 +157,6 @@ def _start_devbox(monkeypatch) -> _Devbox:
 def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("ISTOTA_USER_ID", "bob")
     monkeypatch.setenv("ISTOTA_DEVBOX_CONTAINER", "devbox-bob")
-    monkeypatch.setenv("ISTOTA_DEVBOX_DOCKER_CLI", "/usr/bin/docker")
     monkeypatch.delenv("ISTOTA_DEVBOX_MAX_OUTPUT_BYTES", raising=False)
     # cp-in / cp-out require an allowlist; point at tmp_path so tests
     # can build host paths inside it.
@@ -199,20 +197,6 @@ def _cli(*argv):
 
 def _exec(command: str, timeout: int | None = None) -> dict:
     return devbox.cmd_exec(_args(command=command, timeout=timeout))
-
-
-def _ownership_sequence(*, owner: str = "bob", running: bool = True):
-    """`_check_owned` makes two inspect calls; this is "running, ours"."""
-    return [
-        (0, b"true" if running else b"false", b""),
-        (0, owner.encode(), b""),
-    ]
-
-
-def _drain(returns):
-    """Iterator factory — pop in order. Tests stage docker responses in a list."""
-    it = iter(returns)
-    return lambda argv, timeout: next(it)
 
 
 # --------------------------------------------------------------------------- #
@@ -435,24 +419,8 @@ class TestAFateItCannotReportIsNeverASuccess:
         assert "exit_code" not in result, result
         assert "fate is unknown" in result["error"], result
 
-    def test_status_keeps_its_container_half_through_a_socket_error(
-        self, monkeypatch
-    ):
-        """Same gap, at the one verb that must survive it with half an answer."""
-        monkeypatch.setattr(
-            devbox,
-            "_run_docker",
-            _drain(
-                [
-                    (
-                        0,
-                        b"true|2026-05-13T10:00:00Z|istota-devbox:latest"
-                        b"|deadbeef1234abcd|0|bob",
-                        b"",
-                    ),
-                ]
-            ),
-        )
+    def test_status_answers_through_a_socket_error(self, monkeypatch):
+        """Same gap, at the one verb that must answer rather than raise."""
 
         def boom(*args, **kwargs):
             raise ConnectionResetError(104, "Connection reset by peer")
@@ -462,7 +430,7 @@ class TestAFateItCannotReportIsNeverASuccess:
         info = devbox.cmd_status(_args())
 
         assert info["status"] == "ok", info
-        assert info["running"] is True, info
+        assert info["container"] == "devbox-bob", info
         assert info["transport"]["reachable"] is False, info
 
     def test_a_terminal_frame_with_no_status_is_an_error(self, scripted):
@@ -531,26 +499,9 @@ class TestAFateItCannotReportIsNeverASuccess:
         assert result["status"] == "error", result
         assert "no acknowledgement" in result["error"], result
 
-    def test_status_keeps_its_container_half_when_the_transport_hangs(
-        self, scripted, monkeypatch
-    ):
-        """Two halves, and neither substitutes for the other — so a dead
-        transport must not take the container facts with it."""
+    def test_status_answers_when_the_transport_hangs(self, scripted, monkeypatch):
+        """A dead transport is a fact to report, not an exception."""
         monkeypatch.setattr(devbox, "ACK_TIMEOUT_SECONDS", 0.4)
-        monkeypatch.setattr(
-            devbox,
-            "_run_docker",
-            _drain(
-                [
-                    (
-                        0,
-                        b"true|2026-05-13T10:00:00Z|istota-devbox:latest"
-                        b"|deadbeef1234abcd|0|bob",
-                        b"",
-                    ),
-                ]
-            ),
-        )
 
         def handler(server, conn, request, rest):
             time.sleep(5)
@@ -560,7 +511,6 @@ class TestAFateItCannotReportIsNeverASuccess:
         info = devbox.cmd_status(_args())
 
         assert info["status"] == "ok", info
-        assert info["running"] is True, info
         assert info["transport"]["reachable"] is False, info
 
 
@@ -768,26 +718,17 @@ class TestTheBackendMustBeDevbox:
         assert "[devbox] enabled" in result["error"], result
         assert "may be down" not in result["error"], result
 
-    def test_reset_still_works_with_the_backend_off(self, monkeypatch, tmp_path):
-        """`reset` is host-side Docker and does not touch the transport, so the
-        one verb that never needed a server keeps working."""
+    def test_reset_refuses_by_name_with_the_backend_off(self, monkeypatch, tmp_path):
+        """`reset` is a transport request now, so with no exec server
+        provisioned it gets the same refusal as every other verb."""
         config = tmp_path / "config.toml"
         config.write_text(f'[developer.container]\nexec_socket_dir = "{tmp_path}"\n')
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
-        monkeypatch.setattr(
-            devbox,
-            "_run_docker",
-            _drain(
-                [
-                    *_ownership_sequence(),
-                    (0, b"", b""),
-                    (0, b"", b""),
-                    (0, b"", b""),
-                ]
-            ),
-        )
 
-        assert devbox.cmd_reset(_args(yes=True))["status"] == "ok"
+        result = devbox.cmd_reset(_args(yes=True))
+
+        assert result["status"] == "error", result
+        assert "[devbox] enabled" in result["error"], result
 
 
 class TestTheConnectBudgetComesFromConfig:
@@ -1344,44 +1285,14 @@ class TestCopyOut:
 
 
 class TestStatus:
-    def test_it_reports_the_transport(self, dbx, monkeypatch):
-        monkeypatch.setattr(
-            devbox, "_run_docker", lambda argv, timeout: (1, b"", b"No such container")
-        )
+    def test_it_reports_the_transport(self, dbx):
         info = devbox.cmd_status(_args())
 
         assert info["status"] == "ok", info
+        assert info["container"] == "devbox-bob", info
         assert info["transport"]["reachable"] is True, info
         assert info["transport"]["protocol"] == proto.PROTOCOL_VERSION
         assert Path(info["transport"]["home"]).resolve() == dbx.home.resolve()
-
-    def test_an_unreachable_container_is_reported_and_is_not_fatal(
-        self, dbx, monkeypatch,
-    ):
-        """Two halves that fail separately: Docker says whether the container
-        is up, the transport says whether the server inside it answers. A
-        deployment where the CLI cannot reach Docker at all still gets the
-        answer that matters."""
-        monkeypatch.setattr(
-            devbox, "_run_docker", lambda argv, timeout: (1, b"", b"No such container")
-        )
-        info = devbox.cmd_status(_args())
-
-        assert info["running"] is None, info
-        assert "container_error" in info, info
-        assert info["transport"]["reachable"] is True, info
-
-    def test_it_parses_the_inspect_line(self, dbx, monkeypatch):
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            (0, b"true|2026-05-13T10:00:00Z|istota-devbox:latest|deadbeef1234abcd|0|bob", b""),
-        ]))
-        info = devbox.cmd_status(_args())
-
-        assert info["running"] is True
-        assert info["image"] == "istota-devbox:latest"
-        assert info["id"] == "deadbeef1234"
-        assert info["restart_count"] == 0
-        assert info["owner"] == "bob"
 
     def test_a_dead_transport_is_reported_rather_than_raised(
         self, monkeypatch, tmp_path,
@@ -1395,9 +1306,6 @@ class TestStatus:
             f'exec_socket_dir = "{tmp_path}"\n'
         )
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config))
-        monkeypatch.setattr(
-            devbox, "_run_docker", lambda argv, timeout: (1, b"", b"nope")
-        )
 
         info = devbox.cmd_status(_args())
 
@@ -1407,19 +1315,17 @@ class TestStatus:
 
 
 # --------------------------------------------------------------------------- #
-# reset — the one verb still spoken in Docker
+# reset — a `restart` request on the exec transport
 # --------------------------------------------------------------------------- #
 
 
 class TestReset:
-    """`_run_docker` and `_check_owned` survive for this verb alone.
+    """`reset` speaks the protocol; nothing here calls the Docker CLI.
 
-    The transport cannot recreate a container and should not learn how: a
-    server inside a container cannot restart the container it is inside. And
-    `reset` never used the retired allowlist proxy — `_run_docker` shells
-    `docker` with the daemon's own environment and sets no `DOCKER_HOST`, so it
-    has always talked to the real socket. That is the evidence the proxy could
-    be retired whole rather than kept for this one verb.
+    The istota container has no Docker socket, so the verb that used to
+    `docker exec` a wipe and `docker restart` the box asks the server inside it
+    instead. Which box is answered by which socket this CLI reaches, the task
+    user's own.
     """
 
     def test_it_refuses_without_yes(self):
@@ -1427,64 +1333,65 @@ class TestReset:
         assert result["status"] == "error"
         assert "Refusing" in result["error"]
 
-    def test_it_refuses_when_home_is_not_a_mountpoint(self, monkeypatch):
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (1, b"", b""),  # mountpoint -q /home/dev — not a mountpoint
-        ]))
-        result = devbox.cmd_reset(_args(yes=True))
-        assert result["status"] == "error"
-        assert "not a mountpoint" in result["error"]
+    def test_it_asks_the_real_server_and_the_server_refuses_an_unmounted_home(
+        self, dbx
+    ):
+        """The test server's home is a plain directory, which is exactly the
+        misattached-volume case: nothing is removed and nothing restarts."""
+        (dbx.home / "keep").write_text("x")
 
-    def test_it_refuses_a_container_owned_by_someone_else(self, monkeypatch):
-        monkeypatch.setattr(
-            devbox, "_run_docker", _drain(_ownership_sequence(owner="alice"))
-        )
-        result = devbox.cmd_reset(_args(yes=True))
-        assert result["status"] == "error"
-        assert "owned by 'alice'" in result["error"]
-
-    def test_it_refuses_a_container_that_is_not_running(self, monkeypatch):
-        monkeypatch.setattr(devbox, "_run_docker", _drain([(0, b"false", b"")]))
-        result = devbox.cmd_reset(_args(yes=True))
-        assert result["status"] == "error"
-        assert "not running" in result["error"]
-
-    def test_it_wipes_and_restarts(self, monkeypatch):
-        calls = []
-        seq = iter([
-            *_ownership_sequence(),
-            (0, b"", b""),  # mountpoint -q → ok
-            (0, b"", b""),  # find …rm -rf wipe
-            (0, b"", b""),  # restart
-        ])
-
-        def fake_run(argv, timeout):
-            calls.append(argv)
-            return next(seq)
-
-        monkeypatch.setattr(devbox, "_run_docker", fake_run)
         result = devbox.cmd_reset(_args(yes=True))
 
-        assert result["status"] == "ok"
-        wipe = [c for c in calls if c[0] == "exec" and "find" in " ".join(c)]
-        assert wipe and "-u" in wipe[0] and "root" in wipe[0]
-        assert calls[-1] == ["restart", "devbox-bob"]
+        assert result["status"] == "error", result
+        assert "not a mount point" in result["error"], result
+        assert (dbx.home / "keep").exists()
+        assert dbx.proc.poll() is None
 
-    def test_it_sets_no_docker_host(self):
-        """The evidence Design 14's deletion rests on, held as a test.
+    def test_it_sends_a_wiping_restart_and_reports_it(self, scripted):
+        seen = []
 
-        `_run_docker` passes no environment of its own, so the child inherits
-        the daemon's — which has no `DOCKER_HOST`, so `docker` resolves the
-        real socket. If this file ever started setting one, retiring the proxy
-        would have been the wrong call and this says so.
-        """
+        def handler(server, conn, request, rest):
+            seen.append(request)
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.encode_control(
+                {"restarting": True, "wiped": True, "not_removed": 0}
+            ))
+            conn.sendall(proto.encode_control({"exit_code": 0, "signal": None}))
+
+        scripted(handler)
+
+        result = devbox.cmd_reset(_args(yes=True))
+
+        assert seen == [{"action": "restart", "wipe_home": True}]
+        assert result == {
+            "status": "ok", "reset": True, "wiped": True, "not_removed": 0,
+            "container": "devbox-bob",
+        }
+
+    def test_entries_it_could_not_remove_are_named(self, scripted):
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.encode_control(
+                {"restarting": True, "wiped": True, "not_removed": 2}
+            ))
+            conn.sendall(proto.encode_control({"exit_code": 0, "signal": None}))
+
+        scripted(handler)
+
+        result = devbox.cmd_reset(_args(yes=True))
+
+        assert result["status"] == "ok", result
+        assert result["not_removed"] == 2
+        assert "2 entries" in result["note"]
+
+    def test_no_docker_cli_is_reachable_from_this_module(self):
+        """Nothing here may shell out: the istota container has no Docker CLI
+        and no socket, and a spawn that only works on bare metal would fail
+        quietly in the stack."""
         source = (_SKILL_DIR / "__init__.py").read_text()
-        # An assignment, not a mention: the docstrings here explain at length
-        # why no `DOCKER_HOST` is set, and a bare substring search would be
-        # satisfied by that prose.
-        assert not re.search(r"""DOCKER_HOST["']?\s*[\]:]?\s*=""", source), source
-        assert "env=" not in source.split("def _run_docker", 1)[1].split("\ndef ", 1)[0]
+        assert "import subprocess" not in source
+        assert "_run_docker" not in source
+        assert "ISTOTA_DEVBOX_DOCKER_CLI" not in source
 
 
 # --------------------------------------------------------------------------- #
@@ -1773,17 +1680,20 @@ class TestDocumentedCommandsMatchTheCLI:
             "nothing to check and would pass against anything"
         )
 
-    def test_documented_reset_actually_runs(self, monkeypatch):
-        """End to end through the real `cmd_reset`, with docker stubbed: the
-        documented argv reaches the wipe rather than the refusal."""
+    def test_documented_reset_actually_runs(self, scripted):
+        """End to end through the real `cmd_reset`: the documented argv reaches
+        the server rather than the refusal."""
         resets = [argv for _, argv in _documented_argv() if argv[0] == "reset"]
         assert resets, "skill.md no longer documents reset"
-        monkeypatch.setattr(devbox, "_run_docker", _drain([
-            *_ownership_sequence(),
-            (0, b"", b""),   # mountpoint -q /home/dev
-            (0, b"", b""),   # find … -exec rm -rf
-            (0, b"", b""),   # restart
-        ]))
+
+        def handler(server, conn, request, rest):
+            conn.sendall(_ack_ok())
+            conn.sendall(proto.encode_control(
+                {"restarting": True, "wiped": True, "not_removed": 0}
+            ))
+            conn.sendall(proto.encode_control({"exit_code": 0, "signal": None}))
+
+        scripted(handler)
         args = devbox.build_parser().parse_args(resets[0])
         result = devbox.cmd_reset(args)
         assert result["status"] == "ok", (

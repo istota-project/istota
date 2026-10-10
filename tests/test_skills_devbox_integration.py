@@ -25,7 +25,6 @@ probe for. The gate is simply whether the transport answers a `ping`.
 """
 
 import os
-import shutil
 import uuid
 
 import pytest
@@ -286,16 +285,10 @@ class TestExecFile:
 
 
 class TestStatus:
-    def test_it_reports_the_container_and_the_transport_separately(self):
-        """Two halves, and neither substitutes for the other: Docker says the
-        container is running, the transport says the server inside it answers.
-        """
+    def test_it_reports_the_transport(self):
+        """The server inside the box answers, which is what every other verb
+        depends on. There is no Docker half: the CLI has no Docker socket."""
         info = devbox.cmd_status(_args())
 
         assert info["status"] == "ok", info
         assert info["transport"]["reachable"] is True, info
-        if shutil.which(devbox._docker_cli()) and devbox._container_name():
-            # Only where this process can reach Docker at all — on the
-            # deployment the CLI runs host-side and can, but the transport
-            # half must not depend on it.
-            assert "container" in info, info

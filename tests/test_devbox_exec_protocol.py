@@ -363,7 +363,21 @@ class TestAcknowledgements:
         }
 
     def test_every_action_the_design_names_exists(self):
-        assert p.ALL_ACTIONS == {"exec", "write_file", "read_file", "stat", "ping"}
+        assert p.ALL_ACTIONS == {
+            "exec", "write_file", "read_file", "stat", "ping", "restart",
+        }
+
+    def test_a_restart_request_says_whether_to_wipe(self):
+        line = p.encode_restart_request(wipe_home=True)
+        assert p.decode_request(line) == {"action": "restart", "wipe_home": True}
+
+    def test_a_restart_with_no_wipe_field_means_no_wipe(self):
+        assert p.decode_request(b'{"action":"restart"}\n')["wipe_home"] is False
+
+    def test_the_restart_status_is_not_one_a_shell_produces_for_a_signal(self):
+        # The supervisor stops the container on this status alone, so it must
+        # not collide with 128+N, 126/127 or the transport's own 120-123.
+        assert p.RESTART_EXIT_STATUS < 120
 
 
 class TestTheProtocolVersion:

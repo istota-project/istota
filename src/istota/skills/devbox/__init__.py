@@ -1,10 +1,10 @@
 """Devbox skill — the ad-hoc entrance to the user's own development container.
 
-Every verb but ``reset`` speaks the **exec transport** (``devbox_exec_protocol``)
-to a server running inside the container, over the per-user Unix socket at
-``{exec_socket_dir}/{user_id}/exec.sock``. Nothing here shells out to ``docker``
-any more except ``reset``, which recreates a container and is a thing the
-transport cannot do and should not learn.
+Every verb speaks the **exec transport** (``devbox_exec_protocol``) to a server
+running inside the container, over the per-user Unix socket at
+``{exec_socket_dir}/{user_id}/exec.sock``. Nothing here shells out to ``docker``:
+``reset`` is a ``restart`` request, which the server answers and then exits so
+that the container's restart policy brings it back.
 
 Why the transport and not ``docker exec``
 -----------------------------------------
@@ -35,16 +35,15 @@ the *host* side of ``cp-in`` / ``cp-out``: this CLI runs host-side with the
 daemon's filesystem view and the model still picks the host path, which is a
 different question from what the container may touch.
 
-The remaining hardening, all of it for ``reset``
-------------------------------------------------
+``reset``
+---------
 
-* Container name matches ``^[a-zA-Z0-9_.-]+$`` before every docker call.
-* ``_check_owned`` reads the ``com.istota.user_id`` label and refuses to proceed
-  unless it equals ``ISTOTA_USER_ID`` — against name reuse and stale containers
-  from a prior tenant.
-* ``reset --yes`` requires ``/home/dev`` to be a real mountpoint inside the
-  container before wiping it, so a mis-attached volume does not take a baked-in
-  image layer with it.
+It used to ``docker exec`` a wipe and ``docker restart`` the box, after checking
+the container's ownership label, which needed the Docker CLI and the Docker
+socket in whatever process ran this CLI. The istota container has neither. The
+socket this CLI reaches is the task user's own, which is the ownership check,
+and the server refuses to empty ``/home/dev`` unless it is a mount point, so a
+misattached volume does not take an image layer with it.
 
 Usage:
     python -m istota.skills.devbox exec "<command>" [--timeout 300]
@@ -61,9 +60,7 @@ import argparse
 import functools
 import os
 import re
-import shutil
 import socket
-import subprocess
 import time
 from pathlib import Path
 
@@ -76,7 +73,6 @@ from istota.skills._hostpath import READ, REMOTE, WRITE, host_path
 DEFAULT_MAX_OUTPUT_BYTES = 102_400
 MAX_COMMAND_BYTES = 32 * 1024  # `bash -o pipefail -c` argv length cap
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
-_OWNER_LABEL = "com.istota.user_id"
 
 # The two connect-path budgets, both taken from the exec client rather than
 # restated. There are two clients of one server now — the shims run
@@ -138,17 +134,13 @@ def _err(msg: str, **extra) -> dict:
     return error_envelope(msg, **extra)
 
 
-def _docker_cli() -> str:
-    return os.environ.get("ISTOTA_DEVBOX_DOCKER_CLI") or shutil.which("docker") or "docker"
-
-
 def _user_id() -> str | None:
     uid = os.environ.get("ISTOTA_USER_ID", "").strip()
     return uid or None
 
 
 def _container_name() -> str | None:
-    """Resolve and validate the per-user container name. ``reset`` only."""
+    """The per-user container's name, for ``status`` to report."""
     name = os.environ.get("ISTOTA_DEVBOX_CONTAINER", "").strip()
     if not name:
         uid = _user_id()
@@ -231,8 +223,8 @@ def _transport_settings() -> "tuple[_Transport | None, str | None]":
     if backend != config_module.CONTAINER_BACKEND_DEVBOX:
         return None, (
             "This deployment runs development work on the host, so no exec "
-            "server is provisioned inside the devbox and every verb but `reset` "
-            "has nothing to talk to. That is derived from [devbox] enabled "
+            "server is provisioned inside the devbox and no verb has anything "
+            "to talk to. That is derived from [devbox] enabled "
             "together with developer.enabled and developer.repos_dir; turn them "
             "on and re-run the deploy. This is a deployment setting; a task "
             "cannot change it."
@@ -509,66 +501,6 @@ def _envelope(reply: _Reply, started: float) -> dict:
         # output stays, because it is what a reader has to go on.
         return _err(fault, stdout=result["stdout"], stderr=result["stderr"])
     return result
-
-
-# ---- Docker, for `reset` alone ---------------------------------------------
-
-
-def _run_docker(args: list[str], timeout: int) -> tuple[int, bytes, bytes]:
-    """Run ``docker …`` and return ``(rc, stdout, stderr)``. Raises on timeout.
-
-    Survives for ``reset``, which recreates a container. It shells ``docker``
-    with the daemon's own environment and sets no ``DOCKER_HOST``, so it has
-    always talked to the real socket rather than to the allowlist proxy — which
-    is why retiring that proxy costs this verb nothing.
-    """
-    cmd = [_docker_cli(), *args]
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-def _inspect(container: str, template: str, *, timeout: int = 10) -> tuple[int, str]:
-    rc, out, _ = _run_docker(
-        ["inspect", "-f", template, container], timeout=timeout,
-    )
-    return rc, out.decode("utf-8", "replace").strip()
-
-
-def _check_owned(container: str) -> str | None:
-    """Return None when the container exists, is running, and is owned by
-    the current user — otherwise return an error string.
-
-    Ownership is encoded as a Docker label (``com.istota.user_id=<user_id>``)
-    written by the Ansible-rendered compose template. Containers without
-    the label are accepted only when ``ISTOTA_USER_ID`` is unset (CLI
-    smoke-tests on dev machines that don't deploy the label).
-    """
-    rc, running = _inspect(container, "{{.State.Running}}")
-    if rc != 0:
-        return f"Devbox container '{container}' does not exist."
-    if running != "true":
-        return f"Devbox container '{container}' is not running."
-    uid = _user_id()
-    if not uid:
-        return None
-    rc2, label = _inspect(container, "{{index .Config.Labels \"" + _OWNER_LABEL + "\"}}")
-    if rc2 != 0:
-        # Inspect already succeeded above; missing label means the container
-        # was provisioned outside Ansible. Accept but don't enforce.
-        return None
-    if not label:
-        return None  # legacy / hand-built container — same lenient stance
-    if label != uid:
-        return (
-            f"Devbox container '{container}' is owned by '{label}', not '{uid}'. "
-            "Refusing to operate."
-        )
-    return None
 
 
 # ---- Host paths ------------------------------------------------------------
@@ -868,48 +800,20 @@ def cmd_cp_out(args) -> dict:
 
 @_reports_refusals
 def cmd_status(args) -> dict:
-    """Container facts from Docker, plus what the transport says about itself.
+    """What the transport says about itself.
 
-    Two halves, and neither substitutes for the other: `docker inspect` says the
-    container is running, and a `stat` over the socket says the *server inside
-    it* is answering, which is the thing every other verb depends on.
+    There is no Docker half any more: this CLI runs in a container with no
+    Docker socket. A `stat` over the socket says the server inside the box is
+    answering, which is the thing every other verb depends on, and its
+    `hostname` and `started_at` say which box and since when.
     """
     info: dict = {"status": "ok"}
     container = _container_name()
     if container:
-        fmt = (
-            "{{.State.Running}}|{{.State.StartedAt}}|{{.Config.Image}}|"
-            "{{.Id}}|{{.RestartCount}}|{{index .Config.Labels \""
-            + _OWNER_LABEL + "\"}}"
-        )
-        rc, out, _ = _run_docker(["inspect", "-f", fmt, container], timeout=10)
-        if rc == 0:
-            parts = out.decode("utf-8", "replace").strip().split("|")
-            while len(parts) < 6:
-                parts.append("")
-            running, started_at, image, cid, restart_count, owner = parts[:6]
-            info.update({
-                "container": container,
-                "running": running == "true",
-                "started_at": started_at,
-                "image": image,
-                "id": cid[:12],
-                "restart_count": _to_int(restart_count),
-                "owner": owner or None,
-            })
-        else:
-            info["container"] = container
-            info["running"] = None
-            info["container_error"] = f"could not inspect '{container}'"
-
+        info["container"] = container
     try:
         reply = _converse(proto.encode_stat_request())
     except (_Refused, proto.ProtocolError, OSError) as e:
-        # All three, because this verb's whole point is that the two halves fail
-        # separately. `OSError` covers a server that accepted the connection and
-        # then hung: with only `_Refused` caught, a dead transport took the
-        # container facts down with it and the verb raised — the opposite of
-        # what the docstring above promises.
         message = getattr(e, "message", None) or str(e)
         info["transport"] = {"reachable": False, "error": message}
         return info
@@ -919,56 +823,41 @@ def cmd_status(args) -> dict:
     return info
 
 
-def _to_int(s: str) -> int | None:
-    try:
-        return int(s)
-    except (TypeError, ValueError):
-        return None
-
-
+@_reports_refusals
 def cmd_reset(args) -> dict:
-    """The one verb spoken entirely in Docker, because it restarts a container.
+    """Wipe `/home/dev` and restart the box, over the exec transport.
 
-    It wipes `/home/dev` and `docker restart`s the box — it does not *create*
-    one, so it is not the way to pick up a rebuilt image. The transport cannot
-    do even the restart and should not learn how: a server inside a container
-    cannot restart the container it is inside. So `_check_owned` survives for
-    this verb and nowhere else; `_run_docker` also survives for `cmd_status`,
-    which asks Docker about the container beside what it asks the server.
+    The server checks that `/home/dev` is a mount point before it answers,
+    empties it, reports, and exits; the supervisor then stops the container and
+    `restart: unless-stopped` brings it back. The home volume persists. It
+    does not pick up a rebuilt image: that is a container recreate, which is
+    the operator's `docker compose up -d`.
     """
-    container = _container_name()
-    if not container:
-        return _err("No devbox configured.")
     if not args.yes:
         return _err(
             "Refusing to reset without --yes. This wipes /home/dev for the user."
         )
-    ownership_err = _check_owned(container)
-    if ownership_err:
-        return _err(ownership_err)
-    # Refuse to wipe /home/dev unless it's actually a mountpoint — otherwise
-    # we'd be wiping a baked-in image layer the container couldn't restore
-    # from a `docker restart`.
-    rc_mp, _, _ = _run_docker(
-        ["exec", "-u", "root", container, "mountpoint", "-q", "/home/dev"],
-        timeout=10,
-    )
-    if rc_mp != 0:
-        return _err(
-            "/home/dev is not a mountpoint inside the container — refusing "
-            "to wipe (the volume is likely misconfigured)."
+    reply = _converse(proto.encode_restart_request(wipe_home=True))
+    fault = _terminal_fault(reply.terminal)
+    if fault:
+        return _err(f"the devbox did not finish the reset: {fault}")
+    report = reply.control[0] if reply.control else {}
+    result = {
+        "status": "ok",
+        "reset": True,
+        "wiped": bool(report.get("wiped")),
+        "not_removed": report.get("not_removed", 0),
+    }
+    container = _container_name()
+    if container:
+        result["container"] = container
+    if result["not_removed"]:
+        result["note"] = (
+            f"{result['not_removed']} entr{'y' if result['not_removed'] == 1 else 'ies'} "
+            "in /home/dev could not be removed (owned by root, and sudo was "
+            "refused); the box restarted anyway"
         )
-    rc, _, stderr = _run_docker(
-        ["exec", "-u", "root", container, "sh", "-c",
-         "find /home/dev -mindepth 1 -maxdepth 1 -exec rm -rf {} +"],
-        timeout=120,
-    )
-    if rc != 0:
-        return _err(stderr.decode("utf-8", "replace").strip() or "wipe failed")
-    rc2, _, stderr2 = _run_docker(["restart", container], timeout=60)
-    if rc2 != 0:
-        return _err(stderr2.decode("utf-8", "replace").strip() or "restart failed")
-    return {"status": "ok", "container": container, "reset": True}
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1004,7 +893,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="Devbox state, image, uptime, transport liveness")
 
-    p_reset = sub.add_parser("reset", help="Wipe /home/dev and restart container")
+    p_reset = sub.add_parser("reset", help="Wipe /home/dev and restart the container")
     p_reset.add_argument("--yes", action="store_true", help="Required confirmation flag")
 
     return p
@@ -1029,9 +918,6 @@ def main(argv: list[str] | None = None) -> None:
             return _err(exc.message, **({"code": exc.code} if exc.code else {}))
         if isinstance(exc, proto.ProtocolError):
             return _err(str(exc), code=exc.code)
-        if isinstance(exc, FileNotFoundError):
-            # docker CLI not on PATH — `reset` and `status` only.
-            return _err(f"Docker CLI not available: {exc}")
         return _err(f"{type(exc).__name__}: {exc}")
 
     run_skill_cli(

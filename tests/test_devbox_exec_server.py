@@ -2026,3 +2026,79 @@ class TestAShimReachesThisServerEndToEnd:
 
         assert result.returncode == 120
         assert "exec.sock" in result.stderr
+
+
+class TestRestart:
+    """`devbox reset` without the Docker CLI: the server answers, then exits
+    with the status its supervisor reads as "stop the container"."""
+
+    def test_a_restart_is_answered_and_the_server_exits_with_the_restart_status(
+        self, server
+    ):
+        from istota.devbox.exec_protocol import RESTART_EXIT_STATUS, encode_restart_request
+
+        with server.connect() as conn:
+            conn.send(encode_restart_request(wipe_home=False))
+            assert conn.read_ack()["status"] == "ok"
+            out = conn.collect()
+
+        assert out.controls[0] == {"restarting": True, "wiped": False, "not_removed": 0}
+        assert out.terminal["exit_code"] == 0
+        assert server.proc.wait(timeout=10) == RESTART_EXIT_STATUS
+        assert not os.path.exists(server.socket_path)
+
+    def test_a_restart_kills_what_is_still_running(self, server):
+        from istota.devbox.exec_protocol import encode_restart_request
+
+        conn = server.connect()
+        conn.send(encode_exec_request(
+            argv=["sh", "-c", "echo $$; exec sleep 300"], cwd=str(server.repos),
+        ))
+        assert conn.read_ack()["status"] == "ok"
+        decoder = FrameDecoder()
+        pid = None
+        while pid is None:
+            for stream, payload in decoder.feed(conn.sock.recv(65536)):
+                if stream == STREAM_STDOUT:
+                    pid = int(payload.split()[0])
+        with server.connect() as other:
+            other.send(encode_restart_request(wipe_home=False))
+            assert other.read_ack()["status"] == "ok"
+            other.collect()
+        server.proc.wait(timeout=10)
+        conn.close()
+        deadline = time.monotonic() + 10
+        while _running(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _running(pid), "a command outlived the restart"
+
+    def test_wiping_a_home_that_is_not_a_mount_point_is_refused(self, server):
+        from istota.devbox.exec_protocol import encode_restart_request
+
+        (server.home / "keep").write_text("x")
+        ack = server.refusal(encode_restart_request(wipe_home=True))
+
+        assert ack["code"] == ERR_PATH_REFUSED
+        assert "not a mount point" in ack["message"]
+        assert (server.home / "keep").exists()
+        assert server.proc.poll() is None, "a refused restart stopped the server"
+
+    def test_wipe_home_must_be_a_boolean(self, server):
+        ack = server.refusal(encode_line({"action": "restart", "wipe_home": "yes"}))
+        assert ack["code"] == ERR_BAD_REQUEST
+
+
+def test_emptying_a_directory_removes_entries_and_follows_no_link(tmp_path):
+    module = _load_server_module()
+    home = tmp_path / "home"
+    (home / "sub" / "deeper").mkdir(parents=True)
+    (home / "sub" / "deeper" / "f").write_text("x")
+    (home / ".hidden").write_text("x")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious").write_text("x")
+    (home / "link").symlink_to(outside)
+
+    assert module.empty_directory(str(home)) == []
+    assert list(home.iterdir()) == []
+    assert (outside / "precious").exists()

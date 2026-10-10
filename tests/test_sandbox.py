@@ -1055,7 +1055,7 @@ class TestNoDockerReachesTheSandbox:
     def _devbox_config(self, base: Config, tmp_path: Path):
         cli = tmp_path / "docker"
         cli.touch()
-        base.devbox = DevboxConfig(enabled=True, docker_cli=str(cli))
+        base.devbox = DevboxConfig(enabled=True)
         return base, cli
 
     def test_nothing_is_bound_at_the_conventional_docker_path(

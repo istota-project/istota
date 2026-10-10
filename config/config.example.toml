@@ -1614,11 +1614,19 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # [devbox]
 # enabled = false
 # container_prefix = "devbox-"         # container name = f"{prefix}{user_id}"
-# docker_cli = "/usr/bin/docker"       # host path to the Docker CLI. Used by the
-#                                      #   `reset` verb only — everything else speaks
-#                                      #   the exec transport over a Unix socket, and
-#                                      #   no Docker socket is bound into any sandbox.
 # max_output_bytes = 102400            # stdout/stderr cap per stream in the JSON envelope
+#
+# The rest is read by `istota devbox compose-file`, which renders one compose
+# service per user (the stack's compose.devbox.yml), and by the daemon, which
+# runs one credential-proxy listener per user. The bare-metal role renders its
+# own containers and leaves `users` empty.
+# users = []                           # e.g. ["alice"]; one devbox each
+# mem_limit = "4g"
+# cpus = 2.0
+# pids_limit = 512
+# log_max_size = "10m"
+# log_max_file = 3
+# network_subnet = "172.30.0.0/24"     # must match the VM's egress rules
 #
 # The socket directory is [developer.container] exec_socket_dir above, not a key
 # here: one spelling of /run/istota-exec in the tree, read by the skill CLI, the

@@ -268,17 +268,18 @@ class DevboxConfig:
 
     The ``istota-skill devbox`` CLI speaks the **exec transport** to a server
     running inside ``devbox-<user_id>``, over the per-user socket at
-    ``{exec_socket_dir}/{user_id}/exec.sock``. Everything else (image, network,
-    volume) is provisioned by Ansible.
+    ``{exec_socket_dir}/{user_id}/exec.sock``. In the stack, the containers
+    themselves come from ``istota devbox compose-file``, which renders one
+    service per entry in ``users`` (``devbox/compose_file.py``); the bare-metal
+    role renders its own from ``istota_devbox_users`` and leaves ``users``
+    empty.
 
-    **Nothing here reaches the Docker API from a sandbox any more.** The
-    allowlist proxy that used to be bound in at ``/var/run/docker.sock`` is
-    retired with its only consumer: ``docker exec`` through it could not return
-    an exit status, which is what forced the transport, and once nothing in a
-    build needed the socket the bind went and the proxy had no consumer left.
-    The one verb still spoken in Docker is ``reset``, which recreates a
-    container from this host-side CLI process using the daemon's own
-    environment and no ``DOCKER_HOST`` — the real socket, as it always was.
+    **Nothing here reaches the Docker API, from a sandbox or from the daemon.**
+    ``reset`` used to be the one verb spoken in Docker; it is a ``restart``
+    request on the exec transport now, and the container's restart policy
+    brings the box back. The credential proxy used to inspect containers to
+    authenticate a peer; it is identified by which per-user socket a client
+    reached instead (``devbox/proxy.py``).
 
     **``enabled`` is one switch doing two jobs, on purpose.** It offers the
     devbox skill *and* it is what :func:`devbox_container_backend` derives the
@@ -291,8 +292,21 @@ class DevboxConfig:
     """
     enabled: bool = False
     container_prefix: str = "devbox-"           # container name = f"{prefix}{user_id}"
-    docker_cli: str = "/usr/bin/docker"         # host Docker CLI (`reset` and credential-proxy peer checks)
     max_output_bytes: int = 102_400             # stdout/stderr cap per stream in the JSON envelope
+    # The users who get a devbox in the stack: one compose service each, and
+    # one credential-proxy listener each in the daemon. Empty on bare metal,
+    # where the role runs its own containers and proxy units.
+    users: list[str] = field(default_factory=list)
+    # Per-container limits and logging, rendered into each service.
+    mem_limit: str = "4g"
+    cpus: float = 2.0
+    pids_limit: int = 512
+    log_max_size: str = "10m"
+    log_max_file: int = 3
+    # The devbox network's fixed subnet. The VM's egress unit
+    # (host/istota-devbox-egress.sh) drops metadata, link-local, RFC 1918 and
+    # CGNAT destinations from this source range, so the two must agree.
+    network_subnet: str = "172.30.0.0/24"
     #
     # **There is deliberately no `exec_socket_dir` here.** The skill CLI reads
     # `[developer.container] exec_socket_dir` through `config.exec_socket_path`,
@@ -3549,6 +3563,7 @@ _RETIRED = frozenset({
     "site.base_path",
     "security.sandbox_admin_db_write",
     "rooms",
+    "devbox.docker_cli",
     # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
     "scheduler.istota_file_poll_interval",
 })
@@ -4388,6 +4403,14 @@ def load_config(config_path: Path | None = None) -> Config:
             "ignored. A member's turn in a shared room runs with that member's "
             "full reach, and their personal memory is never loaded there "
             "(ISSUE-576). Remove the key."
+        )
+
+    if "docker_cli" in (data.get("devbox") or {}):
+        logger.warning(
+            "[devbox] docker_cli is no longer supported and is being ignored. "
+            "Nothing in istota calls the Docker CLI: `devbox reset` is a "
+            "request on the exec transport and the credential proxy identifies "
+            "a devbox by its socket. Remove the key."
         )
 
     if "security" in data:
