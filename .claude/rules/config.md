@@ -9,6 +9,8 @@ This covers fields whose behaviour is not obvious from name and default: default
 
 ## Loading
 
+`istota apply -f plan` (`src/istota/apply.py`) is the declarative way in: the plan's `[config]` table is the whole of `config.toml`, validated by loading it (an unknown key warns; a value `config_mapper` would discard, or one the loader raises on, refuses), compared with the file as data, and written 0600 through `lib/toml_write.py` only on a change. Exit 0 unchanged, 2 changed or would change under `--dry-run`, 1 refused with nothing written. Any other section is refused rather than skipped, so the declarative-apply spec adds `[users.*]` as a section without moving the codes. The validation load points `db_path` at a scratch path, because the overlays in steps 7 to 10 below also delete rows.
+
 Search order: `config/config.toml` → `~/src/config/config.toml` → `~/.config/istota/config.toml` → `/etc/istota/config.toml`.
 
 1. Parse TOML; run `normalize_legacy_document` (WhatsApp flat-key migration) before the walk.

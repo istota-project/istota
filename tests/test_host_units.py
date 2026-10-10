@@ -353,6 +353,6 @@ class TestBootstrapFiles:
         doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
         assert doc["base"] == ["template:debian-13"]
         assert doc["containerd"] == {"system": False, "user": False}
-        assert doc["rosetta"]["enabled"] is True
+        assert doc["vmOpts"]["vz"]["rosetta"]["enabled"] is True
         assert doc["mounts"][0]["writable"] is False
         assert "/mnt/istota-repo/host/provision.sh" in doc["provision"][0]["script"]

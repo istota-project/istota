@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A machine dedicated to Istota is set up by one script and updated from signed releases.** `host/provision.sh` prepares a fresh Debian 13 VM, server or Lima VM on a Mac, and `istota-stack update <tag>` builds the images on the machine from a release tag only after checking its signature against the release key you configured; an unsigned tag, a branch or another key's signature is refused before anything changes. `istota-stack rollback` returns to the previous release, and refuses when a newer release has already migrated the database.
+
+- **`istota apply -f plan.toml` writes `config.toml` from a plan**, for installs managed by Ansible or another config manager. It prints a diff with credentials hidden, writes only when something changed, and exits 0 for no change, 2 for a change (or one `--dry-run` would make) and 1 for a refused plan, with nothing written. `istota-stack apply` restarts the stack when the config changed.
+
 - Search beside the notification bell finds messages, room names, memories, facts and records in your enabled modules. Open it with Cmd+K or Ctrl+K, choose a result to open its source, or search transactions when you need them. Older message results can load the matching history and mark the message in its room.
 
 - Recovery-code sign-in can fill one saved code after your approval, without displaying it in chat. Used codes stay marked in Settings, and a notice asks you to regenerate a nearly exhausted set; enrollment can confirm one freshly captured code without a separate approval.

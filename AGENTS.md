@@ -37,7 +37,7 @@ Boundaries and operations:
 - `maintenance.md` — backups, migrators, the worktree and cache sweepers, host pressure, session transcripts
 - `doctor.md` — the runtime self-check registry, and what each check may and may not do
 - `install.md` — the standalone single-user install: the wizard's boundaries and the updater
-- `deployment.md` — Ansible role, Docker stack, the Nextcloud rclone mount
+- `deployment.md` — Ansible role, Docker stack, the dedicated VM (`host/`, `istota-stack`, signed-tag updates, the schema stamp), the Nextcloud rclone mount
 - `testbed.md` — `testbed/`: the two compose shapes, profiles, the `Service` protocol, session-scoped reset, the prompt goldens
 - `testing.md` — why each verification rule below is what it is
 - `committing.md` — the two pre-commit scans and how they fail
@@ -61,6 +61,7 @@ src/istota/
 ├── updater.py            # `istota update` self-update for the standalone install → install.md
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── config_mapper.py      # Maps a parsed TOML document onto the `Config` dataclass tree → leaf-modules.md
+├── apply.py              # `istota apply -f plan`: config.toml from a plan's [config], exit 0/2/1 → config.md
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (framework tables)
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
@@ -185,6 +186,7 @@ src/istota/
 │   ├── gif_frames.py     # The child that tiles a GIF-as-MP4's frames into one JPEG; stdlib, PyAV and Pillow → leaf-modules.md
 │   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 │   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
+│   ├── toml_write.py     # The tree's one TOML writer: the wizard, `istota apply` and the testbed → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
@@ -198,7 +200,7 @@ src/istota/
 
 The root holds only what `tests/test_package_layout.py`'s `ROOT_ALLOWLIST` names. A new module goes in the package for its subsystem; adding one to the root is a deliberate one-line change to that list. Packages created for the layout keep an empty `__init__.py`, and `lib/` imports nothing from `istota`.
 
-Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `docs/` (the documentation markdown, referenced by path from Ansible, compose, the rules files and source docstrings — the files stay here), `docs-site/` (the Docusaurus site that renders it; `.md` is CommonMark, and a new page is listed in its `sidebars.ts`), `tests/`, `testbed/` (the deployment tiers' staging environment; its own `pyproject.toml`, never imported by `src/istota/` — see `.claude/rules/testbed.md`), `schema.sql`.
+Alongside `src/`: `host/` (the dedicated VM: `provision.sh`, `istota-stack`, the systemd units, the Lima template and cloud-init; `.claude/rules/deployment.md`), `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `docs/` (the documentation markdown, referenced by path from Ansible, compose, the rules files and source docstrings — the files stay here), `docs-site/` (the Docusaurus site that renders it; `.md` is CommonMark, and a new page is listed in its `sidebars.ts`), `tests/`, `testbed/` (the deployment tiers' staging environment; its own `pyproject.toml`, never imported by `src/istota/` — see `.claude/rules/testbed.md`), `schema.sql`.
 
 ## Key Concepts
 

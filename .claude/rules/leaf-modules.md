@@ -207,6 +207,10 @@ One fence around content somebody else wrote: `frame_untrusted(text, label)` put
 
 stdlib-only leaf: imports nothing, never raises.
 
+## lib/toml_write.py
+
+The tree's one TOML writer: `toml_string` (basic-string escaping, control characters as `\uXXXX`) and `dumps` (nested tables, arrays of tables, inline arrays and tables, dates), written so `tomllib.loads(dumps(doc)) == doc`. It replaced three: the standalone wizard's escaper (`setup_wizard._toml_str` is now this), the container wizard's `tomli_w`, and the testbed's `toml_dumps`, which imports this. `istota apply` renders through it. `None` is refused rather than dropped, since a plan saying null means something TOML cannot. `tests/test_toml_write.py` holds the round trip and sweeps `src/` and `testbed/` for a new copy; `cron_loader`'s CRON.md escaper (its backtick rule) and money's `tomli_w` calls write other documents and are named there. stdlib-only leaf, imports nothing: the testbed imports it.
+
 ## lib/toml_fence.py
 
 Where a ```toml fence starts and ends, for the four modules that parse one from a user-written markdown file: `cron_loader` (CRON.md), `heartbeat` (HEARTBEAT.md), `user_briefings` (BRIEFINGS.md) and `money._config_io`. All four copied one expression with one defect (ISSUE-386): neither marker was line-anchored, so the block ended at the first backtick run after the opener, in a comment or a string. In `cron_loader`, which drives an orphan sweep, a truncation on a table boundary produced valid TOML holding a subset of the jobs and the sweep deleted the rest silently.

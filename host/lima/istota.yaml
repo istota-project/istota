@@ -23,9 +23,11 @@ cpus: 4
 memory: 6GiB
 disk: 40GiB
 
-rosetta:
-  enabled: true
-  binfmt: true
+vmOpts:
+  vz:
+    rosetta:
+      enabled: true
+      binfmt: true
 
 # Docker Engine, installed by provision.sh, runs every container; Lima's own
 # containerd is off.
