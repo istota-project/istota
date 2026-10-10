@@ -387,15 +387,18 @@ secret_names() {
 }
 
 ensure_secret_files() {
-    local name owner=()
+    local name owner=() request rc=0
     # Root on the VM; the tests run as themselves.
     if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
     install -d -m 0700 "${owner[@]}" "$SECRETS_DIR" || return 1
+    # The files themselves go through put-files: secrets/ is uid 10001's.
+    request='{"secrets": {'
     for name in $(secret_names); do
-        if [ ! -e "${SECRETS_DIR}/${name}" ]; then
-            install -m 0400 "${owner[@]}" /dev/null "${SECRETS_DIR}/${name}" || return 1
-        fi
+        request="${request}\"${name}\": null, "
     done
+    request="${request%, }}}"
+    printf '%s' "$request" | cmd_put_files >/dev/null || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]
 }
 
 # An install upgraded from the Docker shape keeps its config on the state

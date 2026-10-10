@@ -278,6 +278,28 @@ class TestASignedTagIsDeployed:
         assert (secrets / "new_one").read_text() == ""
         assert (secrets / "old_one").read_text() == "kept"
 
+    def test_a_link_planted_at_a_new_secret_is_replaced_not_followed(self, fx, tmp_path):
+        """secrets/ is uid 10001's, so the missing-file pass goes through
+        put-files rather than root's own install."""
+        compose = fx.origin / "docker" / "docker-compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("secrets:\n  new_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/new_one\n")
+        _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        secrets = fx.stack / "secrets"
+        secrets.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (secrets / "new_one").symlink_to(elsewhere)
+
+        result = fx.run("update", "v1")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (secrets / "new_one").is_symlink()
+        assert (secrets / "new_one").read_text() == ""
+        assert list(elsewhere.iterdir()) == []
+
     def test_native_only_builds_without_claude_code(self, fx, tmp_path):
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
