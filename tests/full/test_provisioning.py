@@ -131,8 +131,10 @@ class TestFirstInstallProvisioning:
 
     @pytest.mark.parametrize("service", ["istota", "web"])
     def test_both_login_methods_are_enabled(self, provisioned, service):
+        # The venv's interpreter, not `uv run`: web's root is read-only, and uv
+        # wants to write its cache and lock before it runs anything.
         result = provisioned.exec([
-            "uv", "run", "python", "-c",
+            "/app/.venv/bin/python", "-c",
             "import json; from pathlib import Path; from istota.config import load_config; "
             "print(json.dumps(load_config(Path('/data/config/config.toml')).web.auth))",
         ], service=service)
