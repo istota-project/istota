@@ -10660,6 +10660,12 @@ def run_daemon(
     if start_baileys_bridge(config):
         logger.info("STARTUP Started the WhatsApp Baileys bridge")
 
+    # One listener per `[devbox] users` entry, each answering as its user;
+    # the devbox reaches only its own through the per-user volume.
+    from .devbox.proxy import start_in_daemon as start_devbox_proxy
+    if start_devbox_proxy(config):
+        logger.info("STARTUP Started the devbox credential proxy listeners")
+
     if config.talk.enabled and config.talk.signaling.enabled:
         _start_talk_signaling(config)
         logger.info("STARTUP Started Talk signaling supervisor (poller not started)")

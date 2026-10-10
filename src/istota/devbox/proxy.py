@@ -1,16 +1,31 @@
 """Devbox credential proxy daemon.
 
-Per-user asyncio daemon that lives on the host, listens on a Unix socket
-bind-mounted into the user's devbox container, and answers structured
-requests for git credentials and forge tokens.
-
-See `.claude/skills/spec/devbox-credential-proxy` (in the user's notes
-vault) for the full design. The protocol is in
+Listens on one Unix socket per devbox user and answers structured requests
+for git credentials and forge tokens. The protocol is in
 ``src/istota/devbox/proxy_protocol.py``.
 
 Three actions: ``ping``, ``git_credential`` (get/store/erase), and
 ``forge_token``. Every one of them answers out of the context held in
 memory — the daemon makes no outbound requests of its own.
+
+**Who a caller is, is which socket it reached.** Each listener is bound for
+one user and answers as that user, fixed when it is bound; nothing in a
+request selects a user. User U's socket is in the volume ``devbox-cred-U``,
+which only U's devbox and the istota container mount, and no task sandbox
+binds any credential socket directory. The proxy used to authenticate each
+peer with ``docker container inspect`` and a ``/proc/<pid>/cgroup``
+comparison, which needs the Docker socket and the host's PID namespace; the
+istota container has neither, and giving it both would hand the daemon root
+of the VM. The other processes that can reach the socket are the daemon
+itself and an admin's unsandboxed cron ``command`` or heartbeat
+``shell-command``, which can read the database and the secret key already.
+The one-deployment-shape spec's Decisions section records the reasoning.
+
+In the istota container the scheduler starts every user's listener on its
+own event loop (``start_in_daemon``). The bare-metal role still runs one
+process per user (``python -m istota.devbox.proxy --user U``) until that
+shape is retired; with the peer check gone, its socket is guarded by the
+directory and socket modes alone.
 
 ``forge_token`` replaced the ``gitlab_api`` / ``github_api`` actions,
 which had the proxy make the REST call itself against an endpoint
@@ -35,14 +50,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from istota.sandbox import peer_process
-from istota.devbox.peer import peer_in_devbox
 from istota.devbox.proxy_protocol import (
     ACTION_FORGE_TOKEN,
     ACTION_GIT_CREDENTIAL,
     ACTION_PING,
     ERR_BAD_REQUEST,
-    ERR_FORBIDDEN,
     ERR_INTERNAL,
     ERR_NO_TOKEN,
     ERR_UNKNOWN_ACTION,
@@ -67,8 +79,8 @@ audit_logger.setLevel(logging.INFO)
 class DevboxProxyContext:
     """Per-user runtime context for the proxy daemon.
 
-    Held in memory for the lifetime of the unit. Tokens are loaded once
-    at startup; rotation is handled by restarting the systemd unit.
+    Held in memory for the lifetime of the listener. Tokens are loaded
+    once at startup; rotation is a restart of whatever runs the listener.
 
     No HTTP client and no timeout: since ``forge_token`` replaced the two
     REST actions the daemon answers every request out of these fields and
@@ -80,8 +92,6 @@ class DevboxProxyContext:
     github_token: str
     gitlab_url: str
     github_url: str
-    container_name: str = ""
-    docker_cli: str = "/usr/bin/docker"
 
     @property
     def providers(self) -> list[str]:
@@ -404,16 +414,6 @@ _RETIRED_ACTIONS = {
 MAX_CONCURRENT_CONNECTIONS: int = 32
 
 
-async def _peer_allowed(writer: asyncio.StreamWriter, ctx: DevboxProxyContext) -> bool:
-    sock = writer.get_extra_info("socket")
-    pid = peer_process.peer_pid(sock) if sock is not None else None
-    started = peer_process.start_time(pid) if pid is not None else None
-    return await asyncio.to_thread(
-        peer_in_devbox, pid, started, user_id=ctx.user_id,
-        container_name=ctx.container_name, docker_cli=ctx.docker_cli,
-    )
-
-
 async def handle_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -422,12 +422,10 @@ async def handle_connection(
     """Read one request, dispatch, write one response, close.
 
     Errors at any layer collapse into the canonical structured envelope —
-    the client always sees JSON.
+    the client always sees JSON. There is no peer check: ``ctx`` is the
+    listener's, so a caller is whoever this socket's user is.
     """
     try:
-        allowed = await _peer_allowed(writer, ctx)
-        # Drain one bounded request before closing, so Linux clients receive
-        # the refusal instead of a reset. Never parse an unauthorized request.
         try:
             line_bytes = await asyncio.wait_for(reader.readline(), timeout=5)
         except (asyncio.LimitOverrunError, ValueError, asyncio.TimeoutError):
@@ -435,16 +433,7 @@ async def handle_connection(
             # (MAX_REQUEST_BYTES + 4096). Same outcome as the protocol-
             # layer cap — fail with bad_request.
             await _write_line(
-                writer,
-                encode_error(ERR_BAD_REQUEST, "request too large or timed out")
-                if allowed else encode_error(ERR_FORBIDDEN, "peer is not in this user's devbox"),
-            )
-            return
-        if not allowed:
-            _audit(user_id=ctx.user_id, action="connection", result="forbidden",
-                   dur_ms=0, reason="peer")
-            await _write_line(
-                writer, encode_error(ERR_FORBIDDEN, "peer is not in this user's devbox"),
+                writer, encode_error(ERR_BAD_REQUEST, "request too large or timed out"),
             )
             return
         if not line_bytes:
@@ -508,11 +497,8 @@ async def _write_line(writer: asyncio.StreamWriter, line: str) -> None:
 async def build_context(user_id: str, config) -> DevboxProxyContext:
     """Build a DevboxProxyContext from a loaded Config."""
     dev = config.developer
-    devbox = getattr(config, "devbox", None)
     return DevboxProxyContext(
         user_id=user_id,
-        container_name=f"{getattr(devbox, 'container_prefix', 'devbox-')}{user_id}",
-        docker_cli=getattr(devbox, "docker_cli", "/usr/bin/docker"),
         gitlab_token=getattr(dev, "gitlab_token", "") or "",
         github_token=getattr(dev, "github_token", "") or "",
         gitlab_url=getattr(dev, "gitlab_url", "https://gitlab.com") or "https://gitlab.com",
@@ -520,52 +506,46 @@ async def build_context(user_id: str, config) -> DevboxProxyContext:
     )
 
 
+def _socket_dir(config) -> Path:
+    return Path(getattr(config.developer, "devbox_proxy_socket_dir", "/var/run/istota"))
+
+
 def _default_socket_path(user_id: str, config) -> Path:
     """Per-user subdirectory holds the socket.
 
-    Layout: ``{sock_dir}/{user_id}/sock``. The compose template bind-
-    mounts the per-user directory (not the socket file) so that when the
-    daemon restarts and unlinks+recreates the socket, the container sees
-    the new inode through the same mount. A file bind-mount would pin
-    the original inode and break every reconnect after a daemon restart.
+    Layout: ``{sock_dir}/{user_id}/sock``. The per-user directory is what a
+    devbox mounts (the ``devbox-cred-<user>`` volume in the stack, a bind on
+    bare metal), never the socket file, so a listener that restarts and
+    recreates the socket inode is seen through the same mount. A file mount
+    would pin the original inode and break every reconnect after a restart.
 
-    Per-user directories also enforce cross-tenant isolation: container
-    alice's bind mount only contains alice's socket, even though the
-    sockets are all group-readable by ``istota``.
+    The directory is also the access boundary: devbox alice's mount holds
+    alice's socket and nothing else.
     """
-    sock_dir = getattr(config.developer, "devbox_proxy_socket_dir", "/var/run/istota")
-    return Path(sock_dir) / user_id / "sock"
+    return _socket_dir(config) / user_id / "sock"
 
 
-async def serve(
-    user_id: str,
-    config,
-    *,
-    socket_path: Path | None = None,
-) -> None:
-    """Run the devbox proxy daemon for one user.
+@dataclass
+class Listener:
+    """One user's bound socket."""
 
-    Returns when the server is stopped (cancelled). Cleans up the socket
-    file on the way out.
-    """
-    ctx = await build_context(user_id, config)
-    audit_log_path = getattr(config.developer, "devbox_proxy_audit_log", "") or ""
-    configure_audit_log(audit_log_path or None)
-    sock_path = socket_path or _default_socket_path(user_id, config)
-    # Per-user parent dir is part of the access boundary. Create it 0o750
-    # explicitly (mkdir() defaults respect umask but we don't want to
-    # depend on the systemd-set umask here). The container's `dev` user
-    # gains traverse access via the istota group membership granted by
-    # the compose template's group_add.
+    user_id: str
+    path: Path
+    server: asyncio.AbstractServer
+
+
+async def _bind(ctx: DevboxProxyContext, sock_path: Path) -> asyncio.AbstractServer:
+    """Bind ``sock_path`` for ``ctx``'s user and return the listening server."""
+    # 0o750 explicitly rather than through the umask. The devbox reaches it
+    # as the same uid in the stack, and through the istota group on bare
+    # metal; nobody else needs to traverse it.
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(str(sock_path.parent), 0o750)
     except OSError:
-        # Test harnesses sometimes run with a parent dir we don't own;
-        # the chmod is best-effort. Production deploys put the dir under
-        # /var/run/istota which the daemon owns.
+        # A test harness may hand over a directory it owns; best-effort.
         pass
-    if sock_path.exists():
+    if sock_path.exists() or sock_path.is_symlink():
         sock_path.unlink()
 
     connection_sem = asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
@@ -597,10 +577,6 @@ async def serve(
     # client could race the chmod and see the default-permission inode.
     # The explicit chmod afterwards is belt-and-suspenders for setups
     # with a wider umask (e.g. test harnesses).
-    #
-    # Group access permits container clients to connect; it authenticates
-    # no task sharing the daemon's uid. The kernel peer and Docker cgroup
-    # check in handle_connection decide whose credentials it may receive.
     previous_umask = os.umask(0o117)
     try:
         server = await asyncio.start_unix_server(
@@ -611,6 +587,112 @@ async def serve(
     finally:
         os.umask(previous_umask)
     os.chmod(str(sock_path), 0o660)
+    logger.info(
+        "devbox_proxy listening user_id=%s socket=%s providers=%s",
+        ctx.user_id, sock_path, ",".join(ctx.providers) or "none",
+    )
+    return server
+
+
+def wanted_users(config) -> list[str]:
+    """The users the daemon binds a listener for, in config order.
+
+    ``[devbox] users`` names the devboxes the stack runs; the bare-metal role
+    leaves it empty and runs a systemd unit per user instead, so an empty list
+    is also what keeps the two from binding the same socket.
+    """
+    devbox = getattr(config, "devbox", None)
+    if not getattr(devbox, "enabled", False):
+        return []
+    if not getattr(config.developer, "devbox_proxy_enabled", True):
+        return []
+    return [u for u in (getattr(devbox, "users", None) or []) if isinstance(u, str)]
+
+
+async def start_listeners(config, users: list[str] | None = None) -> list[Listener]:
+    """Bind one listener per user and return them.
+
+    A user id that does not name a child of the socket directory (empty,
+    ``..``, absolute, a separator) is refused with a warning rather than
+    bound somewhere else.
+    """
+    from istota.sandbox.user_scope import scoped_user_dir
+
+    audit_log_path = getattr(config.developer, "devbox_proxy_audit_log", "") or ""
+    configure_audit_log(audit_log_path or None)
+    root = _socket_dir(config)
+    listeners: list[Listener] = []
+    for user_id in wanted_users(config) if users is None else users:
+        user_dir = scoped_user_dir(root, user_id)
+        if user_dir is None or "/" in user_id:
+            logger.warning(
+                "devbox_proxy refusing user_id=%r: it does not name a directory "
+                "under %s", user_id, root,
+            )
+            continue
+        ctx = await build_context(user_id, config)
+        sock_path = user_dir / "sock"
+        try:
+            server = await _bind(ctx, sock_path)
+        except OSError:
+            logger.exception("devbox_proxy could not bind %s", sock_path)
+            continue
+        listeners.append(Listener(user_id=user_id, path=sock_path, server=server))
+    return listeners
+
+
+async def stop_listeners(listeners: list[Listener]) -> None:
+    """Close every listener and remove its socket."""
+    for listener in listeners:
+        listener.server.close()
+        try:
+            await asyncio.wait_for(listener.server.wait_closed(), 5)
+        except Exception:
+            pass
+        try:
+            listener.path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def start_in_daemon(config) -> bool:
+    """Start every wanted listener on the daemon's event loop. Never raises.
+
+    Returns whether any listener is up. The scheduler calls this once at
+    start-up, after the persistent loop exists, the way it starts the
+    WhatsApp bridge; the runtime's cleanup hook closes them on stop.
+    """
+    if not wanted_users(config):
+        return False
+    from istota.async_runtime import get_async_runtime, run_coro
+
+    try:
+        listeners = run_coro(start_listeners(config))
+    except Exception:
+        logger.error("devbox_proxy could not start its listeners", exc_info=True)
+        return False
+    if not listeners:
+        return False
+    get_async_runtime().add_cleanup_hook(lambda: stop_listeners(listeners))
+    return True
+
+
+async def serve(
+    user_id: str,
+    config,
+    *,
+    socket_path: Path | None = None,
+) -> None:
+    """Run the devbox proxy daemon for one user (the bare-metal unit).
+
+    Returns when the server is stopped (cancelled). Cleans up the socket
+    file on the way out.
+    """
+    ctx = await build_context(user_id, config)
+    audit_log_path = getattr(config.developer, "devbox_proxy_audit_log", "") or ""
+    configure_audit_log(audit_log_path or None)
+    sock_path = socket_path or _default_socket_path(user_id, config)
+    server = await _bind(ctx, sock_path)
 
     # SIGTERM cleanup: systemd sends SIGTERM on stop. Without an explicit
     # handler asyncio surfaces it as KeyboardInterrupt only on the main
@@ -631,10 +713,6 @@ async def serve(
             # Windows asyncio); fall through and rely on cancellation.
             pass
 
-    logger.info(
-        "devbox_proxy listening user_id=%s socket=%s providers=%s",
-        user_id, sock_path, ",".join(ctx.providers) or "none",
-    )
     try:
         async with server:
             serve_task = asyncio.create_task(server.serve_forever())
