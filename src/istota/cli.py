@@ -383,6 +383,16 @@ def cmd_apply(args):
     )
 
 
+def cmd_migrate(args):
+    """Reached only when a global option came first; `main` peels the usual form."""
+    print(
+        "istota migrate: put nothing before the verb, e.g. "
+        "`istota migrate import-bare-metal --help`.",
+        file=sys.stderr,
+    )
+    return 64
+
+
 def cmd_setup(args):
     """First-run installer: the container shape, or the standalone install."""
     from . import setup_wizard
@@ -4668,6 +4678,15 @@ def cmd_session_stats(args):
 
 
 def main():
+    # `istota migrate import-bare-metal …` belongs to the module, whose own
+    # `--config` names the file it writes rather than the one to load. Peeled
+    # off the raw argv before either parser can take an option from it.
+    argv = sys.argv[1:]
+    if argv[:2] == ["migrate", "import-bare-metal"]:
+        from istota.maintenance import bare_metal_import
+
+        sys.exit(bare_metal_import.main(argv[2:]))
+
     # `istota money <op> …` forwards operational commands verbatim to the money
     # Click tree. argparse REMAINDER can't capture a leading option (e.g.
     # `money list -u U`), so peel those off before the strict parse_args().
@@ -4712,6 +4731,14 @@ def main():
     apply_parser.add_argument(
         "--dry-run", action="store_true",
         help="Print the diff and the exit code it would take; write nothing",
+    )
+
+    # migrate
+    migrate_parser = subparsers.add_parser("migrate", help="One-time migrations between deployment shapes")
+    migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_action", required=True)
+    migrate_subparsers.add_parser(
+        "import-bare-metal",
+        help="Import a bare-metal install's export (exit 0 done, 1 refused, 2 partial); see --help",
     )
 
     # init
@@ -5633,12 +5660,13 @@ def main():
 
     # Load config and setup logging (except for init/setup/apply, which don't need — or
     # may pre-date — a config file).
-    if args.command not in ("init", "setup", "apply"):
+    if args.command not in ("init", "setup", "apply", "migrate"):
         config = load_config(Path(args.config) if args.config else None)
         setup_logging(config, verbose=args.verbose)
 
     commands = {
         "apply": cmd_apply,
+        "migrate": cmd_migrate,
         "init": cmd_init,
         "doctor": cmd_doctor,
         "task": cmd_task,

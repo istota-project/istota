@@ -1,0 +1,512 @@
+# Test fixture: config.toml as the Ansible role renders it, from
+# deploy/ansible/templates/config.toml.j2 against the role's own defaults with
+# developer, devbox, browser, email and the Baileys adapter switched on and
+# example.test names. Rendered once with tests/test_ansible_config_template.py's
+# render() and frozen, because the role is deleted in the spec's last stage and
+# `istota migrate import-bare-metal` must keep reading what it wrote.
+#
+# Istota configuration - managed by Ansible
+
+# Install namespace (drives /etc/{namespace}/, secrets paths, etc.)
+namespace = "istota"
+
+# Bot identity
+bot_name = "Istota"
+emissaries_enabled = true
+custom_system_prompt = true
+
+# Database path. Filename is fixed (technical IDs are always istota); only
+# the parent dir is per-deploy via /srv/app/istota.
+db_path = "/srv/app/istota/data/istota.db"
+
+# Local-disk root for per-user module DBs (feeds/health/location/money). Local
+# disk, NOT the Nextcloud mount: WAL's -shm SIGBUSes on the FUSE mount. Only the
+# .db lives here; user-facing module files stay in the workspace on the mount.
+module_data_dir = "/srv/app/istota/data/modules"
+
+# File access configuration
+workspace_path = "/srv/mount/nextcloud/content"
+nextcloud_mount_path = "/srv/mount/nextcloud/content"
+# rclone remote name for Nextcloud files (used when mount_path not set, or for owner detection)
+rclone_remote = "nextcloud"
+
+# Path to skills directory (individual skill files loaded selectively)
+# Points to src/config/skills where skills and guidelines folders live in the repo
+skills_dir = "/srv/app/istota/istota/config/skills"
+
+# Temporary directory
+temp_dir = "/srv/app/istota/tmp"
+
+# Experimental feature flags — operator opt-in for rough features that
+# ship in the tree but are off by default. See docs/EXPERIMENTAL.md for
+# the registry. Override via `istota_experimental_features` in
+# host_vars / group_vars. Example: ["money_tax", "money_wash_sales"].
+[experimental]
+features = []
+
+[brain]
+# Which model-invocation backend the executor uses.
+#   "claude_code" (default) wraps the headless `claude -p` CLI subprocess.
+#   "native"                runs istota's own in-process agent loop.
+#   "tmux_claude"           drives the interactive `claude` TUI via tmux
+#                           (needs tmux on the host).
+# Operator runbook: docs/configuration/native-brain.md.
+kind = "claude_code"
+fallback_on_transient = true
+fallback_cooldown_seconds = 3600
+
+[security]
+credential_history_days = 180
+credential_audit_days = 365
+credential_backup_retention = 30
+credential_exports_per_day = 3
+sandbox_enabled = true
+allow_unsandboxed_multi_user_vaults = false
+vault_fetch_limit_per_task = 10
+vault_writes_per_task = 3
+skill_proxy_enabled = true
+skill_proxy_timeout = 300
+skill_client_wait_seconds = 600
+
+[security.credential_broker]
+enabled = false
+enforce_reveal = false
+scan_max_bytes = 1048576
+leaf_validity_hours = 24
+
+[security.network]
+enabled = true
+allow_pypi = true
+
+[nextcloud]
+url = "https://cloud.example.test"
+username = "istota"
+share_default_expire_days = 14
+
+[talk]
+enabled = true
+bot_username = "istota"
+
+[talk.signaling]
+enabled = false
+url = ""
+room_sync_interval = 300
+reconnect_backoff_max = 60
+payload_direct = false
+
+[email]
+enabled = true
+imap_host = "mail.example.test"
+imap_port = 993
+imap_user = "bot@example.test"
+smtp_host = "mail.example.test"
+smtp_port = 587
+poll_folder = "INBOX"
+bot_email = ""
+imap_timeout_seconds = 30
+confirm_sender_match = "off"
+dmarc_canary = true
+dmarc_canary_warn_on_missing = false
+thread_disclosure_footer = false
+authserv_id = ""
+outbound_approval_floor = "untrusted"
+
+[sms]
+enabled = false
+provider = "twilio"
+service_numbers = []
+default_sender_number = ""
+max_segments = 6
+request_timeout_seconds = 10
+
+[sms.twilio]
+
+[sms.telnyx]
+
+[whatsapp]
+enabled = true
+provider = "baileys"
+business_phone_number = ""
+group_bare_file_hold_seconds = 30
+
+[whatsapp.cloud]
+waba_id = ""
+phone_number_id = ""
+graph_api_version = ""
+business_timezone = "UTC"
+request_timeout_seconds = 10
+billing_policy = "free_guard"
+monthly_service_attempt_limit = 900
+
+[whatsapp.cloud.proactive_template]
+enabled = false
+name = ""
+language = "en_US"
+
+[whatsapp.baileys]
+sidecar_command = ""
+pairing_enabled = true
+pairing_window_seconds = 300
+pairing_relay_path = ""
+restart_interval_seconds = 30
+
+[models.aliases]
+
+[models.aliases."fast"]
+"anthropic" = { model = "claude-haiku-5-5", effort = "low" }
+"openai_compat" = { model = "z-ai/glm-5.3-flash", effort = "low" }
+
+[models.aliases."general"]
+"anthropic" = { model = "claude-sonnet-5-5", effort = "medium" }
+"openai_compat" = { model = "z-ai/glm-5.3-flash", effort = "medium" }
+
+[models.aliases."smart"]
+"anthropic" = { model = "claude-opus-5-5", effort = "high" }
+"openai_compat" = { model = "z-ai/glm-5.3-flash", effort = "high" }
+
+[conversation]
+enabled = true
+lookback_count = 25
+selection_model = "fast"
+selection_timeout = 30.0
+skip_selection_threshold = 3
+use_selection = true
+always_include_recent = 10
+context_truncation = 0
+context_recency_hours = 0
+context_min_messages = 10
+previous_tasks_count = 3
+talk_context_limit = 100
+
+[speech_gate]
+ack_reaction = "👍"
+
+[speech_gate.ack_reactions]
+"agreement" = ["👌"]
+"celebration" = ["🎉"]
+"funny" = ["😄", "🐙"]
+"thanks" = ["👍", "🐙"]
+
+[logging]
+level = "INFO"
+output = "both"
+file = "/var/log/istota/istota.log"
+rotate = true
+max_size_mb = 10
+backup_count = 5
+
+[scheduler]
+credential_backup_interval = 86400
+poll_interval = 5
+dispatch_interval = 0.5
+talk_poll_interval = 10
+talk_poll_timeout = 30
+talk_poll_wait = 2.0
+talk_poll_full_sweep_interval = 300
+email_poll_interval = 60
+email_poll_batch_size = 50
+email_rate_limit_messages = 60
+email_sender_rate_limit_messages = 20
+email_rate_limit_window_seconds = 3600
+email_confirmation_prompts_per_window = 3
+email_task_queue = "background"
+email_max_body_chars = 32000
+email_max_attachment_bytes = 26214400
+email_max_attachment_bytes_per_poll = 104857600
+briefing_check_interval = 60
+tasks_file_poll_interval = 30
+shared_file_check_interval = 120
+heartbeat_check_interval = 60
+db_health_check_interval = 86400
+worktree_reap_interval = 21600
+sandbox_cache_sweep_interval = 21600
+avatar_import_interval = 21600
+main_loop_read_timeout_ms = 2000
+db_backup_enabled = true
+db_backup_interval = 86400
+db_backup_dir = ""
+db_backup_retention = 7
+scheduler_stats_interval = 60
+host_pressure_enabled = true
+host_pressure_breadcrumb_interval_seconds = 300
+host_pressure_sample_interval_seconds = 30
+host_pressure_psi_threshold = 40.0
+host_pressure_alert_cooldown_seconds = 900
+host_pressure_shmem_unaccounted_alert_mb = 1024
+host_pressure_docker_socket = "/var/run/docker.sock"
+min_available_memory_mb = 768
+
+# Progress / event streaming
+progress_updates = true
+progress_show_tool_use = true
+progress_show_text = false
+event_log_enabled = true
+stream_text_gate_chars = 280
+push_notification_threshold_seconds = 30
+push_notification_sources = []
+task_timeout_minutes = 60
+log_channel_show_skills = true
+
+# Robustness settings
+confirmation_timeout_minutes = 120
+stale_pending_warn_minutes = 30
+stale_pending_fail_hours = 2
+max_retry_age_minutes = 60
+worker_heartbeat_seconds = 60
+worker_stuck_minutes = 10
+task_retention_days = 7
+email_retention_days = 7
+processed_email_retention_days = 90
+worker_idle_timeout = 10
+worker_idle_poll_interval = 0.5
+max_foreground_workers = 5
+max_background_workers = 3
+user_max_foreground_workers = 2
+user_max_background_workers = 1
+long_task_threshold_minutes = 10
+user_max_long_workers = 1
+max_long_workers = 2
+task_cgroup_enabled = true
+task_memory_max_mb = 2048
+task_pids_max = 512
+task_cpu_max_percent = 200
+scheduled_job_max_consecutive_failures = 5
+cron_max_staleness_minutes = 60
+max_subtasks_per_task = 10
+max_subtask_depth = 3
+max_subtask_prompt_chars = 8000
+talk_cache_max_per_conversation = 200
+temp_file_retention_days = 7
+location_ping_retention_days = 365
+
+
+[[default_briefings]]
+name = "morning"
+cron = "0 6 * * 1-5"
+title = "Morning Briefing"
+output = "email"
+
+  [[default_briefings.blocks]]
+  title = "🌍 Headlines"
+  render_mode = "structured"
+
+    [[default_briefings.blocks.sources]]
+    kind = "shared_block"
+    config = { "name" = "world-headlines", "max_age_hours" = 6 }
+
+  [[default_briefings.blocks]]
+  title = "📈 Markets"
+  render_mode = "structured"
+
+    [[default_briefings.blocks.sources]]
+    kind = "shared_block"
+    config = { "name" = "markets-summary", "max_age_hours" = 6 }
+
+  [[default_briefings.blocks]]
+  title = "📅 Calendar"
+  render_mode = "structured"
+
+    [[default_briefings.blocks.sources]]
+    kind = "calendar"
+    config = {}
+
+[[default_briefings]]
+name = "evening"
+cron = "0 18 * * 1-5"
+title = "Evening Briefing"
+output = "email"
+
+  [[default_briefings.blocks]]
+  title = "🌍 Headlines"
+  render_mode = "structured"
+
+    [[default_briefings.blocks.sources]]
+    kind = "shared_block"
+    config = { "name" = "world-headlines", "max_age_hours" = 6 }
+
+  [[default_briefings.blocks]]
+  title = "📈 Markets"
+  render_mode = "structured"
+
+    [[default_briefings.blocks.sources]]
+    kind = "shared_block"
+    config = { "name" = "markets-summary", "max_age_hours" = 6 }
+
+  [[default_briefings.blocks]]
+  title = "📅 Calendar"
+  render_mode = "structured"
+
+    [[default_briefings.blocks.sources]]
+    kind = "calendar"
+    config = {}
+
+
+[briefings]
+shared_block_timezone = "UTC"
+newsletter_max_links_per_source = 20
+
+[health]
+max_document_bytes = 26214400
+
+[money]
+autoclass_lookup = true
+
+
+[[briefing_shared_blocks]]
+name = "world-headlines"
+cron = "45 5,17 * * *"
+title = "🌍 Headlines"
+directive = "Synthesize the frontpages into ~8 top world stories, lead with what's new. Neutral wire-service tone."
+render_mode = "synthesis"
+enabled = true
+
+  [[briefing_shared_blocks.sources]]
+  kind = "browse"
+  config = { "preset" = "ap" }
+
+  [[briefing_shared_blocks.sources]]
+  kind = "browse"
+  config = { "preset" = "reuters" }
+
+[[briefing_shared_blocks]]
+name = "markets-summary"
+cron = "50 5,17 * * *"
+title = "📈 Markets"
+render_mode = "structured"
+enabled = true
+trusted = true
+
+  [[briefing_shared_blocks.sources]]
+  kind = "markets"
+  config = {}
+
+
+[wordpress]
+private_hosts = []
+max_upload_mb = 25
+
+
+[browser]
+enabled = true
+api_url = "http://localhost:9223"
+vnc_url = ""
+
+
+[devbox]
+enabled = true
+container_prefix = "devbox-"
+max_output_bytes = 102400
+
+
+[memory_search]
+enabled = true
+auto_index_conversations = true
+auto_index_memory_files = true
+auto_recall = false
+auto_recall_limit = 5
+recency_half_life_days = 180
+
+
+
+[sleep_cycle]
+enabled = true
+cron = "0 2 * * *"
+lookback_hours = 24
+memory_retention_days = 0
+auto_load_dated_days = 3
+curate_user_memory = false
+curation_log_summary = true
+knowledge_graph_audit_retention_days = 365
+
+
+[channel_sleep_cycle]
+enabled = true
+cron = "0 11 * * *"
+lookback_hours = 24
+memory_retention_days = 0
+
+[site]
+hostname = "bot.example.test"
+
+[web]
+auth_step_up_ttl_minutes = 10
+auth = ["nextcloud", "email"]
+auth_enrol_ttl_hours = 168
+auth_reset_ttl_hours = 1
+auth_sign_in_code_ttl_minutes = 10
+auth_min_password_length = 12
+auth_throttle_window_seconds = 900
+auth_throttle_max_email = 10
+auth_throttle_max_ip = 30
+auth_mail_link_max_email = 3
+trusted_proxy_hops = 0
+enabled = true
+port = 8766
+oauth2_provider = ""
+oauth2_client_id = ""
+token_storage = "ephemeral"
+max_avatar_kb = 4096
+avatar_import_from_nextcloud = true
+
+[web.map]
+provider = "openfreemap"
+
+[web.chat]
+talk_read_sync_interval = 60
+room_stream_poll_interval_ms = 1000
+room_stream_keepalive_seconds = 20
+room_stream_max_batch = 500
+room_stream_max_bytes = 2000000
+room_stream_room_check_seconds = 10
+max_attachment_mb = 100
+
+[developer]
+enabled = true
+repos_dir = "/srv/app/istota/repos"
+gitlab_url = "https://gitlab.com"
+gitlab_username = ""
+gitlab_default_namespace = ""
+gitlab_reviewer = ""
+gitlab_reviewer_id = ""
+github_url = "https://github.com"
+github_username = ""
+github_default_owner = ""
+github_reviewer = ""
+forge_cli_extra_denied = []
+forge_cli_permit = []
+gh_bin_path = "/usr/local/bin/gh"
+glab_bin_path = "/usr/local/bin/glab"
+devbox_proxy_enabled = true
+devbox_proxy_socket_dir = "/var/run/istota"
+devbox_proxy_audit_log = ""
+worktree_reap_enabled = true
+worktree_retention_hours = 24.0
+
+# Subsections, so they have to stay last in the [developer] block: every key
+# after these headers belongs to one of them.
+[developer.review]
+timeout_seconds = 480
+
+# How the exec transport is configured — not whether it is used. That is
+# derived from `[devbox] enabled` together with `[developer] enabled` and a
+# non-empty `repos_dir`, so the two switches cannot disagree; the `backend` key
+# that used to sit here is retired, and a file still carrying it gets a warning
+# at load and a WARN from `istota doctor --only developer.container`. That check
+# re-derives from this file rather than reading a key, which is also what says
+# whether the file and the running daemon agree.
+[developer.container]
+exec_socket_dir = "/run/istota-exec"
+connect_timeout_seconds = 5.0
+idle_timeout_seconds = 3600
+shim_commands = ["npm", "npx", "pnpm", "yarn", "node", "uv", "uvx", "pip", "pip3", "cargo", "rustc", "rustup", "go", "bundle", "gem"]
+
+# User profiles, folder mounts, and briefing schedule/delivery live in the DB
+# (user_profiles, user_resources, briefing_configs tables). They are populated by
+# `istota user/resource/briefings schedule ensure` invocations in the playbook —
+# config.toml does not render that per-user data.
+#
+# Two exceptions, both per-user settings with no DB column to reach: the
+# retired `vault_path` for the one-time migration, and briefing content blocks.
+# Set both in `istota_users`; see defaults/main.yml.
+# To apply one briefing definition across users, loop it over `istota_users` in
+# the playbook.
