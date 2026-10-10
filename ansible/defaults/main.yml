@@ -40,7 +40,10 @@ istota_tls_cert_source: acme
 istota_upstream_proxy: ""
 istota_listen_addr: ""
 istota_listen_port: 8080
-# The Claude Code pin, for the claude_code and tmux_claude brains.
+# The Claude Code pin, for the claude_code and tmux_claude brains. Empty builds
+# the release's own pin. Whether Claude Code goes in at all follows the config:
+# after the apply, an image lacking what the config needs (or at another pin)
+# is rebuilt at the same tag.
 istota_claude_code_version: ""
 # direct with acme only. An empty ACME server is Let's Encrypt.
 istota_acme_email: ""
@@ -86,7 +89,8 @@ istota_stack_env:
 
 # --- Deployment secrets ------------------------------------------------------
 # One file per name under secrets/, 0400, owned by uid 10001: what compose
-# hands the containers. The same list as setup_wizard.SECRET_NAMES.
+# hands the containers. The same list as setup_wizard.SECRET_NAMES. Written by
+# `istota-stack put-files` as uid 10001, never by root.
 istota_secret_names:
   - anthropic_api_key
   - claude_code_oauth_token
@@ -133,14 +137,20 @@ istota_config: {}
 #     alice: [{name: morning, cron: "0 7 * * 1-5", output: email}]
 #   istota_user_secrets:
 #     alice: [{service: karakeep, key: api_key, value: "{{ vault_alice_karakeep }}"}]
+#
+# A secret's value reaches `istota secret ensure` on stdin, never on a command
+# line. An entry whose value is empty is skipped; `istota secret remove` is how
+# a stored secret is cleared.
 istota_users: {}
 istota_user_resources: {}
 istota_user_briefings: {}
 istota_user_secrets: {}
 
 # --- Behaviour ---------------------------------------------------------------
-# provision.sh runs when host.env or rclone.conf changed, after an update, and
-# on a VM where istota-stack is missing. true runs it on every play.
+# provision.sh runs when what it acts on (host.env, rclone.conf, .env's
+# COMPOSE_PROFILES, the checkout's commit) differs from what its last
+# successful run recorded, and on a VM where istota-stack is missing. true runs
+# it on every play.
 istota_provision_always: false
 # Seconds to wait for the istota service's healthcheck before the ensure loops.
 istota_health_timeout: 900
