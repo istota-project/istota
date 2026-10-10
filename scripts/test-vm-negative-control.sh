@@ -18,7 +18,7 @@
 #
 #   local:     mac-home-mounted (row 7), secret-owned-by-root (row 12),
 #              apparmor-unconfined (row 20), no-egress-unit (row 10),
-#              every-cred-volume-everywhere (row 11),
+#              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
 #              browser-on-default-network (row 17)
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
@@ -91,6 +91,9 @@ control every-cred-volume-everywhere \
     "row 11: every credential volume mounted into every devbox" \
     "$D::TestACredentialSocketReachesOnlyItsOwner::test_each_devbox_mounts_only_its_own_credential_volume" \
     "$D::TestACredentialSocketReachesOnlyItsOwner::test_the_one_socket_a_devbox_sees_answers_as_its_owner"
+control exec-socket-symlink \
+    "row 11: the skill without the no-follow open at the exec socket's leaf" \
+    "$D::TestAPlantedSocketSymlinkDoesNotReachAnotherDevbox::test_admins_socket_linked_to_bobs_is_refused"
 
 control browser-on-default-network \
     "row 17: the browser container on the default network" \

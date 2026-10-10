@@ -23,7 +23,10 @@ Controls (`scripts/test-vm-negative-control.sh`):
 - `no-egress-unit`: the egress unit is disabled and its rules removed, as on a
   VM provisioned without it;
 - `every-cred-volume-everywhere`: the rendered compose file mounts every
-  user's credential volume into every devbox.
+  user's credential volume into every devbox;
+- `exec-socket-symlink`: the skill's no-follow open is neutered in the running
+  istota container, so a planted link at one devbox's socket is followed into
+  another's.
 """
 
 from __future__ import annotations
@@ -134,7 +137,80 @@ istota-stack compose up -d
             vm.run(f"cp {lima.SCRATCH}/compose.devbox.yml.orig {DEVBOX_COMPOSE} && istota-stack compose up -d",
                    timeout=900)
         return
+    if name == "exec-socket-symlink":
+        # Neuter the no-follow open in the running istota container, so the
+        # skill (a fresh process per call) follows a planted link. The module
+        # is a leaf; a plain `connect(path)` is the pre-fix behaviour.
+        cid = lima.container(vm, "istota")
+        src = "/app/src/istota/lib/unix_connect.py"
+        vm.run(
+            f"docker exec {cid} python3 - {src} <<'PY'\n"
+            "import sys\n"
+            "p = sys.argv[1]\n"
+            "body = (\n"
+            '    "import socket\\n"\n'
+            '    "def connect_no_follow(sock, path):\\n"\n'
+            '    "    sock.connect(path)\\n"\n'
+            ")\n"
+            "open(p, 'w').write(body)\n"
+            "PY"
+        )
+        try:
+            yield vm
+        finally:
+            vm.run(f"docker cp {lima.STACK}/src/src/istota/lib/unix_connect.py "
+                   f"{cid}:/app/src/istota/lib/unix_connect.py")
+        return
     yield vm
+
+
+# The two users' exec sockets, as the istota container (where the skill runs)
+# names them. devbox-<user> sees its own at /run/istota-exec/exec.sock.
+def _istota_exec_socket(user: str) -> str:
+    return f"/data/devbox/exec/{user}/exec.sock"
+
+
+@parity.witness(11)
+class TestAPlantedSocketSymlinkDoesNotReachAnotherDevbox:
+    """devbox A's exec socket is in a volume A mounts read-write, so `dev` can
+    replace it with a symlink naming B's socket as the istota container sees
+    it. The skill resolves A's socket host-side and must not follow the link
+    into B's devbox (where `reset` would wipe B's home). Control:
+    `exec-socket-symlink` makes the skill follow it, and this goes red."""
+
+    MARKER = "bob-home-marker-istota-vmtier"
+
+    def test_admins_socket_linked_to_bobs_is_refused(self, stack):
+        # A marker only bob's devbox can produce, so a followed link is visible.
+        bob_socket = _istota_exec_socket(lima.SECOND_DEVBOX_USER)
+        lima.stack_exec(
+            stack,
+            f"ISTOTA_USER_ID={lima.SECOND_DEVBOX_USER} {VENV_PYTHON} -m istota.skills.devbox "
+            f"exec 'echo {self.MARKER} > /home/dev/{self.MARKER}'",
+        )
+        admin = _devbox(stack, lima.USER)
+        original = stack.out(f"docker exec {admin} readlink -f /run/istota-exec/exec.sock")
+        stack.run(f"docker exec {admin} sh -c "
+                  f"'rm -f /run/istota-exec/exec.sock && ln -s {bob_socket} /run/istota-exec/exec.sock'")
+        try:
+            result = lima.stack_exec(
+                stack,
+                f"ISTOTA_USER_ID={lima.USER} {VENV_PYTHON} -m istota.skills.devbox "
+                f"exec 'cat /home/dev/{self.MARKER}'",
+                check=False,
+            )
+        finally:
+            stack.run(f"docker exec {admin} sh -c "
+                      f"'rm -f /run/istota-exec/exec.sock && ln -s {original} /run/istota-exec/exec.sock'",
+                      check=False)
+            stack.run(f"istota-stack compose restart devbox-{lima.USER}", check=False, timeout=120)
+        reply = {}
+        try:
+            reply = json.loads(result.stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError, ValueError):
+            pass
+        assert reply.get("status") == "error", f"row 11: admin's call was not refused: {result.stdout}"
+        assert self.MARKER not in result.stdout, "row 11: admin reached bob's devbox through the link"
 
 
 @parity.witness(10)
