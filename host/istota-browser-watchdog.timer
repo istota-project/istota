@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the istota browser watchdog every minute
+
+[Timer]
+# The cron the role installed ran at a one-minute floor; the debounce, the
+# crash-loop guard and the daily restart live in the script.
+OnCalendar=*-*-* *:*:00
+AccuracySec=5s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

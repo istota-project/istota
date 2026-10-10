@@ -1,0 +1,15 @@
+[Unit]
+Description=Istota devbox egress rules in DOCKER-USER
+# Docker creates DOCKER-USER at start and preserves it across daemon restarts,
+# so riding in behind it once per boot is enough.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/srv/istota/host.env
+ExecStart=/usr/local/sbin/istota-devbox-egress
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
