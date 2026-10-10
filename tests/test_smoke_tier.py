@@ -1159,7 +1159,9 @@ class TestTheTomlWriter:
         assert tomllib.loads(compose_support.toml_dumps(document)) == document
 
     def test_an_unsupported_value_is_refused_rather_than_stringified(self):
-        with pytest.raises(compose_support.StackError, match="no form for"):
+        from istota.lib.toml_write import TomlWriteError
+
+        with pytest.raises(TomlWriteError, match="cannot write"):
             compose_support.toml_dumps({"x": object()})
 
 

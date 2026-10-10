@@ -28,6 +28,8 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from istota.lib import toml_write
+
 logger = logging.getLogger("istota.setup")
 
 
@@ -124,30 +126,13 @@ class Answers:
 # ---------------------------------------------------------------------------
 
 
-def _toml_str(value: str) -> str:
-    """TOML basic-string escaping: backslash, double-quote, control characters.
-
-    The control-character arm is not decoration. TOML 1.0 forbids raw
-    U+0000–U+0008, U+000A–U+001F and U+007F in a basic string, and every value
-    reaching here came off a terminal prompt — where a *pasted* credential is
-    the realistic carrier, since a line-oriented read cannot deliver a newline
-    but happily delivers an ESC or a DEL. Emitting one produces a
-    ``config.toml`` that will not parse, and the failure lands in
-    ``_bootstrap``'s ``load_config`` *after* the config, the env file, the
-    admins file and the database have all been written — as a bare
-    ``TOMLDecodeError``, which ``cli.cmd_setup`` does not catch.
-
-    Tab is left alone: TOML permits it raw, and escaping it would be a
-    gratuitous difference from what the user typed.
-    """
-    out = [
-        "\\\\" if ch == "\\"
-        else '\\"' if ch == '"'
-        else f"\\u{ord(ch):04x}" if (ch < " " or ch == "\x7f") and ch != "\t"
-        else ch
-        for ch in value
-    ]
-    return '"' + "".join(out) + '"'
+#: Basic-string escaping for the hand-assembled standalone config below. The one
+#: TOML writer is `istota.lib.toml_write`; this is its escaper under the name the
+#: renderer has always used. Why the control-character arm matters here: every
+#: value came off a terminal prompt, and an ESC or DEL in a pasted credential
+#: would otherwise produce a config that fails `load_config` after every other
+#: file had been written.
+_toml_str = toml_write.toml_string
 
 
 def render_config_toml(a: Answers) -> str:
@@ -1594,8 +1579,6 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
 
 def render_container_config(a: ContainerAnswers, *, inline_credentials: bool) -> str:
     """The container ``config.toml`` text (pure)."""
-    import tomli_w  # noqa: PLC0415 - only this half needs it
-
     if inline_credentials:
         where = "Credentials are in this file, which is why it is 0600."
     else:
@@ -1609,7 +1592,7 @@ def render_container_config(a: ContainerAnswers, *, inline_credentials: bool) ->
         "# its default. Reference: config/config.example.toml.\n"
         f"# {where}\n\n"
     )
-    return header + tomli_w.dumps(container_config_document(a, inline_credentials=inline_credentials))
+    return header + toml_write.dumps(container_config_document(a, inline_credentials=inline_credentials))
 
 
 #: What compose publishes for a port slot nginx does not listen on in this

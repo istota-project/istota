@@ -43,6 +43,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from istota.lib import toml_write
+
 from . import probe as probe_support
 from . import services as service_support
 from .probe import Probe
@@ -720,64 +722,11 @@ SECRET_NAMES: tuple[str, ...] = (
 #: real one: the endpoint ignores the Authorization header entirely.
 SCRIPTED_ENDPOINT_KEY = "unused-by-the-scripted-endpoint"
 
-_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-def _toml_string(value: str) -> str:
-    out = []
-    for char in value:
-        if char == "\\":
-            out.append("\\\\")
-        elif char == '"':
-            out.append('\\"')
-        elif (char < " " and char != "\t") or char == "\x7f":
-            out.append(f"\\u{ord(char):04x}")
-        else:
-            out.append(char)
-    return '"' + "".join(out) + '"'
-
-
-def _toml_key(key: str) -> str:
-    return key if _BARE_KEY.match(key) else _toml_string(key)
-
-
-def _toml_value(value) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return repr(value)
-    if isinstance(value, str):
-        return _toml_string(value)
-    if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    raise StackError(f"the testbed TOML writer has no form for {type(value).__name__}")
-
-
-def toml_dumps(document: dict) -> str:
-    """A TOML document from nested dicts of strings, numbers, bools and lists.
-
-    Small on purpose: the testbed's dependency set is the standard library plus
-    `cryptography`, and `tomllib` reads but does not write. Arrays of tables are
-    not supported, since no config the tier writes has one.
-    """
-    lines: list[str] = []
-
-    def emit(table: dict, path: tuple[str, ...]) -> None:
-        scalars = [(key, value) for key, value in table.items() if not isinstance(value, dict)]
-        tables = [(key, value) for key, value in table.items() if isinstance(value, dict)]
-        if path and (scalars or not tables):
-            lines.append("[" + ".".join(_toml_key(part) for part in path) + "]")
-        for key, value in scalars:
-            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
-        if path and (scalars or not tables):
-            lines.append("")
-        elif scalars:
-            lines.append("")
-        for key, value in tables:
-            emit(value, (*path, key))
-
-    emit(document, ())
-    return "\n".join(lines).rstrip("\n") + "\n"
+#: The tree's one TOML writer (`istota.lib.toml_write`), the same one `istota
+#: setup` and `istota apply` render a config with. A stdlib-only leaf that
+#: imports nothing from istota, so this package's dependency set is unchanged in
+#: practice; it does need the istota package importable beside it.
+toml_dumps = toml_write.dumps
 
 
 def merge_config(
