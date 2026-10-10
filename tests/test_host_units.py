@@ -459,3 +459,59 @@ class TestBootstrapFiles:
         assert doc["vmOpts"]["vz"]["rosetta"]["enabled"] is True
         assert doc["mounts"][0]["writable"] is False
         assert "/mnt/istota-repo/host/provision.sh" in doc["provision"][0]["script"]
+
+
+class TestTheProvisionDigest:
+    """`provision.sh --digest` names the inputs a run acts on, and a successful
+    run records it, so the management role can tell a provision a dead play
+    left undone from one already done. Anything that changes what provision.sh
+    installs or enables changes the digest; the deployed tag in .env alone
+    does not (the checkout's HEAD is what carries a release)."""
+
+    @pytest.fixture
+    def stack(self, tmp_path):
+        stack = tmp_path / "stack"
+        (stack / "src" / ".git").mkdir(parents=True)
+        (stack / "src" / ".git" / "HEAD").write_text("1" * 40 + "\n")
+        (stack / "host.env").write_text("STORAGE=local\nINGRESS=local\n")
+        (stack / ".env").write_text("COMPOSE_PROFILES=\nISTOTA_TAG=v1\n")
+        return stack
+
+    def _digest(self, stack: Path) -> str:
+        result = subprocess.run(
+            ["bash", str(PROVISION), "--digest"], capture_output=True, text=True, timeout=30,
+            env={"PATH": os.environ["PATH"], "ISTOTA_STACK_DIR": str(stack),
+                 "ISTOTA_MOUNT_DIR": str(stack / "mount")},
+        )
+        assert result.returncode == 0, result.stderr
+        digest = result.stdout.strip()
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), result.stdout
+        return digest
+
+    def test_it_is_stable(self, stack):
+        assert self._digest(stack) == self._digest(stack)
+
+    @pytest.mark.parametrize("change", [
+        lambda s: (s / "host.env").write_text("STORAGE=nextcloud\nINGRESS=local\n"),
+        lambda s: (s / "rclone.conf").write_text("[nextcloud]\ntype = webdav\n"),
+        lambda s: (s / ".env").write_text("COMPOSE_PROFILES=browser\nISTOTA_TAG=v1\n"),
+        lambda s: (s / "src" / ".git" / "HEAD").write_text("2" * 40 + "\n"),
+    ], ids=["host.env", "rclone.conf", "compose-profiles", "release"])
+    def test_an_input_change_changes_it(self, stack, change):
+        before = self._digest(stack)
+        change(stack)
+        assert self._digest(stack) != before
+
+    def test_the_tag_line_alone_does_not(self, stack):
+        before = self._digest(stack)
+        (stack / ".env").write_text("COMPOSE_PROFILES=\nISTOTA_TAG=v2\nISTOTA_PREVIOUS_TAG=v1\n")
+        assert self._digest(stack) == before
+
+    def test_a_successful_run_records_it_last(self):
+        """Read before anything runs and recorded at the very end, so a run
+        that fails partway leaves the old digest and the next play provisions
+        again."""
+        text = PROVISION.read_text()
+        assert 'digest="$(inputs_digest)"' in text
+        assert text.index('digest="$(inputs_digest)"') < text.index("apt-get update")
+        assert text.rindex('"${STACK}/.provisioned"') > text.index("# --- The stack ---")

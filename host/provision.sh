@@ -5,6 +5,7 @@
 #
 #   host/provision.sh                  # from a checkout, by hand or from Lima
 #   ISTOTA_REPO_URL=... provision.sh   # cloud-init clones first, then runs this
+#   host/provision.sh --digest         # what a run would act on; changes nothing
 #
 # Ported from the Ansible role's host tasks (Docker Engine, the userns sysctl,
 # zram, the journald cap, the auditd bound, the rclone mount unit, the devbox
@@ -38,7 +39,27 @@ UNITS=/etc/systemd/system
 log() { echo "[provision] $*"; }
 die() { echo "[provision] $*" >&2; exit 1; }
 
+# What this run acts on: host.env, rclone.conf, .env's COMPOSE_PROFILES (the
+# browser watchdog) and the checkout's commit (the release's host/ files). A
+# successful run records it in .provisioned, so the management role can tell
+# a run a failed play never finished from one already done. `--digest` prints
+# it and changes nothing.
+inputs_digest() {
+    {
+        printf 'host.env\n'; cat "$HOST_ENV" 2>/dev/null || true
+        printf '\0rclone.conf\n'; cat "${STACK}/rclone.conf" 2>/dev/null || true
+        printf '\0profiles\n'; grep -E '^COMPOSE_PROFILES=' "${STACK}/.env" 2>/dev/null || true
+        printf '\0release\n'; cat "${STACK}/src/.git/HEAD" 2>/dev/null || true
+    } | sha256sum | cut -d' ' -f1
+}
+
+if [ "${1:-}" = "--digest" ]; then
+    inputs_digest
+    exit 0
+fi
+
 [ "$(id -u)" -eq 0 ] || die "run as root"
+digest="$(inputs_digest)"
 [ -r /etc/debian_version ] || die "this is for Debian 13"
 
 # host.env, if setup has written one. Values only; the file is not executed.
@@ -313,3 +334,7 @@ else
     log "provisioned. Next: istota-stack update <tag>, istota-stack setup, re-run this script,"
     log "then systemctl start istota-stack."
 fi
+
+# Last, so a run that failed anywhere above leaves the previous digest.
+printf '%s\n' "$digest" > "${STACK}/.provisioned.tmp"
+mv "${STACK}/.provisioned.tmp" "${STACK}/.provisioned"

@@ -52,6 +52,7 @@ case "$args" in
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
   *" istota apply "*) exit "${STUB_APPLY_RC:-0}" ;;
   *" image ls "*) printf 'istota-istota:v0\nistota-istota:v1\nistota-istota:old\nnginx:alpine\n' ;;
+  *" image inspect "*) [ -z "${STUB_IMAGE_ENV:-}" ] || printf '%s\n' "$STUB_IMAGE_ENV" ;;
 esac
 exit 0
 """
@@ -547,3 +548,165 @@ class TestAProfileThatFailsToLoadChangesNothing:
         assert (profiles / "istota").read_text() == "profile istota new\n"
         assert "ISTOTA_TAG=v1\n" in fx.env_text()
         assert fx.head() == commit
+
+
+class TestPutFiles:
+    """`istota-stack put-files` writes `secrets/` and `config/admins`, the two
+    places in the stack uid 10001 owns, from JSON on stdin. Run as root it drops
+    to 10001 before it opens anything, so a link 10001 planted there gains
+    nothing; and it replaces a link rather than following it either way. Exit
+    0 is no change, 2 a change, as for `apply`."""
+
+    @pytest.fixture
+    def secrets(self, fx):
+        path = fx.stack / "secrets"
+        path.mkdir(mode=0o700)
+        return path
+
+    def _put(self, fx, payload: dict, *args: str) -> subprocess.CompletedProcess:
+        import json
+
+        return subprocess.run(
+            ["bash", str(SCRIPT), "put-files", *args], input=json.dumps(payload),
+            capture_output=True, text=True, env=fx.env, timeout=60,
+        )
+
+    def test_it_writes_each_value_and_the_admins(self, fx, secrets):
+        result = self._put(fx, {"secrets": {"anthropic_api_key": "sk-1", "istota_caldav_password": None},
+                                "admins": "alice\nbob\n"})
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert (secrets / "anthropic_api_key").read_text() == "sk-1"
+        assert (secrets / "anthropic_api_key").stat().st_mode & 0o777 == 0o400
+        assert (secrets / "istota_caldav_password").read_text() == ""
+        assert (fx.stack / "config" / "admins").read_text() == "alice\nbob\n"
+        assert (fx.stack / "config" / "admins").stat().st_mode & 0o777 == 0o600
+        assert "sk-1" not in result.stdout + result.stderr
+
+    def test_a_second_run_changes_nothing(self, fx, secrets):
+        payload = {"secrets": {"anthropic_api_key": "sk-1", "istota_caldav_password": None}, "admins": "alice\n"}
+        assert self._put(fx, payload).returncode == 2
+        result = self._put(fx, payload)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_a_null_value_leaves_an_existing_file_alone(self, fx, secrets):
+        (secrets / "istota_caldav_password").write_text("from-the-wizard")
+        result = self._put(fx, {"secrets": {"istota_caldav_password": None}})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (secrets / "istota_caldav_password").read_text() == "from-the-wizard"
+
+    def test_the_dry_run_reports_and_writes_nothing(self, fx, secrets):
+        result = self._put(fx, {"secrets": {"anthropic_api_key": "sk-1"}, "admins": "alice\n"}, "--dry-run")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "anthropic_api_key" in result.stdout
+        assert list(secrets.iterdir()) == []
+        assert not (fx.stack / "config" / "admins").exists()
+
+    def test_a_link_to_a_directory_is_replaced_not_followed(self, fx, secrets, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (secrets / "anthropic_api_key").symlink_to(elsewhere)
+        (fx.stack / "config" / "admins").symlink_to(elsewhere)
+
+        result = self._put(fx, {"secrets": {"anthropic_api_key": "sk-1"}, "admins": "alice\n"})
+
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert list(elsewhere.iterdir()) == []
+        assert not (secrets / "anthropic_api_key").is_symlink()
+        assert (secrets / "anthropic_api_key").read_text() == "sk-1"
+        assert not (fx.stack / "config" / "admins").is_symlink()
+
+    def test_a_name_that_is_not_a_secret_name_is_refused(self, fx, secrets):
+        result = self._put(fx, {"secrets": {"../config/admins": "x"}})
+        assert result.returncode == 1
+        assert not (fx.stack / "config" / "admins").exists()
+
+    def test_as_root_it_drops_to_10001_first(self, fx, secrets, tmp_path):
+        bindir = Path(fx.env["PATH"].split(":")[0])
+        (bindir / "id").write_text('#!/bin/bash\nif [ "$1" = "-u" ]; then echo 0; else exec /usr/bin/id "$@"; fi\n')
+        (bindir / "id").chmod(0o755)
+        recorded = tmp_path / "setpriv"
+        (bindir / "setpriv").write_text(
+            f'#!/bin/bash\necho "$*" > "{recorded}"\n'
+            'while [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n'
+        )
+        (bindir / "setpriv").chmod(0o755)
+
+        result = self._put(fx, {"secrets": {"anthropic_api_key": "sk-1"}})
+
+        assert result.returncode == 2, result.stdout + result.stderr
+        flags = recorded.read_text().split()
+        assert {"--reuid=10001", "--regid=10001", "--clear-groups", "--no-new-privs"} <= set(flags)
+        assert (secrets / "anthropic_api_key").read_text() == "sk-1"
+
+
+class TestCheckImage:
+    """Whether the deployed image has what config.toml needs: Claude Code, at
+    host.env's pin when it names one. `istota-stack setup` says so in words;
+    the management role runs this after its apply and rebuilds on exit 2."""
+
+    def _check(self, fx, image_env: str) -> subprocess.CompletedProcess:
+        return fx.run("check-image", STUB_IMAGE_ENV=image_env)
+
+    @pytest.fixture
+    def claude_code(self, fx):
+        (fx.stack / "config" / "config.toml").write_text('[brain]\nkind = "claude_code"\n')
+        return fx
+
+    def test_a_native_config_needs_nothing(self, fx):
+        assert self._check(fx, "ISTOTA_CLAUDE_CODE_INSTALLED=0").returncode == 0
+
+    def test_claude_code_missing_from_the_image(self, claude_code):
+        result = self._check(claude_code, "ISTOTA_CLAUDE_CODE_INSTALLED=0\nISTOTA_CLAUDE_CODE_VERSION=2.1.296")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "istota-stack update v0" in result.stdout + result.stderr
+
+    def test_claude_code_in_the_image_at_the_pin(self, claude_code):
+        result = self._check(claude_code, "ISTOTA_CLAUDE_CODE_INSTALLED=1\nISTOTA_CLAUDE_CODE_VERSION=2.1.296")
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_claude_code_at_another_version_than_the_pin(self, claude_code):
+        result = self._check(claude_code, "ISTOTA_CLAUDE_CODE_INSTALLED=1\nISTOTA_CLAUDE_CODE_VERSION=2.0.1")
+        assert result.returncode == 2, result.stdout + result.stderr
+
+    def test_no_pin_takes_whatever_version_the_release_built(self, claude_code):
+        (claude_code.stack / "host.env").write_text("INGRESS=local\nCLAUDE_CODE_VERSION=\n")
+        result = self._check(claude_code, "ISTOTA_CLAUDE_CODE_INSTALLED=1\nISTOTA_CLAUDE_CODE_VERSION=2.0.1")
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_setup_uses_the_same_check(self):
+        text = SCRIPT.read_text()
+        setup = text.split("\ncmd_setup() {", 1)[1].split("\n}\n", 1)[0]
+        assert "image_lacks_what_config_needs" in setup
+        assert "ISTOTA_CLAUDE_CODE_INSTALLED" not in setup
+
+
+class TestTheClaudeCodePin:
+    def test_an_empty_pin_leaves_the_dockerfiles_default(self, fx):
+        """An empty build arg overrides the Dockerfile's ARG default, and the
+        build then refuses ("CLAUDE_CODE_VERSION is empty"). host.env with no
+        pin, which is what `istota setup` writes, must build the release's."""
+        (fx.stack / "host.env").write_text("INGRESS=local\nCLAUDE_CODE_VERSION=\n")
+        result = _source(fx, 'docker() { echo "pin=${CLAUDE_CODE_VERSION-unset}"; }; compose build')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "pin=unset"
+
+    def test_a_pin_is_passed(self, fx):
+        result = _source(fx, 'docker() { echo "pin=${CLAUDE_CODE_VERSION-unset}"; }; compose build')
+        assert result.stdout.strip() == "pin=2.1.296"
+
+
+class TestTheWrapperPassesStdin:
+    def test_stdin_reaches_the_exec(self, fx, tmp_path):
+        """`istota secret ensure --value-stdin` reads the value through every
+        layer: the wrapper, `istota-stack exec`, `docker compose exec -T`."""
+        seen = tmp_path / "stdin"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            'case "$args" in\n', f'case "$args" in\n  *" exec "*) cat > "{seen}" ;;\n'))
+        result = subprocess.run(
+            ["sh", str(REPO / "host" / "istota"), "secret", "ensure", "--value-stdin"],
+            input="the-value", capture_output=True, text=True,
+            env={**fx.env, "ISTOTA_STACK_BIN": str(SCRIPT)}, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert seen.read_text() == "the-value"

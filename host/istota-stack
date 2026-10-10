@@ -7,6 +7,9 @@
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
+#   istota-stack put-files [--dry-run]
+#                               write secrets/ and config/admins from JSON on stdin, as uid 10001
+#   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
 #   istota-stack exec <cmd...>  run a command in the istota container as uid 10001
 #   istota-stack compose <...>  docker compose, with this stack's files and settings
@@ -119,14 +122,20 @@ compose() {
     fi
     local certs="${STACK}/certs"
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
-    ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
-    ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
-    ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
-    ISTOTA_HOST_ENV="$HOST_ENV" \
-    CERTS_DIR="$certs" \
-    ACME_WEBROOT="${STACK}/acme" \
-    CLAUDE_CODE_VERSION="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)" \
-        docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" "${files[@]}" "$@"
+    local pin
+    pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
+    (
+        # Only a pin that is set: compose passes an empty variable as an empty
+        # build arg, which overrides the Dockerfile's default and fails the build.
+        if [ -n "$pin" ]; then export CLAUDE_CODE_VERSION="$pin"; else unset CLAUDE_CODE_VERSION; fi
+        ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
+        ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
+        ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
+        ISTOTA_HOST_ENV="$HOST_ENV" \
+        CERTS_DIR="$certs" \
+        ACME_WEBROOT="${STACK}/acme" \
+            docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" "${files[@]}" "$@"
+    )
 }
 
 # A one-shot container from the istota image, dropped to uid 10001 before
@@ -228,6 +237,24 @@ build_images() {
     services="$(ISTOTA_TAG="$tag" build_services)"
     # shellcheck disable=SC2086
     ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="$(needs_claude_code)" compose build $services
+}
+
+# Why the tag's image cannot run what config.toml asks for, or nothing when it
+# can: Claude Code missing where a brain needs it, or at another version than
+# host.env's pin. A build reads the config, so the image follows whatever the
+# config said at build time; this is what catches a config that changed since.
+image_lacks_what_config_needs() {
+    local tag="$1" env installed version pin
+    [ "$(needs_claude_code)" = 1 ] || return 0
+    env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "istota-istota:${tag}" 2>/dev/null || true)"
+    installed="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_INSTALLED=//p')"
+    version="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_VERSION=//p')"
+    pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
+    if [ "$installed" != 1 ]; then
+        echo "this config runs Claude Code, which the ${tag} image was built without"
+    elif [ -n "$pin" ] && [ "$version" != "$pin" ]; then
+        echo "the ${tag} image has Claude Code ${version}, and host.env pins ${pin}"
+    fi
 }
 
 # Keep the current and the previous tag's images, remove every other istota-*.
@@ -450,8 +477,10 @@ cmd_setup() {
     install_staged "${staging}/host.env" "$HOST_ENV"
     # The wizard owns .env's keys but not this script's.
     env_set "ISTOTA_TAG=${tag}"
-    if [ "$(needs_claude_code)" = 1 ] && [ "$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "istota-istota:${tag}" | sed -n 's/^ISTOTA_CLAUDE_CODE_INSTALLED=//p')" != 1 ]; then
-        log "this config runs Claude Code, which the ${tag} image was built without: run \`istota-stack update ${tag}\`."
+    local lacking
+    lacking="$(image_lacks_what_config_needs "$tag")"
+    if [ -n "$lacking" ]; then
+        log "${lacking}: run \`istota-stack update ${tag}\`."
     fi
     render_devbox_compose "$tag"
     log "written. Re-run provision.sh to pick up host.env, then \`systemctl enable --now istota-stack\`."
@@ -515,6 +544,103 @@ restart_for_config() {
     compose restart
 }
 
+cmd_check_image() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    local tag lacking
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || { log "no tag deployed yet; nothing to check"; return 0; }
+    lacking="$(image_lacks_what_config_needs "$tag")"
+    if [ -n "$lacking" ]; then
+        log "${lacking}: run \`istota-stack update ${tag}\`."
+        return 2
+    fi
+}
+
+# The files in the stack that uid 10001 owns, written as 10001: secrets/ and
+# config/admins. Root on the VM drops before anything is opened, so a link
+# 10001 planted in either directory is followed, if at all, with 10001's own
+# rights; the writer replaces a link rather than following it in any case.
+#
+# stdin is one JSON object: {"secrets": {name: value}, "admins": text}. A
+# string value is written exactly (0400); null creates an empty file only where
+# none exists, since compose refuses to start a service whose secret file is
+# missing. "admins", when present, is the whole file (0600). Exit 0 when
+# nothing changed, 2 when something did (or would, under --dry-run). Nothing
+# printed names a value.
+PUT_FILES_PY='
+import json, os, re, stat, sys, tempfile
+
+secrets_dir, config_dir, dry_run = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+request = json.load(sys.stdin)
+wanted = []
+for name, value in (request.get("secrets") or {}).items():
+    if not re.fullmatch(r"[a-z0-9_]+", name):
+        sys.exit(f"[istota-stack] REFUSE: {name!r} is not a secret name")
+    if value is not None and not isinstance(value, str):
+        sys.exit(f"[istota-stack] REFUSE: the value for {name} is not a string")
+    wanted.append((os.path.join(secrets_dir, name), name, value, 0o400))
+if request.get("admins") is not None:
+    wanted.append((os.path.join(config_dir, "admins"), "config/admins", request["admins"], 0o600))
+
+
+def current(path):
+    """The bytes and mode of a regular file at path, or None for anything else."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        return fh.read(), stat.S_IMODE(info.st_mode)
+
+
+changed = []
+for path, label, value, mode in wanted:
+    if value is None:
+        try:
+            if stat.S_ISREG(os.lstat(path).st_mode):
+                continue
+        except FileNotFoundError:
+            pass
+        data = b""
+    else:
+        data = value.encode()
+        if current(path) == (data, mode):
+            continue
+    changed.append(label)
+    if dry_run:
+        continue
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".put.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            os.fchmod(fh.fileno(), mode)
+        # rename(2) replaces a link at path; it never follows one.
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+verb = "would write" if dry_run else "wrote"
+for label in changed:
+    print(f"[istota-stack] {verb} {label}")
+sys.exit(2 if changed else 0)
+'
+
+cmd_put_files() {
+    local dry_run=0
+    case "${1:-}" in
+        --dry-run) dry_run=1; shift ;;
+    esac
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    local drop=()
+    if [ "$(id -u)" -eq 0 ]; then
+        drop=(setpriv "--reuid=${ISTOTA_UID}" "--regid=${ISTOTA_UID}" --clear-groups --no-new-privs)
+    fi
+    "${drop[@]}" python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
+}
+
 cmd_up() {
     # Without a config the entrypoint refuses, and the restart policy would
     # loop on it; say what to do instead.
@@ -543,6 +669,8 @@ main() {
         setup) cmd_setup "$@" ;;
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
+        put-files) cmd_put_files "$@" ;;
+        check-image) cmd_check_image "$@" ;;
         up) cmd_up ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
