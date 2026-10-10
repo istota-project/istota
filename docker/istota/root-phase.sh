@@ -16,6 +16,8 @@
 #      mount unit sets; nothing here touches it.
 #   3. Checks the sandbox grant: bubblewrap must be able to build the sandbox's
 #      namespace as uid 10001, or the container exits naming the compose lines.
+#      The drop itself is checked first, so a credential file uid 10001 cannot
+#      read is reported as that rather than as a missing grant.
 #
 # Its capabilities are compose's cap_add (CHOWN, FOWNER, SETUID, SETGID,
 # SETPCAP, SYS_ADMIN); SYS_ADMIN is for the remount alone. Every decision is a
@@ -143,6 +145,25 @@ fix_ownership() {
     fi
 }
 
+# The drop on its own, before anything else drops through it. `istota-drop`
+# reads every credential file as 10001 and exits 78 on one it cannot read; the
+# ownership marker and the bwrap probe below both drop the same way, and would
+# report that as "no writable state volume" and a missing sandbox grant.
+check_drop() {
+    local err rc=0
+    err="$(istota-drop true 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+    log "the drop to ${ISTOTA_UID} failed (exit ${rc}): ${err}"
+    if [ "$rc" -eq 78 ]; then
+        log "REFUSE: a credential file under /run/secrets is not readable by uid ${ISTOTA_UID}; on the VM, chown 10001:10001 and chmod 0400 it."
+        return 78
+    fi
+    log "REFUSE: istota-drop itself failed; the istota service needs cap_add CHOWN, FOWNER, SETUID, SETGID, SETPCAP and SYS_ADMIN."
+    return 71
+}
+
 grant_refusal() {
     log "REFUSE: bubblewrap cannot build the sandbox's namespace in this container, so every task would run unsandboxed."
     log "REFUSE: the istota service in docker-compose.yml needs:"
@@ -176,6 +197,7 @@ main() {
     else
         log "WARNING: could not delegate ${CGROUP_MOUNT}; tasks will run without per-task limits (security.task_cgroups reports FAIL)"
     fi
+    check_drop || exit $?
     fix_ownership
     probe_grant || exit $?
     exec istota-drop "$@"

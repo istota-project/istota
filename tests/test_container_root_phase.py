@@ -120,6 +120,41 @@ class TestTheGrantRefusal:
             assert line in message
 
 
+class TestTheDropIsCheckedBeforeTheGrant:
+    """`istota-drop` reads every credential file as 10001 and exits 78 on one
+    it cannot read. The bwrap probe drops the same way, so without a check of
+    its own that refusal read as a missing sandbox grant, naming compose lines
+    that were all present."""
+
+    def _with_drop(self, tmp_path, body: str, function: str) -> subprocess.CompletedProcess:
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        drop = bindir / "istota-drop"
+        drop.write_text("#!/bin/sh\n" + body)
+        drop.chmod(0o755)
+        script = f'export PATH="{bindir}:$PATH"; source "{ROOT_PHASE}"; {function}'
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+
+    def test_an_unreadable_secret_is_named_as_that(self, tmp_path):
+        result = self._with_drop(
+            tmp_path,
+            'echo "[istota-secrets] REFUSE: /run/secrets/x is not readable by uid 10001." >&2; exit 78\n',
+            "check_drop",
+        )
+
+        output = result.stdout + result.stderr
+        assert result.returncode == 78
+        assert "/run/secrets" in output and "chmod 0400" in output
+        assert "bubblewrap" not in output
+
+    def test_a_working_drop_passes(self, tmp_path):
+        assert self._with_drop(tmp_path, "exec \"$@\"\n", "check_drop").returncode == 0
+
+    def test_main_checks_the_drop_before_the_ownership_walk_and_the_probe(self):
+        main = ROOT_PHASE.read_text().split("main() {", 1)[1]
+        assert main.index("check_drop") < main.index("fix_ownership") < main.index("probe_grant")
+
+
 class TestTheDrop:
     """`istota-drop` is the one spelling of the drop, for the entrypoint and every exec path."""
 
