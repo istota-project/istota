@@ -31,14 +31,39 @@ SCRIPT = REPO / "host" / "export-bare-metal.sh"
 FIXTURE = REPO / "tests" / "fixtures" / "bare_metal" / "role-config.toml"
 SECRET_KEY = "d" * 64
 
+# A unit named in STUB_MISSING_UNITS is one systemd has no file for: `show`
+# reports it not-found and `stop` fails on it with exit 5, as systemctl does.
 SYSTEMCTL = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
 case "$1" in
+  show)
+    for unit in ${STUB_MISSING_UNITS:-}; do
+      [ "$unit" = "${!#}" ] && { echo not-found; exit 0; }
+    done
+    echo loaded ;;
   is-active) exit 3 ;;
-  stop) [ "$2" = "mount-nextcloud" ] && rm -f "$STUB_MOUNTED" ;;
+  stop)
+    for unit in ${STUB_MISSING_UNITS:-}; do
+      case " $* " in *" $unit "*) echo "Unit $unit.service not loaded." >&2; exit 5 ;; esac
+    done
+    if [ "$2" = "mount-nextcloud" ]; then rm -f "$STUB_MOUNTED"; fi ;;
 esac
 exit 0
 """
+
+# Root, as far as the script can tell: `id -u` answers 0, `runuser` marks what
+# it runs, and `chown` does nothing.
+ID = r"""#!/bin/bash
+if [ "$1" = "-u" ]; then echo 0; else exec /usr/bin/id "$@"; fi
+"""
+
+RUNUSER = r"""#!/bin/bash
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+UNDER_RUNUSER=1 exec "$@"
+"""
+
+CHOWN = "#!/bin/sh\nexit 0\n"
 
 MOUNTPOINT = r"""#!/bin/bash
 [ -e "$STUB_MOUNTED" ]
@@ -59,7 +84,12 @@ class Host:
         # A wrapper, not a symlink: a symlinked interpreter finds no pyvenv.cfg
         # beside itself and loses the venv that has istota installed.
         python = checkout / ".venv" / "bin" / "python"
-        python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        # It records whether `runuser` started it, when PYTHON_LOG is set.
+        python.write_text(
+            '#!/bin/sh\n'
+            'if [ -n "${PYTHON_LOG:-}" ]; then echo "${UNDER_RUNUSER:-unwrapped}" >> "$PYTHON_LOG"; fi\n'
+            f'exec "{sys.executable}" "$@"\n'
+        )
         python.chmod(0o755)
 
         config = tomllib.loads(FIXTURE.read_text())
@@ -90,7 +120,7 @@ class Host:
         self.cron = self.etc / "cron.d" / "istota-update"
         self.cron.write_text('MAILTO=""\n*/2 * * * * root /usr/local/bin/istota-update.sh\n')
 
-        stubs = tmp_path / "stubs"
+        stubs = self.stubs = tmp_path / "stubs"
         stubs.mkdir()
         for name, body in (("systemctl", SYSTEMCTL), ("mountpoint", MOUNTPOINT)):
             (stubs / name).write_text(body)
@@ -102,6 +132,15 @@ class Host:
             "STUB_CALLS": str(self.calls),
             "STUB_MOUNTED": str(self.mounted),
         }
+
+    def as_root(self) -> Path:
+        """Stub the script into its root path; return the venv python's log."""
+        for name, body in (("id", ID), ("runuser", RUNUSER), ("chown", CHOWN)):
+            (self.stubs / name).write_text(body)
+            (self.stubs / name).chmod(0o755)
+        log = self.tmp / "python-log"
+        self.env["PYTHON_LOG"] = str(log)
+        return log
 
     def disable_cron(self) -> None:
         self.cron.write_text('MAILTO=""\n# */2 * * * * root /usr/local/bin/istota-update.sh\n')
@@ -158,9 +197,9 @@ class TestTheStoppedExport:
         assert result.returncode == 0, result.stderr.decode()
         calls = host.system_calls()
         stop_units = calls.index(
-            "stop istota-scheduler istota-web istota-webhooks istota-whatsapp-baileys "
-            "istota-devbox-proxy@*.service"
+            "stop istota-scheduler istota-web istota-webhooks istota-whatsapp-baileys"
         )
+        assert "stop istota-devbox-proxy@*.service" in calls
         assert "disable istota-scheduler istota-web istota-webhooks istota-whatsapp-baileys" in calls
         assert calls.index("stop mount-nextcloud") > stop_units
         assert not host.mounted.exists()
@@ -174,6 +213,29 @@ class TestTheStoppedExport:
         assert not any(n.startswith("browser-profile") for n in members)
         assert _manifest(result.stdout)["mode"] == "stopped"
         assert host.leftovers() == []
+
+    def test_a_unit_systemd_does_not_know_is_not_stopped(self, host):
+        """An install that never ran WhatsApp has no Baileys unit, and a stop
+        naming it fails the whole stop."""
+        host.disable_cron()
+        host.env["STUB_MISSING_UNITS"] = "istota-whatsapp-baileys"
+        result = host.run()
+        assert result.returncode == 0, result.stderr.decode()
+        calls = host.system_calls()
+        assert "stop istota-scheduler istota-web istota-webhooks" in calls
+        assert not any(c.startswith("stop") and "whatsapp-baileys" in c for c in calls)
+        assert _manifest(result.stdout)["mode"] == "stopped"
+
+    def test_the_venv_python_never_runs_as_root(self, host):
+        """The service user can write the venv, and a `.pth` file there runs at
+        interpreter start: root must not start that interpreter."""
+        host.disable_cron()
+        log = host.as_root()
+        result = host.run()
+        assert result.returncode == 0, result.stderr.decode()
+        runs = log.read_text().split()
+        assert len(runs) >= 5, runs  # four config reads and the snapshot
+        assert set(runs) == {"1"}, runs
 
     def test_a_pending_upload_refuses_and_writes_nothing(self, host):
         host.disable_cron()

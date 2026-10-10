@@ -87,13 +87,15 @@ VFS_META="${HOME_DIR}/.cache/rclone/vfsMeta"
 SERVICE_USER="$(stat -c %U "$HOME_DIR" 2>/dev/null || stat -f %Su "$HOME_DIR")"
 
 # As the service user when root, so nothing the daemon owns gains a root-owned
-# file (opening a WAL database writes its -shm).
+# file (opening a WAL database writes its -shm), and so root never starts the
+# venv's interpreter: the service user can write the venv, and a .pth file in
+# it runs at interpreter start.
 as_service_user() {
     if [ "$(id -u)" -eq 0 ]; then runuser -u "$SERVICE_USER" -- "$@"; else "$@"; fi
 }
 
 config_value() {
-    "$PYTHON" - "$CONFIG" "$1" <<'PY'
+    as_service_user "$PYTHON" -I - "$CONFIG" "$1" <<'PY'
 import sys, tomllib
 node = tomllib.load(open(sys.argv[1], "rb"))
 for part in sys.argv[2].split("."):
@@ -133,10 +135,22 @@ wait_until_clean() {
     done
 }
 
+# Whether systemd has the unit at all: an install that never ran WhatsApp has
+# no Baileys unit, and `systemctl stop` naming one it lacks fails the stop.
+unit_known() {
+    [ "$(systemctl show -p LoadState --value "$1")" != "not-found" ]
+}
+
 stop_units() {
-    local unit units=("${NS}-scheduler" "${NS}-web" "${NS}-webhooks" "${NS}-whatsapp-baileys")
+    local unit units=()
+    for unit in "${NS}-scheduler" "${NS}-web" "${NS}-webhooks" "${NS}-whatsapp-baileys"; do
+        if unit_known "$unit"; then units+=("$unit"); else log "no ${unit} unit; nothing to stop"; fi
+    done
+    [ "${#units[@]}" -gt 0 ] || die "systemd knows none of the ${NS}-* units; is --namespace right?"
     log "stopping and disabling ${units[*]}"
-    systemctl stop "${units[@]}" "${NS}-devbox-proxy@*.service"
+    systemctl stop "${units[@]}"
+    # A pattern matches loaded instances only, so none running is not an error.
+    systemctl stop "${NS}-devbox-proxy@*.service"
     systemctl disable "${units[@]}" 2>/dev/null || true
     for unit in "${units[@]}"; do
         if systemctl is-active --quiet "$unit"; then
@@ -151,6 +165,7 @@ release_mount() {
         log "${MOUNT} is not mounted; nothing to flush"
         return 0
     fi
+    unit_known mount-nextcloud || die "${MOUNT} is mounted, but not by a mount-nextcloud unit; unmount it by hand once the cache is clean, and re-run"
     wait_until_clean
     log "stopping and disabling mount-nextcloud"
     systemctl stop mount-nextcloud
