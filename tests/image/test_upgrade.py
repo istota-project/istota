@@ -1076,6 +1076,7 @@ def rollback_boot(istota_image) -> RollbackBoot:
     try:
         seeded = _docker(
             "run", "--rm", *platform_args, "--entrypoint", "istota-drop",
+            "-e", "ISTOTA_BRAIN_NATIVE_API_KEY=rollback-unused-key",
             "-v", f"{volume}:/data", istota_image.tag, "sh", "-c",
             "istota setup --yes --user alice --brain native --native-model scripted-test-model"
             " >/dev/null && istota -c /data/config/config.toml init >/dev/null"
@@ -1097,10 +1098,24 @@ def rollback_boot(istota_image) -> RollbackBoot:
             "-v", f"{volume}:/data", istota_image.tag,
         )
         assert started.returncode == 0, started.stderr
-        waited = _docker("wait", container, timeout=ROLLBACK_EXIT_TIMEOUT)
+        # Polled rather than `docker wait`: an image that does not refuse starts
+        # the daemon and never exits, and that has to read as a failed
+        # assertion, not a fixture error.
+        exit_code = -1
+        deadline = time.monotonic() + ROLLBACK_EXIT_TIMEOUT
+        while time.monotonic() < deadline:
+            state = _docker("inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", container)
+            running, _, code = state.stdout.strip().partition(" ")
+            if running == "false":
+                exit_code = int(code or -1)
+                break
+            logs = _docker("logs", container)
+            if "Starting scheduler daemon" in logs.stdout + logs.stderr:
+                break
+            time.sleep(2)
         logs = _docker("logs", container)
         return RollbackBoot(
-            exit_code=int(waited.stdout.strip() or -1),
+            exit_code=exit_code,
             logs=logs.stdout + logs.stderr,
             check_exit=check.returncode,
             check_output=check.stdout + check.stderr,
