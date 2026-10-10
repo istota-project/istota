@@ -1,0 +1,42 @@
+#!/bin/bash
+# Obtain or renew the certificate for INGRESS=direct with TLS_CERT_SOURCE=acme.
+# Run by istota-certbot.service (twice a day from its timer, and once by
+# `istota-stack up` while there is no certificate yet).
+#
+# certbot runs on the host, never in a container: its deploy hook restarts the
+# compose nginx, which takes the Docker CLI, and that is already root's here.
+# The webroot method against /srv/istota/acme, which nginx serves read-only at
+# /.well-known/acme-challenge/ from port 80; certificates under
+# /srv/istota/letsencrypt, which nginx mounts read-only at /etc/nginx/certs.
+# The istota containers mount neither. The deploy hook's restart is what moves
+# nginx from its port-80-only bootstrap to the full template.
+#
+# ACME_EMAIL registers an address with the CA; ACME_SERVER points at another
+# directory (the vm tier's Pebble).
+set -euo pipefail
+
+STACK="${ISTOTA_STACK_DIR:-/srv/istota}"
+
+if [ "${INGRESS:-}" != "direct" ] || [ "${TLS_CERT_SOURCE:-}" != "acme" ]; then
+    echo "[istota-certbot] INGRESS=${INGRESS:-} TLS_CERT_SOURCE=${TLS_CERT_SOURCE:-}: nothing to do."
+    exit 0
+fi
+domain="${DOMAIN:?DOMAIN is required}"
+case "$domain" in
+    *[!A-Za-z0-9.-]*) echo "[istota-certbot] DOMAIN '${domain}' is not a hostname." >&2; exit 1 ;;
+esac
+
+args=(certonly --non-interactive --agree-tos --keep-until-expiring
+      --webroot -w "${STACK}/acme" -d "$domain"
+      --config-dir "${STACK}/letsencrypt"
+      --work-dir /var/lib/istota-certbot --logs-dir /var/log/istota-certbot
+      --deploy-hook "/usr/local/sbin/istota-stack compose restart nginx")
+if [ -n "${ACME_EMAIL:-}" ]; then
+    args+=(--email "$ACME_EMAIL")
+else
+    args+=(--register-unsafely-without-email)
+fi
+if [ -n "${ACME_SERVER:-}" ]; then
+    args+=(--server "$ACME_SERVER")
+fi
+exec certbot "${args[@]}"

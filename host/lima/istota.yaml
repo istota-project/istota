@@ -1,0 +1,68 @@
+# A Lima VM dedicated to one istota install, on a Mac.
+#
+#   limactl create --name istota --param ISTOTA_REPO=/path/to/istota host/lima/istota.yaml
+#   limactl start istota
+#   limactl shell istota sudo istota-stack update <tag>
+#   limactl shell istota sudo istota-stack setup --hostname localhost:8080 ...
+#   limactl shell istota sudo /srv/istota/src/host/provision.sh
+#   limactl shell istota sudo systemctl start istota-stack
+#
+# The checkout at ISTOTA_REPO is mounted read-only and host/provision.sh runs
+# from it as root on first boot; /srv/istota/src is a clone of it, and
+# `istota-stack update` fetches release tags from that origin. Ingress is
+# `local`: nginx publishes on the VM's loopback and Lima forwards that port to
+# the Mac's loopback. The browser profile's amd64 image runs under Rosetta.
+
+minimumLimaVersion: 2.0.0
+
+base:
+  - template:debian-13
+
+vmType: vz
+cpus: 4
+memory: 6GiB
+disk: 40GiB
+
+rosetta:
+  enabled: true
+  binfmt: true
+
+# Docker Engine, installed by provision.sh, runs every container; Lima's own
+# containerd is off.
+containerd:
+  system: false
+  user: false
+
+param:
+  # The istota checkout on the Mac (required).
+  ISTOTA_REPO: ""
+
+mounts:
+  - location: "{{.Param.ISTOTA_REPO}}"
+    mountPoint: /mnt/istota-repo
+    writable: false
+
+mountType: virtiofs
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      test -n "${PARAM_ISTOTA_REPO}" || { echo "ISTOTA_REPO is required (--param ISTOTA_REPO=...)" >&2; exit 1; }
+      /mnt/istota-repo/host/provision.sh
+
+probes:
+  - script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      timeout 600s bash -c "until command -v istota-stack >/dev/null 2>&1; do sleep 5; done"
+    hint: See /var/log/cloud-init-output.log in the guest
+
+portForwards:
+  - guestIP: 127.0.0.1
+    # `istota setup --hostname localhost:8080` publishes nginx here; another
+    # port needs this pair changed too.
+    guestPort: 8080
+    hostIP: 127.0.0.1
+    hostPort: 8080

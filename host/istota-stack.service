@@ -1,0 +1,21 @@
+[Unit]
+Description=Istota stack (docker compose, from the deployed release tag)
+Documentation=file:///srv/istota/src/docs/deployment/
+# The AppArmor profile the istota service names has to be loaded first, and the
+# egress rules in DOCKER-USER have to be in place before a devbox starts. In
+# full Nextcloud integration provision.sh adds a drop-in requiring
+# mount-nextcloud.service, so nothing is ever written into an unmounted path.
+Requires=docker.service
+Wants=network-online.target istota-devbox-egress.service
+After=docker.service network-online.target apparmor.service istota-devbox-egress.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A first `up` may wait for the istota service's healthcheck before web starts.
+TimeoutStartSec=15min
+ExecStart=/usr/local/sbin/istota-stack up
+ExecStop=/usr/local/sbin/istota-stack down
+
+[Install]
+WantedBy=multi-user.target

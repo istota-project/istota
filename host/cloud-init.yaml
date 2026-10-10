@@ -1,0 +1,48 @@
+#cloud-config
+# Bootstrap a Debian 13 server (a VM, a VPS or a bare-metal box) dedicated to
+# one istota install. Fill in the three values under "Fill in", then pass this
+# file as the machine's user data.
+#
+# What it does: clones the repository, verifies the release tag's signature
+# against the key below before running anything from it, checks the tag out,
+# and runs host/provision.sh from that checkout. Then, on the machine:
+#
+#   istota-stack update <tag>     # builds the images from the verified tag
+#   istota-stack setup            # the wizard: config.toml, secrets, host.env
+#   /srv/istota/src/host/provision.sh   # picks up host.env
+#   systemctl start istota-stack
+#
+# Nothing here is pulled from a registry: the images are built on the machine.
+
+write_files:
+  - path: /srv/istota/host.env
+    permissions: "0644"
+    content: |
+      # Fill in: the release signing key, one line of an SSH public key. Every
+      # tag `istota-stack update` deploys is verified against it.
+      RELEASE_SIGNING_KEY=ssh-ed25519 AAAA...replace-me releases
+  - path: /root/istota-bootstrap.sh
+    permissions: "0700"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      # Fill in: where to clone from, and the release tag to provision from.
+      REPO_URL="https://gitlab.com/cynium/istota.git"
+      TAG="vX.Y.Z"
+
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
+      key="$(sed -n 's/^RELEASE_SIGNING_KEY=//p' /srv/istota/host.env)"
+      signers="$(mktemp)"
+      echo "releases namespaces=\"git\" ${key}" > "$signers"
+      git clone --quiet --no-checkout "$REPO_URL" /srv/istota/src
+      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+      [ "$(git -C /srv/istota/src cat-file -t "refs/tags/${TAG}")" = tag ]
+      git -C /srv/istota/src -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=${signers}" \
+          -c gpg.openpgp.program=false verify-tag "refs/tags/${TAG}"
+      git -C /srv/istota/src checkout --quiet --detach "refs/tags/${TAG}^{commit}"
+      rm -f "$signers"
+      ISTOTA_REPO_URL="$REPO_URL" /srv/istota/src/host/provision.sh
+
+runcmd:
+  - [bash, /root/istota-bootstrap.sh]

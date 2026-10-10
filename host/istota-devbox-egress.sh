@@ -46,3 +46,38 @@ ensure_drop "192.168.0.0/16" "istota-devbox: block 192.168.0.0/16"
 # RFC 6598 carrier-grade NAT, and the range Tailscale hands out: on a VM that
 # joins a tailnet the devbox would otherwise masquerade straight into it.
 ensure_drop "100.64.0.0/10" "istota-devbox: block 100.64.0.0/10"
+
+# --- The proxied listener (INGRESS=proxied) ---
+#
+# Only the upstream proxy may reach the published nginx port: with
+# `trusted_proxy_hops = 2` a client that reached nginx directly could forge the
+# X-Forwarded-For the hop arithmetic reads, which defeats the per-IP login
+# throttle. nginx's `allow`/`deny` is the readable rule; this one stays true if
+# the template is edited. In DOCKER-USER, not INPUT, because a published port
+# bypasses INPUT, and matched on conntrack's original destination, because by
+# FORWARD the packet has been rewritten to the container's address and port.
+# Every rule carries one comment, so a changed UPSTREAM_PROXY removes the old
+# set before the new one is written. IPv4 only, like the rules above.
+PROXIED_COMMENT="istota-proxied: only UPSTREAM_PROXY reaches the listener"
+
+iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"${PROXIED_COMMENT}\"" || true; } \
+    | sed 's/^-A /-D /' | while read -r rule; do
+        # iptables' own output, re-read as arguments (the comment is quoted).
+        eval "iptables -w 5 ${rule}"
+    done
+
+if [ "${INGRESS:-}" = "proxied" ]; then
+    listen_addr="${LISTEN_ADDR:?INGRESS=proxied needs LISTEN_ADDR}"
+    listen_port="${LISTEN_PORT:-8080}"
+    upstreams="$(printf '%s' "${UPSTREAM_PROXY:-}" | tr ',' ' ')"
+    if [ -z "${upstreams// /}" ]; then
+        echo "INGRESS=proxied needs UPSTREAM_PROXY" >&2
+        exit 1
+    fi
+    match=(-p tcp -m conntrack --ctorigdst "$listen_addr" --ctorigdstport "$listen_port" --ctdir ORIGINAL)
+    iptables -w 5 -I DOCKER-USER 1 "${match[@]}" -m comment --comment "$PROXIED_COMMENT" -j DROP
+    for upstream in $upstreams; do
+        iptables -w 5 -I DOCKER-USER 1 -s "$upstream" "${match[@]}" \
+            -m comment --comment "$PROXIED_COMMENT" -j RETURN
+    done
+fi

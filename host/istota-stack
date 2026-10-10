@@ -385,6 +385,22 @@ cmd_apply() {
     return "$rc"
 }
 
+cmd_up() {
+    load_apparmor
+    compose up -d --remove-orphans
+    # The first certificate: nginx serves the ACME challenge on port 80 from its
+    # bootstrap template until one exists, and certbot's deploy hook restarts it
+    # onto the full template.
+    local domain
+    domain="$(env_get "$HOST_ENV" DOMAIN)"
+    if [ "$(env_get "$HOST_ENV" INGRESS)" = "direct" ] \
+            && [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ] \
+            && [ ! -s "${STACK}/letsencrypt/live/${domain%%:*}/fullchain.pem" ] \
+            && command -v systemctl >/dev/null 2>&1; then
+        systemctl start --no-block istota-certbot.service || true
+    fi
+}
+
 main() {
     local command="${1:-}"
     [ "$#" -gt 0 ] && shift
@@ -393,7 +409,7 @@ main() {
         rollback) cmd_rollback "$@" ;;
         setup) cmd_setup "$@" ;;
         apply) cmd_apply "$@" ;;
-        up) load_apparmor; compose up -d --remove-orphans ;;
+        up) cmd_up ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;

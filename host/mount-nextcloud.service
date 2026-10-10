@@ -1,0 +1,35 @@
+[Unit]
+Description=Nextcloud rclone FUSE mount for istota (full Nextcloud integration)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=notify: rclone signals READY=1 only once the FUSE mount is live, so
+# istota-stack.service, which requires and follows this unit, starts against
+# the mount rather than the bare directory. With Type=simple a reboot raced:
+# apps seeded files into the empty mountpoint, and the non-empty directory then
+# wedged rclone ("mountpoint is not empty"). Ported from the Ansible role.
+Type=notify
+# The daemon's uid in the containers, so the workspace is its own.
+User=10001
+Group=10001
+EnvironmentFile=-/srv/istota/host.env
+# Self-heal a dead endpoint ("Transport endpoint is not connected") first.
+ExecStartPre=-/bin/fusermount3 -uz /srv/istota/mount
+ExecStart=/usr/bin/rclone mount \
+  --config /srv/istota/rclone.conf \
+  --allow-other \
+  --vfs-cache-mode full \
+  --vfs-cache-max-age 1h \
+  --dir-cache-time 30s \
+  --poll-interval 10s \
+  --timeout 30s \
+  --contimeout 15s \
+  --low-level-retries 3 \
+  ${RCLONE_REMOTE}: /srv/istota/mount
+ExecStop=/bin/fusermount3 -u /srv/istota/mount
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

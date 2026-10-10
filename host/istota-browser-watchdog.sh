@@ -21,7 +21,6 @@
 # template: settings come from /srv/istota/host.env through the unit.
 set -euo pipefail
 
-STACK_DIR="${ISTOTA_STACK_DIR:-/srv/istota}"
 CONTAINER="${ISTOTA_BROWSER_CONTAINER:-istota-browser}"
 STATE_DIR="${ISTOTA_BROWSER_WATCHDOG_STATE_DIR:-/var/lib/istota/browser-watchdog}"
 LOG_FILE="${ISTOTA_BROWSER_WATCHDOG_LOG:-/var/log/istota/browser-health.log}"
@@ -60,8 +59,10 @@ restart_container() {
     log "Restarting $CONTAINER"
     # `--profile browser` because the service sits behind that profile, and a
     # profile service is invisible to a compose command that does not name it.
-    (cd "$STACK_DIR" && docker compose --profile browser restart browser) >> "$LOG_FILE" 2>&1 \
-        || (cd "$STACK_DIR" && docker compose --profile browser up -d browser) >> "$LOG_FILE" 2>&1 \
+    # Through istota-stack, which knows the stack's compose files and settings.
+    local stack="${ISTOTA_STACK_BIN:-/usr/local/sbin/istota-stack}"
+    "$stack" compose --profile browser restart browser >> "$LOG_FILE" 2>&1 \
+        || "$stack" compose --profile browser up -d browser >> "$LOG_FILE" 2>&1 \
         || log "restart command failed"
 }
 
