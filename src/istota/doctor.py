@@ -3752,8 +3752,9 @@ def check_task_cgroups(config: "Config", probe: bool) -> CheckResult:
     warning. Two ways to have one: a container's root phase declares the
     namespace's root in ``ISTOTA_TASK_CGROUP_ROOT``, or a systemd unit with
     ``Delegate=``. A declared root is held to :func:`declared_root_problem`
-    first, which reads the mount's root in ``/proc/self/mountinfo``: a bind of
-    the host's tree is writable and probes clean, and must never read as OK.
+    first, which reads the mount's root in ``/proc/self/mountinfo`` and this
+    process's own cgroup path: a bind of the host's tree, and ``cgroup: host``,
+    are writable and probe clean, and must never read as OK.
 
     ``WARN`` where nothing declares a root at all. That is a host unit without
     ``Delegate=``, or a process that is not the daemon (the web container runs

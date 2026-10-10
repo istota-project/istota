@@ -200,6 +200,13 @@ print(lean_image_tag())
         "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_doctor_reports_the_delegated_root_ok"
 
     require_smoke_failures \
+        "cgroup-host" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/cgroup-host.yml" \
+        "row 4: the host's cgroup namespace, whose mount reads / too, and the root phase refuses to start" \
+        "REFUSE: give the istota service \`cgroup: private\`; \`cgroup: host\`" \
+        "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_doctor_reports_the_delegated_root_ok"
+
+    require_smoke_failures \
         "read-write-root" \
         "$PWD/${RUN_CONTRACT_CONTROLS}/read-write-root.yml" \
         "row 6: no read_only, so a uid-0 write succeeds and the root mount is rw" \

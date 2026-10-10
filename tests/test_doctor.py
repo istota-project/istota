@@ -2061,6 +2061,22 @@ class TestTaskCgroups:
         assert "/../.." in result.detail
         assert result.remedy
 
+    def test_a_declared_root_in_the_hosts_cgroup_namespace_fails_never_ok(
+        self, make_config, tree, monkeypatch
+    ):
+        # `cgroup: host`: the mount reads `/` because the namespace is the
+        # VM's, so the mount root alone passes; the process's own cgroup path
+        # is the VM's name for the container, not the root phase's leaf.
+        proc, cg = tree
+        (proc / "self" / "cgroup").write_text("0::/system.slice/docker-0123abcd.scope/supervisor\n")
+        monkeypatch.setenv("ISTOTA_TASK_CGROUP_ROOT", str(cg))
+        monkeypatch.setattr(doctor.task_cgroup, "probe", lambda root: None)
+
+        result = self._run(make_config())
+
+        assert result.status == FAIL, result
+        assert "docker-0123abcd.scope" in result.detail
+
     @pytest.mark.requires_dac
     def test_a_declared_root_left_read_only_fails(self, make_config, tree, monkeypatch):
         # The skipped-remount control: Docker's mount is read-only until the

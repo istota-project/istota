@@ -60,7 +60,9 @@ class TestTheMountinfoRootRefusal:
         assert result.stdout.split() == ["/", "cgroup2", "ro,nosuid,nodev,noexec,relatime"]
 
     def test_the_containers_own_cgroup_is_accepted(self, tmp_path):
-        result = _call("require_own_cgroup", str(_mountinfo(tmp_path, OWN)), "/sys/fs/cgroup")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/\n")
+        result = _call("require_own_cgroup", str(_mountinfo(tmp_path, OWN)), "/sys/fs/cgroup", str(cgroup))
 
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -69,6 +71,17 @@ class TestTheMountinfoRootRefusal:
 
         assert result.returncode == 70
         assert "/../.." in result.stdout + result.stderr
+
+    def test_the_hosts_cgroup_namespace_is_refused(self, tmp_path):
+        # `cgroup: host` mounts the VM's tree rooted at `/`, so the mount root
+        # passes; the root phase's own cgroup is then the VM's path for the
+        # container, where a private namespace reads `0::/`.
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/system.slice/docker-0123abcd.scope\n")
+        result = _call("require_own_cgroup", str(_mountinfo(tmp_path, OWN)), "/sys/fs/cgroup", str(cgroup))
+
+        assert result.returncode == 70
+        assert "docker-0123abcd.scope" in result.stdout + result.stderr
 
     def test_a_cgroup_v1_tree_is_refused(self, tmp_path):
         result = _call("require_own_cgroup", str(_mountinfo(tmp_path, V1)), "/sys/fs/cgroup")

@@ -6,8 +6,10 @@
 #   1. Delegates the container's own cgroup to the daemon's uid, the container
 #      equivalent of `Delegate=memory pids cpu` plus `DelegateSubgroup=supervisor`.
 #      Refuses first, before writing anything, unless /sys/fs/cgroup is a cgroup2
-#      mount rooted at `/`: a bind of the host's tree (root `/../..`) is writable
-#      and is the VM's whole hierarchy.
+#      mount rooted at `/` and this process sits at that namespace's root
+#      (`0::/`): a bind of the host's tree (root `/../..`) and `cgroup: host`
+#      (root `/`, process at the VM's path for the container) are both writable
+#      once remounted, and both are the VM's whole hierarchy.
 #   2. Fixes ownership of /data, the local workspace included, once, for a
 #      volume an older image wrote as root (recorded by /data/.ownership-10001).
 #      A full-integration workspace is the VM's rclone mount, whose owner the
@@ -36,14 +38,27 @@ cgroup_mount_fields() {
     } END { if (line != "") print line }' "$mountinfo"
 }
 
+# This process's cgroup v2 path, as its cgroup namespace names it.
+own_cgroup() {
+    awk -F: '$1 == "0" && $2 == "" { sub(/^0::/, ""); print; exit }' "$1"
+}
+
 require_own_cgroup() {
-    local mountinfo="$1" mountpoint="$2" fields root fstype
+    local mountinfo="$1" mountpoint="$2" cgroup_file="${3:-/proc/self/cgroup}" fields root fstype own
     fields="$(cgroup_mount_fields "$mountinfo" "$mountpoint")"
     root="${fields%% *}"
     fstype="$(echo "$fields" | awk '{print $2}')"
     if [ -z "$fields" ] || [ "$fstype" != "cgroup2" ] || [ "$root" != "/" ]; then
         log "REFUSE: ${mountpoint} is ${fstype:-not mounted} rooted at ${root:-nothing}, not this container's own cgroup2 at /."
         log "REFUSE: give the istota service \`cgroup: private\` and no volume on ${mountpoint}; a bind of the host's tree hands the daemon the VM's whole cgroup hierarchy."
+        return 70
+    fi
+    # The mount root is `/` in the host's namespace too; there this process is
+    # at the VM's path for the container rather than at the namespace's root.
+    own="$(own_cgroup "$cgroup_file")"
+    if [ "$own" != "/" ]; then
+        log "REFUSE: this process's cgroup is ${own:-unknown}, not / in a cgroup namespace of its own, so ${mountpoint} is the VM's whole tree."
+        log "REFUSE: give the istota service \`cgroup: private\`; \`cgroup: host\` hands the daemon the VM's whole cgroup hierarchy."
         return 70
     fi
 }

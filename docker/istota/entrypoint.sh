@@ -57,10 +57,11 @@ fi
 # Nextcloud shares a Docker volume with this container rather than an rclone
 # mount, so a mount point of any type passes. Nothing an operator runs sets it.
 python3 - "$CONFIG_FILE" <<'PY' || exit 78
-import os, re, socket, sys
+import os, socket, sys
 from pathlib import Path
 from urllib.parse import urlsplit
 from istota.config import load_config
+from istota.lib.mountinfo import covering_mount
 
 config = load_config(Path(sys.argv[1]))
 refusals = []
@@ -75,14 +76,9 @@ if url and urlsplit(url).hostname == "nextcloud":
             "switch to local storage; see docs/deployment/moving-the-bundled-nextcloud.md.")
 if config.storage_is_nextcloud and config.workspace_path is not None:
     workspace = os.path.normpath(str(config.workspace_path))
-    mountpoint, fstype = "/", "unknown"
     with open(os.environ.get("ISTOTA_MOUNTINFO", "/proc/self/mountinfo")) as mounts:
-        for line in mounts:
-            fields = line.split()
-            point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4])
-            within = workspace == point or workspace.startswith(point.rstrip("/") + "/")
-            if within and len(point) >= len(mountpoint):
-                mountpoint, fstype = point, fields[fields.index("-") + 1]
+        mount = covering_mount(workspace, mounts.read())
+    mountpoint, fstype = (mount.point, mount.fstype) if mount else ("/", "unknown")
     concession = os.environ.get("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE") == "1"
     if not (fstype == "fuse.rclone" or (concession and mountpoint == workspace)):
         refusals.append(

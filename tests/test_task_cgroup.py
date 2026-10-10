@@ -732,6 +732,30 @@ class TestResolveRootInAContainer:
         problem = task_cgroup.declared_root_problem(cg, proc_root=proc)
         assert problem is not None and "/../.." in problem
 
+    def test_a_mount_in_the_hosts_cgroup_namespace_is_refused(self, tmp_path):
+        # `cgroup: host`: the namespace is the VM's, so its cgroup2 mount is
+        # rooted at `/` and is the VM's whole tree. The process's own cgroup
+        # is then the VM's path for the container rather than the root phase's
+        # `/supervisor` leaf, which is what tells the two apart.
+        proc, cg = _container_cgroupfs(tmp_path)
+        (proc / "self" / "cgroup").write_text("0::/system.slice/docker-0123abcd.scope/supervisor\n")
+
+        root = task_cgroup.resolve_root(
+            proc_root=proc, cgroup_root=cg, environ={"ISTOTA_TASK_CGROUP_ROOT": str(cg)}
+        )
+
+        assert root is None
+        problem = task_cgroup.declared_root_problem(cg, proc_root=proc)
+        assert problem is not None and "docker-0123abcd.scope" in problem
+
+    def test_the_namespace_root_itself_is_accepted(self, tmp_path):
+        # Before the root phase moves into `supervisor/`, and for a process
+        # that never joined it.
+        proc, cg = _container_cgroupfs(tmp_path)
+        (proc / "self" / "cgroup").write_text("0::/\n")
+
+        assert task_cgroup.declared_root_problem(cg, proc_root=proc) is None
+
     def test_a_directory_on_no_cgroup2_mount_is_refused(self, tmp_path):
         proc, cg = _container_cgroupfs(tmp_path)
         elsewhere = tmp_path / "elsewhere"
