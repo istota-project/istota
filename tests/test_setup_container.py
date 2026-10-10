@@ -303,6 +303,30 @@ class TestTheRun:
             tmp_path / "vm" / "secrets" / "istota_web_session_secret_key"
         ).read_text() == session
 
+    def test_a_rerun_with_no_answer_keeps_a_working_credential(self, tmp_path, monkeypatch):
+        """A credential the re-run was not given is one the operator did not
+        mean to remove: `istota-stack setup --force` without the token in the
+        environment rewrote every file from the new answers and emptied it."""
+        monkeypatch.setenv("ISTOTA_DEVELOPER_GITLAB_TOKEN", "glpat-working")
+        setup_wizard.run_setup(_args(tmp_path, developer=True), out=lambda *_: None)
+        secret = tmp_path / "vm" / "secrets" / "istota_developer_gitlab_token"
+        assert secret.read_text() == "glpat-working"
+        monkeypatch.delenv("ISTOTA_DEVELOPER_GITLAB_TOKEN")
+
+        setup_wizard.run_setup(_args(tmp_path, developer=True, force=True), out=lambda *_: None)
+
+        assert secret.read_text() == "glpat-working"
+        assert _mode(secret) == 0o400
+
+    def test_a_rerun_with_a_new_answer_replaces_the_credential(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_DEVELOPER_GITLAB_TOKEN", "glpat-working")
+        setup_wizard.run_setup(_args(tmp_path, developer=True), out=lambda *_: None)
+        monkeypatch.setenv("ISTOTA_DEVELOPER_GITLAB_TOKEN", "glpat-rotated")
+
+        setup_wizard.run_setup(_args(tmp_path, developer=True, force=True), out=lambda *_: None)
+
+        assert (tmp_path / "vm" / "secrets" / "istota_developer_gitlab_token").read_text() == "glpat-rotated"
+
     def test_without_a_vm_dir_credentials_go_into_the_private_config(self, tmp_path):
         setup_wizard.run_setup(_args(tmp_path, vm_dir=None), out=lambda *_: None)
 

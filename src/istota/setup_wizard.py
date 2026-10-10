@@ -2026,7 +2026,13 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
         secrets_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(secrets_dir, 0o700)
         for name, value in container_secret_values(a).items():
-            _write_secret_file(secrets_dir / name, value)
+            path = secrets_dir / name
+            # An empty answer on a re-run is a credential this run was not
+            # given, not one to delete: keep what a previous run wrote.
+            if not value and _read_secret_file(path):
+                out(f"  Keeping the existing {name}; delete the file to remove it.")
+                continue
+            _write_secret_file(path, value)
         for name, render in ((".env", render_stack_env), ("host.env", render_host_env)):
             path = vm_dir / name
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
