@@ -26,6 +26,31 @@ x-workspace-mount: &workspace_mount
 # since compose refuses to start a service whose secret file is missing), 0400
 # and owned by uid 10001. `setup_wizard.SECRET_NAMES` is the same list, and
 # tests/test_setup_container.py holds the two equal.
+# The config directory: /srv/istota/config on the VM, bound at /data/config.
+# Read-only for every running service, so the daemon cannot rewrite its own
+# config. `istota setup` and `istota apply` write it from a one-shot container
+# that `istota-stack` starts with ISTOTA_CONFIG_ACCESS=rw.
+x-config-mount: &config_mount
+  type: bind
+  source: ${ISTOTA_CONFIG_DIR:-./config}
+  target: /data/config
+  read_only: ${ISTOTA_CONFIG_READ_ONLY:-true}
+  bind:
+    create_host_path: true
+
+# The image every service built from docker/istota/Dockerfile runs. Built on the
+# VM from a verified release tag by `istota-stack update`, which writes the tag
+# to .env as ISTOTA_TAG; nothing is pulled from a registry.
+x-istota-build: &istota_build
+  context: ..
+  dockerfile: docker/istota/Dockerfile
+  args:
+    # From host.env through `istota-stack`, which sets INSTALL_CLAUDE_CODE=0
+    # when config.toml names no brain that needs it. Unset, the Dockerfile's
+    # defaults apply.
+    - INSTALL_CLAUDE_CODE
+    - CLAUDE_CODE_VERSION
+
 x-istota-secrets: &istota_secrets
   - anthropic_api_key
   - claude_code_oauth_token
@@ -40,9 +65,8 @@ x-istota-secrets: &istota_secrets
 
 services:
   istota:
-    build:
-      context: ..
-      dockerfile: docker/istota/Dockerfile
+    build: *istota_build
+    image: istota-istota:${ISTOTA_TAG:-local}
     # The run contract. Every task runs in a bubblewrap sandbox inside this
     # container, and bwrap needs what Docker's defaults refuse: creating a user
     # namespace (seccomp), mounting inside it (seccomp and AppArmor), and
@@ -108,12 +132,14 @@ services:
       start_period: 30s
     volumes:
       - istota_data:/data
+      - *config_mount
       - *workspace_mount
     # The ingress mode and the public name, for the entrypoint's check that
     # `[site] hostname` is DOMAIN behind TLS. host.env is written by `istota
-    # setup --vm-dir` beside this file; without one the stack is `local`.
+    # setup --vm-dir`; `istota-stack` names /srv/istota/host.env. Without one
+    # the stack is `local`.
     env_file:
-      - path: ./host.env
+      - path: ${ISTOTA_HOST_ENV:-./host.env}
         required: false
     # No istota configuration here. config.toml is an input: `istota setup`
     # writes /data/config/config.toml on the state volume once, and the
@@ -142,9 +168,8 @@ services:
   # config.toml the scheduler container generates. Depends on `istota` so the
   # config file exists before uvicorn starts.
   web:
-    build:
-      context: ..
-      dockerfile: docker/istota/Dockerfile
+    build: *istota_build
+    image: istota-istota:${ISTOTA_TAG:-local}
     # Healthy, not started: the istota service's healthcheck is the `tasks`
     # table, so this starts on a migrated database. The config is an input and
     # exists before either starts.
@@ -153,6 +178,7 @@ services:
         condition: service_healthy
     volumes:
       - istota_data:/data
+      - *config_mount
       - *workspace_mount
     # Internal-only — nginx routes /istota/ to web:${WEB_PORT}. To bypass nginx,
     # uncomment the ports block below.
@@ -210,7 +236,7 @@ services:
   # written by certbot on the VM) or /srv/istota/certs (files), and ACME_WEBROOT
   # is /srv/istota/acme. Neither is mounted into any istota container.
   nginx:
-    image: nginx:alpine
+    image: nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
     depends_on:
       web:
         condition: service_started
@@ -223,7 +249,7 @@ services:
       - ${CERTS_DIR:-./nginx/certs}:/etc/nginx/certs:ro
       - ${ACME_WEBROOT:-./nginx/acme}:/var/www/acme:ro
     env_file:
-      - path: ./host.env
+      - path: ${ISTOTA_HOST_ENV:-./host.env}
         required: false
     environment:
       WEB_PORT: ${WEB_PORT:-8766}
@@ -235,6 +261,7 @@ services:
     build:
       context: browser/
       dockerfile: Dockerfile
+    image: istota-browser:${ISTOTA_TAG:-local}
     container_name: istota-browser
     platform: ${BROWSER_PLATFORM:-linux/amd64}
     # PID 1 in this image is `su` (entrypoint.sh ends with `exec su … python`),
@@ -414,9 +441,8 @@ services:
     restart: unless-stopped
 
   webhooks:
-    build:
-      context: ..
-      dockerfile: docker/istota/Dockerfile
+    build: *istota_build
+    image: istota-istota:${ISTOTA_TAG:-local}
     profiles:
       - location
       - sms
@@ -430,6 +456,7 @@ services:
       - "${ISTOTA_WEBHOOKS_PORT:-8765}"
     volumes:
       - istota_data:/data
+      - *config_mount
       - *workspace_mount
     environment:
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
@@ -460,6 +487,7 @@ services:
       # needs nothing from the tree.
       context: whatsapp-baileys
       dockerfile: Dockerfile
+    image: istota-whatsapp-baileys:${ISTOTA_TAG:-local}
     # Its own profile, and not `whatsapp`, because the two adapters need
     # opposite things: Cloud needs the webhook receiver and no sidecar, Baileys
     # needs the sidecar and no receiver. A compose profile cannot read

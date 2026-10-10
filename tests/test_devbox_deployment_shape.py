@@ -712,7 +712,7 @@ class TestTheImageToolchainOutlivesTheHomeVolume:
     def test_the_uv_image_is_pinned(self):
         _, tokens = self._copy_destination("/uv")
         source = next(t for t in tokens if t.startswith("--from="))
-        assert re.fullmatch(r"--from=\S+/uv:\d+\.\d+\.\d+", source), (
+        assert re.fullmatch(r"--from=\S+/uv:\d+\.\d+\.\d+(@sha256:[0-9a-f]{64})?", source), (
             f"{source} is not a pinned uv release, so a rebuild is not "
             f"reproducible"
         )

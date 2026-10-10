@@ -2,7 +2,11 @@
 # SvelteKit static build for the web UI. The output (web/build) is copied into
 # the runtime image so the web service can mount it without `npm install` at
 # container start.
-FROM node:20-slim AS web-builder
+# Every base is pinned by digest (the one-deployment-shape spec, Stage 6):
+# each VM builds this image from a signed tag, so the tag has to name the
+# bytes it builds from as far as a Dockerfile can. Debian packages still
+# resolve at build time. tests/test_docker_base_images.py requires the pins.
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS web-builder
 
 WORKDIR /app/web
 
@@ -14,7 +18,7 @@ COPY web/ ./
 RUN npm run build
 
 # --- Runtime stage ---
-FROM python:3.12-slim-trixie
+FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 ENV PYTHONUNBUFFERED=1
 ENV LANG=C.UTF-8
@@ -37,11 +41,27 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Claude Code
-RUN npm install -g @anthropic-ai/claude-code
+# Claude Code, for the claude_code and tmux_claude brains only, at a pinned
+# version. Proprietary, so the operator's own build fetches it and no artifact
+# this project distributes contains it. `istota-stack` passes
+# INSTALL_CLAUDE_CODE=0 when config.toml names neither brain, and
+# CLAUDE_CODE_VERSION from host.env; the defaults here are what every other
+# build (the test tiers, a checkout's `docker compose build`) gets. The
+# autoupdater is off so the pinned version stays the one that runs, and doctor
+# compares the running `claude --version` with ISTOTA_CLAUDE_CODE_VERSION.
+ARG INSTALL_CLAUDE_CODE=1
+ARG CLAUDE_CODE_VERSION=2.1.296
+RUN set -eu; \
+    if [ "${INSTALL_CLAUDE_CODE}" = "1" ]; then \
+        [ -n "${CLAUDE_CODE_VERSION}" ] || { echo "CLAUDE_CODE_VERSION is empty" >&2; exit 1; }; \
+        npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
+    fi
+ENV DISABLE_AUTOUPDATER=1
+ENV ISTOTA_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
+ENV ISTOTA_CLAUDE_CODE_INSTALLED=${INSTALL_CLAUDE_CODE}
 
 # uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 /uv /usr/local/bin/uv
 
 # Forge CLIs (developer skill). The skill's forge verbs — MR/PR creation,
 # review, ci/run status, repo view — exec a real `gh` or `glab` through

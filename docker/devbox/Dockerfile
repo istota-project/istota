@@ -1,4 +1,4 @@
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -145,7 +145,7 @@ RUN set -eux; \
 # container is exactly where they belong — and a task that wants them installs
 # them with rustup at the time. That install lands in /home/dev and dies with
 # the next reset, which is now the documented boundary rather than a surprise.
-COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 /uv /uvx /usr/local/bin/
 
 USER dev
 WORKDIR /home/dev
