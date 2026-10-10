@@ -46,7 +46,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 TEMPLATE = REPO / "host" / "lima" / "istota.yaml"
 
-DEFAULT_NAME = "istota-vmtier-1"
+DEFAULT_NAME = "istota-vmtier-2"
 STACK = "/srv/app/istota"
 #: The Nextcloud rclone mount, outside the stack directory (provision.sh's default).
 MOUNT = "/srv/mount/nextcloud/content"

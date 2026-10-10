@@ -128,7 +128,7 @@ if [ "$ran" -eq 0 ]; then
     exit 64
 fi
 if [ "$keep" != "1" ]; then
-    limactl stop "${ISTOTA_VM_NAME:-istota-vmtier-1}" >/dev/null 2>&1 || true
+    limactl stop "${ISTOTA_VM_NAME:-istota-vmtier-2}" >/dev/null 2>&1 || true
 fi
 echo
 echo "[control] all controls OK"
