@@ -329,10 +329,13 @@ copy_out_config() {
     docker volume inspect "$volume" >/dev/null 2>&1 || return 0
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     [ -n "$tag" ] || return 0
-    log "copying config.toml and admins out of the ${volume} volume, once"
-    docker run --rm --network none --user "${ISTOTA_UID}:${ISTOTA_UID}" --entrypoint /bin/sh \
+    local copied
+    copied="$(docker run --rm --network none --user "${ISTOTA_UID}:${ISTOTA_UID}" --entrypoint /bin/sh \
         -v "${volume}:/old:ro" -v "${CONFIG_DIR}:/new" "istota-istota:${tag}" -c \
-        'for f in config.toml admins; do [ ! -f "/old/config/$f" ] || cp -p "/old/config/$f" /new/; done'
+        'for f in config.toml admins; do if [ -f "/old/config/$f" ]; then cp -p "/old/config/$f" /new/ && echo "$f"; fi; done')"
+    if [ -n "$copied" ]; then
+        log "copied $(echo "$copied" | tr '\n' ' ')out of the ${volume} volume into ${CONFIG_DIR}, once"
+    fi
 }
 
 cmd_setup() {
