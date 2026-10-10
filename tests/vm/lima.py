@@ -317,6 +317,9 @@ def ensure_release(vm: Vm, release: Release) -> None:
     vm.run(f"{REPO_MOUNT}/host/provision.sh", timeout=CREATE_TIMEOUT)
     current = vm.out(f"awk -F= '$1 == \"ISTOTA_TAG\" {{ print $2 }}' {STACK}/.env")
     if current != release.tag:
+        # `update` brings the stack up in the mode the VM was left in, and the
+        # proxied listener's address lives on a namespace a VM restart drops.
+        ensure_proxied_namespaces(vm)
         vm.run(f"istota-stack update {shlex.quote(release.tag)}", timeout=BUILD_TIMEOUT)
 
 
