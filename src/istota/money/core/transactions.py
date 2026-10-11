@@ -662,7 +662,10 @@ def backup_ledger(ledger_path: Path, max_backups: int = 10) -> Path | None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = backups_dir / f"{ledger_path.name}.{timestamp}"
 
-    shutil.copy2(ledger_path, backup_path)
+    # Not copy2: its xattr step raises EIO on some FUSE workspace mounts (#694),
+    # and a failed backup blocks the ledger write behind it.
+    shutil.copyfile(ledger_path, backup_path)
+    shutil.copymode(ledger_path, backup_path)
 
     existing = sorted(backups_dir.glob(f"{ledger_path.name}.*"), reverse=True)
     for old_backup in existing[max_backups:]:

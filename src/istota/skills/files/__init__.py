@@ -101,7 +101,9 @@ def copy_to_local(config: "Config", remote_path: str, local_path: Path) -> None:
         if not src.exists():
             raise RuntimeError(f"Source file not found: {src}")
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(src), str(local_path))
+        # Not copy2: its xattr step raises EIO on some FUSE workspace mounts (#694).
+        shutil.copyfile(src, local_path)
+        shutil.copymode(src, local_path)
     else:
         rclone_download(config.rclone_remote, remote_path, local_path)
 
