@@ -39,7 +39,7 @@ log() { echo "[istota] $*"; }
 # an operator reading `docker compose ps` sees one code for "fix the setup".
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "[istota] REFUSE: there is no ${CONFIG_FILE}. Write one first:" >&2
-    echo "[istota]   docker compose run --rm --entrypoint istota-drop istota istota setup" >&2
+    echo "[istota]   docker compose run --rm --entrypoint istota-drop daemon istota setup" >&2
     exit 78
 fi
 

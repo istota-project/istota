@@ -135,7 +135,7 @@ services:
         setfacl -R -m g:33:rwX /mnt/shared &&
         setfacl -R -d -m g:33:rwX /mnt/shared
 
-  istota:
+  daemon:
     depends_on:
       nextcloud:
         condition: service_healthy

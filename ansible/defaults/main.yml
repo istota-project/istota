@@ -152,5 +152,5 @@ istota_user_secrets: {}
 # successful run recorded, and on a VM where istota-stack is missing. true runs
 # it on every play.
 istota_provision_always: false
-# Seconds to wait for the istota service's healthcheck before the ensure loops.
+# Seconds to wait for the daemon service's healthcheck before the ensure loops.
 istota_health_timeout: 900

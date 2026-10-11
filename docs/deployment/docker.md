@@ -10,7 +10,7 @@ The Docker deployment is functional but unstable. For production, use [Ansible](
 
 | Service | Purpose |
 |---|---|
-| `istota` | Scheduler + Claude Code |
+| `daemon` | Scheduler + Claude Code |
 | `web` | SvelteKit + FastAPI web UI |
 | `nginx` | Reverse proxy (single entry port) |
 | `browser` (profile) | Chrome + VNC container for web browsing |
@@ -23,12 +23,12 @@ istota's configuration is `/data/config/config.toml` on the state volume. `istot
 ```bash
 cd docker
 cp .env.example .env
-docker compose build istota
+docker compose build daemon
 touch host.env && sudo chown 10001:10001 .env host.env
 sudo install -d -o 10001 -g 10001 -m 0700 secrets
 for n in $(docker compose config --format json | python3 -c 'import json,sys; print(*json.load(sys.stdin)["secrets"])'); do
     sudo install -o 10001 -g 10001 -m 0400 /dev/null "secrets/$n"; done
-docker compose run --rm --no-deps -v "$PWD:/vm" --entrypoint istota-drop istota istota setup --vm-dir /vm
+docker compose run --rm --no-deps -v "$PWD:/vm" --entrypoint istota-drop daemon istota setup --vm-dir /vm
 docker compose up -d
 ```
 
@@ -47,23 +47,27 @@ A config written before the binaries existed names the old default path. Nothing
 Edit `/data/config/config.toml` and restart:
 
 ```bash
-docker compose exec istota istota-drop vi /data/config/config.toml   # or copy it out and back
-docker compose restart istota web webhooks
+docker compose exec daemon istota-drop vi /data/config/config.toml   # or copy it out and back
+docker compose restart daemon web webhooks
 ```
 
 A credential is a file under `docker/secrets/` (0400, owned by uid 10001); replace the file and restart. An existing install keeps the `config.toml` its old entrypoint rendered, unchanged, as its own file; `docker/istota/config-diff.py` in the image compares two configs by key if you want to see what an old render would have changed.
 
 ## Upgrading an existing deployment
 
+### The daemon service is called `daemon`
+
+The scheduler's compose service was called `istota` and is now `daemon`, so its container is `istota-daemon-1` rather than `istota-istota-1`, and the image built for it is `istota:<tag>` rather than `istota-istota:<tag>`. `istota-stack update` brings the stack up with `docker compose up -d --remove-orphans`, which removes the old `istota-istota-1` container; by hand, run `docker compose up -d --remove-orphans` once after the new build. Nothing moves on disk: the state volume is keyed by its own name, `istota_data`, not by the service, so the new container mounts the same data.
+
 ### Room identities: offline maintenance required
 
 When upgrading a volume with legacy room identities, build the new image, then stop all three application services before running the migration. Keep Nextcloud and its database running for the server-side channel directory moves. From `docker/`, with the existing config and workspace volumes retained:
 
 ```bash
-docker compose build istota
-docker compose stop istota web webhooks
-docker compose run --rm --no-deps --entrypoint /app/.venv/bin/istota istota -c /data/config/config.toml init --relocate-rooms --scheduler-stopped
-docker compose up -d istota web webhooks
+docker compose build daemon
+docker compose stop daemon web webhooks
+docker compose run --rm --no-deps --entrypoint /app/.venv/bin/istota daemon -c /data/config/config.toml init --relocate-rooms --scheduler-stopped
+docker compose up -d daemon web webhooks
 ```
 
 Inspect the migration result before the final command. Exit 1 is a refusal, and exit 2 means partial work needs attention; follow the [refusal and retry procedure](ansible.md#room-identity-migration). The command is safe to rerun while the application services remain stopped. `--scheduler-stopped` recovers the task rows a stopped scheduler left in flight, which would otherwise refuse as `live_tasks` on every rerun; leave it off if anything else is executing a task. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the scheduler entrypoint cannot stop sibling web and webhook containers.
@@ -104,8 +108,8 @@ The Ansible role runs `python -m istota.maintenance.repos_relocate` on every dep
 If you set `repos_dir` by hand on an install predating the per-user split, run the migration yourself once before the clones are used:
 
 ```bash
-docker compose exec istota python -m istota.maintenance.repos_relocate --dry-run
-docker compose exec istota python -m istota.maintenance.repos_relocate
+docker compose exec daemon python -m istota.maintenance.repos_relocate --dry-run
+docker compose exec daemon python -m istota.maintenance.repos_relocate
 ```
 
 It refuses rather than guessing when it cannot tell whose clones are whose, and exits 0 with nothing to do on an install that never set it.
@@ -176,20 +180,20 @@ users = ["alice"]
 ```
 
 ```bash
-docker compose exec istota istota-drop istota devbox compose-file > compose.devbox.yml
+docker compose exec daemon istota-drop istota devbox compose-file > compose.devbox.yml
 docker compose -f docker-compose.yml -f compose.devbox.yml up -d
 ```
 
-The verb prints one `devbox-<user>` service per entry, plus the `istota` service's mounts of each user's two socket volumes, and creates each user's repos directory first. On the VM, `istota-stack` does both steps and passes the file as a second `-f` whenever it exists. Re-render after changing `users`; `up -d --remove-orphans` removes the service of a user taken out, and keeps their home volume.
+The verb prints one `devbox-<user>` service per entry, plus the `daemon` service's mounts of each user's two socket volumes, and creates each user's repos directory first. On the VM, `istota-stack` does both steps and passes the file as a second `-f` whenever it exists. Re-render after changing `users`; `up -d --remove-orphans` removes the service of a user taken out, and keeps their home volume.
 
 What each devbox gets, and nothing else:
 
 - `devbox-home-<user>` at `/home/dev`, its persistent home.
-- `devbox-exec-<user>` at `/run/istota-exec`: the exec transport's socket, which the server inside the box creates and the istota container reaches at `[developer.container] exec_socket_dir`/`<user>`.
+- `devbox-exec-<user>` at `/run/istota-exec`: the exec transport's socket, which the server inside the box creates and the daemon container reaches at `[developer.container] exec_socket_dir`/`<user>`.
 - `devbox-cred-<user>` at `/run/istota-cred`: the credential proxy's socket, which istota creates at `[developer] devbox_proxy_socket_dir`/`<user>`. The proxy answers on that socket as that user, whoever connects, so it matters that no other container mounts it and no task sandbox binds any credential socket directory.
 - Its own subdirectory of the state volume, `/data/repos/<user>`, at the same path on both sides.
 
-`istota setup` writes both socket directories under `/data/devbox/` when the developer skill is on; the render refuses socket directories outside `/data`, because only mounts there are handed to uid 10001 when the istota container starts.
+`istota setup` writes both socket directories under `/data/devbox/` when the developer skill is on; the render refuses socket directories outside `/data`, because only mounts there are handed to uid 10001 when the daemon container starts.
 
 `istota-skill devbox reset` needs no Docker CLI: it is a request on the exec transport. The server empties `/home/dev` if it is a mount point, answers, and exits, and the service's `restart: unless-stopped` brings the box back.
 
@@ -262,14 +266,14 @@ The noVNC console is for operators only. Reach `/instances.html` on the existing
 ## Security differences
 
 - **The network allowlist is the default.** `istota setup` leaves `[security.network] enabled` at its default, on, as the Ansible shape has it, so each task gets `--unshare-net` and the CONNECT proxy's `host:port` allowlist. A config the old entrypoint rendered says `enabled = false`, and keeps saying it until you change it
-- **The filesystem sandbox runs here**, under the run contract the `istota` service carries. See below
+- **The filesystem sandbox runs here**, under the run contract the `daemon` service carries. See below
 - **Skill proxy**: enabled by default and works inside the container. It is what keeps credentials out of the model's environment
 - **All extras installed**: every optional dependency included in the image
-- **Devboxes are rendered per user** into a second compose file, and each one's credential socket is a volume only it and istota mount. [Details above](#devboxes)
+- **Devboxes are rendered per user** into a second compose file, and each one's credential socket is a volume only it and the daemon mount. [Details above](#devboxes)
 
 ### Running tasks sandboxed
 
-The `istota` service in `docker-compose.yml` carries the grant bubblewrap needs and nothing wider:
+The `daemon` service in `docker-compose.yml` carries the grant bubblewrap needs and nothing wider:
 
 ```yaml
     security_opt:
@@ -291,7 +295,7 @@ sudo apparmor_parser -r -W docker/istota/apparmor-istota
 
 A host without AppArmor, Docker Desktop among them, ignores the option.
 
-The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec istota istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
+The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec daemon istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
 
 These settings are meant for a host that runs nothing else, such as a VM dedicated to the install: `systempaths=unconfined` would let a uid-0 process in the container reach host sysctls if AppArmor were not loaded, and nothing in the container runs as uid 0 after the root phase.
 

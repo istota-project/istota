@@ -41,7 +41,8 @@ x-config-mount: &config_mount
 
 # The image every service built from docker/istota/Dockerfile runs. Built on the
 # VM from a verified release tag by `istota-stack update`, which writes the tag
-# to .env as ISTOTA_TAG; nothing is pulled from a registry.
+# to .env as ISTOTA_TAG and tags istota:<tag>; nothing is pulled from a
+# registry. web and webhooks run the same image as the daemon service.
 x-istota-build: &istota_build
   context: ..
   dockerfile: docker/istota/Dockerfile
@@ -55,7 +56,7 @@ x-istota-build: &istota_build
 # web and webhooks have no root phase: they start as uid 0 only to run
 # `istota-drop`, which needs SETUID, SETGID and SETPCAP (the last empties the
 # bounding set) and nothing else, then serve as 10001 with every set empty.
-# Read-only like istota: they write only under /data and /tmp.
+# Read-only like the daemon: they write only under /data and /tmp.
 x-dropped-service: &dropped_service
   security_opt:
     - no-new-privileges:true
@@ -83,9 +84,9 @@ x-istota-secrets: &istota_secrets
   - istota_google_workspace_client_secret
 
 services:
-  istota:
+  daemon:
     build: *istota_build
-    image: istota-istota:${ISTOTA_TAG:-local}
+    image: istota:${ISTOTA_TAG:-local}
     # The run contract. Every task runs in a bubblewrap sandbox inside this
     # container, and bwrap needs what Docker's defaults refuse: creating a user
     # namespace (seccomp), mounting inside it (seccomp and AppArmor), and
@@ -174,7 +175,7 @@ services:
       # The admin allowlist `istota setup` writes beside the config. Shared
       # with the web and webhooks services.
       ISTOTA_ADMINS_FILE: /data/config/admins
-      # So `docker compose exec istota istota-drop istota <verb>` finds the
+      # So `docker compose exec daemon istota-drop istota <verb>` finds the
       # config: /data/config/config.toml is on none of the four search paths.
       ISTOTA_CONFIG_PATH: /data/config/config.toml
     # Credentials, one file each, mounted under /run/secrets and read into the
@@ -184,17 +185,17 @@ services:
     restart: unless-stopped
 
   # Web UI service. Shares the istota image (built once) and reads the same
-  # config.toml the scheduler container generates. Depends on `istota` so the
+  # config.toml the scheduler container generates. Depends on `daemon` so the
   # config file exists before uvicorn starts.
   web:
     <<: *dropped_service
     build: *istota_build
-    image: istota-istota:${ISTOTA_TAG:-local}
-    # Healthy, not started: the istota service's healthcheck is the `tasks`
+    image: istota:${ISTOTA_TAG:-local}
+    # Healthy, not started: the daemon service's healthcheck is the `tasks`
     # table, so this starts on a migrated database. The config is an input and
     # exists before either starts.
     depends_on:
-      istota:
+      daemon:
         condition: service_healthy
     volumes:
       - istota_data:/data
@@ -214,9 +215,9 @@ services:
       # mode: `local` is http://localhost, which browsers treat as a secure
       # context. Off unless an operator sets it.
       ISTOTA_WEB_INSECURE_COOKIES: ${ISTOTA_WEB_INSECURE_COOKIES:-0}
-      # Admin allowlist (shared with the istota and webhooks services).
+      # Admin allowlist (shared with the daemon and webhooks services).
       ISTOTA_ADMINS_FILE: /data/config/admins
-      # The config, where the istota service reads it; the root filesystem is
+      # The config, where the daemon service reads it; the root filesystem is
       # read-only, so nothing links it into /app/config.
       ISTOTA_CONFIG_PATH: /data/config/config.toml
     # The web process calls a model on its own (the health OCR extractors, the
@@ -226,7 +227,7 @@ services:
     # Dropped first, as the daemon's uid like everything else that writes under
     # /data: a root-owned database sidecar locks the daemon out (ISSUE-458).
     # The drop reads the master key (istota-secrets); the web-only token key,
-    # which the istota service creates on its first boot, is read here.
+    # which the daemon service creates on its first boot, is read here.
     # Healthy means both exist.
     entrypoint:
       - istota-drop
@@ -440,7 +441,7 @@ services:
     # is correct: the image declares no CMD (`docker image inspect … .Config.Cmd`
     # is null), so there is nothing being discarded.
     #
-    # **Nothing orders the istota container after this one**, and that is a
+    # **Nothing orders the daemon container after this one**, and that is a
     # limitation rather than an oversight: compose auto-enables the profile of
     # any service a running service depends on, so a `depends_on` here would
     # start the signaling server on every deployment. The daemon's watchers
@@ -464,7 +465,7 @@ services:
   webhooks:
     <<: *dropped_service
     build: *istota_build
-    image: istota-istota:${ISTOTA_TAG:-local}
+    image: istota:${ISTOTA_TAG:-local}
     profiles:
       - location
       - sms
@@ -472,7 +473,7 @@ services:
     # Healthy for the reason `web` waits: a migrated database, and the config
     # (an input) in place.
     depends_on:
-      istota:
+      daemon:
         condition: service_healthy
     expose:
       - "${ISTOTA_WEBHOOKS_PORT:-8765}"
@@ -482,7 +483,7 @@ services:
       - *workspace_mount
     environment:
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
-      # Admin allowlist (shared with the istota and web services).
+      # Admin allowlist (shared with the daemon and web services).
       ISTOTA_ADMINS_FILE: /data/config/admins
       ISTOTA_CONFIG_PATH: /data/config/config.toml
     # The SMS and WhatsApp webhook credentials it verifies callbacks with.
@@ -524,7 +525,7 @@ services:
       # The daemon owns the listener. The sidecar retries a missing socket
       # every two seconds either way, so this only saves a burst of reconnect
       # lines on a cold start, so `service_started` is enough.
-      istota:
+      daemon:
         condition: service_started
     volumes:
       # The whole data volume, for one directory and one socket in it. Both

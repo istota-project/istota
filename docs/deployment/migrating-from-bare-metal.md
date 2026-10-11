@@ -185,7 +185,7 @@ Rollback is the snapshot. The old units, crons and directories stay on disk, dis
 
 ### Optional state
 
-- **Browser profile.** With `--with-browser-profile` the tarball holds `browser-profile/`. The import does not place it, because the istota container does not mount the browser's volume. Copy it in with the stack stopped: `docker run --rm -v istota_browser_profile:/v -v /srv/app/istota/import/browser-profile:/src:ro debian:trixie-slim sh -c 'cp -a /src/. /v/'`, and give it the browser image's user. Without it, users sign in to their sites again.
+- **Browser profile.** With `--with-browser-profile` the tarball holds `browser-profile/`. The import does not place it, because the daemon container does not mount the browser's volume. Copy it in with the stack stopped: `docker run --rm -v istota_browser_profile:/v -v /srv/app/istota/import/browser-profile:/src:ro debian:trixie-slim sh -c 'cp -a /src/. /v/'`, and give it the browser image's user. Without it, users sign in to their sites again.
 - **Devbox homes.** The repositories live in `repos_dir`, not in the devbox home, so this is optional. Copy a home with `docker run --rm -v <volume>:/v … tar` on each side.
 - **Baileys session.** The import copies it. Never run both WhatsApp sidecars at once, which is a replaced-connection loop; the old one is stopped by the export. Re-pairing on the new side is the alternative.
 

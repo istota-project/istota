@@ -284,7 +284,7 @@ Without `-t`, it walks every Talk-origin room. Use it after binding existing Tal
 istota devbox compose-file > compose.devbox.yml   # One devbox service per [devbox] users entry
 ```
 
-Prints the stack's second compose file: a `devbox-<user>` service per user and the `istota` service's mounts of each user's exec and credential socket volumes. It creates each user's repos directory first, and exits 1 naming the key when a socket directory or `repos_dir` is outside `/data`. See [Docker](../deployment/docker.md#devboxes).
+Prints the stack's second compose file: a `devbox-<user>` service per user and the `daemon` service's mounts of each user's exec and credential socket volumes. It creates each user's repos directory first, and exits 1 naming the key when a socket directory or `repos_dir` is outside `/data`. See [Docker](../deployment/docker.md#devboxes).
 
 ### Nextcloud
 

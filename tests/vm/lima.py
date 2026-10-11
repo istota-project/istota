@@ -334,7 +334,7 @@ def ensure_release(vm: Vm, release: Release) -> None:
 
 def stack_exec(vm: Vm, command: str, *, timeout: int = 300, check: bool = True,
                stdin_file: str = "") -> subprocess.CompletedProcess:
-    """A command in the running istota container, as uid 10001 (`istota-stack exec`)."""
+    """A command in the running daemon container, as uid 10001 (`istota-stack exec`)."""
     redirect = f" < {shlex.quote(stdin_file)}" if stdin_file else " < /dev/null"
     return vm.run(f"istota-stack exec sh -c {shlex.quote(command)}{redirect}", timeout=timeout, check=check)
 
@@ -371,14 +371,14 @@ def wait_healthy(vm: Vm, *, timeout: int = 900) -> None:
     deadline = time.monotonic() + timeout
     state = ""
     while time.monotonic() < deadline:
-        cid = container(vm, "istota")
+        cid = container(vm, "daemon")
         if cid:
             state = vm.out(f"docker inspect -f '{{{{.State.Health.Status}}}}' {cid}", check=False)
             if state == "healthy":
                 return
         time.sleep(5)
-    logs = vm.out("istota-stack compose logs --tail 60 istota 2>&1 || true", check=False)
-    raise VmError(f"the istota service did not become healthy (last state {state!r}):\n{logs}")
+    logs = vm.out("istota-stack compose logs --tail 60 daemon 2>&1 || true", check=False)
+    raise VmError(f"the daemon service did not become healthy (last state {state!r}):\n{logs}")
 
 
 def wait_for(predicate, *, timeout: float, interval: float = 3.0, what: str = "") -> None:
@@ -664,7 +664,7 @@ def ensure_mode(vm: Vm, release: Release, mode: Mode, *, prepare=None) -> RoleRu
         prepare(vm)
     if mode.by_role:
         return ensure_mode_by_role(vm, release, mode)
-    if vm.read(MODE_FILE).strip() == signature and container(vm, "istota"):
+    if vm.read(MODE_FILE).strip() == signature and container(vm, "daemon"):
         try:
             wait_healthy(vm, timeout=300)
             return
@@ -823,7 +823,7 @@ def nextcloud_fixture_compose(vm_ip: str) -> dict:
 
     `testbed/compose/nextcloud.yml`'s postgres, redis, init-shared and
     nextcloud, run as their own project in the VM and published on NC_PORT, so
-    the VM's rclone unit and the istota container reach it by address the way
+    the VM's rclone unit and the daemon container reach it by address the way
     they would reach an operator's own Nextcloud. Provisioned by the same
     `provision-nc.sh`, which creates the bot's `Shared Files` external mount.
     """

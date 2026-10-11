@@ -5,7 +5,7 @@
 # the same block stay. Built in the VM from the deployed image:
 #
 #   docker build -f docker/test/Dockerfile.no-storage-refusal \
-#       --build-arg BASE=istota-istota:<tag> -t istota-istota:<tag>-no-storage-refusal docker/test
+#       --build-arg BASE=istota:<tag> -t istota:<tag>-no-storage-refusal docker/test
 #
 # Expected: tests/vm/test_nextcloud.py::TestNothingIsWrittenIntoAnUnmountedStore fails.
 ARG BASE

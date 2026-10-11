@@ -44,7 +44,7 @@
 #   scripts/test-image-negative-control.sh rendered-config
 #   scripts/test-image-negative-control.sh devbox
 #
-# The second form runs only the third half, the istota container's run
+# The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
 # 16 and 17).
 # Its witnesses are smoke tests, because a run contract is a property of a
@@ -54,7 +54,7 @@
 # go red. See the half's own header below.
 #
 # The third form runs only parity row 12's control: the shipped compose file's
-# `istota` service with one credential passed through `environment:`, which
+# `daemon` service with one credential passed through `environment:`, which
 # `docker inspect` then shows (tests/image/test_secrets_contract.py). The
 # fourth runs the upgrade case that boots the new entrypoint over a config an
 # old release rendered, against an image whose entrypoint appends to that file.
@@ -163,7 +163,7 @@ print(lean_image_tag())
 
     # An image with one step of the root phase removed, run by the lean stack.
     image_overlay() {
-        printf 'services:\n  istota:\n    build: !reset null\n    image: %s\n' "$1" > "$scratch/$2.yml"
+        printf 'services:\n  daemon:\n    build: !reset null\n    image: %s\n' "$1" > "$scratch/$2.yml"
         echo "$scratch/$2.yml"
     }
 
@@ -203,7 +203,7 @@ print(lean_image_tag())
         "cgroup-host" \
         "$PWD/${RUN_CONTRACT_CONTROLS}/cgroup-host.yml" \
         "row 4: the host's cgroup namespace, whose mount reads / too, and the root phase refuses to start" \
-        "REFUSE: give the istota service \`cgroup: private\`; \`cgroup: host\`" \
+        "REFUSE: give the daemon service \`cgroup: private\`; \`cgroup: host\`" \
         "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_doctor_reports_the_delegated_root_ok"
 
     require_smoke_failures \
@@ -274,7 +274,7 @@ print(lean_image_tag())
 }
 
 # --------------------------------------------------------------------------
-# Row 12. The witness boots the shipped compose file's `istota` service from
+# Row 12. The witness boots the shipped compose file's `daemon` service from
 # the image the tier built; the control adds one overlay passing a credential
 # through `environment:`, and the inspect assertion must go red. The other
 # three assertions are about files and stay green, which is what tells this

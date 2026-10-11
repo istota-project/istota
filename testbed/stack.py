@@ -60,7 +60,7 @@ DOWN_TIMEOUT = 120
 POLL_INTERVAL = 0.5
 
 #: The compose service the daemon runs as, on both shapes.
-ISTOTA_SERVICE = "istota"
+DAEMON_SERVICE = "daemon"
 
 #: The setpriv wrapper the istota image ships for every exec path.
 DROP = "istota-drop"
@@ -125,8 +125,8 @@ FULL_READY_TIMEOUT = 1500
 KEEP_PROJECT_MARKER = "-full-keep-"
 
 READY_SERVICES: dict[str, tuple[str, ...]] = {
-    "lean": (ISTOTA_SERVICE,),
-    "full": ("nextcloud", ISTOTA_SERVICE),
+    "lean": (DAEMON_SERVICE,),
+    "full": ("nextcloud", DAEMON_SERVICE),
 }
 
 # The three pieces of framework state a reset has to *write*, all through the
@@ -1411,7 +1411,7 @@ class Stack:
             key=lambda pair: len(pair[1]),
             reverse=True,
         )
-        self.probe = Probe(compose_args=args, service=ISTOTA_SERVICE)
+        self.probe = Probe(compose_args=args, service=DAEMON_SERVICE)
         #: The watermark the most recent `reset` returned, for the negative
         #: assertions in `Probe.rows_above`. Set by the fixture that drives the
         #: reset, because the instant it is taken is what makes it useful: a
@@ -1448,7 +1448,7 @@ class Stack:
         self,
         argv: list[str],
         *,
-        service: str = ISTOTA_SERVICE,
+        service: str = DAEMON_SERVICE,
         timeout: int = 60,
         user: str = "",
     ) -> subprocess.CompletedProcess:
@@ -1481,7 +1481,7 @@ class Stack:
         # with the cap_add set and leave root-owned files under /data for the
         # daemon to trip over. So every exec into it goes through the same drop
         # the shipped healthcheck uses.
-        if service == ISTOTA_SERVICE and not user:
+        if service == DAEMON_SERVICE and not user:
             argv = [DROP, *argv]
         with probe_support.counted_exec():
             return subprocess.run(
@@ -1833,7 +1833,7 @@ class Stack:
         )
         return self.probe.watermark()
 
-    def restart(self, service: str = ISTOTA_SERVICE) -> None:
+    def restart(self, service: str = DAEMON_SERVICE) -> None:
         """Restart one service in place, keeping its volumes.
 
         The idempotence half of a provisioning scenario is "boot it twice", and
@@ -1879,14 +1879,14 @@ class Stack:
         # and report a timeout on a stack that was fine.
         timeout = max(timeout, READY_TIMEOUT)
         deadline = time.monotonic() + timeout
-        wait_ready(self.args, ISTOTA_SERVICE, timeout=timeout)
+        wait_ready(self.args, DAEMON_SERVICE, timeout=timeout)
 
         while time.monotonic() < deadline:
             if self.exec(["sh", "-c", _SCHEDULER_RUNNING], timeout=30).returncode == 0:
                 return
             time.sleep(POLL_INTERVAL)
         raise TimeoutError(
-            f"the istota container reported healthy but had not reached "
+            f"the daemon container reported healthy but had not reached "
             f"`exec istota-scheduler` within {timeout}s — it is still "
             "somewhere in entrypoint.sh\n--- last logs ---\n" + self.logs(60)
         )
@@ -1926,7 +1926,7 @@ class Stack:
                 check["status"] = check["status"].lower()
         return report
 
-    def logs(self, tail: int = 60, service: str = ISTOTA_SERVICE) -> str:
+    def logs(self, tail: int = 60, service: str = DAEMON_SERVICE) -> str:
         return logs(self.args, service, tail=tail)
 
     def diagnostics(self, task: dict) -> str:
@@ -2294,11 +2294,11 @@ class StackPool:
             try:
                 up(args, platform=self.platform, build=build, skip=skip)
             except ComposeError as exc:
-                # `up` waits on web's `depends_on: istota: service_healthy`, so
-                # an istota that refused to start fails `up` itself, and the
-                # refusal is in istota's log rather than in compose's output.
+                # `up` waits on web's `depends_on: daemon: service_healthy`, so
+                # a daemon that refused to start fails `up` itself, and the
+                # refusal is in the daemon's log rather than in compose's output.
                 raise ComposeError(
-                    f"{exc}\n--- istota logs ---\n{logs(args, ISTOTA_SERVICE, tail=40)}"
+                    f"{exc}\n--- daemon logs ---\n{logs(args, DAEMON_SERVICE, tail=40)}"
                 ) from exc
             if build:
                 self._built = True

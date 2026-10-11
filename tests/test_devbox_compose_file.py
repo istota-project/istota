@@ -3,7 +3,7 @@
 The render replaces the Ansible role's Jinja template for the one deployment
 shape. What matters most is the mount table, because it is the boundary the
 credential proxy now rests on: user U's credential socket volume is mounted
-into U's devbox and the istota container, and into nothing else.
+into U's devbox and the daemon container, and into nothing else.
 """
 
 from __future__ import annotations
@@ -50,7 +50,14 @@ def _targets(service: dict) -> dict[str, dict]:
 class TestOneServicePerUser:
     def test_each_user_gets_a_service_named_for_them(self):
         services = _doc(_config())["services"]
-        assert set(services) == {"devbox-alice", "devbox-bob", "istota"}
+        assert set(services) == {"devbox-alice", "devbox-bob", "daemon"}
+
+    def test_the_daemon_service_is_the_shipped_files_healthchecked_one(self):
+        """A name the shipped file does not define would make compose create a
+        second, image-less service from the render's mounts alone."""
+        shipped = yaml.safe_load(SHIPPED_COMPOSE.read_text())["services"]
+        assert "healthcheck" in shipped[compose_file.DAEMON_SERVICE]
+        assert compose_file.DAEMON_SERVICE in _doc(_config())["services"]
 
     def test_the_build_is_the_devbox_image_at_the_daemons_uid(self):
         service = _doc(_config())["services"]["devbox-alice"]
@@ -72,7 +79,7 @@ class TestOneServicePerUser:
         assert service["cpus"] == 2.0
         assert service["pids_limit"] == 512
         assert service["logging"]["driver"] == "json-file"
-        assert service["depends_on"] == {"istota": {"condition": "service_healthy"}}
+        assert service["depends_on"] == {"daemon": {"condition": "service_healthy"}}
         for key in ("cap_add", "privileged", "pid", "network_mode", "security_opt"):
             assert key not in service, key
 
@@ -111,8 +118,8 @@ class TestTheMountsAreTheBoundary:
         assert repos["source"] == "istota_data"
         assert repos["volume"] == {"subpath": "repos/alice"}
 
-    def test_the_istota_service_mounts_every_users_sockets_under_the_config_paths(self):
-        mounts = _targets(_doc(_config())["services"]["istota"])
+    def test_the_daemon_service_mounts_every_users_sockets_under_the_config_paths(self):
+        mounts = _targets(_doc(_config())["services"]["daemon"])
         assert {t: m["source"] for t, m in mounts.items()} == {
             "/data/devbox/exec/alice": "devbox-exec-alice",
             "/data/devbox/cred/alice": "devbox-cred-alice",
@@ -121,14 +128,14 @@ class TestTheMountsAreTheBoundary:
         }
 
     def test_the_daemon_and_the_devbox_resolve_the_same_socket(self):
-        """The istota side reaches `{exec_socket_dir}/{user}/exec.sock`, the
+        """The daemon side reaches `{exec_socket_dir}/{user}/exec.sock`, the
         devbox server listens on ISTOTA_EXEC_SOCKET; one volume joins them."""
         from istota.config import exec_socket_path
 
         config = _config()
         services = _doc(config)["services"]
         daemon = Path(exec_socket_path(config, "alice"))
-        istota = _targets(services["istota"])[str(daemon.parent)]
+        istota = _targets(services["daemon"])[str(daemon.parent)]
         devbox = services["devbox-alice"]
         listen = Path(devbox["environment"]["ISTOTA_EXEC_SOCKET"])
         assert _targets(devbox)[str(listen.parent)]["source"] == istota["source"]

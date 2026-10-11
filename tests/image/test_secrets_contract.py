@@ -98,7 +98,7 @@ class TestTheCredentialsAreFilesNotEnvironment:
             ("the web session key", secrets_boot.session_key),
         ):
             assert value not in secrets_boot.inspect, (
-                f"{label} is in `docker inspect istota`, so it reached the "
+                f"{label} is in the daemon's `docker inspect`, so it reached the "
                 "container through compose's environment rather than a secret file"
             )
 

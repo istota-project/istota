@@ -91,7 +91,7 @@ class TestTheBrowserRunsUnderRosetta:
         assert stack.out(f"docker exec {cid} uname -m") == "x86_64"
 
     def test_the_daemon_drives_the_browser(self, stack):
-        istota = lima.container(stack, "istota")
+        istota = lima.container(stack, "daemon")
         assert _connect(stack, istota, ["browser:9223"], user="10001") == {"browser:9223": "reached"}
         health = lima.stack_exec(
             stack, "python3 -c \"import urllib.request;"
@@ -106,7 +106,7 @@ class TestTheBrowserReachesNoPublishedPort:
             f"{_default_network_address(stack, 'nginx')}:80",
             f"{_default_network_address(stack, 'web')}:8766",
         ]
-        istota = lima.container(stack, "istota")
+        istota = lima.container(stack, "daemon")
         from_istota = _connect(stack, istota, targets, user="10001")
         assert set(from_istota.values()) == {"reached"}, f"the in-session control: {from_istota}"
         from_browser = _connect(stack, lima.container(stack, "browser"), targets)

@@ -3,7 +3,7 @@
 # refused there (Stage 1 measured it), so the root phase's grant probe refuses
 # to start the daemon and every sandbox witness errors at boot.
 services:
-  istota:
+  daemon:
     security_opt: !override
       - apparmor=istota
       - systempaths=unconfined

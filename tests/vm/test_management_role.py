@@ -171,14 +171,14 @@ class TestTheRoleInProxiedMode(_RoleChecks):
         wanting["istota_config"].setdefault("brain", {})["kind"] = "claude_code"
         tag = variables["istota_release"]
         image_env = (f"docker image inspect -f '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' "
-                     f"istota-istota:{tag}")
+                     f"istota:{tag}")
         try:
             run = lima.converge_role(stack, wanting)
             assert run.returncode == 0, _describe(run)
             assert "ISTOTA_CLAUDE_CODE_INSTALLED=1" in stack.out(image_env).splitlines(), _describe(run)
-            running = lima.container(stack, "istota")
+            running = lima.container(stack, "daemon")
             assert stack.out(f"docker inspect -f '{{{{.Image}}}}' {running}") == stack.out(
-                f"docker image inspect -f '{{{{.Id}}}}' istota-istota:{tag}"), "the stack runs the old image"
+                f"docker image inspect -f '{{{{.Id}}}}' istota:{tag}"), "the stack runs the old image"
         finally:
             restore = lima.converge_role(stack, variables)
             assert restore.returncode == 0, _describe(restore)

@@ -57,7 +57,7 @@ services:
       - "127.0.0.1::143"
       - "127.0.0.1::587"
 
-  istota:
+  daemon:
     depends_on:
       mail:
         condition: service_started

@@ -220,10 +220,10 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}
 
       - name: Build the istota image (with Claude Code, the default)
-        run: docker build -f docker/istota/Dockerfile -t istota-istota:check .
+        run: docker build -f docker/istota/Dockerfile -t istota:check .
 
       - name: Build the istota image without Claude Code
-        run: docker build -f docker/istota/Dockerfile --build-arg INSTALL_CLAUDE_CODE=0 -t istota-istota:check-native .
+        run: docker build -f docker/istota/Dockerfile --build-arg INSTALL_CLAUDE_CODE=0 -t istota:check-native .
 
       - name: Build the devbox image
         run: docker build -t istota-devbox:check docker/devbox

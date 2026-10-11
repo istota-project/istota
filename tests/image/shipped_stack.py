@@ -69,7 +69,7 @@ def boot_shipped_stack(
     # The full-integration workspace bind is `rslave`, which Docker Desktop
     # refuses for a macOS path; this stack stores locally and never reads it.
     overlay.write_text(
-        "services:\n  istota:\n    build: !reset null\n"
+        "services:\n  daemon:\n    build: !reset null\n"
         f"    image: {image_tag}\n"
         "    volumes:\n      - shipped_mount:/mnt/shared\n"
         "volumes:\n  shipped_mount:\n"
@@ -99,17 +99,17 @@ def boot_shipped_stack(
         for key, value in setup_env.items():
             setup_args += ["-e", f"{key}={value}"]
         setup = compose([
-            *setup_args, "-v", f"{vm}:/vm", "--entrypoint", "istota-drop", "istota",
+            *setup_args, "-v", f"{vm}:/vm", "--entrypoint", "istota-drop", "daemon",
             "istota", "setup", "--yes", "--vm-dir", "/vm", "--user", "alice",
             "--brain", "native", "--native-model", "scripted-test-model",
         ], extra_env={"ISTOTA_CONFIG_READ_ONLY": "false"})
         assert setup.returncode == 0, setup.stdout + setup.stderr
         assert (config_dir / "config.toml").is_file(), "setup wrote no config into the config directory"
 
-        up = compose(["up", "-d", "--no-deps", "--no-build", "istota"])
+        up = compose(["up", "-d", "--no-deps", "--no-build", "daemon"])
         assert up.returncode == 0, up.stdout + up.stderr
-        container = compose(["ps", "-q", "istota"]).stdout.strip()
-        assert container, "no istota container came up"
+        container = compose(["ps", "-q", "daemon"]).stdout.strip()
+        assert container, "no daemon container came up"
 
         deadline = time.monotonic() + HEALTHY_TIMEOUT
         health = ""
@@ -121,8 +121,8 @@ def boot_shipped_stack(
             if health == "healthy":
                 break
             time.sleep(2)
-        logs = compose(["logs", "istota"]).stdout
-        assert health == "healthy", f"istota is {health!r}\n{logs[-4000:]}"
+        logs = compose(["logs", "daemon"]).stdout
+        assert health == "healthy", f"the daemon is {health!r}\n{logs[-4000:]}"
         yield ShippedStack(container, vm, secrets_dir, config_dir, logs, compose)
     finally:
         compose(["down", "--volumes", "--remove-orphans", "--timeout", "5"])

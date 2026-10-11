@@ -1661,7 +1661,7 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
 
 def host_env_values(a: ContainerAnswers) -> dict[str, str]:
     """The ``host.env`` keys: what the VM's provisioning reads, and what the nginx
-    and istota containers read for the ingress mode."""
+    and daemon containers read for the ingress mode."""
     return {
         "STORAGE": "nextcloud" if a.uses_nextcloud else "local",
         "INGRESS": a.ingress,

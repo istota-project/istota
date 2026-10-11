@@ -26,7 +26,7 @@ sudo -u istota HOME=/srv/app/istota claude login
 Docker:
 
 ```bash
-docker compose exec istota claude login
+docker compose exec daemon claude login
 ```
 
 ## Invite the bot to Talk
@@ -45,7 +45,7 @@ sudo -u istota HOME=/srv/app/istota \
 Docker:
 
 ```bash
-docker compose exec istota istota task "Hello" -u alice -x
+docker compose exec daemon istota task "Hello" -u alice -x
 ```
 
 ## Service management (bare metal)

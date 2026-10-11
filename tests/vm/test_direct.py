@@ -11,7 +11,7 @@ pointed at it by `ACME_SERVER` and trusts its directory through
 The witness: the certificate is issued and served, port 80 redirects to https,
 a TLS 1.1 handshake is refused by the server, HSTS is sent, doctor's `web.tls`
 is OK (given Pebble's root, which no client trusts by default), and the private
-key is nowhere in the istota container.
+key is nowhere in the daemon container.
 
 Control `certbot-disabled`: the certificate is removed and certbot masked before
 the first issuance, so nginx stays on its port-80 bootstrap: `web.tls` FAILs
@@ -95,8 +95,8 @@ class TestDirectIngressServesTls:
         result = lima.doctor(stack, "web.tls", env=f"SSL_CERT_FILE={CONTAINER_ROOT}")
         assert result["status"] == "ok", result
 
-    def test_the_private_key_is_not_in_the_istota_container(self, stack):
-        for service in ("istota", "web"):
+    def test_the_private_key_is_not_in_the_daemon_container(self, stack):
+        for service in ("daemon", "web"):
             cid = lima.container(stack, service)
             mounts = json.loads(stack.out(f"docker inspect -f '{{{{json .Mounts}}}}' {cid}"))
             sources = [m["Source"] for m in mounts]
@@ -104,4 +104,4 @@ class TestDirectIngressServesTls:
         found = lima.stack_exec(
             stack, "find / -xdev \\( -name 'privkey*.pem' -o -path '*letsencrypt*' \\) 2>/dev/null | head -5",
             check=False).stdout.strip()
-        assert found == "", f"row 19: key material in the istota container: {found}"
+        assert found == "", f"row 19: key material in the daemon container: {found}"

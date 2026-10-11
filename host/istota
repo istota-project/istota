@@ -1,5 +1,5 @@
 #!/bin/sh
-# The VM's `istota`: the CLI inside the running istota container, as uid 10001
+# The VM's `istota`: the CLI inside the running daemon container, as uid 10001
 # with every capability set empty. `istota-stack exec` runs it through
 # `istota-drop`, because a `docker compose exec` starts as uid 0 with the
 # container's cap_add set, and a root-owned file under /data (a database

@@ -771,7 +771,7 @@ def lean_image_tag() -> str:
     `up --build` moves it out from under the first run's containers, mid-run.
     Same reasoning as `tests/image/conftest._tag_for`.
 
-    Both shapes run it: `testbed.yml` gives the istota, web and webhooks
+    Both shapes run it: `testbed.yml` gives the daemon, web and webhooks
     services this tag, and the pool builds it on the session's first boot.
     """
     digest = hashlib.sha256(str(REPO).encode()).hexdigest()[:8]

@@ -244,7 +244,7 @@ class TestTheComposeFileIsAddressable:
         )
 
     def test_the_lean_stack_is_the_shipped_services(self, tmp_path):
-        """No Nextcloud, no harness-only service: istota, web and nginx, the
+        """No Nextcloud, no harness-only service: daemon, web and nginx, the
         stack an operator runs with no profile on."""
         _require_compose_cli()
         args = compose_support.compose_args(
@@ -255,7 +255,7 @@ class TestTheComposeFileIsAddressable:
         result = self._config(args, env=_MINIMAL_ENV)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-        assert sorted(result.stdout.split()) == ["istota", "nginx", "web"], result.stdout
+        assert sorted(result.stdout.split()) == ["daemon", "nginx", "web"], result.stdout
 
     def test_the_full_stack_adds_the_fixture(self, tmp_path):
         _require_compose_cli()
@@ -340,7 +340,7 @@ class TestTheImage:
     def test_istota_web_and_webhooks_run_the_named_tag(self, tmp_path):
         merged = self._merged(tmp_path, "istota-test/no-forge:pinned")
 
-        for name in ("istota", "web", "webhooks"):
+        for name in ("daemon", "web", "webhooks"):
             assert merged["services"][name]["image"] == "istota-test/no-forge:pinned", name
 
     def test_a_profile_with_its_own_image_is_never_built(self, tmp_path, monkeypatch):
@@ -403,9 +403,9 @@ class TestTheStackStartsTheWayTheDeploymentDoes:
     def test_the_entrypoint_is_not_bypassed(self):
         """The lean shape used to run `init` and the scheduler itself. It runs
         the shipped entrypoint now, which is what makes a smoke boot a witness
-        for it: no overlay gives the istota service an entrypoint or a command."""
+        for it: no overlay gives the daemon service an entrypoint or a command."""
         overlay = yaml.load(TESTBED_OVERLAY.read_text(), Loader=_ComposeLoader)
-        assert not {"entrypoint", "command"} & set(overlay["services"]["istota"])
+        assert not {"entrypoint", "command"} & set(overlay["services"]["daemon"])
 
     def test_the_health_check_asks_for_the_schema_not_the_file(self):
         """A file check is satisfied before `init` has run.
@@ -492,10 +492,10 @@ class TestServiceStateParsing:
     def test_a_json_array_is_understood(self, monkeypatch):
         self._with_ps_output(
             monkeypatch,
-            json.dumps([{"Service": "istota", "State": "running", "Health": "healthy"}]),
+            json.dumps([{"Service": "daemon", "State": "running", "Health": "healthy"}]),
         )
 
-        assert compose_support._service_state([], "istota") == ("running", "healthy")
+        assert compose_support._service_state([], "daemon") == ("running", "healthy")
 
     def test_one_object_per_line_is_understood(self, monkeypatch):
         """Genuine NDJSON — two objects, one per line.
@@ -510,11 +510,11 @@ class TestServiceStateParsing:
             monkeypatch,
             json.dumps({"Service": "other", "State": "exited", "Health": ""})
             + "\n"
-            + json.dumps({"Service": "istota", "State": "running", "Health": ""}),
+            + json.dumps({"Service": "daemon", "State": "running", "Health": ""}),
         )
 
         # And the requested service is selected, not merely the first row.
-        assert compose_support._service_state([], "istota") == ("running", "")
+        assert compose_support._service_state([], "daemon") == ("running", "")
 
     def test_a_starting_healthcheck_with_an_empty_health_field_is_still_starting(self, monkeypatch):
         """Compose 5.5 leaves `Health` empty on the first poll of a container
@@ -525,12 +525,12 @@ class TestServiceStateParsing:
         self._with_ps_output(
             monkeypatch,
             json.dumps([{
-                "Service": "istota", "State": "running", "Health": "",
+                "Service": "daemon", "State": "running", "Health": "",
                 "Status": "Up Less than a second (health: starting)",
             }]),
         )
 
-        assert compose_support._service_state([], "istota") == ("running", "starting")
+        assert compose_support._service_state([], "daemon") == ("running", "starting")
 
     def test_an_exited_container_is_reported_as_exited(self, monkeypatch):
         # `wait_ready`'s fast-fail keys on this exact string. It only ever
@@ -538,10 +538,10 @@ class TestServiceStateParsing:
         # compose omits stopped containers entirely.
         self._with_ps_output(
             monkeypatch,
-            json.dumps([{"Service": "istota", "State": "exited", "Health": ""}]),
+            json.dumps([{"Service": "daemon", "State": "exited", "Health": ""}]),
         )
 
-        assert compose_support._service_state([], "istota") == ("exited", "")
+        assert compose_support._service_state([], "daemon") == ("exited", "")
 
     def test_ps_is_invoked_with_all_so_stopped_containers_are_visible(self, monkeypatch):
         """The flag whose absence made the dead-container path unreachable.
@@ -558,7 +558,7 @@ class TestServiceStateParsing:
             return "[]"
 
         monkeypatch.setattr(compose_support, "_run", fake_run)
-        compose_support._service_state(["docker", "compose"], "istota")
+        compose_support._service_state(["docker", "compose"], "daemon")
 
         assert "--all" in seen["args"], seen["args"]
 
@@ -569,7 +569,7 @@ class TestServiceStateParsing:
         # die on one bad `ps` — but it must not raise either.
         self._with_ps_output(monkeypatch, "", returncode=1)
 
-        assert compose_support._service_state([], "istota") == ("", "")
+        assert compose_support._service_state([], "daemon") == ("", "")
 
     def test_unparseable_output_reads_as_empty_rather_than_raising(self, monkeypatch):
         # A deprecation notice on stdout is neither JSON nor JSON-lines. A
@@ -577,12 +577,12 @@ class TestServiceStateParsing:
         # the timeout-with-logs this module works to produce.
         self._with_ps_output(monkeypatch, "WARNING: something on stdout")
 
-        assert compose_support._service_state([], "istota") == ("", "")
+        assert compose_support._service_state([], "daemon") == ("", "")
 
     def test_no_container_reads_as_empty_not_as_a_crash(self, monkeypatch):
         self._with_ps_output(monkeypatch, "")
 
-        assert compose_support._service_state([], "istota") == ("", "")
+        assert compose_support._service_state([], "daemon") == ("", "")
 
 
 class TestTheChildEnvironmentIsExtendedNotReplaced:
@@ -641,7 +641,7 @@ class TestWaitReady:
             lambda args, service, env=None: ("running", "healthy"),
         )
 
-        compose_support.wait_ready([], "istota", timeout=5)
+        compose_support.wait_ready([], "daemon", timeout=5)
 
     def test_running_without_a_health_check_is_ready(self, monkeypatch):
         """The case that would otherwise hang for the full timeout.
@@ -653,7 +653,7 @@ class TestWaitReady:
             compose_support, "_service_state", lambda args, service, env=None: ("running", "")
         )
 
-        compose_support.wait_ready([], "istota", timeout=5)
+        compose_support.wait_ready([], "daemon", timeout=5)
 
     def test_running_but_unhealthy_is_not_ready(self, monkeypatch):
         # The inverse, and the reason the two cases cannot be collapsed into
@@ -666,7 +666,7 @@ class TestWaitReady:
         monkeypatch.setattr(compose_support, "POLL_INTERVAL", 0.01)
 
         with pytest.raises(TimeoutError):
-            compose_support.wait_ready([], "istota", timeout=0.05)
+            compose_support.wait_ready([], "daemon", timeout=0.05)
 
     def test_the_timeout_message_carries_the_service_logs(self, monkeypatch):
         """A bare timeout says nothing about why the service did not start.
@@ -683,7 +683,7 @@ class TestWaitReady:
         )
 
         with pytest.raises(TimeoutError, match="config is malformed"):
-            compose_support.wait_ready([], "istota", timeout=5)
+            compose_support.wait_ready([], "daemon", timeout=5)
 
     def test_an_exited_service_fails_fast_rather_than_waiting_out_the_timeout(
         self, monkeypatch
@@ -697,7 +697,7 @@ class TestWaitReady:
 
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            compose_support.wait_ready([], "istota", timeout=30)
+            compose_support.wait_ready([], "daemon", timeout=30)
 
         assert time.monotonic() - started < 5, "waited out the timeout on a dead service"
 

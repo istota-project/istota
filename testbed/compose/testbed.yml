@@ -27,7 +27,7 @@
 x-test-image: &test_image ${ISTOTA_TEST_IMAGE:?the harness must export ISTOTA_TEST_IMAGE}
 
 services:
-  istota:
+  daemon:
     image: *test_image
 
     # `host.docker.internal` is built in on Docker Desktop and absent on Docker

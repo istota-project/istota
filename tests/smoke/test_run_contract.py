@@ -486,16 +486,16 @@ class TestTheBrowserIsOnItsOwnNetwork:
     def _targets(self, stack) -> list[str]:
         targets = ["web:8766", "signaling:8080"]
         listening = stack.exec(["python3", "-c", LISTENING_PORTS]).stdout.split()
-        targets += [f"istota:{port}" for port in listening]
+        targets += [f"daemon:{port}" for port in listening]
         resolved = stack.exec(["getent", "hosts", "web"]).stdout.split()
-        assert resolved, "web does not resolve from the istota container"
+        assert resolved, "web does not resolve from the daemon container"
         targets.append(f"{resolved[0]}:8766")
         return targets
 
     def test_the_browser_reaches_nothing_the_daemon_reaches(self, stack):
         targets = self._targets(stack)
-        from_istota = _connect(stack, "istota", [t for t in targets if not t.startswith("istota:")])
-        assert set(from_istota.values()) == {"reached"}, from_istota
+        from_daemon = _connect(stack, "daemon", [t for t in targets if not t.startswith("daemon:")])
+        assert set(from_daemon.values()) == {"reached"}, from_daemon
 
         from_browser = _connect(stack, "browser", targets)
 
@@ -506,7 +506,7 @@ class TestTheBrowserIsOnItsOwnNetwork:
         deadline = time.monotonic() + 180
         outcome = {}
         while time.monotonic() < deadline:
-            outcome = _connect(stack, "istota", ["browser:9223"])
+            outcome = _connect(stack, "daemon", ["browser:9223"])
             if outcome.get("browser:9223") == "reached":
                 break
             time.sleep(2)

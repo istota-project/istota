@@ -10351,7 +10351,7 @@ def _report_sandbox_posture(config: Config) -> None:
             reason = (
                 "sandbox_enabled but bubblewrap cannot create a namespace here, so "
                 "every task would run unsandboxed. In the container, check the "
-                "istota service's security_opt (the seccomp and AppArmor profiles "
+                "daemon service's security_opt (the seccomp and AppArmor profiles "
                 "and systempaths=unconfined); on a host, unprivileged user "
                 "namespaces. `istota doctor --only security.sandbox_effective` "
                 "names the failure."

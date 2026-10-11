@@ -85,6 +85,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Docker stack's scheduler service is called `daemon`.** Its container is `istota-daemon-1` and its image `istota:<tag>`, in place of `istota-istota-1` and `istota-istota:<tag>`; the browser, devbox and WhatsApp sidecar images keep their names.
+
+  **Upgrade note:** `istota-stack update` removes the old container on its own. By hand, run `docker compose up -d --remove-orphans` once after building, and use `daemon` wherever a command named the `istota` service (`docker compose exec daemon istota-drop istota doctor`). The `istota_data` volume is unchanged.
+
 - **The Docker stack picks how it is reached.** nginx now serves one of three ingress modes: `local` (loopback, the default), `proxied` (behind your own reverse proxy, accepting connections only from it) or `direct` (terminating TLS itself, with a certificate from certbot or from files). `istota setup` asks which and writes the matching ports; the container refuses to start when the public hostname in the config and the stack's name disagree behind TLS, and `istota doctor` reports whether the certificate is valid.
 
 - **The Docker stack's configuration is now a file you own, written once by `istota setup`.** Run inside the image, the wizard asks about your Nextcloud (or none), the model backend, email, modules and optional containers, and writes `config.toml`, the admins file and the master key; credentials go to one file each under `docker/secrets/` instead of `.env`, so they no longer show in `docker inspect`. Nothing rewrites the config on boot any more, and `docker/init.sh` is gone.

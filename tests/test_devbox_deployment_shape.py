@@ -763,9 +763,9 @@ class TestTheShippedComposeFile:
         {"/var/run/docker.sock", "/run/docker.sock", "/var/run", "/run", "/"}
     )
 
-    def test_the_istota_service_mounts_no_route_to_the_host_daemon(self, compose):
-        mounts = compose["services"]["istota"].get("volumes", [])
-        assert mounts, "the istota service lost its volumes; this test is asserting nothing"
+    def test_the_daemon_service_mounts_no_route_to_the_host_daemon(self, compose):
+        mounts = compose["services"]["daemon"].get("volumes", [])
+        assert mounts, "the daemon service lost its volumes; this test is asserting nothing"
         offending = []
         for entry in mounts:
             if isinstance(entry, dict):
@@ -780,7 +780,7 @@ class TestTheShippedComposeFile:
             ):
                 offending.append(entry)
         assert not offending, (
-            f"the istota service now mounts {offending}. That is root of the VM "
+            f"the daemon service now mounts {offending}. That is root of the VM "
             f"for the daemon and every task; the credential proxy identifies a "
             f"devbox by its socket volume precisely so it needs none"
         )

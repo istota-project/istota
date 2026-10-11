@@ -8,7 +8,7 @@
 # The webroot method against /srv/app/istota/acme, which nginx serves read-only at
 # /.well-known/acme-challenge/ from port 80; certificates under
 # /srv/app/istota/letsencrypt, which nginx mounts read-only at /etc/nginx/certs.
-# The istota containers mount neither. The deploy hook's restart is what moves
+# The daemon, web and webhooks containers mount neither. The deploy hook's restart is what moves
 # nginx from its port-80-only bootstrap to the full template.
 #
 # ACME_EMAIL registers an address with the CA; ACME_SERVER points at another

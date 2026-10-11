@@ -178,7 +178,7 @@ class Probe:
     db_path: str = DEFAULT_DB_PATH
     local: Path | None = None
     compose_args: list[str] | None = None
-    service: str = "istota"
+    service: str = "daemon"
 
     def __post_init__(self) -> None:
         if self.local is None and self.compose_args is None:

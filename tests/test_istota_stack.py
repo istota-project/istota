@@ -42,16 +42,20 @@ DOCKER_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
 args=" $* "
 case "$args" in
-  *" config --services "*) printf 'istota\nweb\nwebhooks\nnginx\n' ;;
+  *" config --services "*) printf 'daemon\nweb\nwebhooks\nnginx\n' ;;
   *" build "*) exit "${STUB_BUILD_RC:-0}" ;;
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
     else echo '{"services": {}}'; fi ;;
-  *" ps -q istota"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
+  *" ps -q daemon"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
   *" istota apply "*) exit "${STUB_APPLY_RC:-0}" ;;
-  *" image ls "*) printf 'istota-istota:v0\nistota-istota:v1\nistota-istota:old\nnginx:alpine\n' ;;
+  *" image ls "*) printf 'istota:v0\nistota:v1\nistota:old\nistota-istota:v0\nistota-istota:older\nistota-browser:old\nnginx:alpine\n' ;;
+  *" image tag "*) touch "${STUB_CALLS}.tagged" ;;
+  *" image inspect istota:"*)
+    if [ -n "${STUB_RENAMED_IMAGE_MISSING:-}" ] && [ ! -e "${STUB_CALLS}.tagged" ]; then exit 1; fi
+    [ -z "${STUB_IMAGE_ENV:-}" ] || printf '%s\n' "$STUB_IMAGE_ENV" ;;
   *" image inspect "*) [ -z "${STUB_IMAGE_ENV:-}" ] || printf '%s\n' "$STUB_IMAGE_ENV" ;;
 esac
 exit 0
@@ -230,11 +234,14 @@ class TestASignedTagIsDeployed:
         assert "ISTOTA_PREVIOUS_TAG=v0\n" in fx.env_text()
         calls = fx.docker_calls()
         builds = [call for call in calls if " build" in call]
-        assert builds and builds[0].endswith("build istota"), builds
+        assert builds and builds[0].endswith("build daemon"), builds
         assert any(call.endswith("up -d --remove-orphans") for call in calls)
         # The previous tag's images are kept for rollback, everything older goes.
-        assert any(call == "image rm istota-istota:old" for call in calls)
-        assert not any(call.startswith("image rm istota-istota:v") for call in calls)
+        removed = {call.removeprefix("image rm ") for call in calls if call.startswith("image rm ")}
+        assert removed == {"istota:old", "istota-istota:older", "istota-browser:old"}, removed
+        # A release before the rename built istota-istota; its image for the
+        # previous tag is what a rollback to it runs.
+        assert "istota-istota:v0" not in removed
 
     def test_a_failed_build_puts_the_checkout_back(self, fx):
         fx.commit("v1")
@@ -449,7 +456,34 @@ class TestRollback:
         check = next(i for i, call in enumerate(calls) if "--check-schema" in call)
         up = next(i for i, call in enumerate(calls) if call.endswith("up -d --remove-orphans"))
         assert check < up
-        assert "--entrypoint istota-drop istota istota init --check-schema" in calls[check]
+        assert "--entrypoint istota-drop daemon istota init --check-schema" in calls[check]
+
+    def test_a_release_from_before_the_rename_has_its_image_tagged_first(self, updated):
+        """v0's image is istota-istota:v0. Unless it is tagged istota:v0 first,
+        the schema check's `compose run` would build one from this checkout."""
+        result = updated.run("rollback", STUB_RENAMED_IMAGE_MISSING="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = updated.docker_calls()
+        tag = calls.index("image tag istota-istota:v0 istota:v0")
+        check = next(i for i, call in enumerate(calls) if "--check-schema" in call)
+        assert tag < check
+
+
+class TestTheServiceFollowsTheCheckout:
+    """A rollback to a release from before the rename checks out a compose
+    file whose daemon service is still called `istota`."""
+
+    def test_an_old_checkout_is_exec_d_as_istota(self, fx):
+        (fx.src / "docker" / "docker-compose.yml").write_text("services:\n  istota:\n    image: x\n")
+        result = fx.run("exec", "istota", "doctor")
+        assert result.returncode == 0, result.stderr
+        assert fx.docker_calls()[-1].endswith("exec -T istota istota-drop istota doctor")
+
+    def test_the_shipped_compose_file_is_exec_d_as_daemon(self, fx):
+        shutil.copy(REPO / "docker" / "docker-compose.yml", fx.src / "docker" / "docker-compose.yml")
+        result = fx.run("exec", "istota", "doctor")
+        assert result.returncode == 0, result.stderr
+        assert fx.docker_calls()[-1].endswith("exec -T daemon istota-drop istota doctor")
 
 
 class TestApply:
@@ -464,7 +498,7 @@ class TestApply:
         calls = fx.docker_calls()
         assert any(
             "--entrypoint istota-drop" in call and call.endswith(
-                f"istota istota apply -f /plan/plan.toml{''.join(' ' + f for f in flags)}")
+                f"daemon istota apply -f /plan/plan.toml{''.join(' ' + f for f in flags)}")
             for call in calls
         ), calls
         assert any(call.endswith(" restart") for call in calls) is restarted
@@ -517,7 +551,7 @@ class TestImportBareMetal:
         assert fx.docker_calls()[-1].endswith(
             f"run --rm --no-deps -T --entrypoint istota-drop "
             f"-v {export}:/import:ro -v {fx.stack}/secrets:/secrets "
-            "istota istota migrate import-bare-metal --source /import --ingress proxied --dry-run"
+            "daemon istota migrate import-bare-metal --source /import --ingress proxied --dry-run"
         ), fx.docker_calls()
 
     def test_a_missing_export_directory_is_refused(self, fx, tmp_path):
@@ -530,7 +564,7 @@ class TestExec:
     def test_every_exec_goes_through_the_drop(self, fx):
         result = fx.run("exec", "istota", "doctor")
         assert result.returncode == 0, result.stderr
-        assert fx.docker_calls()[-1].endswith("exec -T istota istota-drop istota doctor")
+        assert fx.docker_calls()[-1].endswith("exec -T daemon istota-drop istota doctor")
 
     def test_the_vm_wrapper_is_the_exec_path(self, fx):
         wrapper = REPO / "host" / "istota"
@@ -539,7 +573,7 @@ class TestExec:
             env={**fx.env, "ISTOTA_STACK_BIN": str(SCRIPT)}, timeout=60,
         )
         assert result.returncode == 0, result.stderr
-        assert fx.docker_calls()[-1].endswith("exec -T istota istota-drop istota user list")
+        assert fx.docker_calls()[-1].endswith("exec -T daemon istota-drop istota user list")
 
 
 def _source(fx: Fixture, script: str, **extra_env: str) -> subprocess.CompletedProcess:

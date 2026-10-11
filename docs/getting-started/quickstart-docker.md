@@ -16,7 +16,7 @@ The one-liner clones the repo to `~/istota` and prints the remaining steps. Requ
 4. Run the wizard inside the image:
 
    ```bash
-   docker compose run --rm --no-deps -v "$PWD:/vm" --entrypoint istota-drop istota istota setup --vm-dir /vm
+   docker compose run --rm --no-deps -v "$PWD:/vm" --entrypoint istota-drop daemon istota setup --vm-dir /vm
    ```
 
 5. `docker compose up -d`.
@@ -49,7 +49,7 @@ Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per comma
 `/data/config/config.toml` is yours: nothing regenerates it. Edit it and restart:
 
 ```bash
-docker compose restart istota web webhooks   # webhooks for location or SMS
+docker compose restart daemon web webhooks   # webhooks for location or SMS
 ```
 
 A credential is a file under `docker/secrets/`; replace it and restart. A release that adds or renames a config key changes nothing until you edit the file; the CHANGELOG says what to write. See [Docker deployment](../deployment/docker.md) for the settings that matter on this stack.
@@ -66,7 +66,7 @@ A credential is a file under `docker/secrets/`; replace it and restart. A releas
 | Python extras | All installed | Configurable per feature |
 | Devbox | Not shipped; the skill cannot run here | Available |
 
-The `istota` service carries the run contract that lets bubblewrap work inside the container (a seccomp profile, an AppArmor profile, `systempaths=unconfined`, no capabilities after a short root phase). [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) has the details and why the stack belongs on a host that runs nothing else.
+The `daemon` service carries the run contract that lets bubblewrap work inside the container (a seccomp profile, an AppArmor profile, `systempaths=unconfined`, no capabilities after a short root phase). [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) has the details and why the stack belongs on a host that runs nothing else.
 
 ## Next steps
 

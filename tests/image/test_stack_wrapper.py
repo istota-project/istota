@@ -4,9 +4,9 @@ Stage 2 witnessed the daemon (`tests/image/test_istota_image.py`). A
 `docker compose exec` does not inherit the daemon's drop: it starts as uid 0
 with the container's cap_add set, in a container whose /proc/sys is writable.
 So every exec path goes through `istota-drop`. This boots the shipped compose
-file's `istota` service and drives the real `host/istota` wrapper and
+file's `daemon` service and drives the real `host/istota` wrapper and
 `host/istota-stack exec` against it (ISTOTA_STACK_EXEC points the script's
-`compose exec istota` prefix at this container; the drop is the script's own),
+`compose exec daemon` prefix at this container; the drop is the script's own),
 then runs `istota doctor` and `istota user ensure` through the wrapper and
 requires that nothing under /data is owned by uid 0 afterwards. The
 healthcheck's command is read from the compose file and its drop run the same
@@ -80,7 +80,7 @@ def wrapper_run(istota_image, tmp_path_factory) -> WrapperRun:
         doctor = via("doctor", "--json", script=["sh", str(WRAPPER)])
         ensure = via("user", "ensure", "--name", "bob", script=["sh", str(WRAPPER)])
 
-        test = yaml.safe_load(COMPOSE.read_text())["services"]["istota"]["healthcheck"]["test"]
+        test = yaml.safe_load(COMPOSE.read_text())["services"]["daemon"]["healthcheck"]["test"]
         command = test[1] if test[0] == "CMD-SHELL" else " ".join(test[1:])
         prefix = command.split()[0]
         health = stack.exec("sh", "-c", f"{prefix} sh -c \"{STATUS}\"")

@@ -3593,7 +3593,7 @@ def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
 # unprivileged user namespaces. A remedy naming one sends half its readers to
 # the wrong file.
 _SANDBOX_EFFECTIVE_REMEDY = (
-    "On Docker, give the istota service the run contract docker-compose.yml "
+    "On Docker, give the daemon service the run contract docker-compose.yml "
     "ships: security_opt seccomp=./istota/seccomp-istota.json, "
     "apparmor=istota (with docker/istota/apparmor-istota loaded where AppArmor "
     "is enabled) and systempaths=unconfined — the profiles let bubblewrap "
@@ -3948,7 +3948,7 @@ def check_forge_config_drift(config: "Config", probe: bool) -> list[CheckResult]
                 remedy=(
                     f"Rewrite config.toml so {name}_bin_path names the installed binary "
                     f"(a full Ansible play does; the auto-update cron does not. On "
-                    f"docker, restarting the istota service re-renders it)."
+                    f"docker, restarting the daemon service re-renders it)."
                 ),
             )
         )

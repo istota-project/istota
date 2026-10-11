@@ -52,7 +52,7 @@ require_own_cgroup() {
     fstype="$(echo "$fields" | awk '{print $2}')"
     if [ -z "$fields" ] || [ "$fstype" != "cgroup2" ] || [ "$root" != "/" ]; then
         log "REFUSE: ${mountpoint} is ${fstype:-not mounted} rooted at ${root:-nothing}, not this container's own cgroup2 at /."
-        log "REFUSE: give the istota service \`cgroup: private\` and no volume on ${mountpoint}; a bind of the host's tree hands the daemon the VM's whole cgroup hierarchy."
+        log "REFUSE: give the daemon service \`cgroup: private\` and no volume on ${mountpoint}; a bind of the host's tree hands the daemon the VM's whole cgroup hierarchy."
         return 70
     fi
     # The mount root is `/` in the host's namespace too; there this process is
@@ -60,7 +60,7 @@ require_own_cgroup() {
     own="$(own_cgroup "$cgroup_file")"
     if [ "$own" != "/" ]; then
         log "REFUSE: this process's cgroup is ${own:-unknown}, not / in a cgroup namespace of its own, so ${mountpoint} is the VM's whole tree."
-        log "REFUSE: give the istota service \`cgroup: private\`; \`cgroup: host\` hands the daemon the VM's whole cgroup hierarchy."
+        log "REFUSE: give the daemon service \`cgroup: private\`; \`cgroup: host\` hands the daemon the VM's whole cgroup hierarchy."
         return 70
     fi
 }
@@ -160,13 +160,13 @@ check_drop() {
         log "REFUSE: a credential file under /run/secrets is not readable by uid ${ISTOTA_UID}; on the VM, chown 10001:10001 and chmod 0400 it."
         return 78
     fi
-    log "REFUSE: istota-drop itself failed; the istota service needs cap_add CHOWN, FOWNER, SETUID, SETGID, SETPCAP and SYS_ADMIN."
+    log "REFUSE: istota-drop itself failed; the daemon service needs cap_add CHOWN, FOWNER, SETUID, SETGID, SETPCAP and SYS_ADMIN."
     return 71
 }
 
 grant_refusal() {
     log "REFUSE: bubblewrap cannot build the sandbox's namespace in this container, so every task would run unsandboxed."
-    log "REFUSE: the istota service in docker-compose.yml needs:"
+    log "REFUSE: the daemon service in docker-compose.yml needs:"
     log "    security_opt:"
     log "      - seccomp=./istota/seccomp-istota.json"
     log "      - apparmor=istota"
@@ -188,7 +188,7 @@ probe_grant() {
 
 main() {
     if [ "$(id -u)" != "0" ]; then
-        log "REFUSE: the root phase must start as uid 0 (it delegates the cgroup and then drops to ${ISTOTA_UID}); remove \`user:\` from the istota service."
+        log "REFUSE: the root phase must start as uid 0 (it delegates the cgroup and then drops to ${ISTOTA_UID}); remove \`user:\` from the daemon service."
         exit 64
     fi
     require_own_cgroup /proc/self/mountinfo "$CGROUP_MOUNT" || exit $?

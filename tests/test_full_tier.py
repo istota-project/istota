@@ -471,12 +471,12 @@ class TestTheProcessEnvironmentGuard:
 
 
 class TestReadiness:
-    def test_the_full_shape_waits_on_nextcloud_and_istota(self):
-        assert compose_support.READY_SERVICES["full"] == ("nextcloud", "istota")
+    def test_the_full_shape_waits_on_nextcloud_and_the_daemon(self):
+        assert compose_support.READY_SERVICES["full"] == ("nextcloud", "daemon")
 
     def test_it_waits_on_neither_web_nor_nginx(self):
-        """`web` starts only once `istota` is healthy and `nginx` depends on
-        `web`, so waiting on `istota` covers both, and waiting on either would
+        """`web` starts only once `daemon` is healthy and `nginx` depends on
+        `web`, so waiting on `daemon` covers both, and waiting on either would
         only add their start-up to a budget the cold Nextcloud already spends."""
         assert "web" not in compose_support.READY_SERVICES["full"]
         assert "nginx" not in compose_support.READY_SERVICES["full"]
@@ -736,9 +736,9 @@ class TestTheOverlayIsAddressable:
     def test_the_merged_model_parses(self, tmp_path):
         config = _compose_config(tmp_path)
 
-        assert "istota" in config["services"]
+        assert "daemon" in config["services"]
 
-    def test_the_seccomp_grant_reaches_the_istota_service(self, tmp_path):
+    def test_the_seccomp_grant_reaches_the_daemon_service(self, tmp_path):
         """Without it Docker's default profile blocks the
         `unshare(CLONE_NEWUSER)` bubblewrap needs, and every task that runs a
         Bash tool call fails. Measured on the shipped image: `bwrap
@@ -746,12 +746,12 @@ class TestTheOverlayIsAddressable:
         0 with it. The grant is the shipped profile now, from the shipped file,
         and the overlay must not widen it back to `seccomp:unconfined`."""
         config = _compose_config(tmp_path)
-        opts = config["services"]["istota"]["security_opt"]
+        opts = config["services"]["daemon"]["security_opt"]
 
         assert "seccomp=./istota/seccomp-istota.json" in opts
         assert not [o for o in opts if "unconfined" in o and o.startswith("seccomp")]
 
-    def test_the_unmasked_system_paths_reach_the_istota_service(self, tmp_path):
+    def test_the_unmasked_system_paths_reach_the_daemon_service(self, tmp_path):
         """The second half of the same grant, and the quiet one.
 
         seccomp lets bwrap create the user namespace; it does not let it mount
@@ -765,23 +765,23 @@ class TestTheOverlayIsAddressable:
         """
         config = _compose_config(tmp_path)
 
-        assert "systempaths=unconfined" in config["services"]["istota"]["security_opt"]
+        assert "systempaths=unconfined" in config["services"]["daemon"]["security_opt"]
 
-    def test_the_host_gateway_alias_reaches_the_istota_service(self, tmp_path):
+    def test_the_host_gateway_alias_reaches_the_daemon_service(self, tmp_path):
         """`host.docker.internal` is built in on Docker Desktop and absent on
         Docker Engine, and every full-shape task reaches the scripted endpoint
         through it."""
         config = _compose_config(tmp_path)
-        hosts = config["services"]["istota"]["extra_hosts"]
+        hosts = config["services"]["daemon"]["extra_hosts"]
 
         assert any("host-gateway" in str(entry) for entry in _entries(hosts))
 
-    def test_the_istota_service_gains_a_health_check(self, tmp_path):
+    def test_the_daemon_service_gains_a_health_check(self, tmp_path):
         """The shipped service has none, and `restart: unless-stopped` makes a
         wedged boot look alive — so without this `wait_ready` has nothing
         honest to wait on."""
         config = _compose_config(tmp_path)
-        check = config["services"]["istota"]["healthcheck"]
+        check = config["services"]["daemon"]["healthcheck"]
 
         assert "tasks" in " ".join(str(part) for part in check["test"])
 
@@ -799,13 +799,13 @@ class TestTheOverlayIsAddressable:
         }
         config = _compose_config(tmp_path, extra_env=poisoned)
 
-        for service in ("istota", "web"):
+        for service in ("daemon", "web"):
             environment = config["services"][service].get("environment") or {}
             assert not set(poisoned) & set(environment), service
         for name, spec in config["secrets"].items():
             assert spec["file"] == str(SECRETS_DIR / name), name
 
-    @pytest.mark.parametrize("service", ["istota", "web"])
+    @pytest.mark.parametrize("service", ["daemon", "web"])
     def test_the_config_directory_is_bound_read_only(self, tmp_path, service):
         """Where `istota setup` would have written it, from the session's
         scratch directory, for both services that read it."""
@@ -1211,13 +1211,13 @@ class TestTheSharedMountName:
         assert fallback is not None, "the script no longer reads the compose value"
         assert fallback.group(1) == mount_name
 
-    def test_the_istota_service_is_passed_no_dav_prefix(self, tmp_path):
+    def test_the_daemon_service_is_passed_no_dav_prefix(self, tmp_path):
         """The prefix is a config key now. An `ISTOTA_NEXTCLOUD_DAV_PREFIX`
         passed to the container would be read by nothing."""
         model = _compose_config(tmp_path)
 
         assert "ISTOTA_NEXTCLOUD_DAV_PREFIX" not in (
-            model["services"]["istota"].get("environment") or {}
+            model["services"]["daemon"].get("environment") or {}
         )
 
 

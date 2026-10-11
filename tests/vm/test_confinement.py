@@ -5,7 +5,7 @@ a user's home, not the stack's .env or host.env, not the checkout the images
 were built from, and on Lima no Mac path but the read-only checkout mount, which
 the containers do not see either.
 
-Row 20: the istota container runs under the shipped AppArmor profile, so a
+Row 20: the daemon container runs under the shipped AppArmor profile, so a
 root `docker exec` (which does not inherit the daemon's drop, and holds the
 root phase's capabilities in a container with a writable /proc/sys) still
 cannot write a VM sysctl or the sysrq trigger, while bwrap still starts.
@@ -19,7 +19,7 @@ Controls (`scripts/test-vm-negative-control.sh`):
 - `mac-home-mounted`: a Mac directory standing in for the home is added to the
   VM's Lima mounts (the Lima default template mounts the whole home);
 - `apparmor-unconfined`: the deployed compose file's `apparmor=istota` becomes
-  `apparmor=unconfined` and the istota service is recreated;
+  `apparmor=unconfined` and the daemon service is recreated;
 - `secret-owned-by-root`: one secret file on the VM is chowned to root.
 """
 
@@ -64,13 +64,13 @@ def stack(local_stack, release):
         return
     if name == "apparmor-unconfined":
         vm.run(f"sed -i 's/apparmor=istota/apparmor=unconfined/' {lima.STACK}/src/docker/docker-compose.yml"
-               " && istota-stack compose up -d istota", timeout=600)
+               " && istota-stack compose up -d daemon", timeout=600)
         lima.wait_healthy(vm)
         try:
             yield vm
         finally:
             vm.run(f"git -C {lima.STACK}/src checkout -- docker/docker-compose.yml"
-                   " && istota-stack compose up -d istota", timeout=600)
+                   " && istota-stack compose up -d daemon", timeout=600)
             lima.wait_healthy(vm)
         return
     if name == "secret-owned-by-root":
@@ -117,12 +117,12 @@ class TestTheDaemonCannotSeeTheMachine:
         assert "ro" in mounts[lima.REPO_MOUNT].split(","), mounts
 
     def test_the_istota_container_binds_only_the_stacks_own_paths(self, stack):
-        cid = lima.container(stack, "istota")
+        cid = lima.container(stack, "daemon")
         mounts = json.loads(stack.out(f"docker inspect -f '{{{{json .Mounts}}}}' {cid}"))
         binds = sorted(m["Source"] for m in mounts if m["Type"] == "bind")
         allowed = (f"{lima.STACK}/config", lima.MOUNT, f"{lima.STACK}/secrets/")
         strays = [b for b in binds if not (b in allowed[:2] or b.startswith(allowed[2]))]
-        assert strays == [], f"row 7: the istota container binds {strays}"
+        assert strays == [], f"row 7: the daemon container binds {strays}"
         assert f"{lima.STACK}/config" in binds, binds
 
     def test_the_daemon_sees_none_of_the_vm(self, stack):
@@ -159,19 +159,19 @@ _WRITE_SYSCTL = (
 @parity.witness(20)
 class TestTheContainerIsConfinedByAppArmor:
     def test_the_istota_profile_is_in_force(self, stack):
-        cid = lima.container(stack, "istota")
+        cid = lima.container(stack, "daemon")
         assert stack.out(f"docker inspect -f '{{{{.AppArmorProfile}}}}' {cid}") == "istota"
         current = stack.out(f"docker exec -u 0 {cid} cat /proc/1/attr/current")
         assert current == "istota (enforce)", current
 
     def test_a_root_exec_cannot_write_core_pattern(self, stack):
-        cid = lima.container(stack, "istota")
+        cid = lima.container(stack, "daemon")
         result = stack.run(f"docker exec -u 0 {cid} sh -c {shlex.quote(_WRITE_SYSCTL)}", check=False)
         assert result.returncode != 0, "row 20: a root exec wrote kernel/core_pattern"
         assert "Permission denied" in result.stderr, result.stderr
 
     def test_a_root_exec_cannot_write_the_sysrq_trigger(self, stack):
-        cid = lima.container(stack, "istota")
+        cid = lima.container(stack, "daemon")
         # `h` only prints the sysrq help to the kernel log, should the write land.
         result = stack.run(f"docker exec -u 0 {cid} sh -c 'echo h > /proc/sysrq-trigger'", check=False)
         assert result.returncode != 0, "row 20: a root exec wrote /proc/sysrq-trigger"

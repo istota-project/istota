@@ -15,7 +15,7 @@
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
 #   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
-#   istota-stack exec <cmd...>  run a command in the istota container as uid 10001
+#   istota-stack exec <cmd...>  run a command in the daemon container as uid 10001
 #   istota-stack compose <...>  docker compose, with this stack's files and settings
 #
 # --- end usage ---
@@ -72,6 +72,10 @@ DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
 LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
 ISTOTA_UID=10001
 PROJECT=istota
+# The daemon, web and webhooks image. Releases before the service was renamed
+# to `daemon` built it as istota-istota.
+IMAGE=istota
+LEGACY_IMAGE=istota-istota
 # Overridable so tests/test_istota_stack.py can stand in for a host with AppArmor.
 APPARMOR_SYSFS="${ISTOTA_APPARMOR_SYSFS:-/sys/kernel/security/apparmor}"
 APPARMOR_DIR="${ISTOTA_APPARMOR_DIR:-/etc/apparmor.d}"
@@ -152,6 +156,17 @@ compose() {
     )
 }
 
+# The compose service the daemon runs as, read from the checkout's compose
+# file: a rollback to a release from before the rename checks out a file that
+# still calls it `istota`.
+main_service() {
+    if grep -qx '  istota:' "${SRC}/docker/docker-compose.yml" 2>/dev/null; then
+        echo istota
+    else
+        echo daemon
+    fi
+}
+
 # A one-shot container from the istota image, dropped to uid 10001 before
 # anything runs: the root phase is bypassed, and `istota-drop` empties every
 # capability set. ISTOTA_CONFIG_READ_ONLY=false makes /data/config writable for
@@ -162,9 +177,9 @@ oneshot() {
     compose run --rm --no-deps "${tty[@]}" --entrypoint istota-drop "$@"
 }
 
-# `docker compose exec` into the running istota container, through `istota-drop`:
+# `docker compose exec` into the running daemon container, through `istota-drop`:
 # an exec starts as uid 0 with the cap_add set, not from the daemon's state.
-# ISTOTA_STACK_EXEC replaces the `compose exec istota` prefix, so the image tier
+# ISTOTA_STACK_EXEC replaces the `compose exec daemon` prefix, so the image tier
 # can point this at a container it started; the drop is not part of it.
 stack_exec() {
     if [ -n "${ISTOTA_STACK_EXEC:-}" ]; then
@@ -175,7 +190,7 @@ stack_exec() {
     fi
     local tty=(-T)
     if [ -t 0 ] && [ -t 1 ]; then tty=(); fi
-    compose exec "${tty[@]}" istota istota-drop "$@"
+    compose exec "${tty[@]}" "$(main_service)" istota-drop "$@"
 }
 
 # --- release tags ------------------------------------------------------------
@@ -252,7 +267,7 @@ print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
 PY
 }
 
-# The services this stack builds. web and webhooks run the istota service's
+# The services this stack builds. web and webhooks run the daemon service's
 # image, so building them again would only repeat it.
 build_services() {
     compose config --services | grep -vxE 'web|webhooks|nginx|signaling' || true
@@ -272,7 +287,7 @@ build_images() {
 image_lacks_what_config_needs() {
     local tag="$1" env installed version pin
     [ "$(needs_claude_code)" = 1 ] || return 0
-    env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "istota-istota:${tag}" 2>/dev/null || true)"
+    env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${IMAGE}:${tag}" 2>/dev/null || true)"
     installed="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_INSTALLED=//p')"
     version="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_VERSION=//p')"
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
@@ -283,11 +298,12 @@ image_lacks_what_config_needs() {
     fi
 }
 
-# Keep the current and the previous tag's images, remove every other istota-*.
+# Keep the current and the previous tag's images, remove every other istota
+# and istota-* image (istota-istota included, which older releases built).
 prune_images() {
     local keep_current="$1" keep_previous="$2" ref tag
     docker image ls --format '{{.Repository}}:{{.Tag}}' | while read -r ref; do
-        case "$ref" in istota-*:*) ;; *) continue ;; esac
+        case "$ref" in "${IMAGE}":*|istota-*:*) ;; *) continue ;; esac
         tag="${ref##*:}"
         if [ "$tag" = "$keep_current" ] || [ "$tag" = "$keep_previous" ]; then continue; fi
         docker image rm "$ref" >/dev/null 2>&1 || log "could not remove ${ref}; in use?"
@@ -298,7 +314,7 @@ render_devbox_compose() {
     local tag="$1" tmp
     [ -f "${CONFIG_DIR}/config.toml" ] || return 0
     tmp="$(mktemp)"
-    if ! ISTOTA_TAG="$tag" oneshot istota istota devbox compose-file > "$tmp"; then
+    if ! ISTOTA_TAG="$tag" oneshot "$(main_service)" istota devbox compose-file > "$tmp"; then
         rm -f "$tmp"
         log "istota devbox compose-file failed"
         return 1
@@ -393,8 +409,15 @@ cmd_rollback() {
     previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"
     previous_unsigned="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG_UNSIGNED)"
     [ -n "$previous" ] || die "no previous tag in ${ENV_FILE}; nothing to roll back to."
-    docker image inspect "istota-istota:${previous}" >/dev/null 2>&1 \
-        || die "the image istota-istota:${previous} is gone; run \`istota-stack update ${previous}\`."
+    # A release from before the rename built its image as istota-istota. The
+    # schema check below runs it under this compose file's name, and compose
+    # would build a missing image from this checkout rather than fail.
+    if ! docker image inspect "${IMAGE}:${previous}" >/dev/null 2>&1 \
+            && docker image inspect "${LEGACY_IMAGE}:${previous}" >/dev/null 2>&1; then
+        docker image tag "${LEGACY_IMAGE}:${previous}" "${IMAGE}:${previous}"
+    fi
+    docker image inspect "${IMAGE}:${previous}" >/dev/null 2>&1 \
+        || die "the image ${IMAGE}:${previous} is gone; run \`istota-stack update ${previous}\`."
     if [ -n "$previous_unsigned" ]; then
         object="$(resolve_unsigned_tag "$previous")"
     else
@@ -403,7 +426,7 @@ cmd_rollback() {
 
     # Ask the older image whether it can run this database before switching to
     # it: a newer release's migration may have been one-way.
-    ISTOTA_TAG="$previous" oneshot istota istota init --check-schema || rc=$?
+    ISTOTA_TAG="$previous" oneshot "$(main_service)" istota init --check-schema || rc=$?
     if [ "$rc" -eq 3 ]; then
         echo "[istota-stack] REFUSE: ${previous} cannot run this database: a newer release migrated it. ${ENV_FILE} still names ${current}." >&2
         exit 3
@@ -458,7 +481,7 @@ copy_out_config() {
     [ -n "$tag" ] || return 0
     local copied
     copied="$(docker run --rm --network none --user "${ISTOTA_UID}:${ISTOTA_UID}" --entrypoint /bin/sh \
-        -v "${volume}:/old:ro" -v "${CONFIG_DIR}:/new" "istota-istota:${tag}" -c \
+        -v "${volume}:/old:ro" -v "${CONFIG_DIR}:/new" "${IMAGE}:${tag}" -c \
         'for f in config.toml admins; do if [ -f "/old/config/$f" ]; then cp -p "/old/config/$f" /new/ && echo "$f"; fi; done')"
     if [ -n "$copied" ]; then
         log "copied $(echo "$copied" | tr '\n' ' ')out of the ${volume} volume into ${CONFIG_DIR}, once"
@@ -519,7 +542,7 @@ cmd_setup() {
     done
     ISTOTA_CONFIG_READ_ONLY=false oneshot "${pass[@]}" \
         -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
-        istota istota setup --vm-dir /vm "$@"
+        "$(main_service)" istota setup --vm-dir /vm "$@"
     # Nothing running as 10001 may change staging while root reads it.
     chown root:root "$staging"
     chmod 0700 "$staging"
@@ -548,7 +571,7 @@ cmd_apply() {
     install -m 0400 "$plan" "${staging}/${name}"
     if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
     ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/plan:ro" \
-        istota istota apply -f "/plan/${name}" "$@" || rc=$?
+        "$(main_service)" istota apply -f "/plan/${name}" "$@" || rc=$?
     if [ "$rc" -eq 2 ]; then
         case " $* " in
             *" --dry-run "*) ;;
@@ -574,18 +597,18 @@ cmd_import_bare_metal() {
     fi
     ISTOTA_CONFIG_READ_ONLY=false oneshot \
         -v "${source}:/import:ro" -v "${SECRETS_DIR}:/secrets" \
-        istota istota migrate import-bare-metal --source /import "$@"
+        "$(main_service)" istota migrate import-bare-metal --source /import "$@"
 }
 
 # After a config change: re-render the devbox services, since [devbox] users may
 # have changed, and bring a running stack onto both. `up -d` creates an added
-# user's devbox and recreates istota with its socket volumes; `restart` is what
+# user's devbox and recreates the daemon with its socket volumes; `restart` is what
 # makes every other service read the new config.toml. A stack that is down
 # stays down.
 restart_for_config() {
     render_devbox_compose "$(env_get "$ENV_FILE" ISTOTA_TAG)" \
         || log "the devbox services were not re-rendered; run \`istota-stack update <tag>\`"
-    if [ -z "$(compose ps -q istota 2>/dev/null)" ]; then
+    if [ -z "$(compose ps -q "$(main_service)" 2>/dev/null)" ]; then
         log "the config changed; the stack is not running, so nothing was restarted"
         return 0
     fi

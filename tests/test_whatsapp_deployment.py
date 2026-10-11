@@ -225,7 +225,7 @@ class TestTheBaileysSidecarService:
         config = _container_config(tmp_path)
         service = self._service()
 
-        istota = yaml.safe_load(COMPOSE.read_text())["services"]["istota"]
+        istota = yaml.safe_load(COMPOSE.read_text())["services"]["daemon"]
 
         assert "istota_data:/data" in service["volumes"]
         # **Both sides, because the property is that they see one inode set.**

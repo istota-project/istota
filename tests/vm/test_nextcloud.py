@@ -11,10 +11,10 @@ full tier covers Talk against the same fixture; this file is about the mount.
 Row 9: never write into an unmounted store. `istota-stack.service` requires
 and follows the mount unit (provision.sh's drop-in), so stopping the mount
 stops the stack; and the entrypoint refuses a workspace that is not a
-`fuse.rclone` mount, so the istota service started by hand with the mount
+`fuse.rclone` mount, so the daemon service started by hand with the mount
 down does not start, and nothing lands in `/srv/mount/nextcloud/content`.
 
-Control `no-storage-refusal`: the istota service is started from an image whose
+Control `no-storage-refusal`: the daemon service is started from an image whose
 entrypoint has the refusal removed (`docker/test/Dockerfile.no-storage-refusal`).
 """
 
@@ -51,13 +51,13 @@ def stack(nextcloud_stack, vm):
 
 @pytest.fixture(scope="module")
 def istota_image(stack, release) -> str:
-    """The tag the row 9 case starts the istota service from."""
+    """The tag the row 9 case starts the daemon service from."""
     if lima.control() != "no-storage-refusal":
         return release.tag
     tag = f"{release.tag}-no-storage-refusal"
     stack.run(
         f"docker build -q -f {lima.STACK}/src/docker/test/Dockerfile.no-storage-refusal "
-        f"--build-arg BASE=istota-istota:{release.tag} -t istota-istota:{tag} {lima.STACK}/src/docker/test",
+        f"--build-arg BASE=istota:{release.tag} -t istota:{tag} {lima.STACK}/src/docker/test",
         timeout=900)
     return tag
 
@@ -111,11 +111,11 @@ class TestNothingIsWrittenIntoAnUnmountedStore:
             assert not stack.ok(f"mountpoint -q {MOUNT}"), "the mount is still there"
             before = stack.out(f"find {MOUNT} -mindepth 1 | sort")
             # Past systemd, as an operator could: compose itself, the mount down.
-            stack.run(f"ISTOTA_TAG={shlex.quote(istota_image)} istota-stack compose up -d --no-deps istota",
+            stack.run(f"ISTOTA_TAG={shlex.quote(istota_image)} istota-stack compose up -d --no-deps daemon",
                       timeout=600)
             cid = stack.out(
                 "docker ps -aq --filter label=com.docker.compose.project=istota "
-                "--filter label=com.docker.compose.service=istota | head -1")
+                "--filter label=com.docker.compose.service=daemon | head -1")
             # Until it has either refused (exited, and restarted by its policy)
             # or come up healthy; a daemon that starts is healthy within this.
             state = ""

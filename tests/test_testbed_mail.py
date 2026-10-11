@@ -365,14 +365,14 @@ class TestComposeEnvIsSeparateFromConfig:
     reach no reader at all.
     """
 
-    def test_no_compose_env_name_is_passed_to_the_istota_service(self, tmp_path):
-        """Nothing the mail overlay needs is in the istota service's
+    def test_no_compose_env_name_is_passed_to_the_daemon_service(self, tmp_path):
+        """Nothing the mail overlay needs is in the daemon service's
         `environment:`, which carries only three container facts now."""
         import yaml
 
         service = mail.serve(tmp_path / "mail")
         compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
-        passed = set(compose["services"]["istota"].get("environment") or {})
+        passed = set(compose["services"]["daemon"].get("environment") or {})
 
         assert not set(service.compose_env()) & passed
 

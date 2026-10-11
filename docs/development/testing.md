@@ -243,11 +243,11 @@ Fine-grained on the lean shape, exactly one on the full shape. Many profiles is 
 
 - `extra_hosts: host.docker.internal:host-gateway`, so a host-side stub is reachable by one name on Docker Desktop and Docker Engine alike.
 - The three credential-shaped brain variables as fixed literals rather than interpolations, on `istota` and on `web`. The process environment outranks an `--env-file`, so a developer's exported `ANTHROPIC_API_KEY` would otherwise reach a test container that POSTs to a listener on their own machine.
-- Longer timings on the `tasks` healthcheck the shipped `istota` service carries, since the full shape waits up to 600 seconds on Nextcloud provisioning.
+- Longer timings on the `tasks` healthcheck the shipped `daemon` service carries, since the full shape waits up to 600 seconds on Nextcloud provisioning.
 
 The generated passwords, the module switches derived from the profile's service list, and the ephemeral `NC_PORT` with its matching `ISTOTA_WEB_CALLBACK_URL` are in the env-file the pool writes, because a file in the repository cannot hold a value invented at boot.
 
-**The sandbox grant is the shipped file's.** The `istota` service in `docker/docker-compose.yml` carries the run contract: the shipped seccomp and AppArmor profiles, `systempaths=unconfined`, `no-new-privileges`, `cap_drop: ALL` with six root-phase capabilities, a read-only root and a private cgroup namespace. The container's root phase delegates its own cgroup and drops to uid 10001 before the daemon starts. No test overlay may touch those lines; `tests/test_container_security_profiles.py` holds that. `tests/smoke/test_run_contract.py` witnesses the contract in a running stack, and `scripts/test-image-negative-control.sh run-contract` proves each witness can fail.
+**The sandbox grant is the shipped file's.** The `daemon` service in `docker/docker-compose.yml` carries the run contract: the shipped seccomp and AppArmor profiles, `systempaths=unconfined`, `no-new-privileges`, `cap_drop: ALL` with six root-phase capabilities, a read-only root and a private cgroup namespace. The container's root phase delegates its own cgroup and drops to uid 10001 before the daemon starts. No test overlay may touch those lines; `tests/test_container_security_profiles.py` holds that. `tests/smoke/test_run_contract.py` witnesses the contract in a running stack, and `scripts/test-image-negative-control.sh run-contract` proves each witness can fail.
 
 ### The storage backend, and why it needs no stack
 

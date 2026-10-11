@@ -315,10 +315,14 @@
     state: started
   when: _istota_current_tag.stdout | length > 0 or _istota_updated is changed
 
-- name: Wait for the istota service to be healthy
+# A release from before the rename runs the daemon as the service `istota`.
+- name: Wait for the daemon service to be healthy
   ansible.builtin.shell: |
     set -euo pipefail
-    cid="$(docker ps -q --filter label=com.docker.compose.project=istota --filter label=com.docker.compose.service=istota | head -1)"
+    cid=""
+    for service in daemon istota; do
+      [ -n "$cid" ] || cid="$(docker ps -q --filter label=com.docker.compose.project=istota --filter "label=com.docker.compose.service=${service}" | head -1)"
+    done
     [ -n "$cid" ] && [ "$(docker inspect -f '{{ '{{' }}.State.Health.Status{{ '}}' }}' "$cid")" = healthy ]
   args:
     executable: /bin/bash

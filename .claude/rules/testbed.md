@@ -23,7 +23,7 @@ The developer-facing version is `docs/development/testing.md`: which tier to run
 | | lean | full |
 |---|---|---|
 | Compose | `docker/docker-compose.yml` + `testbed/compose/testbed.yml` | the same + `testbed/compose/nextcloud.yml` |
-| Containers | istota, web, nginx (+ profile services) | + postgres, redis, nextcloud and two one-shot volume jobs |
+| Containers | daemon, web, nginx (+ profile services) | + postgres, redis, nextcloud and two one-shot volume jobs |
 | Storage | local, `/data/workspace` | full Nextcloud integration, `/mnt/shared` |
 | Entrypoint | the shipped one, in full | the same |
 | Boot | seconds | 50 to 84 seconds to both healthchecks on warm base images |
@@ -140,7 +140,7 @@ Four non-obvious points:
 - **Nothing is truncated.** Deleting rows under a running dispatcher is a race. The three exceptions above are forced: a parked `pending_confirmation` blocks its room for two hours, a retry row can fire mid-test and take a scripted turn the barrier cannot see, and a trusted sender changes what later scenarios mean.
 - **The retry ladder wedges a naive quiesce.** A failed task is rewritten `pending` with `scheduled_for` one, four, then sixteen minutes out, so a status-only quiesce waits out a backoff. The barrier's refusal is a 403 rather than 409 for the same reason: 409 is in neither the transient nor the permanent status set, so the daemon retried it and created the wedging row.
 - **The daemon writes inside the container too.** A host-side stub cannot reach `/data/repos`, where the model cloned on the previous test, so each service declares its dirtied container directories beside the `config()` key that put the daemon there.
-- **The workspace is never cleared.** On the full shape `/mnt/shared/.istota-provisioned` lives there, and the fixture's healthcheck (which `istota` waits on) requires it. A storage scenario writes under a generated name and asserts on that name.
+- **The workspace is never cleared.** On the full shape `/mnt/shared/.istota-provisioned` lives there, and the fixture's healthcheck (which `daemon` waits on) requires it. A storage scenario writes under a generated name and asserts on that name.
 
 `nextcloud.reset()` deletes only the rooms this object created. The boot leaves baseline rooms (the entrypoint's 1:1, `#general`, `#logs`, `#alerts`, plus Talk's own `Talk updates` and `Note to self` per account), so a scenario asserts on a room it made, never on a count.
 
@@ -148,21 +148,21 @@ Four non-obvious points:
 
 `testbed/compose/testbed.yml` is a harness concession file, not a deployment recipe. It is the complete list of ways a stack this tier boots differs from what an operator boots, each with its reason inline:
 
-- `image: ${ISTOTA_TEST_IMAGE}` on istota, web and webhooks: one tag per checkout, built on the session's first boot and run as it is after; a negative control's prebuilt image goes through the same variable with no `--build`, which is what replaced `docker-compose.test.prebuilt.yml`.
+- `image: ${ISTOTA_TEST_IMAGE}` on daemon, web and webhooks: one tag per checkout, built on the session's first boot and run as it is after; a negative control's prebuilt image goes through the same variable with no `--build`, which is what replaced `docker-compose.test.prebuilt.yml`.
 - `extra_hosts: host.docker.internal:host-gateway`: built in on Docker Desktop, absent on Docker Engine.
-- The config directory the testbed wrote, bound read-only at `/data/config` on `istota` and `web`. The shipped file binds a host directory there too (`ISTOTA_CONFIG_DIR`, `/srv/app/istota/config` on the VM); compose merges the two by target, so only the source differs.
+- The config directory the testbed wrote, bound read-only at `/data/config` on `daemon` and `web`. The shipped file binds a host directory there too (`ISTOTA_CONFIG_DIR`, `/srv/app/istota/config` on the VM); compose merges the two by target, so only the source differs.
 - `/mnt/shared` replaced by an empty volume: the shipped bind is `rslave`, which Docker Desktop refuses for a macOS path.
 - The shipped `tasks` healthcheck polled faster.
 - The browser's fixed `container_name` reset, so two stacks on one machine can both run one.
 - `ISTOTA_WEB_INSECURE_COOKIES=1` on `web`: the tiers sign in with httpx over plain http on 127.0.0.1, and its cookie jar sends a `Secure` cookie back over https only, where a browser treats `http://localhost` as secure.
 
-`testbed/compose/nextcloud.yml` is the Nextcloud fixture: postgres, redis, Nextcloud 30 provisioned by `provision-nc.sh`, a one-shot job that applies the old root phase's shared-volume convention after provisioning, the fixture's shared volume at `/mnt/shared` on istota, web and webhooks, the Nextcloud locations on the stack's nginx (`ISTOTA_NGINX_ROOT_LOCATIONS`), and `ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE=1`, which narrows the entrypoint's mount refusal to "a mount point of its own" because the workspace is a Docker volume rather than an rclone mount. No install ships that layout; the rclone mount is the vm tier's job.
+`testbed/compose/nextcloud.yml` is the Nextcloud fixture: postgres, redis, Nextcloud 30 provisioned by `provision-nc.sh`, a one-shot job that applies the old root phase's shared-volume convention after provisioning, the fixture's shared volume at `/mnt/shared` on daemon, web and webhooks, the Nextcloud locations on the stack's nginx (`ISTOTA_NGINX_ROOT_LOCATIONS`), and `ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE=1`, which narrows the entrypoint's mount refusal to "a mount point of its own" because the workspace is a Docker volume rather than an rclone mount. No install ships that layout; the rclone mount is the vm tier's job.
 
 Per-session values go in the env-file `StackPool` writes (`stack.stack_env`, plus `full_env` on the full shape): the image tag, the config and secrets directories, ephemeral published ports (nginx, the browser, signaling), and on the full shape the generated passwords, the OAuth2 pair, the reserved `NC_PORT` and its matching `ISTOTA_WEB_CALLBACK_URL` (which `provision-nc.sh` bakes irreversibly into `oauth2_clients` at first install). Which subsystems a full profile runs is `FULL_MODULE_SWITCHES`, written into the config.
 
-**The sandbox grant is the shipped file's, and no overlay touches it.** `docker/docker-compose.yml`'s `istota` service carries the run contract (Stage 2): `seccomp=./istota/seccomp-istota.json`, `apparmor=istota`, `systempaths=unconfined`, `no-new-privileges:true`, `cap_drop: ALL` with the six root-phase capabilities, `read_only`, `cgroup: private`. `tests/test_container_security_profiles.py` refuses any of those keys in `testbed.yml` or `nextcloud.yml`, and `tests/test_smoke_tier.py` refuses an unconfined grant in all three files. On a host with AppArmor the `istota` profile has to be loaded first; Docker Desktop has none and ignores the option.
+**The sandbox grant is the shipped file's, and no overlay touches it.** `docker/docker-compose.yml`'s `daemon` service carries the run contract (Stage 2): `seccomp=./istota/seccomp-istota.json`, `apparmor=istota`, `systempaths=unconfined`, `no-new-privileges:true`, `cap_drop: ALL` with the six root-phase capabilities, `read_only`, `cgroup: private`. `tests/test_container_security_profiles.py` refuses any of those keys in `testbed.yml` or `nextcloud.yml`, and `tests/test_smoke_tier.py` refuses an unconfined grant in all three files. On a host with AppArmor the `istota` profile has to be loaded first; Docker Desktop has none and ignores the option.
 
-**Every exec into the `istota` container goes through `istota-drop`.** `Stack.exec` and `Probe.query` prefix it for the `istota` service, because a `docker compose exec` starts as uid 0 with the `cap_add` set, not from the daemon's state, and a root-owned file under `/data` locks the daemon out of it. A caller that needs uid 0 for a read passes `user="0"`.
+**Every exec into the `daemon` container goes through `istota-drop`.** `Stack.exec` and `Probe.query` prefix it for the `daemon` service, because a `docker compose exec` starts as uid 0 with the `cap_add` set, not from the daemon's state, and a root-owned file under `/data` locks the daemon out of it. A caller that needs uid 0 for a read passes `user="0"`.
 
 **The smoke negative controls break the run contract one line at a time.** `ISTOTA_TESTBED_CONTROL_OVERLAYS` (paths, `os.pathsep`-separated) adds compose overlays to every stack, last; `scripts/test-image-negative-control.sh run-contract` uses it with the overlays in `docker/test/run-contract-controls/` and the control images, and names the `tests/smoke/test_run_contract.py` node ids each must turn red.
 
@@ -238,7 +238,7 @@ No variable names the checkout a stack builds from. `Shape` takes `compose_file`
 One developer machine, August 2026 (arm64, 10 cores, Docker Desktop 29.6), warm caches, runs serialized through `scripts/qtest`. Treat them as shape, not threshold; the tier prints its own `docker compose exec` fraction at the end of each session.
 
 - Lean tier: nine stacks per session (`base`, `forge`, `no-forge`, `notify`, `feeds`, `mail`, `signaling`, `email`, `email-hold-all`). About 165 seconds for the first six, measured before `signaling` and the two email profiles were added. Per-profile boot 6.5 to 9 seconds, per-test setup after that about 0.7 seconds.
-- Full tier: one cold boot of six containers, 50 to 84 seconds to both healthchecks. Nextcloud is healthy before `up` returns, because `istota` declares `depends_on: service_healthy`.
+- Full tier: one cold boot of six containers, 50 to 84 seconds to both healthchecks. Nextcloud is healthy before `up` returns, because `daemon` declares `depends_on: service_healthy`.
 - `docker compose exec` is about 31% of a lean session (123 to 127 ms a call) and 5 to 8% of a full one. No optimization was built; the counters stay.
 
 ## Still open

@@ -129,7 +129,7 @@ def _recorded_rooms(stack) -> dict[str, str]:
 class TestFirstInstallProvisioning:
     """What `provision-nc.sh` and the entrypoint left behind on a cold volume set."""
 
-    @pytest.mark.parametrize("service", ["istota", "web"])
+    @pytest.mark.parametrize("service", ["daemon", "web"])
     def test_both_login_methods_are_enabled(self, provisioned, service):
         # The venv's interpreter, not `uv run`: web's root is read-only, and uv
         # wants to write its cache and lock before it runs anything.

@@ -2,6 +2,6 @@
 # is writable and rooted above the container (`/../..`), and the root phase
 # must refuse before it writes anything.
 services:
-  istota:
+  daemon:
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw

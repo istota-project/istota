@@ -2,5 +2,5 @@
 # mounts the VM's whole tree rooted at `/`, so the mount root alone passes, and
 # the root phase must refuse on its own cgroup path before it writes anything.
 services:
-  istota:
+  daemon:
     cgroup: host

@@ -149,7 +149,7 @@ class TestTheAppArmorProfile:
         assert "deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w," in shipped
 
 
-def _service(compose_file: Path, name: str = "istota") -> dict:
+def _service(compose_file: Path, name: str = "daemon") -> dict:
     return yaml.safe_load(compose_file.read_text())["services"][name]
 
 
@@ -165,7 +165,7 @@ def _volume_targets(service: dict) -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def istota_service() -> tuple[Path, dict]:
+def daemon_service() -> tuple[Path, dict]:
     return SHIPPED_COMPOSE, _service(SHIPPED_COMPOSE)
 
 
@@ -213,8 +213,8 @@ class TestTheSessionCookie:
 
 
 class TestTheRunContract:
-    def test_security_opt_is_the_grant_and_nothing_wider(self, istota_service):
-        compose_file, service = istota_service
+    def test_security_opt_is_the_grant_and_nothing_wider(self, daemon_service):
+        compose_file, service = daemon_service
         opts = set(service.get("security_opt") or [])
 
         assert opts == {
@@ -225,47 +225,47 @@ class TestTheRunContract:
         }
         assert (compose_file.parent / "istota" / "seccomp-istota.json").resolve() == SECCOMP
 
-    def test_capabilities_are_the_root_phase_set_only(self, istota_service):
-        _, service = istota_service
+    def test_capabilities_are_the_root_phase_set_only(self, daemon_service):
+        _, service = daemon_service
         assert service.get("cap_drop") == ["ALL"]
         assert set(service.get("cap_add") or []) == ROOT_PHASE_CAPS
 
-    def test_the_root_filesystem_is_read_only(self, istota_service):
-        _, service = istota_service
+    def test_the_root_filesystem_is_read_only(self, daemon_service):
+        _, service = daemon_service
         assert service.get("read_only") is True
         assert "/tmp" in (service.get("tmpfs") or [])
 
-    def test_the_cgroup_namespace_is_private_and_unbound(self, istota_service):
-        _, service = istota_service
+    def test_the_cgroup_namespace_is_private_and_unbound(self, daemon_service):
+        _, service = daemon_service
         assert service.get("cgroup") == "private"
         assert not [t for t in _volume_targets(service) if t.startswith("/sys")]
 
-    def test_no_user_line_the_entrypoint_drops(self, istota_service):
+    def test_no_user_line_the_entrypoint_drops(self, daemon_service):
         # The root phase needs uid 0 for the remount and the ownership fix; the
         # drop to 10001 is the entrypoint's, through `istota-drop`.
-        _, service = istota_service
+        _, service = daemon_service
         assert "user" not in service
 
-    def test_the_delegated_root_is_declared(self, istota_service):
-        _, service = istota_service
+    def test_the_delegated_root_is_declared(self, daemon_service):
+        _, service = daemon_service
         assert (service.get("environment") or {}).get("ISTOTA_TASK_CGROUP_ROOT") == "/sys/fs/cgroup"
 
-    def test_the_healthcheck_drops_before_it_opens_the_database(self, istota_service):
+    def test_the_healthcheck_drops_before_it_opens_the_database(self, daemon_service):
         # A healthcheck runs the way `docker exec` does: uid 0 with the cap_add
         # set. Opening the database as root is how a root-owned sidecar locks
         # the daemon out (ISSUE-458).
-        _, service = istota_service
+        _, service = daemon_service
         test = service["healthcheck"]["test"]
         command = test[-1] if isinstance(test, list) else test
         assert command.lstrip().startswith("istota-drop "), command
         assert "name='tasks'" in command
 
-    def test_no_docker_socket(self, istota_service):
-        _, service = istota_service
+    def test_no_docker_socket(self, daemon_service):
+        _, service = daemon_service
         assert not [t for t in _volume_targets(service) if "docker" in t or t in ("/run", "/var/run")]
 
 
-#: The keys of the `istota` service that decide its boundary. An overlay the
+#: The keys of the `daemon` service that decide its boundary. An overlay the
 #: test tiers apply may not set one, or a witness would observe the overlay.
 CONTRACT_KEYS = (
     "security_opt", "cap_add", "cap_drop", "read_only", "cgroup", "user",
@@ -289,19 +289,29 @@ for _tag in ("!reset", "!override"):
     )
 
 
-def _overlay_istota(overlay: Path) -> dict:
-    return yaml.load(overlay.read_text(), Loader=_ComposeLoader)["services"].get("istota", {})
+def _overlay_services(overlay: Path) -> dict:
+    return yaml.load(overlay.read_text(), Loader=_ComposeLoader)["services"]
+
+
+def _overlay_daemon(overlay: Path) -> dict:
+    return _overlay_services(overlay).get("daemon", {})
 
 
 class TestTheTestOverlaysLeaveTheContractAlone:
     @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
-    def test_no_overlay_sets_a_contract_key_on_istota(self, overlay):
-        service = _overlay_istota(overlay)
+    def test_no_overlay_names_the_service_by_its_old_name(self, overlay):
+        """An overlay keyed `istota` would add a second service rather than
+        touch the daemon, and the two tests below would pass on nothing."""
+        assert "istota" not in _overlay_services(overlay)
+
+    @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
+    def test_no_overlay_sets_a_contract_key_on_the_daemon(self, overlay):
+        service = _overlay_daemon(overlay)
         assert not set(service) & set(CONTRACT_KEYS), sorted(set(service) & set(CONTRACT_KEYS))
 
     @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
     def test_no_overlay_binds_anything_under_sys_or_a_docker_socket(self, overlay):
-        service = _overlay_istota(overlay)
+        service = _overlay_daemon(overlay)
         targets = _volume_targets(service)
         assert not [t for t in targets if t.startswith("/sys") or "docker" in t], targets
 
@@ -326,12 +336,12 @@ class TestTheBrowserNetwork:
         assert self._networks(compose["services"]["browser"]) == {"browser"}
 
     def test_the_daemon_joins_it_and_keeps_the_default(self, compose):
-        assert self._networks(compose["services"]["istota"]) == {"default", "browser"}
+        assert self._networks(compose["services"]["daemon"]) == {"default", "browser"}
 
     def test_nothing_else_joins_it(self, compose):
         joined = sorted(
             name for name, service in compose["services"].items()
-            if name not in ("browser", "istota") and "browser" in self._networks(service)
+            if name not in ("browser", "daemon") and "browser" in self._networks(service)
         )
         assert joined == []
 
@@ -340,14 +350,14 @@ def test_every_service_on_the_data_volume_runs_as_the_daemon():
     """A service that writes the data volume as root leaves files uid 10001
     cannot read: the Baileys sidecar rewrote creds.json root-owned 0600 on a
     migrated install's first start, and the daemon then read the session as
-    unpaired. Each such service drops through istota-drop, is the istota
+    unpaired. Each such service drops through istota-drop, is the daemon
     service (whose root phase drops), or names the uid itself."""
     compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
     for name, service in compose["services"].items():
         volumes = [v if isinstance(v, str) else v.get("source", "") for v in service.get("volumes", [])]
         if not any(str(v).split(":")[0] == "istota_data" for v in volumes):
             continue
-        if name == "istota":
+        if name == "daemon":
             continue
         entrypoint = service.get("entrypoint") or []
         drops = bool(entrypoint) and entrypoint[0] == "istota-drop"
