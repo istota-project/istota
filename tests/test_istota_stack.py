@@ -42,7 +42,9 @@ DOCKER_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
 args=" $* "
 case "$args" in
-  *" config --services "*) printf 'daemon\nweb\nwebhooks\nnginx\n' ;;
+  *" config --services "*)
+    printf 'daemon\nweb\nnginx\n'
+    case "$args" in *compose.devbox.yml*) echo devbox-stefan ;; esac ;;
   *" build "*) exit "${STUB_BUILD_RC:-0}" ;;
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
@@ -325,6 +327,32 @@ if [ "${1:-}" = "--digest" ]; then echo "digest-$(git -C "$(dirname "$0")/.." re
 echo "provision ran" >> "$STUB_CALLS"
 exit "${STUB_PROVISION_RC:-0}"
 """
+
+
+class TestAStaleDevboxFile:
+    """compose.devbox.yml is rendered by the release that wrote it, so on an
+    update it can name what the new compose file no longer has (the service
+    was `istota` before the rename) and compose refuses the merged project.
+    The core images and the render run without it; the devbox images are built
+    from the fresh one."""
+
+    def test_the_old_devbox_file_is_kept_out_until_it_is_rendered_again(self, fx):
+        (fx.stack / "compose.devbox.yml").write_text('{"services": {"istota": {"volumes": ["x:/y"]}}}\n')
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        rendered = '{"services": {"devbox-stefan": {"image": "istota-devbox:v1"}}}'
+
+        result = fx.run("update", "v1", STUB_DEVBOX_COMPOSE=rendered)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        render = next(i for i, c in enumerate(calls) if "devbox compose-file" in c)
+        core = next(i for i, c in enumerate(calls) if " build " in f"{c} " and "devbox-stefan" not in c)
+        assert "compose.devbox.yml" not in calls[core], calls[core]
+        assert "compose.devbox.yml" not in calls[render], calls[render]
+        devbox = [c for c in calls[render:] if " build " in f"{c} " and "devbox-stefan" in c]
+        assert devbox and "compose.devbox.yml" in devbox[0], calls
+        assert rendered in (fx.stack / "compose.devbox.yml").read_text()
 
 
 class TestAnUpdateReprovisionsTheHost:

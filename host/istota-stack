@@ -134,7 +134,9 @@ require_own_file() {
 
 compose() {
     local files=(-f "${SRC}/docker/docker-compose.yml")
-    if [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; then
+    # WITHOUT_DEVBOX=1: the release's own file alone, for the steps of an
+    # update that run before compose.devbox.yml is rendered again.
+    if [ -z "${WITHOUT_DEVBOX:-}" ] && { [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; }; then
         require_own_file "$DEVBOX_COMPOSE"
         if [ -s "$DEVBOX_COMPOSE" ]; then files+=(-f "$DEVBOX_COMPOSE"); fi
     fi
@@ -273,11 +275,25 @@ build_services() {
     compose config --services | grep -vxE 'web|webhooks|nginx|signaling' || true
 }
 
+# The core images first, from the release's compose file alone: the
+# compose.devbox.yml on disk was rendered by the previous release and may name
+# what this one no longer has, which compose refuses for the whole project.
+# Then the devbox file is rendered with the new image, and its images built.
 build_images() {
     local tag="$1" services
-    services="$(ISTOTA_TAG="$tag" build_services)"
+    services="$(WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" build_services)"
     # shellcheck disable=SC2086
-    ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="$(needs_claude_code)" compose build $services
+    WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="$(needs_claude_code)" compose build $services
+}
+
+build_devbox_images() {
+    local tag="$1" core devbox
+    [ -s "$DEVBOX_COMPOSE" ] || return 0
+    core="$(WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" compose config --services)"
+    devbox="$(ISTOTA_TAG="$tag" compose config --services | grep -vxF -f <(printf '%s\n' "$core") || true)"
+    [ -n "$devbox" ] || return 0
+    # shellcheck disable=SC2086
+    ISTOTA_TAG="$tag" compose build $devbox
 }
 
 # Why the tag's image cannot run what config.toml asks for, or nothing when it
@@ -314,7 +330,7 @@ render_devbox_compose() {
     local tag="$1" tmp
     [ -f "${CONFIG_DIR}/config.toml" ] || return 0
     tmp="$(mktemp)"
-    if ! ISTOTA_TAG="$tag" oneshot "$(main_service)" istota devbox compose-file > "$tmp"; then
+    if ! WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" oneshot "$(main_service)" istota devbox compose-file > "$tmp"; then
         rm -f "$tmp"
         log "istota devbox compose-file failed"
         return 1
@@ -370,7 +386,7 @@ cmd_update() {
     # the checkout and the running stack all stay as they were.
     verified_git checkout --quiet --detach "${object}^{commit}"
     log "building ${tag}"
-    if ! build_images "$tag" || ! render_devbox_compose "$tag"; then
+    if ! build_images "$tag" || ! render_devbox_compose "$tag" || ! build_devbox_images "$tag"; then
         verified_git checkout --quiet --detach "$before" || true
         die "building ${tag} failed; .env, the checkout and the running stack are unchanged."
     fi
