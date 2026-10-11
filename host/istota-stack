@@ -2,6 +2,8 @@
 # istota-stack: the VM's command for the one istota stack on it. Run as root.
 #
 #   istota-stack update <tag>   verify a signed release tag, build it, switch to it
+#   istota-stack update --unsigned <tag>
+#                               the same for any tag, signed or not, on request
 #   istota-stack rollback       back to the previous tag, if its image can run the database
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
@@ -20,7 +22,9 @@
 #
 #   src/              a git checkout of the repository, at the deployed tag
 #   allowed_signers   the release key, written by provision.sh from host.env
-#   .env              compose settings: the wizard's keys, ISTOTA_TAG, ISTOTA_PREVIOUS_TAG
+#   .env              compose settings: the wizard's keys, ISTOTA_TAG, ISTOTA_PREVIOUS_TAG,
+#                     and ISTOTA_TAG_UNSIGNED / ISTOTA_PREVIOUS_TAG_UNSIGNED for a tag
+#                     installed with --unsigned
 #   host.env          host settings, read by provision.sh and the units
 #   config/           bound at /data/config, read-only to every running service
 #   compose.devbox.yml   the devbox services, rendered by `istota devbox compose-file`
@@ -42,6 +46,11 @@
 # carry an SSH signature and name itself. A branch, a lightweight tag, an
 # unsigned tag and a tag signed by any other key are refused before anything
 # moves. tests/test_istota_stack.py holds each refusal.
+#
+# Only releases are signed. `update --unsigned <tag>` deploys any tag without a
+# signature check, for that run; a branch is still refused, since rollback needs
+# a name that stays put. .env marks the tag, and rollback returns to a marked tag
+# without verifying it, because the operator accepted it when installing it.
 set -euo pipefail
 
 STACK="${ISTOTA_STACK_DIR:-/srv/app/istota}"
@@ -211,6 +220,18 @@ verify_release_tag() {
 
 # --- builds and images -------------------------------------------------------
 
+# Print the object id of any tag, signed or not: `update --unsigned`.
+resolve_unsigned_tag() {
+    local tag="$1" object
+    check_tag_name "$tag"
+    if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
+        refuse_tag "${tag} is not a tag in the checkout. A branch or a commit is never deployed, signed or not."
+    fi
+    verified_git rev-parse -q --verify "${object}^{commit}" >/dev/null 2>&1 \
+        || refuse_tag "${tag} does not point at a commit."
+    echo "$object"
+}
+
 # Whether config.toml names a brain that runs Claude Code. With no config yet,
 # no: `istota-stack setup` says so when the answers need it.
 needs_claude_code() {
@@ -306,13 +327,22 @@ load_apparmor() {
 # --- commands ----------------------------------------------------------------
 
 cmd_update() {
+    local unsigned=""
+    if [ "${1:-}" = "--unsigned" ]; then unsigned=1; shift; fi
     [ "$#" -eq 1 ] || { usage >&2; exit 64; }
-    local tag="$1" object current previous before
+    local tag="$1" object current current_unsigned previous previous_unsigned before
     check_tag_name "$tag"
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
     verified_git fetch --quiet --tags origin || die "git fetch failed; nothing was changed."
-    object="$(verify_release_tag "$tag")"
+    if [ -n "$unsigned" ]; then
+        object="$(resolve_unsigned_tag "$tag")"
+        log "${tag}: installing without a signature check (--unsigned)"
+    elif ! object="$(verify_release_tag "$tag")"; then
+        echo "[istota-stack] Only releases are signed: \`istota-stack update --unsigned ${tag}\` installs any other tag." >&2
+        exit "$EXIT_REFUSED_TAG"
+    fi
     before="$(verified_git rev-parse HEAD)"
 
     # From here until .env is written, a failure puts the checkout back, so .env,
@@ -335,8 +365,13 @@ cmd_update() {
     fi
 
     previous="$current"
-    if [ "$current" = "$tag" ]; then previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"; fi
-    env_set "ISTOTA_TAG=${tag}" "ISTOTA_PREVIOUS_TAG=${previous}"
+    previous_unsigned="$current_unsigned"
+    if [ "$current" = "$tag" ]; then
+        previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"
+        previous_unsigned="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG_UNSIGNED)"
+    fi
+    env_set "ISTOTA_TAG=${tag}" "ISTOTA_TAG_UNSIGNED=${unsigned}" \
+        "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
         compose up -d --remove-orphans
     else
@@ -347,13 +382,19 @@ cmd_update() {
 }
 
 cmd_rollback() {
-    local current previous object rc=0
+    local current current_unsigned previous previous_unsigned object rc=0
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
     previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"
+    previous_unsigned="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG_UNSIGNED)"
     [ -n "$previous" ] || die "no previous tag in ${ENV_FILE}; nothing to roll back to."
     docker image inspect "istota-istota:${previous}" >/dev/null 2>&1 \
         || die "the image istota-istota:${previous} is gone; run \`istota-stack update ${previous}\`."
-    object="$(verify_release_tag "$previous")"
+    if [ -n "$previous_unsigned" ]; then
+        object="$(resolve_unsigned_tag "$previous")"
+    else
+        object="$(verify_release_tag "$previous")"
+    fi
 
     # Ask the older image whether it can run this database before switching to
     # it: a newer release's migration may have been one-way.
@@ -372,7 +413,8 @@ cmd_rollback() {
         verified_git checkout --quiet --detach "$before" || true
         die "${previous}'s AppArmor profile did not load; ${ENV_FILE} still names ${current}."
     fi
-    env_set "ISTOTA_TAG=${previous}" "ISTOTA_PREVIOUS_TAG=${current}"
+    env_set "ISTOTA_TAG=${previous}" "ISTOTA_TAG_UNSIGNED=${previous_unsigned}" \
+        "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}"
     compose up -d --remove-orphans
     log "rolled back to ${previous} (previous: ${current})"
 }

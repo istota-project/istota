@@ -313,6 +313,96 @@ class TestASignedTagIsDeployed:
         assert recorder.read_text().split() == ["0", "2.1.296"]
 
 
+class TestAnUnsignedTagOnRequest:
+    """Only releases are signed. `--unsigned` installs any other tag, for that
+    one run, and .env records it so a rollback can return to it."""
+
+    def test_an_unsigned_annotated_tag_is_deployed(self, fx):
+        commit = fx.commit("v1")
+        fx.tag("v1")
+        result = fx.run("update", "--unsigned", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.head() == commit
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "ISTOTA_TAG_UNSIGNED=1\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG=v0\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG_UNSIGNED=\n" in fx.env_text()
+        assert "unsigned" in result.stdout + result.stderr
+        assert any(call.endswith("up -d --remove-orphans") for call in fx.docker_calls())
+
+    def test_a_lightweight_tag_is_deployed(self, fx):
+        commit = fx.commit("v1")
+        fx.tag("v1", annotated=False)
+        result = fx.run("update", "--unsigned", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.head() == commit
+
+    def test_no_release_key_is_needed(self, fx):
+        (fx.stack / "allowed_signers").unlink()
+        commit = fx.commit("v1")
+        fx.tag("v1")
+        result = fx.run("update", "--unsigned", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.head() == commit
+
+    def test_a_branch_is_still_refused(self, fx):
+        fx.commit("v1")
+        _git(fx.origin, "branch", "release", env=fx.env)
+        before = fx.env_text(), fx.head()
+        _assert_unchanged(fx, fx.run("update", "--unsigned", "release"), *before)
+
+    def test_a_bad_name_is_still_refused(self, fx):
+        before = fx.env_text(), fx.head()
+        _assert_unchanged(fx, fx.run("update", "--unsigned", "../v0"), *before)
+
+    def test_without_the_flag_the_refusal_names_it(self, fx):
+        fx.commit("v1")
+        fx.tag("v1")
+        result = fx.run("update", "v1")
+        assert result.returncode == 65
+        assert "--unsigned" in result.stderr
+
+    def test_a_signed_release_after_it_carries_the_mark_to_previous(self, fx):
+        fx.commit("v1")
+        fx.tag("v1")
+        assert fx.run("update", "--unsigned", "v1").returncode == 0
+        fx.commit("v2")
+        fx.tag("v2", key=fx.release_key)
+        result = fx.run("update", "v2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v2\n" in fx.env_text()
+        assert "ISTOTA_TAG_UNSIGNED=\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG=v1\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG_UNSIGNED=1\n" in fx.env_text()
+
+    def test_rollback_returns_to_a_tag_installed_unsigned(self, fx):
+        fx.commit("v1")
+        fx.tag("v1")
+        assert fx.run("update", "--unsigned", "v1").returncode == 0
+        fx.commit("v2")
+        fx.tag("v2", key=fx.release_key)
+        assert fx.run("update", "v2").returncode == 0
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "ISTOTA_TAG_UNSIGNED=1\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG=v2\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG_UNSIGNED=\n" in fx.env_text()
+
+    def test_rollback_to_an_unsigned_tag_nobody_accepted_is_refused(self, fx):
+        """The mark is what accepted it; an unsigned previous tag without one
+        (.env edited by hand) is verified like any release."""
+        fx.commit("v1")
+        fx.tag("v1")
+        (fx.stack / ".env").write_text(
+            "COMPOSE_PROFILES=\nISTOTA_TAG=v0\nISTOTA_PREVIOUS_TAG=v1\n"
+        )
+        _git(fx.src, "fetch", "-q", "--tags", "origin", env=fx.env)
+        before = fx.env_text(), fx.head()
+        result = fx.run("rollback")
+        _assert_unchanged(fx, result, *before)
+
+
 class TestRollback:
     @pytest.fixture
     def updated(self, fx):
