@@ -320,6 +320,58 @@ class TestASignedTagIsDeployed:
         assert recorder.read_text().split() == ["0", "2.1.296"]
 
 
+PROVISION_STUB = """#!/bin/bash
+if [ "${1:-}" = "--digest" ]; then echo "digest-$(git -C "$(dirname "$0")/.." rev-parse HEAD)"; exit 0; fi
+echo "provision ran" >> "$STUB_CALLS"
+exit "${STUB_PROVISION_RC:-0}"
+"""
+
+
+class TestAnUpdateReprovisionsTheHost:
+    """`provision.sh` installs istota-stack, the units and the host scripts, so
+    an update that never ran it left them at whatever tag last provisioned."""
+
+    @pytest.fixture
+    def with_provision(self, fx):
+        script = fx.origin / "host" / "provision.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text(PROVISION_STUB)
+        script.chmod(0o755)
+        _git(fx.origin, "add", "host/provision.sh", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        return fx
+
+    def test_a_release_whose_host_inputs_changed_is_provisioned(self, with_provision):
+        fx = with_provision
+        (fx.stack / ".provisioned").write_text("digest-of-the-previous-release\n")
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "provision ran" in fx.docker_calls()
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+
+    def test_unchanged_inputs_are_not_provisioned_again(self, with_provision):
+        fx = with_provision
+        head = _git(fx.origin, "rev-parse", "v1^{commit}", env=fx.env)
+        (fx.stack / ".provisioned").write_text(f"digest-{head}\n")
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "provision ran" not in fx.docker_calls()
+
+    def test_a_failed_provision_fails_the_update_with_the_stack_on_the_tag(self, with_provision):
+        fx = with_provision
+        result = fx.run("update", "v1", STUB_PROVISION_RC="1")
+        assert result.returncode == 1
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "provision.sh" in result.stdout + result.stderr
+
+    def test_a_release_without_provision_sh_updates_as_before(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
 class TestAHardenedUmask:
     """A host whose umask is 027 (zorg's) checked the tree out root-only, and
     the image copied those modes in: uid 10001 could not import istota.cli."""

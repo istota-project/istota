@@ -400,6 +400,21 @@ cmd_update() {
     fi
     prune_images "$tag" "$previous"
     log "now on ${tag} (previous: ${previous:-none})"
+    reprovision_if_changed
+}
+
+# provision.sh installs this script, the units and the host scripts, so a
+# release that changed them is provisioned straight after it is running.
+# Last and by exec: provision.sh replaces the file bash is reading this from.
+reprovision_if_changed() {
+    local provision="${SRC}/host/provision.sh" digest
+    [ -x "$provision" ] || return 0
+    digest="$("$provision" --digest 2>/dev/null || true)"
+    if [ -n "$digest" ] && [ "$digest" = "$(cat "${STACK}/.provisioned" 2>/dev/null || true)" ]; then
+        return 0
+    fi
+    log "the host's provisioning inputs changed; running ${provision} (the stack already runs the new tag)"
+    exec "$provision"
 }
 
 cmd_rollback() {
