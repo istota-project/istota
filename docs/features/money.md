@@ -58,11 +58,28 @@ The agent-side surface is `istota-skill money transaction-rules list|set|test`; 
 
 ### Settling invoices from the feed
 
+Automatic payment detection starts disabled for every billing entity, including entities created before this setting existed. To enable it, open Money → Settings → Invoicing → Edit entity, switch on “Automatically detect invoice payments”, then choose a ledger and its income account. The income account is the `Income:*` revenue account invoice payments are booked to. Declared accounts are available even before their first posting. Changing the ledger clears the old account; when there is exactly one eligible income account, it is selected for you. Save applies the settings to this entity independently of the page-wide ledger selection.
+
+A new credit must match the entity’s selected ledger, exact income account and receiving bank account. The bank account remains the separate `Assets:*` condition; these settings do not change it or manual payment posting. The normal negative revenue posting in a payment is expected: matching uses the positive imported bank credit. Refunds and debits do not become payments. A profile name is not a ledger name, and identical account names in different ledgers do not match each other.
+
+The operator CLI accepts the same settings on `company add`, `update` and the idempotent `ensure` command:
+
+```bash
+istota money company ensure -u alice --key acme \
+  --payment-detection-enabled --payment-detection-ledger business \
+  --payment-detection-income-account Income:Consulting
+istota money company update -u alice --key acme --no-payment-detection-enabled
+```
+
+Config import/export uses `payment_detection_enabled`, `payment_detection_ledger` and `payment_detection_income_account` under `[companies.acme]`. A merge import preserves omitted company fields; `--replace` uses defaults for omitted fields. Imports and dry runs validate the selected pair against the user’s ledgers, canonicalize the ledger name case-insensitively, and require an exact declared `Income:*` account. Exports include the enabled flag even when false so reimporting a disabled configuration disables detection.
+
+Switching detection off keeps its selections, even if the saved ledger has disappeared. Existing reviews and settlement history remain visible, and saved reviews can still be settled or dismissed after settings change. Invalid saved settings skip that entity with a diagnostic while the ledger sync completes. Enabling detection does not backfill old credits; legacy match rows without ledger and income-account metadata remain historical. Physical bank accounts mapped to the same ledger, bank and income accounts remain indistinguishable.
+
 A sync books incoming payments into the ledger. It also closes the invoice each one paid, where it can say which: a credit that fits exactly one open invoice — same amount, issued no later than the payment — marks that invoice paid. It records the payment directly rather than routing through `invoice paid`, because the sync has already written the income to the ledger and going through the command would post it twice.
 
 Anything ambiguous is reported for you to settle rather than guessed at. Two open invoices at the same amount, two credits fitting one invoice, or a credit that fits to the cent but predates the invoice — all are named in the output and left alone. Three shapes of invoice are excluded from matching outright, because for each the total on hand is not the amount owed: partly paid ones, fully paid ones, and any invoice with a line whose service has left the config, which makes it look cheaper than it is.
 
-`--tolerance` allows for a wire fee. `--no-match-invoices` turns matching off. `invoice unpaid` undoes a match that was wrong — `invoice void` is not the inverse, since it clears the invoice number and un-invoices the work.
+`--tolerance` allows for a wire fee. `--no-match-invoices` turns matching off for the run. `--match-invoices` cannot override a disabled entity. `invoice unpaid` undoes a match that was wrong — `invoice void` is not the inverse, since it clears the invoice number and un-invoices the work.
 
 Matching runs once across all sync profiles rather than once per profile. `sync_all_profiles` fetches from Monarch once and dedups per profile, so two profiles can each book a credit fitting the same invoice; a per-profile pass would let whichever ran first settle it and leave the other unreported, with profile order deciding the winner.
 
@@ -113,3 +130,5 @@ Two operations are behind operator feature flags — `lots` (tax lots, `money_ta
 | `[money] autoclass_lookup` | `true` | Allow portfolio auto-classification to look up unknown symbols |
 
 Everything else — clients, entities, services, tax config, portfolio accounts — lives in the per-user money DB, not in `config.toml`.
+
+A review saves its chosen invoice before recording payment on the work entries. If settlement is interrupted, retry the same credit and invoice with `invoice review settle`; it finishes that decision without paying another candidate. A refusal before any invoice is chosen leaves the other candidates available.

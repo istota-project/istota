@@ -261,7 +261,11 @@ function dropItem(id: number) {
 export async function runAction(id: number, action: NotificationAction): Promise<boolean> {
   if (action.method !== 'POST' || !action.endpoint) return false;
   try {
-    await runNotificationAction(action.endpoint);
+    if (action.body) {
+      await runNotificationAction(action.endpoint, action.body);
+    } else {
+      await runNotificationAction(action.endpoint);
+    }
   } catch {
     notifyError('That action could not be completed. Try again.', {
       key: 'notifications:action',

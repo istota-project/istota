@@ -105,6 +105,7 @@ class NotificationAction:
     # Offered only in the detail view, where the full body is shown: an action
     # that approves what the body says must not be one click from the list.
     detail_only: bool = False
+    body: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -115,6 +116,7 @@ class NotificationAction:
             "endpoint": self.endpoint,
             "href": self.href,
             "detail_only": self.detail_only,
+            **({"body": self.body} if self.body is not None else {}),
         }
 
 
@@ -290,6 +292,7 @@ def _register_all() -> None:
             "cron_job",
             "connected_service",
             "health_panel",
+            "invoice_match",
             "task_alert",
             "message_relay",
             "relay_question",

@@ -158,7 +158,13 @@ Cash-basis accounting: no ledger entries at invoice time; income recognized when
 
 ### Payments matched automatically
 
-`sync-monarch` and `run-scheduled` close the loop for the obvious case: a newly synced credit that fits **exactly one** open invoice marks that invoice paid, without a ledger posting — the sync already booked the income. An invoice is a candidate when its total matches the credit to the cent (or within `--tolerance`, in dollars) and it was issued no later than the payment.
+Automatic detection starts disabled for every billing entity, including existing entities. Configure it in Money → Settings → Invoicing → Edit entity: enable “Automatically detect invoice payments”, choose the ledger, then choose the declared `Income:*` revenue account. The credit must match this pair and the entity’s receiving bank account. An `Assets:*` bank account is not an income account, and selecting the detection pair does not change the bank account or manual payment posting. Ledger names resolve case-insensitively; income-account names are exact. Identical income-account names in different ledgers stay separate.
+
+For an operator, `istota money company ensure -u USER --key ENTITY --payment-detection-enabled --payment-detection-ledger LEDGER --payment-detection-income-account Income:Consulting` applies the pair; `company update ... --no-payment-detection-enabled` disables it while keeping the selections. Config import/export carries `payment_detection_enabled`, `payment_detection_ledger` and `payment_detection_income_account` under each company. Omitted fields survive merge imports. Never infer the income account from the bank account.
+
+A disabled entity creates no new automatic settlements or reviews, and `--match-invoices` cannot override it. Existing reviews remain actionable after settings change. Invalid saved settings skip that entity with a diagnostic without failing sync. Only newly imported positive bank credits are eligible; the normal negative revenue posting is expected. Enabling detection does not backfill old credits.
+
+`sync-monarch` and `run-scheduled` close the loop for the obvious case: a newly synced credit that fits **exactly one** open invoice marks that invoice paid, without a ledger posting — the sync already booked the income. An invoice is a candidate when its total matches the credit to the cent (or within `--tolerance`, in dollars) and it was issued no later than the payment. The credit must land in the invoice entity's configured bank account.
 
 Ambiguity is never resolved by guessing. Two open invoices that fit one credit, or two credits that fit one invoice, are reported and left alone:
 
@@ -169,7 +175,7 @@ Ambiguity is never resolved by guessing. Two open invoices that fit one credit, 
 }}
 ```
 
-Act on a `review` row by running `invoice paid <number> --date <date> --no-post` for the right one. `--no-match-invoices` turns the whole thing off for a run (on both `sync-monarch` and `run-scheduled` — unlike `--skip-monarch`, which would also skip the ledger sync), and `invoice unpaid <number>` undoes a match that was wrong. The `invoice_matching` key only appears when there was something to report.
+Run `invoice review list` to see open reviews with the credit's ledger id and each live candidate's number, client and total. Use `invoice review settle LEDGER_TXN_ID --invoice INV-NNNNNN` to choose a candidate; it uses the credit's date and makes no ledger posting. Use `invoice review dismiss LEDGER_TXN_ID` for a credit that was not an invoice payment. `invoice review list --all` includes decided rows. `invoice matches [--invoice INV-NNNNNN]` shows settled and reverted history. `invoice unpaid` marks the match reverted without reopening its review. `--no-match-invoices` turns the whole thing off for a run (on both `sync-monarch` and `run-scheduled` — unlike `--skip-monarch`, which would also skip the ledger sync), and `invoice unpaid <number>` undoes a match that was wrong. The `invoice_matching` key only appears when there was something to report.
 
 An invoice is left out of matching entirely when its total can't be stated exactly: partly paid, or carrying a work entry whose service is no longer in the config. Matching on a total that isn't what the client owes is how the wrong invoice gets settled. The date filter uses the invoice's own issue date, which is recorded on its work entries. An invoice raised before that field existed has none, and falls back to the latest work billed on it as a lower bound — that never rejects a real payment, but it does admit credits from the gap between the last work and the invoice going out.
 

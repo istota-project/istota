@@ -98,7 +98,7 @@ def check(ledger_path: Path) -> dict:
         }
 
 
-def list_open_accounts(ledger_path: Path) -> list[str]:
+def list_open_accounts(ledger_path: Path, *, strict: bool = False) -> list[str]:
     """Return all accounts opened in the ledger via ``open`` directives.
 
     Useful when bean-query's posting-based aggregations miss accounts that
@@ -109,7 +109,9 @@ def list_open_accounts(ledger_path: Path) -> list[str]:
     from beancount.core.data import Open
     from beancount.loader import load_file
 
-    entries, _errors, _options = load_file(str(ledger_path))
+    entries, errors, _options = load_file(str(ledger_path))
+    if strict and errors:
+        raise ValueError("Payment detection ledger has errors; fix the ledger before selecting an account")
     return sorted({e.account for e in entries if isinstance(e, Open)})
 
 

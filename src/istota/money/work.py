@@ -29,6 +29,7 @@ import hashlib
 import logging
 import re
 from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -834,12 +835,17 @@ def record_invoice_payment(
     data_dir: Path,
     invoice_number: str,
     paid_date: str | date,
+    *,
+    validate: Callable[[list[WorkEntry]], bool] | None = None,
 ) -> int:
     """Set paid_date on all entries for an invoice. Returns count."""
     if isinstance(paid_date, str):
         paid_date = _parse_date(paid_date)
     with _work_lock(data_dir):
         entries = load_work_entries(data_dir)
+        invoice_entries = [entry for entry in entries if entry.invoice == invoice_number]
+        if validate is not None and not validate(invoice_entries):
+            return 0
         count = 0
         for entry in entries:
             if entry.invoice == invoice_number and entry.paid_date is None:

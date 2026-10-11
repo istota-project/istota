@@ -1365,6 +1365,7 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity var(--transition-fast);
+    max-width: var(--chat-body-max);
   }
   /* Two guards, as everywhere else in this file: the media query knows a phone
 	   has no hover at all, `.touch` knows a finger was used on a device that also

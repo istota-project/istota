@@ -2734,3 +2734,62 @@ class TestMapKeysAreCheckedOnWrite:
         notes = cs.get_transaction_rules_migration_notes(db_path)
         assert [n["reason"] for n in notes] == ["uneditable-key"]
         assert notes[0]["limit"] == rule_engine.MAX_MATCH_VALUE_CHARS
+
+
+class TestPaymentDetectionStorage:
+    def test_upgrade_defaults_and_round_trip(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "money.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("""CREATE TABLE invoicing_companies (
+                key TEXT PRIMARY KEY, name TEXT NOT NULL, address TEXT,
+                email TEXT, payment_instructions TEXT, logo TEXT,
+                ar_account TEXT, bank_account TEXT, currency TEXT
+            )""")
+            conn.execute("INSERT INTO invoicing_companies(key, name) VALUES ('acme', 'Acme')")
+        company = cs.load_invoicing(db_path).companies["acme"]
+        assert company.payment_detection_enabled is False
+        assert company.payment_detection_ledger == ""
+        assert company.payment_detection_income_account == ""
+        company, state = cs.upsert_company(
+            db_path, "acme", payment_detection_enabled=True,
+            payment_detection_ledger="Business",
+            payment_detection_income_account="Income:Consulting",
+        )
+        assert state == "updated"
+        cs._INITIALISED.pop(str(db_path))
+        cs.init_db(db_path)
+        cfg = cs.load_invoicing(db_path)
+        assert cfg.companies["acme"] == company
+        exported = cs.invoicing_to_toml_dict(cfg)
+        assert cs.invoicing_config_from_toml_dict(exported).companies["acme"] == company
+        cs.save_invoicing(db_path, cs.invoicing_config_from_toml_dict(exported))
+        assert cs.load_invoicing(db_path).companies["acme"] == company
+        disabled, _ = cs.upsert_company(db_path, "acme", payment_detection_enabled=False)
+        assert disabled.payment_detection_enabled is False
+        assert disabled.payment_detection_ledger == "Business"
+        assert disabled.payment_detection_income_account == "Income:Consulting"
+        assert cs.upsert_company(db_path, "acme", payment_detection_enabled=False)[1] == "noop"
+
+    def test_legacy_toml_parser_keeps_detection_settings(self, tmp_path):
+        from istota.money.core.invoicing import parse_invoicing_config
+
+        path = tmp_path / "invoicing.toml"
+        path.write_text(
+            '[companies.acme]\nname = "Acme"\n'
+            'payment_detection_enabled = true\n'
+            'payment_detection_ledger = "Business"\n'
+            'payment_detection_income_account = "Income:Consulting"\n'
+        )
+        company = parse_invoicing_config(path).companies["acme"]
+        assert company.payment_detection_enabled is True
+        assert company.payment_detection_ledger == "Business"
+        assert company.payment_detection_income_account == "Income:Consulting"
+
+    @pytest.mark.parametrize("enabled", [1, 0, "true", "false", None])
+    def test_store_requires_strict_boolean(self, tmp_path, enabled):
+        db_path = tmp_path / "money.db"
+        cs.upsert_company(db_path, "acme")
+        with pytest.raises(ValueError, match="payment_detection_enabled"):
+            cs.upsert_company(db_path, "acme", payment_detection_enabled=enabled)

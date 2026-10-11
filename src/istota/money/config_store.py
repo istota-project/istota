@@ -77,7 +77,10 @@ CREATE TABLE IF NOT EXISTS invoicing_companies (
     logo                 TEXT,
     ar_account           TEXT,
     bank_account         TEXT,
-    currency             TEXT
+    currency             TEXT,
+    payment_detection_enabled INTEGER NOT NULL DEFAULT 0,
+    payment_detection_ledger TEXT NOT NULL DEFAULT '',
+    payment_detection_income_account TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS invoicing_clients (
@@ -293,6 +296,14 @@ def init_db(db_path: Path | str) -> None:
         # implicit BEGIN gave the same order only because its first statement
         # happened to be a write; this keeps it if a read ever goes first.
         conn.execute("BEGIN IMMEDIATE")
+        company_columns = {row[1] for row in conn.execute("PRAGMA table_info(invoicing_companies)")}
+        for name, definition in (
+            ("payment_detection_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("payment_detection_ledger", "TEXT NOT NULL DEFAULT ''"),
+            ("payment_detection_income_account", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in company_columns:
+                conn.execute(f"ALTER TABLE invoicing_companies ADD COLUMN {name} {definition}")
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", SCHEMA_VERSION),
@@ -488,6 +499,9 @@ def _company_from_dict(key: str, raw: dict) -> CompanyConfig:
         ar_account=raw.get("ar_account", ""),
         bank_account=raw.get("bank_account", ""),
         currency=raw.get("currency", ""),
+        payment_detection_enabled=raw.get("payment_detection_enabled", False),
+        payment_detection_ledger=raw.get("payment_detection_ledger", ""),
+        payment_detection_income_account=raw.get("payment_detection_income_account", ""),
     )
 
 
@@ -538,9 +552,10 @@ def invoicing_to_toml_dict(cfg: InvoicingConfig) -> dict:
 
 
 def _company_to_dict(c: CompanyConfig) -> dict:
-    out: dict[str, Any] = {"name": c.name}
+    out: dict[str, Any] = {"name": c.name, "payment_detection_enabled": c.payment_detection_enabled}
     for attr in ("address", "email", "payment_instructions", "logo",
-                 "ar_account", "bank_account", "currency"):
+                 "ar_account", "bank_account", "currency",
+                 "payment_detection_ledger", "payment_detection_income_account"):
         v = getattr(c, attr)
         if v:
             out[attr] = v
@@ -610,6 +625,9 @@ def load_invoicing(db_path: Path | str) -> InvoicingConfig:
                 ar_account=row["ar_account"] or "",
                 bank_account=row["bank_account"] or "",
                 currency=row["currency"] or "",
+                payment_detection_enabled=bool(row["payment_detection_enabled"]),
+                payment_detection_ledger=row["payment_detection_ledger"],
+                payment_detection_income_account=row["payment_detection_income_account"],
             )
 
         clients: dict[str, ClientConfig] = {}
@@ -796,12 +814,18 @@ def _invoicing_scalar(cfg: InvoicingConfig, key: str) -> Any:
 
 
 def _upsert_company_row(conn: sqlite3.Connection, key: str, c: CompanyConfig) -> None:
+    _validate_company_fields({
+        "payment_detection_enabled": c.payment_detection_enabled,
+        "payment_detection_ledger": c.payment_detection_ledger,
+        "payment_detection_income_account": c.payment_detection_income_account,
+    })
     conn.execute(
         """
         INSERT INTO invoicing_companies(
             key, name, address, email, payment_instructions, logo,
-            ar_account, bank_account, currency
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ar_account, bank_account, currency, payment_detection_enabled,
+            payment_detection_ledger, payment_detection_income_account
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
             name = excluded.name,
             address = excluded.address,
@@ -810,10 +834,14 @@ def _upsert_company_row(conn: sqlite3.Connection, key: str, c: CompanyConfig) ->
             logo = excluded.logo,
             ar_account = excluded.ar_account,
             bank_account = excluded.bank_account,
-            currency = excluded.currency
+            currency = excluded.currency,
+            payment_detection_enabled = excluded.payment_detection_enabled,
+            payment_detection_ledger = excluded.payment_detection_ledger,
+            payment_detection_income_account = excluded.payment_detection_income_account
         """,
         (key, c.name, c.address, c.email, c.payment_instructions, c.logo,
-         c.ar_account, c.bank_account, c.currency),
+         c.ar_account, c.bank_account, c.currency, c.payment_detection_enabled,
+         c.payment_detection_ledger, c.payment_detection_income_account),
     )
 
 
@@ -922,7 +950,8 @@ def _is_account(value: str) -> bool:
 
 _COMPANY_FIELDS = frozenset({
     "name", "address", "email", "payment_instructions", "logo",
-    "ar_account", "bank_account", "currency",
+    "ar_account", "bank_account", "currency", "payment_detection_enabled",
+    "payment_detection_ledger", "payment_detection_income_account",
 })
 _CLIENT_FIELDS = frozenset({
     "name", "address", "email", "terms", "ar_account", "entity",
@@ -1065,6 +1094,11 @@ def check_invoicing_scalars(fields: dict) -> None:
 
 def _validate_company_fields(fields: dict, skip: frozenset[str] = frozenset()) -> None:
     _reject_unknown("company", fields, _COMPANY_FIELDS)
+    if "payment_detection_enabled" in fields and not isinstance(fields["payment_detection_enabled"], bool):
+        raise ValueError("invalid payment_detection_enabled — expected a boolean")
+    for name in ("payment_detection_ledger", "payment_detection_income_account"):
+        if name in fields and not isinstance(fields[name], str):
+            raise ValueError(f"invalid {name} — expected text")
     _check_accounts(fields, skip)
     _check_currency(fields, skip)
     _check_logo(fields, skip)
@@ -1181,10 +1215,13 @@ def upsert_company(
         merged = {
             "name": "", "address": "", "email": "", "payment_instructions": "",
             "logo": "", "ar_account": "", "bank_account": "", "currency": "",
+            "payment_detection_enabled": False, "payment_detection_ledger": "",
+            "payment_detection_income_account": "",
         }
         if existing is not None:
             for col in merged:
                 merged[col] = existing[col] or ""
+            merged["payment_detection_enabled"] = bool(existing["payment_detection_enabled"])
         _validate_company_fields(fields, unchanged_fields(fields, merged if existing else None))
         merged.update({k: v for k, v in fields.items() if v is not None})
         comp = CompanyConfig(
@@ -1197,6 +1234,9 @@ def upsert_company(
             ar_account=merged["ar_account"] or "",
             bank_account=merged["bank_account"] or "",
             currency=merged["currency"] or "",
+            payment_detection_enabled=merged["payment_detection_enabled"],
+            payment_detection_ledger=merged["payment_detection_ledger"],
+            payment_detection_income_account=merged["payment_detection_income_account"],
         )
         _upsert_company_row(conn, key, comp)
         if existing is None:

@@ -354,6 +354,12 @@ describe('refreshItems', () => {
 });
 
 describe('actions', () => {
+  it('passes the selected invoice to the API', async () => {
+    const action = { ...row(9).actions[0], body: { invoice_number: 'INV-000001' } };
+    await store.runAction(9, action as never);
+    expect(api.runNotificationAction).toHaveBeenCalledWith(action.endpoint, action.body);
+  });
+
   it('posts the exact path the view named', async () => {
     const item = row(9);
     await store.runAction(item.id, item.actions[0] as never);

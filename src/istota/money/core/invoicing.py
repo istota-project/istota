@@ -117,6 +117,9 @@ def _parse_company_data(key: str, company_data: dict) -> CompanyConfig:
         ar_account=company_data.get("ar_account", ""),
         bank_account=company_data.get("bank_account", ""),
         currency=company_data.get("currency", ""),
+        payment_detection_enabled=company_data.get("payment_detection_enabled", False),
+        payment_detection_ledger=company_data.get("payment_detection_ledger", ""),
+        payment_detection_income_account=company_data.get("payment_detection_income_account", ""),
     )
 
 

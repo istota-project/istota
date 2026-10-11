@@ -1,13 +1,20 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { KEY_RE, KEY_HINT, type EntityRow, type EntityInput } from '$lib/money/api';
-  import { Modal, Button } from '$lib/components/ui';
+  import { onMount, untrack } from 'svelte';
+  import {
+    KEY_RE,
+    KEY_HINT,
+    getLedgers,
+    getAccounts,
+    type EntityRow,
+    type EntityInput,
+  } from '$lib/money/api';
+  import { Modal, Button, Select } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
 
   /**
    * Create/edit form for a billing entity.
    *
-   * Everything here lands on the generated invoice PDF, which is why the
+   * Invoice identity and payment detection settings share this form. The
    * delete guard behind it is strict: a client whose entity vanished falls
    * back to whichever company happens to be first, and the next invoice
    * carries a different legal entity's name, address and payment details.
@@ -37,7 +44,121 @@
   let arAccount = $state(untrack(() => entity?.ar_account ?? ''));
   let bankAccount = $state(untrack(() => entity?.bank_account ?? ''));
   let currency = $state(untrack(() => entity?.currency ?? ''));
+  let detectionEnabled = $state(untrack(() => entity?.payment_detection_enabled ?? false));
+  let detectionLedger = $state(untrack(() => entity?.payment_detection_ledger ?? ''));
+  let incomeAccount = $state(untrack(() => entity?.payment_detection_income_account ?? ''));
+  let ledgers = $state<string[]>([]);
+  let incomeAccounts = $state<string[]>([]);
+  let ledgersLoading = $state(true);
+  let accountsLoading = $state(false);
+  let ledgerError = $state('');
+  let accountError = $state('');
+  let loadedLedger = $state('');
   let open = $state(true);
+
+  onMount(() => {
+    let active = true;
+    async function loadLedgers() {
+      try {
+        const names = await getLedgers();
+        if (!active) return;
+        ledgers = names;
+        // Older imported settings may use a different case than the registry.
+        detectionLedger =
+          names.find((name) => name.toLowerCase() === detectionLedger.toLowerCase()) ??
+          detectionLedger;
+      } catch (e) {
+        if (active) ledgerError = e instanceof Error ? e.message : 'Failed to load ledgers';
+      } finally {
+        if (active) ledgersLoading = false;
+      }
+    }
+    void loadLedgers();
+    return () => {
+      active = false;
+    };
+  });
+
+  $effect(() => {
+    const ledger = detectionLedger;
+    let active = true;
+    incomeAccounts = [];
+    loadedLedger = '';
+    accountError = '';
+    accountsLoading = false;
+    if (ledgersLoading || ledgerError || !ledgers.includes(ledger)) return;
+    accountsLoading = true;
+    async function loadAccounts() {
+      try {
+        const data = await getAccounts({ ledger });
+        if (!active) return;
+        incomeAccounts = data.accounts
+          .map((row) => row.account)
+          .filter((account) => account.startsWith('Income:'));
+        loadedLedger = ledger;
+        // Preserve a saved selection, including an unavailable one the user
+        // must explicitly replace or disable.
+        if (!incomeAccount && incomeAccounts.length === 1) incomeAccount = incomeAccounts[0];
+      } catch (e) {
+        if (active)
+          accountError = e instanceof Error ? e.message : 'Failed to load income accounts';
+      } finally {
+        if (active) accountsLoading = false;
+      }
+    }
+    void loadAccounts();
+    return () => {
+      active = false;
+    };
+  });
+
+  function changeLedger(next: string) {
+    if (next === detectionLedger) return;
+    detectionLedger = next;
+    incomeAccount = '';
+  }
+
+  const ledgerOptions = $derived([
+    ...ledgers.map((name) => ({ value: name, label: name })),
+    ...(detectionLedger && !ledgers.includes(detectionLedger)
+      ? [{ value: detectionLedger, label: `${detectionLedger} (unavailable)`, disabled: true }]
+      : []),
+  ]);
+  const incomeOptions = $derived([
+    ...incomeAccounts.map((account) => ({ value: account, label: account })),
+    ...(incomeAccount && !incomeAccounts.includes(incomeAccount)
+      ? [{ value: incomeAccount, label: `${incomeAccount} (unavailable)`, disabled: true }]
+      : []),
+  ]);
+  const ledgerProblem = $derived(
+    ledgerError ||
+      (ledgersLoading
+        ? ''
+        : !ledgers.length
+          ? 'No ledgers configured.'
+          : detectionLedger && !ledgers.includes(detectionLedger)
+            ? 'Saved ledger is unavailable. Choose another ledger or turn detection off.'
+            : ''),
+  );
+  const accountProblem = $derived(
+    accountError ||
+      (loadedLedger !== detectionLedger || !loadedLedger
+        ? ''
+        : !incomeAccounts.length
+          ? 'No income accounts in this ledger.'
+          : incomeAccount && !incomeAccounts.includes(incomeAccount)
+            ? 'Saved income account is unavailable. Choose another account or turn detection off.'
+            : ''),
+  );
+  const detectionReady = $derived(
+    !ledgersLoading &&
+      !accountsLoading &&
+      !ledgerProblem &&
+      !accountProblem &&
+      !!detectionLedger &&
+      loadedLedger === detectionLedger &&
+      incomeAccounts.includes(incomeAccount),
+  );
 
   const keyError = $derived(!isEdit && key && !KEY_RE.test(key) ? KEY_HINT : '');
   // The logo is base64-embedded into the invoice, resolved against the
@@ -53,7 +174,11 @@
     return escapes ? 'Expected a path inside the accounting folder' : '';
   });
   const canSave = $derived(
-    !!name.trim() && (isEdit || (!!key && !keyError)) && !logoError && !saving,
+    !!name.trim() &&
+      (isEdit || (!!key && !keyError)) &&
+      !logoError &&
+      !saving &&
+      (!detectionEnabled || detectionReady),
   );
 
   function handleSave() {
@@ -67,6 +192,9 @@
       ar_account: arAccount.trim(),
       bank_account: bankAccount.trim(),
       currency: currency.trim(),
+      payment_detection_enabled: detectionEnabled,
+      payment_detection_ledger: detectionLedger,
+      payment_detection_income_account: incomeAccount,
     });
   }
 
@@ -78,7 +206,7 @@
     if (e.key !== 'Enter') return;
     // Only a single-line text input commits — Enter inside a textarea is a
     // newline, and inside any other control is that control's own business.
-    if (!(e.target instanceof HTMLInputElement)) return;
+    if (!(e.target instanceof HTMLInputElement) || e.target.type === 'checkbox') return;
     handleSave();
   }
 </script>
@@ -139,6 +267,47 @@
     <SettingsField label="Currency">
       <input type="text" bind:value={currency} placeholder="USD" />
     </SettingsField>
+
+    <SettingsField label="Automatically detect invoice payments" checkbox>
+      <input type="checkbox" bind:checked={detectionEnabled} disabled={saving} />
+    </SettingsField>
+
+    {#if detectionEnabled}
+      <SettingsField label="Ledger" labelled={false} error={ledgerProblem}>
+        <Select
+          value={detectionLedger}
+          onValueChange={changeLedger}
+          options={ledgerOptions}
+          placeholder="Choose a ledger"
+          disabled={ledgersLoading || !!ledgerError || !ledgers.length || saving}
+          fullWidth
+          ariaLabel="Ledger"
+        />
+        {#if ledgersLoading}<span class="caption" role="status">Loading ledgers…</span>{/if}
+      </SettingsField>
+      <SettingsField
+        label="Income account"
+        labelled={false}
+        error={accountProblem}
+        hint="The revenue account invoice payments are booked to."
+      >
+        <Select
+          bind:value={incomeAccount}
+          options={incomeOptions}
+          placeholder="Choose an income account"
+          disabled={!detectionLedger ||
+            loadedLedger !== detectionLedger ||
+            accountsLoading ||
+            !!accountError ||
+            !incomeAccounts.length ||
+            saving}
+          fullWidth
+          ariaLabel="Income account"
+        />
+        {#if accountsLoading}<span class="caption" role="status">Loading income accounts…</span
+          >{/if}
+      </SettingsField>
+    {/if}
   </div>
 
   {#if error}

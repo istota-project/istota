@@ -78,7 +78,15 @@ def _run(args: list[str]) -> dict:
     if err:
         return err
 
+    from copy import copy
+    from pathlib import Path
+
     obj = Context()
+    obj.framework_config = copy(istota_cfg)
+    framework_path = os.environ.get("ISTOTA_DB_PATH")
+    if framework_path:
+        obj.framework_config.db_path = Path(framework_path)
+    obj.framework_db_path = obj.framework_config.db_path
     obj.users[user_id] = user_ctx
     obj.activate_user(user_id)
     obj.secrets = load_user_secrets(user_id, istota_cfg) or None
@@ -556,6 +564,30 @@ def cmd_invoice_list(args):
     _output(_run(cli_args))
 
 
+
+def cmd_invoice_review_list(args):
+    cli_args = ["invoice", "review", "list"]
+    if args.show_all:
+        cli_args.append("--all")
+    _output(_run(cli_args))
+
+
+def cmd_invoice_review_settle(args):
+    _output(_run(["invoice", "review", "settle", args.ledger_txn_id,
+                  "--invoice", args.invoice_number]))
+
+
+def cmd_invoice_review_dismiss(args):
+    _output(_run(["invoice", "review", "dismiss", args.ledger_txn_id]))
+
+
+def cmd_invoice_matches(args):
+    cli_args = ["invoice", "matches"]
+    if args.invoice_number:
+        cli_args += ["--invoice", args.invoice_number]
+    _output(_run(cli_args))
+
+
 def cmd_invoice_paid(args):
     cli_args = ["invoice", "paid", args.invoice_number, "--date", args.payment_date]
     if args.bank:
@@ -952,6 +984,18 @@ def build_parser():
     p_inv_list.add_argument("--client", "-c", help="Filter by client")
     p_inv_list.add_argument("--all", "-a", dest="show_all", action="store_true", help="Include paid")
 
+    p_review = inv_sub.add_parser("review", help="Review synced invoice payments")
+    review_sub = p_review.add_subparsers(dest="invoice_review_command")
+    p_review_list = review_sub.add_parser("list", help="List payment reviews")
+    p_review_list.add_argument("--all", dest="show_all", action="store_true")
+    p_review_settle = review_sub.add_parser("settle", help="Settle a candidate invoice")
+    p_review_settle.add_argument("ledger_txn_id")
+    p_review_settle.add_argument("--invoice", dest="invoice_number", required=True)
+    p_review_dismiss = review_sub.add_parser("dismiss", help="Dismiss a payment review")
+    p_review_dismiss.add_argument("ledger_txn_id")
+    p_matches = inv_sub.add_parser("matches", help="Show settled and reverted payments")
+    p_matches.add_argument("--invoice", dest="invoice_number")
+
     p_inv_paid = inv_sub.add_parser("paid", help="Record payment")
     p_inv_paid.add_argument("invoice_number", help="Invoice number")
     p_inv_paid.add_argument("--date", "-d", dest="payment_date", required=True, help="Payment date")
@@ -1112,6 +1156,10 @@ def commands() -> dict:
         "monarch-category-map set": cmd_monarch_category_map_set,
         "invoice generate": cmd_invoice_generate,
         "invoice list": cmd_invoice_list,
+        "invoice review list": cmd_invoice_review_list,
+        "invoice review settle": cmd_invoice_review_settle,
+        "invoice review dismiss": cmd_invoice_review_dismiss,
+        "invoice matches": cmd_invoice_matches,
         "invoice paid": cmd_invoice_paid,
         "invoice create": cmd_invoice_create,
         "invoice unpaid": cmd_invoice_unpaid,
@@ -1139,6 +1187,7 @@ GROUP_ACTION_DEST = {
     "transaction-rules": "transaction_rules_action",
     "monarch-category-map": "category_map_action",
     "invoice": "invoice_command",
+    "invoice review": "invoice_review_command",
     "work": "work_command",
     "portfolio": "portfolio_command",
 }
@@ -1149,13 +1198,13 @@ def main(argv=None):
     args = parse_and_resolve(parser, argv)
 
     command = args.command
-    if command in GROUP_ACTION_DEST:
+    while command in GROUP_ACTION_DEST:
         action = getattr(args, GROUP_ACTION_DEST[command], None)
         if not action:
             # A group named with no action: argparse prints that group's help
             # and exits 0 from inside `parse_args`, which is where the model
             # reads the actions. Nothing below runs.
-            parser.parse_args([command, "--help"])
+            parser.parse_args([*command.split(), "--help"])
         command = f"{command} {action}"
 
     table = commands()

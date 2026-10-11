@@ -16,6 +16,9 @@ const ENTITIES: EntityRow[] = [
     ar_account: '',
     bank_account: '',
     currency: 'USD',
+    payment_detection_enabled: false,
+    payment_detection_ledger: '',
+    payment_detection_income_account: '',
   },
 ];
 
