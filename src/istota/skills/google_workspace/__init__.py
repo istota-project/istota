@@ -301,4 +301,12 @@ def main() -> None:
         argv, refusal = scan_argv(sys.argv[1:])
     if refusal is not None:
         fail(refusal, reason="host_path_refused")
-    os.execvp("gws", ["gws"] + argv)
+    try:
+        os.execvp("gws", ["gws"] + argv)
+    except FileNotFoundError:
+        fail(
+            "The gws binary is not installed on this deployment, so no Google "
+            "Workspace command can run. This is a deployment problem; report it "
+            "to the operator.",
+            reason="gws_missing",
+        )

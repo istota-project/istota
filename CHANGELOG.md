@@ -171,6 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On the containerized stack, Google Workspace commands run again and developer tasks can commit again (#695). The image shipped without the `gws` and `gitleaks` binaries, so every Google Workspace call failed with a traceback and the pre-commit secret scan refused every unattended commit. Both are now in the image at pinned, checksum-verified versions, `istota doctor` reports either one missing where it is needed, and a missing `gws` gives a clear error instead of a crash.
+
 - An interrupted invoice review settlement keeps its chosen invoice. Retrying finishes that decision instead of allowing the same credit to pay another candidate.
 
 - Daily Monarch sync now runs for profiles configured through the settings page or operator CLI, without requiring a legacy configuration file. Previously those users could sync manually but the daily job skipped their profiles.

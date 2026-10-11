@@ -426,6 +426,69 @@ def check_tmux(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_gitleaks(config: "Config", probe: bool) -> CheckResult:
+    """``gitleaks`` with the ``git`` subcommand, wherever developer tasks commit.
+
+    `.githooks/pre-commit` refuses every unattended commit when gitleaks is
+    missing or predates 8.19, so a deployment without it has a developer skill
+    that clones, edits and then cannot commit (#695: the image shipped without
+    it and nothing said so). Under ``probe`` this asks the binary the hook's own
+    question, ``gitleaks git --help``, so the two cannot disagree.
+    """
+    name = "runtime.gitleaks"
+    dev, reason = _dev_gate(config)
+    if dev is None:
+        return CheckResult(name, SKIP, reason, scope=IMAGE)
+    remedy = (
+        "Install gitleaks >= 8.19 from the upstream release (the image pins it); "
+        "the pre-commit hook refuses every unattended commit without it."
+    )
+    path = shutil.which("gitleaks")
+    if path is None:
+        return CheckResult(
+            name, FAIL, "no `gitleaks` on PATH", remedy=remedy, scope=IMAGE
+        )
+    if not probe:
+        return CheckResult(
+            name, OK, f"{path} is on PATH (not executed: probe disabled)", scope=IMAGE
+        )
+    result = _run([path, "git", "--help"])
+    if result is None or result.returncode != 0:
+        return CheckResult(
+            name,
+            FAIL,
+            f"{path} has no working `git` subcommand, so it is missing or older than 8.19",
+            remedy=remedy,
+            scope=IMAGE,
+        )
+    return CheckResult(name, OK, f"{path} has the `git` subcommand", scope=IMAGE)
+
+
+def check_gws(config: "Config", probe: bool) -> CheckResult:
+    """``gws``, the binary the google_workspace skill execs, when it is enabled."""
+    name = "runtime.gws"
+    gw = getattr(config, "google_workspace", None)
+    if gw is None or not gw.enabled:
+        return CheckResult(name, SKIP, "google_workspace is disabled", scope=IMAGE)
+    path = shutil.which("gws")
+    if path is None:
+        return CheckResult(
+            name,
+            FAIL,
+            "google_workspace is enabled but there is no `gws` on PATH",
+            remedy="Install the pinned gws release, or disable [google_workspace].",
+            scope=IMAGE,
+        )
+    status, detail = _binary_status(path, probe=probe)
+    return CheckResult(
+        name,
+        status,
+        detail,
+        remedy="" if status == OK else "Install a working gws release.",
+        scope=IMAGE,
+    )
+
+
 def _native_key_holders(config: "Config") -> int:
     """How many configured users have a ``native_brain``/``api_key`` secret.
 
@@ -9508,6 +9571,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.bwrap", check_bwrap),
     ("runtime.model_cli", check_model_cli),
     ("runtime.tmux", check_tmux),
+    ("runtime.gitleaks", check_gitleaks),
+    ("runtime.gws", check_gws),
     ("runtime.native_brain", check_native_brain),
     ("runtime.framework_db", check_framework_db),
     ("runtime.task_failure_rate", check_task_failure_rate),
@@ -9597,6 +9662,8 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.bwrap": IMAGE,
     "runtime.model_cli": IMAGE,
     "runtime.tmux": IMAGE,
+    "runtime.gitleaks": IMAGE,
+    "runtime.gws": IMAGE,
     # Deployment, not image: a credential is a property of an install, and the
     # per-user arm reads the install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.

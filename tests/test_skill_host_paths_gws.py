@@ -353,6 +353,21 @@ class TestMain:
         )
         return calls
 
+    def test_a_missing_binary_is_a_structured_error(self, mount, monkeypatch):
+        """#695: the image shipped without gws and every call died with a
+        `FileNotFoundError` traceback rather than a deployment error."""
+        def _no_gws(file, args):
+            raise FileNotFoundError(2, "No such file or directory", file)
+
+        monkeypatch.setattr(os, "execvp", _no_gws)
+        monkeypatch.chdir(mount)
+
+        run = run_skill_main(main, ["drive", "files", "list"])
+
+        assert run.exit_code == 1, run.stdout
+        assert run.envelope.get("status") == "error", run.stdout
+        assert run.envelope.get("reason") == "gws_missing", run.envelope
+
     def test_a_refused_path_never_reaches_the_exec(self, mount, execs):
         run = run_skill_main(main, ["drive", "+upload", "/etc/passwd"])
 
