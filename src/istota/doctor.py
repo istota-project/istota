@@ -832,6 +832,8 @@ def check_workspace_xattr(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(name, SKIP, "no nextcloud_mount_path configured")
     if not probe:
         return CheckResult(name, SKIP, "probe disabled (the check reads the mount)")
+    if not hasattr(os, "listxattr"):
+        return CheckResult(name, SKIP, "listxattr is not available on this platform")
     path = Path(mount)
     if not os.path.ismount(path):
         return CheckResult(

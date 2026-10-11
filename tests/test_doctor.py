@@ -1579,6 +1579,7 @@ class TestWorkspaceXattr:
         monkeypatch.setattr(doctor.os, "listxattr", _raise)
         return _errno
 
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
     def test_eio_warns(self, make_config, tmp_path, monkeypatch):
         import errno as _errno
 
@@ -1589,6 +1590,7 @@ class TestWorkspaceXattr:
         assert "EIO" in r.detail
         assert r.remedy
 
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
     @pytest.mark.parametrize("name", ["ENOTSUP", "ENODATA"])
     def test_a_clean_refusal_is_ok(self, make_config, tmp_path, monkeypatch, name):
         import errno as _errno
@@ -1600,6 +1602,12 @@ class TestWorkspaceXattr:
 
     def test_skips_without_a_mount(self, make_config):
         r = run_checks(make_config(nextcloud_mount_path=None), only=("runtime.workspace_xattr",))[0]
+        assert r.status == SKIP
+
+    def test_skips_where_listxattr_does_not_exist(self, make_config, tmp_path, monkeypatch):
+        config = self._mounted(make_config, tmp_path, monkeypatch)
+        monkeypatch.delattr(doctor.os, "listxattr", raising=False)
+        r = run_checks(config, only=("runtime.workspace_xattr",))[0]
         assert r.status == SKIP
 
     def test_skips_and_touches_nothing_without_probe(self, make_config, tmp_path, monkeypatch):

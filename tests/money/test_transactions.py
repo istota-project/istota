@@ -1,9 +1,12 @@
 """Tests for money.core.transactions module."""
 
+import os
 import re
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from istota.money import config_store
 from istota.money.core import rules as rule_engine
@@ -944,6 +947,7 @@ class TestLedgerFileOps:
         result = backup_ledger(tmp_path / "missing.beancount")
         assert result is None
 
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
     def test_backup_survives_a_mount_whose_xattr_calls_fail(self, tmp_path, monkeypatch):
         """#694: copy2's xattr step raised EIO on the workspace mount, and a
         failed backup blocks the ledger write behind it."""

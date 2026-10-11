@@ -878,6 +878,7 @@ class TestMigrateOldLayout:
         assert (tmp_path / "USER.md").exists()
         assert (tmp_path / "USER.md").read_text() == "# My memories\n- likes coffee\n"
 
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
     def test_survives_a_mount_whose_xattr_calls_fail(self, tmp_path, monkeypatch):
         """#694: the migration copies out of the workspace mount."""
         _xattr_eio(monkeypatch)

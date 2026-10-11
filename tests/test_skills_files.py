@@ -3,6 +3,8 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import os
+
 import pytest
 
 from istota.config import Config
@@ -243,6 +245,7 @@ def _xattr_eio(monkeypatch):
     monkeypatch.setattr(os, "listxattr", _raise)
 
 
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
 def test_copy_to_local_survives_a_mount_whose_xattr_calls_fail(mount_config, tmp_path, monkeypatch):
     _xattr_eio(monkeypatch)
     (mount_config.workspace_path / "report.pdf").write_bytes(b"%PDF-1.4\n")
