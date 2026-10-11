@@ -52,6 +52,9 @@
 # a name that stays put. .env marks the tag, and rollback returns to a marked tag
 # without verifying it, because the operator accepted it when installing it.
 set -euo pipefail
+# A hardened host (umask 027) would check the tree out root-only, and the
+# image builds copy those modes in, out of uid 10001's reach.
+umask 022
 
 STACK="${ISTOTA_STACK_DIR:-/srv/app/istota}"
 MOUNT_DIR="${ISTOTA_MOUNT_DIR:-/srv/mount/nextcloud/content}"

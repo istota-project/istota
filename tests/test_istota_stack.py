@@ -313,6 +313,25 @@ class TestASignedTagIsDeployed:
         assert recorder.read_text().split() == ["0", "2.1.296"]
 
 
+class TestAHardenedUmask:
+    """A host whose umask is 027 (zorg's) checked the tree out root-only, and
+    the image copied those modes in: uid 10001 could not import istota.cli."""
+
+    def test_the_checkout_is_world_readable_whatever_the_callers_umask(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "update", "v1"], capture_output=True, text=True,
+            env=fx.env, timeout=60, preexec_fn=lambda: os.umask(0o077),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (fx.src / "file.txt").stat().st_mode & 0o777 == 0o644
+
+    def test_provision_sets_it_before_cloning(self):
+        text = (REPO / "host" / "provision.sh").read_text()
+        assert text.index("\numask 022\n") < text.index("git clone")
+
+
 class TestAnUnsignedTagOnRequest:
     """Only releases are signed. `--unsigned` installs any other tag, for that
     one run, and .env records it so a rollback can return to it."""

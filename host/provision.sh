@@ -25,6 +25,9 @@
 #   RCLONE_REMOTE        the rclone remote name in /srv/app/istota/rclone.conf
 #   ZRAM_ENABLED         0 to leave swap alone
 set -euo pipefail
+# The checkout it clones is what the images are built from: under a hardened
+# umask (027) it would be root-only, and out of uid 10001's reach in them.
+umask 022
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
