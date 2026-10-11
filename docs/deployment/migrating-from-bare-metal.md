@@ -49,10 +49,14 @@ A variable the stack has no secrets file for is a refusal, with nothing written.
 
 ## Before the day
 
-1. **Provision the new VM** with `host/provision.sh`, then `istota-stack update <tag>` and `istota-stack setup` with the answers this install needs: full Nextcloud integration, `proxied` ingress, the same public hostname. Do not start the stack. Its first start comes after the import.
-2. **Keep the public hostname.** Talk's bot callback, the Nextcloud OAuth redirect URIs, the Meta and Twilio or Telnyx webhook URLs and the signaling server's backend URL are all keyed to it. Only the upstream proxy's target changes.
-3. **Read the upstream proxy's configuration.** Write down the server block for this install: the `server` address and port it forwards to, the scheme in `proxy_pass`, and how it sets `X-Forwarded-For`. In `proxied` mode the new VM listens on plain HTTP, so the cutover changes the scheme as well as the address, unless the stack runs with `TLS_CERT_SOURCE=files`. With `trusted_proxy_hops = 2`, the chain the app reads is `<client>, <upstream>`, which is right for one upstream proxy in front of the stack's nginx.
-4. **Find the upstream's maintenance switch** for this hostname: a per-host flag that answers every request with a 503 page. It holds the public name during the stop-copy-start window, so no webhook delivery and no login lands on either side mid-copy.
+Two choices shape the steps. The stack runs either on a new VM or on the old host itself (see "In place, on the old host" below). Traffic reaches it in one of two ways, which should match how it reached the old host: `direct`, where the stack's nginx serves TLS on a public address, as a role install with its own certificate did, or `proxied`, where a reverse proxy you run in front forwards to it. Steps that apply to one case only say so.
+
+1. **Provision the new VM** with `host/provision.sh`, then `istota-stack update <tag>` and `istota-stack setup` with the answers this install needs: full Nextcloud integration if the old host mounted Nextcloud, the ingress mode above, the same public hostname. Do not start the stack. Its first start comes after the import.
+2. **Keep the public hostname.** Talk's bot callback, the Nextcloud OAuth redirect URIs, the Meta and Twilio or Telnyx webhook URLs and the signaling server's backend URL are all keyed to it. Only where the name points changes.
+3. **Work out how the name will move.**
+   - *Behind a reverse proxy:* read its configuration for this hostname and write down the address and port it forwards to, the scheme it uses, and how it sets `X-Forwarded-For`. In `proxied` mode the stack listens on plain HTTP, so the cutover changes the scheme as well as the address, unless the stack runs with `TLS_CERT_SOURCE=files`. With `trusted_proxy_hops = 2`, the chain the app reads is `<client>, <proxy>`, which is right for one proxy in front of the stack's nginx.
+   - *Serving directly:* the name resolves to the old host's address. A new VM needs that address moved to it, or a DNS change (lower the record's TTL a day ahead). In place, the address stays, but the old host's nginx holds 80 and 443, and has to stop before the stack's nginx can bind them. Bring the certificate across too, or let the stack issue its own (`TLS_CERT_SOURCE=acme`).
+4. **Find a way to hold the name**, if you can: a maintenance page on the reverse proxy that answers every request for this hostname with a 503. It keeps webhook deliveries and logins from landing on either side mid-copy. Without one, stopping the old units is the hold, and anything that arrives in the window fails and is retried by its sender, or is lost.
 5. **Check the export fits.** The export streams to stdout, so it needs no space on the old host beyond the database snapshot, which sits in a scratch directory beside the databases and is deleted when the script exits.
 6. **Rehearse** (below), and time the rehearsal's stop-copy-start: that is the downtime to announce.
 
@@ -109,9 +113,9 @@ Two paths stay open and are yours to watch. A newer release can add a module job
 
 ## Cutover
 
-Every step on the old host and on the upstream proxy is a change to production. Read each one before running it.
+Every step on the old host, on a reverse proxy and in DNS is a change to production. Read each one before running it.
 
-1. **Hold the public name.** Turn on the upstream's maintenance switch for this hostname.
+1. **Hold the public name**, if you have a maintenance page for it. Otherwise go on: step 3 stops the old units.
 2. **Disable the update cron** on the old host: comment out the line in `/etc/cron.d/<ns>-update`, or move the file out of `/etc/cron.d`. The export refuses while it is enabled, because the cron resets the checkout and restarts the units on any new commit, which would bring the old daemon back beside the new one.
 3. **Export.** As root on the old host:
 
@@ -135,7 +139,7 @@ Every step on the old host and on the upstream proxy is a change to production. 
 6. **Import**, with the stack stopped. `istota-stack import-bare-metal` refuses while any of the stack's containers is running, then runs the import in a one-shot container with the export read-only at `/import`, the secrets directory writable at `/secrets` and the config directory writable. Look at the plan first:
 
    ```sh
-   istota-stack import-bare-metal /srv/app/istota/import --ingress proxied --dry-run
+   istota-stack import-bare-metal /srv/app/istota/import --ingress <direct|proxied> --dry-run
    ```
 
    Then run the same command without `--dry-run`. Add `--emit-plan /data/config/import-plan.json` to get the rewritten config as an `istota apply` plan, in `/srv/app/istota/config`, so the variables of a config manager can start from what this install runs. The plan carries no credentials.
@@ -144,18 +148,20 @@ Every step on the old host and on the upstream proxy is a change to production. 
 
 7. **Fix each `CRON.md`** the report names, in the users' workspaces. `--rewrite-workspace` on the import does it for every user's bot directory (CRON.md, scripts, prompt files, playbooks), keeping a `.pre-migration` copy of each file it changes; `istota migrate workspace-paths` does the same afterwards. Lines naming an old path it has no mapping for are listed for you to fix by hand.
 8. **Start the stack**: `systemctl enable --now istota-stack`, then `istota doctor` through the VM's `istota` wrapper.
-9. **Switch the upstream.** In this hostname's server block, change the `server` address and port to the new VM's `LISTEN_ADDR:LISTEN_PORT`, and `https://` to `http://` in `proxy_pass` (unless the stack serves TLS from files). Reload the proxy.
-10. **Lift the maintenance switch**, log in, and send the bot a message.
+9. **Point the name at the stack.**
+   - *Behind a reverse proxy:* change the address and port it forwards to for this hostname to the stack's `LISTEN_ADDR:LISTEN_PORT`, and the scheme from `https` to `http` (unless the stack serves TLS from files), then reload it.
+   - *Serving directly:* move the address to the new VM, or change the DNS record. In place, nothing moves, since the stack already answers on the old address.
+10. **Lift the maintenance page** if you set one, log in, and send the bot a message.
 11. **Delete `/srv/app/istota/import`.** It holds every credential and a copy of every database.
 
 ### In place, on the old host
 
-The new shape can also be provisioned onto the bare-metal host itself, when it runs Debian 13. The state moves the same way. What changes is that both installs share one machine until the export, so rollback is a hypervisor snapshot taken before the window rather than a stopped second host.
+The new shape can also be provisioned onto the bare-metal host itself, when it runs Debian 13. The state moves the same way. What changes is that both installs share one machine until the export, so rollback is a snapshot or full backup of the machine, taken before the window, rather than a stopped second host.
 
 Before the day, with the old install still running:
 
 1. **Check the disk.** The images take about 9 GB and their build cache several more, the unpacked export and the restored state volume take about twice the export's size, and the old install's directory stays until you are past rollback. Grow the disk first if that does not fit.
-2. **Write `host.env` and `.env` by hand** in `/srv/app/istota`, and copy the old service user's `rclone.conf` to `/srv/app/istota/rclone.conf`. Pick a `LISTEN_PORT` the old nginx does not hold; it keeps 80 and 443 until it is removed. Do not run `istota-stack setup` here: it writes a `config.toml`, and with a config on disk an update or a reboot starts a second daemon beside the live one. `.env` takes the keys the wizard would own (`setup_wizard.stack_env_values`): `COMPOSE_PROJECT_NAME=istota`, `DOMAIN`, `ISTOTA_SECRETS_DIR=./secrets`, `NGINX_PUBLISH=<LISTEN_ADDR>:<LISTEN_PORT>:80`, `NGINX_PUBLISH_TLS=127.0.0.1::443`, `ISTOTA_WEB_INSECURE_COOKIES=0`, and `COMPOSE_PROFILES` naming what the install runs (`browser`, `location`, `whatsapp-baileys`, `signaling`).
+2. **Write `host.env` and `.env` by hand** in `/srv/app/istota`, and copy the old service user's `rclone.conf` to `/srv/app/istota/rclone.conf`. The old host's nginx keeps 80 and 443 until the window. In `proxied` mode, pick a `LISTEN_PORT` it does not hold. In `direct` mode the stack needs 80 and 443 themselves, so stop and disable the old nginx in the window, after the export and before the stack starts. Do not run `istota-stack setup` here: it writes a `config.toml`, and with a config on disk an update or a reboot starts a second daemon beside the live one. `.env` takes the keys the wizard would own (`setup_wizard.stack_env_values`): `COMPOSE_PROJECT_NAME=istota`, `DOMAIN`, `ISTOTA_SECRETS_DIR=./secrets`, `NGINX_PUBLISH=<LISTEN_ADDR>:<LISTEN_PORT>:80`, `NGINX_PUBLISH_TLS=127.0.0.1::443`, `ISTOTA_WEB_INSECURE_COOKIES=0`, and `COMPOSE_PROFILES` naming what the install runs (`browser`, `location`, `whatsapp-baileys`, `signaling`).
 3. **Move any cron running `docker system prune -a` out of `/etc/cron.d`.** It removes every image no running container uses: all of the stack's until its first start, and afterwards the previous tag's, which `istota-stack rollback` needs. `istota-stack update` already keeps the current and previous tags' images and removes the rest.
 4. **Run `provision.sh` and `istota-stack update <tag>`** (`update --unsigned <tag>` for a tag that is not a signed release). `provision.sh` finds the old install's `mount-nextcloud.service`, which has the same name and path as the stack's, and leaves it alone while it is enabled or running: no unit replaced, no mountpoint chowned, nothing stopped. Everything else is provisioned. The update builds the images and does not start the stack, since there is no `config.toml` yet. The build reads no config, so the image has no Claude Code yet; step 9 below rebuilds it.
 
@@ -173,7 +179,7 @@ In the window, after the cutover's steps 1 and 2:
 
 7. **Run `provision.sh` again.** The export disabled the old mount unit, so this run replaces it with the stack's, chowns the mountpoint to uid 10001, makes its parent reachable, and mounts it.
 8. **Import**, as step 6 of the cutover.
-9. **Rebuild and start**: `istota-stack update <tag>` with the same tag. Now that `config.toml` names a Claude Code brain, the build includes it, and with a config in place the update starts the stack. `istota-stack check-image` exits 0 when the image has what the config needs. Then continue from the cutover's step 9: on the upstream only the port and the scheme change.
+9. **Rebuild and start**: `istota-stack update <tag>` with the same tag. Now that `config.toml` names a Claude Code brain, the build includes it, and with a config in place the update starts the stack. `istota-stack check-image` exits 0 when the image has what the config needs. Then continue from the cutover's step 9: behind a reverse proxy only its target port and scheme change, and serving directly nothing moves.
 
 Rollback is the snapshot. The old units, crons and directories stay on disk, disabled, until you are past the first real work on the new side. Then `istota-stack retire-bare-metal --namespace <ns> --dry-run` lists what the old role installed, and the same command without `--dry-run` removes it: the units, crons, scripts and sysctl, journald and tmpfiles files, `/etc/<ns>`, `/var/lib/<ns>`, the service user and its home under `/srv/app/<ns>`, its containers, volumes, networks and images, its host nginx site, and its ufw rule for the Docker range. It refuses while the stack is not running or any old unit is still enabled, and leaves alone what the stack took over under the same names (`mount-nextcloud.service`, the zram config).
 
@@ -185,6 +191,6 @@ Rollback is the snapshot. The old units, crons and directories stay on disk, dis
 
 ## Rollback
 
-Until the new side has done real work, rolling back is: turn the maintenance switch on, stop the new stack, re-enable and start the old units and `mount-nextcloud`, re-enable the update cron, point the upstream back at the old host, and lift the switch. The old host's state is as the export left it.
+Until the new side has done real work, rolling back is: hold the name again if you can, stop the new stack, re-enable and start the old units and `mount-nextcloud`, re-enable the update cron, point the name back at the old host (the reverse proxy's target, the address or the DNS record), and lift the hold. The old host's state is as the export left it. In place, restoring the snapshot taken before the window does all of that at once.
 
 After the new side has done real work, going back loses it: answered messages, written rows, files written into the workspace from the new side's state. Take the first successful scheduled run on the new side as the point after which rollback means losing data. Keep the old host stopped, not deleted, until you are past it.

@@ -87,6 +87,14 @@ class TestRunningOverAWorkspace:
         assert prompt.read_text() == "Never modify a file under /srv/app/zorg/istota.\n"
         assert [(p.name, n) for p, n, _ in result.leftovers] == [("check.txt", 1)]
 
+    def test_exports_are_history_and_left_alone(self, workspace):
+        export = workspace / "Users" / "alice" / "zorg" / "exports" / "conversations" / "a.md"
+        export.parent.mkdir(parents=True)
+        export.write_text("ran /srv/app/zorg/tmp/alice/x\n")
+        result = wp.run(workspace, "zorg", PREFIXES, OLD_HOME)
+        assert export.read_text() == "ran /srv/app/zorg/tmp/alice/x\n"
+        assert all("exports" not in p.relative_to(workspace).parts for p, _ in result.changed)
+
     def test_a_planted_link_is_not_followed(self, workspace, tmp_path):
         outside = tmp_path / "outside.md"
         outside.write_text("/srv/app/zorg/tmp/x\n")

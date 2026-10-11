@@ -26,6 +26,9 @@ from pathlib import Path
 BACKUP_SUFFIX = ".pre-migration"
 TEXT_SUFFIXES = frozenset({".md", ".txt", ".py", ".sh", ".toml", ".json", ".yaml", ".yml"})
 MAX_BYTES = 1 << 20
+# Records of what happened, not instructions: rewriting them would falsify
+# history, as the import's rebase leaves free-text history alone.
+SKIPPED_DIRS = frozenset({"exports"})
 # Characters that end a path in prose, shell and code.
 _PATH_END = r"(?=[/\s'\"`)\]},;:]|$)"
 
@@ -73,6 +76,8 @@ def candidate_files(workspace_root: Path, bot_dir: str) -> list[Path]:
         if user_dir.is_symlink() or base.is_symlink() or not base.is_dir():
             continue
         for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            if Path(dirpath) == base:
+                dirnames[:] = [d for d in dirnames if d not in SKIPPED_DIRS]
             dirnames.sort()
             for name in sorted(filenames):
                 path = Path(dirpath) / name
