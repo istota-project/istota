@@ -240,9 +240,9 @@ Docker: `ISTOTA_SPEECH_GATE_MODE`, `ISTOTA_SPEECH_GATE_DISPOSITION`, `ISTOTA_SPE
 | `email_max_attachment_bytes` | `26214400` | Attachment bytes **written to disk and uploaded** per message (25 MiB). Not a bound on the IMAP transfer — the client fetches and decodes the whole message before any part can be inspected. Whole attachments only: one that would cross the budget is skipped rather than truncated, and the prompt names it. 0 = unlimited |
 | `email_max_attachment_bytes_per_poll` | `104857600` | The same budget across one whole poll tick (100 MiB). A per-message cap alone bounds one message and not a batch of fifty. 0 = unlimited |
 | `briefing_check_interval` | `60` | Seconds between briefing/job/cleanup checks |
-| `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls |
-| `shared_file_check_interval` | `120` | Seconds between shared file checks |
-| `heartbeat_check_interval` | `60` | Seconds between heartbeat checks |
+| `tasks_file_poll_interval` | `30` | Seconds between TASKS.md polls; `0` turns them off |
+| `shared_file_check_interval` | `120` | Seconds between shared file checks; `0` turns them off |
+| `heartbeat_check_interval` | `60` | Seconds between heartbeat checks; `0` turns them off |
 | `db_health_check_interval` | `86400` | Seconds between SQLite `quick_check` + self-heal `REINDEX` sweeps over framework + per-user DBs (24h) |
 | `doctor_check_interval` | `3600` | Seconds between re-runs of the `istota doctor` runtime self-check (1h; 0 disables). Re-run rather than trusted from boot, because the drift it catches happens after boot — the auto-update cron changes what is installed under a config the daemon already loaded |
 | `worktree_reap_interval` | `21600` | Seconds between developer-worktree reaping sweeps (ISSUE-288, 6h; 0 disables). Also gated by `[developer] worktree_reap_enabled`. Well under the 24h default retention, so nothing waits long after becoming eligible. A periodic job rather than a task setup hook: `setup_env` hooks run for every skill whatever the task selected, so a sweep there fired on every Talk reply and every heartbeat tick |
@@ -787,10 +787,15 @@ A persistent per-user Linux container. It is where the agent installs packages a
 |---|---|---|
 | `enabled` | `false` | Enable the devbox skill. With `[developer] enabled` and `repos_dir` set, this is also the switch that sends project builds into the container |
 | `container_prefix` | `"devbox-"` | Container name is `{prefix}{user_id}` |
-| `docker_cli` | `"/usr/bin/docker"` | Host path to the Docker CLI binary. Used by the `reset` verb and nothing else |
 | `max_output_bytes` | `102400` | Cap per output stream in the skill's JSON envelope |
+| `users` | `[]` | The users who get a devbox in the stack. `istota devbox compose-file` renders one service each, and the daemon runs one credential-proxy listener each. Empty on the bare-metal role, which runs its own |
+| `mem_limit` | `"4g"` | Memory limit per devbox container |
+| `cpus` | `2.0` | CPU limit per devbox container |
+| `pids_limit` | `512` | Process limit per devbox container |
+| `log_max_size` / `log_max_file` | `"10m"` / `3` | The container's json-file log rotation |
+| `network_subnet` | `"172.30.0.0/24"` | The devbox network's fixed subnet. The VM's egress unit drops metadata, link-local, RFC 1918 and CGNAT destinations from this range, so the two must agree |
 
-**No Docker socket is bound into a task's sandbox, and no `docker` binary either.** The skill CLI reaches the container over the [exec transport](#developercontainer) — a Unix socket into a server running inside it. Two verbs also speak Docker, about the container rather than into it: `status` adds a `docker inspect` for the container's own facts, and `reset` wipes `/home/dev` and restarts the container. Both run host-side in the CLI's own process, outside any sandbox. The per-user Docker-API allowlist proxy that used to stand at `/var/run/docker.sock` in every sandbox is deleted along with its `docker_socket`, `exec_timeout_seconds` and `api_proxy_*` settings; a value left for any of those in a TOML file is read by nothing.
+**No Docker socket is bound into a task's sandbox, and no `docker` binary either.** The skill CLI reaches the container over the [exec transport](#developercontainer) — a Unix socket into a server running inside it — for every verb. `reset` is a `restart` request on that transport: the server empties `/home/dev` (only if it is a mount point), answers, and exits, and the container's restart policy brings it back. `docker_cli` is retired with the last Docker call; a value left for it is warned about and ignored. The per-user Docker-API allowlist proxy that used to stand at `/var/run/docker.sock` in every sandbox is deleted along with its `docker_socket`, `exec_timeout_seconds` and `api_proxy_*` settings; a value left for any of those in a TOML file is read by nothing.
 
 The raw-socket diagnostics — `traceroute`, `mtr`, `tcpdump` — no longer work inside the container. They need `CAP_NET_RAW`, which the deployment dropped: a build needs none of them, and a container holding that capability can pick its own source address and walk past address-scoped firewall rules. Tools that work over ordinary sockets are unaffected, and `ping` is probably one of them: it tries an unprivileged ICMP datagram socket first, which Docker's default sysctls permit.
 

@@ -14,13 +14,11 @@ from tests.test_ansible_config_template import (
     render as render_ansible_config,
     render_secrets,
 )
-from tests.test_render_config import REQUIRED, render as render_docker_config
 
 
 REPO = Path(__file__).resolve().parent.parent
 COMPOSE = REPO / "docker" / "docker-compose.yml"
-DOCKER_NGINX = REPO / "docker" / "nginx" / "default.conf.template"
-DOCKER_ENTRYPOINT = REPO / "docker" / "istota" / "entrypoint.sh"
+DOCKER_NGINX = REPO / "docker" / "nginx" / "istota.conf.template"
 ANSIBLE = REPO / "deploy" / "ansible"
 
 SMS_VALUES = {
@@ -41,67 +39,34 @@ SMS_VALUES = {
 }
 
 
-def test_docker_render_writes_provider_qualified_sms_config(tmp_path):
-    path = render_docker_config(tmp_path, **REQUIRED, **SMS_VALUES)
-    sms = tomllib.loads(path.read_text())["sms"]
-
-    assert sms["enabled"] is True
-    assert sms["provider"] == "twilio"
-    assert sms["service_numbers"] == ["+15551230000", "+15551230001"]
-    assert sms["default_sender_number"] == "+15551230000"
-    assert sms["max_segments"] == 4
-    assert sms["request_timeout_seconds"] == 8
-    assert sms["twilio"] == {
-        "account_sid": "AC-placeholder",
-        "auth_token": "auth-placeholder",
-        "api_key_sid": "SK-placeholder",
-        "api_key_secret": "secret-placeholder",
-        "messaging_service_sid": "MG-placeholder",
-    }
-    assert sms["telnyx"] == {
-        "api_key": "telnyx-api-placeholder",
-        "public_key": "telnyx-public-placeholder",
-        "messaging_profile_id": "telnyx-profile-placeholder",
-    }
-
-
-def test_compose_passes_sms_inputs_and_shares_one_webhook_service():
+def test_the_web_service_serves_every_webhook_route():
+    """The receiver is no service of its own: its routes are included into the
+    web process (webui/stack_app.py), as `istota serve` includes them."""
     compose = yaml.safe_load(COMPOSE.read_text())
     services = compose["services"]
-    webhook = services["webhooks"]
+    web = services["web"]
 
-    # An equality, not a superset: the claim is that every optional webhook
-    # surface shares this one service rather than growing its own. WhatsApp
-    # joined it in the spec after this one.
-    assert set(webhook["profiles"]) == {"location", "sms", "whatsapp"}
-    assert "ports" not in webhook
-    assert webhook["expose"] == ["${ISTOTA_WEBHOOKS_PORT:-8765}"]
+    assert "webhooks" not in services
+    assert "istota.webui.stack_app:app" in web["entrypoint"][-1]
+    # Always running: a feature switched on in the config needs no profile.
+    assert "profiles" not in web
+    assert "ports" not in web
+    assert web["expose"] == ["${WEB_PORT:-8766}"]
     # Deliberately no assertion on the location default. Flipping it to
     # `false` disables a module for every Docker deployment that never set it,
     # which is an unannounced behaviour change and no part of the SMS work —
     # the two subsystems share this service through `profiles`, and nothing in
     # SMS needs location off. Pinning the flip here would have made the
-    # out-of-scope change the tested behaviour.
-    for name in SMS_VALUES:
-        assert name in services["istota"]["environment"]
+    # out-of-scope change the tested behaviour. The SMS settings themselves
+    # are config.toml keys now; compose passes no istota configuration.
 
 
 def test_docker_nginx_keeps_webhooks_behind_the_shared_proxy():
     nginx = DOCKER_NGINX.read_text()
 
-    assert "set $upstream_webhooks" in nginx
+    assert "set $upstream_webhooks  web:${WEB_PORT};" in nginx
     assert "location /webhooks/" in nginx
     assert "proxy_pass http://$upstream_webhooks" in nginx
-
-
-def test_location_banner_uses_the_public_nginx_address():
-    entrypoint = DOCKER_ENTRYPOINT.read_text()
-    banner = entrypoint.split("# --- Module activation summary", 1)[1].split(
-        "# --- Application secret key", 1,
-    )[0]
-
-    assert "ISTOTA_WEB_SITE_HOSTNAME" in banner
-    assert "ISTOTA_WEBHOOKS_PORT" not in banner
 
 
 def test_ansible_renders_sms_and_keeps_provider_secrets_out_of_config():

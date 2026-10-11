@@ -99,15 +99,13 @@ class Service(Protocol):
         name. The caller never learns which.
         """
 
-    def config_env(self) -> dict[str, str]:
-        """The `ISTOTA_*` variables that point `render-config.sh` at this service.
+    def config(self) -> dict:
+        """The `config.toml` fragment that points the daemon at this service.
 
-        Merged into the render environment (lean shape) or the compose env-file
-        (full shape) by the stack fixture. **Must name only variables the
-        shipped generator already reads _and_ `docker-compose.yml` passes
-        through.** If a subsystem has no such variable, the fix is to add one to
-        both, as a reviewed product change — never to side-load config from the
-        fixture, which is the property that makes this whole tier honest.
+        Merged over the stack's base config, on both shapes, by
+        `stack.assemble_config`. Two services setting the same key is refused.
+        A service the daemon reaches through seeded rows or a secrets-store
+        entry returns nothing, and says so in its own override.
         """
 
     def reset(self) -> None:
@@ -200,13 +198,12 @@ HOST_STUBS = frozenset({"model", "gitlab", "ntfy", "feeds"})
 #:
 #: Both are real servers we control rather than ones we wrote, which is the
 #: distinction this package draws between a service and a stub. `nextcloud` is
-#: declared by the shipped compose file; `mail` is added by the profile's own
+#: declared by the fixture overlay (`compose/nextcloud.yml`); `mail` is added by the profile's own
 #: overlay. Neither opens a socket in the pytest process, so neither has a
 #: credential to publish and the credential rule does not reach them.
 #: `signaling` is here rather than in `HOST_STUBS` because the compose files
-#: run it: `docker-compose.yml` declares it behind the `signaling` profile and
-#: `docker-compose.test.yml` does the same, so on either shape this object
-#: configures a container and then attaches to it. It opens no socket of its
+#: run it: `docker-compose.yml` declares it behind the `signaling` profile, so
+#: on either shape this object configures a container and then attaches to it. It opens no socket of its
 #: own, which is why the credential rule does not reach it — the secrets it
 #: generates are the *server's*, published into the compose env-file rather
 #: than expected by a listener in this process.

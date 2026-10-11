@@ -1,0 +1,7 @@
+---
+# Down and up again through istota-stack.service, so every container reads the
+# changed host.env, .env, secrets or admins. A stack that is not running stays
+# down.
+- name: Restart the istota stack
+  ansible.builtin.command:
+    argv: [systemctl, try-restart, istota-stack.service]

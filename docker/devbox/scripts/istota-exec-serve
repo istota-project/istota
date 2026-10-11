@@ -93,6 +93,7 @@ import contextlib
 import itertools
 import logging
 import os
+import shutil
 import signal
 import stat as stat_module
 import subprocess
@@ -126,6 +127,7 @@ from istota_devbox_exec_protocol import (  # noqa: E402
     ACTION_EXEC,
     ACTION_PING,
     ACTION_READ_FILE,
+    ACTION_RESTART,
     ACTION_STAT,
     ACTION_WRITE_FILE,
     CHUNK_BYTES,
@@ -140,6 +142,7 @@ from istota_devbox_exec_protocol import (  # noqa: E402
     MAX_READ_FILE_BYTES,
     MAX_REQUEST_BYTES,
     PROTOCOL_VERSION,
+    RESTART_EXIT_STATUS,
     STREAM_CONTROL,
     STREAM_STDERR,
     STREAM_STDIN,
@@ -759,6 +762,9 @@ class ExecServer:
         # running against the repos mount with nothing watching it.
         self.live_groups: set[int] = set()
         self._temp_ids = itertools.count(1)
+        # Called once a `restart` has been answered; `serve` sets it to stop
+        # the loop and exit with RESTART_EXIT_STATUS.
+        self.on_restart = lambda: None
 
     def _release_group(self, handle: _GroupHandle, *, final: bool = False) -> None:
         """Stop tracking a group once, and only once it is actually empty.
@@ -837,8 +843,40 @@ class ExecServer:
             await conn.ack()
             await conn.send(encode_control(self._stat_reply()))
             await conn.send(encode_control(terminal_frame(0, conn.started, None)))
+        elif action == ACTION_RESTART:
+            await self._do_restart(request, conn)
         else:  # pragma: no cover - validate_request already refused it
             raise ProtocolError(ERR_BAD_REQUEST, f"unhandled action '{action}'")
+
+    async def _do_restart(self, request: dict, conn: Connection) -> None:
+        """Answer, optionally empty the home directory, then stop the container.
+
+        The check comes before the acknowledgement, so a refusal means nothing
+        happened: emptying a home that is not a mount point would delete what
+        the image put there, and a restart could not bring it back.
+        """
+        wipe = request["wipe_home"]
+        home = self.roots.home
+        if wipe and not os.path.ismount(home):
+            raise ProtocolError(
+                ERR_PATH_REFUSED,
+                f"{home} is not a mount point, so emptying it would delete the "
+                "image's own files; refusing (the home volume is likely not "
+                "attached)",
+            )
+        await conn.ack()
+        not_removed = await asyncio.to_thread(empty_directory, home) if wipe else []
+        logger.info(
+            "connection %s: restart requested (wipe_home=%s, not removed: %d)",
+            conn.id, wipe, len(not_removed),
+        )
+        await conn.send(encode_control({
+            "restarting": True,
+            "wiped": wipe,
+            "not_removed": len(not_removed),
+        }))
+        await conn.send(encode_control(terminal_frame(0, conn.started, None)))
+        self.on_restart()
 
     def _stat_reply(self) -> dict:
         return {
@@ -1416,6 +1454,37 @@ class ExecServer:
 # ---- Entry point -----------------------------------------------------------
 
 
+def empty_directory(path: str) -> list[str]:
+    """Remove everything inside ``path`` and return the entries that stayed.
+
+    As ``dev`` first, which owns what it wrote; an entry it cannot remove
+    (something installed through ``sudo``) gets one ``sudo -n rm -rf``, which a
+    ``no-new-privileges`` container refuses. Symlinks are removed, never
+    followed.
+    """
+    left: list[str] = []
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return [path]
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+            continue
+        except OSError:
+            pass
+        result = subprocess.run(
+            ["sudo", "-n", "rm", "-rf", "--", entry.path],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
+        )
+        if result.returncode != 0 or os.path.lexists(entry.path):
+            left.append(entry.path)
+    return left
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="istota-exec-serve",
@@ -1496,6 +1565,14 @@ async def serve(args: argparse.Namespace) -> int:
     os.chmod(args.socket, SOCKET_MODE)
 
     stop = asyncio.Event()
+    restarting = False
+
+    def _restart() -> None:
+        nonlocal restarting
+        restarting = True
+        stop.set()
+
+    server_obj.on_restart = _restart
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):
@@ -1524,6 +1601,9 @@ async def serve(args: argparse.Namespace) -> int:
         # Last, so its verdict is in the log before "stopped" and so a group
         # that survived `shutdown` is still caught on the way out.
         reaper.close()
+    if restarting:
+        logger.info("stopped for a restart; exiting %d", RESTART_EXIT_STATUS)
+        return RESTART_EXIT_STATUS
     logger.info("stopped")
     return 0
 

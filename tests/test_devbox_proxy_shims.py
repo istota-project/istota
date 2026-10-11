@@ -123,8 +123,6 @@ class FakeDaemon:
 
 @pytest.fixture()
 def daemon_factory(sock_path, monkeypatch):
-    from unittest.mock import AsyncMock
-    monkeypatch.setattr("istota.devbox.proxy._peer_allowed", AsyncMock(return_value=True))
     instances: list[FakeDaemon] = []
 
     def factory(ctx):

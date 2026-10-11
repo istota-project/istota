@@ -9,7 +9,7 @@ the same commit as the key they render because a test fails otherwise, and
 nothing at all failed when a section reached the dataclass tree and no
 operator-facing artifact.
 
-``tests/test_render_config.py`` is the working model — three guards over the
+The retired ``tests/test_render_config.py`` was the working model — three guards over the
 render → compose → ``.env.example`` chain, each with an exemption map carrying a
 reason and a staleness check that refuses an entry the thing no longer has. This
 is the same shape one layer up, over the ``Config`` dataclass tree itself.

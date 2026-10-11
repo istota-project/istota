@@ -153,7 +153,7 @@ istota briefings archive show -u USER --id ARCHIVE_ID
 ### Secrets (encrypted store)
 
 ```bash
-istota secret ensure -u USER --service SERVICE --key KEY --value VALUE   # value via flag, env, or stdin
+istota secret ensure -u USER --service SERVICE --key KEY --value VALUE   # or --value-stdin
 istota secret list   -u USER                                             # service/key/last_accessed; values never printed
 istota secret remove -u USER --service SERVICE --key KEY
 
@@ -163,6 +163,8 @@ istota secret vault-new    -u USER --slug SLUG [--username USER] [--url URL] [--
 ```
 
 Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are long-only (`-v` is the global verbose flag).
+
+`--value-stdin` reads the value from stdin instead (the whole input, less one trailing line ending), so it is not on the command line, where other processes on the host can read it. The Ansible management role passes every user secret this way.
 
 
 Export requires a terminal and prints a generated password once. Import prompts privately for the source passphrase, prints a preview, and imports new entries; `--include-changed` also replaces changed entries. Both use the same credential modules as Settings.
@@ -275,6 +277,14 @@ istota chat backfill-history [-t TOKEN]      # Recover dormant rooms' transcript
 ```
 
 Without `-t`, it walks every Talk-origin room. Use it after binding existing Talk rooms into web chat, so their history is visible on the web surface rather than starting from the next message.
+
+### Devboxes
+
+```bash
+istota devbox compose-file > compose.devbox.yml   # One devbox service per [devbox] users entry
+```
+
+Prints the stack's second compose file: a `devbox-<user>` service per user and the `daemon` service's mounts of each user's exec and credential socket volumes. It creates each user's repos directory first, and exits 1 naming the key when a socket directory or `repos_dir` is outside `/data`. See [Docker](../deployment/docker.md#devboxes).
 
 ### Nextcloud
 

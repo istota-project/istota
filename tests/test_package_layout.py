@@ -52,6 +52,9 @@ mm = _mover()
 #: entry points. Adding one here is a decision a reviewer should see.
 ROOT_ALLOWLIST = frozenset({
     "__init__",
+    # `istota apply`, the declarative verb beside `config`; the declarative-apply
+    # spec grows it with [users.*] sections.
+    "apply",
     "async_runtime",
     "brain_availability",
     "build_info",

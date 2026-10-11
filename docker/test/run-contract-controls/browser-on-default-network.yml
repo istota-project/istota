@@ -1,0 +1,6 @@
+# Row 17's negative control: the browser on the stack's default network, as
+# every other service is. It then reaches web, nginx and the signaling server.
+services:
+  browser:
+    networks: !override
+      - default

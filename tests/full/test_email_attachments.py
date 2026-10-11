@@ -8,7 +8,7 @@ Nextcloud by `tests/testbed/test_email_wire.py` and
 **What "uploaded to Nextcloud" turns out to mean on this deployment**, because
 the spec's phrasing assumed a WebDAV write and there is not one.
 `upload_file_to_inbox_v2` branches on `config.has_workspace`, and
-`render-config.sh` writes `workspace_path` as the literal `/mnt/shared` on
+The config names `workspace_path` as the literal `/mnt/shared` on
 every profile — so the write is an ordinary `shutil.copy2` onto a Docker volume.
 Nextcloud reaches the same bytes through the `files_external` *local* mount
 `provision-nc.sh` creates for the bot, which is why the WebDAV path carries a
@@ -173,7 +173,7 @@ class TestTheEmailSettingsCompose:
     Read out of the config the *container* rendered for itself, which is the
     only place the fix is visible: on the lean shape the generator runs on the
     host and every variable it reads is reachable, so the gap this closes does
-    not exist there. `render-config.sh` read both and compose passed neither, so
+    not exist there. The old generator read both and compose passed neither, so
     an operator setting either in `docker/.env` silently got the default.
 
     **Both values are ones the shell default is not**, and that is the point of
@@ -257,7 +257,7 @@ class TestTheSelfClaimGateOnTheDeployedShape:
 
     @pytest.mark.profile("full")
     def test_the_daemon_is_pointed_at_the_mail_container(self, stack):
-        """The rest of the mail service's `config_env`, on the shape where a
+        """The rest of the mail service's `config`, on the shape where a
         variable can be read by the generator and dropped by compose."""
         rendered = stack.exec(["cat", "/data/config/config.toml"])
 

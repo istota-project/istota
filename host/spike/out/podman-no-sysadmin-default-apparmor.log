@@ -1,0 +1,74 @@
+##### podman variant no-sysadmin-default-apparmor
+extra flags: --cap-add CHOWN --cap-add FOWNER --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
+Error: template: inspect:1:87: executing "inspect" at <.HostConfig.CgroupnsMode>: can't evaluate field CgroupnsMode in type *define.InspectContainerHostConfig
+applied: caps=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETPCAP CAP_SETUID] apparmor=containers-default-0.62.2 cgroupns=
+
+=== container log ===
+[spike-root] uid=0 caps: CapPrm:	00000000000001c9 CapEff:	00000000000001c9 CapBnd:	00000000000001c9 
+[spike-root] cgroup mount before: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+[spike-root] cgroup mount already rw: no remount
+[spike-root] cgroup mount after: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+[spike-root] controllers available: cpuset cpu io memory hugetlb pids rdma misc
+[spike-root] root subtree_control: cpu memory pids
+[spike-root] dropping: setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all
+[spike-unpriv] uid=10001 gid=10001 groups=10001 caps: CapPrm:	0000000000000000 CapEff:	0000000000000000 CapBnd:	0000000000000000 
+[spike-unpriv] rendered /data/config/config.toml
+[spike-unpriv] istota init: ok
+[spike-unpriv] exec istota-scheduler --daemon
+2026-10-09 21:45:12 ERROR [istota.scheduler  ] doctor runtime.writable_dirs.mount: /mnt/shared does not exist and /mnt is not writable Create /mnt/shared and make it writable by the daemon's user.
+2026-10-09 21:45:12 ERROR [istota.scheduler  ] doctor security.sandbox_effective: [security] sandbox_enabled is set but a bubblewrap namespace could not be created here, so every task runs unsandboxed with the daemon's own filesystem access On Docker, grant the istota service both seccomp:unconfined and systempaths=unconfined (security_opt) — bubblewrap needs the first to create the namespace and the second to mount a procfs inside it. On a host, allow unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1) and install a working bubblewrap. Or set [security] sandbox_enabled = false to say the deployment is deliberately unconfined.
+2026-10-09 21:45:12 WARNING [istota.scheduler  ] doctor config.operator_persona: /mnt/shared is not a directory; the last good copy, or the shipped persona, is in force Check the file root's mount (see `runtime.mount_liveness`). The operator persona syncs again once it is reachable.
+
+=== plain podman exec (uid 0) ===
+  CapPrm: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  CapEff: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  CapBnd: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  NoNewPrivs: 1
+  Seccomp: 2
+  Seccomp_filters: 1
+  apparmor: containers-default-0.62.2 (enforce)
+cgroup mount: root=/ opts=rw,nosuid,nodev,noexec,relatime type=cgroup2
+/proc/self/cgroup: 0::/supervisor
+root mkdir in /sys/fs/cgroup: Permission denied
+
+=== daemon ===
+daemon pid=1 cmd='/app/.venv/bin/python /app/.venv/bin/istota-scheduler --daemon -c /data/config/c'
+  Uid: 10001	10001	10001	10001
+  CapPrm: 0000000000000000 [-]
+  CapEff: 0000000000000000 [-]
+  CapBnd: 0000000000000000 [-]
+  NoNewPrivs: 1
+  apparmor: containers-default-0.62.2 (enforce)
+
+=== podman exec --user 10001:10001 ===
+  CapPrm: 0000000000000000 [-]
+  CapEff: 0000000000000000 [-]
+  CapBnd: 00000000000001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP]
+  NoNewPrivs: 1
+
+=== bwrap as 10001 ===
+uid=10001 bwrap=bubblewrap 0.12.0
+CASE userns exit=1 stderr=bwrap: Creating new namespace failed: Permission denied stdout=
+CASE userns_proc_dev exit=1 stderr=bwrap: Creating new namespace failed: Permission denied stdout=
+CASE plan_shape exit=1 stderr=bwrap: Creating new namespace failed: Permission denied stdout=
+CASE unshare_net exit=1 stderr=bwrap: Creating new namespace failed: Permission denied stdout=
+CASE outside_net_control exit=0 stderr= stdout=connect TimeoutError None|
+CASE syscalls_in_sandbox exit=1 stderr=bwrap: Creating new namespace failed: Permission denied stdout=
+CASE executor_bwrap_available exit=0 stderr=Sandbox skipped: bwrap namespace creation failed both without and with --unshare-user (kernel without unprivileged user namespaces, or a container blocking the syscall): bwrap: Creating new namespace failed: Permission denied / bwrap: Creating new namespace failed: Permission denied stdout=available False needs_unshare_user False|
+
+=== cgroup as 10001 ===
+uid=10001 root=/sys/fs/cgroup
+mountinfo: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+/proc/self/cgroup: 0::/supervisor
+root listing: ['supervisor']
+subtree_control: 'cpu memory pids'
+resolve_root() (unpatched, no ISTOTA_TASK_CGROUP_ROOT arm yet): None
+probe(): OK
+create(): /sys/fs/cgroup/task-990001-1
+  memory.max = 67108864
+  pids.max = 64
+  cpu.max = 50000 100000
+256 MiB child under 64 MiB: returncode=-9 stdout=''
+  memory.events: {'low': 0, 'high': 0, 'max': 38, 'oom': 1, 'oom_kill': 1, 'oom_group_kill': 0}
+16 MiB child under 64 MiB: returncode=0 stdout='survived'
+destroy(): True

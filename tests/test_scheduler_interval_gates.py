@@ -302,6 +302,12 @@ class TestTheEnablingConditions:
             ("scheduler-stats", "scheduler_stats_interval"),
             ("host-pressure-breadcrumb", "host_pressure_breadcrumb_interval_seconds"),
             ("host-pressure-sample", "host_pressure_sample_interval_seconds"),
+            # A rehearsal import of a bare-metal install writes 0 for these to
+            # switch them off; before that, 0 meant every tick.
+            ("heartbeats", "heartbeat_check_interval"),
+            ("tasks-file-poll", "tasks_file_poll_interval"),
+            ("briefing-triggers", "tasks_file_poll_interval"),
+            ("shared-files", "shared_file_check_interval"),
         ],
     )
     def test_a_zero_interval_disables_rather_than_firing_every_tick(self, name, field):

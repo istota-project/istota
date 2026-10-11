@@ -659,13 +659,12 @@ def build_mount_plan(
     # the exec transport, whose socket is bound below and gated on
     # `"developer" in authorized_skills` — an arbitrary-command channel into a
     # permissive-egress container is not an allowlist, so unlike the proxy's it
-    # cannot be ungated. The devbox skill's one remaining Docker verb, `reset`,
-    # runs host-side in the skill CLI process and never wanted a bind.
+    # cannot be ungated. The devbox skill's `reset` is a request on that same
+    # transport now, so no verb anywhere speaks Docker.
     #
     # **The socket is what makes this true, not the missing CLI bind.** `/usr`
-    # is `--ro-bind`ed unconditionally a little above, so `/usr/bin/docker` —
-    # which is exactly `devbox.docker_cli`'s default — is still in the namespace
-    # on any host that installs the client. The explicit bind was redundant
+    # is `--ro-bind`ed unconditionally a little above, so `/usr/bin/docker` is
+    # still in the namespace on any host that installs the client. The explicit bind was redundant
     # there and is gone with the rest; what a task cannot do is reach a daemon,
     # because no socket is bound at any path and no `DOCKER_HOST` is exported.
 

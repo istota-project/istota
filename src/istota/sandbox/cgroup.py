@@ -38,7 +38,7 @@ for this subtree, and one that fails is evidence it is not. There is no
 separate probe, and no fixture can disagree with the host about it.
 
 Roots are parameters, as in ``host_pressure``, so a test can point the whole
-module at a tree under ``tmp_path``. stdlib-only leaf: no config import, no
+module at a tree under ``tmp_path``. A leaf (stdlib plus ``istota.lib.mountinfo``): no config import, no
 logging of anything a caller did not pass in, and it never raises.
 """
 
@@ -49,13 +49,18 @@ import errno
 import logging
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from istota.lib import mountinfo
+
 __all__ = [
+    "ROOT_ENV",
     "CgroupLimits",
+    "cgroup2_mount_root",
     "create",
+    "declared_root_problem",
     "destroy",
     "place",
     "placement",
@@ -131,11 +136,109 @@ class CgroupLimits:
     # contained task is observed driving host swap I/O rather than dying.
 
 
+#: Where a container's root phase says it delegated the container's own cgroup.
+ROOT_ENV = "ISTOTA_TASK_CGROUP_ROOT"
+
+#: The leaf the root phase moves itself (and so the daemon) into, `root-phase.sh`'s
+#: `supervisor`, the container's counterpart of `DelegateSubgroup=supervisor`.
+SUPERVISOR_LEAF = "supervisor"
+
+
+def cgroup2_mount_root(path: Path, *, proc_root: Path = Path("/proc")) -> str | None:
+    """The mountinfo ``root`` of the cgroup2 mount ``path`` sits on, or ``None``.
+
+    ``/`` is a mount of the namespace's root cgroup: the container's own in a
+    private cgroup namespace, the VM's whole tree under ``cgroup: host``, which
+    is why :func:`declared_root_problem` asks a second question. Anything else
+    (``/../..`` under a bind of the host's ``/sys/fs/cgroup``) is a view of
+    somebody else's tree. A path whose covering mount is not cgroup2 has no
+    answer.
+    """
+    text = mountinfo.read_mountinfo(proc_root)
+    if text is None:
+        return None
+    mount = mountinfo.covering_mount(path, text)
+    if mount is None or mount.fstype != "cgroup2":
+        return None
+    return mount.root
+
+
+def own_cgroup_path(proc_root: Path = Path("/proc")) -> str | None:
+    """This process's cgroup v2 path, as its cgroup namespace names it.
+
+    cgroup v2 puts the process on a single ``0::<path>`` line. A v1 line
+    (``11:memory:/…``) names a controller-specific hierarchy with no
+    ``cgroup.subtree_control`` in it, so it is not an answer.
+    """
+    text = _read_text(Path(proc_root) / "self" / "cgroup")
+    if text is None:
+        return None
+    for line in text.splitlines():
+        fields = line.split(":", 2)
+        if len(fields) == 3 and fields[0] == "0" and fields[1] == "":
+            return fields[2].strip()
+    return None
+
+
+def _in_private_namespace(own: str) -> bool:
+    """Whether ``own`` is where a process sits in a private cgroup namespace
+    the root phase delegated: its root, the supervisor leaf, or a task's
+    cgroup. Under ``cgroup: host`` the path is the VM's name for the
+    container (``/system.slice/docker-<id>.scope/…``), which none of these is.
+    """
+    first = own.strip("/").split("/", 1)[0]
+    return first == "" or first == SUPERVISOR_LEAF or first.startswith("task-")
+
+
+def declared_root_problem(path: Path, *, proc_root: Path = Path("/proc")) -> str | None:
+    """Why ``path`` cannot be the delegated root a root phase declared, or ``None``.
+
+    Four conditions, each one the kernel's answer rather than a convention:
+    a cgroup2 directory, on a mount of its namespace's root cgroup (root
+    ``/``), in a cgroup namespace of the container's own (this process's
+    cgroup is that namespace's root, the supervisor leaf or a task's cgroup),
+    whose ``cgroup.subtree_control`` this process can write. The middle two
+    are what a writability probe cannot see: a bind of the host's tree reads
+    ``/../..``, and ``cgroup: host`` reads ``/`` with this process at the
+    VM's path for the container. Both are writable, probe clean, and are the
+    VM's whole hierarchy.
+    """
+    path = Path(path)
+    if not path.is_dir():
+        return f"{path} is not a directory"
+    root = cgroup2_mount_root(path, proc_root=proc_root)
+    if root is None:
+        return f"{path} is not on a cgroup2 mount"
+    if root != "/":
+        return (
+            f"the cgroup2 mount at {path} is rooted at {root}, not at this "
+            "container's own cgroup (/)"
+        )
+    own = own_cgroup_path(proc_root)
+    if own is None:
+        return "this process has no cgroup v2 line in /proc/self/cgroup"
+    if not _in_private_namespace(own):
+        return (
+            f"this process's cgroup is {own}, so the cgroup namespace is the "
+            f"host's (`cgroup: host`) and {path} is the VM's whole tree"
+        )
+    if not os.access(path / "cgroup.subtree_control", os.W_OK):
+        return f"{path}/cgroup.subtree_control is not writable by this process"
+    return None
+
+
 def resolve_root(
     proc_root: Path = Path("/proc"),
     cgroup_root: Path = Path("/sys/fs/cgroup"),
+    environ: Mapping[str, str] | None = None,
 ) -> Path | None:
     """The directory task cgroups are created in, or ``None`` where there is none.
+
+    **In a container** the entrypoint's root phase remounts the private
+    namespace's cgroup2 mount read-write, delegates its root to the daemon's
+    uid, and names it in :data:`ROOT_ENV`. That arm runs first and is taken only
+    when :func:`declared_root_problem` finds nothing wrong; otherwise the unit
+    walk below decides, as it always has.
 
     Reads the calling process's unified-hierarchy cgroup from
     ``/proc/self/cgroup`` and truncates at the ``.service`` / ``.scope``
@@ -158,21 +261,18 @@ def resolve_root(
     no subtree this module can be confident it owns, and creating directories
     in one it does not own is worse than leaving the task uncontained.
     """
+    env = os.environ if environ is None else environ
+    declared = env.get(ROOT_ENV, "")
+    if declared:
+        try:
+            if declared_root_problem(Path(declared), proc_root=proc_root) is None:
+                return Path(declared)
+        except (OSError, ValueError):
+            pass
     try:
-        text = _read_text(Path(proc_root) / "self" / "cgroup")
-        if text is None:
-            return None
-
-        # cgroup v2 puts the process on a single `0::<path>` line. A v1 line
-        # (`11:memory:/…`) names a controller-specific hierarchy with no
-        # `cgroup.subtree_control` in it, so matching loosely would build a
-        # path that either does not exist or means something else entirely.
-        rel = None
-        for line in text.splitlines():
-            fields = line.split(":", 2)
-            if len(fields) == 3 and fields[0] == "0" and fields[1] == "":
-                rel = fields[2].strip()
-                break
+        # Matching a v1 line loosely would build a path that either does not
+        # exist or means something else entirely.
+        rel = own_cgroup_path(proc_root)
         if rel is None:
             return None
 

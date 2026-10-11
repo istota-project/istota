@@ -166,11 +166,11 @@ class TestTheNtfyStub:
         assert len(push_server.pushes()) == 1
         assert push_server.pushes()[0].body == b""
 
-    def test_it_configures_nothing_through_the_generator(self, push_server):
+    def test_it_writes_nothing_into_the_config(self, push_server):
         """ntfy lives in the secrets store, not in `config.toml`. Asserted so
         that adding a variable here has to be a deliberate change rather than
-        something that slips in with a copied `config_env`."""
-        assert push_server.config_env() == {}
+        something that slips in with a copied `config`."""
+        assert push_server.config() == {}
 
 
 class TestTheFeedsStub:
@@ -318,8 +318,8 @@ class TestTheFeedsStub:
         assert documents.calls == []
         assert _request(f"{documents.url}/feed.xml")[0] == 404
 
-    def test_it_configures_nothing_through_the_generator(self, documents):
+    def test_it_writes_nothing_into_the_config(self, documents):
         """Feed URLs are rows, not config. Same guard as the ntfy stub's, and
-        for the same reason: an empty `config_env` that quietly gains an entry
+        for the same reason: an empty `config` that quietly gains an entry
         is how a fixture starts side-loading configuration."""
-        assert documents.config_env() == {}
+        assert documents.config() == {}

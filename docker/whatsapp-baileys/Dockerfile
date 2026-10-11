@@ -16,7 +16,7 @@
 # every other image it owns is on trixie. The web builder in
 # docker/istota/Dockerfile stays on the untagged variant because it copies
 # static JS out and contributes no library to the runtime.
-FROM node:20-trixie-slim
+FROM node:20-trixie-slim@sha256:abfbe12cc943141a0c9e8c0a57d710df1dadd95d35e8662cc02958b284d1f35b
 
 WORKDIR /app
 

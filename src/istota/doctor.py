@@ -53,6 +53,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable
@@ -64,6 +65,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from istota.lib import du
 from istota.lib import sqlite_util
+from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.user_scope import is_within, paths_overlap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
@@ -349,15 +351,36 @@ def check_model_cli(config: "Config", probe: bool) -> CheckResult:
         )
     reached = ", ".join(kinds)
     path = shutil.which("claude")
+    # Set by the image build: whether Claude Code was installed, and at which
+    # pinned version (CLAUDE_CODE_VERSION in host.env, through istota-stack).
+    built_without = os.environ.get("ISTOTA_CLAUDE_CODE_INSTALLED") == "0"
+    pin = os.environ.get("ISTOTA_CLAUDE_CODE_VERSION", "").strip()
     if path is None:
         return CheckResult(
             "runtime.model_cli",
             FAIL,
-            f"{reached} is reachable on this deployment but there is no `claude` on PATH",
-            remedy="Install the Claude Code CLI, or stop routing tasks to it.",
+            f"{reached} is reachable on this deployment but there is no `claude` on PATH"
+            + (" (this image was built without Claude Code)" if built_without else ""),
+            remedy=(
+                "Rebuild the images: `istota-stack update <current tag>` builds with "
+                "Claude Code when config.toml names a brain that runs it."
+                if built_without
+                else "Install the Claude Code CLI, or stop routing tasks to it."
+            ),
             scope=IMAGE,
         )
     status, detail = _binary_status(path, probe=probe)
+    if status == OK and probe and pin and pin not in detail:
+        return CheckResult(
+            "runtime.model_cli",
+            WARN,
+            f"{detail}, but the image pins Claude Code {pin}",
+            remedy=(
+                "Something updated the CLI in place; the autoupdater is off in the "
+                "image. Rebuild with `istota-stack update <current tag>`."
+            ),
+            scope=IMAGE,
+        )
     return CheckResult(
         "runtime.model_cli",
         status,
@@ -3106,7 +3129,8 @@ def check_credential_library(config: "Config", probe: bool) -> CheckResult:
             missing.append(name)
     return CheckResult("security.credential_library", WARN if missing else OK,
         "missing credential libraries: " + ", ".join(missing) if missing else "credential libraries are available",
-        remedy="Install the vault extra: uv sync --extra vault." if missing else "")
+        remedy="Install the vault extra: uv sync --extra vault." if missing else "",
+        scope=IMAGE)
 
 
 def check_secret_key_separation(config: "Config", probe: bool) -> CheckResult:
@@ -3133,7 +3157,7 @@ def check_secret_key_separation(config: "Config", probe: bool) -> CheckResult:
             detail += "; scheduled credential backups are off (no recipient registered)"
     except Exception:
         detail += "; credential backup recipients could not be checked"
-    return CheckResult("security.secret_key_separation", WARN if colocated else OK, detail,
+    return CheckResult("security.key_separation", WARN if colocated else OK, detail,
         remedy="Back up the secret key separately from the database and its backups, or enable an age credential backup." if colocated else "")
 
 
@@ -3570,10 +3594,13 @@ def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
 # unprivileged user namespaces. A remedy naming one sends half its readers to
 # the wrong file.
 _SANDBOX_EFFECTIVE_REMEDY = (
-    "On Docker, grant the istota service both seccomp:unconfined and "
-    "systempaths=unconfined (security_opt) — bubblewrap needs the first to "
-    "create the namespace and the second to mount a procfs inside it. On a "
-    "host, allow unprivileged user namespaces "
+    "On Docker, give the daemon service the run contract docker-compose.yml "
+    "ships: security_opt seccomp=./istota/seccomp-istota.json, "
+    "apparmor=istota (with docker/istota/apparmor-istota loaded where AppArmor "
+    "is enabled) and systempaths=unconfined — the profiles let bubblewrap "
+    "create the namespace and mount inside it, and the last lets it mount a "
+    "procfs. seccomp:unconfined also works and drops the syscall denylist. On "
+    "a host, allow unprivileged user namespaces "
     "(sysctl kernel.unprivileged_userns_clone=1) and install a working "
     "bubblewrap. Or set [security] sandbox_enabled = false to say the "
     "deployment is deliberately unconfined."
@@ -3600,7 +3627,7 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
     ``tests/image/test_istota_image.py::TestGroupATheDoctorUmbrella::test_no_check_fails``
     runs ``istota doctor --json --scope image`` inside a bare ``docker run``
     with no ``security_opt``, ``cmd_doctor`` passes ``probe=True``
-    unconditionally, and ``render-config.sh`` defaults ``sandbox_enabled``
+    unconditionally, and ``istota setup`` writes ``sandbox_enabled``
     true. ``DEPLOYMENT`` scope is filtered out before invocation, so the image
     tier never reaches this, and an operator running the whole registry gets
     both lines with the remedy on the one that has a repair.
@@ -3701,6 +3728,84 @@ def check_sandbox_effective(config: "Config", probe: bool) -> CheckResult:
         name,
         OK,
         "bubblewrap can create a namespace here, so tasks are confined by the sandbox",
+    )
+
+
+# Parameters rather than literals so a test can point the check at a tree under
+# `tmp_path`, the way `sandbox/cgroup.py` takes its roots.
+_CGROUP_PROC_ROOT = Path("/proc")
+_CGROUP_FS_ROOT = Path("/sys/fs/cgroup")
+
+_TASK_CGROUPS_REMEDY = (
+    "In the container, the entrypoint's root phase remounts the private cgroup "
+    "namespace read-write and delegates it to the daemon's uid; that needs "
+    "`cgroup: private`, no bind of /sys/fs/cgroup, and CAP_SYS_ADMIN in "
+    "cap_add, as docker-compose.yml ships them. On a host, the unit needs "
+    "Delegate=memory pids cpu and DelegateSubgroup=supervisor."
+)
+
+
+def check_task_cgroups(config: "Config", probe: bool) -> CheckResult:
+    """Whether each task gets a cgroup of its own with its limits written.
+
+    Per-task resource limits are a security parity row, so a delegated root
+    that does not work is a ``FAIL`` rather than the startup report's quiet
+    warning. Two ways to have one: a container's root phase declares the
+    namespace's root in ``ISTOTA_TASK_CGROUP_ROOT``, or a systemd unit with
+    ``Delegate=``. A declared root is held to :func:`declared_root_problem`
+    first, which reads the mount's root in ``/proc/self/mountinfo`` and this
+    process's own cgroup path: a bind of the host's tree, and ``cgroup: host``,
+    are writable and probe clean, and must never read as OK.
+
+    ``WARN`` where nothing declares a root at all. That is a host unit without
+    ``Delegate=``, or a process that is not the daemon (the web container runs
+    the registry for the admin pane and has no delegated subtree of its own),
+    so there is no probe to fail. ``SKIP`` off Linux and inside a task.
+
+    The probe is three syscalls on the cgroup tree and spawns nothing, so it
+    runs under ``probe=False`` too.
+    """
+    name = "security.task_cgroups"
+    if not config.scheduler.task_cgroup_enabled:
+        return CheckResult(name, SKIP, "[scheduler] task_cgroup_enabled = false")
+    if not sys.platform.startswith("linux"):
+        return CheckResult(name, SKIP, "cgroup v2 is Linux-only; a development checkout runs tasks uncontained")
+    if _is_task_process():
+        return CheckResult(
+            name, SKIP,
+            "run from inside a task, which has no view of the daemon's cgroup tree",
+        )
+
+    declared = os.environ.get(task_cgroup.ROOT_ENV, "")
+    if declared:
+        problem = task_cgroup.declared_root_problem(Path(declared), proc_root=_CGROUP_PROC_ROOT)
+        if problem is not None:
+            return CheckResult(
+                name, FAIL,
+                f"{task_cgroup.ROOT_ENV} names {declared}, but {problem}; tasks run uncontained",
+                remedy=_TASK_CGROUPS_REMEDY,
+            )
+        root = Path(declared)
+    else:
+        root = task_cgroup.resolve_root(
+            proc_root=_CGROUP_PROC_ROOT, cgroup_root=_CGROUP_FS_ROOT, environ={}
+        )
+        if root is None:
+            return CheckResult(
+                name, WARN,
+                "no delegated cgroup subtree here (no container root declared, no "
+                "systemd unit in /proc/self/cgroup); tasks run without per-task limits",
+                remedy=_TASK_CGROUPS_REMEDY,
+            )
+
+    reason = task_cgroup.probe(root)
+    if reason is not None:
+        return CheckResult(
+            name, FAIL, f"{root}: {reason}; tasks run uncontained", remedy=_TASK_CGROUPS_REMEDY,
+        )
+    return CheckResult(
+        name, OK,
+        f"{root}: a new cgroup takes memory.max and accepts members, so each task is contained",
     )
 
 
@@ -3844,7 +3949,7 @@ def check_forge_config_drift(config: "Config", probe: bool) -> list[CheckResult]
                 remedy=(
                     f"Rewrite config.toml so {name}_bin_path names the installed binary "
                     f"(a full Ansible play does; the auto-update cron does not. On "
-                    f"docker, restarting the istota service re-renders it)."
+                    f"docker, restarting the daemon service re-renders it)."
                 ),
             )
         )
@@ -4609,6 +4714,92 @@ def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
     return results
 
 
+#: Where `web.tls` makes its handshake: the stack's nginx, as the istota
+#: container reaches it on the compose network.
+TLS_CHECK_TARGET = ("nginx", 443)
+#: Under this many days to expiry the certificate is a WARN: certbot renews at
+#: thirty, so a certificate this close has missed at least two renewals.
+TLS_EXPIRY_WARN_DAYS = 14
+
+
+def _tls_check_context():
+    """The system trust store, which is what a browser holds the name to."""
+    import ssl
+
+    return ssl.create_default_context()
+
+
+def check_web_tls(config: "Config", probe: bool) -> CheckResult:
+    """In `direct` ingress, whether nginx serves a certificate a client accepts.
+
+    One TLS handshake to the stack's nginx with the public name as SNI, made
+    from this container, which mounts no certificate and no key. The ingress
+    mode and the name come from the stack's host.env (`INGRESS`, `DOMAIN`),
+    falling back to `[site] hostname`. Before the first certificate nginx
+    serves port 80 alone, so nothing listens on 443 and this FAILs naming the
+    first issuance. Opens a socket, so it needs `probe`.
+    """
+    name = "web.tls"
+    ingress = os.environ.get("INGRESS", "").strip()
+    if ingress != "direct":
+        return CheckResult(
+            name, SKIP,
+            f"INGRESS is {ingress or 'unset'}; this stack's nginx terminates no public TLS",
+        )
+    if not probe:
+        return CheckResult(name, SKIP, "a TLS handshake needs probe")
+    domain = (os.environ.get("DOMAIN", "") or config.site.hostname or "").strip()
+    if not domain:
+        return CheckResult(
+            name, FAIL, "INGRESS=direct and neither DOMAIN nor [site] hostname names the stack",
+            remedy="Re-run `istota setup` with --hostname, which writes both.",
+        )
+    import socket
+    import ssl
+
+    host, port = TLS_CHECK_TARGET
+    try:
+        with socket.create_connection((host, port), timeout=5) as raw:
+            with _tls_check_context().wrap_socket(raw, server_hostname=domain) as tls:
+                certificate = tls.getpeercert() or {}
+                version = tls.version() or "unknown"
+    except ssl.SSLCertVerificationError as exc:
+        return CheckResult(
+            name, FAIL,
+            f"the certificate served for {domain} is not accepted: {exc.verify_message or exc.reason}",
+            remedy=(
+                "Check the certificate in /srv/app/istota/letsencrypt (acme) or "
+                "/srv/app/istota/certs (files) is for this name, unexpired and complete "
+                "(fullchain.pem), then `docker compose restart nginx`."
+            ),
+        )
+    except (ConnectionRefusedError, socket.timeout, TimeoutError) as exc:
+        return CheckResult(
+            name, FAIL, f"nothing answers TLS on {host}:{port} ({exc.__class__.__name__})",
+            remedy=(
+                "nginx serves port 80 alone until a certificate exists. Run certbot "
+                "once (`istota-stack setup` does), or put fullchain.pem and privkey.pem "
+                "in /srv/app/istota/certs; the deploy hook restarts nginx onto port 443."
+            ),
+        )
+    except (OSError, ssl.SSLError) as exc:
+        return CheckResult(
+            name, FAIL, f"the TLS handshake with {host}:{port} failed: {exc}",
+            remedy="Read `docker compose logs nginx`; the istota-ingress lines say what it rendered.",
+        )
+    expires = certificate.get("notAfter")
+    if not expires:
+        return CheckResult(name, OK, f"{domain}: certificate accepted ({version})")
+    days = int((ssl.cert_time_to_seconds(expires) - time.time()) // 86400)
+    detail = f"{domain}: certificate accepted ({version}), {days} days to expiry"
+    if days < TLS_EXPIRY_WARN_DAYS:
+        return CheckResult(
+            name, WARN, detail,
+            remedy="Renewal is overdue: check `systemctl status istota-certbot.timer` on the VM.",
+        )
+    return CheckResult(name, OK, detail)
+
+
 def check_web_static(config: "Config", probe: bool) -> CheckResult:
     """The SvelteKit build the web surface serves actually exists.
 
@@ -5283,12 +5474,13 @@ def _exec_transport_request(
     import socket as socket_module  # noqa: PLC0415 - a leaf import on a probe path
 
     from istota.devbox import exec_protocol as proto  # noqa: PLC0415
+    from istota.lib.unix_connect import connect_no_follow  # noqa: PLC0415
 
     sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
     try:
         sock.settimeout(timeout)
         try:
-            sock.connect(str(socket_path))
+            connect_no_follow(sock, str(socket_path))
         except OSError as exc:
             return [], f"could not connect to {socket_path}: {exc}"
 
@@ -5858,6 +6050,78 @@ def _uv_cache_result(
     )
 
 
+#: What a devbox must not reach, asked from inside it on the stack: cloud
+#: metadata and one RFC 1918 address. The VM's DOCKER-USER rules drop both.
+DEVBOX_EGRESS_TARGETS: tuple[tuple[str, int], ...] = (
+    ("169.254.169.254", 80),
+    ("10.0.0.1", 80),
+)
+DEVBOX_EGRESS_CONNECT_SECONDS = 3
+
+
+def _devbox_egress_probe(config: "Config", users: list[str], probe: bool) -> CheckResult:
+    """The stack's arm of ``security.devbox_netfilter``: connect from inside.
+
+    The daemon runs in a container with no view of the VM's DOCKER-USER chain,
+    so it cannot read the rules. It asks each devbox, through the exec
+    transport, to open a TCP connection to each of ``DEVBOX_EGRESS_TARGETS``;
+    a connection that opens is a FAIL. One that does not is an OK that cannot
+    tell a dropped packet from an address with nothing behind it: the vm tier's
+    row 10 witness supplies a target that answers, which this cannot.
+    """
+    name = "security.devbox_netfilter"
+    if not probe:
+        return CheckResult(
+            name, SKIP,
+            "asking the devboxes to connect out needs the exec transport (probe disabled)",
+        )
+    from istota import config as config_module  # noqa: PLC0415
+    from istota.devbox import exec_protocol as proto  # noqa: PLC0415
+
+    reached: list[str] = []
+    unasked: list[str] = []
+    for user_id in users:
+        socket_path = config_module.exec_socket_path(config, user_id)
+        if socket_path is None:
+            unasked.append(f"{user_id}: no exec socket path")
+            continue
+        for host, port in DEVBOX_EGRESS_TARGETS:
+            request = proto.encode_exec_request(
+                argv=["timeout", str(DEVBOX_EGRESS_CONNECT_SECONDS), "bash", "-c",
+                      f"exec 3<>/dev/tcp/{host}/{port}"],
+                cwd=None, stdin=False, timeout=CONTAINER_EXEC_TIMEOUT,
+            )
+            frames, error = _exec_transport_request(
+                socket_path, request, float(DEVBOX_EGRESS_CONNECT_SECONDS + 5),
+            )
+            terminal = next((f for f in frames if proto.is_terminal(f)), None)
+            if terminal is None:
+                unasked.append(f"{user_id}: {error or 'no exit status'}")
+                break
+            if terminal.get("exit_code") == 0:
+                reached.append(f"{user_id} reached {host}:{port}")
+    if reached:
+        return CheckResult(
+            name, FAIL,
+            "a devbox opened a connection it must not: " + "; ".join(reached),
+            remedy=(
+                "On the VM: `systemctl restart istota-devbox-egress`, and check that "
+                "ISTOTA_DEVBOX_SUBNET in /srv/app/istota/host.env is [devbox] network_subnet."
+            ),
+        )
+    if unasked:
+        return CheckResult(
+            name, WARN,
+            "the egress probe could not run in every devbox: " + "; ".join(unasked),
+            remedy="Check `istota-skill devbox status` for each user, then re-run doctor.",
+        )
+    targets = ", ".join(f"{host}:{port}" for host, port in DEVBOX_EGRESS_TARGETS)
+    return CheckResult(
+        name, OK,
+        f"no devbox ({len(users)}) could connect to {targets}",
+    )
+
+
 def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
     """Read the live ``DOCKER-USER`` chain and report anything shadowing our rules.
 
@@ -5889,6 +6153,9 @@ def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
             name, SKIP,
             "devbox is disabled ([devbox] enabled); the role adds no rules",
         )
+    stack_users = list(getattr(getattr(config, "devbox", None), "users", None) or [])
+    if stack_users:
+        return _devbox_egress_probe(config, stack_users, probe)
     if not probe:
         return CheckResult(
             name,
@@ -9015,6 +9282,61 @@ def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult
     )
 
 
+def check_bare_metal_import(config: "Config", probe: bool) -> CheckResult:
+    """Whether this install was imported from a bare-metal one, and as what.
+
+    ``istota migrate import-bare-metal`` records the source host, its release,
+    the export and import times and whether the import was a rehearsal, in the
+    reserved ``_migration`` namespace. A rehearsal copy holds production
+    credentials and every user's data with its pollers switched off, so it is
+    a WARN on every run: the one place an operator looking at the install sees
+    that it must never take traffic and must be deleted afterwards. Hostnames
+    are in the detail on purpose; the audience is an operator. Reads only.
+    """
+    import sqlite3
+
+    from istota.maintenance import bare_metal_import as bmi
+
+    name = "runtime.bare_metal_import"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(name, SKIP, f"no framework database at {db_path}", scope=DEPLOYMENT)
+    try:
+        record = bmi.read_record(db_path)
+    except (sqlite3.Error, ValueError) as exc:
+        return CheckResult(
+            name, WARN, f"could not read the import record: {exc}",
+            remedy=(
+                "Check `runtime.framework_db`. The record is the "
+                f"`{bmi.MIGRATION_NAMESPACE}`/`{bmi.RECORD_KEY}` row in `shared_kv`."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if record is None:
+        return CheckResult(name, SKIP, "not imported from a bare-metal install", scope=DEPLOYMENT)
+
+    def field(key: str) -> str:
+        return " ".join(str(record.get(key) or "?").split())[:120]
+
+    source = (
+        f"from {field('source_host')} ({field('source_release')}, "
+        f"{field('export_mode')} export at {field('exported_at')}), "
+        f"imported at {field('imported_at')}"
+    )
+    if record.get("rehearsal") is True:
+        return CheckResult(
+            name, WARN, f"a rehearsal copy {source}",
+            remedy=(
+                "This install holds the source's credentials and data with its "
+                "pollers and transports switched off. Never point the upstream "
+                "proxy or a webhook at it, and delete it when the rehearsal is done. "
+                "The real cutover imports a fresh export without --rehearsal."
+            ),
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(name, OK, f"imported {source}", scope=DEPLOYMENT)
+
+
 def check_operator_persona(config: "Config", probe: bool) -> CheckResult:
     """Which persona is in force, and whether anything about it needs a hand.
 
@@ -9193,16 +9515,18 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.mount_liveness", check_mount_liveness),
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.task_control_dir", check_task_control_dir),
+    ("runtime.bare_metal_import", check_bare_metal_import),
     ("runtime.subscription_usage", check_subscription_usage),
     ("runtime.model_execution", check_model_execution),
     ("security.skill_proxy", check_skill_proxy),
     ("security.sandbox_effective", check_sandbox_effective),
+    ("security.task_cgroups", check_task_cgroups),
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.proxy_peer_check", check_proxy_peer_check),
     ("security.credential_broker", check_credential_broker),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
-    ("security.secret_key_separation", check_secret_key_separation),
+    ("security.key_separation", check_secret_key_separation),
     ("security.credential_library", check_credential_library),
     ("security.credential_isolation", check_credential_isolation),
     ("security.wallet", check_wallet),
@@ -9234,6 +9558,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("whatsapp.pairing_relay", check_whatsapp_pairing_relay),
     ("web.auth", check_web_auth),
     ("web.static", check_web_static),
+    ("web.tls", check_web_tls),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
@@ -9305,6 +9630,9 @@ CHECK_SCOPES: dict[str, str] = {
     # no `security_opt` and asserts no check fails, so an IMAGE scope here would
     # fail every correct image. See `check_sandbox_effective`.
     "security.sandbox_effective": DEPLOYMENT,
+    # Deployment: a delegated cgroup subtree is a property of how the install
+    # runs the daemon (the container's root phase, or a unit's Delegate=).
+    "security.task_cgroups": DEPLOYMENT,
     # Deployment, not image: it reaches `istota.executor` for the bwrap
     # capability probe, and the pairing it reports is a posture an operator
     # chose in a rendered config. The image tier asserts over `--scope image`
@@ -9317,7 +9645,7 @@ CHECK_SCOPES: dict[str, str] = {
     # thing it unlocks is that install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.
     "security.secret_key": DEPLOYMENT,
-    "security.secret_key_separation": DEPLOYMENT,
+    "security.key_separation": DEPLOYMENT,
     "security.credential_library": IMAGE,
     # Deployment, not image: every question it asks is about an install — which
     # users a rendered config declares, a file on that install's workspace, and
@@ -9368,6 +9696,8 @@ CHECK_SCOPES: dict[str, str] = {
     "whatsapp.pairing_relay": DEPLOYMENT,
     "web.auth": DEPLOYMENT,
     "web.static": IMAGE,
+    # Deployment: a handshake with the running stack's nginx.
+    "web.tls": DEPLOYMENT,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.
     "web.build_current": DEPLOYMENT,
@@ -9384,6 +9714,8 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it reads the file root and the configured users' folders,
     # which a bare `docker run` has none of.
     "config.operator_persona": DEPLOYMENT,
+    # Deployment: it reads the install's own import record.
+    "runtime.bare_metal_import": DEPLOYMENT,
     # Deployment: it reads the install's own user tables.
     "users.email_address_uniqueness": DEPLOYMENT,
     "email.confirmation_answers": DEPLOYMENT,

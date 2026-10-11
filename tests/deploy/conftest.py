@@ -100,6 +100,8 @@ wants the installer twice; nothing in the tier uses it today.
 
 from __future__ import annotations
 
+from istota.lib import toml_write
+
 import json
 import os
 import shlex
@@ -443,17 +445,8 @@ class ConvergedHost:
         )
 
 
-def _toml_string(value: str) -> str:
-    """A TOML basic string, escaped.
-
-    Every value here is fixture-controlled except `repo_branch`, which is
-    whatever `git` reports — and while git refuses `"` and `\\` in a ref name,
-    that is a fact about git rather than about this function, and the next
-    value interpolated in may not come from git at all. Escaping is two lines;
-    reasoning about which callers are safe is not.
-    """
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+# The tree's one TOML writer's escaper (`istota.lib.toml_write`).
+_toml_string = toml_write.toml_string
 
 
 def _settings_toml(settings: dict) -> str:

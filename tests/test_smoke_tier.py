@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from testbed import profiles
 from testbed import stack as compose_support
@@ -39,8 +40,10 @@ from testbed.services import gitlab
 from tests.support.nested_pytest import run_nested_pytest
 
 REPO = Path(__file__).resolve().parents[1]
-PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
-COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
+#: The lean stack: the shipped compose file plus the harness concessions.
+COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
+TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
+NEXTCLOUD_OVERLAY = REPO / "testbed" / "compose" / "nextcloud.yml"
 
 #: What the nested collects below walk. A tier guard asserts about the items of
 #: one tier, so it need not pay for the whole tree — 26631 items against 278
@@ -217,31 +220,59 @@ def _collect(scope: list[str], args: list[str] | None = None):
     )
 
 
+def _lean_env_file(tmp_path: Path, **extra: str) -> Path:
+    """The env-file a lean stack boots with, as `stack.lean_env` builds it."""
+    environment = compose_support.lean_env(
+        {}, image="istota-test/lean:unit", config_dir=tmp_path, secrets_dir=tmp_path / "secrets",
+    )
+    environment.update(extra)
+    compose_support.write_secrets(tmp_path / "secrets", {})
+    return compose_support.write_env_file(tmp_path / "compose.env", environment)
+
+
 class TestTheComposeFileIsAddressable:
     """`docker compose config` is the parser, not a YAML load — it applies the
     interpolation and schema rules the real invocation will."""
 
-    def _config(self, args: list[str], *, env: dict) -> subprocess.CompletedProcess:
+    def _config(self, args: list[str], *, env: dict, what: str = "--services") -> subprocess.CompletedProcess:
         return subprocess.run(
-            args + ["config", "--services"],
+            args + ["config", what],
             capture_output=True,
             text=True,
             timeout=60,
             env=env,
         )
 
-    def test_the_compose_file_is_valid_and_names_one_service(self, tmp_path):
+    def test_the_lean_stack_is_the_shipped_services(self, tmp_path):
+        """No Nextcloud, no harness-only service: daemon, web and nginx, the
+        stack an operator runs with no profile on."""
         _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
         args = compose_support.compose_args(
-            COMPOSE_FILE, project="cfg-check", env_file=env_file
+            COMPOSE_FILE, project="cfg-check", env_file=_lean_env_file(tmp_path),
+            overlays=[TESTBED_OVERLAY],
         )
 
         result = self._config(args, env=_MINIMAL_ENV)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-        assert result.stdout.split() == ["istota"], result.stdout
+        assert sorted(result.stdout.split()) == ["daemon", "nginx", "web"], result.stdout
+
+    def test_the_full_stack_adds_the_fixture(self, tmp_path):
+        _require_compose_cli()
+        env_file = _lean_env_file(
+            tmp_path, POSTGRES_PASSWORD="p", ADMIN_PASSWORD="p", NC_PORT="18080",
+            BOT_USER="istota", BOT_PASSWORD="p", USER_NAME="testuser",
+            USER_PASSWORD="p", ISTOTA_WEB_CALLBACK_URL="http://localhost:18080/istota/callback",
+        )
+        args = compose_support.compose_args(
+            COMPOSE_FILE, project="cfg-check", env_file=env_file,
+            overlays=[TESTBED_OVERLAY, NEXTCLOUD_OVERLAY],
+        )
+
+        result = self._config(args, env=_MINIMAL_ENV)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert {"nextcloud", "postgres", "redis"} <= set(result.stdout.split())
 
     def test_the_env_file_alone_satisfies_interpolation(self, tmp_path):
         """The bug this tier actually shipped once, pinned.
@@ -259,13 +290,13 @@ class TestTheComposeFileIsAddressable:
         exact distinction that broke.
         """
         _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
-
         from_args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file
+            COMPOSE_FILE, project="p", env_file=_lean_env_file(tmp_path),
+            overlays=[TESTBED_OVERLAY],
         )
-        without = compose_support.compose_args(COMPOSE_FILE, project="p")
+        without = compose_support.compose_args(
+            COMPOSE_FILE, project="p", overlays=[TESTBED_OVERLAY],
+        )
 
         assert self._config(from_args, env=_MINIMAL_ENV).returncode == 0
         # And the control: no env file, no ambient variable, so it must fail.
@@ -273,199 +304,135 @@ class TestTheComposeFileIsAddressable:
         # value came from.
         assert self._config(without, env=_MINIMAL_ENV).returncode != 0
 
-    def test_the_config_dir_is_required_rather_than_defaulted(self):
-        # `:?` not `:-`. A default would silently mount some other directory and
-        # the daemon would boot with no config, which surfaces as a health-check
-        # timeout rather than as "the harness forgot to supply this".
-        body = COMPOSE_FILE.read_text()
+    def test_the_config_dir_and_the_image_are_required_rather_than_defaulted(self):
+        # `:?` not `:-`. A default config directory would silently mount some
+        # other directory and the daemon would boot with no config, which
+        # surfaces as a health-check timeout; an empty image renders a service
+        # with no image at all.
+        body = TESTBED_OVERLAY.read_text()
 
         assert "${ISTOTA_TEST_CONFIG_DIR:?" in body, body[:400]
+        assert "${ISTOTA_TEST_IMAGE:?" in body, body[:400]
 
 
-class TestThePrebuiltOverlay:
-    """The overlay that points the stack at an image somebody else built.
+class TestTheImage:
+    """Every service built from the istota Dockerfile runs the session's tag.
 
-    Its only caller is the negative control, and the control is the one thing
-    proving the smoke tier can see a broken deployment — so an overlay that
-    silently failed to apply would disarm the tier's own falsification while
-    every test still passed.
+    A negative control runs a prebuilt image through the same tag variable, and
+    the pool passes no `--build` for it, so compose runs the tag as it is
+    rather than rebuilding the checkout over it, which would test the correct
+    image and pass.
     """
 
-    def test_the_merged_model_runs_the_named_image_and_builds_nothing(self, tmp_path):
-        """`build: !reset null` is the whole point, so it is what is asserted.
-
-        A service carrying both `build` and `image` is one compose rebuilds,
-        tagging the result over the name we asked it to run — the control would
-        then test the *correct* image and pass. `config` renders the merged
-        model, which is the only place that outcome is visible before a
-        container exists.
-        """
+    def _merged(self, tmp_path: Path, image: str) -> dict:
         _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(
-            f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n"
-            "ISTOTA_TEST_IMAGE=istota-test/no-forge:pinned\n"
-        )
         args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
+            COMPOSE_FILE, project="p", env_file=_lean_env_file(tmp_path, ISTOTA_TEST_IMAGE=image),
+            overlays=[TESTBED_OVERLAY], compose_profiles=("location",),
         )
-
         result = subprocess.run(
-            args + ["config"], capture_output=True, text=True, timeout=60,
-            env=_MINIMAL_ENV,
+            args + ["config", "--format", "json"], capture_output=True, text=True,
+            timeout=60, env=_MINIMAL_ENV,
         )
-
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-        assert "istota-test/no-forge:pinned" in result.stdout, result.stdout
-        assert "build:" not in result.stdout, (
-            "the overlay left a build section in the merged model, so compose "
-            "would rebuild and retag over the image the control asked for\n"
-            + result.stdout
+        return json.loads(result.stdout)
+
+    def test_the_daemon_and_web_run_the_named_tag(self, tmp_path):
+        merged = self._merged(tmp_path, "istota-test/no-forge:pinned")
+
+        for name in ("daemon", "web"):
+            assert merged["services"][name]["image"] == "istota-test/no-forge:pinned", name
+
+    def test_a_profile_with_its_own_image_is_never_built(self, tmp_path, monkeypatch):
+        pool = compose_support.StackPool(
+            workdir=tmp_path,
+            shape=compose_support.Shape(compose_file=COMPOSE_FILE, image="istota-test/lean:unit"),
         )
+        calls: list[dict] = []
 
-    def test_the_image_is_required_rather_than_defaulted(self, tmp_path):
-        """`:?` not `:-`. An empty default renders a service with no image at
-        all, and the failure arrives as a compose error about a malformed
-        service rather than as "the harness forgot to say which image"."""
-        _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
-        args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file, overlays=[PREBUILT_OVERLAY]
-        )
+        def fake_up(args, *, platform="", env=None, build=True, skip=()):
+            calls.append({"build": build, "args": args, "skip": skip})
+            raise compose_support.StackError("stop here")
 
-        result = subprocess.run(
-            args + ["config"], capture_output=True, text=True, timeout=60,
-            env=_MINIMAL_ENV,
-        )
+        monkeypatch.setattr(compose_support, "up", fake_up)
+        monkeypatch.setattr(compose_support, "down", lambda *a, **k: None)
+        control = dataclasses.replace(profiles.BASE, image="istota-test/no-forge:pinned")
 
-        assert result.returncode != 0
+        with pytest.raises(compose_support.StackError):
+            pool.get(control)
+        with pytest.raises(compose_support.StackError):
+            pool.get(profiles.BASE)
 
-    def test_the_base_file_still_builds_when_no_overlay_is_applied(self, tmp_path):
-        """The control for the control. Without this, the assertion above
-        would pass on a base file that had stopped declaring a build at all."""
-        _require_compose_cli()
-        env_file = tmp_path / "compose.env"
-        env_file.write_text(f"ISTOTA_TEST_CONFIG_DIR={tmp_path}\n")
-        args = compose_support.compose_args(
-            COMPOSE_FILE, project="p", env_file=env_file
-        )
-
-        result = subprocess.run(
-            args + ["config"], capture_output=True, text=True, timeout=60,
-            env=_MINIMAL_ENV,
-        )
-
-        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-        assert "build:" in result.stdout, result.stdout
+        assert [call["build"] for call in calls] == [False, True]
+        # A lean profile that reads no web app starts neither web nor nginx.
+        assert calls[1]["skip"] == ("web", "nginx")
 
 
-class TestTheSeccompGrantStaysInTheTestFile:
-    """The lean stack loosens seccomp so bwrap can build a namespace.
+class TestNoUnconfinedGrantInAnyComposeFile:
+    """The sandbox grant is the shipped profile pair, never `unconfined`.
 
-    That is a test-harness concession — the supported production shape is bare
-    metal via Ansible, where the syscall is not blocked — and the comment in
-    the test compose file says so. Nothing enforced it, so a copy across while
-    debugging would ship a container-escape-adjacent grant to every operator
-    running the Docker stack, and no test would notice.
-
-    Precedent for the shape: `TestVendoredCopy` and
-    `tests/test_private_data_scan.py` both guard a property whose violation is
-    otherwise silent.
+    The shipped file carries the run contract, and no test overlay may touch it
+    (`tests/test_container_security_profiles.py`). What this keeps out is the
+    wider grant the old lean file carried (`seccomp:unconfined`) and its
+    AppArmor equivalent, which Stage 1 measured lets a uid-0 exec write VM
+    sysctls. A copy across while debugging would otherwise pass every witness:
+    unconfined is strictly more permissive than the profiles.
     """
 
     @pytest.mark.parametrize(
-        "setting",
-        ["seccomp", "privileged", "cap_add", "apparmor", "systempaths"],
+        "compose",
+        ["docker/docker-compose.yml", "testbed/compose/testbed.yml", "testbed/compose/nextcloud.yml"],
     )
-    def test_the_production_compose_grants_no_extra_privilege(self, setting):
-        lines = (REPO / "docker" / "docker-compose.yml").read_text().splitlines()
-        offenders = []
-        for number, line in enumerate(lines, 1):
-            if setting not in line or line.strip().startswith("#"):
-                continue
-            # The key and the list under it, because a YAML sequence puts the
-            # value on the *following* lines and `cap_add:` alone says nothing
-            # about what is being added.
-            block = " ".join(part.strip() for part in lines[number - 1 : number + 3])
-            offenders.append(f"{number}: {block}")
+    @pytest.mark.parametrize(
+        "grant",
+        ["seccomp:unconfined", "seccomp=unconfined", "apparmor:unconfined",
+         "apparmor=unconfined", "privileged:"],
+    )
+    def test_no_unconfined_grant(self, compose, grant):
+        lines = (REPO / compose).read_text().splitlines()
+        offenders = [
+            f"{number}: {line.strip()}"
+            for number, line in enumerate(lines, 1)
+            if grant in line and not line.strip().startswith("#")
+        ]
 
-        # This used to exempt the devbox's `cap_add: NET_RAW`, which was there
-        # for ping and traceroute rather than as a sandbox grant. That service
-        # is gone, so the sweep is unqualified again: no capability, seccomp or
-        # systempaths grant belongs in this file at all.
-
-        assert not offenders, (
-            f"docker/docker-compose.yml grants {setting!r}: {offenders}. The "
-            "seccomp relaxation belongs to docker-compose.test.yml alone — see "
-            "the comment there."
-        )
-
-    def test_the_test_compose_still_carries_it(self):
-        """The control. Without this the assertion above would pass just as
-        well on a test file that had lost the grant, at which point the whole
-        smoke tier fails on bwrap and nothing explains why."""
-        body = (REPO / "docker" / "docker-compose.test.yml").read_text()
-
-        assert "seccomp:unconfined" in body, (
-            "the lean stack no longer relaxes seccomp; bwrap cannot create a "
-            "user namespace under Docker's default profile, so every task "
-            "running a Bash tool call will fail"
-        )
-
-    def test_the_test_compose_also_unmasks_the_system_paths(self):
-        """The other half, and the one whose loss is quiet rather than loud.
-
-        Without `systempaths=unconfined` bwrap creates the user namespace and
-        then cannot mount a procfs inside it: Docker's masked `/proc` entries
-        and read-only `/proc/sys` make the container's procfs not "fully
-        visible" to the kernel, and `build_bwrap_cmd` emits `--proc /proc`.
-
-        The daemon's response to a bwrap it cannot run is to disable the
-        sandbox for the process and carry on — `_bwrap_available` performs
-        those same mounts, so it answers no here — which means losing this line
-        does not fail the tier. It silently runs every scenario unconfined,
-        which is the state `TestTheDatabaseMasks` was written to catch and the
-        reason this guard is worth its three lines.
-        """
-        body = (REPO / "docker" / "docker-compose.test.yml").read_text()
-
-        assert "systempaths=unconfined" in body, (
-            "the lean stack no longer unmasks /proc, so bwrap cannot mount a "
-            "procfs inside its user namespace and every task will run with the "
-            "sandbox skipped rather than failing"
-        )
+        assert not offenders, f"{compose} grants {grant!r}: {offenders}"
 
 
 class TestTheStackStartsTheWayTheDeploymentDoes:
-    def test_the_schema_is_created_before_the_scheduler_runs(self):
-        """`init` is not optional, and nothing else does it.
-
-        `db.init_db` is reached from the `init` subcommand alone — the scheduler
-        opens the DB without creating a schema. The shipped entrypoint runs
-        `istota … init` before exec'ing the scheduler; a lean stack that skips
-        it comes up and then logs "no such table: tasks" on every tick, forever.
-        Measured, before this was fixed.
-        """
-        body = COMPOSE_FILE.read_text()
-
-        assert "init &&" in body, "the lean stack does not run `istota init`"
-        assert "istota-scheduler" in body
+    def test_the_entrypoint_is_not_bypassed(self):
+        """The lean shape used to run `init` and the scheduler itself. It runs
+        the shipped entrypoint now, which is what makes a smoke boot a witness
+        for it: no overlay gives the daemon service an entrypoint or a command."""
+        overlay = yaml.load(TESTBED_OVERLAY.read_text(), Loader=_ComposeLoader)
+        assert not {"entrypoint", "command"} & set(overlay["services"]["daemon"])
 
     def test_the_health_check_asks_for_the_schema_not_the_file(self):
         """A file check is satisfied before `init` has run.
 
         Anything that opens the DB creates the file, so `test -f` reports
         healthy on a daemon that cannot dispatch. The health check has to name
-        a table.
+        a table, on the shipped file and on the overlay that polls it faster.
         """
-        body = COMPOSE_FILE.read_text()
+        for path in (COMPOSE_FILE, TESTBED_OVERLAY):
+            body = path.read_text()
+            assert "test -f /data/db/istota.db" not in body, path
+            assert "sqlite_master" in body and "'tasks'" in body, path
 
-        assert "test -f /data/db/istota.db" not in body, (
-            "the health check is back to a bare file test, which passes on a "
-            "container with no schema"
-        )
-        assert "sqlite_master" in body and "'tasks'" in body, body
+
+class _ComposeLoader(yaml.SafeLoader):
+    """Reads compose's merge tags (`!reset`, `!override`) as their plain value."""
+
+
+for _tag in ("!reset", "!override"):
+    _ComposeLoader.add_constructor(
+        _tag,
+        lambda loader, node: (
+            loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode)
+            else loader.construct_mapping(node) if isinstance(node, yaml.MappingNode)
+            else loader.construct_scalar(node)
+        ),
+    )
 
 
 class TestComposeArgs:
@@ -525,10 +492,10 @@ class TestServiceStateParsing:
     def test_a_json_array_is_understood(self, monkeypatch):
         self._with_ps_output(
             monkeypatch,
-            json.dumps([{"Service": "istota", "State": "running", "Health": "healthy"}]),
+            json.dumps([{"Service": "daemon", "State": "running", "Health": "healthy"}]),
         )
 
-        assert compose_support._service_state([], "istota") == ("running", "healthy")
+        assert compose_support._service_state([], "daemon") == ("running", "healthy")
 
     def test_one_object_per_line_is_understood(self, monkeypatch):
         """Genuine NDJSON — two objects, one per line.
@@ -543,11 +510,27 @@ class TestServiceStateParsing:
             monkeypatch,
             json.dumps({"Service": "other", "State": "exited", "Health": ""})
             + "\n"
-            + json.dumps({"Service": "istota", "State": "running", "Health": ""}),
+            + json.dumps({"Service": "daemon", "State": "running", "Health": ""}),
         )
 
         # And the requested service is selected, not merely the first row.
-        assert compose_support._service_state([], "istota") == ("running", "")
+        assert compose_support._service_state([], "daemon") == ("running", "")
+
+    def test_a_starting_healthcheck_with_an_empty_health_field_is_still_starting(self, monkeypatch):
+        """Compose 5.5 leaves `Health` empty on the first poll of a container
+        whose healthcheck has not run yet, and says `(health: starting)` only in
+        `Status`. Read as "no healthcheck", `wait_ready` returned on a container
+        that exited a second later: a root phase refusing to start looked like
+        a stack that came up (measured with the run-contract controls)."""
+        self._with_ps_output(
+            monkeypatch,
+            json.dumps([{
+                "Service": "daemon", "State": "running", "Health": "",
+                "Status": "Up Less than a second (health: starting)",
+            }]),
+        )
+
+        assert compose_support._service_state([], "daemon") == ("running", "starting")
 
     def test_an_exited_container_is_reported_as_exited(self, monkeypatch):
         # `wait_ready`'s fast-fail keys on this exact string. It only ever
@@ -555,10 +538,10 @@ class TestServiceStateParsing:
         # compose omits stopped containers entirely.
         self._with_ps_output(
             monkeypatch,
-            json.dumps([{"Service": "istota", "State": "exited", "Health": ""}]),
+            json.dumps([{"Service": "daemon", "State": "exited", "Health": ""}]),
         )
 
-        assert compose_support._service_state([], "istota") == ("exited", "")
+        assert compose_support._service_state([], "daemon") == ("exited", "")
 
     def test_ps_is_invoked_with_all_so_stopped_containers_are_visible(self, monkeypatch):
         """The flag whose absence made the dead-container path unreachable.
@@ -575,7 +558,7 @@ class TestServiceStateParsing:
             return "[]"
 
         monkeypatch.setattr(compose_support, "_run", fake_run)
-        compose_support._service_state(["docker", "compose"], "istota")
+        compose_support._service_state(["docker", "compose"], "daemon")
 
         assert "--all" in seen["args"], seen["args"]
 
@@ -586,7 +569,7 @@ class TestServiceStateParsing:
         # die on one bad `ps` — but it must not raise either.
         self._with_ps_output(monkeypatch, "", returncode=1)
 
-        assert compose_support._service_state([], "istota") == ("", "")
+        assert compose_support._service_state([], "daemon") == ("", "")
 
     def test_unparseable_output_reads_as_empty_rather_than_raising(self, monkeypatch):
         # A deprecation notice on stdout is neither JSON nor JSON-lines. A
@@ -594,12 +577,12 @@ class TestServiceStateParsing:
         # the timeout-with-logs this module works to produce.
         self._with_ps_output(monkeypatch, "WARNING: something on stdout")
 
-        assert compose_support._service_state([], "istota") == ("", "")
+        assert compose_support._service_state([], "daemon") == ("", "")
 
     def test_no_container_reads_as_empty_not_as_a_crash(self, monkeypatch):
         self._with_ps_output(monkeypatch, "")
 
-        assert compose_support._service_state([], "istota") == ("", "")
+        assert compose_support._service_state([], "daemon") == ("", "")
 
 
 class TestTheChildEnvironmentIsExtendedNotReplaced:
@@ -658,7 +641,7 @@ class TestWaitReady:
             lambda args, service, env=None: ("running", "healthy"),
         )
 
-        compose_support.wait_ready([], "istota", timeout=5)
+        compose_support.wait_ready([], "daemon", timeout=5)
 
     def test_running_without_a_health_check_is_ready(self, monkeypatch):
         """The case that would otherwise hang for the full timeout.
@@ -670,7 +653,7 @@ class TestWaitReady:
             compose_support, "_service_state", lambda args, service, env=None: ("running", "")
         )
 
-        compose_support.wait_ready([], "istota", timeout=5)
+        compose_support.wait_ready([], "daemon", timeout=5)
 
     def test_running_but_unhealthy_is_not_ready(self, monkeypatch):
         # The inverse, and the reason the two cases cannot be collapsed into
@@ -683,7 +666,7 @@ class TestWaitReady:
         monkeypatch.setattr(compose_support, "POLL_INTERVAL", 0.01)
 
         with pytest.raises(TimeoutError):
-            compose_support.wait_ready([], "istota", timeout=0.05)
+            compose_support.wait_ready([], "daemon", timeout=0.05)
 
     def test_the_timeout_message_carries_the_service_logs(self, monkeypatch):
         """A bare timeout says nothing about why the service did not start.
@@ -700,7 +683,7 @@ class TestWaitReady:
         )
 
         with pytest.raises(TimeoutError, match="config is malformed"):
-            compose_support.wait_ready([], "istota", timeout=5)
+            compose_support.wait_ready([], "daemon", timeout=5)
 
     def test_an_exited_service_fails_fast_rather_than_waiting_out_the_timeout(
         self, monkeypatch
@@ -714,7 +697,7 @@ class TestWaitReady:
 
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            compose_support.wait_ready([], "istota", timeout=30)
+            compose_support.wait_ready([], "daemon", timeout=30)
 
         assert time.monotonic() - started < 5, "waited out the timeout on a dead service"
 
@@ -980,12 +963,7 @@ class TestStackPool:
     def _pool(self, tmp_path, monkeypatch) -> tuple:
         pool = compose_support.StackPool(
             workdir=tmp_path,
-            lean=compose_support.LeanShape(
-                compose_file=COMPOSE_FILE,
-                render_script=Path("/nonexistent/render-config.sh"),
-                image="istota-test/lean:unit",
-                prebuilt_overlay=PREBUILT_OVERLAY,
-            ),
+            shape=compose_support.Shape(compose_file=COMPOSE_FILE, image="istota-test/lean:unit"),
         )
         booted: list = []
         torn_down: list = []
@@ -1088,37 +1066,10 @@ class TestStackPool:
 
         assert len(seen) == 2
 
-    def test_a_full_shape_profile_needs_a_full_shape_to_boot_from(self, tmp_path):
-        """A pool with no `full=` must say so rather than boot a lean stack.
-
-        A one-container lean stack has no Nextcloud, no entrypoint and no
-        provisioning, so it would answer every assertion in `tests/full/`
-        wrongly rather than failing. The pool is constructible without a
-        `FullShape` on purpose — an external driver consuming `testbed` may only
-        want the lean one — which is what makes the guard necessary.
-        """
-        pool = compose_support.StackPool(
-            workdir=tmp_path,
-            lean=compose_support.LeanShape(
-                compose_file=COMPOSE_FILE,
-                render_script=Path("/nonexistent/render-config.sh"),
-                image="istota-test/lean:unit",
-                prebuilt_overlay=PREBUILT_OVERLAY,
-            ),
-        )
-
-        with pytest.raises(compose_support.StackError, match="no `full="):
-            pool.get(profiles.FULL)
-
     def test_an_unknown_shape_names_the_shapes_that_exist(self, tmp_path):
         pool = compose_support.StackPool(
             workdir=tmp_path,
-            lean=compose_support.LeanShape(
-                compose_file=COMPOSE_FILE,
-                render_script=Path("/nonexistent/render-config.sh"),
-                image="istota-test/lean:unit",
-                prebuilt_overlay=PREBUILT_OVERLAY,
-            ),
+            shape=compose_support.Shape(compose_file=COMPOSE_FILE, image="istota-test/lean:unit"),
         )
         nonsense = dataclasses.replace(profiles.BASE, name="odd", shape="medium")
 
@@ -1126,57 +1077,92 @@ class TestStackPool:
             pool.get(nonsense)
 
 
-class TestRenderConfig:
-    """The lean shape's config comes out of the shipped generator, on the host.
+class TestTheLeanConfig:
+    """The lean shape boots from a `config.toml` the testbed writes.
 
-    That is the property making the shortcut legitimate, so the failure paths
-    are worth holding down: a generator that exited non-zero used to be
-    reported as "the daemon never became ready" 120 seconds later.
+    The config is an input on every shape now, so there is no generator to run
+    on the host: the base is what `istota setup` writes for the stack's one user
+    (`tests/test_testbed_config.py` holds that equality), and each service and
+    the profile add their fragment.
     """
 
-    def test_two_services_claiming_one_variable_is_refused(self, tmp_path):
+    def test_two_services_claiming_one_key_is_refused(self):
         """Silent last-wins would boot a stack from a config naming the wrong
         service's port, with dict order deciding which."""
-        first = _FakeService("first", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://a"})
-        second = _FakeService("second", {"ISTOTA_BRAIN_NATIVE_BASE_URL": "http://b"})
+        first = _FakeService("first", {"brain": {"native": {"base_url": "http://a"}}})
+        second = _FakeService("second", {"brain": {"native": {"base_url": "http://b"}}})
 
-        with pytest.raises(compose_support.StackError, match="BASE_URL"):
-            compose_support.render_config(
-                Path("/nonexistent/render-config.sh"),
-                tmp_path,
-                {"first": first, "second": second},
+        with pytest.raises(compose_support.StackError, match="base_url"):
+            compose_support.lean_config(profiles.BASE, {"first": first, "second": second})
+
+    def test_the_lean_config_claims_no_nextcloud(self):
+        """An empty `url` is what makes the lean daemon local-backed, which is a
+        shipped install shape. `http://nextcloud` would claim Nextcloud-backed
+        storage at a hostname the lean compose file resolves to nothing: a third
+        configuration nobody ships."""
+        document = compose_support.lean_config(profiles.BASE, {})
+
+        assert document.get("nextcloud", {}).get("url", "") == ""
+        assert document["talk"]["enabled"] is False
+
+    def test_every_lean_profile_writes_a_config_the_loader_accepts(
+        self, tmp_path, monkeypatch,
+    ):
+        """Loaded, because the loader is the reader that decides: an unknown key
+        is a warning, and a bad value fails the boot rather than this test."""
+        from istota.config import load_config
+
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
+        for profile in profiles.ALL:
+            if profile.shape != "lean":
+                continue
+            directory = tmp_path / profile.name
+            # The `verify` profiles need the mail service's `authserv_id`.
+            services = {}
+            if "mail" in profile.services:
+                services["mail"] = _FakeService(
+                    "mail", {"email": {"enabled": True, "authserv_id": "mail"}},
+                )
+            path = compose_support.write_config(
+                directory, compose_support.lean_config(profile, services),
             )
+            config = load_config(path)
+            assert config.users["testuser"], profile.name
+            assert (directory / "admins").read_text().split() == ["testuser"]
 
-    def test_a_generator_that_failed_is_reported_with_its_output(self, tmp_path):
-        script = tmp_path / "render.sh"
-        script.write_text('echo "missing required input" >&2\nexit 2\n')
+    def test_each_write_mints_its_own_session_key(self):
+        one = compose_support.lean_config(profiles.BASE, {})
+        two = compose_support.lean_config(profiles.BASE, {})
 
-        with pytest.raises(compose_support.StackError, match="missing required input"):
-            compose_support.render_config(script, tmp_path, {})
+        assert one["web"]["session_secret_key"] != two["web"]["session_secret_key"]
+        assert len(one["web"]["session_secret_key"]) >= 32
 
-    def test_the_lean_render_environment_claims_no_nextcloud(self):
-        """`NC_URL` and `APP_PASSWORD` are *set and empty*, not absent.
 
-        `render-config.sh` preflights with `[ -n "${NC_URL+x}" ]`, which tests
-        whether the variable is set rather than whether it has a value — so
-        unset fails the render outright, and empty is what makes the lean
-        daemon local-backed. It used to be `http://nextcloud`, which rendered a
-        config claiming Nextcloud-backed storage and pointed it at a hostname
-        the lean compose file resolves to nothing: a third configuration nobody
-        ships.
-        """
-        assert compose_support.DEFAULT_RENDER_ENV["NC_URL"] == ""
-        assert compose_support.DEFAULT_RENDER_ENV["APP_PASSWORD"] == ""
+class TestTheTomlWriter:
+    """The testbed's own TOML writer: the standard library reads TOML but does
+    not write it, and this package takes no dependency beyond `cryptography`."""
 
-    def test_the_preflight_really_tests_for_set_rather_than_non_empty(self):
-        """Asserted against the shipped script, because the whole mechanism
-        rests on which of the two spellings it uses."""
-        body = (REPO / "docker" / "istota" / "render-config.sh").read_text()
+    def test_a_nested_document_round_trips(self):
+        import tomllib
 
-        assert "${NC_URL+x}" in body, (
-            "the generator no longer preflights NC_URL with the set-test "
-            "spelling, so an empty value may no longer render"
-        )
+        document = {
+            "a": 1,
+            "f": 1.5,
+            "flag": True,
+            "s": 'quote " backslash \\ newline \n escape \x1b tab \t end',
+            "list": ["x", "y"],
+            "t": {"inner": {"deep": "v"}, "k": False},
+            "users": {"with space": {"name": "n"}},
+            "empty": {},
+        }
+
+        assert tomllib.loads(compose_support.toml_dumps(document)) == document
+
+    def test_an_unsupported_value_is_refused_rather_than_stringified(self):
+        from istota.lib.toml_write import TomlWriteError
+
+        with pytest.raises(TomlWriteError, match="cannot write"):
+            compose_support.toml_dumps({"x": object()})
 
 
 class _FakeService:
@@ -1187,7 +1173,7 @@ class _FakeService:
         #: the rest of the sequence; left alone otherwise.
         self.order: list | None = None
 
-    def config_env(self) -> dict:
+    def config(self) -> dict:
         return dict(self._env)
 
     def reset(self) -> None:
@@ -1217,13 +1203,11 @@ class TestContainerSideState:
         )
 
     def test_the_forge_declares_the_directory_it_configured(self):
-        """Declared on the service, so it cannot drift from the `config_env`
-        variable that pointed the daemon there."""
+        """Declared on the service, so it cannot drift from the `config()` key
+        that pointed the daemon there."""
         forge = gitlab.GitLabService(Path("/tmp/unused"))
 
-        assert forge.container_state_paths == (
-            forge.config_env()["ISTOTA_DEVELOPER_REPOS_DIR"],
-        )
+        assert forge.container_state_paths == (forge.config()["developer"]["repos_dir"],)
 
     def test_a_service_with_nothing_to_clear_costs_no_exec(self, monkeypatch):
         """Every test pays for this, so the no-op path must not shell out."""
@@ -1681,7 +1665,7 @@ class _FakeEndpoint:
     def reset(self) -> None:
         self.order.append("model.reset")
 
-    def config_env(self) -> dict:
+    def config(self) -> dict:
         return {}
 
     def close(self) -> None:

@@ -412,3 +412,21 @@ class TestServeWebhookMount:
 
         assert handshake.status_code == 404
         assert batch.status_code == 404
+
+    def test_the_stack_passes_its_config_in(self, tmp_path, monkeypatch):
+        """The stack's web process includes the routes at import, before the
+        web app's lifespan has loaded a config; the caller hands one in."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
+
+        monkeypatch.setattr(wr, "reload_config", lambda: None)
+        monkeypatch.setattr("istota.webui.app._config", None, raising=False)
+        parent = FastAPI()
+        serve._maybe_mount_webhooks(parent, self._config(tmp_path))
+
+        with TestClient(parent) as client:
+            assert client.post("/webhooks/location", json={"locations": []}).status_code == 401
+

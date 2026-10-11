@@ -1,0 +1,31 @@
+# Negative control: the devbox image whose supervisor does not recognise the
+# restart status, so a `restart` request respawns the server instead of
+# stopping the container.
+#
+# `test_a_restart_request_stops_the_supervisor` is the assertion. The server
+# half is left intact (it still answers and exits with the restart status), so
+# this turns the test red on exactly the supervisor's half of `devbox reset`:
+# a container that never exits, which `restart: unless-stopped` never brings
+# back, and a reset that wipes nothing.
+#
+# Usage:
+#
+#   docker build -f docker/test/Dockerfile.devbox-restart-respawns \
+#       --build-arg BASE=<the devbox tag conftest built> \
+#       -t istota-test/devbox-restart-respawns:local docker/test
+ARG BASE
+FROM ${BASE}
+
+USER root
+
+# One line changed, and checked both ways so an edit that matched nothing
+# cannot pass as a control.
+RUN set -eux; \
+    target=/usr/local/bin/istota-exec-run; \
+    test "$(grep -c '^RESTART_EXIT_STATUS=99$' "$target")" = "1"; \
+    sed -i 's|^RESTART_EXIT_STATUS=99$|RESTART_EXIT_STATUS=255|' "$target"; \
+    test "$(grep -c '^RESTART_EXIT_STATUS=99$' "$target")" = "0"; \
+    sh -n "$target"; \
+    echo "control: the supervisor respawns the server after a restart request"
+
+USER dev

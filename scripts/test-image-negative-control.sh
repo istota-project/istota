@@ -16,7 +16,7 @@
 # It covers both halves of the tier:
 #
 #   * the istota image, via docker/test/Dockerfile.no-forge;
-#   * the devbox image, via ten controls, because that file asserts that many
+#   * the devbox image, via eleven controls, because that file asserts that many
 #     separable things and no single broken image reaches all of them. The
 #     forge-less image alone left four of the original thirteen assertions
 #     green, since /usr/local/bin/gh is a *copy* of the wrapper rather than a
@@ -24,7 +24,8 @@
 #     closed those. The last six arrived with the exec transport: the uid the
 #     container runs as, the ownership of /home/dev, the vendored protocol
 #     module, whether the transport comes *up*, the /home/dev repair, and the
-#     absence of /workspace. Read each Dockerfile.devbox-* file's note about
+#     absence of /workspace. The eleventh is the supervisor's half of
+#     `devbox reset` over the exec transport. Read each Dockerfile.devbox-* file's note about
 #     what it deliberately does *not* break — several turn a neighbour's
 #     assertion red for the wrong reason, which is exactly what a second
 #     control exists to separate.
@@ -38,6 +39,26 @@
 # (a process still alive and a message naming two literal variables).
 #
 #   scripts/test-image-negative-control.sh [amd64]
+#   scripts/test-image-negative-control.sh run-contract
+#   scripts/test-image-negative-control.sh secrets
+#   scripts/test-image-negative-control.sh rendered-config
+#   scripts/test-image-negative-control.sh devbox
+#
+# The second form runs only the third half, the daemon container's run
+# contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
+# 16 and 17).
+# Its witnesses are smoke tests, because a run contract is a property of a
+# running container rather than of an image, so each control there breaks one
+# line of the contract (a compose overlay on the lean stack, or an image with
+# one step of the root phase removed) and names the smoke node ids that must
+# go red. See the half's own header below.
+#
+# The third form runs only parity row 12's control: the shipped compose file's
+# `daemon` service with one credential passed through `environment:`, which
+# `docker inspect` then shows (tests/image/test_secrets_contract.py). The
+# fourth runs the upgrade case that boots the new entrypoint over a config an
+# old release rendered, against an image whose entrypoint appends to that file.
+# The fifth runs only the devbox half, for a change that touches nothing else.
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -46,8 +67,295 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 platform="${1:-}"
+only_run_contract=""
+only_secrets=""
+if [ "$platform" = "run-contract" ]; then
+    only_run_contract=1
+    platform=""
+fi
+if [ "$platform" = "secrets" ]; then
+    only_secrets=1
+    platform=""
+fi
+only_rendered_config=""
+if [ "$platform" = "rendered-config" ]; then
+    only_rendered_config=1
+    platform=""
+fi
+only_devbox=""
+if [ "$platform" = "devbox" ]; then
+    only_devbox=1
+    platform=""
+fi
 control_tag="istota-test/no-forge:control"
 
+# --------------------------------------------------------------------------
+# The run-contract half. Defined first so the second form can run it alone;
+# called at the end of a full run.
+#
+# Each control breaks one thing and names the node ids that must turn red. A
+# control that stops the stack from booting at all (the root phase refusing on
+# purpose) reports its witnesses as ERROR rather than FAILED, so for those the
+# refusal's own words must also appear in the output: an error for any other
+# reason is the wrong red.
+
+RUN_CONTRACT_TESTS="tests/smoke/test_run_contract.py"
+RUN_CONTRACT_CONTROLS="docker/test/run-contract-controls"
+
+require_smoke_failures() {
+    control_name="$1"
+    control_overlays="$2"
+    control_expect="$3"
+    control_must_say="$4"
+    shift 4
+
+    echo
+    echo "[control] run-contract/${control_name}: ${control_expect}"
+    control_out="$(mktemp)"
+    set +e
+    ISTOTA_TESTBED_CONTROL_OVERLAYS="$control_overlays" \
+        uv run pytest -m smoke -n0 -q --no-header -p no:randomly "$@" 2>&1 | tee "$control_out"
+    set -e
+
+    # FAILED only, unless the control is a refusal to boot: a stack that did
+    # not come up for some other reason errors every witness, and that red
+    # says nothing about the line the control broke.
+    control_missing=""
+    for node in "$@"; do
+        if grep -Fq "FAILED ${node}" "$control_out"; then
+            continue
+        fi
+        if [ -n "$control_must_say" ] && grep -Fq "ERROR ${node}" "$control_out"; then
+            continue
+        fi
+        control_missing="${control_missing} ${node}"
+    done
+    if [ -n "$control_must_say" ] && ! grep -Fq "$control_must_say" "$control_out"; then
+        control_missing="${control_missing} (output never said: ${control_must_say})"
+    fi
+    rm -f "$control_out"
+
+    if [ -n "$control_missing" ]; then
+        echo "[control] FAILED: run-contract/${control_name} did not turn these red:"
+        for node in $control_missing; do echo "[control]   ${node}"; done
+        echo "[control] Expected: ${control_expect}"
+        exit 1
+    fi
+    echo "[control] OK: run-contract/${control_name} turned every named witness red."
+}
+
+run_contract_half() {
+    # The lean image the smoke tier builds, by the same rule it uses.
+    lean_tag="$(uv run python -c '
+import sys
+sys.path.insert(0, ".")
+from tests.conftest import lean_image_tag
+print(lean_image_tag())
+')"
+    echo
+    echo "[control] run-contract: lean image ${lean_tag}"
+    if ! docker image inspect "$lean_tag" >/dev/null 2>&1; then
+        echo "[control] not built yet — run \`uv run pytest -m smoke -n0 ${RUN_CONTRACT_TESTS}\` first." >&2
+        exit 2
+    fi
+    suffix="${lean_tag##*:}"
+    scratch="$(mktemp -d)"
+
+    # An image with one step of the root phase removed, run by the lean stack.
+    image_overlay() {
+        printf 'services:\n  daemon:\n    build: !reset null\n    image: %s\n' "$1" > "$scratch/$2.yml"
+        echo "$scratch/$2.yml"
+    }
+
+    # Row 5. The daemon started without the drop is uid 0 with the cap_add
+    # set and no CAP_DAC_OVERRIDE, so it cannot read the state it does not own
+    # (the master key, first) and the stack never comes up: the run contract
+    # fails closed rather than running a root daemon. The uid and capability
+    # assertion itself is turned red by the image half's no-drop control above.
+    docker build -q -f docker/test/Dockerfile.no-daemon-drop \
+        --build-arg "BASE=$lean_tag" -t "istota-test/no-daemon-drop:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "no-daemon-drop" \
+        "$(image_overlay "istota-test/no-daemon-drop:$suffix" no-daemon-drop)" \
+        "row 5: the root phase execs the daemon without the drop" \
+        "/data/.secret_key: Permission denied" \
+        "${RUN_CONTRACT_TESTS}::TestTheDaemonIsUnprivileged::test_the_daemon_runs_as_10001_with_every_capability_set_empty" \
+        "${RUN_CONTRACT_TESTS}::TestTheDaemonIsUnprivileged::test_nothing_the_daemon_wrote_is_owned_by_root"
+
+    docker build -q -f docker/test/Dockerfile.no-cgroup-remount \
+        --build-arg "BASE=$lean_tag" -t "istota-test/no-cgroup-remount:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "no-cgroup-remount" \
+        "$(image_overlay "istota-test/no-cgroup-remount:$suffix" no-cgroup-remount)" \
+        "row 4: the root phase skips the remount, so nothing is delegated" \
+        "" \
+        "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_doctor_reports_the_delegated_root_ok" \
+        "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_a_task_is_placed_limited_and_killed_past_its_limit"
+
+    require_smoke_failures \
+        "cgroup-host-bind" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/cgroup-host-bind.yml" \
+        "row 4: the host's cgroup tree is bound in, and the root phase refuses to start" \
+        "REFUSE: /sys/fs/cgroup is cgroup2 rooted at /../.." \
+        "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_doctor_reports_the_delegated_root_ok"
+
+    require_smoke_failures \
+        "cgroup-host" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/cgroup-host.yml" \
+        "row 4: the host's cgroup namespace, whose mount reads / too, and the root phase refuses to start" \
+        "REFUSE: give the daemon service \`cgroup: private\`; \`cgroup: host\`" \
+        "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_doctor_reports_the_delegated_root_ok"
+
+    require_smoke_failures \
+        "read-write-root" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/read-write-root.yml" \
+        "row 6: no read_only, so a uid-0 write succeeds and the root mount is rw" \
+        "" \
+        "${RUN_CONTRACT_TESTS}::TestTheRootFilesystemIsReadOnly::test_a_root_write_is_refused_by_the_mount[/app]" \
+        "${RUN_CONTRACT_TESTS}::TestTheRootFilesystemIsReadOnly::test_a_root_write_is_refused_by_the_mount[/usr]" \
+        "${RUN_CONTRACT_TESTS}::TestTheRootFilesystemIsReadOnly::test_a_root_write_is_refused_by_the_mount[/etc]" \
+        "${RUN_CONTRACT_TESTS}::TestTheRootFilesystemIsReadOnly::test_the_daemons_root_mount_is_read_only"
+
+    require_smoke_failures \
+        "docker-socket" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/docker-socket.yml" \
+        "row 8: the host's Docker socket is bound into the container" \
+        "" \
+        "${RUN_CONTRACT_TESTS}::TestNoDockerApi::test_no_docker_socket_at_any_path" \
+        "${RUN_CONTRACT_TESTS}::TestNoDockerApi::test_nothing_is_mounted_from_a_docker_socket"
+
+    require_smoke_failures \
+        "seccomp-unconfined" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/seccomp-unconfined.yml" \
+        "row 16: no syscall filter, so the denied calls reach the kernel" \
+        "" \
+        "${RUN_CONTRACT_TESTS}::TestATasksSyscallSurface::test_the_denied_calls_are_eperm_inside_a_live_sandbox"
+
+    require_smoke_failures \
+        "seccomp-docker-default" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/seccomp-docker-default.yml" \
+        "row 1: Docker's default profile, so bwrap fails and the root phase refuses to start" \
+        "REFUSE: bubblewrap cannot build the sandbox's namespace" \
+        "tests/smoke/test_sandbox_in_stack.py::TestTheDatabaseMasks::test_the_database_directory_is_an_empty_read_only_tmpfs" \
+        "tests/smoke/test_sandbox_repos_isolation.py::TestAnotherUsersSubtree::test_it_is_not_in_the_namespace_at_all" \
+        "tests/smoke/test_sandbox_shared_room.py::TestAGuestsTurn::test_it_reaches_no_workspace_and_no_group"
+
+    # Rows 2 and 3 share a witness: one task's network and its two proxy
+    # sockets. Each control must turn it red with its own row's message.
+    network_node="${RUN_CONTRACT_TESTS}::TestATasksNetworkAndItsProxies::test_the_proxies_answer_the_task_and_refuse_everyone_else"
+    docker build -q -f docker/test/Dockerfile.no-unshare-net \
+        --build-arg "BASE=$lean_tag" -t "istota-test/no-unshare-net:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "no-unshare-net" \
+        "$(image_overlay "istota-test/no-unshare-net:$suffix" no-unshare-net)" \
+        "row 2: the mount plan drops --unshare-net, so a task reaches a host past the proxy" \
+        "row 2: the task reached a host without the proxy" \
+        "$network_node"
+
+    docker build -q -f docker/test/Dockerfile.every-pid-a-root \
+        --build-arg "BASE=$lean_tag" -t "istota-test/every-pid-a-root:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "every-pid-a-root" \
+        "$(image_overlay "istota-test/every-pid-a-root:$suffix" every-pid-a-root)" \
+        "row 3: every pid counts as a task root, so the proxies serve an outsider" \
+        "row 3: the skill proxy served a process outside the task" \
+        "$network_node"
+
+    require_smoke_failures \
+        "browser-on-default-network" \
+        "$PWD/${RUN_CONTRACT_CONTROLS}/browser-on-default-network.yml" \
+        "row 17: the browser shares the default network with web, nginx and signaling" \
+        "row 17: the browser container reached" \
+        "${RUN_CONTRACT_TESTS}::TestTheBrowserIsOnItsOwnNetwork::test_the_browser_reaches_nothing_the_daemon_reaches"
+
+    rm -rf "$scratch"
+    echo
+    echo "[control] OK: every run-contract control turned its witnesses red."
+}
+
+# --------------------------------------------------------------------------
+# Row 12. The witness boots the shipped compose file's `daemon` service from
+# the image the tier built; the control adds one overlay passing a credential
+# through `environment:`, and the inspect assertion must go red. The other
+# three assertions are about files and stay green, which is what tells this
+# red from a stack that did not come up.
+
+SECRETS_TESTS="tests/image/test_secrets_contract.py"
+
+secrets_half() {
+    echo
+    echo "[control] secrets: a credential in compose's environment"
+    secrets_out="$(mktemp)"
+    set +e
+    ISTOTA_SECRETS_CONTROL_OVERLAYS="$PWD/${RUN_CONTRACT_CONTROLS}/secret-in-environment.yml" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly "$SECRETS_TESTS" 2>&1 | tee "$secrets_out"
+    set -e
+    secrets_node="${SECRETS_TESTS}::TestTheCredentialsAreFilesNotEnvironment::test_docker_inspect_carries_no_credential"
+    secrets_read="${SECRETS_TESTS}::TestTheCredentialsAreFilesNotEnvironment::test_the_daemon_read_them"
+    if ! grep -Fq "FAILED ${secrets_node}" "$secrets_out"; then
+        rm -f "$secrets_out"
+        echo "[control] FAILED: secrets did not turn ${secrets_node} red."
+        exit 1
+    fi
+    if grep -Fq "FAILED ${secrets_read}" "$secrets_out" || grep -Fq "ERROR ${secrets_read}" "$secrets_out"; then
+        rm -f "$secrets_out"
+        echo "[control] FAILED: secrets broke the stack rather than the one line;"
+        echo "[control]   ${secrets_read} should still pass."
+        exit 1
+    fi
+    rm -f "$secrets_out"
+    echo "[control] OK: secrets turned the inspect witness red and left the files' witnesses green."
+}
+
+# --------------------------------------------------------------------------
+# The config is an input: the upgrade case boots the new entrypoint over a
+# config.toml an old release rendered and requires the file unchanged. The
+# control image appends a line to it at boot; only that assertion may go red,
+# and the daemon must still start.
+
+RENDERED_TESTS="tests/image/test_upgrade.py::TestTheNewEntrypointKeepsARenderedConfig"
+
+rendered_config_half() {
+    # The newest image the tier built; `docker images` lists newest first.
+    rendered_base="$(docker images --format '{{.Repository}}:{{.Tag}}' istota-test/istota | head -1)"
+    if [ -z "$rendered_base" ]; then
+        echo "[control] no istota-test/istota image yet — run \`uv run pytest -m image -n0\` first." >&2
+        exit 2
+    fi
+    echo
+    echo "[control] rendered-config: an entrypoint that rewrites the operator's config (base ${rendered_base})"
+    docker build -q -f docker/test/Dockerfile.rewrites-config \
+        --build-arg "BASE=$rendered_base" -t istota-test/rewrites-config:control docker/test >/dev/null
+    rendered_out="$(mktemp)"
+    set +e
+    ISTOTA_IMAGE_TAG=istota-test/rewrites-config:control ISTOTA_UPGRADE_SHAPES=volume \
+        ISTOTA_UPGRADE_FROM="$(grep -v '^#' scripts/upgrade-floor | grep -v '^$' | head -1)" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly "$RENDERED_TESTS" 2>&1 | tee "$rendered_out"
+    set -e
+    if ! grep -Fq "FAILED ${RENDERED_TESTS}::test_the_file_is_not_rewritten" "$rendered_out" \
+        || grep -Fq "FAILED ${RENDERED_TESTS}::test_the_daemon_starts_from_it" "$rendered_out"; then
+        rm -f "$rendered_out"
+        echo "[control] FAILED: rendered-config did not turn exactly the rewrite witness red."
+        exit 1
+    fi
+    rm -f "$rendered_out"
+    echo "[control] OK: rendered-config turned the rewrite witness red and the daemon still started."
+}
+
+if [ -n "$only_run_contract" ]; then
+    run_contract_half
+    exit 0
+fi
+if [ -n "$only_rendered_config" ]; then
+    rendered_config_half
+    exit 0
+fi
+if [ -n "$only_secrets" ]; then
+    secrets_half
+    exit 0
+fi
+
+istota_half() {
 # The tier's own tag scheme is the authority. Reproducing it in shell would be a
 # second copy of a rule that already exists, and it would drift.
 base_tag="$(
@@ -103,6 +411,37 @@ fi
 
 echo "[control] OK: the istota tier failed on the broken image, as it must."
 echo "[control] Read the failures above and confirm they name the missing path."
+
+# The image half of parity row 5: an image whose `istota-drop` skips setpriv.
+# The same control image the run-contract half below runs as a stack.
+echo
+echo "[control] building the no-drop control (row 5, image half)…"
+no_drop_tag="istota-test/no-drop:${base_tag##*:}"
+docker build -q -f docker/test/Dockerfile.no-drop \
+    --build-arg "BASE=$base_tag" -t "$no_drop_tag" docker/test >/dev/null
+no_drop_out="$(mktemp)"
+set +e
+if [ -n "$platform" ]; then
+    ISTOTA_IMAGE_TAG="$no_drop_tag" uv run pytest -m image -n0 -q --no-header \
+        --platform "$platform" tests/image/test_istota_image.py::TestTheDropToTheDaemonsUser 2>&1 | tee "$no_drop_out"
+else
+    ISTOTA_IMAGE_TAG="$no_drop_tag" uv run pytest -m image -n0 -q --no-header \
+        tests/image/test_istota_image.py::TestTheDropToTheDaemonsUser 2>&1 | tee "$no_drop_out"
+fi
+set -e
+no_drop_node="tests/image/test_istota_image.py::TestTheDropToTheDaemonsUser::test_the_drop_leaves_uid_10001_and_no_capabilities"
+if ! grep -Fq "FAILED ${no_drop_node}" "$no_drop_out"; then
+    rm -f "$no_drop_out"
+    echo "[control] FAILED: the drop witness passed on an image whose drop does nothing."
+    exit 1
+fi
+rm -f "$no_drop_out"
+echo "[control] OK: the drop witness failed on the no-drop image."
+}
+
+if [ -z "$only_devbox" ]; then
+    istota_half
+fi
 
 
 # --------------------------------------------------------------------------
@@ -310,7 +649,7 @@ fi
 require_devbox_failures \
     "devbox-wrong-uid" \
     "$wrong_uid_tag" \
-    "dev is 1234, so a build with no args did not reproduce uid 1000" \
+    "dev is 1234, so a build with no args did not produce uid 10001" \
     "${DEVBOX_TESTS}::TestTheDevUidBuildArgs::test_the_dev_account_has_the_default_uid_and_gid"
 
 run_devbox_control \
@@ -344,6 +683,14 @@ run_devbox_control \
     "the transport comes up normally and never chowns /home/dev" \
     "${DEVBOX_TESTS}::TestTheSupervisorStartsTheTransport::test_the_supervisor_repairs_a_home_directory_with_the_wrong_owner"
 
+# The supervisor's half of `devbox reset`: the server still answers and exits
+# with the restart status, and the supervisor respawns it instead of exiting.
+run_devbox_control \
+    "devbox-restart-respawns" \
+    "Dockerfile.devbox-restart-respawns" \
+    "the supervisor treats the restart status as a crash and respawns the server" \
+    "${DEVBOX_TESTS}::TestTheSupervisorStartsTheTransport::test_a_restart_request_stops_the_supervisor"
+
 run_devbox_control \
     "devbox-workspace-present" \
     "Dockerfile.devbox-workspace-present" \
@@ -351,7 +698,19 @@ run_devbox_control \
     "${DEVBOX_TESTS}::TestTheWorkspaceTmpfsIsGone::test_the_image_has_no_workspace_directory"
 
 echo
-echo "[control] OK: both halves of the image tier can see a broken artifact,"
+if [ -n "$only_devbox" ]; then
+    echo "[control] OK: the devbox half of the image tier can see a broken artifact,"
+else
+    echo "[control] OK: both halves of the image tier can see a broken artifact,"
+fi
 echo "[control] and every assertion in the devbox file that could pass"
 echo "[control] vacuously has one that reaches it."
 echo "[control] The five without one all fail closed; the header says which."
+
+# The run-contract half runs the lean smoke stack, which builds natively; an
+# amd64 run of this script leaves it to the native one. So does row 12's.
+if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
+    run_contract_half
+    secrets_half
+    rendered_config_half
+fi

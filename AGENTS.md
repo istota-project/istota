@@ -37,7 +37,7 @@ Boundaries and operations:
 - `maintenance.md` — backups, migrators, the worktree and cache sweepers, host pressure, session transcripts
 - `doctor.md` — the runtime self-check registry, and what each check may and may not do
 - `install.md` — the standalone single-user install: the wizard's boundaries and the updater
-- `deployment.md` — Ansible role, Docker stack, the Nextcloud rclone mount
+- `deployment.md` — Ansible role, Docker stack, the dedicated VM (`host/`, `istota-stack`, signed-tag updates, the schema stamp), the Nextcloud rclone mount
 - `testbed.md` — `testbed/`: the two compose shapes, profiles, the `Service` protocol, session-scoped reset, the prompt goldens
 - `testing.md` — why each verification rule below is what it is
 - `committing.md` — the two pre-commit scans and how they fail
@@ -61,6 +61,7 @@ src/istota/
 ├── updater.py            # `istota update` self-update for the standalone install → install.md
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── config_mapper.py      # Maps a parsed TOML document onto the `Config` dataclass tree → leaf-modules.md
+├── apply.py              # `istota apply -f plan`: config.toml from a plan's [config], exit 0/2/1 → config.md
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (framework tables)
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
@@ -131,7 +132,8 @@ src/istota/
 │   ├── google_scopes.py  # The Google service ↔ OAuth scope table, bounded by the operator's configured ceiling
 │   └── broker/           # Credential grants, the broker CA and the intercepting proxy → sandbox.md
 ├── devbox/               # The development container's daemon side → devbox.md
-│   ├── proxy.py          # Per-user host-side daemon: git credentials and the forge token injected server-side
+│   ├── proxy.py          # One credential listener per devbox user, identified by its socket: git credentials and the forge token
+│   ├── compose_file.py   # `istota devbox compose-file`: the stack's per-user devbox services and socket volumes → devbox.md
 │   ├── proxy_protocol.py # Wire protocol for the devbox proxy (single-line JSON, 16 MiB cap) → devbox.md
 │   ├── exec_protocol.py  # The exec transport's wire format → devbox.md
 │   └── exec_client.py    # The other end, copied into each task's shim directory → devbox.md
@@ -163,6 +165,7 @@ src/istota/
 │   ├── db_backup.py      # Timed online-backup snapshot of local DBs to dated dirs on the mount; retention, row-count collapse guard, 0700/0600 → maintenance.md
 │   ├── db_restore.py     # Restore a cold snapshot back to local disk (newest good, or `--date`); refuses an empty snapshot without `--force` → maintenance.md
 │   ├── repos_relocate.py # One-shot migrator: `developer.repos_dir` → per-user subtrees
+│   ├── workspace_paths.py # A migrated install's old host paths in users' bot directories, rewritten with backups → maintenance.md
 │   ├── room_relocate.py, room_mount_reconcile.py  # The room-identity migration and its mount sweep
 │   ├── persona_retire.py # Deletes or retires the old per-user PERSONA.md copies, from `istota init` → maintenance.md
 │   ├── worktree_reaper.py   # Removes a developer worktree once its work has landed → maintenance.md
@@ -184,10 +187,13 @@ src/istota/
 │   ├── gif_frames.py     # The child that tiles a GIF-as-MP4's frames into one JPEG; stdlib, PyAV and Pillow → leaf-modules.md
 │   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 │   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
+│   ├── toml_write.py     # The tree's one TOML writer: the wizard, `istota apply` and the testbed → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
-│   └── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
+│   ├── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
+│   ├── mountinfo.py      # Which mount covers a path: the entrypoint's rclone preflight and the cgroup root check → leaf-modules.md
+│   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Block/source briefings module — DB, source resolvers, generation, reader/settings routes, migration
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
 ├── health/               # Body stats, bloodwork, biomarker trends, encounters, immunizations, Garmin, OCR
@@ -197,7 +203,7 @@ src/istota/
 
 The root holds only what `tests/test_package_layout.py`'s `ROOT_ALLOWLIST` names. A new module goes in the package for its subsystem; adding one to the root is a deliberate one-line change to that list. Packages created for the layout keep an empty `__init__.py`, and `lib/` imports nothing from `istota`.
 
-Alongside `src/`: `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `deploy/ansible/`, `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `docs/` (the documentation markdown, referenced by path from Ansible, compose, the rules files and source docstrings — the files stay here), `docs-site/` (the Docusaurus site that renders it; `.md` is CommonMark, and a new page is listed in its `sidebars.ts`), `tests/`, `testbed/` (the deployment tiers' staging environment; its own `pyproject.toml`, never imported by `src/istota/` — see `.claude/rules/testbed.md`), `schema.sql`.
+Alongside `src/`: `host/` (the dedicated VM: `provision.sh`, `istota-stack`, the systemd units, the Lima template and cloud-init; `.claude/rules/deployment.md`), `config/` (config.toml, persona.md, emissaries.md, system-prompt.md, guidelines/ — read by the daemon, never bound into the sandbox; skill bodies live in `src/istota/skills/`), `ansible/` (the optional management role for an estate-managed VM: writes `host.env`, the secrets and an `istota apply` plan, then calls `provision.sh` and `istota-stack`; `tests/test_management_role.py` holds its names to the code), `deploy/ansible/` (the old bare-metal role, deleted in the one-deployment-shape spec's Stage 9), `docker/` (full-stack compose), `web/` (SvelteKit, adapter-static, base `/istota`), `docs/` (the documentation markdown, referenced by path from Ansible, compose, the rules files and source docstrings — the files stay here), `docs-site/` (the Docusaurus site that renders it; `.md` is CommonMark, and a new page is listed in its `sidebars.ts`), `tests/`, `testbed/` (the deployment tiers' staging environment; its own `pyproject.toml`, never imported by `src/istota/` — see `.claude/rules/testbed.md`), `schema.sql`.
 
 ## Key Concepts
 
@@ -250,7 +256,7 @@ A room or a job may only pin a kind the operator listed in `[brain] room_selecta
 
 Full posture, with the reasoning and the shape-by-shape caveats, in `.claude/rules/sandbox.md`. The operative rules:
 
-- **Sandbox** (`bwrap`): per-user filesystem isolation. Linux + bubblewrap is the only supported deployment. The shipped Docker stack grants neither `seccomp:unconfined` nor `systempaths=unconfined`, so it runs every task unsandboxed.
+- **Sandbox** (`bwrap`): per-user filesystem isolation. Linux + bubblewrap is the only supported deployment. The `daemon` service carries the run contract in `docker/docker-compose.yml`: the shipped seccomp and AppArmor profiles (`docker/istota/seccomp-istota.json`, `apparmor-istota`) plus `systempaths=unconfined`, `cap_drop: ALL` with six root-phase capabilities, `read_only`, `cgroup: private`. The root phase (`docker/istota/root-phase.sh`) delegates the container's cgroup and drops to uid 10001 through `istota-drop`, which every exec path uses too. On Linux a daemon whose sandbox cannot be built refuses to start.
 - **The native brain's tools are in the sandbox too**, one namespace per task attempt: `NativeBrain` spawns `istota.sandbox.tool_server` through `build_bwrap_cmd(..., profile=NATIVE)` over an inherited socketpair, and the six core tools run in there. `executor.native_fs_roots` is still enforced and is the only confinement on the unsandboxed shapes.
 - **Native web credentials**: password hashes and token digests live in the framework DB, bound into no sandbox. Email identities are separate from inbound email routing addresses.
 - **No databases in the sandbox**: `build_bwrap_cmd` ends by masking `db_path.parent` and `module_db_root()` with an empty read-only tmpfs, after every other mount. Nothing binds the framework DB for anyone, and `sandbox_ro_paths` defaults to `[]`. Reads and writes go through skill CLIs that run host-side and scope by `ISTOTA_USER_ID`; the masks are defence in depth behind that.
@@ -302,7 +308,7 @@ npm --prefix web run format:check
 - **Wrap a full suite run in `scripts/qtest`.** Both suites size their worker pool from `cpu_count()`, so concurrent runs across worktrees fail on timeouts that have nothing to do with the code. `qtest` is a machine-wide `flock` semaphore and ends every run with a verdict line on stderr (`PASS` / `FAIL` / `KILLED-SIGKILL` / `NO-SLOT`). Exit 75 means the command did not run. Serialize the expensive runs only.
 - **Chain the checks in one shell invocation**, and use `-x` / `--bail=1` while iterating; drop the bail flag for the run you report. Never read a result through a pipe unless `pipefail` is on — a task under the daemon inherits it, a terminal in this repo does not.
 
-**Nine markers are deselected by default and none runs unless you ask**: `integration`, `live`, `linux`, `image`, `smoke`, `full`, `testbed`, `deploy`, `ml`. A tenth, `requires_dac`, skips itself where the process can bypass permission bits. The seven discretionary tiers:
+**Ten markers are deselected by default and none runs unless you ask**: `integration`, `live`, `linux`, `image`, `smoke`, `full`, `testbed`, `deploy`, `vm`, `ml`. An eleventh, `requires_dac`, skips itself where the process can bypass permission bits. The eight discretionary tiers:
 
 ```bash
 scripts/test-linux.sh            # the suite + the linux tests, on a real kernel
@@ -312,15 +318,18 @@ uv run pytest -m full -n0        # end-to-end against the full stack, incl. a re
 uv run pytest -m testbed -n0     # wire-level email against a real IMAP/SMTP server, no istota image
 scripts/test-deploy.sh           # the Ansible role converged on a real systemd host
 scripts/test-upgrade.sh          # the current image over an older release's state
+scripts/test-vm.sh               # the stack on a VM provisioned by host/provision.sh, in Lima
 ```
 
-`image`, `smoke`, `full`, `testbed` and `deploy` require `-n0`: their fixtures are session-scoped and build one tagged image. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Three tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-deploy-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`). **On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail** — run the control and write down what it turned red.
+`image`, `smoke`, `full`, `testbed`, `deploy` and `vm` require `-n0`: their fixtures are session-scoped and build one tagged image or drive one VM. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Four tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-deploy-negative-control.sh`, `scripts/test-vm-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`).
+
+**The `vm` tier is the dedicated-VM half (the one-deployment-shape spec, Stage 7).** It boots a Lima VM from `host/lima/istota.yaml`, lets `provision.sh` set it up, deploys a signed snapshot of the checkout through `istota-stack update`, and switches the stack between the local, proxied, direct and full-Nextcloud modes with `istota-stack setup`, `apply` and `provision.sh`, as an operator would. It witnesses the parity rows only a real VM can hold (7, 9, 10, 11, 15, 18, 19, 20, and the halves of 12 and 17 Docker Desktop cannot see). It needs `limactl` rather than Docker on the host, keeps its VM (`istota-vm-1`) between sessions, and costs tens of minutes on a first run. `tests/vm/conftest.py` and `tests/vm/lima.py` say how. **On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail** — run the control and write down what it turned red.
 
 **The `deploy` tier is the bare-metal half, and it is new (ISSUE-439).** It boots `docker/test/Dockerfile.deploy` with systemd as PID 1 and drives the real `deploy/install.sh --headless` inside it, so `ansible-playbook` actually runs — which nothing in the repository did before. The `tests/test_ansible_*.py` files parse the role's YAML and assert on the parse, and cannot see a unit that fails to start or a task ordering that only breaks when the tasks run. Doctor is the oracle, as it is for `image` and `smoke`. It converges with rclone, zram, Talk and the web UI off, and covers neither reboot ordering, nor the `Require`/`After` relationship with the rclone mount unit, nor a real FUSE mount — `tests/deploy/conftest.py` states each concession and why.
 
-**All seven tiers need Docker — the Linux tier unless it runs natively — so a sandboxed task cannot run any of them; check `ISTOTA_SANDBOXED` before you plan around one.** No Docker socket is bound into a sandbox, and a task's own sandbox passes `--unshare-user --disable-userns`, which shuts the nested-namespace route too. **When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say so in the merge request, name the tier that covers it, and ask for the run before merge.** Report the default suite as what it is: it patches `_bwrap_available` and checks argv, so it has never executed the sandbox path you changed.
+**All eight tiers need Docker or a VM — the Linux tier unless it runs natively, the vm tier through Lima — so a sandboxed task cannot run any of them; check `ISTOTA_SANDBOXED` before you plan around one.** No Docker socket is bound into a sandbox, and a task's own sandbox passes `--unshare-user --disable-userns`, which shuts the nested-namespace route too. **When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say so in the merge request, name the tier that covers it, and ask for the run before merge.** Report the default suite as what it is: it patches `_bwrap_available` and checks argv, so it has never executed the sandbox path you changed.
 
-Anything added to `testbed/` is bound by four rules, the first three enforced in the default suite: a service points the daemon at itself only through a variable `docker/istota/render-config.sh` reads **and** `docker/docker-compose.yml` passes through; a stub bound off loopback must be given a credential to expect; a negative assertion takes a watermark *and* a discriminating column; a service whose client negotiates capabilities is run for real rather than stubbed. The prompt goldens (`tests/test_prompt_golden.py`) are in the default suite and need no container — regenerate with `uv run env ISTOTA_UPDATE_GOLDEN=1 pytest tests/test_prompt_golden.py -n0` and review the diff.
+Anything added to `testbed/` is bound by four rules, the first three enforced in the default suite: every key a service or profile writes into the stack's `config.toml` is one `load_config` reads (the config is an input on every shape, written by `istota setup` for an operator and by the testbed for a stack); a stub bound off loopback must be given a credential to expect; a negative assertion takes a watermark *and* a discriminating column; a service whose client negotiates capabilities is run for real rather than stubbed. The prompt goldens (`tests/test_prompt_golden.py`) are in the default suite and need no container — regenerate with `uv run env ISTOTA_UPDATE_GOLDEN=1 pytest tests/test_prompt_golden.py -n0` and review the diff.
 
 ## Committing
 

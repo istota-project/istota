@@ -207,6 +207,10 @@ One fence around content somebody else wrote: `frame_untrusted(text, label)` put
 
 stdlib-only leaf: imports nothing, never raises.
 
+## lib/toml_write.py
+
+The tree's one TOML writer: `toml_string` (basic-string escaping, control characters as `\uXXXX`) and `dumps` (nested tables, arrays of tables, inline arrays and tables, dates), written so `tomllib.loads(dumps(doc)) == doc`. It replaced three: the standalone wizard's escaper (`setup_wizard._toml_str` is now this), the container wizard's `tomli_w`, and the testbed's `toml_dumps`, which imports this. `istota apply` renders through it. `None` is refused rather than dropped, since a plan saying null means something TOML cannot. `tests/test_toml_write.py` holds the round trip and sweeps `src/`, `testbed/` and the upgrade tier's harness (`tests/support/`, `tests/image/`, which write a `config.toml` an image boots) for a new copy; `cron_loader`'s CRON.md escaper (its backtick rule) and money's `tomli_w` calls write other documents and are named there. stdlib-only leaf, imports nothing: the testbed imports it.
+
 ## lib/toml_fence.py
 
 Where a ```toml fence starts and ends, for the four modules that parse one from a user-written markdown file: `cron_loader` (CRON.md), `heartbeat` (HEARTBEAT.md), `user_briefings` (BRIEFINGS.md) and `money._config_io`. All four copied one expression with one defect (ISSUE-386): neither marker was line-anchored, so the block ended at the first backtick run after the opener, in a comment or a string. In `cron_loader`, which drives an orphan sweep, a truncation on a table boundary produced valid TOML holding a subset of the jobs and the sweep deleted the rest silently.
@@ -266,3 +270,12 @@ The strict arm is not redundant and the order matters: a backtick run mentioned 
 Test traps: a fence case whose caller has a `{...}` fallback cannot fail, since the fallback rescues a well-formed fence, so each has a sibling whose prose carries a bracket. The timing fixture is `"```json\n" * N` (many openers, no closer); `"```json\nx" * N` holds one anchored opener and lets a quadratic expression pass.
 
 stdlib-only leaf, never raises.
+
+## lib/unix_connect.py
+
+`connect_no_follow(sock, path)`: connect to a Unix socket whose leaf somebody else can write, refusing a symlink (`ELOOP`) or anything that is not a socket (`ENOTSOCK`). A devbox's exec socket is in the `devbox-exec-<user>` volume, which that user's devbox mounts read-write, so `dev` there could replace `exec.sock` with a link to another user's socket as the istota container sees it, and the devbox skill or doctor's probe would then run commands in, or `reset`, the other user's devbox. On Linux the leaf is opened `O_PATH | O_NOFOLLOW`, checked with `fstat` and connected through `/proc/self/fd/<n>`, so the inode checked is the one connected. Without `O_PATH` (macOS) it is `lstat` then a connect by path, which leaves a swap window on a platform nothing deploys to. Only the leaf is held: the directories above it must be ones the leaf's writer cannot replace, which a volume mount point is. Callers: `skills/devbox._converse` and `doctor._exec_transport_request`. stdlib-only leaf, imports nothing from istota.
+
+## lib/mountinfo.py
+
+Which mount covers a path, from `/proc/self/mountinfo`: `parse`, `covering_mount` and `read_mountinfo`. Two callers each had their own parse: the container entrypoint's preflight, which refuses full Nextcloud integration when the workspace is not on a `fuse.rclone` mount (parity row 9), and `sandbox/cgroup.cgroup2_mount_root`, which reads the mount root of the declared task-cgroup root (parity row 4). The filesystem type is the field after the `-` separator, never a fixed column, since the optional fields vary in number; paths are octal-unescaped; the longest mount point that is the path or an ancestor wins, and a later line wins a tie, because a later mount at the same point hides the earlier one. The entrypoint imports it inside its preflight heredoc and keeps `ISTOTA_MOUNTINFO` as the test override. The root phase keeps its own `awk` reading of the cgroup mount, because it runs before the drop and its tests source it on a host without the package. stdlib-only leaf, never raises.
+

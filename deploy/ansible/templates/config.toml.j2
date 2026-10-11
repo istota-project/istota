@@ -722,7 +722,6 @@ vnc_url = "{{ istota_browser_vnc_external_url | istota_toml_escape }}"
 [devbox]
 enabled = true
 container_prefix = "{{ istota_devbox_container_prefix | istota_toml_escape }}"
-docker_cli = "{{ istota_devbox_docker_cli | istota_toml_escape }}"
 max_output_bytes = {{ istota_devbox_max_output_bytes }}
 {% endif %}
 {# The money skill is in-process and resolves per-user config from the

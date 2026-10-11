@@ -78,8 +78,8 @@ needs_floor_tag = pytest.mark.skipif(
 )
 
 
-def _grep_paths(pattern: str, treeish: str) -> list[str]:
-    """Files under `docker/istota` matching `pattern` at `treeish`.
+def _grep_paths(pattern: str, treeish: str, path: str = "docker/istota") -> list[str]:
+    """Files under `path` matching `pattern` at `treeish`.
 
     `git grep` exits 1 for "no matches", which is a normal answer here rather
     than a failure — hence not routed through `_git`. Anything above 1 is a
@@ -87,7 +87,7 @@ def _grep_paths(pattern: str, treeish: str) -> list[str]:
     as a clean tree.
     """
     result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "grep", "-l", pattern, treeish, "--", "docker/istota"],
+        ["git", "-C", str(REPO_ROOT), "grep", "-l", pattern, treeish, "--", path],
         capture_output=True,
         text=True,
         timeout=60,
@@ -153,12 +153,14 @@ class TestTheFloorFile:
         # The control, first. `git grep` exits 1 on no matches, so a broken
         # invocation — a bad pathspec, a tree-ish this git cannot read — is
         # indistinguishable from the clean answer, and this assertion would be
-        # green against every floor ever chosen. HEAD renders the key; if the
-        # same call cannot see it there, the call is what is wrong.
-        assert _grep_paths("gh_bin_path", "HEAD"), (
-            "the control failed: `git grep gh_bin_path` finds nothing under "
-            "docker/istota at HEAD, where render-config.sh renders it. This "
-            "test cannot distinguish a good floor from a broken grep."
+        # green against every floor ever chosen. At HEAD `istota setup` writes
+        # the key; if the same call cannot see it there, the call is what is
+        # wrong. (The floor's writer was the entrypoint's render, under
+        # docker/istota, which is where the second call looks.)
+        assert _grep_paths("gh_bin_path", "HEAD", "src/istota/setup_wizard.py"), (
+            "the control failed: `git grep gh_bin_path` finds nothing in "
+            "src/istota/setup_wizard.py at HEAD, which writes it. This test "
+            "cannot distinguish a good floor from a broken grep."
         )
 
         rendered = _grep_paths("gh_bin_path", floor)
@@ -381,16 +383,26 @@ class TestTheNextcloudStub:
     def test_the_probes_own_grep_matches_the_stub(self):
         """The contract read out of the entrypoint, not restated by hand.
 
-        A copy of the pattern in this file could drift from the shipped
-        entrypoint and neither side would notice. This reads the pattern the
-        entrypoint actually greps for and runs it against the stub's body.
+        The stub stands in for a Nextcloud an *older* release's entrypoint polls
+        while it renders its config; the current entrypoint polls nothing and
+        renders nothing. So the pattern is read from the floor release's own
+        entrypoint, the oldest one the capture runs, and run against the stub's
+        body. A copy of it in this file could drift and neither side would
+        notice.
         """
-        entrypoint = (REPO_ROOT / "docker" / "istota" / "entrypoint.sh").read_text()
-        match = re.search(r"""grep -q '("installed":[^']*)'""", entrypoint)
+        floor = upgrade.read_floor()
+        shown = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "show", f"{floor}:docker/istota/entrypoint.sh"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert shown.returncode == 0, (
+            f"could not read {floor}'s entrypoint: {shown.stderr}"
+        )
+        match = re.search(r"""grep -q '("installed":[^']*)'""", shown.stdout)
         assert match, (
-            "no `grep -q '\"installed\":…'` in docker/istota/entrypoint.sh — the "
-            "readiness probe moved, and this stub is now guessing at a contract "
-            "that no longer exists"
+            f"no `grep -q '\"installed\":…'` in {floor}'s docker/istota/entrypoint.sh "
+            "— the readiness probe the capture has to satisfy moved, and this stub "
+            "is now guessing at a contract that no longer exists"
         )
         assert match.group(1) in upgrade.STATUS_PHP_BODY.decode()
 

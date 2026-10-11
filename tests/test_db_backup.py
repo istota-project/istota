@@ -170,6 +170,15 @@ class TestBackupClockPersistence:
         db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert db_backup.last_backup_time(cfg) == 0.0
 
+    def test_a_snapshot_taken_for_someone_else_leaves_the_clock(self, tmp_path):
+        """The bare-metal export snapshots through this function into its own
+        scratch dir; advancing the clock would defer the install's real backup."""
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY, record_last_run=False)
+        assert any(r["status"] == "ok" for r in results)
+        assert db_backup.last_backup_time(cfg) == 0.0
+
     def test_disabled_does_not_persist_last_run(self, tmp_path):
         cfg = _config(tmp_path, db_backup_enabled=False)
         db.init_db(cfg.db_path)

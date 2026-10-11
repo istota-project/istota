@@ -23,7 +23,7 @@ binary frames in both directions until close. The frame header is 8 bytes,
   0  client -> server   stdin bytes; the ``write_file`` body
   1  server -> client   stdout bytes; the ``read_file`` body
   2  server -> client   stderr bytes
-  3  both               a JSON control object; the ``stat``/``ping`` replies
+  3  both               a JSON control object; the ``stat``/``ping``/``restart`` replies
 ===  =================  ===============================================
 
 Every action's payload has a stream. Leaving one unassigned is exactly the
@@ -41,7 +41,21 @@ is running.
 ``protocol`` is checked by the client, which exits 121 on a value it does not
 know. The server ships in a separately built image and the client is copied out
 of the daemon's tree at task setup, so the two are independently upgradable by
-construction; bump ``PROTOCOL_VERSION`` whenever a frame or an action changes.
+construction; bump ``PROTOCOL_VERSION`` whenever a frame or an existing action
+changes. A new action needs no bump: a server without it refuses it with
+``unknown_action`` before anything runs, which is already a clean answer.
+
+Restart
+-------
+
+``restart`` is how ``devbox reset`` reaches a container without the Docker CLI.
+The server checks the request (with ``wipe_home``, that its home is a mount
+point, so a misattached volume never takes an image layer with it), answers
+``ok``, empties the home directory when asked, sends one control frame saying
+what it did and a terminal frame, and then exits with ``RESTART_EXIT_STATUS``.
+The supervisor (``istota-exec-run``) reads that status as "stop the container"
+and exits, and the service's ``restart: unless-stopped`` brings it back. The
+home volume itself persists either way.
 
 The working directory
 ---------------------
@@ -114,6 +128,7 @@ ACTION_WRITE_FILE = "write_file"
 ACTION_READ_FILE = "read_file"
 ACTION_STAT = "stat"
 ACTION_PING = "ping"
+ACTION_RESTART = "restart"
 
 ALL_ACTIONS: frozenset[str] = frozenset({
     ACTION_EXEC,
@@ -121,7 +136,13 @@ ALL_ACTIONS: frozenset[str] = frozenset({
     ACTION_READ_FILE,
     ACTION_STAT,
     ACTION_PING,
+    ACTION_RESTART,
 })
+
+# What the server exits with after answering a `restart`, and the one status the
+# supervisor treats as "stop the container" rather than "respawn the server".
+# Restated in `istota-exec-run`, which is shell.
+RESTART_EXIT_STATUS = 99
 
 # ---- Error codes -----------------------------------------------------------
 
@@ -374,6 +395,17 @@ def encode_ping_request() -> bytes:
     return encode_line({"action": ACTION_PING})
 
 
+def encode_restart_request(*, wipe_home: bool) -> bytes:
+    """Serialize a ``restart`` request; the reply is one control frame.
+
+    ``wipe_home`` is keyword-only and has no default, so a caller says whether
+    it is asking for a clean box or only a restart.
+    """
+    payload = {"action": ACTION_RESTART, "wipe_home": wipe_home}
+    validate_request(payload)
+    return encode_line(payload)
+
+
 def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Check a decoded request and return it with defaults filled in.
 
@@ -456,6 +488,12 @@ def validate_request(payload: dict[str, Any]) -> dict[str, Any]:
 
     elif action == ACTION_READ_FILE:
         _require_path(payload)
+
+    elif action == ACTION_RESTART:
+        wipe_home = payload.get("wipe_home", False)
+        if not isinstance(wipe_home, bool):
+            raise ProtocolError(ERR_BAD_REQUEST, "'wipe_home' must be a boolean")
+        payload["wipe_home"] = wipe_home
 
     return payload
 

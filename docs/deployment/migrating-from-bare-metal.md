@@ -1,0 +1,196 @@
+# Migrating a bare-metal install
+
+A bare-metal install is one the Ansible role converged onto a Debian host: systemd units named after the install's namespace (`<ns>-scheduler`, `<ns>-web`, …), state under `/srv/app/<ns>`, secrets in `/etc/<ns>/secrets.env`, and a two-minute update cron. This page moves such an install onto a dedicated VM running the stack: provisioned by `host/provision.sh`, updated by `istota-stack update <tag>`.
+
+There is no general export format. The two shapes share the database schema, the master key and the workspace, so the move is a stopped-service copy plus one rewrite step:
+
+- `host/export-bare-metal.sh`, run as root on the old host, stops the install and writes one tarball of its state.
+- `istota migrate import-bare-metal`, run in a one-shot container on the new VM by `istota-stack import-bare-metal`, reads that tarball and lands it in the container layout: it rewrites `config.toml`, splits the secrets files, restores the databases, copies the repositories and repairs their worktrees, and rebases the host paths the database stores.
+
+On an install whose workspace is an external Nextcloud the workspace does not move at all: the new VM mounts the same Nextcloud, at the same path.
+
+## What moves
+
+| State | Old host | New VM | How |
+|---|---|---|---|
+| Nextcloud workspace | the rclone mount at `/srv/mount/nextcloud/content` | the rclone mount at `/srv/mount/nextcloud/content`, bound at `/mnt/shared` in the containers | not moved; the new VM mounts the same Nextcloud. Stored paths under the mount are rebased to `/mnt/shared` (below) |
+| Framework and module databases | `/srv/app/<ns>/data/` | `/data/db/` in the state volume | `db_backup` snapshot on the old host, `db_restore` on the new one, `quick_check` on both sides |
+| `config.toml` | the role's render | `/srv/app/istota/config/config.toml` | rewritten by the import; every change is printed |
+| Admins | `/etc/<ns>/admins` | `/srv/app/istota/config/admins` | copied |
+| Secrets | `/etc/<ns>/secrets.env`, `web-secrets.env` | `/srv/app/istota/secrets/*`, `/data/.secret_key`, `/data/.web_token_key` | one file per credential; the master key and the web token key byte for byte |
+| Developer repositories | `developer.repos_dir` | `/data/repos` | copied, then `git worktree repair` per repository |
+| Baileys session | `<data>/whatsapp-baileys-session` | `/data/db/whatsapp-baileys-session` | copied, except by a rehearsal |
+| Session transcripts | `<data>/logs` | `/data/db/logs` | copied |
+| Browser profile | `<data>/browser-profile` | the `browser_profile` volume | optional, by hand (below) |
+| Devbox homes | per-user Docker volumes | per-user Docker volumes | optional, by hand (below) |
+
+Not carried: the credential broker's CA (regenerated, and each task gets the current one), the WhatsApp media staging and inbound spool, temp and control directories, the role's own backups under `data/backups`, superseded Baileys sessions, Claude Code's home directory (a `claude_code` brain authenticates from `CLAUDE_CODE_OAUTH_TOKEN`), the update cron's clone token, and the CLI configuration of the forge tools (they read their token from the environment).
+
+The rclone configuration is the operator's input to `provision.sh` on the new VM. Copy `~/.config/rclone/rclone.conf` from the old service user's home to `/srv/app/istota/rclone.conf` by hand; it is not in the tarball.
+
+## What the import rewrites
+
+In `config.toml`, every state path is set to what `istota setup` writes for the container (`db_path`, `temp_dir`, `workspace_path`, `nextcloud_mount_path`, `developer.repos_dir`, the forge binary paths, the devbox socket directories, `browser.api_url`). Keys the container derives are dropped so they derive (`module_data_dir`, `skills_dir`, a set `brain.native.session_log.dir`, `logging.file`, `scheduler.host_pressure_docker_socket`, the Baileys paths). Keys this shape removed are dropped (`namespace`, `[devbox] docker_cli`, `[security] allow_unsandboxed_multi_user_vaults`). `web.trusted_proxy_hops` follows `--ingress`. Everything else stays as you had it, and any string still naming an old host path is listed.
+
+In the database, values under an old state root are rebased with a path boundary, inside JSON as decoded values: `tasks.attachments`, `memory_chunks.source_id` with the same rows' `metadata_json`, the `note_resurface_configs` and `note_resurface_history` tables when a user's script created them, and the `corpus` and `resurface` history rows in `istota_kv`. A value under no old root is listed and left alone. Free-text history (task prompts and results, logs, messages) is a record of what happened and is not rewritten.
+
+Some rows are listed and not rewritten, because they come from somewhere else:
+
+- `scheduled_jobs.command` and `.prompt` are synced from each user's `CRON.md`. A job that calls `/srv/app/<ns>/istota/.venv/bin/…` or names a host path has to be fixed in that `CRON.md`, or the next sync writes the old value back. The import report names each job as `<user>/<job>`.
+- Any other `istota_kv` row naming a host path, such as a `system_check` result naming the old Claude Code home.
+
+### Secrets
+
+Each variable in the two env files goes to the file the stack reads it from, under the variable's name lowercased (`ISTOTA_NEXTCLOUD_APP_PASSWORD` becomes `secrets/istota_nextcloud_app_password`). `ISTOTA_SECRET_KEY` becomes `/data/.secret_key` and `ISTOTA_WEB_TOKEN_KEY` becomes `/data/.web_token_key`, both 0600 and byte for byte: every stored credential is encrypted under the first, and every stored web token under the second.
+
+The SMTP password, the three Telnyx values and the Google Workspace client secret each have a file too (`istota_email_smtp_password`, `istota_sms_telnyx_api_key`, `istota_sms_telnyx_public_key`, `istota_sms_telnyx_messaging_profile_id`, `istota_google_workspace_client_secret`).
+
+A variable the stack has no secrets file for is a refusal, with nothing written. The import never drops a credential. The stack's compose file declares the set (`setup_wizard.SECRET_NAMES` is the same list); a credential outside it has to be added there before the import can carry it.
+
+## Before the day
+
+Two choices shape the steps. The stack runs either on a new VM or on the old host itself (see "In place, on the old host" below). Traffic reaches it in one of two ways, which should match how it reached the old host: `direct`, where the stack's nginx serves TLS on a public address, as a role install with its own certificate did, or `proxied`, where a reverse proxy you run in front forwards to it. Steps that apply to one case only say so.
+
+1. **Provision the new VM** with `host/provision.sh`, then `istota-stack update <tag>` and `istota-stack setup` with the answers this install needs: full Nextcloud integration if the old host mounted Nextcloud, the ingress mode above, the same public hostname. Do not start the stack. Its first start comes after the import.
+2. **Keep the public hostname.** Talk's bot callback, the Nextcloud OAuth redirect URIs, the Meta and Twilio or Telnyx webhook URLs and the signaling server's backend URL are all keyed to it. Only where the name points changes.
+3. **Work out how the name will move.**
+   - *Behind a reverse proxy:* read its configuration for this hostname and write down the address and port it forwards to, the scheme it uses, and how it sets `X-Forwarded-For`. In `proxied` mode the stack listens on plain HTTP, so the cutover changes the scheme as well as the address, unless the stack runs with `TLS_CERT_SOURCE=files`. With `trusted_proxy_hops = 2`, the chain the app reads is `<client>, <proxy>`, which is right for one proxy in front of the stack's nginx.
+   - *Serving directly:* the name resolves to the old host's address. A new VM needs that address moved to it, or a DNS change (lower the record's TTL a day ahead). In place, the address stays, but the old host's nginx holds 80 and 443, and has to stop before the stack's nginx can bind them. Bring the certificate across too, or let the stack issue its own (`TLS_CERT_SOURCE=acme`).
+4. **Find a way to hold the name**, if you can: a maintenance page on the reverse proxy that answers every request for this hostname with a 503. It keeps webhook deliveries and logins from landing on either side mid-copy. Without one, stopping the old units is the hold, and anything that arrives in the window fails and is retried by its sender, or is lost.
+5. **Check the export fits.** The export streams to stdout, so it needs no space on the old host beyond the database snapshot, which sits in a scratch directory beside the databases and is deleted when the script exits.
+6. **Rehearse** (below), and time the rehearsal's stop-copy-start: that is the downtime to announce.
+
+## Rehearsal
+
+The rehearsal runs in a local Lima VM provisioned from `host/lima/istota.yaml`. It holds the production credentials, so it must not become a second live bot: it would poll the production Talk rooms and mailbox, answer users, and write into the production Nextcloud.
+
+1. On the old host, take an online export. Nothing is stopped and the update cron is not checked:
+
+   ```sh
+   ssh root@<old-host> /path/to/export-bare-metal.sh --namespace <ns> --no-stop > rehearsal.tar
+   ```
+
+   The export's `MANIFEST` records `mode=online`, and the import refuses such an export without `--rehearsal`: it is a copy of a bot that is still running.
+
+2. Point the rehearsal VM's rclone remote at a copy of the workspace, never at the production mount: `rclone sync` the users' folders into a scratch remote, and name that remote in the VM's `rclone.conf`.
+3. Set the VM up in local ingress first (`istota-stack setup` with `--ingress local`, or the management role), with `STORAGE=nextcloud` and that scratch remote. The import rewrites `config.toml` but not the stack's `.env` or `host.env`, so the VM's own ingress and storage have to match what the import is told: a VM left in another mode refuses to start on the imported config, and says why. Then unpack and import with `--rehearsal` and `--ingress local` (the import command is in step 6 of the cutover). If the config runs Claude Code and the image was built before the import, `istota-stack check-image` says so and names the `update` that rebuilds it. The import switches off every loop and delivery path that can reach a person or another service, each through a switch the daemon already reads, and prints each change. The list below is what it covers.
+4. Check the import: the printed config changes and rebase counts, `istota doctor` clean apart from what the withheld credentials explain and the `runtime.bare_metal_import` warning that names the copy as a rehearsal, the web UI logging in, and one task run by hand with `istota task`, which also confirms a `claude_code` brain runs on the token alone.
+5. Delete the rehearsal VM afterwards. It holds the master key and every user's data.
+
+### What a rehearsal import switches off
+
+In the written `config.toml`:
+
+| Switch | What it stops |
+|---|---|
+| `talk.enabled = false` | the Talk poller or signaling stream, posts to Talk rooms, room provisioning |
+| `email.enabled = false` | the IMAP poll, mail sends, the IMAP retention sweep |
+| `sms.enabled = false`, `whatsapp.enabled = false` | SMS and WhatsApp sends, the Baileys bridge and its pairing, request drains |
+| `sleep_cycle.enabled = false`, `channel_sleep_cycle.enabled = false` | the nightly memory passes, which call the model |
+| `scheduler.heartbeat_check_interval = 0` | every user's `HEARTBEAT.md`: shell commands, URL probes and their alerts |
+| `scheduler.tasks_file_poll_interval = 0` | `TASKS.md` files and briefing trigger files, which queue tasks |
+| `scheduler.shared_file_check_interval = 0` | accepting and moving files shared with the bot on the Nextcloud |
+| `scheduler.push_notification_sources = []` | the ntfy push when a long task finishes |
+| `developer.worktree_reap_enabled = false` | the worktree reaper, which fetches from each repository's remote |
+| `web.avatar_import_from_nextcloud = false` | avatar fetches from the Nextcloud |
+| `[[default_briefings]]` dropped, each `[[briefing_shared_blocks]]` `enabled = false` | briefings and shared blocks seeded from the config at start-up |
+
+An interval of 0 turns those three scheduler checks off; it does not run them every tick.
+
+In the imported database:
+
+| Rows | Change | What it stops |
+|---|---|---|
+| `scheduled_jobs` | `auto_disabled_at` set on every row | CRON.md jobs; the CRON.md sync never writes that column |
+| `scheduled_jobs`, `_module.*` rows | `enabled = 0` with `disabled_at` set | feeds polls, Garmin syncs and the money jobs; the module sync lifts the daemon's suspension after an hour but keeps a user's off switch |
+| `briefing_configs`, `shared_block_configs` | `enabled = 0` | every briefing and shared block |
+| `secrets` with `service = 'ntfy'` | deleted | ntfy pushes from heartbeats, job output, alerts and finished tasks |
+| `tasks` that are `pending`, `locked`, `running` or `pending_confirmation` | `cancelled` | the old host's queue at the moment of the online export |
+
+The credentials for every transport, for Google Workspace and for the forges are withheld: the Nextcloud app password, the email, SMS, WhatsApp and CalDAV credentials, the Google Workspace client secret, the Nextcloud OAuth client secret, and the GitLab and GitHub tokens. Each of their secrets files is written empty, including one `istota-stack setup` had already filled. The Baileys session is not copied either: the WhatsApp sidecar connects with whatever session it finds, whether or not `whatsapp.enabled` is set, and two connections on one session keep replacing each other. With those gone, the remaining start-up calls to the Nextcloud (user hydration, folder setup) cannot authenticate. Alerts from `doctor`, the loop watchdog and backups still go to each admin's alert route, which then reaches only the web bell.
+
+Two paths stay open and are yours to watch. A newer release can add a module job that the source's database did not hold; the module sync inserts it enabled. And a job added to a user's `CRON.md` between the export and the workspace copy is inserted by the CRON.md sync. Compare `!cron` against the export if the workspace copy was taken later. A task you run by hand still uses that user's stored credentials, such as a Karakeep key; a Google Workspace token cannot refresh without the withheld client secret.
+
+## Cutover
+
+Every step on the old host, on a reverse proxy and in DNS is a change to production. Read each one before running it.
+
+1. **Hold the public name**, if you have a maintenance page for it. Otherwise go on: step 3 stops the old units.
+2. **Disable the update cron** on the old host: comment out the line in `/etc/cron.d/<ns>-update`, or move the file out of `/etc/cron.d`. The export refuses while it is enabled, because the cron resets the checkout and restarts the units on any new commit, which would bring the old daemon back beside the new one.
+3. **Export.** As root on the old host:
+
+   ```sh
+   ssh root@<old-host> /path/to/export-bare-metal.sh --namespace <ns> > export.tar
+   ```
+
+   In this mode the script stops and disables `<ns>-scheduler`, `<ns>-web`, `<ns>-webhooks` and `<ns>-whatsapp-baileys`, and stops the devbox credential proxies. It then waits until no rclone VFS cache entry is marked `"Dirty"` (`--dirty-timeout`, ten minutes by default), stops and disables `mount-nextcloud`, and checks the cache again. A file still marked dirty after the unmount never reached Nextcloud and exists only in the old host's cache: the script refuses, and that file has to be copied up by hand before going on. Then it snapshots the databases as the service user and writes the tarball. Add `--with-browser-profile` to carry the logged-in browser sessions.
+
+   Both daemons must never run at once: they would read the same Talk rooms, mailbox and webhooks, and both would answer. The units are disabled as well as stopped so a reboot does not bring them back.
+
+4. **Copy the tarball** to the new VM and unpack it where only root and uid 10001 can read it:
+
+   ```sh
+   install -d -m 0700 -o 10001 -g 10001 /srv/app/istota/import
+   tar -xf export.tar -C /srv/app/istota/import
+   chown -R 10001:10001 /srv/app/istota/import
+   ```
+
+5. **Copy `rclone.conf`** to `/srv/app/istota/rclone.conf` if you have not, and re-run `provision.sh` so the mount unit is in place. The new mount runs as uid 10001, the daemon's uid in the container, so the workspace is writable from inside it.
+6. **Import**, with the stack stopped. `istota-stack import-bare-metal` refuses while any of the stack's containers is running, then runs the import in a one-shot container with the export read-only at `/import`, the secrets directory writable at `/secrets` and the config directory writable. Look at the plan first:
+
+   ```sh
+   istota-stack import-bare-metal /srv/app/istota/import --ingress <direct|proxied> --dry-run
+   ```
+
+   Then run the same command without `--dry-run`. Add `--emit-plan /data/config/import-plan.json` to get the rewritten config as an `istota apply` plan, in `/srv/app/istota/config`, so the variables of a config manager can start from what this install runs. The plan carries no credentials.
+
+   Exit codes: 0 done, or already imported; 1 refused, nothing written; 2 partial. A partial leaves `/data/.bare-metal-import.in-progress` naming the export, and re-running the same command with the same export finishes it. The import refuses a target whose database already holds tasks, since it replaces the database and the master key.
+
+7. **Fix each `CRON.md`** the report names, in the users' workspaces. `--rewrite-workspace` on the import does it for every user's bot directory (CRON.md, scripts, prompt files, playbooks), keeping a `.pre-migration` copy of each file it changes; `istota migrate workspace-paths` does the same afterwards. Lines naming an old path it has no mapping for are listed for you to fix by hand.
+8. **Start the stack**: `systemctl enable --now istota-stack`, then `istota doctor` through the VM's `istota` wrapper.
+9. **Point the name at the stack.**
+   - *Behind a reverse proxy:* change the address and port it forwards to for this hostname to the stack's `LISTEN_ADDR:LISTEN_PORT`, and the scheme from `https` to `http` (unless the stack serves TLS from files), then reload it.
+   - *Serving directly:* move the address to the new VM, or change the DNS record. In place, nothing moves, since the stack already answers on the old address.
+10. **Lift the maintenance page** if you set one, log in, and send the bot a message.
+11. **Delete `/srv/app/istota/import`.** It holds every credential and a copy of every database.
+
+### In place, on the old host
+
+The new shape can also be provisioned onto the bare-metal host itself, when it runs Debian 13. The state moves the same way. What changes is that both installs share one machine until the export, so rollback is a snapshot or full backup of the machine, taken before the window, rather than a stopped second host.
+
+Before the day, with the old install still running:
+
+1. **Check the disk.** The images take about 9 GB and their build cache several more, the unpacked export and the restored state volume take about twice the export's size, and the old install's directory stays until you are past rollback. Grow the disk first if that does not fit.
+2. **Write `host.env` and `.env` by hand** in `/srv/app/istota`, and copy the old service user's `rclone.conf` to `/srv/app/istota/rclone.conf`. The old host's nginx keeps 80 and 443 until the window. In `proxied` mode, pick a `LISTEN_PORT` it does not hold. In `direct` mode the stack needs 80 and 443 themselves, so stop and disable the old nginx in the window, after the export and before the stack starts. Do not run `istota-stack setup` here: it writes a `config.toml`, and with a config on disk an update or a reboot starts a second daemon beside the live one. `.env` takes the keys the wizard would own (`setup_wizard.stack_env_values`): `COMPOSE_PROJECT_NAME=istota`, `DOMAIN`, `ISTOTA_SECRETS_DIR=./secrets`, `NGINX_PUBLISH=<LISTEN_ADDR>:<LISTEN_PORT>:80`, `NGINX_PUBLISH_TLS=127.0.0.1::443`, `ISTOTA_WEB_INSECURE_COOKIES=0`, and `COMPOSE_PROFILES` naming what the install runs (`browser`, `location`, `whatsapp-baileys`, `signaling`).
+3. **Move any cron running `docker system prune -a` out of `/etc/cron.d`.** It removes every image no running container uses: all of the stack's until its first start, and afterwards the previous tag's, which `istota-stack rollback` needs. `istota-stack update` already keeps the current and previous tags' images and removes the rest.
+4. **Run `provision.sh` and `istota-stack update <tag>`** (`update --unsigned <tag>` for a tag that is not a signed release). `provision.sh` finds the old install's `mount-nextcloud.service`, which has the same name and path as the stack's, and leaves it alone while it is enabled or running: no unit replaced, no mountpoint chowned, nothing stopped. Everything else is provisioned. The update builds the images and does not start the stack, since there is no `config.toml` yet. The build reads no config, so the image has no Claude Code yet; step 9 below rebuilds it.
+
+In the window, after the cutover's steps 1 and 2:
+
+5. **Stop what the export does not.** The role's browser container and each devbox container restart on their own (`unless-stopped`) and the new stack publishes the browser's ports, so run `docker update --restart=no <ns>-browser devbox-<user>` and `docker stop` them. Then `docker rm` the devbox containers and `docker network rm <ns>-devbox-net`: the stack's devbox network has the same fixed subnet (`[devbox] network_subnet`, `172.30.0.0/24` by default), and Docker refuses an overlapping one. The home volumes stay. Move `/etc/cron.d/<ns>-browser-watchdog` and `/etc/cron.d/<ns>-backup` out of `/etc/cron.d` with the update cron.
+6. **Export straight into the import directory**, so the tarball never sits on the disk:
+
+   ```sh
+   install -d -m 0700 -o 10001 -g 10001 /srv/app/istota/import
+   set -o pipefail
+   /srv/app/istota/src/host/export-bare-metal.sh --namespace <ns> | tar -xf - -C /srv/app/istota/import
+   chown -R 10001:10001 /srv/app/istota/import
+   ```
+
+7. **Run `provision.sh` again.** The export disabled the old mount unit, so this run replaces it with the stack's, chowns the mountpoint to uid 10001, makes its parent reachable, and mounts it.
+8. **Import**, as step 6 of the cutover.
+9. **Rebuild and start**: `istota-stack update <tag>` with the same tag. Now that `config.toml` names a Claude Code brain, the build includes it, and with a config in place the update starts the stack. `istota-stack check-image` exits 0 when the image has what the config needs. Then continue from the cutover's step 9: behind a reverse proxy only its target port and scheme change, and serving directly nothing moves.
+
+Rollback is the snapshot. The old units, crons and directories stay on disk, disabled, until you are past the first real work on the new side. Then `istota-stack retire-bare-metal --namespace <ns> --dry-run` lists what the old role installed, and the same command without `--dry-run` removes it: the units, crons, scripts and sysctl, journald and tmpfiles files, `/etc/<ns>`, `/var/lib/<ns>`, the service user and its home under `/srv/app/<ns>`, its containers, volumes, networks and images, its host nginx site, and its ufw rule for the Docker range. It refuses while the stack is not running or any old unit is still enabled, and leaves alone what the stack took over under the same names (`mount-nextcloud.service`, the zram config).
+
+### Optional state
+
+- **Browser profile.** With `--with-browser-profile` the tarball holds `browser-profile/`. The import does not place it, because the daemon container does not mount the browser's volume. Copy it in with the stack stopped: `docker run --rm -v istota_browser_profile:/v -v /srv/app/istota/import/browser-profile:/src:ro debian:trixie-slim sh -c 'cp -a /src/. /v/'`, and give it the browser image's user. Without it, users sign in to their sites again.
+- **Devbox homes.** The repositories live in `repos_dir`, not in the devbox home, so this is optional. Copy a home with `docker run --rm -v <volume>:/v … tar` on each side.
+- **Baileys session.** The import copies it. Never run both WhatsApp sidecars at once, which is a replaced-connection loop; the old one is stopped by the export. Re-pairing on the new side is the alternative.
+
+## Rollback
+
+Until the new side has done real work, rolling back is: hold the name again if you can, stop the new stack, re-enable and start the old units and `mount-nextcloud`, re-enable the update cron, point the name back at the old host (the reverse proxy's target, the address or the DNS record), and lift the hold. The old host's state is as the export left it. In place, restoring the snapshot taken before the window does all of that at once.
+
+After the new side has done real work, going back loses it: answered messages, written rows, files written into the workspace from the new side's state. Take the first successful scheduled run on the new side as the point after which rollback means losing data. Keep the old host stopped, not deleted, until you are past it.

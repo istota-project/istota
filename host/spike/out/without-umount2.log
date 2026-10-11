@@ -1,0 +1,33 @@
+##### variant without-umount2
+overlays: overlay-setpcap.yml
+env: SPIKE_SECCOMP=/srv/istota-spike/profiles/without-umount2.json SPIKE_APPARMOR=unconfined SPIKE_BOUNDING=drop SPIKE_SKIP_CGROUP=1 SPIKE_DAEMON=1
+ Container istota-spike-istota-1 Started 
+applied: SecurityOpt=[seccomp={"defaultAction":"SCMP; no-new-privileges:true; apparmor=unconfined; ] CapAdd=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN] CapDrop=[ALL] ReadonlyRootfs=true CgroupnsMode=private AppArmorProfile=unconfined
+
+=== container start log ===
+[spike-root] uid=0 caps: CapPrm:	00000000002001c9 CapEff:	00000000002001c9 CapBnd:	00000000002001c9 
+[spike-root] dropping: setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all
+[spike-unpriv] uid=10001 gid=10001 groups=10001 caps: CapPrm:	0000000000000000 CapEff:	0000000000000000 CapBnd:	0000000000000000 
+[spike-unpriv] rendered /data/config/config.toml
+[spike-unpriv] istota init: ok
+[spike-unpriv] exec istota-scheduler --daemon
+
+=== bwrap as 10001 ===
+uid=10001 bwrap=bubblewrap 0.12.0
+CASE userns exit=1 stderr=bwrap: unmount old root: Operation not permitted stdout=
+CASE userns_proc_dev exit=1 stderr=bwrap: unmount old root: Operation not permitted stdout=
+CASE plan_shape exit=1 stderr=bwrap: unmount old root: Operation not permitted stdout=
+CASE unshare_net exit=1 stderr=bwrap: unmount old root: Operation not permitted stdout=
+CASE outside_net_control exit=0 stderr= stdout=connect ok|
+CASE syscalls_in_sandbox exit=1 stderr=bwrap: unmount old root: Operation not permitted stdout=
+CASE executor_bwrap_available exit=0 stderr=Sandbox skipped: bwrap namespace creation failed both without and with --unshare-user (kernel without unprivileged user namespaces, or a container blocking the syscall): bwrap: unmount old root: Operation not permitted / bwrap: unmount old root: Operation not permitted stdout=available False needs_unshare_user False|
+
+=== syscalls as 10001, outside bwrap ===
+uid=10001
+  bpf(BPF_MAP_CREATE, zeroed attr): EPERM
+  keyctl(GET_KEYRING_ID, session): EPERM
+  add_key(NULL type): EPERM
+  userfaultfd(O_CLOEXEC|USER_MODE_ONLY): EPERM
+  userfaultfd(O_CLOEXEC): EPERM
+  perf_event_open(NULL attr): EPERM
+  sysctl kernel.unprivileged_bpf_disabled=2 kernel.perf_event_paranoid=3 vm.unprivileged_userfaultfd=0

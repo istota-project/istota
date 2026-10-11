@@ -1,0 +1,124 @@
+##### variant main-setpcap-aa-istota
+overlays: overlay-setpcap.yml
+env: SPIKE_SECCOMP=draft SPIKE_APPARMOR=istota-spike-default SPIKE_BOUNDING=drop SPIKE_SKIP_CGROUP=0 SPIKE_DAEMON=1
+ Container istota-spike-istota-1 Started 
+applied: SecurityOpt=[seccomp={"defaultAction":"SCMP; no-new-privileges:true; apparmor=istota-spike-default; ] CapAdd=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN] CapDrop=[ALL] ReadonlyRootfs=true CgroupnsMode=private AppArmorProfile=istota-spike-default
+
+=== container start log ===
+[spike-root] uid=0 caps: CapPrm:	00000000002001c9 CapEff:	00000000002001c9 CapBnd:	00000000002001c9 
+[spike-root] cgroup mount before: root=/ type=cgroup2 opts=ro,nosuid,nodev,noexec,relatime
+[spike-root] remount,rw: ok
+[spike-root] cgroup mount after: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+[spike-root] controllers available: cpuset cpu io memory hugetlb pids rdma misc
+[spike-root] root subtree_control: cpu memory pids
+[spike-root] dropping: setpriv --reuid=10001 --regid=10001 --init-groups --inh-caps=-all --bounding-set=-all
+[spike-unpriv] uid=10001 gid=10001 groups=10001 caps: CapPrm:	0000000000000000 CapEff:	0000000000000000 CapBnd:	0000000000000000 
+[spike-unpriv] rendered /data/config/config.toml
+[spike-unpriv] istota init: ok
+[spike-unpriv] exec istota-scheduler --daemon
+
+=== daemon process (PID tree, found by cmdline) ===
+daemon pid=1 cmd='/app/.venv/bin/python /app/.venv/bin/istota-scheduler --daemon -c /data/config/c'
+  Uid: 10001	10001	10001	10001
+  Gid: 10001	10001	10001	10001
+  Groups: 10001
+  CapInh: 0000000000000000 [-]
+  CapPrm: 0000000000000000 [-]
+  CapEff: 0000000000000000 [-]
+  CapBnd: 0000000000000000 [-]
+  CapAmb: 0000000000000000 [-]
+  NoNewPrivs: 1
+  Seccomp: 2
+  Seccomp_filters: 1
+  apparmor: istota-spike-default (enforce)
+
+=== docker compose exec --user 10001:10001 ===
+self pid=161 cmd='python3 /spike/probes/procstatus.py self'
+  Uid: 10001	10001	10001	10001
+  Gid: 10001	10001	10001	10001
+  Groups: 10001
+  CapInh: 0000000000000000 [-]
+  CapPrm: 0000000000000000 [-]
+  CapEff: 0000000000000000 [-]
+  CapBnd: 00000000002001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP,SYS_ADMIN]
+  CapAmb: 0000000000000000 [-]
+  NoNewPrivs: 1
+  Seccomp: 2
+  Seccomp_filters: 1
+  apparmor: istota-spike-default (enforce)
+
+=== plain docker compose exec (no --user) ===
+self pid=167 cmd='python3 /spike/probes/procstatus.py self'
+  Uid: 0	0	0	0
+  Gid: 0	0	0	0
+  Groups: 0
+  CapInh: 0000000000000000 [-]
+  CapPrm: 00000000002001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP,SYS_ADMIN]
+  CapEff: 00000000002001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP,SYS_ADMIN]
+  CapBnd: 00000000002001c9 [CHOWN,FOWNER,SETGID,SETUID,SETPCAP,SYS_ADMIN]
+  CapAmb: 0000000000000000 [-]
+  NoNewPrivs: 1
+  Seccomp: 2
+  Seccomp_filters: 1
+  apparmor: istota-spike-default (enforce)
+
+=== bwrap as 10001 ===
+uid=10001 bwrap=bubblewrap 0.12.0
+CASE userns exit=0 stderr= stdout=
+CASE userns_proc_dev exit=0 stderr= stdout=
+CASE plan_shape exit=0 stderr= stdout=0|touch: cannot touch '/data/db/x': Read-only file system|     10001          0          1|
+CASE unshare_net exit=0 stderr= stdout=ifaces ['lo']|connect OSError 101|
+CASE outside_net_control exit=0 stderr= stdout=connect ok|
+CASE syscalls_in_sandbox exit=0 stderr= stdout=uid=10001|  bpf(BPF_MAP_CREATE, zeroed attr): EPERM|  keyctl(GET_KEYRING_ID, session): EPERM|  add_key(NULL type): EPERM|  userfaultfd(O_CLOEXEC|USER_MODE_ONLY): EPERM|  userfaultfd(O_CLOEXEC): EPERM|  perf_event_open(NULL attr): EPERM|  sysctl kernel.unprivileged_bpf_disabled=2 kernel.perf_event_pa
+CASE executor_bwrap_available exit=0 stderr= stdout=available True needs_unshare_user False|
+
+=== syscalls as 10001, outside bwrap ===
+uid=10001
+  bpf(BPF_MAP_CREATE, zeroed attr): EPERM
+  keyctl(GET_KEYRING_ID, session): EPERM
+  add_key(NULL type): EPERM
+  userfaultfd(O_CLOEXEC|USER_MODE_ONLY): EPERM
+  userfaultfd(O_CLOEXEC): EPERM
+  perf_event_open(NULL attr): EPERM
+  sysctl kernel.unprivileged_bpf_disabled=2 kernel.perf_event_paranoid=3 vm.unprivileged_userfaultfd=0
+
+=== cgroup as 10001 ===
+uid=10001 root=/sys/fs/cgroup
+mountinfo: root=/ type=cgroup2 opts=rw,nosuid,nodev,noexec,relatime
+/proc/self/cgroup: 0::/supervisor
+root listing: ['supervisor']
+subtree_control: 'cpu memory pids'
+resolve_root() (unpatched, no ISTOTA_TASK_CGROUP_ROOT arm yet): None
+probe(): OK
+create(): /sys/fs/cgroup/task-990001-1
+  memory.max = 67108864
+  pids.max = 64
+  cpu.max = 50000 100000
+256 MiB child under 64 MiB: returncode=-9 stdout=''
+  memory.events: {'low': 0, 'high': 0, 'max': 38, 'oom': 1, 'oom_kill': 1, 'oom_group_kill': 0}
+16 MiB child under 64 MiB: returncode=0 stdout='survived'
+destroy(): True
+
+=== misc as 10001 ===
+uid=10001
+secret /run/secrets/probe_secret: uid=0 gid=0 mode=644
+/proc/sys mount:  (absent line = part of /proc)
+write same value to /proc/sys/vm/swappiness: refused
+write same value to /proc/sys/kernel/core_pattern: refused
+/proc/sysrq-trigger: mode=200, writable=no
+write /app: refused
+write /usr: refused
+write /etc: refused
+docker.sock: none; DOCKER_HOST=unset
+
+=== misc as plain exec (uid 0) ===
+uid=0
+secret /run/secrets/probe_secret: uid=0 gid=0 mode=644
+/proc/sys mount:  (absent line = part of /proc)
+write same value to /proc/sys/vm/swappiness: refused
+write same value to /proc/sys/kernel/core_pattern: refused
+/proc/sysrq-trigger: mode=200, writable=yes
+write /app: refused
+write /usr: refused
+write /etc: refused
+docker.sock: none; DOCKER_HOST=unset

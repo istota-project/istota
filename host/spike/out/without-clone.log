@@ -1,0 +1,9 @@
+##### variant without-clone
+overlays: overlay-setpcap.yml
+env: SPIKE_SECCOMP=/srv/istota-spike/profiles/without-clone.json SPIKE_APPARMOR=unconfined SPIKE_BOUNDING=drop SPIKE_SKIP_CGROUP=1 SPIKE_DAEMON=1
+ Container istota-spike-istota-1 Started 
+applied: SecurityOpt=[seccomp={"defaultAction":"SCMP; no-new-privileges:true; apparmor=unconfined; ] CapAdd=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN] CapDrop=[ALL] ReadonlyRootfs=true CgroupnsMode=private AppArmorProfile=unconfined
+
+=== daemon never came up ===
+running=false exit=254
+istota-1  | /entrypoint.spike.sh: fork: Operation not permitted

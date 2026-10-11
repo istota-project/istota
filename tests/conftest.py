@@ -707,11 +707,9 @@ from testbed import profiles  # noqa: E402
 from testbed import stack as stack_support  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-LEAN_COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
-RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
-LEAN_PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
-FULL_COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
-TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
+#: The one compose file both shapes boot, plus `testbed/compose/testbed.yml`
+#: (and `nextcloud.yml` on the full shape), which `testbed.stack` names itself.
+COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
 
 LEAN_READY_TIMEOUT = 120
 
@@ -732,7 +730,7 @@ SERIAL_TIER_MARKERS = ("smoke", "full", "testbed", "deploy")
 #: missing here, which would have an incremental run building Docker images.
 DISCRETIONARY_MARKERS = (
     "integration", "live", "linux", "image", "smoke", "full", "testbed",
-    "deploy", "ml",
+    "deploy", "vm", "ml",
 )
 
 #: Every compose project these tiers create starts with it, which is what makes
@@ -761,7 +759,7 @@ DEFAULT_SCRIPT = [{"text": "the scripted answer"}]
 
 
 def lean_image_tag() -> str:
-    """One image tag per checkout, shared by every lean stack in the session.
+    """One image tag per checkout, shared by every stack in the session.
 
     Compose names a built image after the project, and the project is unique per
     stack so an interrupted run's containers are never adopted by the next
@@ -773,8 +771,8 @@ def lean_image_tag() -> str:
     `up --build` moves it out from under the first run's containers, mid-run.
     Same reasoning as `tests/image/conftest._tag_for`.
 
-    The full shape needs no equivalent. Its `build:` blocks name no `image:`, so
-    compose tags them `<project>-<service>` and each stack gets its own.
+    Both shapes run it: `testbed.yml` gives the daemon, web and webhooks
+    services this tag, and the pool builds it on the session's first boot.
     """
     digest = hashlib.sha256(str(REPO).encode()).hexdigest()[:8]
     return f"istota-test/lean:{digest}"
@@ -898,7 +896,7 @@ def _keep_scope() -> str:
     resolved path for the same reason: two worktrees sharing a kept volume set
     would each boot the other's half-provisioned Nextcloud.
     """
-    return hashlib.sha256(str(FULL_COMPOSE_FILE.resolve()).encode()).hexdigest()[:8]
+    return hashlib.sha256(str(COMPOSE_FILE.resolve()).encode()).hexdigest()[:8]
 
 
 def _report_boot_times(config, pool) -> None:
@@ -936,16 +934,18 @@ def stacks(pytestconfig, tmp_path_factory, _sweep_leftover_stacks, _measure_prob
     keep = bool(os.environ.get("ISTOTA_TESTBED_KEEP"))
     pool = stack_support.StackPool(
         workdir=tmp_path_factory.mktemp("testbed"),
-        lean=stack_support.LeanShape(
-            compose_file=LEAN_COMPOSE_FILE,
-            render_script=RENDER_CONFIG,
+        shape=stack_support.Shape(
+            compose_file=COMPOSE_FILE,
             image=lean_image_tag(),
-            prebuilt_overlay=LEAN_PREBUILT_OVERLAY,
             ready_timeout=LEAN_READY_TIMEOUT,
-        ),
-        full=stack_support.FullShape(
-            compose_file=FULL_COMPOSE_FILE,
-            overlay=TESTBED_OVERLAY,
+            # The negative controls (scripts/test-image-negative-control.sh)
+            # break the run contract with a compose overlay applied to every
+            # stack. Unset in every ordinary run.
+            extra_overlays=tuple(
+                Path(part)
+                for part in os.environ.get("ISTOTA_TESTBED_CONTROL_OVERLAYS", "").split(os.pathsep)
+                if part
+            ),
             keep=keep,
             # Outside the checkout, with the other machine-wide test state:
             # these are real generated passwords, and the repo's pre-commit hook
@@ -988,6 +988,8 @@ def stack(request, stacks):
     profile = profiles.by_name(name)
     if profile.name == profiles.NO_FORGE.name:
         profile = replace(profile, image=request.getfixturevalue("no_forge_image"))
+    if profile.name == profiles.BROWSER.name:
+        profile = replace(profile, browser_image=request.getfixturevalue("testbed_browser_image"))
 
     running = stacks.get(profile, fresh=fresh)
     script_marker = request.node.get_closest_marker("script")

@@ -163,6 +163,39 @@ class TestTheGate:
             not in _bind_sources(argv)
 
 
+class TestNoCredentialSocketDirectory:
+    """The sandbox half of parity row 11, in argv.
+
+    The credential proxy no longer authenticates a peer: user U's listener
+    answers as U whoever connects, because only U's devbox and the istota
+    container mount `devbox-cred-U`. That is sound only while no task sandbox
+    can reach any credential socket directory, so every authorization set is
+    checked, `developer` included, which is the one that does get the exec
+    socket.
+    """
+
+    @pytest.mark.parametrize("authorized", [set(), {"developer"}, {"email"}])
+    @pytest.mark.parametrize("is_admin", [True, False])
+    def test_no_bind_names_the_credential_socket_directory(
+        self, sandbox, tmp_path, authorized, is_admin
+    ):
+        config, task, _ = sandbox
+        cred_root = tmp_path / "devbox" / "cred"
+        for user in ("alice", "bob"):
+            (cred_root / user).mkdir(parents=True)
+            (cred_root / user / "sock").touch()
+        config.developer.devbox_proxy_socket_dir = str(cred_root)
+
+        argv = _argv(config, task, authorized, is_admin=is_admin)
+
+        root = str(cred_root.resolve())
+        assert not [
+            token for token in argv
+            if token == root or token.startswith(root + "/")
+        ], f"a credential socket path reached the sandbox argv under {authorized}"
+        assert str(cred_root) not in " ".join(argv)
+
+
 class TestTheDockerProxySocket:
     """Gone, in both directions, and that is the whole of this class.
 
@@ -187,7 +220,7 @@ class TestTheDockerProxySocket:
         config, task, _ = sandbox
         cli = tmp_path / "docker"
         cli.write_text("#!/bin/sh\n")
-        config.devbox = DevboxConfig(enabled=True, docker_cli=str(cli))
+        config.devbox = DevboxConfig(enabled=True)
 
         for authorized in ({"developer"}, {"email"}):
             argv = _argv(config, task, authorized)

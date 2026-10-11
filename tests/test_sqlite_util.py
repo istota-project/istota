@@ -922,7 +922,7 @@ class TestNoSecondCopy:
         it.** `testbed/probe.py` has two and cannot use this helper at all —
         that package deliberately imports nothing from `src/istota/`
         (`.claude/rules/testbed.md`) — and the `istota` healthchecks in
-        `docker/docker-compose.test.yml` and `testbed/compose/testbed.yml` open
+        `docker/docker-compose.yml` and `testbed/compose/testbed.yml` open
         the live framework database on an interval, so they do strand the pair.
         Harmless there rather than fixed: the image declares no `USER`, the
         compose services set no `user:`, and the entrypoint drops no privilege,

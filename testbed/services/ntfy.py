@@ -56,21 +56,14 @@ class NtfyService(HttpStub):
         """
         return self.container_url
 
-    def config_env(self) -> dict[str, str]:
+    def config(self) -> dict:
         """Nothing, and that is not an omission.
 
         ntfy is a *per-user connected service* held in the encrypted `secrets`
-        table, not a config block — the global `[ntfy]` block was retired, and
-        `ntfy_settings` resolves `server_url`, `topic` and the credentials per
-        user out of the store. So there is no `ISTOTA_NTFY_*` variable for
-        `render-config.sh` to read and none for this to return; the fixture
-        points the daemon here with `istota secret ensure` inside the container,
-        against `container_url`.
-
-        Said out loud because an empty `config_env` invites the reader to think
-        it was forgotten, and the two-file rule this method usually satisfies
-        (`render-config.sh` reads it *and* `docker-compose.yml` passes it
-        through) has nothing to check here.
+        table, not a config block — the global `[ntfy]` block was retired. So
+        there is no key for this to return; the fixture points the daemon here
+        with `istota secret ensure` inside the container, against
+        `container_url`.
         """
         return {}
 

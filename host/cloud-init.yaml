@@ -1,0 +1,97 @@
+#cloud-config
+# Bootstrap a Debian 13 server (a VM, a VPS or a bare-metal box) dedicated to
+# one istota install. Fill in the three values under "Fill in", then pass this
+# file as the machine's user data.
+#
+# What it does: clones the repository, verifies the release tag's signature
+# against the key below before running anything from it, checks the tag out,
+# and runs host/provision.sh from that checkout. Then, on the machine:
+#
+#   istota-stack update <tag>     # builds the images from the verified tag
+#   istota-stack setup            # the wizard: config.toml, secrets, host.env
+#   /srv/app/istota/src/host/provision.sh   # picks up host.env
+#   systemctl start istota-stack
+#
+# Nothing here is pulled from a registry: the images are built on the machine.
+
+write_files:
+  - path: /srv/app/istota/host.env
+    permissions: "0644"
+    content: |
+      # Fill in: the release signing key, one line of an SSH public key. Every
+      # tag `istota-stack update` deploys is verified against it.
+      RELEASE_SIGNING_KEY=ssh-ed25519 AAAA...replace-me releases
+  - path: /root/istota-bootstrap.sh
+    permissions: "0700"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      # Fill in: where to clone from, and the release tag to provision from.
+      REPO_URL="https://gitlab.com/cynium/istota.git"
+      TAG="vX.Y.Z"
+
+      SRC=/srv/app/istota/src
+      ALLOWED_SIGNERS=/srv/app/istota/allowed_signers
+      refuse_tag() { echo "[istota-bootstrap] REFUSE: $*" >&2; exit 65; }
+
+      # Copied from host/istota-stack, which is authoritative: nothing from the
+      # checkout may run before its tag is verified, so this cannot source it.
+      # tests/test_host_units.py holds the copy byte for byte equal to the original.
+      # --- release tags ------------------------------------------------------------
+
+      # git against the checkout, reading no configuration but this.
+      verified_git() {
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$SRC" \
+              -c gpg.format=ssh \
+              -c "gpg.ssh.allowedSignersFile=${ALLOWED_SIGNERS}" \
+              -c gpg.openpgp.program=false \
+              -c gpg.x509.program=false \
+              "$@"
+      }
+
+      check_tag_name() {
+          case "$1" in
+              ""|-*|*[!A-Za-z0-9._-]*|*..*) refuse_tag "'$1' is not a release tag name." ;;
+          esac
+      }
+
+      # Print the object id of a release tag that passes every check, or refuse.
+      verify_release_tag() {
+          local tag="$1" object kind named
+          check_tag_name "$tag"
+          if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
+              refuse_tag "${tag} is not a tag in the checkout. Only a signed release tag is deployed, never a branch or a commit."
+          fi
+          kind="$(verified_git cat-file -t "$object")"
+          if [ "$kind" != "tag" ]; then
+              refuse_tag "${tag} is a lightweight tag; a release tag is annotated and signed."
+          fi
+          named="$(verified_git cat-file tag "$object" | awk '/^tag / { print $2; exit } /^$/ { exit }')"
+          if [ "$named" != "$tag" ]; then
+              refuse_tag "the ref ${tag} points at a tag object named '${named}'."
+          fi
+          if ! verified_git cat-file tag "$object" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+              refuse_tag "${tag} carries no SSH signature."
+          fi
+          if [ ! -s "$ALLOWED_SIGNERS" ]; then
+              refuse_tag "${ALLOWED_SIGNERS} is missing or empty; provision.sh writes it from RELEASE_SIGNING_KEY."
+          fi
+          if ! verified_git verify-tag "$object" >/dev/null 2>&1; then
+              refuse_tag "${tag} is not signed by the key in ${ALLOWED_SIGNERS}."
+          fi
+          echo "$object"
+      }
+
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
+      key="$(sed -n 's/^RELEASE_SIGNING_KEY=//p' /srv/app/istota/host.env)"
+      # The file provision.sh writes from host.env, in the same form.
+      printf 'releases namespaces="git" %s\n' "$key" > "$ALLOWED_SIGNERS"
+      chmod 0644 "$ALLOWED_SIGNERS"
+      git clone --quiet --no-checkout "$REPO_URL" "$SRC"
+      object="$(verify_release_tag "$TAG")"
+      verified_git checkout --quiet --detach "${object}^{commit}"
+      ISTOTA_REPO_URL="$REPO_URL" "${SRC}/host/provision.sh"
+
+runcmd:
+  - [bash, /root/istota-bootstrap.sh]

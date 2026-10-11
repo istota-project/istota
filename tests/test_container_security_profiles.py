@@ -1,0 +1,364 @@
+"""The istota container's run contract, as files: two profiles and the compose lines.
+
+Three things are held here, and none of them needs a container.
+
+**The seccomp profile is Docker's default with two changes.** It is derived
+from the default profile Docker Engine 29.9.0 compiles in, vendored beside it,
+and differs in exactly two ways: one unconditional allow rule for the calls
+bubblewrap and the root phase's cgroup remount need (measured one at a time in
+the Stage 1 spike), and the removal of the default's `includes.caps:
+[CAP_SYS_ADMIN]` rule. Docker evaluates `includes.caps` against the
+container's configured capabilities, not the calling process's, so with
+`SYS_ADMIN` in `cap_add` for the root phase that rule would open `bpf`,
+`perf_event_open` and the new mount API to the dropped daemon and every
+sandbox. A change to either file is therefore a change this test reports.
+
+**The AppArmor profile is docker-default with the mount rules bwrap needs.**
+Rendered from moby/profiles' template at the same engine version, vendored
+beside it. The diff is compared line by line, comments aside.
+
+**Compose carries the contract, and the test overlays leave it alone.** The
+smoke and full tiers run the shipped file plus `testbed/compose/testbed.yml`
+(and `nextcloud.yml` on the full shape), so their witnesses speak for the
+shipped stack only while no overlay touches a line that decides the boundary.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+
+import pytest
+import yaml
+
+REPO = Path(__file__).resolve().parent.parent
+DOCKER = REPO / "docker"
+SECCOMP = DOCKER / "istota" / "seccomp-istota.json"
+SECCOMP_DEFAULT = DOCKER / "istota" / "seccomp-docker-default-29.9.0.json"
+APPARMOR = DOCKER / "istota" / "apparmor-istota"
+APPARMOR_DEFAULT = DOCKER / "istota" / "apparmor-docker-default-29.9.0"
+SHIPPED_COMPOSE = DOCKER / "docker-compose.yml"
+TEST_OVERLAYS = (
+    REPO / "testbed" / "compose" / "testbed.yml",
+    REPO / "testbed" / "compose" / "nextcloud.yml",
+)
+
+#: Measured in the Stage 1 spike by removing one name at a time. `setns`, which
+#: the spec's first list named, is not needed by bwrap 0.12.
+BWRAP_SYSCALLS = ["clone", "clone3", "mount", "pivot_root", "umount2", "unshare"]
+
+#: The denylist the profile must keep. Written out, not derived: a profile that
+#: lost one of these would derive a list without it.
+STILL_DENIED = (
+    "bpf", "keyctl", "add_key", "request_key", "perf_event_open", "userfaultfd",
+    "kexec_load", "kexec_file_load", "init_module", "finit_module",
+    "delete_module", "open_by_handle_at",
+)
+
+ROOT_PHASE_CAPS = {"CHOWN", "FOWNER", "SETUID", "SETGID", "SETPCAP", "SYS_ADMIN"}
+
+
+def _is_sysadmin_include(rule: dict) -> bool:
+    return (rule.get("includes") or {}).get("caps") == ["CAP_SYS_ADMIN"]
+
+
+def derive_seccomp(default: dict) -> dict:
+    profile = copy.deepcopy(default)
+    profile["syscalls"] = [r for r in profile["syscalls"] if not _is_sysadmin_include(r)]
+    profile["syscalls"].append(
+        {
+            "names": sorted(BWRAP_SYSCALLS),
+            "action": "SCMP_ACT_ALLOW",
+            "comment": (
+                "istota: bwrap namespace setup and the root phase's cgroup "
+                "remount; no capability condition"
+            ),
+        }
+    )
+    return profile
+
+
+class TestTheSeccompProfile:
+    @pytest.fixture(scope="class")
+    def shipped(self) -> dict:
+        return json.loads(SECCOMP.read_text())
+
+    def test_it_is_dockers_default_with_exactly_the_two_changes(self, shipped):
+        default = json.loads(SECCOMP_DEFAULT.read_text())
+        assert shipped == derive_seccomp(default)
+
+    def test_the_cap_sys_admin_rule_is_gone(self, shipped):
+        assert not [r for r in shipped["syscalls"] if _is_sysadmin_include(r)]
+
+    def test_the_default_action_still_refuses(self, shipped):
+        assert shipped["defaultAction"] == "SCMP_ACT_ERRNO"
+
+    @pytest.mark.parametrize("syscall", STILL_DENIED)
+    def test_the_denylist_survives(self, shipped, syscall):
+        # Allowed only where a capability nothing in the container holds after
+        # the drop would include it, and never unconditionally.
+        unconditional = [
+            r for r in shipped["syscalls"]
+            if r["action"] == "SCMP_ACT_ALLOW" and syscall in r["names"]
+            and not (r.get("includes") or {}).get("caps")
+        ]
+        assert not unconditional, f"{syscall} is allowed by {unconditional}"
+
+
+def _significant(text: str) -> list[str]:
+    """Rule lines: comment-only and blank lines dropped, `#include` kept."""
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or (stripped.startswith("#") and not stripped.startswith("#include")):
+            continue
+        out.append(stripped)
+    return out
+
+
+class TestTheAppArmorProfile:
+    REMOVED = {
+        "deny mount,",
+        "deny @{PROC}/sys/[^k]** w,  # deny /proc/sys except /proc/sys/k* (effectively /proc/sys/kernel)",
+    }
+    ADDED = {
+        "mount,",
+        "pivot_root,",
+        "deny @{PROC}/sys/[^ku]** w,  # deny /proc/sys except /proc/sys/k* and /proc/sys/u*",
+        "deny @{PROC}/sys/u[^s]** w,",
+        "deny @{PROC}/sys/user/[^m]** w,",
+        "deny @{PROC}/sys/user/max_[^u]** w,",
+        "deny @{PROC}/sys/user/max_u[^s]** w,  # leaves max_user_namespaces alone writable",
+    }
+
+    def test_it_is_docker_default_with_exactly_the_mount_changes(self):
+        default = _significant(APPARMOR_DEFAULT.read_text().replace("docker-default", "istota"))
+        shipped = _significant(APPARMOR.read_text())
+
+        assert set(default) - set(shipped) == self.REMOVED
+        assert set(shipped) - set(default) == self.ADDED
+        assert len(shipped) == len(set(shipped)), "a rule line is duplicated"
+
+    def test_the_profile_is_named_istota(self):
+        assert 'profile "istota" flags=(attach_disconnected,mediate_deleted) {' in APPARMOR.read_text()
+
+    def test_the_proc_writes_that_matter_stay_denied(self):
+        shipped = APPARMOR.read_text()
+        assert "deny @{PROC}/sysrq-trigger rwklx," in shipped
+        assert "deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w," in shipped
+
+
+def _service(compose_file: Path, name: str = "daemon") -> dict:
+    return yaml.safe_load(compose_file.read_text())["services"][name]
+
+
+def _volume_targets(service: dict) -> list[str]:
+    targets = []
+    for entry in service.get("volumes") or []:
+        if isinstance(entry, dict):
+            targets.append(str(entry.get("target", "")))
+        else:
+            parts = str(entry).split(":")
+            targets.append(parts[1] if len(parts) > 1 else parts[0])
+    return targets
+
+
+@pytest.fixture(scope="module")
+def daemon_service() -> tuple[Path, dict]:
+    return SHIPPED_COMPOSE, _service(SHIPPED_COMPOSE)
+
+
+@pytest.mark.parametrize("name", ["web"])
+class TestTheServicesWithNoRootPhase:
+    """web starts as uid 0 only to run `istota-drop`.
+
+    They had Docker's default capability set, no `no-new-privileges` and a
+    writable root, and web read the master key as root before the drop that
+    reads it anyway. Now: the drop's three capabilities and no other, the
+    drop first in the entrypoint, nothing written outside /data and /tmp.
+    """
+
+    def test_only_the_drops_capabilities(self, name):
+        service = _service(SHIPPED_COMPOSE, name)
+        assert service.get("cap_drop") == ["ALL"]
+        assert set(service.get("cap_add") or []) == {"SETUID", "SETGID", "SETPCAP"}
+        assert "no-new-privileges:true" in (service.get("security_opt") or [])
+
+    def test_the_root_filesystem_is_read_only(self, name):
+        service = _service(SHIPPED_COMPOSE, name)
+        assert service.get("read_only") is True
+        assert "/tmp" in (service.get("tmpfs") or [])
+        assert (service.get("environment") or {}).get("ISTOTA_CONFIG_PATH") == "/data/config/config.toml"
+
+    def test_the_drop_runs_before_anything_else(self, name):
+        entrypoint = _service(SHIPPED_COMPOSE, name)["entrypoint"]
+        assert entrypoint[0] == "istota-drop"
+        script = entrypoint[-1]
+        assert ".secret_key" not in script, "istota-secrets reads the master key after the drop"
+        assert "istota-drop" not in script and "ln -s" not in script
+
+
+class TestTheSessionCookie:
+    def test_it_is_secure_unless_an_operator_says_otherwise(self):
+        environment = _service(SHIPPED_COMPOSE, "web")["environment"]
+        assert environment["ISTOTA_WEB_INSECURE_COOKIES"] == "${ISTOTA_WEB_INSECURE_COOKIES:-0}"
+
+    @pytest.mark.parametrize("ingress", ["local", "proxied", "direct"])
+    def test_the_wizard_writes_secure_for_every_ingress(self, ingress):
+        from istota.setup_wizard import ContainerAnswers, stack_env_values
+
+        answers = ContainerAnswers(user_id="alice", ingress=ingress, hostname="localhost:8080")
+        assert stack_env_values(answers)["ISTOTA_WEB_INSECURE_COOKIES"] == "0"
+
+
+class TestTheRunContract:
+    def test_security_opt_is_the_grant_and_nothing_wider(self, daemon_service):
+        compose_file, service = daemon_service
+        opts = set(service.get("security_opt") or [])
+
+        assert opts == {
+            "seccomp=./istota/seccomp-istota.json",
+            "apparmor=istota",
+            "systempaths=unconfined",
+            "no-new-privileges:true",
+        }
+        assert (compose_file.parent / "istota" / "seccomp-istota.json").resolve() == SECCOMP
+
+    def test_capabilities_are_the_root_phase_set_only(self, daemon_service):
+        _, service = daemon_service
+        assert service.get("cap_drop") == ["ALL"]
+        assert set(service.get("cap_add") or []) == ROOT_PHASE_CAPS
+
+    def test_the_root_filesystem_is_read_only(self, daemon_service):
+        _, service = daemon_service
+        assert service.get("read_only") is True
+        assert "/tmp" in (service.get("tmpfs") or [])
+
+    def test_the_cgroup_namespace_is_private_and_unbound(self, daemon_service):
+        _, service = daemon_service
+        assert service.get("cgroup") == "private"
+        assert not [t for t in _volume_targets(service) if t.startswith("/sys")]
+
+    def test_no_user_line_the_entrypoint_drops(self, daemon_service):
+        # The root phase needs uid 0 for the remount and the ownership fix; the
+        # drop to 10001 is the entrypoint's, through `istota-drop`.
+        _, service = daemon_service
+        assert "user" not in service
+
+    def test_the_delegated_root_is_declared(self, daemon_service):
+        _, service = daemon_service
+        assert (service.get("environment") or {}).get("ISTOTA_TASK_CGROUP_ROOT") == "/sys/fs/cgroup"
+
+    def test_the_healthcheck_drops_before_it_opens_the_database(self, daemon_service):
+        # A healthcheck runs the way `docker exec` does: uid 0 with the cap_add
+        # set. Opening the database as root is how a root-owned sidecar locks
+        # the daemon out (ISSUE-458).
+        _, service = daemon_service
+        test = service["healthcheck"]["test"]
+        command = test[-1] if isinstance(test, list) else test
+        assert command.lstrip().startswith("istota-drop "), command
+        assert "name='tasks'" in command
+
+    def test_no_docker_socket(self, daemon_service):
+        _, service = daemon_service
+        assert not [t for t in _volume_targets(service) if "docker" in t or t in ("/run", "/var/run")]
+
+
+#: The keys of the `daemon` service that decide its boundary. An overlay the
+#: test tiers apply may not set one, or a witness would observe the overlay.
+CONTRACT_KEYS = (
+    "security_opt", "cap_add", "cap_drop", "read_only", "cgroup", "user",
+    "privileged", "entrypoint", "command", "tmpfs", "pid", "ipc", "network_mode",
+    "devices", "userns_mode",
+)
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    """Reads compose's merge tags (`!reset`, `!override`) as their plain value."""
+
+
+for _tag in ("!reset", "!override"):
+    _ComposeLoader.add_constructor(
+        _tag,
+        lambda loader, node: (
+            loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode)
+            else loader.construct_mapping(node) if isinstance(node, yaml.MappingNode)
+            else loader.construct_scalar(node)
+        ),
+    )
+
+
+def _overlay_services(overlay: Path) -> dict:
+    return yaml.load(overlay.read_text(), Loader=_ComposeLoader)["services"]
+
+
+def _overlay_daemon(overlay: Path) -> dict:
+    return _overlay_services(overlay).get("daemon", {})
+
+
+class TestTheTestOverlaysLeaveTheContractAlone:
+    @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
+    def test_no_overlay_names_the_service_by_its_old_name(self, overlay):
+        """An overlay keyed `istota` would add a second service rather than
+        touch the daemon, and the two tests below would pass on nothing."""
+        assert "istota" not in _overlay_services(overlay)
+
+    @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
+    def test_no_overlay_sets_a_contract_key_on_the_daemon(self, overlay):
+        service = _overlay_daemon(overlay)
+        assert not set(service) & set(CONTRACT_KEYS), sorted(set(service) & set(CONTRACT_KEYS))
+
+    @pytest.mark.parametrize("overlay", TEST_OVERLAYS, ids=lambda p: p.name)
+    def test_no_overlay_binds_anything_under_sys_or_a_docker_socket(self, overlay):
+        service = _overlay_daemon(overlay)
+        targets = _volume_targets(service)
+        assert not [t for t in targets if t.startswith("/sys") or "docker" in t], targets
+
+    def test_the_shipped_image_entrypoint_is_the_root_phase(self):
+        dockerfile = (DOCKER / "istota" / "Dockerfile").read_text()
+        assert 'ENTRYPOINT ["/usr/local/sbin/istota-root-phase", "/entrypoint.sh"]' in dockerfile
+
+
+class TestTheBrowserNetwork:
+    """Row 17's shape: the browser shares a network with the daemon only."""
+
+    @pytest.fixture(scope="class")
+    def compose(self) -> dict:
+        return yaml.safe_load(SHIPPED_COMPOSE.read_text())
+
+    @staticmethod
+    def _networks(service: dict) -> set[str]:
+        nets = service.get("networks") or ["default"]
+        return set(nets if isinstance(nets, list) else nets.keys())
+
+    def test_the_browser_is_on_its_own_network_only(self, compose):
+        assert self._networks(compose["services"]["browser"]) == {"browser"}
+
+    def test_the_daemon_joins_it_and_keeps_the_default(self, compose):
+        assert self._networks(compose["services"]["daemon"]) == {"default", "browser"}
+
+    def test_nothing_else_joins_it(self, compose):
+        joined = sorted(
+            name for name, service in compose["services"].items()
+            if name not in ("browser", "daemon") and "browser" in self._networks(service)
+        )
+        assert joined == []
+
+
+def test_every_service_on_the_data_volume_runs_as_the_daemon():
+    """A service that writes the data volume as root leaves files uid 10001
+    cannot read: the Baileys sidecar rewrote creds.json root-owned 0600 on a
+    migrated install's first start, and the daemon then read the session as
+    unpaired. Each such service drops through istota-drop, is the daemon
+    service (whose root phase drops), or names the uid itself."""
+    compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
+    for name, service in compose["services"].items():
+        volumes = [v if isinstance(v, str) else v.get("source", "") for v in service.get("volumes", [])]
+        if not any(str(v).split(":")[0] == "istota_data" for v in volumes):
+            continue
+        if name == "daemon":
+            continue
+        entrypoint = service.get("entrypoint") or []
+        drops = bool(entrypoint) and entrypoint[0] == "istota-drop"
+        assert drops or str(service.get("user")) == "10001:10001", name

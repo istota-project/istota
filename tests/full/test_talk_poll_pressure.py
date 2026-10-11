@@ -159,7 +159,7 @@ PROBE_POLL = textwrap.dedent(
 def _run_probe(stack, source: str, *argv: str) -> str:
     result = stack.exec(
         ["uv", "run", "python", "-c", source, *argv],
-        service="istota",
+        service="daemon",
         timeout=300,
     )
     assert result.returncode == 0, (

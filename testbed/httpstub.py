@@ -197,7 +197,7 @@ class HttpStub:
 
     # -- the `Service` members a stub gets for free -----------------------
 
-    def config_env(self) -> dict[str, str]:
+    def config(self) -> dict:
         """No configuration by default.
 
         A stub the daemon reaches through seeded DB rows or a secrets-store

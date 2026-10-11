@@ -300,16 +300,11 @@ features = []
 # nothing copies them off the host. An operator who cannot accept a credential
 # a task `cat`ed living there for the retention window sets `enabled = false`.
 #
-# DOCKER: these knobs are deliberately not operator-settable on the Docker
-# shape (the Ansible role does have a variable for each). There is no
-# ISTOTA_BRAIN_NATIVE_SESSION_LOG_* variable in
-# docker/istota/render-config.sh or docker/docker-compose.yml — a Docker
-# deployment runs the shipped defaults. render-config.sh writes
-# db_path = "/data/db/istota.db", so the directory resolves to /data/db/logs on
-# the istota_data volume, beside the framework database and behind the same
-# sandbox mask. Adding a knob means adding it to *both* files; a variable the
-# generator reads and compose never passes is silently ignored, which is the
-# documented defect class (ISTOTA_EMAIL_AUTHSERV_ID).
+# DOCKER: the container's config.toml is the operator's own (written once by
+# `istota setup`), so these keys are set there like any other. `istota setup`
+# writes db_path = "/data/db/istota.db", so the directory resolves to
+# /data/db/logs on the istota_data volume, beside the framework database and
+# behind the same sandbox mask.
 # [brain.native.session_log]
 # enabled = true                  # false = no new files; retention still sweeps existing ones
 # dir = ""                        # "" resolves to {db_path.parent}/logs — local disk,
@@ -609,10 +604,10 @@ auto_share_bot_dir = true
 # renders nothing unless it has both; this file is the one place you can write
 # the broken shape by hand.
 #
-# DOCKER: there is no ISTOTA_CALDAV_* variable in
-# docker/istota/render-config.sh or docker/docker-compose.yml, and that shape
-# re-renders config.toml on every boot — so a block added here by hand is gone
-# at the next restart. On Docker the calendar is the bundled Nextcloud's.
+# DOCKER: the container's `istota setup` offers this when there is no
+# Nextcloud, writing the url and username here and the password to the
+# stack's secrets/istota_caldav_password, which reaches the daemon as
+# ISTOTA_CALDAV_PASSWORD.
 #
 # `istota setup` offers this and writes the url and username here, with the
 # password in the sibling istota.env. The password has an
@@ -1619,11 +1614,19 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # [devbox]
 # enabled = false
 # container_prefix = "devbox-"         # container name = f"{prefix}{user_id}"
-# docker_cli = "/usr/bin/docker"       # host path to the Docker CLI. Used by the
-#                                      #   `reset` verb only — everything else speaks
-#                                      #   the exec transport over a Unix socket, and
-#                                      #   no Docker socket is bound into any sandbox.
 # max_output_bytes = 102400            # stdout/stderr cap per stream in the JSON envelope
+#
+# The rest is read by `istota devbox compose-file`, which renders one compose
+# service per user (the stack's compose.devbox.yml), and by the daemon, which
+# runs one credential-proxy listener per user. The bare-metal role renders its
+# own containers and leaves `users` empty.
+# users = []                           # e.g. ["alice"]; one devbox each
+# mem_limit = "4g"
+# cpus = 2.0
+# pids_limit = 512
+# log_max_size = "10m"
+# log_max_file = 3
+# network_subnet = "172.30.0.0/24"     # must match the VM's egress rules
 #
 # The socket directory is [developer.container] exec_socket_dir above, not a key
 # here: one spelling of /run/istota-exec in the tree, read by the skill CLI, the

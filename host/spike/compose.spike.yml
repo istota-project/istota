@@ -1,0 +1,45 @@
+# Stage 1 spike: the istota service's run contract from the spec ("The istota
+# container's run contract"), on the hand-patched image. Not shipped; Stage 2
+# moves the contract into docker/docker-compose.yml.
+#
+# Variants are overlays in this directory and environment values set by
+# run-probes.sh: SPIKE_SECCOMP (a profile path, or `unconfined`),
+# SPIKE_APPARMOR, SPIKE_BOUNDING, SPIKE_SKIP_CGROUP.
+name: istota-spike
+
+services:
+  istota:
+    image: istota-spike/istota-patched:latest
+    restart: "no"
+    security_opt:
+      - seccomp=${SPIKE_SECCOMP:-/srv/istota-spike/seccomp-istota.draft.json}
+      - systempaths=unconfined
+      - no-new-privileges:true
+      - apparmor=${SPIKE_APPARMOR:-docker-default}
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, SYS_ADMIN]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cgroup: private
+    environment:
+      SPIKE_BOUNDING: ${SPIKE_BOUNDING:-drop}
+      SPIKE_SKIP_CGROUP: ${SPIKE_SKIP_CGROUP:-0}
+      SPIKE_DAEMON: ${SPIKE_DAEMON:-1}
+    volumes:
+      - spike_data:/data
+      - spike_shared:/mnt/shared
+    secrets:
+      - source: probe_secret
+        target: probe_secret
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+
+secrets:
+  probe_secret:
+    file: ./secrets/probe_secret
+
+volumes:
+  spike_data:
+  spike_shared:

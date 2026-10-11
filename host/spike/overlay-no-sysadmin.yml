@@ -1,0 +1,5 @@
+# Variant: the root phase without CAP_SYS_ADMIN, to answer whether the cgroup
+# remount needs it and whether bwrap needs it.
+services:
+  istota:
+    cap_add: !override [CHOWN, FOWNER, SETUID, SETGID, SETPCAP]

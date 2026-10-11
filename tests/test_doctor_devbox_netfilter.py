@@ -598,3 +598,61 @@ class TestItIsWiredIn:
         command, so it belongs in the default run — a check that only fires
         under `--deep` would not be looked at on the host that needs it."""
         assert CHECK_NAME not in doctor.DEEP_CHECKS
+
+
+class TestTheStacksFunctionalProbe:
+    """With `[devbox] users` set (the stack), the daemon has no DOCKER-USER to
+    read, so it asks each devbox to connect out through the exec transport."""
+
+    @pytest.fixture
+    def config(self, tmp_path):
+        from istota.config import Config, ContainerConfig, DeveloperConfig
+
+        config = Config()
+        config.developer = DeveloperConfig(
+            enabled=True, repos_dir=str(tmp_path / "repos"),
+            container=ContainerConfig(exec_socket_dir=str(tmp_path / "exec")),
+        )
+        config.devbox = DevboxConfig(enabled=True, users=["alice", "bob"])
+        return config
+
+    def _answer(self, monkeypatch, exit_codes: dict[str, int] | None = None, error: str = ""):
+        asked: list[tuple[str, list[str]]] = []
+
+        def fake(socket_path, payload, timeout):
+            import json
+
+            request = json.loads(payload)
+            asked.append((str(socket_path), request["argv"]))
+            if error:
+                return [], error
+            target = request["argv"][-1].rsplit("/", 2)[-2]
+            return [{"type": "exit", "exit_code": (exit_codes or {}).get(target, 124)}], ""
+
+        monkeypatch.setattr(doctor, "_exec_transport_request", fake)
+        monkeypatch.setattr(doctor, "_run", lambda *a, **k: pytest.fail("iptables was read on the stack"))
+        return asked
+
+    def test_nothing_reachable_is_ok(self, config, monkeypatch):
+        asked = self._answer(monkeypatch)
+        result = doctor.check_devbox_netfilter(config, probe=True)
+        assert result.status == OK, result.detail
+        users = {path.split("/")[-2] for path, _ in asked}
+        assert users == {"alice", "bob"}
+        targets = {argv[-1] for _, argv in asked}
+        assert targets == {f"exec 3<>/dev/tcp/{h}/{p}" for h, p in doctor.DEVBOX_EGRESS_TARGETS}
+
+    def test_a_connection_that_opens_is_a_fail(self, config, monkeypatch):
+        self._answer(monkeypatch, {"169.254.169.254": 0})
+        result = doctor.check_devbox_netfilter(config, probe=True)
+        assert result.status == FAIL
+        assert "169.254.169.254:80" in result.detail
+
+    def test_an_unreachable_devbox_is_a_warn_not_an_ok(self, config, monkeypatch):
+        self._answer(monkeypatch, error="could not connect")
+        assert doctor.check_devbox_netfilter(config, probe=True).status == WARN
+
+    def test_no_probe_no_spawn(self, config, monkeypatch):
+        self._answer(monkeypatch, error="must not be called")
+        monkeypatch.setattr(doctor, "_exec_transport_request", lambda *a: pytest.fail("probed"))
+        assert doctor.check_devbox_netfilter(config, probe=False).status == SKIP

@@ -1,0 +1,13 @@
+##### variant main-spec-caps
+overlays: none
+env: SPIKE_SECCOMP=draft SPIKE_APPARMOR=docker-default SPIKE_BOUNDING=drop SPIKE_SKIP_CGROUP=0 SPIKE_DAEMON=1
+ Container istota-spike-istota-1 Started 
+
+=== daemon never came up ===
+running=false exit=32
+istota-1  | [spike-root] uid=0 caps: CapPrm:	00000000002000c9 CapEff:	00000000002000c9 CapBnd:	00000000002000c9 
+istota-1  | [spike-root] cgroup mount before: root=/ type=cgroup2 opts=ro,nosuid,nodev,noexec,relatime
+istota-1  | [spike-root] remount,rw failed: mount: /sys/fs/cgroup: permission denied.
+istota-1  |        dmesg(1) may have more information after failed mount system call.; trying umount + fresh cgroup2
+istota-1  | mount: /sys/fs/cgroup: permission denied.
+istota-1  |        dmesg(1) may have more information after failed mount system call.

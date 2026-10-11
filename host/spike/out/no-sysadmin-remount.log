@@ -1,0 +1,15 @@
+##### variant no-sysadmin-remount
+overlays: overlay-no-sysadmin.yml
+env: SPIKE_SECCOMP=draft SPIKE_APPARMOR=istota-spike-default SPIKE_BOUNDING=drop SPIKE_SKIP_CGROUP=0 SPIKE_DAEMON=1
+ Container istota-spike-istota-1 Started 
+applied: SecurityOpt=[seccomp={"defaultAction":"SCMP; no-new-privileges:true; apparmor=istota-spike-default; ] CapAdd=[CAP_CHOWN CAP_FOWNER CAP_SETGID CAP_SETPCAP CAP_SETUID] CapDrop=[ALL] ReadonlyRootfs=true CgroupnsMode=private AppArmorProfile=istota-spike-default
+
+=== container state ===
+running=false exit=32
+
+=== container log ===
+[spike-root] uid=0 caps: CapPrm:	00000000000001c9 CapEff:	00000000000001c9 CapBnd:	00000000000001c9 
+[spike-root] cgroup mount before: root=/ type=cgroup2 opts=ro,nosuid,nodev,noexec,relatime
+[spike-root] remount,rw failed: mount: /sys/fs/cgroup: permission denied.
+       dmesg(1) may have more information after failed mount system call.; trying umount + fresh cgroup2
+umount: /sys/fs/cgroup: must be superuser to unmount.

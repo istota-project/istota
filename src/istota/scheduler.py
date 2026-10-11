@@ -246,6 +246,14 @@ _shutdown_requested = False
 DAEMON_LOCK_PATH = Path("/tmp/istota-scheduler-daemon.lock")
 
 
+class SandboxUnavailable(RuntimeError):
+    """Raised at startup on Linux when ``sandbox_enabled`` cannot be honoured.
+
+    ``main()`` turns it into exit status 1, so a container restart loop shows
+    the reason rather than a daemon running every task unconfined.
+    """
+
+
 class _DaemonAlreadyRunning(RuntimeError):
     """Raised by ``run_daemon`` when the singleton flock is already held.
 
@@ -9613,6 +9621,7 @@ def build_interval_gates(
             name="briefing-triggers",
             run=_briefing_triggers,
             field="tasks_file_poll_interval",
+            enabled=lambda c: bool(c.scheduler.tasks_file_poll_interval),
             on_error="Error checking briefing triggers: %s",
         ),
         IntervalGate(
@@ -9675,6 +9684,7 @@ def build_interval_gates(
             name="shared-files",
             run=_shared_files,
             field="shared_file_check_interval",
+            enabled=lambda c: bool(c.scheduler.shared_file_check_interval),
             on_error="Error organizing shared files: %s",
             one_shot=True,
             one_shot_on_error="Error organizing shared files: %s",
@@ -9683,6 +9693,7 @@ def build_interval_gates(
             name="tasks-file-poll",
             run=_tasks_files,
             field="tasks_file_poll_interval",
+            enabled=lambda c: bool(c.scheduler.tasks_file_poll_interval),
             on_error="Error polling TASKS.md files: %s",
             one_shot=True,
             one_shot_on_error="Error polling TASKS.md files: %s",
@@ -9959,6 +9970,9 @@ def build_interval_gates(
             name="heartbeats",
             run=_heartbeats,
             field="heartbeat_check_interval",
+            # 0 is off, not every tick: a rehearsal import writes it so a
+            # copy of a live install runs nobody's HEARTBEAT.md.
+            enabled=lambda c: bool(c.scheduler.heartbeat_check_interval),
             background=True,
             overlap_expected=True,
             one_shot=True,
@@ -10317,6 +10331,68 @@ def _report_task_cgroups(config: Config) -> None:
         logger.warning("STARTUP Per-task cgroups: check failed: %s", e)
 
 
+def _report_sandbox_posture(config: Config) -> None:
+    """Say at startup whether tasks will be sandboxed, and refuse where they cannot be.
+
+    On Linux a sandbox that was asked for and cannot be built stops the daemon
+    (``SandboxUnavailable``): in the one deployment shape that means the
+    container lost its grant or the profile is too narrow, and a daemon that
+    carried on would run every task with its own filesystem access behind one
+    warning line, which is ISSUE-381. Compose restarts the container, so the
+    operator sees the loop and this reason in the log. Elsewhere (a macOS
+    development checkout) bubblewrap does not exist and the warning stands.
+    """
+    # Linux + bubblewrap is the only supported deployment configuration.
+    # Other configurations are for development only and provide no isolation guarantees.
+    from .executor import _bwrap_available
+    multi_user = len(config.users) > 1
+    if config.security.sandbox_enabled and not _bwrap_available():
+        if sys.platform.startswith("linux"):
+            reason = (
+                "sandbox_enabled but bubblewrap cannot create a namespace here, so "
+                "every task would run unsandboxed. In the container, check the "
+                "daemon service's security_opt (the seccomp and AppArmor profiles "
+                "and systempaths=unconfined); on a host, unprivileged user "
+                "namespaces. `istota doctor --only security.sandbox_effective` "
+                "names the failure."
+            )
+            logger.error("SECURITY %s", reason)
+            raise SandboxUnavailable(reason)
+        if multi_user:
+            logger.warning(
+                "SECURITY UNSUPPORTED CONFIGURATION: sandbox_enabled but bubblewrap unavailable "
+                "with %d users configured — no filesystem isolation between users. "
+                "Linux + bubblewrap is the only supported multi-user deployment.",
+                len(config.users),
+            )
+        else:
+            logger.warning(
+                "SECURITY Sandbox enabled but bubblewrap unavailable (single-user, dev-only configuration)"
+            )
+    elif config.security.sandbox_enabled:
+        logger.info("SECURITY Sandbox enabled with bubblewrap")
+    else:
+        if multi_user:
+            logger.warning(
+                "SECURITY UNSUPPORTED CONFIGURATION: sandbox_enabled=false with %d users configured — "
+                "no isolation between users. Linux + bubblewrap is the only supported multi-user deployment.",
+                len(config.users),
+            )
+        elif config.is_standalone:
+            # Intended single-user local posture (istota serve / setup), not a
+            # misconfiguration. Still visible so the trust model isn't hidden.
+            logger.info(
+                "SECURITY Standalone local install — no sandbox isolation. The "
+                "agent runs with your user account's full privileges (trusted "
+                "single-user posture). Only give it content and instructions you "
+                "trust."
+            )
+        else:
+            logger.warning(
+                "SECURITY Sandbox explicitly disabled — no isolation guarantees (dev-only configuration)"
+            )
+
+
 def run_daemon(
     config: Config,
     *,
@@ -10420,45 +10496,7 @@ def run_daemon(
     logger.info("STARTUP Email retention: %d days", config.scheduler.email_retention_days)
     logger.info("STARTUP Temp file retention: %d days", config.scheduler.temp_file_retention_days)
 
-    # Security status checks
-    # Linux + bubblewrap is the only supported deployment configuration.
-    # Other configurations are for development only and provide no isolation guarantees.
-    from .executor import _bwrap_available
-    multi_user = len(config.users) > 1
-    if config.security.sandbox_enabled and not _bwrap_available():
-        if multi_user:
-            logger.warning(
-                "SECURITY UNSUPPORTED CONFIGURATION: sandbox_enabled but bubblewrap unavailable "
-                "with %d users configured — no filesystem isolation between users. "
-                "Linux + bubblewrap is the only supported multi-user deployment.",
-                len(config.users),
-            )
-        else:
-            logger.warning(
-                "SECURITY Sandbox enabled but bubblewrap unavailable (single-user, dev-only configuration)"
-            )
-    elif config.security.sandbox_enabled:
-        logger.info("SECURITY Sandbox enabled with bubblewrap")
-    else:
-        if multi_user:
-            logger.warning(
-                "SECURITY UNSUPPORTED CONFIGURATION: sandbox_enabled=false with %d users configured — "
-                "no isolation between users. Linux + bubblewrap is the only supported multi-user deployment.",
-                len(config.users),
-            )
-        elif config.is_standalone:
-            # Intended single-user local posture (istota serve / setup), not a
-            # misconfiguration. Still visible so the trust model isn't hidden.
-            logger.info(
-                "SECURITY Standalone local install — no sandbox isolation. The "
-                "agent runs with your user account's full privileges (trusted "
-                "single-user posture). Only give it content and instructions you "
-                "trust."
-            )
-        else:
-            logger.warning(
-                "SECURITY Sandbox explicitly disabled — no isolation guarantees (dev-only configuration)"
-            )
+    _report_sandbox_posture(config)
     logger.info("SECURITY Skill proxy: %s", "enabled" if config.security.skill_proxy_enabled else "disabled")
     logger.info("SECURITY Network proxy: %s", "enabled" if config.security.network.enabled else "disabled")
     # Beside the sandbox lines rather than in a corner of its own: this is the
@@ -10628,6 +10666,12 @@ def run_daemon(
     if start_baileys_bridge(config):
         logger.info("STARTUP Started the WhatsApp Baileys bridge")
 
+    # One listener per `[devbox] users` entry, each answering as its user;
+    # the devbox reaches only its own through the per-user volume.
+    from .devbox.proxy import start_in_daemon as start_devbox_proxy
+    if start_devbox_proxy(config):
+        logger.info("STARTUP Started the devbox credential proxy listeners")
+
     if config.talk.enabled and config.talk.signaling.enabled:
         _start_talk_signaling(config)
         logger.info("STARTUP Started Talk signaling supervisor (poller not started)")
@@ -10789,8 +10833,8 @@ def main():
             logger.warning("--dry-run is ignored in daemon mode")
         try:
             run_daemon(config)
-        except _DaemonAlreadyRunning:
-            # Already logged an error inside run_daemon; exit cleanly.
+        except (_DaemonAlreadyRunning, SandboxUnavailable):
+            # Already logged an error inside run_daemon; exit without a traceback.
             raise SystemExit(1)
     else:
         processed = run_scheduler(config, max_tasks=args.max_tasks, dry_run=args.dry_run)

@@ -47,6 +47,10 @@ set -u
 
 SERVER=/usr/local/bin/istota-exec-serve
 
+# The server's exit status after it has answered a `restart` request.
+# `RESTART_EXIT_STATUS` in the exec protocol module; a test holds the two equal.
+RESTART_EXIT_STATUS=99
+
 # Constants, not settings. Design 6 names `/home/dev` as the directory to
 # repair and the server compiles the same path in as its own `--home` default,
 # so there is nothing here to configure and a recursive chown has a target
@@ -349,6 +353,14 @@ main() {
 
         if [ "$SHUTTING_DOWN" -eq 1 ]; then
             log "stopping: the server exited with status ${status}"
+            return 0
+        fi
+
+        # `devbox reset`: the server answered a `restart` request. Exiting takes
+        # the container down, and `restart: unless-stopped` brings it back, so
+        # a reset needs no Docker CLI anywhere.
+        if [ "$status" -eq "$RESTART_EXIT_STATUS" ]; then
+            log "restart requested over the exec transport; stopping the container"
             return 0
         fi
 

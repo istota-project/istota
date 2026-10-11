@@ -135,7 +135,6 @@ Set when `[devbox] enabled`. The exec socket directory is bound into a sandbox o
 | Variable | Source |
 |---|---|
 | `ISTOTA_DEVBOX_CONTAINER` | `{devbox.container_prefix}{user_id}` |
-| `ISTOTA_DEVBOX_DOCKER_CLI` | `config.devbox.docker_cli` |
 | `ISTOTA_DEVBOX_MAX_OUTPUT_BYTES` | `config.devbox.max_output_bytes` |
 
 There is deliberately **no** `ISTOTA_DEVBOX_EXEC_TIMEOUT`: the transport imposes no timeout, the task's own budget governs, and a caller wanting a kill passes `--timeout`. The exec protocol carries no `env` field either — a task's environment is never forwarded into the container, whose caches are set on the container itself.

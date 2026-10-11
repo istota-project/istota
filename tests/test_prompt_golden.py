@@ -327,9 +327,8 @@ class Case:
     """One golden. Everything not named here comes from the shared base."""
 
     name: str
-    #: "nextcloud" (a URL is configured) or "local" (the URL is the empty
-    #: string, which is what `render-config.sh` writes for the Nextcloud-free
-    #: install).
+    #: "nextcloud" (a URL is configured) or "local" (the URL is empty, the
+    #: dataclass default `istota setup` leaves for the Nextcloud-free install).
     backend: str = "nextcloud"
     admin: bool = True
     emissaries: bool = True
@@ -630,9 +629,9 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
 
     db.init_db(tmp_path / "framework.db")
 
-    # The empty string, not a missing key: `Config.storage_is_nextcloud` is
-    # `bool(self.nextcloud.url)`, and `render-config.sh` renders `url = ""` for
-    # the Nextcloud-free install (an *unset* NC_URL fails its preflight).
+    # Empty means local: `Config.storage_is_nextcloud` is
+    # `bool(self.nextcloud.url)`, and `istota setup` writes no `url` for the
+    # Nextcloud-free install.
     url = "https://cloud.example.test" if case.backend == "nextcloud" else ""
 
     return Config(

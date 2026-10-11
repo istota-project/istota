@@ -684,21 +684,19 @@ def fetch_forge_credentials(
         url = reply.get("url")
         return str(value), str(url) if isinstance(url, str) else ""
 
-    # Name the deployment shape, not the socket path. The path is a fact about
-    # this process's environment and tells the reader nothing about why it is
-    # missing; the shape is the actual answer, and the two shapes differ on
-    # purpose (ISSUE-282). Under Ansible a per-user `istota-devbox-proxy@`
-    # instance provides the socket; the docker-compose deployment ships no
-    # devbox at all, so forge commands in a container are unavailable there
-    # rather than broken.
+    # Name what provides the socket, not the socket path. The path is a fact
+    # about this process's environment and tells the reader nothing about why
+    # it is missing (ISSUE-282). In the stack the daemon runs one listener per
+    # `[devbox] users` entry and the devbox mounts its own; on the bare-metal
+    # role a per-user `istota-devbox-proxy@` unit does.
     raise NoProxyError(
         "no credential proxy: neither ISTOTA_SKILL_PROXY_SOCK (sandbox) nor "
-        "ISTOTA_CRED_SOCK (devbox) is set in this environment. The Ansible "
-        "deployment runs a per-user credential proxy for the devbox; the "
-        "docker-compose deployment ships no devbox at all, so forge commands "
-        "in a container are not available on that shape. Report this "
-        "rather than retrying — no retry finds a socket that is not "
-        "configured."
+        "ISTOTA_CRED_SOCK (devbox) is set in this environment. In the docker "
+        "compose stack istota runs a credential proxy for each user listed in "
+        "[devbox] users, and each devbox mounts its own socket; the Ansible "
+        "deployment runs one per user as a systemd unit. Without one, forge "
+        "commands in a container are not available. Report this rather than "
+        "retrying — no retry finds a socket that is not configured."
     )
 
 

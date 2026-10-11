@@ -10,7 +10,7 @@ pair cannot witness them.
 **Nothing points the daemon here through config.** A feed's URL is a row in the
 user's own `modules/testuser/feeds.db`, so the scenario subscribes through the
 shipped `feeds add` CLI — from inside a task, through the skill proxy, which is
-the path a deployment uses. `services/feeds.py::config_env` says the same thing
+the path a deployment uses. `services/feeds.py::config` says the same thing
 from the other side.
 
 Not here: `image_dedupe`. Its only caller is `feeds/routes.py`, the

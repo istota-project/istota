@@ -67,11 +67,32 @@ def _installed_version() -> str:
     return version_label(version=version)
 
 
+#: `istota init` refusing a database a newer release migrated. Distinct from 1,
+#: so `istota-stack rollback` can tell "this image cannot run that database"
+#: from any other failure.
+EXIT_SCHEMA_TOO_NEW = 3
+
+
+def _refuse_newer_schema(refusal) -> int:
+    print(
+        f"[istota] REFUSE: {refusal}. Run that release again, or restore a database "
+        "backup taken before it migrated.",
+        file=sys.stderr,
+    )
+    return EXIT_SCHEMA_TOO_NEW
+
+
 def cmd_init(args):
     """Initialize the database."""
     config = load_config(Path(args.config) if args.config else None)
+    if getattr(args, "check_schema", False):
+        refusal = db.check_schema_version(config.db_path)
+        return _refuse_newer_schema(refusal) if refusal is not None else 0
     config.db_path.parent.mkdir(parents=True, exist_ok=True)
-    db.init_db(config.db_path)
+    try:
+        db.init_db(config.db_path)
+    except db.SchemaTooNew as refusal:
+        return _refuse_newer_schema(refusal)
     print(f"Database initialized at {config.db_path}")
     _init_sync_operator_persona(config)
     _init_retire_user_personas(config)
@@ -344,8 +365,36 @@ def _default_env_file(args) -> Path:
     return Path.home() / ".config" / "istota" / "istota.env"
 
 
+def cmd_apply(args):
+    """Reconcile the config with a plan; 0 unchanged, 2 changed, 1 refused."""
+    from istota import apply
+
+    target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
+    if not target:
+        print(
+            "istota apply: name the config file to reconcile with -c "
+            "(or ISTOTA_CONFIG_PATH); nothing was written.",
+            file=sys.stderr,
+        )
+        return apply.EXIT_ERROR
+    return apply.run(
+        Path(args.file), Path(target), dry_run=args.dry_run,
+        out=print, err=lambda line: print(line, file=sys.stderr),
+    )
+
+
+def cmd_migrate(args):
+    """Reached only when a global option came first; `main` peels the usual form."""
+    print(
+        "istota migrate: put nothing before the verb, e.g. "
+        "`istota migrate import-bare-metal --help`.",
+        file=sys.stderr,
+    )
+    return 64
+
+
 def cmd_setup(args):
-    """Interactive first-run installer for the local single-user shape."""
+    """First-run installer: the container shape, or the standalone install."""
     from . import setup_wizard
 
     try:
@@ -1002,8 +1051,13 @@ def cmd_secret(args):
     if args.action == "ensure":
 
         value = args.value
+        if args.value_stdin:
+            if value is not None:
+                print("Error: pass --value or --value-stdin, not both", file=sys.stderr)
+                sys.exit(1)
+            value = _read_secret_stdin()
         if not value:
-            print("Error: --value is required for ensure", file=sys.stderr)
+            print("Error: --value or --value-stdin is required for ensure", file=sys.stderr)
             sys.exit(1)
         state = secrets_store.upsert_secret(
             db_path, args.user, args.service, args.key, value,
@@ -1030,6 +1084,19 @@ def cmd_secret(args):
         print(f"Secret remove for {args.user!r}: service={args.service} key={args.key}")
         print(f"STATE: {state}")
         return
+
+
+#: Above any credential the store holds; a bound, so a runaway pipe is refused.
+_SECRET_STDIN_LIMIT = 1 << 20
+
+
+def _read_secret_stdin() -> str:
+    """The whole of stdin less one line ending, as `--password-stdin` reads a line."""
+    value = sys.stdin.read(_SECRET_STDIN_LIMIT + 1)
+    if len(value) > _SECRET_STDIN_LIMIT:
+        print("Error: the value on stdin is over 1 MiB", file=sys.stderr)
+        sys.exit(1)
+    return value.removesuffix("\n").removesuffix("\r")
 
 
 def _cmd_secret_file(config, args) -> None:
@@ -3746,6 +3813,34 @@ def cmd_nextcloud_capabilities(args):
     print(json.dumps(caps_mod.summarize(payload, account), indent=2, default=str))
 
 
+def cmd_devbox_compose_file(args) -> int:
+    """Print the stack's devbox compose file to stdout.
+
+    Stdout, not a path: the config directory is read-only to the daemon, so
+    `istota-stack` writes the output on the host. Each user's repos directory is
+    created first (as the daemon's uid, through the exec path), because the
+    devbox mounts it as a `subpath` of the state volume and Docker refuses a
+    subpath that does not exist.
+    """
+    from istota.devbox import compose_file
+
+    config = load_config(Path(args.config) if args.config else None)
+    try:
+        text = compose_file.render_devbox_compose(config)
+        repos = compose_file.repos_dirs_to_create(config)
+    except compose_file.ComposeFileError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    for path in repos:
+        try:
+            Path(path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"Error: could not create {path}: {exc}", file=sys.stderr)
+            return 1
+    sys.stdout.write(text)
+    return 0
+
+
 def cmd_nextcloud_provision_rooms(args):
     """Create the user's default Talk rooms and seed their channel tokens.
 
@@ -4601,6 +4696,19 @@ def cmd_session_stats(args):
 
 
 def main():
+    # `istota migrate import-bare-metal …` belongs to the module, whose own
+    # `--config` names the file it writes rather than the one to load. Peeled
+    # off the raw argv before either parser can take an option from it.
+    argv = sys.argv[1:]
+    if argv[:2] == ["migrate", "import-bare-metal"]:
+        from istota.maintenance import bare_metal_import
+
+        sys.exit(bare_metal_import.main(argv[2:]))
+    if argv[:2] == ["migrate", "workspace-paths"]:
+        from istota.maintenance import workspace_paths
+
+        sys.exit(workspace_paths.main(argv[2:]))
+
     # `istota money <op> …` forwards operational commands verbatim to the money
     # Click tree. argparse REMAINDER can't capture a leading option (e.g.
     # `money list -u U`), so peel those off before the strict parse_args().
@@ -4633,11 +4741,42 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # apply
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Reconcile config.toml with a declarative plan (exit 0 unchanged, 2 changed, 1 refused)",
+    )
+    apply_parser.add_argument(
+        "-f", "--file", required=True,
+        help="The plan: TOML, or JSON when the name ends in .json. Its [config] table is the whole config.toml",
+    )
+    apply_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the diff and the exit code it would take; write nothing",
+    )
+
+    # migrate
+    migrate_parser = subparsers.add_parser("migrate", help="One-time migrations between deployment shapes")
+    migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_action", required=True)
+    migrate_subparsers.add_parser(
+        "import-bare-metal",
+        help="Import a bare-metal install's export (exit 0 done, 1 refused, 2 partial); see --help",
+    )
+    migrate_subparsers.add_parser(
+        "workspace-paths",
+        help="Rewrite a migrated install's old host paths in users' bot directories; see --help",
+    )
+
     # init
     init_parser = subparsers.add_parser("init", help="Initialize database")
     init_parser.add_argument(
         "--relocate-rooms", action="store_true",
         help="Migrate room identities and reconcile workspace files; stop all writers first",
+    )
+    init_parser.add_argument(
+        "--check-schema", action="store_true",
+        help=f"Only ask whether this release can run the database: exit 0, or "
+             f"{EXIT_SCHEMA_TOO_NEW} when a newer release migrated it. Writes nothing",
     )
     init_parser.add_argument(
         "--scheduler-stopped", action="store_true",
@@ -4689,7 +4828,7 @@ def main():
 
     # setup (interactive first-run installer for the local single-user shape)
     setup_parser = subparsers.add_parser(
-        "setup", help="Interactive first-run installer (local single-user install)",
+        "setup", help="First-run installer (the container, or a standalone install)",
     )
     setup_parser.add_argument("--workspace", help="Workspace directory (default ~/.istota)")
     setup_parser.add_argument(
@@ -4722,6 +4861,55 @@ def main():
     )
     setup_parser.add_argument("--yes", action="store_true", help="Non-interactive; take defaults + flags")
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
+    # The container half (the one deployment shape). Credentials for a --yes
+    # run come from the environment, under the names the daemon reads.
+    setup_parser.add_argument(
+        "--shape", choices=["standalone", "container"],
+        help="Which install to set up (default: container inside the image, else standalone)",
+    )
+    setup_parser.add_argument(
+        "--vm-dir", help="Also write the stack's .env, host.env and secrets/ here (container)",
+    )
+    setup_parser.add_argument("--data-dir", help="The state volume (container; default /data)")
+    setup_parser.add_argument("--bot-name", help="User-facing bot name (container)")
+    setup_parser.add_argument("--user-email", help="The first admin's email address (container)")
+    setup_parser.add_argument("--hostname", help="Public hostname browsers use (container)")
+    setup_parser.add_argument(
+        "--ingress", choices=["direct", "proxied", "local"], help="How the stack is reached (container)",
+    )
+    setup_parser.add_argument("--upstream-proxy", help="Proxied ingress: the upstream's address(es)")
+    setup_parser.add_argument("--listen-addr", help="Proxied ingress: the private address to listen on")
+    setup_parser.add_argument("--listen-port", type=int, help="Proxied ingress: the port to listen on")
+    setup_parser.add_argument(
+        "--tls-cert-source", choices=["acme", "files", "self-signed", "none"],
+        help="Certificate source: acme or files for direct ingress; self-signed, files or none for proxied",
+    )
+    setup_parser.add_argument("--nextcloud-url", help="Existing Nextcloud, as the stack reaches it")
+    setup_parser.add_argument("--nextcloud-public-url", help="The same Nextcloud, as browsers reach it")
+    setup_parser.add_argument("--nextcloud-user", help="The bot's Nextcloud user")
+    setup_parser.add_argument(
+        "--nextcloud-dav-prefix", help="Folder in the bot's files holding the workspace",
+    )
+    setup_parser.add_argument(
+        "--no-nextcloud-auto-share", action="store_true",
+        help="Do not share each user's bot folder back to them over OCS",
+    )
+    setup_parser.add_argument("--no-talk", action="store_true", help="Leave Nextcloud Talk off")
+    setup_parser.add_argument("--oauth-client-id", help="Nextcloud OAuth2 client id for web login")
+    setup_parser.add_argument(
+        "--no-email-login", action="store_true", help="Leave email sign-in off for the web UI",
+    )
+    setup_parser.add_argument("--imap-host", help="IMAP host (with --email)")
+    setup_parser.add_argument("--imap-user", help="IMAP user (with --email)")
+    setup_parser.add_argument("--smtp-host", help="SMTP host (with --email)")
+    setup_parser.add_argument("--bot-email", help="The bot's email address (with --email)")
+    setup_parser.add_argument("--caldav-url", help="CalDAV server, without Nextcloud (container)")
+    setup_parser.add_argument("--caldav-username", help="CalDAV username (with --caldav-url)")
+    setup_parser.add_argument("--developer", action="store_true", help="Enable the developer skill")
+    setup_parser.add_argument(
+        "--profile", action="append",
+        help="Compose profile to enable: browser, signaling, location, whatsapp-baileys (repeatable)",
+    )
 
     # serve (combined local launcher: scheduler + web in one process)
     serve_parser = subparsers.add_parser(
@@ -4880,6 +5068,10 @@ def main():
     secret_parser.add_argument(
         "--value",
         help="Secret value (ensure only). Use `secret remove` to clear.",
+    )
+    secret_parser.add_argument(
+        "--value-stdin", action="store_true",
+        help="Read the value from stdin instead, keeping it off the command line (ensure only)",
     )
 
     # email
@@ -5356,6 +5548,14 @@ def main():
     from istota import cli_money
     cli_money.add_subparser(subparsers)
 
+    # devbox (with subparsers)
+    devbox_parser = subparsers.add_parser("devbox", help="The per-user development containers")
+    devbox_subparsers = devbox_parser.add_subparsers(dest="devbox_action", required=True)
+    devbox_subparsers.add_parser(
+        "compose-file",
+        help="Print compose.devbox.yml: one devbox service per [devbox] users entry",
+    )
+
     # nextcloud (with subparsers)
     nc_parser = subparsers.add_parser("nextcloud", help="Nextcloud server operations")
     nc_subparsers = nc_parser.add_subparsers(dest="nextcloud_action", required=True)
@@ -5488,13 +5688,15 @@ def main():
                 "--reset-whatsapp-identity"
             )
 
-    # Load config and setup logging (except for init/setup which don't need — or
+    # Load config and setup logging (except for init/setup/apply, which don't need — or
     # may pre-date — a config file).
-    if args.command not in ("init", "setup"):
+    if args.command not in ("init", "setup", "apply", "migrate"):
         config = load_config(Path(args.config) if args.config else None)
         setup_logging(config, verbose=args.verbose)
 
     commands = {
+        "apply": cmd_apply,
+        "migrate": cmd_migrate,
         "init": cmd_init,
         "doctor": cmd_doctor,
         "task": cmd_task,
@@ -5579,6 +5781,13 @@ def main():
         chat_commands[args.chat_action](args)
     elif args.command == "money":
         rc = cli_money.dispatch(args, config)
+        if rc:
+            sys.exit(rc)
+    elif args.command == "devbox":
+        devbox_commands = {
+            "compose-file": cmd_devbox_compose_file,
+        }
+        rc = devbox_commands[args.devbox_action](args)
         if rc:
             sys.exit(rc)
     elif args.command == "nextcloud":

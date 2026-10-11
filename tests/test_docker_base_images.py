@@ -252,3 +252,42 @@ def test_the_negative_controls_take_their_base_as_an_argument() -> None:
                 "building FROM ${BASE}. A control has to inherit the image it "
                 "is a control for."
             )
+
+
+# The images each VM builds from a signed release tag (the one-deployment-shape
+# spec, Stage 6). A tag is only as reproducible as the bases it names, so every
+# `FROM` and `COPY --from` image in these is pinned by digest. The browser image
+# is vendored, and its base is pinned when upstream pins it; the test runners
+# under docker/test/ ship nothing.
+SHIPPED_DOCKERFILES = (
+    Path("docker/istota/Dockerfile"),
+    Path("docker/devbox/Dockerfile"),
+    Path("docker/whatsapp-baileys/Dockerfile"),
+)
+_COPY_FROM_RE = re.compile(r"^\s*COPY\s+--from=(?P<image>\S+)", re.IGNORECASE)
+_DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
+
+
+@pytest.mark.parametrize("rel", SHIPPED_DOCKERFILES, ids=str)
+def test_every_shipped_base_is_pinned_by_digest(rel: Path) -> None:
+    path = REPO / rel
+    lines = path.read_text().splitlines()
+    stages = {
+        line.split()[-1].lower()
+        for line in lines
+        if _FROM_RE.match(line) and " as " in line.lower()
+    }
+    images = [image for _, image in _from_images(path)]
+    for line in lines:
+        match = _COPY_FROM_RE.match(line)
+        if match and match.group("image").lower() not in stages:
+            images.append(match.group("image"))
+    assert images, f"{rel} names no image at all"
+    unpinned = [image for image in images if not _DIGEST.search(image)]
+    assert unpinned == [], f"{rel}: not pinned by digest: {unpinned}"
+
+
+def test_the_stacks_pulled_nginx_is_pinned_by_digest() -> None:
+    compose = (DOCKER / "docker-compose.yml").read_text()
+    images = re.findall(r"^\s*image:\s*(nginx\S*)\s*$", compose, re.M)
+    assert images and all(_DIGEST.search(image) for image in images), images

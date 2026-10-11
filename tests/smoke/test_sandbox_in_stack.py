@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.support import parity
+
 pytestmark = pytest.mark.smoke
 
 # One turn that runs a command, then one that answers with what it saw. The
@@ -46,7 +48,7 @@ SANDBOX_SCRIPT = [
 ]
 
 #: `db_path` is `/data/db/istota.db` on both container shapes
-#: (`render-config.sh:121`), so the directory `build_bwrap_cmd` masks is this.
+#: (`istota setup`, and so the testbed's base config), so the directory `build_bwrap_cmd` masks is this.
 #: `module_db_root()` derives as `{db_path.parent}/modules` and is therefore
 #: already covered — `_mask_dir` skips a candidate an earlier mask contains,
 #: because a nested mask makes bwrap fail every task rather than one directory.
@@ -57,8 +59,8 @@ CONTAINER_DB_DIR = "/data/db"
 # directory that is empty, and a path that is not in the namespace at all — and
 # the first version of this probe would have passed on the third.
 #
-# `stat -f -c %T` is the positive half. Unmasked, `/data/db` is the
-# `istota_test_db` named volume and reports `ext2/ext3`; masked it reports
+# `stat -f -c %T` is the positive half. Unmasked, `/data/db` is on the
+# `istota_data` named volume and reports `ext2/ext3`; masked it reports
 # `tmpfs`, because the mask *is* a tmpfs. So the probe fails loudly if the path
 # vanished (stat prints an error, and `fstype=` carries it into the assertion)
 # rather than reading an absence as a boundary.
@@ -162,6 +164,7 @@ class TestTheSandboxRunsInsideTheContainer:
         )
 
 
+@parity.witness(1)
 class TestTheDatabaseMasks:
     """The boundary, observed from inside a live task in the shipped artifact.
 
@@ -251,7 +254,7 @@ class TestTheDatabaseMasks:
 # --------------------------------------------------------------------------
 
 #: `temp_dir` is the literal `/data/tmp` on both container shapes
-#: (`render-config.sh:130`) and `Stack.submit` submits as `testuser`, so the
+#: (the testbed's base config) and `Stack.submit` submits as `testuser`, so the
 #: task temp dir — `ISTOTA_DEFERRED_DIR`, a read-write bind and therefore a
 #: `native_fs_roots` write root — is this. It is also the sandbox's `--chdir`
 #: target *on this stack*, which is a narrower claim than it looks:
@@ -698,11 +701,11 @@ class TestDoctorAnswersFromInsideTheStack:
     """Two registry checks, run by the shipped CLI in the shipped image.
 
     `security.sandbox_effective` is asserted **`ok`**, not `fail`, and the
-    positive direction is the point. Both container shapes carry
-    `seccomp:unconfined` *and* `systempaths=unconfined`
-    (`docker/docker-compose.test.yml`, `testbed/compose/testbed.yml`), so bwrap
-    genuinely works here; only the shipped `docker/docker-compose.yml`, which no
-    tier boots, produces the `FAIL` this check was added for. What that buys is
+    positive direction is the point. Every stack this tier boots is the shipped
+    `docker/docker-compose.yml`, which carries the sandbox grant (the shipped
+    seccomp and AppArmor profiles and `systempaths=unconfined`), so bwrap
+    genuinely works here; a stack without the grant refuses to start in the
+    root phase, which the row-1 negative control witnesses. What that buys is
     the tier's control that the check answers from a real namespace probe rather
     than from `security.sandbox_enabled` — the flag reads true on both stacks
     and on the shipped one, so a check reading the flag would say `ok` on all

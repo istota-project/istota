@@ -713,7 +713,6 @@ istota_browser_cdp_failure_window: 900  # seconds; a failure older than this no 
 istota_devbox_enabled: false
 istota_devbox_image: "istota-devbox:latest"
 istota_devbox_container_prefix: "devbox-"
-istota_devbox_docker_cli: "/usr/bin/docker"
 istota_devbox_max_output_bytes: 102400
 # Shared by all of one user's concurrent tasks, and the only limit on a build —
 # container processes sit in the container's cgroup, not the task's. An

@@ -27,12 +27,14 @@ import re
 
 import pytest
 
+from tests.support import parity
+
 pytestmark = pytest.mark.smoke
 
-#: `render-config.sh`: `workspace_path`, `temp_dir`, and the user and bot name
+#: the testbed's config: `workspace_path`, `temp_dir`, and the user and bot name
 #: the lean profile renders. Restated so a scenario reads as one thing; the
 #: control below fails if any of them is not where the daemon put it.
-WORKSPACE = "/mnt/shared"
+WORKSPACE = "/data/workspace"
 TEMP = "/data/tmp"
 USER = "testuser"
 BOT_DIR = "istota"
@@ -56,7 +58,8 @@ PRIVATE = "sr-private"
 SEED = f"""
 import json, sys
 from pathlib import Path
-from istota import db, room_policy
+from istota import db
+from istota.rooms import policy as room_policy
 from istota.config import load_config
 
 config = load_config(Path({CONFIG!r}))
@@ -244,6 +247,7 @@ class TestATaskNobodyAskedInTheRoom:
         assert facts["memory_readable"] == "no", report
 
 
+@parity.witness(1)
 class TestAGuestsTurn:
     @pytest.mark.script(SCRIPT)
     def test_it_reaches_no_workspace_and_no_group(self, shared_rooms):

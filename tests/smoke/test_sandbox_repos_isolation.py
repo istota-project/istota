@@ -43,6 +43,7 @@ from __future__ import annotations
 import pytest
 
 from testbed import profiles
+from tests.support import parity
 
 pytestmark = pytest.mark.smoke
 
@@ -201,6 +202,7 @@ def seeded(stack):
     stack.exec(["sh", "-c", f"rm -rf {OTHER_SUBTREE} {OWN_SUBTREE}/fake-venv"])
 
 
+@parity.witness(1)
 @pytest.mark.profile(profiles.FORGE.name)
 class TestAnotherUsersSubtree:
     @pytest.mark.script(REPOS_SCRIPT)

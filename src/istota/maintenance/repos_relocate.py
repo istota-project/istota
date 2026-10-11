@@ -151,6 +151,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from istota.maintenance.sandbox_cache_sweeper import CACHE_ROOT_NAME
 from istota.sandbox.git_hardening import run_git
 from istota.sandbox.git_remote_scrub import is_git_dir
 from istota.sandbox.user_scope import is_within, scoped_user_dir
@@ -488,6 +489,10 @@ def _git_dirs(
             notes.append(f"{directory}: could not be listed ({exc})")
             continue
         for entry in entries:
+            # A user's package cache holds no clone, only thousands of
+            # directories that each read as a subtree the walk could not see.
+            if depth == 0 and entry.name == CACHE_ROOT_NAME:
+                continue
             try:
                 if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
                     continue
@@ -1034,6 +1039,36 @@ def apply(plan: RelocatePlan) -> RelocateReport:
         failed=tuple(failed),
         marker_written=marker_written,
         notes=tuple(notes),
+    )
+
+
+def repair_after_copy(old_root: str | Path, new_root: str | Path) -> RelocateReport:
+    """Repair every worktree under ``new_root`` whose records still name ``old_root``.
+
+    For a tree copied whole to another root, as a bare-metal import does with
+    ``developer.repos_dir``: each top-level directory is treated as a namespace
+    an earlier run already moved, so the records are read from the copy and the
+    repair is the one :func:`apply` runs on a resume, preconditions included.
+    Never raises.
+    """
+    old = Path(old_root)
+    new = Path(new_root)
+    listing = _read_root(new)
+    if isinstance(listing, RelocateRefusal):
+        return RelocateReport(failed=(listing.message,))
+    repaired: list[str] = []
+    unrepaired: list[str] = []
+    notes = list(listing.notes)
+    for name in listing.namespaces:
+        repairs, repair_notes = _plan_repairs(name, old / name, new / name, clone_root=new / name)
+        notes.extend(repair_notes)
+        for repair in repairs:
+            got, missed, said = _run_repair(repair)
+            repaired.extend(got)
+            unrepaired.extend(missed)
+            notes.extend(said)
+    return RelocateReport(
+        repaired=tuple(repaired), unrepaired=tuple(unrepaired), notes=tuple(notes),
     )
 
 

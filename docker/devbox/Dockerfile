@@ -1,4 +1,4 @@
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -88,25 +88,23 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 # becomes permanently unreapable. Neither has an error message anywhere that
 # says "uid".
 #
-# The deploy passes the daemon's own uid and gid, read with `getent`. They
-# default to 1000 so a build with no args reproduces the image this recipe
-# built before they existed, exactly. Nothing is lost in distribution by
-# building per host: the Ansible role has always built this image on the
-# machine it runs on, and hashes the directory's contents to trigger a rebuild.
+# They default to 10001, the istota image's fixed daemon uid, so the stack's
+# devboxes (rendered by `istota devbox compose-file`, which passes 10001 as
+# well) match by construction. The Ansible role passes the bare-metal daemon's
+# own uid, read with `getent`. Nothing is lost in distribution by building per
+# host: every install builds this image on the machine it runs on.
 #
 # The uid is checked against the base image's own accounts first. Debian
 # allocates system uids from 100 upward and so does the istota role, so a
 # collision is reachable — and `useradd`'s own "UID 42 is not unique" arrives at
 # deploy time, in a build log, naming neither the arg nor the account it hit.
 #
-# One consequence is worth naming rather than discovering: the preflight also
-# refuses `DEV_UID=0`, which is the answer for a compose deployment, whose
-# istota service runs as root. Nothing here supports that yet — this ships bare
-# metal only — and reusing the existing root account rather than creating a
-# second one is a different recipe, not a different argument. The refusal is at
-# least loud, and it says which account it collided with.
-ARG DEV_UID=1000
-ARG DEV_GID=1000
+# The preflight also refuses `DEV_UID=0`: reusing the existing root account
+# rather than creating a second one is a different recipe, not a different
+# argument. The refusal is at least loud, and it says which account it
+# collided with.
+ARG DEV_UID=10001
+ARG DEV_GID=10001
 RUN set -eux; \
     if taken="$(getent passwd "${DEV_UID}")"; then \
         echo "DEV_UID=${DEV_UID} is already used by: ${taken}" >&2; \
@@ -147,7 +145,7 @@ RUN set -eux; \
 # container is exactly where they belong — and a task that wants them installs
 # them with rustup at the time. That install lands in /home/dev and dies with
 # the next reset, which is now the documented boundary rather than a surprise.
-COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 /uv /uvx /usr/local/bin/
 
 USER dev
 WORKDIR /home/dev
