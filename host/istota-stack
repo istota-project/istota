@@ -9,6 +9,8 @@
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
+#   istota-stack retire-bare-metal --namespace NS [--dry-run]
+#                               remove what the old Ansible role installed, once the stack runs
 #   istota-stack put-files [--dry-run]
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
 #   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
@@ -708,6 +710,120 @@ cmd_up() {
     fi
 }
 
+# --- retiring a bare-metal install --------------------------------------------
+
+# Everything below the old install's paths is read under this root, for the
+# tests; on a host it is empty.
+RETIRE_ROOT="${ISTOTA_RETIRE_ROOT:-}"
+RETIRE_DRY=""
+
+retire_run() {
+    log "  $*"
+    [ -n "$RETIRE_DRY" ] || "$@"
+}
+
+retire_path() {
+    local path="${RETIRE_ROOT}$1"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        retire_run rm -rf -- "$path"
+    fi
+}
+
+# Remove what the old Ansible role installed for namespace NS, once the stack
+# runs in its place: units, crons, scripts, its /etc and /var/lib directories,
+# the service user and its home, its containers, volumes, networks and images,
+# its host nginx site and its ufw rule for the Docker range. What the stack
+# took over under the same names (mount-nextcloud.service, zram) is left.
+cmd_retire_bare_metal() {
+    local ns="" unit name home domain line number
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --namespace) ns="${2:-}"; shift 2 || { usage >&2; exit 64; } ;;
+            --dry-run) RETIRE_DRY=1; shift ;;
+            *) usage >&2; exit 64 ;;
+        esac
+    done
+    case "$ns" in
+        ""|istota|*[!a-z0-9_-]*) die "--namespace takes the old install's plain name, and it is never istota." ;;
+    esac
+    systemctl is-active --quiet istota-stack.service \
+        || die "istota-stack.service is not active: retire the old install only once the stack runs in its place."
+    for unit in scheduler web webhooks whatsapp-baileys; do
+        if systemctl is-active --quiet "${ns}-${unit}.service" || systemctl is-enabled --quiet "${ns}-${unit}.service"; then
+            die "${ns}-${unit}.service is still enabled or running; the export stops and disables it. Nothing was removed."
+        fi
+    done
+
+    log "retiring ${ns}${RETIRE_DRY:+ (dry run, nothing removed)}:"
+    for unit in scheduler web webhooks whatsapp-baileys devbox-iptables; do
+        retire_path "/etc/systemd/system/${ns}-${unit}.service"
+    done
+    retire_path "/etc/systemd/system/${ns}-devbox-proxy@.service"
+    for name in update backup browser-watchdog; do
+        retire_path "/etc/cron.d/${ns}-${name}"
+    done
+    retire_path "/etc/logrotate.d/${ns}"
+    retire_path "/etc/systemd/journald.conf.d/99-${ns}.conf"
+    retire_path "/etc/tmpfiles.d/${ns}-devbox-proxy.conf"
+    retire_path "/etc/tmpfiles.d/${ns}-exec.conf"
+    retire_path "/etc/modules-load.d/${ns}-devbox.conf"
+    retire_path "/etc/sysctl.d/99-${ns}-sandbox.conf"
+    retire_path "/etc/sysctl.d/99-${ns}-devbox.conf"
+    for name in "${ns}" "${ns}-run" "${ns}-backup.sh" "${ns}-browser-watchdog" "${ns}-git-credential" "${ns}-update.sh"; do
+        retire_path "/usr/local/bin/${name}"
+    done
+    retire_path /usr/local/sbin/istota-devbox-iptables
+    retire_path "/etc/${ns}"
+    retire_path "/var/lib/${ns}"
+
+    domain="$(env_get "$HOST_ENV" DOMAIN)"
+    if [ -n "$domain" ] && [ -e "${RETIRE_ROOT}/etc/nginx/conf.d/${domain}.conf" ]; then
+        retire_path "/etc/nginx/conf.d/${domain}.conf"
+        if command -v nginx >/dev/null 2>&1; then
+            if [ -n "$RETIRE_DRY" ] || nginx -t >/dev/null 2>&1; then
+                retire_run systemctl reload-or-restart nginx.service
+            else
+                log "  nginx -t failed after removing the site; nginx was not reloaded"
+            fi
+        fi
+    fi
+
+    if command -v ufw >/dev/null 2>&1; then
+        # Highest number first: deleting a rule renumbers the ones after it.
+        ufw status numbered 2>/dev/null \
+            | grep -F "# Docker containers (${ns})" \
+            | sed -n 's/^\[ *\([0-9][0-9]*\)\].*/\1/p' | sort -rn \
+            | while read -r number; do retire_run ufw --force delete "$number"; done
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^${ns}-" \
+            | while read -r name; do retire_run docker rm -f "$name"; done
+        docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${ns}[-_]" \
+            | while read -r name; do retire_run docker volume rm "$name"; done
+        docker network ls --format '{{.Name}}' 2>/dev/null | grep -E "^${ns}[-_]" \
+            | while read -r name; do retire_run docker network rm "$name"; done
+        docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "^${ns}-" \
+            | while read -r name; do retire_run docker image rm "$name"; done
+    fi
+
+    line="$(getent passwd "$ns" || true)"
+    if [ -n "$line" ]; then
+        home="$(printf '%s' "$line" | cut -d: -f6)"
+        # Only the role's own layout: never the stack directory, never a home
+        # anywhere else.
+        if [ "$home" = "/srv/app/${ns}" ] && [ "$home" != "$STACK" ]; then
+            retire_run userdel "$ns"
+            retire_run groupdel "$ns" || true
+            retire_path "$home"
+        else
+            log "  the ${ns} user's home is ${home}, not /srv/app/${ns}: the user and its home are left"
+        fi
+    fi
+    retire_run systemctl daemon-reload
+    log "${ns} retired${RETIRE_DRY:+ (dry run: nothing was removed)}"
+}
+
 main() {
     local command="${1:-}"
     [ "$#" -gt 0 ] && shift
@@ -717,6 +833,7 @@ main() {
         setup) cmd_setup "$@" ;;
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
+        retire-bare-metal) cmd_retire_bare_metal "$@" ;;
         put-files) cmd_put_files "$@" ;;
         check-image) cmd_check_image "$@" ;;
         up) cmd_up ;;

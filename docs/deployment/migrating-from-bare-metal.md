@@ -175,7 +175,7 @@ In the window, after the cutover's steps 1 and 2:
 8. **Import**, as step 6 of the cutover.
 9. **Rebuild and start**: `istota-stack update <tag>` with the same tag. Now that `config.toml` names a Claude Code brain, the build includes it, and with a config in place the update starts the stack. `istota-stack check-image` exits 0 when the image has what the config needs. Then continue from the cutover's step 9: on the upstream only the port and the scheme change.
 
-Rollback is the snapshot. The old units, crons and directories stay on disk, disabled, until you are past the first real work on the new side; then delete `/srv/app/<ns>`, `/etc/<ns>`, the disabled units and crons, and the old images.
+Rollback is the snapshot. The old units, crons and directories stay on disk, disabled, until you are past the first real work on the new side. Then `istota-stack retire-bare-metal --namespace <ns> --dry-run` lists what the old role installed, and the same command without `--dry-run` removes it: the units, crons, scripts and sysctl, journald and tmpfiles files, `/etc/<ns>`, `/var/lib/<ns>`, the service user and its home under `/srv/app/<ns>`, its containers, volumes, networks and images, its host nginx site, and its ufw rule for the Docker range. It refuses while the stack is not running or any old unit is still enabled, and leaves alone what the stack took over under the same names (`mount-nextcloud.service`, the zram config).
 
 ### Optional state
 
