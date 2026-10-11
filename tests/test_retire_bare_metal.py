@@ -106,6 +106,7 @@ def host(tmp_path):
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "ISTOTA_RETIRE_ROOT": str(root),
         "ISTOTA_STACK_DIR": str(root / "srv/app/istota"),
+        "ISTOTA_MOUNT_DIR": str(root / "srv/mount/nextcloud/content"),
         "STUB_CALLS": str(calls),
         "LANG": "C.UTF-8",
     }
