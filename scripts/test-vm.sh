@@ -1,7 +1,7 @@
 #!/bin/bash
 # The vm tier: the stack as provisioned on a dedicated VM, in a Lima VM.
 #
-# Boots (or reuses) the Lima instance istota-vmtier-2 from host/lima/istota.yaml,
+# Boots (or reuses) the Lima instance istota-vm-1 from host/lima/istota.yaml,
 # deploys a signed snapshot of this checkout through `istota-stack update`, and
 # runs tests/vm/: parity rows 7, 9, 10, 11, 15, 18, 19 and 20, the halves of 12
 # and 17 Docker Desktop cannot see, the full Nextcloud integration over the

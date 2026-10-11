@@ -21,7 +21,7 @@ Variables:
 
 | Variable | Effect |
 |---|---|
-| `ISTOTA_VM_NAME` | the Lima instance (default `istota-vmtier-2`) |
+| `ISTOTA_VM_NAME` | the Lima instance (default `istota-vm-1`) |
 | `ISTOTA_VM_WORKDIR` | the release repository and signing key (default `~/.cache/istota-vmtier`) |
 | `ISTOTA_VM_KEEP_RUNNING` | `1` leaves the VM running after the session |
 | `ISTOTA_VM_MODEL_PORT` | the scripted model's port on the Mac (default 18731) |
