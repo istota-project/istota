@@ -189,13 +189,17 @@ import sys
 from pathlib import Path
 
 from istota.config import load_config
-from istota.maintenance.db_backup import backup_databases
+from istota.maintenance import db_backup
+
+# This runs the source's own code, which may predate record_last_run; every
+# release has _write_last_run, so silencing it keeps the install's clock.
+db_backup._write_last_run = lambda *args, **kwargs: None
 
 config = load_config(Path(sys.argv[1]))
 config.scheduler.db_backup_enabled = True
 config.scheduler.db_backup_dir = sys.argv[2]
 config.scheduler.db_backup_retention = 0
-results = backup_databases(config, record_last_run=False)
+results = db_backup.backup_databases(config)
 for result in results:
     print(f"[export-bare-metal]   {result['label']}: {result['status']}", file=sys.stderr)
 framework = [r for r in results if r["label"] == "framework" and r["status"] == "ok"]
