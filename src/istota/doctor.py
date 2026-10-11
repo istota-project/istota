@@ -470,12 +470,18 @@ def check_gws(config: "Config", probe: bool) -> CheckResult:
     gw = getattr(config, "google_workspace", None)
     if gw is None or not gw.enabled:
         return CheckResult(name, SKIP, "google_workspace is disabled", scope=IMAGE)
+    # The Ansible role installs gws in the daemon user's ~/.local/bin, which is
+    # on the scheduler unit's PATH but not the web unit's, and the admin Health
+    # pane runs this check in the web process.
     path = shutil.which("gws")
+    if path is None:
+        home_bin = Path.home() / ".local" / "bin" / "gws"
+        path = str(home_bin) if _executable(home_bin) else None
     if path is None:
         return CheckResult(
             name,
             FAIL,
-            "google_workspace is enabled but there is no `gws` on PATH",
+            "google_workspace is enabled but there is no `gws` on PATH or in ~/.local/bin",
             remedy="Install the pinned gws release, or disable [google_workspace].",
             scope=IMAGE,
         )

@@ -772,11 +772,20 @@ class TestGws:
         assert r.status == SKIP
         assert r.scope == IMAGE
 
-    def test_missing_gws_fails_when_enabled(self, make_config, monkeypatch):
+    def test_missing_gws_fails_when_enabled(self, make_config, tmp_path, monkeypatch):
         monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path))
         r = run_checks(self._gws_config(make_config), only=("runtime.gws",))[0]
         assert r.status == FAIL
         assert "gws" in r.detail
+
+    def test_finds_the_roles_install_off_path(self, make_config, tmp_path, monkeypatch):
+        """The role puts gws in ~/.local/bin, which the web unit's PATH lacks."""
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path))
+        _fake_bin(tmp_path / ".local" / "bin" / "gws", "gws 0.22.5")
+        r = run_checks(self._gws_config(make_config), only=("runtime.gws",))[0]
+        assert r.status == OK, r.detail
 
     def test_a_working_gws_passes(self, make_config, tmp_path, monkeypatch):
         _which_only(monkeypatch, "gws", _fake_bin(tmp_path / "bin" / "gws", "gws 0.22.5"))

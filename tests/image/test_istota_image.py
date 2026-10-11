@@ -380,6 +380,8 @@ class TestGroupBTheRuntime:
             "tmux -V",
             "sqlite3 --version",
             "uv --version",
+            "gitleaks git --help",
+            "gws --version",
             "git --version",
             "tesseract --version",
         ],
