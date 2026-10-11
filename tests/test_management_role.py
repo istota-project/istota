@@ -160,6 +160,8 @@ MODES = {
                          listen_addr="10.0.0.5", listen_port=8443, tls_cert_source=""),
     "proxied-files": dict(ingress="proxied", hostname="istota.example.com", upstream_proxy="192.0.2.10",
                           listen_addr="10.0.0.5", listen_port=8443, tls_cert_source="files"),
+    "proxied-self-signed": dict(ingress="proxied", hostname="istota.example.com", upstream_proxy="192.0.2.10",
+                                listen_addr="10.0.0.5", listen_port=8443, tls_cert_source="self-signed"),
     "nextcloud-browser": dict(ingress="local", hostname="localhost:8080",
                               nextcloud_url="https://cloud.example.com", profiles=("browser", "signaling")),
 }

@@ -94,6 +94,29 @@ bare_metal_mount_live() {
         || systemctl is-active --quiet mount-nextcloud.service 2>/dev/null
 }
 
+# The certificate a reverse proxy pins (INGRESS=proxied, TLS_CERT_SOURCE=
+# self-signed): made once and never replaced, since a new one breaks the pin.
+# Ten years, for the same reason; the proxy trusts this one certificate, not a
+# chain, so its lifetime is the only expiry there is.
+ensure_self_signed_cert() {
+    local dir="$1" domain="$2" addr="$3" names fingerprint
+    if [ ! -s "${dir}/fullchain.pem" ] || [ ! -s "${dir}/privkey.pem" ]; then
+        names="DNS:${domain}"
+        [ -n "$addr" ] && names="${names},IP:${addr}"
+        install -d -m 0755 "$dir"
+        (umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -days 3650 -subj "/CN=${domain}" -addext "subjectAltName=${names}" \
+            -keyout "${dir}/privkey.pem" -out "${dir}/fullchain.pem" 2>/dev/null)
+        chmod 0600 "${dir}/privkey.pem"
+        chmod 0644 "${dir}/fullchain.pem"
+        log "made a self-signed certificate for ${names} in ${dir}"
+    fi
+    fingerprint="$(openssl x509 -in "${dir}/fullchain.pem" -noout -fingerprint -sha256 | cut -d= -f2)"
+    log "the reverse proxy pins ${dir}/fullchain.pem (SHA-256 ${fingerprint}): copy that file to it,"
+    log "  forward to https://, and verify against it, e.g. in nginx: proxy_ssl_verify on;"
+    log "  proxy_ssl_trusted_certificate <the copy>; proxy_ssl_name ${domain}; (docs/deployment/docker.md)"
+}
+
 export DEBIAN_FRONTEND=noninteractive
 
 # --- Packages and Docker Engine ----------------------------------------------
@@ -102,7 +125,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt_install() { apt-get install -y -qq --no-install-recommends "$@" >/dev/null; }
 
 apt-get update -qq
-apt_install ca-certificates curl git python3 iptables apparmor apparmor-utils
+apt_install ca-certificates curl git python3 iptables apparmor apparmor-utils openssl
 
 if [ ! -f /etc/apt/sources.list.d/docker.sources ]; then
     install -m 0755 -d /etc/apt/keyrings
@@ -332,6 +355,10 @@ else
     rm -f "${dropin}/mount.conf"
     systemctl daemon-reload
     [ -n "$bare_metal_mount" ] || systemctl disable --now mount-nextcloud.service >/dev/null 2>&1 || true
+fi
+
+if [ "$(host_env INGRESS)" = "proxied" ] && [ "$(host_env TLS_CERT_SOURCE)" = "self-signed" ]; then
+    ensure_self_signed_cert "${STACK}/certs" "$(host_env DOMAIN)" "$(host_env LISTEN_ADDR)"
 fi
 
 # --- Firewall: devbox egress and the proxied listener ------------------------

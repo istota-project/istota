@@ -62,9 +62,9 @@ have_cert() {
 
 case "$TLS_CERT_SOURCE" in
     acme) TLS_CERT_DIR="/etc/nginx/certs/live/${DOMAIN}" ;;
-    files) TLS_CERT_DIR="/etc/nginx/certs" ;;
+    files|self-signed) TLS_CERT_DIR="/etc/nginx/certs" ;;
     "") ;;
-    *) refuse "TLS_CERT_SOURCE '${TLS_CERT_SOURCE}' is neither acme nor files." ;;
+    *) refuse "TLS_CERT_SOURCE '${TLS_CERT_SOURCE}' is not acme, files or self-signed." ;;
 esac
 export DOMAIN WEB_PORT NGINX_CLIENT_MAX_BODY_SIZE TLS_CERT_DIR
 
@@ -99,18 +99,20 @@ case "$INGRESS" in
             UPSTREAM_ALLOW="${UPSTREAM_ALLOW}allow ${entry}; "
         done
         case "$TLS_CERT_SOURCE" in
-            files)
-                have_cert || refuse "TLS_CERT_SOURCE=files and there is no fullchain.pem and privkey.pem in /srv/app/istota/certs."
+            files|self-signed)
+                have_cert || refuse "TLS_CERT_SOURCE=${TLS_CERT_SOURCE} and there is no fullchain.pem and privkey.pem in /srv/app/istota/certs (provision.sh makes the self-signed pair)."
                 PROXIED_LISTEN="listen 443 ssl default_server; include ${OUT}/tls.conf;"
                 ;;
             "") PROXIED_LISTEN="listen 80 default_server;" ;;
-            *) refuse "INGRESS=proxied takes certificates from files or none; ACME needs the public name to point here." ;;
+            *) refuse "INGRESS=proxied takes a self-signed certificate, files or none; ACME needs the public name to point here." ;;
         esac
         export PROXIED_LISTEN UPSTREAM_ALLOW
         render listen-proxied.conf >> "$CONF"
         ;;
     direct)
         [ -n "$TLS_CERT_SOURCE" ] || refuse "INGRESS=direct needs TLS_CERT_SOURCE (acme or files)."
+        [ "$TLS_CERT_SOURCE" != self-signed ] \
+            || refuse "TLS_CERT_SOURCE=self-signed is only behind a reverse proxy that pins it; a public client cannot."
         render direct-http.conf >> "$CONF"
         if have_cert; then
             render listen-direct.conf >> "$CONF"

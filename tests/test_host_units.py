@@ -13,6 +13,7 @@ from __future__ import annotations
 import configparser
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -399,6 +400,48 @@ class TestABareMetalInstallOnTheSameHost:
         """The role made /srv/mount/nextcloud 0770 root:nextcloud-mount; uid 10001 is
         in no such group, and fusermount refuses a mountpoint its user cannot reach."""
         assert 'chmod o+x "$(dirname "$MOUNT_DIR")"' in self.TEXT
+
+
+class TestTheSelfSignedCertificate:
+    """Proxied mode with TLS_CERT_SOURCE=self-signed: a certificate the reverse
+    proxy pins, made once on the VM and never replaced, since a new one breaks
+    the pin."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, certs, domain="istota.example.com", addr="10.0.0.5"):
+        function = re.search(r"^ensure_self_signed_cert\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines ensure_self_signed_cert"
+        return subprocess.run(
+            ["bash", "-c", f'log() {{ echo "$*"; }}\n{function.group(0)}\n'
+                           f'ensure_self_signed_cert "{certs}" "{domain}" "{addr}"'],
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def _x509(self, cert, *args):
+        return subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", *args],
+                              capture_output=True, text=True, check=True).stdout
+
+    @pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
+    def test_it_names_the_host_and_the_listen_address_and_keeps_the_key_private(self, tmp_path):
+        result = self._run(tmp_path)
+        assert result.returncode == 0, result.stderr
+        cert, key = tmp_path / "fullchain.pem", tmp_path / "privkey.pem"
+        names = self._x509(cert, "-ext", "subjectAltName")
+        assert "DNS:istota.example.com" in names and "IP Address:10.0.0.5" in names
+        assert key.stat().st_mode & 0o777 == 0o600
+        fingerprint = self._x509(cert, "-fingerprint", "-sha256").split("=", 1)[1].strip()
+        assert fingerprint in result.stdout
+
+    @pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
+    def test_an_existing_certificate_is_never_replaced(self, tmp_path):
+        assert self._run(tmp_path).returncode == 0
+        before = (tmp_path / "fullchain.pem").read_bytes()
+        assert self._run(tmp_path, domain="other.example.com").returncode == 0
+        assert (tmp_path / "fullchain.pem").read_bytes() == before
+
+    def test_provision_makes_it_only_for_proxied_self_signed(self):
+        assert 'if [ "$(host_env INGRESS)" = "proxied" ] && [ "$(host_env TLS_CERT_SOURCE)" = "self-signed" ]; then' in self.TEXT
 
 
 STACK_DIR = "/srv/app/istota"

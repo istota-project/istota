@@ -59,7 +59,7 @@ istota_host_env:
   STORAGE: "{{ istota_storage }}"
   INGRESS: "{{ istota_ingress }}"
   DOMAIN: "{{ istota_domain }}"
-  TLS_CERT_SOURCE: "{{ istota_tls_cert_source if istota_ingress == 'direct' else ('files' if istota_ingress == 'proxied' and istota_tls_cert_source == 'files' else '') }}"
+  TLS_CERT_SOURCE: "{{ istota_tls_cert_source if istota_ingress == 'direct' else (istota_tls_cert_source if istota_ingress == 'proxied' and istota_tls_cert_source in ['self-signed', 'files'] else '') }}"
   UPSTREAM_PROXY: "{{ istota_upstream_proxy if istota_ingress == 'proxied' else '' }}"
   LISTEN_ADDR: "{{ istota_listen_addr if istota_ingress == 'proxied' else '' }}"
   LISTEN_PORT: "{{ (istota_listen_port or 8080) if istota_ingress == 'proxied' else '' }}"
@@ -83,8 +83,8 @@ istota_stack_env:
   COMPOSE_PROFILES: "{{ istota_compose_profiles | join(',') }}"
   DOMAIN: "{{ istota_domain }}"
   ISTOTA_SECRETS_DIR: ./secrets
-  NGINX_PUBLISH: "{{ '80:80' if istota_ingress == 'direct' else (('127.0.0.1::80' if istota_tls_cert_source == 'files' else istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':80') if istota_ingress == 'proxied' else '127.0.0.1:' ~ (istota_domain.rpartition(':')[2] if istota_domain.rpartition(':')[2].isdigit() else '8080') ~ ':80') }}"
-  NGINX_PUBLISH_TLS: "{{ '443:443' if istota_ingress == 'direct' else (istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':443' if istota_ingress == 'proxied' and istota_tls_cert_source == 'files' else '127.0.0.1::443') }}"
+  NGINX_PUBLISH: "{{ '80:80' if istota_ingress == 'direct' else (('127.0.0.1::80' if istota_tls_cert_source in ['self-signed', 'files'] else istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':80') if istota_ingress == 'proxied' else '127.0.0.1:' ~ (istota_domain.rpartition(':')[2] if istota_domain.rpartition(':')[2].isdigit() else '8080') ~ ':80') }}"
+  NGINX_PUBLISH_TLS: "{{ '443:443' if istota_ingress == 'direct' else (istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':443' if istota_ingress == 'proxied' and istota_tls_cert_source in ['self-signed', 'files'] else '127.0.0.1::443') }}"
   ISTOTA_WEB_INSECURE_COOKIES: "0"
 
 # --- Deployment secrets ------------------------------------------------------

@@ -1615,13 +1615,18 @@ def render_container_config(a: ContainerAnswers, *, inline_credentials: bool) ->
 UNUSED_PUBLISH = "127.0.0.1::{port}"
 
 
+#: The certificate sources that terminate TLS on the proxied listener.
+#: `self-signed` is made once by provision.sh for the reverse proxy to pin.
+PROXIED_TLS_SOURCES = ("self-signed", "files")
+
+
 def tls_cert_source(a: ContainerAnswers) -> str:
     """Where nginx's certificate comes from: `acme` or `files` for `direct`,
-    `files` or nothing for `proxied`, nothing for `local`."""
+    `self-signed`, `files` or nothing for `proxied`, nothing for `local`."""
     if a.ingress == "direct":
+        return a.tls_cert_source if a.tls_cert_source in ("acme", "files") else "acme"
+    if a.ingress == "proxied" and a.tls_cert_source in PROXIED_TLS_SOURCES:
         return a.tls_cert_source
-    if a.ingress == "proxied" and a.tls_cert_source == "files":
-        return "files"
     return ""
 
 
@@ -1636,7 +1641,7 @@ def nginx_publish(a: ContainerAnswers) -> tuple[str, str]:
         return "80:80", "443:443"
     if a.ingress == "proxied":
         listen = f"{a.listen_addr}:{a.listen_port or 8080}"
-        if tls_cert_source(a) == "files":
+        if tls_cert_source(a) in PROXIED_TLS_SOURCES:
             return UNUSED_PUBLISH.format(port=80), f"{listen}:443"
         return f"{listen}:80", UNUSED_PUBLISH.format(port=443)
     _, _, port = a.hostname.rpartition(":")
@@ -1812,18 +1817,28 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
             _ask_port(input_fn, "Port to listen on", 8080, out=out) if interactive else 8080
         ))
         if interactive:
-            out("  The hop from the proxy to this VM is plain HTTP unless you set up")
-            out("  certificates here too; that is only acceptable on a network you control.")
+            out("  The hop from the proxy to this VM: self-signed encrypts it with a")
+            out("  certificate made here, which you pin in the proxy (provision.sh prints")
+            out("  how); files uses one you provide; none is plain HTTP, acceptable only")
+            out("  on a network nothing else shares.")
         # No ACME here: the public name points at the upstream, not this VM.
         source = flag("tls_cert_source")
         if source is None and interactive:
-            source = "files" if _ask_yes_no(
-                input_fn, "Terminate TLS here too, from certificate files?", False, out=out,
-            ) else ""
-        if source not in (None, "", "files"):
-            raise SetupError("Proxied ingress takes certificates from files or none, never ACME.")
+            source = _ask_choice(
+                input_fn, "TLS on the hop from the proxy", ("self-signed", "files", "none"),
+                "self-signed", out=out,
+            )
+        if source == "none":
+            source = ""
+        if source not in (None, "", *PROXIED_TLS_SOURCES):
+            raise SetupError("Proxied ingress takes a self-signed certificate, files or none, never ACME.")
         a.tls_cert_source = source or ""
     if a.ingress == "direct":
+        if flag("tls_cert_source") == "self-signed":
+            raise SetupError(
+                "A self-signed certificate is only for proxied ingress, behind a reverse proxy "
+                "that pins it; a public client cannot."
+            )
         a.tls_cert_source = _ask_choice(
             input_fn, "Certificates from", ("acme", "files"), "acme", out=out,
         ) if flag("tls_cert_source") is None and interactive else (flag("tls_cert_source") or "acme")

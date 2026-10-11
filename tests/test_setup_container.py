@@ -465,6 +465,38 @@ class TestWhatNginxPublishes:
         assert values["NGINX_PUBLISH_TLS"] == "10.0.0.20:8080:443"
         assert _env(render_host_env(a))["TLS_CERT_SOURCE"] == "files"
 
+    def test_proxied_with_a_self_signed_certificate_publishes_the_tls_slot(self):
+        a = _full_answers(tls_cert_source="self-signed")
+        values = _env(render_stack_env(a))
+
+        assert values["NGINX_PUBLISH"] == "127.0.0.1::80"
+        assert values["NGINX_PUBLISH_TLS"] == "10.0.0.20:8080:443"
+        assert _env(render_host_env(a))["TLS_CERT_SOURCE"] == "self-signed"
+
+    def test_a_self_signed_certificate_is_only_for_proxied(self):
+        """A public client cannot pin a certificate it was never given."""
+        a = _full_answers(ingress="direct", tls_cert_source="self-signed")
+        assert _env(render_host_env(a))["TLS_CERT_SOURCE"] != "self-signed"
+        args = SimpleNamespace(
+            yes=True, user="alice", hostname="bot.example.test", ingress="direct",
+            tls_cert_source="self-signed",
+        )
+        with pytest.raises(setup_wizard.SetupError, match="reverse proxy"):
+            setup_wizard.collect_container_answers(
+                args, input_fn=input, out=lambda *_: None, getpass_fn=None,
+            )
+
+    def test_proxied_takes_self_signed_from_the_flag(self):
+        args = SimpleNamespace(
+            yes=True, user="alice", hostname="bot.example.test", ingress="proxied",
+            upstream_proxy="10.0.0.5", listen_addr="10.0.0.20", listen_port=8080,
+            tls_cert_source="self-signed",
+        )
+        a = setup_wizard.collect_container_answers(
+            args, input_fn=input, out=lambda *_: None, getpass_fn=None,
+        )
+        assert setup_wizard.tls_cert_source(a) == "self-signed"
+
     def test_local_publishes_loopback_at_the_hostnames_port(self):
         a = _full_answers(ingress="local", hostname="localhost:8282")
         values = _env(render_stack_env(a))

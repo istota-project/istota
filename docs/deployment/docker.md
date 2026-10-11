@@ -223,12 +223,34 @@ The compose `nginx` is the only listener the stack publishes. The mode is `INGRE
 | `INGRESS` | nginx listens on | TLS |
 |---|---|---|
 | `local` (the default) | loopback | none |
-| `proxied` | one private address (`LISTEN_ADDR:LISTEN_PORT`), allowing only `UPSTREAM_PROXY` | none on the hop by default, or a certificate from files |
+| `proxied` | one private address (`LISTEN_ADDR:LISTEN_PORT`), allowing only `UPSTREAM_PROXY` | on the hop from the proxy: a self-signed certificate the proxy pins (`TLS_CERT_SOURCE=self-signed`), a certificate from files, or none |
 | `direct` | ports 80 and 443 on every address | a certificate from certbot on the VM (`TLS_CERT_SOURCE=acme`) or from files |
 
 `docker/nginx/istota-ingress.sh` renders the server blocks for the mode around the one location template, `istota.conf.template`, before nginx starts, and refuses a mode it cannot render (proxied with no upstream address, for one). In `direct` mode, before the first certificate exists, nginx serves only the ACME challenge and the redirect on port 80; `istota doctor`'s `web.tls` reports FAIL until the certificate is there. The published ports are `NGINX_PUBLISH` and `NGINX_PUBLISH_TLS` in `.env`, which the wizard writes per mode.
 
 Behind TLS (`direct` and `proxied`) the entrypoint refuses to start when `[site] hostname` and the stack's `DOMAIN` differ, since every login would then fail its origin check.
+
+### Encrypting the hop from a reverse proxy
+
+In `proxied` mode the reverse proxy terminates the public TLS and forwards to the VM. What crosses that hop is everything: passwords at login, session cookies, OAuth codes, and webhook payloads (messages, location points). Plain HTTP there is acceptable only on a network nothing else shares. Otherwise encrypt it, and make the proxy check what it connects to. A certificate the proxy does not verify stops only passive reading: anyone who can redirect the traffic presents their own certificate and the proxy accepts it.
+
+`TLS_CERT_SOURCE=self-signed` (the wizard's default for `proxied`) does both. `provision.sh` makes a certificate once, in `/srv/app/istota/certs/`, naming `DOMAIN` and `LISTEN_ADDR`, valid for ten years, and never replaces it, since a new one would break the pin; it prints the SHA-256 fingerprint on every run. nginx then listens with TLS on `LISTEN_ADDR:LISTEN_PORT`. Copy `fullchain.pem` to the proxy and make it trust that certificate alone for this upstream:
+
+- nginx:
+
+  ```nginx
+  proxy_pass https://<LISTEN_ADDR>:<LISTEN_PORT>;
+  proxy_ssl_verify on;
+  proxy_ssl_trusted_certificate /etc/nginx/istota-upstream.pem;
+  proxy_ssl_name <DOMAIN>;
+  proxy_ssl_server_name on;
+  ```
+
+- Caddy: `reverse_proxy https://<LISTEN_ADDR>:<LISTEN_PORT>` with a `transport http { tls_trust_pool file /etc/caddy/istota-upstream.pem  tls_server_name <DOMAIN> }` block.
+- HAProxy: `server istota <LISTEN_ADDR>:<LISTEN_PORT> ssl verify required ca-file /etc/haproxy/istota-upstream.pem verifyhost <DOMAIN> sni str(<DOMAIN>)`.
+- Traefik: a `serversTransport` with `rootCAs` naming the file and `serverName: <DOMAIN>`, referenced by the service.
+
+To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `provision.sh`, copy the new `fullchain.pem` to the proxy and reload it, then restart the stack. `TLS_CERT_SOURCE=files` is the same listener with a certificate you provide, for a proxy that verifies against an internal CA instead.
 
 ## Volumes
 
