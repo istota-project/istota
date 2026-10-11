@@ -65,7 +65,7 @@ A web export, recovery reveal, backup recipient change, history restore or purge
 
 Ansible stores it in `/etc/<namespace>/secrets.env`. Docker uses `/data/.secret_key` unless the environment supplies the key. A standalone installation uses `istota.env` beside its configuration. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
 
-An age credential backup is an independent recovery path: decrypt it with the private age key you keep elsewhere, then open its KeePass file with the enclosed password. It needs no server secret key. `security.secret_key_separation` checks file locations, and reports when scheduled credential backups are off.
+An age credential backup is an independent recovery path: decrypt it with the private age key you keep elsewhere, then open its KeePass file with the enclosed password. It needs no server secret key. `security.key_separation` checks file locations, and reports when scheduled credential backups are off.
 
 ### The `.developer` carve-out
 

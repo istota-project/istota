@@ -3129,7 +3129,8 @@ def check_credential_library(config: "Config", probe: bool) -> CheckResult:
             missing.append(name)
     return CheckResult("security.credential_library", WARN if missing else OK,
         "missing credential libraries: " + ", ".join(missing) if missing else "credential libraries are available",
-        remedy="Install the vault extra: uv sync --extra vault." if missing else "")
+        remedy="Install the vault extra: uv sync --extra vault." if missing else "",
+        scope=IMAGE)
 
 
 def check_secret_key_separation(config: "Config", probe: bool) -> CheckResult:
@@ -3156,7 +3157,7 @@ def check_secret_key_separation(config: "Config", probe: bool) -> CheckResult:
             detail += "; scheduled credential backups are off (no recipient registered)"
     except Exception:
         detail += "; credential backup recipients could not be checked"
-    return CheckResult("security.secret_key_separation", WARN if colocated else OK, detail,
+    return CheckResult("security.key_separation", WARN if colocated else OK, detail,
         remedy="Back up the secret key separately from the database and its backups, or enable an age credential backup." if colocated else "")
 
 
@@ -9525,7 +9526,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.credential_broker", check_credential_broker),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
-    ("security.secret_key_separation", check_secret_key_separation),
+    ("security.key_separation", check_secret_key_separation),
     ("security.credential_library", check_credential_library),
     ("security.credential_isolation", check_credential_isolation),
     ("security.wallet", check_wallet),
@@ -9644,7 +9645,7 @@ CHECK_SCOPES: dict[str, str] = {
     # thing it unlocks is that install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.
     "security.secret_key": DEPLOYMENT,
-    "security.secret_key_separation": DEPLOYMENT,
+    "security.key_separation": DEPLOYMENT,
     "security.credential_library": IMAGE,
     # Deployment, not image: every question it asks is about an install — which
     # users a rendered config declares, a file on that install's workspace, and
