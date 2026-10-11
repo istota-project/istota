@@ -212,6 +212,13 @@ copy_private() {
     install -m 0600 "$1" "$2"
 }
 
+# The role named its devbox users in its own variables, never in the config;
+# each one has a home volume named after it.
+devbox_users() {
+    { docker volume ls --format '{{.Name}}' 2>/dev/null || true; } \
+        | sed -n "s/^${NS}-devbox-home-//p" | tr '\n' ' ' | sed 's/ $//'
+}
+
 write_manifest() {
     local release
     release="$(git -C "$CHECKOUT" describe --tags --always 2>/dev/null || echo unknown)"
@@ -223,6 +230,7 @@ write_manifest() {
         echo "mode=$([ "$NO_STOP" -eq 1 ] && echo online || echo stopped)"
         echo "namespace=${NS}"
         echo "istota_home=${HOME_DIR}"
+        echo "devbox_users=$(devbox_users)"
     } > "${scratch}/MANIFEST"
 }
 

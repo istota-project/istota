@@ -214,6 +214,28 @@ class TestTheStoppedExport:
         assert _manifest(result.stdout)["mode"] == "stopped"
         assert host.leftovers() == []
 
+    def test_the_devbox_users_are_read_off_their_home_volumes(self, host):
+        host.disable_cron()
+        docker = host.stubs / "docker"
+        docker.write_text(
+            "#!/bin/sh\n"
+            "[ \"$1 $2\" = \"volume ls\" ] || exit 1\n"
+            "printf '%s\\n' istota-devbox-home-alice other-devbox-home-eve istota-devbox-home-bob istota_data\n"
+        )
+        docker.chmod(0o755)
+        result = host.run()
+        assert result.returncode == 0, result.stderr.decode()
+        assert _manifest(result.stdout)["devbox_users"] == "alice bob"
+
+    def test_no_docker_means_no_devbox_users(self, host):
+        host.disable_cron()
+        docker = host.stubs / "docker"
+        docker.write_text("#!/bin/sh\nexit 127\n")
+        docker.chmod(0o755)
+        result = host.run()
+        assert result.returncode == 0, result.stderr.decode()
+        assert _manifest(result.stdout)["devbox_users"] == ""
+
     def test_a_unit_systemd_does_not_know_is_not_stopped(self, host):
         """An install that never ran WhatsApp has no Baileys unit, and a stop
         naming it fails the whole stop."""

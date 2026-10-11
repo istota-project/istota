@@ -316,6 +316,7 @@ def _strings(value, where: str):
 
 def rewrite_config(
     old: dict, *, ingress: str, rehearsal: bool = False, old_home: str = "",
+    devbox_users: tuple[str, ...] = (),
 ) -> ConfigRewrite:
     """The role's config, in the container layout. Pure."""
     if ingress not in wizard.INGRESS_HOPS:
@@ -367,6 +368,11 @@ def rewrite_config(
             assign(("developer", "devbox_proxy_socket_dir"), wizard.CONTAINER_DEVBOX_CRED_DIR)
         if _get(new, ("developer", "container", "exec_socket_dir")) is not None:
             assign(("developer", "container", "exec_socket_dir"), wizard.CONTAINER_DEVBOX_EXEC_DIR)
+    # The role named its devbox users in its own variables, not the config;
+    # the stack renders one devbox per `[devbox] users` entry.
+    devbox = new.get("devbox")
+    if isinstance(devbox, dict) and devbox.get("enabled") and not devbox.get("users") and devbox_users:
+        assign(("devbox", "users"), list(devbox_users))
     if isinstance(new.get("browser"), dict) and "api_url" in new["browser"]:
         assign(("browser", "api_url"), wizard.CONTAINER_BROWSER_API_URL)
     assign(("web", "trusted_proxy_hops"), wizard.INGRESS_HOPS[ingress])
@@ -1056,6 +1062,7 @@ def run(args, out, err) -> int:
         rewrite = rewrite_config(
             source.config, ingress=args.ingress, rehearsal=args.rehearsal,
             old_home=source.manifest.get("istota_home", ""),
+            devbox_users=tuple(source.manifest.get("devbox_users", "").split()),
         )
         secrets = map_secrets(source.env, rehearsal=args.rehearsal)
         if args.emit_plan:

@@ -253,6 +253,26 @@ def source(tmp_path):
 
 
 class TestTheConfigRewrite:
+    def test_the_old_roles_devbox_users_come_across(self):
+        """The role named its devbox users in its own variables, not the config,
+        so the export reads them off the users' home volumes."""
+        old = _old_config()
+        old["devbox"] = {"enabled": True}
+        new = bmi.rewrite_config(old, ingress="proxied", devbox_users=("alice", "bob")).document
+        assert new["devbox"]["users"] == ["alice", "bob"]
+
+    def test_devbox_users_the_config_names_are_kept(self):
+        old = _old_config()
+        old["devbox"] = {"enabled": True, "users": ["carol"]}
+        new = bmi.rewrite_config(old, ingress="proxied", devbox_users=("alice",)).document
+        assert new["devbox"]["users"] == ["carol"]
+
+    def test_no_devbox_users_without_an_enabled_devbox(self):
+        old = _old_config()
+        old["devbox"] = {"enabled": False}
+        new = bmi.rewrite_config(old, ingress="proxied", devbox_users=("alice",)).document
+        assert "users" not in new["devbox"]
+
     def test_state_paths_move_to_the_container_layout(self):
         new = bmi.rewrite_config(_old_config(), ingress="proxied").document
         assert new["db_path"] == "/data/db/istota.db"
