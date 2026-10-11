@@ -151,6 +151,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from istota.maintenance.sandbox_cache_sweeper import CACHE_ROOT_NAME
 from istota.sandbox.git_hardening import run_git
 from istota.sandbox.git_remote_scrub import is_git_dir
 from istota.sandbox.user_scope import is_within, scoped_user_dir
@@ -488,6 +489,10 @@ def _git_dirs(
             notes.append(f"{directory}: could not be listed ({exc})")
             continue
         for entry in entries:
+            # A user's package cache holds no clone, only thousands of
+            # directories that each read as a subtree the walk could not see.
+            if depth == 0 and entry.name == CACHE_ROOT_NAME:
+                continue
             try:
                 if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
                     continue

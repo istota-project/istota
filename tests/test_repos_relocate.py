@@ -1154,6 +1154,18 @@ class TestTheWalkReportsWhatItCouldNotSee:
         assert any("scan depth" in n for n in report.notes)
         assert "deep" in report.moved
 
+    def test_a_users_package_cache_is_not_walked(self, tmp_path):
+        from istota.maintenance.repos_relocate import _git_dirs
+
+        user = tmp_path / "alice"
+        (user / ".package-caches" / "uv" / "archive-v0" / "x" / "y" / "z").mkdir(parents=True)
+        (user / "deep" / "a" / "b" / "c" / "d").mkdir(parents=True)
+
+        _found, notes = _git_dirs(user)
+
+        assert not any(".package-caches" in n for n in notes)
+        assert any("deep" in n and "scan depth" in n for n in notes)
+
 
 class TestTheGitWrapperContract:
     """The two things this module's `_git` needs that the reaper's does not.
