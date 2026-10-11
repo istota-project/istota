@@ -334,3 +334,21 @@ class TestTheBrowserNetwork:
             if name not in ("browser", "istota") and "browser" in self._networks(service)
         )
         assert joined == []
+
+
+def test_every_service_on_the_data_volume_runs_as_the_daemon():
+    """A service that writes the data volume as root leaves files uid 10001
+    cannot read: the Baileys sidecar rewrote creds.json root-owned 0600 on a
+    migrated install's first start, and the daemon then read the session as
+    unpaired. Each such service drops through istota-drop, is the istota
+    service (whose root phase drops), or names the uid itself."""
+    compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
+    for name, service in compose["services"].items():
+        volumes = [v if isinstance(v, str) else v.get("source", "") for v in service.get("volumes", [])]
+        if not any(str(v).split(":")[0] == "istota_data" for v in volumes):
+            continue
+        if name == "istota":
+            continue
+        entrypoint = service.get("entrypoint") or []
+        drops = bool(entrypoint) and entrypoint[0] == "istota-drop"
+        assert drops or str(service.get("user")) == "10001:10001", name

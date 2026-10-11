@@ -510,6 +510,9 @@ services:
       context: whatsapp-baileys
       dockerfile: Dockerfile
     image: istota-whatsapp-baileys:${ISTOTA_TAG:-local}
+    # The daemon's uid: Baileys rewrites the session files and creates the
+    # media directory, and as root it left them unreadable to the daemon.
+    user: "10001:10001"
     # Its own profile, and not `whatsapp`, because the two adapters need
     # opposite things: Cloud needs the webhook receiver and no sidecar, Baileys
     # needs the sidecar and no receiver. A compose profile cannot read
