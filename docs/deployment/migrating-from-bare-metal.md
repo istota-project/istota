@@ -156,12 +156,13 @@ Before the day, with the old install still running:
 
 1. **Check the disk.** The images take about 9 GB and their build cache several more, the unpacked export and the restored state volume take about twice the export's size, and the old install's directory stays until you are past rollback. Grow the disk first if that does not fit.
 2. **Write `host.env`** in `/srv/app/istota` and copy the old service user's `rclone.conf` to `/srv/app/istota/rclone.conf`. Pick a `LISTEN_PORT` the old nginx does not hold; it keeps 80 and 443 until it is removed.
-3. **Run `provision.sh` and `istota-stack update <tag>`.** `provision.sh` finds the old install's `mount-nextcloud.service`, which has the same name and path as the stack's, and leaves it alone while it is enabled or running: no unit replaced, no mountpoint chowned, nothing stopped. Everything else is provisioned. The update builds the images and does not start the stack, since there is no `config.toml` yet. The build reads no config, so the image has no Claude Code yet; step 8 below rebuilds it.
+3. **Move any cron running `docker system prune -a` out of `/etc/cron.d`.** It removes every image no running container uses: all of the stack's until its first start, and afterwards the previous tag's, which `istota-stack rollback` needs. `istota-stack update` already keeps the current and previous tags' images and removes the rest.
+4. **Run `provision.sh` and `istota-stack update <tag>`.** `provision.sh` finds the old install's `mount-nextcloud.service`, which has the same name and path as the stack's, and leaves it alone while it is enabled or running: no unit replaced, no mountpoint chowned, nothing stopped. Everything else is provisioned. The update builds the images and does not start the stack, since there is no `config.toml` yet. The build reads no config, so the image has no Claude Code yet; step 9 below rebuilds it.
 
 In the window, after the cutover's steps 1 and 2:
 
-4. **Stop what the export does not.** The role's browser container and each devbox container restart on their own (`unless-stopped`) and the new stack publishes the browser's ports, so run `docker update --restart=no <ns>-browser devbox-<user>` and `docker stop` them. Move `/etc/cron.d/<ns>-browser-watchdog` and `/etc/cron.d/<ns>-backup` out of `/etc/cron.d` with the update cron.
-5. **Export straight into the import directory**, so the tarball never sits on the disk:
+5. **Stop what the export does not.** The role's browser container and each devbox container restart on their own (`unless-stopped`) and the new stack publishes the browser's ports, so run `docker update --restart=no <ns>-browser devbox-<user>` and `docker stop` them. Move `/etc/cron.d/<ns>-browser-watchdog` and `/etc/cron.d/<ns>-backup` out of `/etc/cron.d` with the update cron.
+6. **Export straight into the import directory**, so the tarball never sits on the disk:
 
    ```sh
    install -d -m 0700 -o 10001 -g 10001 /srv/app/istota/import
@@ -170,9 +171,9 @@ In the window, after the cutover's steps 1 and 2:
    chown -R 10001:10001 /srv/app/istota/import
    ```
 
-6. **Run `provision.sh` again.** The export disabled the old mount unit, so this run replaces it with the stack's, chowns the mountpoint to uid 10001, makes its parent reachable, and mounts it.
-7. **Import**, as step 6 of the cutover.
-8. **Rebuild and start**: `istota-stack update <tag>` with the same tag. Now that `config.toml` names a Claude Code brain, the build includes it, and with a config in place the update starts the stack. `istota-stack check-image` exits 0 when the image has what the config needs. Then continue from the cutover's step 9: on the upstream only the port and the scheme change.
+7. **Run `provision.sh` again.** The export disabled the old mount unit, so this run replaces it with the stack's, chowns the mountpoint to uid 10001, makes its parent reachable, and mounts it.
+8. **Import**, as step 6 of the cutover.
+9. **Rebuild and start**: `istota-stack update <tag>` with the same tag. Now that `config.toml` names a Claude Code brain, the build includes it, and with a config in place the update starts the stack. `istota-stack check-image` exits 0 when the image has what the config needs. Then continue from the cutover's step 9: on the upstream only the port and the scheme change.
 
 Rollback is the snapshot. The old units, crons and directories stay on disk, disabled, until you are past the first real work on the new side; then delete `/srv/app/<ns>`, `/etc/<ns>`, the disabled units and crons, and the old images.
 
