@@ -138,6 +138,11 @@ cmd_check() {
     restart_container
 }
 
+# A stack that is not running has no browser to watch: before its first start
+# (beside a live bare-metal install, mid-migration) and after an operator stops
+# it, a restart would bring one up that nobody asked for.
+systemctl is-active --quiet istota-stack.service || exit 0
+
 case "${1:-check}" in
     check) cmd_check ;;
     daily-restart) cmd_daily_restart ;;

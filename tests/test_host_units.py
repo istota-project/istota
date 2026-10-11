@@ -125,7 +125,8 @@ class TestTheEgressRules:
 
 
 class TestTheBrowserWatchdog:
-    def _run(self, tmp_path: Path, statuses: list[str]) -> str:
+    def _run(self, tmp_path: Path, statuses: list[str], *, stack_active: bool = True,
+             daily_hour: str = "99") -> str:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         calls = tmp_path / "docker-calls"
@@ -134,6 +135,7 @@ class TestTheBrowserWatchdog:
               f'echo "$@" >> {calls}\n'
               f'if [ "$1" = inspect ]; then cat {status}; fi\nexit 0\n')
         _stub(bindir, "curl", "exit 0\n")
+        _stub(bindir, "systemctl", f"exit {0 if stack_active else 3}\n")
         stack = tmp_path / "stack"
         stack.mkdir()
         env = dict(
@@ -145,7 +147,7 @@ class TestTheBrowserWatchdog:
             ISTOTA_BROWSER_WATCHDOG_STATE_DIR=str(tmp_path / "state"),
             ISTOTA_BROWSER_WATCHDOG_LOG=str(tmp_path / "log" / "health.log"),
             # Never due inside the test, whatever the clock says.
-            ISTOTA_BROWSER_DAILY_RESTART_HOUR="99",
+            ISTOTA_BROWSER_DAILY_RESTART_HOUR=daily_hour,
         )
         for value in statuses:
             status.write_text(value + "\n")
@@ -167,6 +169,17 @@ class TestTheBrowserWatchdog:
 
     def test_a_healthy_read_resets_the_debounce(self, tmp_path):
         assert "restart" not in self._run(tmp_path, ["unhealthy", "healthy", "unhealthy"])
+
+    def test_a_stack_that_is_not_running_is_left_alone(self, tmp_path):
+        """Before the first start (an in-place migration provisions beside the
+        old install) and after an operator stops it, there is nothing to watch:
+        a restart would bring up a browser nobody asked for."""
+        calls = self._run(tmp_path, ["missing", "missing", "missing"], stack_active=False)
+        assert "restart" not in calls and " up " not in calls, calls
+
+    def test_the_daily_restart_waits_for_a_running_stack(self, tmp_path):
+        calls = self._run(tmp_path, ["healthy"], stack_active=False, daily_hour="0")
+        assert "restart" not in calls, calls
 
     def test_it_watches_the_container_the_compose_file_names(self):
         compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
