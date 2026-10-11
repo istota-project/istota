@@ -355,7 +355,8 @@ class TestTheAnsibleRole:
         # The Meta keys are nested, matching where the loader has them; the
         # role used to render them flat and lean on the legacy-flat migration.
         assert set(parsed) == {
-            "enabled", "business_phone_number", "cloud", "baileys",
+            "enabled", "business_phone_number", "group_bare_file_hold_seconds",
+            "cloud", "baileys",
         }
         # `istota_use_environment_file` defaults on, so the three credentials
         # travel in secrets.env and this file must not name them at all.

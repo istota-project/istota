@@ -868,13 +868,13 @@ class TestAnsibleProvisionsRooms:
 
 
 class TestDockerEntrypointMatchesTheCli:
-    def test_entrypoint_creates_group_rooms_not_public_ones(self):
+    def test_entrypoint_provisions_rooms_through_the_cli(self):
         # Both deploy targets must agree on room privacy, or the same install
-        # documented two ways behaves differently.
+        # documented two ways behaves differently. The entrypoint holds that by
+        # calling the CLI rather than creating rooms of its own.
         body = ENTRYPOINT.read_text()
-        start = body.index("create_group_room() {")
-        end = body.index("post_room_message() {")
-        assert '\\"roomType\\":2' in body[start:end]
+        assert "nextcloud provision-rooms" in body
+        assert "roomType" not in body
 
 
 # ---------------------------------------------------------------------------
