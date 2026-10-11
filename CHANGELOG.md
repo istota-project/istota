@@ -171,6 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Copying a file out of the Nextcloud workspace on the dedicated VM no longer fails with an I/O error.** The VM's provisioning installed Debian's rclone build, whose mount answers every extended-attribute request on a file with an I/O error, which broke copies that preserve file metadata, such as the backup taken before each ledger write. Provisioning now installs rclone's own pinned release and restarts the mount onto it.
+
 - An interrupted invoice review settlement keeps its chosen invoice. Retrying finishes that decision instead of allowing the same credit to pay another candidate.
 
 - Daily Monarch sync now runs for profiles configured through the settings page or operator CLI, without requiring a legacy configuration file. Previously those users could sync manually but the daily job skipped their profiles.
