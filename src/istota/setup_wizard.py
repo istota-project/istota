@@ -1326,8 +1326,9 @@ SECRET_NAMES: tuple[str, ...] = (
 #: for an upstream proxy in `proxied`.
 INGRESS_HOPS = {"direct": 1, "proxied": 2, "local": 1}
 
-#: Compose profiles the wizard can turn on. `location` starts the webhook
-#: receiver; the rest start the service of the same name.
+#: Compose profiles the wizard can turn on; each starts the service of the same
+#: name. `location` starts nothing now that the web process serves the webhook
+#: routes, and stays accepted so an existing `.env` naming it still validates.
 CONTAINER_PROFILES = ("browser", "signaling", "location", "whatsapp-baileys")
 
 

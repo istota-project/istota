@@ -79,11 +79,6 @@ services:
     environment:
       ISTOTA_WEB_INSECURE_COOKIES: "1"
 
-  webhooks:
-    image: *test_image
-    volumes:
-      - testbed_mount:/mnt/shared
-
   # The shipped service has a fixed `container_name`, which two stacks on one
   # machine cannot both hold. Without it the container is reached by its
   # service name, `browser`, which the browser profile's config names.

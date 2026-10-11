@@ -215,7 +215,7 @@ class TestTheSecretFilesMatchCompose:
         declared = set(self._compose().get("secrets", {}))
         assert declared == set(SECRET_NAMES)
 
-    @pytest.mark.parametrize("service", ["daemon", "web", "webhooks"])
+    @pytest.mark.parametrize("service", ["daemon", "web"])
     def test_every_istota_image_service_mounts_every_secret(self, service):
         mounted = self._compose()["services"][service].get("secrets", [])
         assert sorted(mounted) == sorted(SECRET_NAMES)

@@ -129,7 +129,7 @@ docker compose --profile browser --profile location up -d  # Combine as needed
 
 Rather than naming them per command, set `COMPOSE_PROFILES` in `.env` — a comma-separated list every `docker compose` in that directory then picks up. `istota setup --vm-dir` writes it from the answers you give it; a hand-copied `.env.example` leaves it empty, which means the core stack only.
 
-The `location`, `sms` and `whatsapp` profiles select the same `webhooks` service. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`; the profile starts the shared process, while the setting controls which feature accepts work. Nginx is the public endpoint for `/webhooks/`; the receiver port is exposed only inside the Compose network. Enabling several profiles still runs one receiver.
+The web service serves the webhook receiver's routes too (location pings, SMS and Meta's WhatsApp callbacks), so no profile is needed for them; each route answers only when its feature is enabled in the config. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`. Nginx is the public endpoint for `/webhooks/`; the receiver port is exposed only inside the Compose network. Enabling several profiles still runs one receiver.
 
 **The two WhatsApp profiles are alternatives, not a pair.** The surface has two adapters and they need opposite halves of the stack: Meta's Cloud API receives over a signed HTTP callback, so it wants `whatsapp` and the receiver; a paired WhatsApp Web session receives over a Unix socket, so it wants `whatsapp-baileys` and the Node sidecar, and no receiver at all. A profile cannot read the config, so pick the one matching `[whatsapp] provider`. Selecting both costs a receiver whose handlers answer 404, which is inert rather than harmful.
 
@@ -157,7 +157,7 @@ The registration is a config write on the Nextcloud side and nothing more: in Ta
 
 `[talk.signaling] url` is a separate thing and `istota setup` fills it in: it is the daemon's own route, `http://signaling:8080`, since the daemon is on the container network beside the server. Left empty the daemon reads the browser-facing URL out of Talk's settings, which on this stack is the wrong answer.
 
-One consequence of turning it on before the server is registered: the daemon refuses to boot, and `restart: unless-stopped` makes that a loop that keeps `web` and `webhooks` down with it, since both wait for `istota` to be healthy. Set `[talk.signaling] enabled = false` to back out. Note also that nothing orders `istota` after `signaling` (compose would then start the server on every deployment), so a first boot can post its provisioning message while the server is still coming up; the daemon's own watchers retry, but that one post can fail.
+One consequence of turning it on before the server is registered: the daemon refuses to boot, and `restart: unless-stopped` makes that a loop that keeps `web` down with it, since it waits for the daemon to be healthy. Set `[talk.signaling] enabled = false` to back out. Note also that nothing orders `istota` after `signaling` (compose would then start the server on every deployment), so a first boot can post its provisioning message while the server is still coming up; the daemon's own watchers retry, but that one post can fail.
 
 If the daemon is told to use it and cannot — Talk still in `internal` signaling mode, or the library missing — **it refuses to boot**. That is deliberate: a daemon quietly polling while you believe push is live is worse than one that did not start. `istota doctor --only talk.signaling_reachable` says which of the three is missing.
 
@@ -210,7 +210,7 @@ Two modes, chosen by `[nextcloud] url` in `config.toml`, which `istota setup` wr
 | Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume |
 | Full Nextcloud integration | `url` names your Nextcloud | the VM's rclone mount of the bot's files, bound at `/mnt/shared` |
 
-In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `istota`, `web` and `webhooks` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
+In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
 
 The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason this file runs in a VM.
 

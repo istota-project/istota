@@ -337,10 +337,10 @@ class TestTheImage:
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         return json.loads(result.stdout)
 
-    def test_istota_web_and_webhooks_run_the_named_tag(self, tmp_path):
+    def test_the_daemon_and_web_run_the_named_tag(self, tmp_path):
         merged = self._merged(tmp_path, "istota-test/no-forge:pinned")
 
-        for name in ("daemon", "web", "webhooks"):
+        for name in ("daemon", "web"):
             assert merged["services"][name]["image"] == "istota-test/no-forge:pinned", name
 
     def test_a_profile_with_its_own_image_is_never_built(self, tmp_path, monkeypatch):

@@ -267,7 +267,7 @@ print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
 PY
 }
 
-# The services this stack builds. web and webhooks run the daemon service's
+# The services this stack builds. web runs the daemon service's
 # image, so building them again would only repeat it.
 build_services() {
     compose config --services | grep -vxE 'web|webhooks|nginx|signaling' || true

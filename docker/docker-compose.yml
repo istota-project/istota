@@ -42,7 +42,7 @@ x-config-mount: &config_mount
 # The image every service built from docker/istota/Dockerfile runs. Built on the
 # VM from a verified release tag by `istota-stack update`, which writes the tag
 # to .env as ISTOTA_TAG and tags istota:<tag>; nothing is pulled from a
-# registry. web and webhooks run the same image as the daemon service.
+# registry. web runs the same image as the daemon service.
 x-istota-build: &istota_build
   context: ..
   dockerfile: docker/istota/Dockerfile
@@ -53,10 +53,10 @@ x-istota-build: &istota_build
     - INSTALL_CLAUDE_CODE
     - CLAUDE_CODE_VERSION
 
-# web and webhooks have no root phase: they start as uid 0 only to run
+# web has no root phase: it starts as uid 0 only to run
 # `istota-drop`, which needs SETUID, SETGID and SETPCAP (the last empties the
 # bounding set) and nothing else, then serve as 10001 with every set empty.
-# Read-only like the daemon: they write only under /data and /tmp.
+# Read-only like the daemon: it writes only under /data and /tmp.
 x-dropped-service: &dropped_service
   security_opt:
     - no-new-privileges:true
@@ -173,7 +173,7 @@ services:
       # root the daemon uses.
       ISTOTA_TASK_CGROUP_ROOT: /sys/fs/cgroup
       # The admin allowlist `istota setup` writes beside the config. Shared
-      # with the web and webhooks services.
+      # with the web service.
       ISTOTA_ADMINS_FILE: /data/config/admins
       # So `docker compose exec daemon istota-drop istota <verb>` finds the
       # config: /data/config/config.toml is on none of the four search paths.
@@ -215,7 +215,7 @@ services:
       # mode: `local` is http://localhost, which browsers treat as a secure
       # context. Off unless an operator sets it.
       ISTOTA_WEB_INSECURE_COOKIES: ${ISTOTA_WEB_INSECURE_COOKIES:-0}
-      # Admin allowlist (shared with the daemon and webhooks services).
+      # Admin allowlist (shared with the daemon service).
       ISTOTA_ADMINS_FILE: /data/config/admins
       # The config, where the daemon service reads it; the root filesystem is
       # read-only, so nothing links it into /app/config.
@@ -237,7 +237,7 @@ services:
         if [ -z "$${ISTOTA_WEB_TOKEN_KEY:-}" ] && [ -f /data/.web_token_key ]; then
           export ISTOTA_WEB_TOKEN_KEY=$$(cat /data/.web_token_key)
         fi
-        exec /app/.venv/bin/uvicorn istota.webui.app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
+        exec /app/.venv/bin/uvicorn istota.webui.stack_app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
     command: []
     restart: unless-stopped
 
@@ -275,7 +275,6 @@ services:
         required: false
     environment:
       WEB_PORT: ${WEB_PORT:-8766}
-      WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-512M}
     restart: unless-stopped
 
@@ -460,48 +459,6 @@ services:
           fi
         done
         exec /entrypoint.sh
-    restart: unless-stopped
-
-  webhooks:
-    <<: *dropped_service
-    build: *istota_build
-    image: istota:${ISTOTA_TAG:-local}
-    profiles:
-      - location
-      - sms
-      - whatsapp
-    # Healthy for the reason `web` waits: a migrated database, and the config
-    # (an input) in place.
-    depends_on:
-      daemon:
-        condition: service_healthy
-    expose:
-      - "${ISTOTA_WEBHOOKS_PORT:-8765}"
-    volumes:
-      - istota_data:/data
-      - *config_mount
-      - *workspace_mount
-    environment:
-      ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
-      # Admin allowlist (shared with the daemon and web services).
-      ISTOTA_ADMINS_FILE: /data/config/admins
-      ISTOTA_CONFIG_PATH: /data/config/config.toml
-    # The SMS and WhatsApp webhook credentials it verifies callbacks with.
-    secrets: *istota_secrets
-    entrypoint:
-      - istota-drop
-      - /bin/sh
-      - -c
-      - |
-        # --no-access-log, because one route's query string is a credential.
-        # Meta sends the WhatsApp verify token as `?hub.verify_token=` on the
-        # GET subscription handshake, and uvicorn's default access formatter
-        # renders the path *with* the query string — so the container log
-        # would hold the token however nginx is configured. nginx is told not
-        # to log that path too; this is the half nginx cannot reach. The
-        # receiver logs each event itself under a stable name, without it.
-        exec /app/.venv/bin/uvicorn istota.webui.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
-    command: []
     restart: unless-stopped
 
   whatsapp-baileys:

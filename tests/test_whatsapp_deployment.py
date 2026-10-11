@@ -94,16 +94,14 @@ WHATSAPP_ADAPTER_VALUES = {
 
 
 class TestTheComposeStack:
-    def test_the_webhook_service_carries_the_whatsapp_profile(self):
+    def test_the_receiver_is_served_by_the_web_process(self):
         compose = yaml.safe_load(COMPOSE.read_text())
-        webhook = compose["services"]["webhooks"]
+        web = compose["services"]["web"]
 
-        assert set(webhook["profiles"]) == {"location", "sms", "whatsapp"}
-        # One receiver for all three, on one internal port. `ports` here would
-        # publish the raw receiver beside nginx, which is what the signed
-        # webhook contract is behind.
-        assert "ports" not in webhook
-        assert webhook["expose"] == ["${ISTOTA_WEBHOOKS_PORT:-8765}"]
+        # `ports` here would publish the raw receiver beside nginx, which is
+        # what the signed webhook contract is behind.
+        assert "ports" not in web
+        assert "istota.webui.stack_app:app" in web["entrypoint"][-1]
 
     def test_the_env_example_documents_both_profiles(self):
         text = ENV_EXAMPLE.read_text()
@@ -139,13 +137,12 @@ class TestTheBaileysSidecarService:
 
     def test_it_carries_its_own_profile_and_never_the_receivers(self):
         service = self._service()
-        webhooks = yaml.safe_load(COMPOSE.read_text())["services"]["webhooks"]
+        web = yaml.safe_load(COMPOSE.read_text())["services"]["web"]
 
         assert service["profiles"] == ["whatsapp-baileys"]
-        # The control for the split: the two must not share a profile, or
-        # selecting either adapter starts both halves and the receiver's two
-        # handlers 404 everything a Baileys deployment has.
-        assert "whatsapp-baileys" not in webhooks["profiles"]
+        # The receiver is in the web process, which no profile gates; its
+        # WhatsApp handlers 404 unless the config enables Meta's adapter.
+        assert "profiles" not in web
         assert "whatsapp" not in service["profiles"]
 
     def test_it_is_given_every_variable_the_program_requires(self):
@@ -313,10 +310,10 @@ class TestTheReceiverLogsNoVerifyToken:
 
     def test_the_compose_receiver_disables_the_uvicorn_access_log(self):
         compose = COMPOSE.read_text()
-        command = compose.split("  webhooks:", 1)[1]
+        command = compose.split("\n  web:\n", 1)[1]
         line = next(
             ln for ln in command.splitlines()
-            if "uvicorn istota.webui.webhook_receiver:app" in ln
+            if "uvicorn istota.webui.stack_app:app" in ln
         )
 
         assert "--no-access-log" in line

@@ -156,10 +156,6 @@ services:
     volumes:
       - shared_files:/mnt/shared
 
-  webhooks:
-    volumes:
-      - shared_files:/mnt/shared
-
   nginx:
     depends_on:
       nextcloud:

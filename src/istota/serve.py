@@ -240,7 +240,7 @@ def install_force_quit(server) -> None:
     server.handle_exit = handle_exit
 
 
-def _maybe_mount_webhooks(web_app) -> None:
+def _maybe_mount_webhooks(web_app, config=None) -> None:
     """Serve configured webhook routes from the combined web process.
 
     Off by default in the lean footprint. Location, a complete SMS provider
@@ -265,7 +265,10 @@ def _maybe_mount_webhooks(web_app) -> None:
     (:mod:`istota.location.ingest_signal`) is the reload path in this shape,
     and it is the one that works in every shape.
     """
-    from istota.webui.app import _config as web_config
+    if config is not None:
+        web_config = config
+    else:
+        from istota.webui.app import _config as web_config
 
     if not web_config:
         return

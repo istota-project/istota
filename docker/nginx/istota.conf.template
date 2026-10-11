@@ -10,7 +10,6 @@
 # pass through):
 #   ${DOMAIN}                       server_name
 #   ${WEB_PORT}                     the web service's port
-#   ${WEBHOOKS_PORT}                the webhook receiver's port
 #   ${NGINX_CLIENT_MAX_BODY_SIZE}   the upload cap
 
 server_name ${DOMAIN};
@@ -32,7 +31,8 @@ proxy_send_timeout 600s;
 resolver 127.0.0.11 valid=30s ipv6=off;
 set $upstream_web       web:${WEB_PORT};
 set $upstream_signaling signaling:8080;
-set $upstream_webhooks  webhooks:${WEBHOOKS_PORT};
+# The webhook receiver's routes are served by the web process (webui/stack_app.py).
+set $upstream_webhooks  web:${WEB_PORT};
 
 # Every location below forwards `Host: $http_host`, not `$host`. `$host` is
 # normalized with the port stripped, so a stack published on anything but the

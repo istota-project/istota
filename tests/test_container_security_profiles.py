@@ -169,9 +169,9 @@ def daemon_service() -> tuple[Path, dict]:
     return SHIPPED_COMPOSE, _service(SHIPPED_COMPOSE)
 
 
-@pytest.mark.parametrize("name", ["web", "webhooks"])
+@pytest.mark.parametrize("name", ["web"])
 class TestTheServicesWithNoRootPhase:
-    """web and webhooks start as uid 0 only to run `istota-drop`.
+    """web starts as uid 0 only to run `istota-drop`.
 
     They had Docker's default capability set, no `no-new-privileges` and a
     writable root, and web read the master key as root before the drop that

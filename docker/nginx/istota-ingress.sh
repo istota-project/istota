@@ -30,7 +30,6 @@ ROOT_LOCATIONS="${ISTOTA_NGINX_ROOT_LOCATIONS:-$SRC/root-locations.conf}"
 INGRESS="${INGRESS:-local}"
 TLS_CERT_SOURCE="${TLS_CERT_SOURCE:-}"
 WEB_PORT="${WEB_PORT:-8766}"
-WEBHOOKS_PORT="${WEBHOOKS_PORT:-8765}"
 NGINX_CLIENT_MAX_BODY_SIZE="${NGINX_CLIENT_MAX_BODY_SIZE:-512M}"
 # server_name takes no port; DOMAIN may carry one in local mode.
 DOMAIN="${DOMAIN:-localhost}"
@@ -45,8 +44,8 @@ refuse() { echo "[istota-ingress] REFUSE: $*" >&2; exit 1; }
 case "$DOMAIN" in
     *[!A-Za-z0-9.-]*|"") refuse "DOMAIN '${DOMAIN}' is not a hostname." ;;
 esac
-case "$WEB_PORT$WEBHOOKS_PORT" in
-    *[!0-9]*) refuse "WEB_PORT and WEBHOOKS_PORT must be numbers." ;;
+case "$WEB_PORT" in
+    *[!0-9]*|"") refuse "WEB_PORT must be a number." ;;
 esac
 case "$NGINX_CLIENT_MAX_BODY_SIZE" in
     *[!0-9kKmMgG]*|"") refuse "NGINX_CLIENT_MAX_BODY_SIZE '${NGINX_CLIENT_MAX_BODY_SIZE}' is not a size." ;;
@@ -54,7 +53,7 @@ esac
 
 render() {
     # An explicit list, so nginx's own variables pass through untouched.
-    envsubst '${DOMAIN} ${WEB_PORT} ${WEBHOOKS_PORT} ${NGINX_CLIENT_MAX_BODY_SIZE} ${TLS_CERT_DIR} ${PROXIED_LISTEN} ${UPSTREAM_ALLOW}' < "$SRC/$1"
+    envsubst '${DOMAIN} ${WEB_PORT} ${NGINX_CLIENT_MAX_BODY_SIZE} ${TLS_CERT_DIR} ${PROXIED_LISTEN} ${UPSTREAM_ALLOW}' < "$SRC/$1"
 }
 
 have_cert() {
@@ -67,7 +66,7 @@ case "$TLS_CERT_SOURCE" in
     "") ;;
     *) refuse "TLS_CERT_SOURCE '${TLS_CERT_SOURCE}' is neither acme nor files." ;;
 esac
-export DOMAIN WEB_PORT WEBHOOKS_PORT NGINX_CLIENT_MAX_BODY_SIZE TLS_CERT_DIR
+export DOMAIN WEB_PORT NGINX_CLIENT_MAX_BODY_SIZE TLS_CERT_DIR
 
 mkdir -p "$OUT"
 # http level: the websocket upgrade map, and the scheme an upstream proxy
