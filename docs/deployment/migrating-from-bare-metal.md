@@ -161,7 +161,7 @@ Before the day, with the old install still running:
 
 In the window, after the cutover's steps 1 and 2:
 
-5. **Stop what the export does not.** The role's browser container and each devbox container restart on their own (`unless-stopped`) and the new stack publishes the browser's ports, so run `docker update --restart=no <ns>-browser devbox-<user>` and `docker stop` them. Move `/etc/cron.d/<ns>-browser-watchdog` and `/etc/cron.d/<ns>-backup` out of `/etc/cron.d` with the update cron.
+5. **Stop what the export does not.** The role's browser container and each devbox container restart on their own (`unless-stopped`) and the new stack publishes the browser's ports, so run `docker update --restart=no <ns>-browser devbox-<user>` and `docker stop` them. Then `docker rm` the devbox containers and `docker network rm <ns>-devbox-net`: the stack's devbox network has the same fixed subnet (`[devbox] network_subnet`, `172.30.0.0/24` by default), and Docker refuses an overlapping one. The home volumes stay. Move `/etc/cron.d/<ns>-browser-watchdog` and `/etc/cron.d/<ns>-backup` out of `/etc/cron.d` with the update cron.
 6. **Export straight into the import directory**, so the tarball never sits on the disk:
 
    ```sh
