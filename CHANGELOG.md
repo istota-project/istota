@@ -171,8 +171,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Copying a file out of the Nextcloud workspace on the dedicated VM no longer fails with an I/O error.** The VM's provisioning installed Debian's rclone build, whose mount answers every extended-attribute request on a file with an I/O error, which broke copies that preserve file metadata, such as the backup taken before each ledger write. Provisioning now installs rclone's own pinned release and restarts the mount onto it.
-
 - An interrupted invoice review settlement keeps its chosen invoice. Retrying finishes that decision instead of allowing the same credit to pay another candidate.
 
 - Daily Monarch sync now runs for profiles configured through the settings page or operator CLI, without requiring a legacy configuration file. Previously those users could sync manually but the daily job skipped their profiles.
@@ -197,6 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The unmeasured-task count no longer includes tasks that have not run yet: a first attempt still queued or running, and a task cancelled or failed before it started. The dashboard's 24-hour counters showed every running task as unmeasured until it finished. In `istota usage`, the count now follows `--source` and `--brain`, and `--model` or a non-task `--origin` reports it as not applicable (`null` in JSON) instead of an unfiltered number.
 - The model picker in room settings lists every configured model again. An alias given a default effort, such as an operator's `general` at medium effort, was left out, so the picker offered only the older models behind the built-in `sonnet` and `haiku` shortcuts. Those shortcuts now point at Sonnet 5.5 and Haiku 5.5 as well.
 - Questions about token usage and API list-price equivalents can now be answered directly in chat. Members can read their own usage; admins can compare all users, with missing usage records reported beside the totals.
+
+- **Copying a file out of the Nextcloud workspace on the dedicated VM no longer fails with an I/O error.** The VM's provisioning installed Debian's rclone build, whose mount answers every extended-attribute request on a file with an I/O error, which broke copies that preserve file metadata, such as the backup taken before each ledger write. Provisioning now installs rclone's own pinned release and restarts the mount onto it.
 
 - The Add credential dialog labels the secret field Secret rather than Value, marks Username and Site optional, and requires Name and Secret before it submits. The secret input is now as wide as the fields around it: a settings field that can never clear a stored value no longer reserves space for the clear button.
 - `istota-skill memory --channel` accepts an older name for the task's own room, its Talk token or a pre-migration alias, and reads the room's current file. A scheduled prompt written before the room refactor named its room by the Talk token and was refused with "channel token mismatch" every run. Another room's name is still refused.
