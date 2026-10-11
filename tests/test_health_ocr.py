@@ -327,3 +327,75 @@ class TestExtractFromPanel:
         assert result["biomarkers"] == []
         assert any("LLM" in w for w in result["warnings"])
         assert "lab text" in result["raw_text"]
+
+
+def _text_pdf(path, line: str, lines: int = 12) -> None:
+    """Write a minimal one-page text-native PDF holding `line` repeated.
+
+    Built by hand so the test needs no PDF library: one Helvetica content
+    stream, with the xref offsets computed rather than hardcoded.
+    """
+    ops = "BT /F1 10 Tf 14 TL 40 760 Td " + " ".join(
+        f"({line}) Tj T*" for _ in range(lines)
+    ) + " ET"
+    objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        f"<< /Length {len(ops)} >>\nstream\n{ops}\nendstream",
+    ]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n{body}\nendobj\n".encode()
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref}\n%%EOF\n"
+    ).encode()
+    path.write_bytes(out)
+
+
+class TestPdfTextExtraction:
+    """#696: the image had no poppler-utils, and the pypdf fallback had no
+    dependency behind it, so every PDF silently went to vision mode."""
+
+    def test_a_missing_pdftotext_is_logged(self, tmp_path, monkeypatch, caplog):
+        from istota.health import encounter_ocr, immunization_ocr
+
+        pdf = tmp_path / "report.pdf"
+        _text_pdf(pdf, "Hemoglobin 14.8 g/dL")
+        for mod in (health_ocr, encounter_ocr, immunization_ocr):
+            monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+            caplog.clear()
+            with caplog.at_level("WARNING", logger=mod.__name__):
+                assert mod._pdftotext(pdf) is None
+            assert "health_pdftotext_missing" in caplog.text, mod.__name__
+            assert "poppler-utils" in caplog.text, mod.__name__
+
+    @pytest.mark.skipif(
+        __import__("shutil").which("pdftotext") is None,
+        reason="poppler-utils not installed",
+    )
+    def test_a_text_native_pdf_goes_through_text_mode(self, ctx):
+        """The real binary on a real PDF, through the route the upload uses."""
+        pid = _seed_pdf_source(ctx)
+        with health_db.connect(ctx.db_path) as conn:
+            panel = health_db.get_panel(conn, pid)
+        _text_pdf(ctx.uploads_dir / panel.source_file, "Hemoglobin 14.8 g/dL WBC 7.2")
+
+        fake_response = (
+            '{"biomarkers": [{"name": "Hemoglobin", "value": 14.8, "unit": "g/dL"}]}'
+        )
+        with patch.object(health_ocr, "_call_brain", return_value=fake_response) as brain:
+            result = health_ocr.extract_from_panel(ctx, panel)
+
+        assert result["mode"] == "text"
+        prompt = brain.call_args.args[0]
+        assert "Hemoglobin 14.8 g/dL WBC 7.2" in prompt

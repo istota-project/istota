@@ -34,6 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libffi-dev libcairo2 \
     # Tesseract OCR (transcribe skill)
     tesseract-ocr \
+    # pdftotext / pdftoppm (health module: text-native PDF extraction and
+    # page rasterising for OCR)
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 20 (for Claude Code)

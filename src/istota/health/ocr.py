@@ -61,6 +61,12 @@ def _resolve_source_file(ctx: HealthContext, panel: Panel) -> Path | None:
 
 def _pdftotext(path: Path) -> str | None:
     if not shutil.which("pdftotext"):
+        # Not silent: without poppler every PDF drops to the slower vision
+        # path, and nothing else on this route would say why.
+        logger.warning(
+            "health_pdftotext_missing path=%s: install poppler-utils; "
+            "falling back to vision-mode extraction", path,
+        )
         return None
     try:
         out = subprocess.run(
@@ -71,25 +77,6 @@ def _pdftotext(path: Path) -> str | None:
             return None
         return out.stdout
     except (OSError, subprocess.TimeoutExpired):
-        return None
-
-
-def _pypdf_extract(path: Path) -> str | None:
-    try:
-        import pypdf  # noqa: PLC0415
-    except ImportError:
-        return None
-    try:
-        reader = pypdf.PdfReader(str(path))
-        pages = []
-        for page in reader.pages:
-            try:
-                pages.append(page.extract_text() or "")
-            except Exception:  # noqa: BLE001
-                continue
-        return "\n\f\n".join(pages)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("health_ocr_pypdf_failed path=%s error=%s", path, e)
         return None
 
 
@@ -152,7 +139,7 @@ def extract_text(ctx: HealthContext, panel: Panel) -> str:
         return _ocr_image(source) or ""
 
     if mime == "application/pdf" or source.suffix.lower() == ".pdf":
-        text = _pdftotext(source) or _pypdf_extract(source) or ""
+        text = _pdftotext(source) or ""
         if len(text.strip()) >= _TEXT_NATIVE_MIN_CHARS:
             return text
         fallback = _ocr_pdf_via_pdftoppm(source)
@@ -459,7 +446,7 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
     mode = "vision"
     if source_path is not None:
         if mime == "application/pdf" or source_path.suffix.lower() == ".pdf":
-            text = _pdftotext(source_path) or _pypdf_extract(source_path) or ""
+            text = _pdftotext(source_path) or ""
             if len(text.strip()) >= _TEXT_NATIVE_MIN_CHARS:
                 mode = "text"
 

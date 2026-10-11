@@ -296,6 +296,36 @@ def check_bwrap(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_pdf_tools(config: "Config", probe: bool) -> CheckResult:
+    """``pdftotext`` and ``pdftoppm`` (poppler-utils) for the health module.
+
+    Health's PDF uploads read text with ``pdftotext`` and rasterise scanned
+    lab reports with ``pdftoppm``. Without them every PDF drops to vision-mode
+    extraction, which still works but is slower and costs a model read per
+    upload, and nothing on the upload route says why (#696: the image shipped
+    without poppler-utils). A ``WARN`` rather than a ``FAIL`` for that reason.
+    Presence only, so it spawns nothing under either ``probe``.
+    """
+    name = "runtime.pdf_tools"
+    from istota.modules import module_available
+
+    if not module_available("health"):
+        return CheckResult(
+            name, SKIP, "the health module's dependencies are not installed", scope=IMAGE
+        )
+    missing = [b for b in ("pdftotext", "pdftoppm") if shutil.which(b) is None]
+    if missing:
+        return CheckResult(
+            name,
+            WARN,
+            f"not on PATH: {', '.join(missing)}; health PDF uploads fall back to "
+            "vision-mode extraction",
+            remedy="Install poppler-utils.",
+            scope=IMAGE,
+        )
+    return CheckResult(name, OK, "pdftotext and pdftoppm are on PATH", scope=IMAGE)
+
+
 def _reachable_kinds(config: "Config") -> frozenset[str]:
     """The brain kinds a task on this deployment could run under.
 
@@ -9509,6 +9539,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.model_cli", check_model_cli),
     ("runtime.tmux", check_tmux),
     ("runtime.native_brain", check_native_brain),
+    ("runtime.pdf_tools", check_pdf_tools),
     ("runtime.framework_db", check_framework_db),
     ("runtime.task_failure_rate", check_task_failure_rate),
     ("runtime.writable_dirs", check_writable_dirs),
@@ -9601,6 +9632,7 @@ CHECK_SCOPES: dict[str, str] = {
     # per-user arm reads the install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.
     "runtime.native_brain": DEPLOYMENT,
+    "runtime.pdf_tools": IMAGE,
     "runtime.framework_db": DEPLOYMENT,
     # Deployment, not image: it queries the `tasks` table of an install's own
     # database, which a bare `docker run` has none of.
