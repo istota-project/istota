@@ -257,6 +257,7 @@
       - python3
       - python3-venv
       - tesseract-ocr
+      - poppler-utils       # pdftotext / pdftoppm: health PDF uploads
       - libpango-1.0-0      # WeasyPrint PDF generation
       - libpangocairo-1.0-0
       - libgdk-pixbuf-2.0-0
