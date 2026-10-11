@@ -142,7 +142,7 @@ Every step on the old host and on the upstream proxy is a change to production. 
 
    Exit codes: 0 done, or already imported; 1 refused, nothing written; 2 partial. A partial leaves `/data/.bare-metal-import.in-progress` naming the export, and re-running the same command with the same export finishes it. The import refuses a target whose database already holds tasks, since it replaces the database and the master key.
 
-7. **Fix each `CRON.md`** the report names, in the users' workspaces.
+7. **Fix each `CRON.md`** the report names, in the users' workspaces. `--rewrite-workspace` on the import does it for every user's bot directory (CRON.md, scripts, prompt files, playbooks), keeping a `.pre-migration` copy of each file it changes; `istota migrate workspace-paths` does the same afterwards. Lines naming an old path it has no mapping for are listed for you to fix by hand.
 8. **Start the stack**: `systemctl enable --now istota-stack`, then `istota doctor` through the VM's `istota` wrapper.
 9. **Switch the upstream.** In this hostname's server block, change the `server` address and port to the new VM's `LISTEN_ADDR:LISTEN_PORT`, and `https://` to `http://` in `proxy_pass` (unless the stack serves TLS from files). Reload the proxy.
 10. **Lift the maintenance switch**, log in, and send the bot a message.

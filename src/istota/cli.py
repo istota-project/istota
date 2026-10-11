@@ -4704,6 +4704,10 @@ def main():
         from istota.maintenance import bare_metal_import
 
         sys.exit(bare_metal_import.main(argv[2:]))
+    if argv[:2] == ["migrate", "workspace-paths"]:
+        from istota.maintenance import workspace_paths
+
+        sys.exit(workspace_paths.main(argv[2:]))
 
     # `istota money <op> …` forwards operational commands verbatim to the money
     # Click tree. argparse REMAINDER can't capture a leading option (e.g.
@@ -4757,6 +4761,10 @@ def main():
     migrate_subparsers.add_parser(
         "import-bare-metal",
         help="Import a bare-metal install's export (exit 0 done, 1 refused, 2 partial); see --help",
+    )
+    migrate_subparsers.add_parser(
+        "workspace-paths",
+        help="Rewrite a migrated install's old host paths in users' bot directories; see --help",
     )
 
     # init

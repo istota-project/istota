@@ -327,3 +327,36 @@ class TestTheRoundTrip:
         assert (data / "db" / "istota.db").exists()
         assert (data / "repos" / "alice" / "acme" / "README").exists()
         assert (data / "db" / "whatsapp-baileys-session" / "creds.json").exists()
+
+    def test_the_import_rewrites_the_users_files_on_request(self, host, tmp_path):
+        host.disable_cron()
+        result = host.run()
+        assert result.returncode == 0, result.stderr.decode()
+        unpacked = tmp_path / "unpacked"
+        unpacked.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+            archive.extractall(unpacked, filter="data")
+        data = tmp_path / "data"
+        secrets = tmp_path / "secrets"
+        (data / "config").mkdir(parents=True)
+        secrets.mkdir()
+        for name in SECRET_NAMES:
+            (secrets / name).write_text("")
+        workspace = tmp_path / "workspace"
+        cron = workspace / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron.parent.mkdir(parents=True)
+        cron.write_text(f'command = "{host.home}/.venv/bin/python {host.mount}/Users/alice/a.py"\n')
+
+        rc = bmi.main([
+            "--source", str(unpacked), "--ingress", "proxied",
+            "--config", str(data / "config" / "config.toml"),
+            "--secrets-dir", str(secrets), "--data-dir", str(data),
+            "--rewrite-workspace", "--workspace-root", str(workspace),
+        ])
+
+        assert rc == bmi.EXIT_OK
+        assert cron.read_text() == 'command = "python /mnt/shared/Users/alice/a.py"\n'
+        assert cron.with_name("CRON.md.pre-migration").exists()
+        record = bmi.read_record(data / "db" / "istota.db")
+        assert [str(host.mount), "/mnt/shared"] in record["prefixes"]
+        assert record["istota_home"] == str(host.home)

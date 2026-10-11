@@ -1007,8 +1007,11 @@ def _import_side_trees(source: Source, target: Target, out, *, rehearsal: bool) 
         )
 
 
-def _record(source: Source, rehearsal: bool) -> str:
+def _record(source: Source, rehearsal: bool, prefixes: list[tuple[str, str]] = ()) -> str:
     return json.dumps({
+        # What `istota migrate workspace-paths` rewrites the users' files with.
+        "prefixes": [list(pair) for pair in prefixes],
+        "istota_home": source.manifest.get("istota_home", ""),
         "source_host": source.manifest.get("source_host", ""),
         "source_release": source.manifest.get("source_release", ""),
         "exported_at": source.manifest.get("exported_at", ""),
@@ -1028,7 +1031,7 @@ def _finish_database(source, target, rewrite, rehearsal: bool) -> DbReport:
             conn, rewrite.prefixes, write=True, rehearsal=rehearsal,
             scan=_scan_prefixes(source, rewrite),
         )
-        db.shared_kv_set(conn, MIGRATION_NAMESPACE, RECORD_KEY, _record(source, rehearsal), "import-bare-metal")
+        db.shared_kv_set(conn, MIGRATION_NAMESPACE, RECORD_KEY, _record(source, rehearsal, rewrite.prefixes), "import-bare-metal")
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -1117,6 +1120,28 @@ def run(args, out, err) -> int:
         err(f"import-bare-metal: {target.progress} is kept; re-run with the same export to resume.")
         return EXIT_PARTIAL
     out(f"imported {source.manifest.get('source_host')} ({'rehearsal' if args.rehearsal else 'live'}).")
+    if args.rewrite_workspace:
+        return _rewrite_workspace(args, source, target, rewrite, out, err)
+    return EXIT_OK
+
+
+def _rewrite_workspace(args, source, target, rewrite, out, err) -> int:
+    """The users' own files, after the database: a failure here leaves the
+    import done, and `istota migrate workspace-paths` finishes it."""
+    from istota.config import load_config
+    from istota.maintenance import workspace_paths
+
+    try:
+        config = load_config(target.config_path)
+        root = Path(args.workspace_root or config.nextcloud_mount_path or config.workspace_path)
+        result = workspace_paths.run(
+            root, config.bot_dir_name, rewrite.prefixes, source.manifest.get("istota_home", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - the import itself is done
+        err(f"import-bare-metal: the workspace rewrite failed: {exc}; "
+            "run `istota migrate workspace-paths` to finish it.")
+        return EXIT_PARTIAL
+    workspace_paths.report(result, root, dry_run=False, out=out)
     return EXIT_OK
 
 
@@ -1140,6 +1165,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--data-dir", default=str(wizard.CONTAINER_DATA_DIR), help=argparse.SUPPRESS)
     parser.add_argument("--rehearsal", action="store_true", help="Import as an inert copy.")
+    parser.add_argument(
+        "--rewrite-workspace", action="store_true",
+        help="Afterwards, rewrite the old host's paths in each user's bot directory "
+             "(CRON.md, scripts, prompts, playbooks), keeping a .pre-migration copy.",
+    )
+    parser.add_argument("--workspace-root", help=argparse.SUPPRESS)
     parser.add_argument(
         "--emit-plan", metavar="PATH",
         help="Also write the rewritten config as an `istota apply` plan (JSON).",
