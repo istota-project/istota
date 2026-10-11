@@ -97,10 +97,14 @@ def _data_row_count(path: Path) -> int:
     """
     conn = sqlite3.connect(path)
     try:
+        # A virtual table's rows live in its shadow tables, which are counted;
+        # counting the table itself needs its module (sqlite-vec's vec0), and a
+        # plain connection has none, so it would read as unreadable.
         tables = [
             r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name NOT LIKE 'sqlite_%'"
+                "AND name NOT LIKE 'sqlite_%' "
+                "AND upper(coalesce(sql, '')) NOT LIKE 'CREATE VIRTUAL TABLE%'"
             )
         ]
         total = 0

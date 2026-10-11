@@ -90,6 +90,31 @@ class TestRestoreFramework:
         finally:
             conn.close()
 
+    def test_a_virtual_table_whose_module_is_not_loaded_does_not_read_as_empty(self, tmp_path):
+        # Memory search keeps a sqlite-vec table in the framework DB; a plain
+        # connection has no vec0 module, so counting it raises.
+        cfg = _config(tmp_path)
+        db.init_db(cfg.db_path)
+        with db.get_db(cfg.db_path) as conn:
+            db.create_task(conn, prompt="hi", user_id="alice")
+        conn = sqlite3.connect(cfg.db_path)
+        try:
+            conn.execute("PRAGMA writable_schema=ON")
+            conn.execute(
+                "INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES "
+                "('table', 'chunks_vec', 'chunks_vec', 0, "
+                "'CREATE VIRTUAL TABLE chunks_vec USING vec0(chunk_id INTEGER PRIMARY KEY)')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        db_backup.backup_databases(cfg, today="2026-07-12")
+        cfg.db_path.unlink()
+
+        res = db_restore.restore_database(cfg, label="framework")
+        assert res["status"] == "restored"
+        assert res["rows"] > 0
+
 
 class TestRestoreModule:
     def test_restore_module_db(self, tmp_path):
