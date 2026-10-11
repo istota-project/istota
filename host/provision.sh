@@ -79,6 +79,18 @@ changed_file() {
     return 0
 }
 
+# An install the old Ansible role converged has its own mount-nextcloud.service,
+# at this path, run as its service user. While that unit is enabled or running
+# the install is live: replacing, stopping or chowning it pulls the workspace
+# from under its daemon. The export disables it; the run after that takes over.
+bare_metal_mount_live() {
+    local unit="${UNITS}/mount-nextcloud.service"
+    [ -f "$unit" ] || return 1
+    grep -qx "User=${ISTOTA_UID}" "$unit" && return 1
+    systemctl is-enabled --quiet mount-nextcloud.service 2>/dev/null \
+        || systemctl is-active --quiet mount-nextcloud.service 2>/dev/null
+}
+
 export DEBIAN_FRONTEND=noninteractive
 
 # --- Packages and Docker Engine ----------------------------------------------
@@ -210,8 +222,14 @@ getent group "$ISTOTA_UID" >/dev/null || groupadd -g "$ISTOTA_UID" istota
 getent passwd "$ISTOTA_UID" >/dev/null \
     || useradd -u "$ISTOTA_UID" -g "$ISTOTA_UID" -M -d "$STACK" -s /usr/sbin/nologin istota
 
+bare_metal_mount=""
+bare_metal_mount_live && bare_metal_mount=1
+[ -z "$bare_metal_mount" ] \
+    || log "a bare-metal install's mount-nextcloud.service is live: left alone until the export disables it, then re-run this."
+
 # --- /srv/app/istota ---------------------------------------------------------
-install -d -m 0755 "$STACK" "$MOUNT_DIR" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+install -d -m 0755 "$STACK" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+[ -n "$bare_metal_mount" ] || install -d -m 0755 "$MOUNT_DIR"
 install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/config"
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/secrets"
 [ -f "${STACK}/.env" ] || install -m 0644 /dev/null "${STACK}/.env"
@@ -249,6 +267,9 @@ mount_unit_changed=""
 for unit in istota-stack.service istota-devbox-egress.service \
         istota-browser-watchdog.service istota-browser-watchdog.timer \
         istota-certbot.service istota-certbot.timer mount-nextcloud.service; do
+    if [ "$unit" = mount-nextcloud.service ] && [ -n "$bare_metal_mount" ]; then
+        continue
+    fi
     if [ "$unit" = mount-nextcloud.service ] && ! cmp -s "${HERE}/${unit}" "${UNITS}/${unit}"; then
         mount_unit_changed=1
     fi
@@ -281,7 +302,6 @@ if [ "$(host_env STORAGE)" = "nextcloud" ]; then
     else
         log "STORAGE=nextcloud: put the rclone remote's config at ${STACK}/rclone.conf (written by you, never on a command line), then re-run this."
     fi
-    chown "$ISTOTA_UID:$ISTOTA_UID" "$MOUNT_DIR"
     # Never write into an unmounted path: the stack requires the mount.
     changed_file "${dropin}/mount.conf" "$(cat <<'EOF'
 [Unit]
@@ -290,7 +310,13 @@ After=mount-nextcloud.service
 EOF
 )" || true
     systemctl daemon-reload
-    if [ -f "${STACK}/rclone.conf" ]; then
+    if [ -n "$bare_metal_mount" ]; then
+        : # left alone, logged above
+    elif [ -f "${STACK}/rclone.conf" ]; then
+        chown "$ISTOTA_UID:$ISTOTA_UID" "$MOUNT_DIR"
+        # The role left the parent 0770 to its own group; fusermount refuses a
+        # mountpoint the mount's user cannot reach.
+        chmod o+x "$(dirname "$MOUNT_DIR")"
         systemctl enable --now mount-nextcloud.service
         # A running mount keeps the flags it started with. Restarting it
         # restarts the stack too (Requires=), so only on a changed unit.
@@ -302,7 +328,7 @@ EOF
 else
     rm -f "${dropin}/mount.conf"
     systemctl daemon-reload
-    systemctl disable --now mount-nextcloud.service >/dev/null 2>&1 || true
+    [ -n "$bare_metal_mount" ] || systemctl disable --now mount-nextcloud.service >/dev/null 2>&1 || true
 fi
 
 # --- Firewall: devbox egress and the proxied listener ------------------------

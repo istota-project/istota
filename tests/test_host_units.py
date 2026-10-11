@@ -307,6 +307,87 @@ class TestProvision:
         assert "--cache-dir /var/cache/istota-rclone" in mount["Service"]["ExecStart"]
 
 
+ROLE_MOUNT_UNIT = """[Unit]
+Description=Nextcloud rclone FUSE mount
+
+[Service]
+User=zorg
+ExecStart=/usr/bin/rclone mount nextcloud: /srv/mount/nextcloud/content
+"""
+
+
+class TestABareMetalInstallOnTheSameHost:
+    """An in-place migration provisions the host the old role converged, while
+    that install still runs. Its mount-nextcloud.service shares our unit's name
+    and path, so provision.sh leaves it alone until the export has disabled it."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _live(self, tmp_path, unit_text, enabled, active):
+        units = tmp_path / "units"
+        units.mkdir()
+        if unit_text is not None:
+            (units / "mount-nextcloud.service").write_text(unit_text)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        _stub(bindir, "systemctl", (
+            f'case "$1" in is-enabled) exit {0 if enabled else 1} ;;'
+            f' is-active) exit {0 if active else 1} ;; esac\nexit 1\n'
+        ))
+        function = re.search(r"^bare_metal_mount_live\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines bare_metal_mount_live"
+        result = subprocess.run(
+            ["bash", "-c", f'{function.group(0)}\nbare_metal_mount_live'],
+            env={"PATH": f"{bindir}:{os.environ['PATH']}", "UNITS": str(units),
+                 "ISTOTA_UID": "10001"},
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode in (0, 1), result.stderr
+        return result.returncode == 0
+
+    def test_an_enabled_role_mount_is_live(self, tmp_path):
+        assert self._live(tmp_path, ROLE_MOUNT_UNIT, enabled=True, active=False)
+
+    def test_a_running_role_mount_is_live(self, tmp_path):
+        assert self._live(tmp_path, ROLE_MOUNT_UNIT, enabled=False, active=True)
+
+    def test_the_role_mount_the_export_disabled_is_taken_over(self, tmp_path):
+        assert not self._live(tmp_path, ROLE_MOUNT_UNIT, enabled=False, active=False)
+
+    def test_our_own_mount_is_never_the_old_install(self, tmp_path):
+        ours = (HOST / "mount-nextcloud.service").read_text()
+        assert not self._live(tmp_path, ours, enabled=True, active=True)
+
+    def test_no_mount_unit_is_nothing_to_leave_alone(self, tmp_path):
+        assert not self._live(tmp_path, None, enabled=True, active=True)
+
+    def test_every_change_to_the_mount_waits_for_the_export(self):
+        """Installing the unit, creating or chowning the mountpoint, and enabling,
+        restarting or disabling the unit each pull the workspace from under the
+        old daemon. Each sits behind the one flag."""
+        assert 'bare_metal_mount_live && bare_metal_mount=1' in self.TEXT
+        assert ('if [ "$unit" = mount-nextcloud.service ] && [ -n "$bare_metal_mount" ]; then'
+                in self.TEXT)
+        assert '[ -n "$bare_metal_mount" ] || install -d -m 0755 "$MOUNT_DIR"' in self.TEXT
+        nextcloud = self.TEXT.split('if [ "$(host_env STORAGE)" = "nextcloud" ]; then', 1)[1]
+        nextcloud = nextcloud.split("# --- Firewall", 1)[0]
+        guarded = nextcloud.split('if [ -n "$bare_metal_mount" ]; then', 1)
+        assert len(guarded) == 2, "the nextcloud branch has a bare-metal arm"
+        before, after = guarded
+        for change in ('chown "$ISTOTA_UID:$ISTOTA_UID" "$MOUNT_DIR"',
+                       "systemctl enable --now mount-nextcloud.service",
+                       "systemctl restart mount-nextcloud.service",
+                       "systemctl disable --now mount-nextcloud.service"):
+            assert change not in before, change
+        assert ('[ -n "$bare_metal_mount" ] || systemctl disable --now mount-nextcloud.service'
+                in after)
+
+    def test_the_mount_user_can_reach_the_mountpoint(self):
+        """The role made /srv/mount/nextcloud 0770 root:nextcloud-mount; uid 10001 is
+        in no such group, and fusermount refuses a mountpoint its user cannot reach."""
+        assert 'chmod o+x "$(dirname "$MOUNT_DIR")"' in self.TEXT
+
+
 STACK_DIR = "/srv/app/istota"
 MOUNT_DIR = "/srv/mount/nextcloud/content"
 
