@@ -367,8 +367,8 @@ class TestUpstreamRclone:
             'log() { echo "$*"; }\ndie() { echo "$*" >&2; exit 1; }\n'
             f'RCLONE_VERSION={pinned.group(1)}\n'
             f'RCLONE_SHA256_AMD64={sha}\nRCLONE_SHA256_ARM64={sha}\n'
-            f'rclone_replaced=""\n{function.group(0)}\n'
-            'install_rclone\necho "replaced=${rclone_replaced}"\n'
+            f'{function.group(0)}\n'
+            'install_rclone\necho done\n'
         )
         result = subprocess.run(
             ["bash", "-c", script], capture_output=True, text=True, timeout=30,
@@ -394,7 +394,6 @@ class TestUpstreamRclone:
                                       f"rclone-v{version}-linux-amd64.deb"))
         assert calls[1].startswith("dpkg -i ") and calls[1].endswith("rclone.deb")
         assert calls[2] == "apt-mark hold rclone"
-        assert "replaced=1" in result.stdout
 
     def test_a_missing_rclone_is_installed(self, tmp_path):
         result, calls, _ = self._run(tmp_path, installed=None, arch="arm64")
@@ -406,14 +405,14 @@ class TestUpstreamRclone:
         result, calls, _ = self._run(tmp_path, sha="0" * 64)
         assert result.returncode != 0
         assert not any(c.startswith(("dpkg", "apt-mark")) for c in calls)
-        assert "replaced=" not in result.stdout
+        assert "done" not in result.stdout
 
-    def test_the_pinned_build_is_left_alone(self, tmp_path):
+    def test_the_pinned_build_is_left_alone_but_held(self, tmp_path):
+        """A run killed between `dpkg -i` and the hold is finished by the next."""
         pinned = re.search(r"^RCLONE_VERSION=(\S+)$", self.TEXT, re.M).group(1)
         result, calls, _ = self._run(tmp_path, installed=f"rclone v{pinned}")
         assert result.returncode == 0, result.stderr
-        assert calls == []
-        assert "replaced=\n" in result.stdout + "\n"
+        assert calls == ["apt-mark hold rclone"]
 
     def test_an_unpinned_architecture_is_refused(self, tmp_path):
         result, calls, _ = self._run(tmp_path, arch="riscv64")
@@ -422,10 +421,39 @@ class TestUpstreamRclone:
 
     def test_a_replaced_binary_restarts_the_mount(self):
         """A running mount keeps the binary it started with, so the fix would
-        wait for a reboot."""
+        wait for a reboot. Decided from the running process, not from this
+        run, so a re-run after one that died before the restart still does it."""
         assert re.search(
-            r'if \[ -n "\$mount_unit_changed" \] \|\| \[ -n "\$rclone_replaced" \]; then\n'
+            r'if \[ -n "\$mount_unit_changed" \] \|\| mount_runs_stale_rclone; then\n'
             r'.*\n\s*systemctl restart mount-nextcloud.service', self.TEXT)
+
+    def _stale(self, tmp_path, pid, exe):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        _stub(bindir, "systemctl", f'echo {pid}\n')
+        _stub(bindir, "readlink", f'[ "$1" = /proc/{pid}/exe ] || exit 1\n'
+              + (f'echo "{exe}"\n' if exe is not None else 'exit 1\n'))
+        function = re.search(r"^mount_runs_stale_rclone\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines mount_runs_stale_rclone"
+        result = subprocess.run(
+            ["bash", "-c", f"set -euo pipefail\n{function.group(0)}\nmount_runs_stale_rclone"],
+            env={"PATH": f"{bindir}:{os.environ['PATH']}"}, capture_output=True, text=True,
+            timeout=30,
+        )
+        assert result.returncode in (0, 1), result.stderr
+        return result.returncode == 0
+
+    def test_a_mount_on_the_replaced_binary_is_stale(self, tmp_path):
+        assert self._stale(tmp_path, 4242, "/usr/bin/rclone (deleted)")
+
+    def test_a_mount_on_the_current_binary_is_not(self, tmp_path):
+        assert not self._stale(tmp_path, 4242, "/usr/bin/rclone")
+
+    def test_a_stopped_mount_is_not(self, tmp_path):
+        assert not self._stale(tmp_path, 0, None)
+
+    def test_a_vanished_process_is_not(self, tmp_path):
+        assert not self._stale(tmp_path, 4242, None)
 
 
 ROLE_MOUNT_UNIT = """[Unit]

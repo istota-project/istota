@@ -134,11 +134,14 @@ apt_install() { apt-get install -y -qq --no-install-recommends "$@" >/dev/null; 
 RCLONE_VERSION=1.75.2
 RCLONE_SHA256_AMD64=efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
 RCLONE_SHA256_ARM64=b8ba161d5c837206fad79ff1aabf0a81aa02a5fb164cdbc0ff5db4160aecd278
-rclone_replaced=""
 install_rclone() {
     local have arch sha tmp
     have="$(rclone version 2>/dev/null || true)"
-    [ "${have%%$'\n'*}" = "rclone v${RCLONE_VERSION}" ] && return 0
+    if [ "${have%%$'\n'*}" = "rclone v${RCLONE_VERSION}" ]; then
+        # A run killed between the install and the hold left it unheld.
+        apt-mark hold rclone >/dev/null
+        return 0
+    fi
     arch="$(dpkg --print-architecture)"
     case "$arch" in
         amd64) sha="$RCLONE_SHA256_AMD64" ;;
@@ -156,7 +159,17 @@ install_rclone() {
     rm -rf "$tmp"
     apt-mark hold rclone >/dev/null
     log "installed rclone ${RCLONE_VERSION} from rclone.org (was: ${have%%$'\n'*})"
-    rclone_replaced=1
+}
+
+# Whether the running mount's process is an rclone other than the one on disk:
+# dpkg replaced it under the mount, in this run or one that died before the
+# restart. Read off the process, so a re-run still sees it.
+mount_runs_stale_rclone() {
+    local pid exe
+    pid="$(systemctl show -p MainPID --value mount-nextcloud.service 2>/dev/null || true)"
+    [ -n "$pid" ] && [ "$pid" != 0 ] || return 1
+    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || return 1
+    [ "$exe" != /usr/bin/rclone ]
 }
 
 apt-get update -qq
@@ -383,7 +396,7 @@ EOF
         # A running mount keeps the flags and the binary it started with.
         # Restarting it restarts the stack too (Requires=), so only on a
         # changed unit or a replaced rclone.
-        if [ -n "$mount_unit_changed" ] || [ -n "$rclone_replaced" ]; then
+        if [ -n "$mount_unit_changed" ] || mount_runs_stale_rclone; then
             log "mount-nextcloud.service or rclone changed; restarting the mount"
             systemctl restart mount-nextcloud.service
         fi
