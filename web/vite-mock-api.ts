@@ -4774,8 +4774,40 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
   'Empty folder': [],
   Archive: [workspaceEntry('note.txt')],
 };
-const workspaceHandler: MockHandler = ({ url, method }) => {
+const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const [path, query] = url.split('?');
+  if (
+    method === 'POST' &&
+    (path === '/istota/api/workspace/folders' || path === '/istota/api/workspace/upload')
+  ) {
+    const upload = path.endsWith('/upload');
+    const raw = typeof body === 'string' ? body : '';
+    const field = (name: string) =>
+      raw.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r]*)`))?.[1] || '';
+    const place = upload ? field('place') : body.place;
+    const folder = upload ? field('path') : body.path;
+    const entries = workspaceTree[folder];
+    if (place !== 'home' || !entries) return { __status: 404, error: 'Folder not found.' };
+    let name = upload ? raw.match(/filename="([^"]*)"/)?.[1] || 'upload' : body.name.trim();
+    const original = name;
+    let n = 2;
+    while (entries.some((entry) => entry.name === name)) {
+      if (!upload) return { __status: 409, error: 'A file or folder already exists.' };
+      const dot = original.lastIndexOf('.');
+      name =
+        dot > 0
+          ? `${original.slice(0, dot)} (${n++})${original.slice(dot)}`
+          : `${original} (${n++})`;
+    }
+    const resultPath = [folder, name].filter(Boolean).join('/');
+    const entry = workspaceEntry(name, upload ? 'file' : 'dir');
+    entries.push(entry);
+    entries.sort(
+      (a, b) => Number(b.kind === 'dir') - Number(a.kind === 'dir') || a.name.localeCompare(b.name),
+    );
+    if (!upload) workspaceTree[resultPath] = [];
+    return upload ? { name, path: resultPath, size: entry.size } : { path: resultPath };
+  }
   if (method !== 'GET') return undefined;
   if (path === '/istota/api/workspace/places')
     return {

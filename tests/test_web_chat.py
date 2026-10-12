@@ -2225,6 +2225,20 @@ class TestChatTaskRetry:
 
 @_needs_web_deps
 class TestChatAttachments:
+    async def test_workspace_writes_reject_cross_origin_requests(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        for headers in [{}, {"origin": "https://other.example.com"}]:
+            response = await chat_client.post(
+                "/istota/api/workspace/upload", files={"file": ("note.txt", b"x")},
+                cookies=cookies, headers=headers,
+            )
+            assert response.status_code == 403
+            response = await chat_client.post(
+                "/istota/api/workspace/folders", json={"place": "home", "path": "", "name": "Notes"},
+                cookies=cookies, headers=headers,
+            )
+            assert response.status_code == 403
+
     @pytest.mark.parametrize("component", ["inbox", "web-chat", "day", "temp"])
     @pytest.mark.parametrize("operation", ["upload", "send"])
     async def test_symlinked_upload_directories_are_refused(

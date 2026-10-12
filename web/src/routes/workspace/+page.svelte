@@ -1,10 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { AppShell, ShellHeader, Sidebar, SidebarToggle, Button } from '$lib/components/ui';
+  import {
+    AppShell,
+    ShellHeader,
+    Sidebar,
+    SidebarToggle,
+    Button,
+    Modal,
+    Field,
+    Input,
+    FileDropZone,
+  } from '$lib/components/ui';
   import {
     getWorkspacePlaces,
     getWorkspaceListing,
+    createWorkspaceFolder,
+    uploadWorkspaceFile,
     type WorkspacePlace,
     type WorkspaceListing,
   } from '$lib/api';
@@ -26,6 +38,84 @@
   let listingLoading = $state(false);
   let listingError = $state('');
   let showHidden = $state(loadSetting<boolean>('workspace.showHidden', false) === true);
+  let fileInput: HTMLInputElement;
+  let folderOpen = $state(false);
+  let folderName = $state('');
+  let folderPath = $state('');
+  let folderBusy = $state(false);
+  let folderError = $state('');
+  type Upload = {
+    file: File;
+    path: string;
+    progress: number;
+    state: 'waiting' | 'uploading' | 'done' | 'error';
+    message: string;
+  };
+  let uploads = $state<Upload[]>([]);
+  let uploading = false;
+
+  function openFolderDialog() {
+    folderPath = selected?.path || '';
+    folderName = '';
+    folderError = '';
+    folderOpen = true;
+  }
+  async function refreshIfCurrent(path: string) {
+    if (active && selected?.place === 'home' && selected.path === path) await loadFolder(selected);
+  }
+  async function createFolder(event: SubmitEvent) {
+    event.preventDefault();
+    if (!folderName.trim() || folderBusy) return;
+    folderBusy = true;
+    folderError = '';
+    try {
+      await createWorkspaceFolder(folderPath, folderName.trim());
+      folderOpen = false;
+      await refreshIfCurrent(folderPath);
+    } catch (e) {
+      folderError = e instanceof Error ? e.message : 'Could not create this folder.';
+    } finally {
+      folderBusy = false;
+    }
+  }
+  function enqueue(files: File[]) {
+    if (selected?.place !== 'home') return;
+    uploads.push(
+      ...files.map((file): Upload => ({
+        file,
+        path: selected!.path,
+        progress: 0,
+        state: 'waiting',
+        message: '',
+      })),
+    );
+    void runUploads();
+  }
+  async function runUploads() {
+    if (uploading) return;
+    uploading = true;
+    try {
+      for (const row of uploads) {
+        if (!active || row.state !== 'waiting') continue;
+        row.state = 'uploading';
+        try {
+          const result = await uploadWorkspaceFile(
+            row.path,
+            row.file,
+            (percent) => (row.progress = percent),
+          );
+          row.state = 'done';
+          row.message = result.name === row.file.name ? 'Uploaded' : `Saved as ${result.name}`;
+          await refreshIfCurrent(row.path);
+        } catch (e) {
+          row.state = 'error';
+          row.message = e instanceof Error ? e.message : 'Could not upload this file.';
+        }
+      }
+    } finally {
+      uploading = false;
+    }
+  }
   let generation = 0;
   let active = true;
   const selection = createUrlSelection<Selection>({
@@ -158,37 +248,178 @@
           {/each}
         </ol>
       </nav>
-      {#if place.browsable}
-        <label class="hidden-toggle"
-          ><input
-            type="checkbox"
-            bind:checked={showHidden}
-            onchange={() => saveSetting('workspace.showHidden', showHidden)}
-          />Show hidden</label
-        >
-      {/if}
+      <div class="folder-actions">
+        {#if place.id === 'home' && listing && !listingLoading && !listingError}
+          <Button variant="secondary" size="sm" onclick={openFolderDialog}>New folder</Button>
+          <Button size="sm" onclick={() => fileInput.click()}>Upload</Button>
+          <input
+            bind:this={fileInput}
+            type="file"
+            multiple
+            hidden
+            aria-label="Upload files"
+            onchange={() => {
+              enqueue(Array.from(fileInput.files || []));
+              fileInput.value = '';
+            }}
+          />
+        {/if}
+        {#if place.browsable}
+          <label class="hidden-toggle"
+            ><input
+              type="checkbox"
+              bind:checked={showHidden}
+              onchange={() => saveSetting('workspace.showHidden', showHidden)}
+            />Show hidden</label
+          >
+        {/if}
+      </div>
     </div>
     <ReachPanel {place} {notes} />
-    {#if !place.browsable}
-      <div class="center-msg">
-        {place.kind === 'talk'
-          ? 'Talk attachments are available to tasks, but cannot be browsed here.'
-          : 'This connection is reached through a skill during a task.'}
-      </div>
-    {:else if listingLoading}
-      <div class="center-msg">Loading folder…</div>
-    {:else if listingError}
-      <div class="center-msg error">
-        <p>{listingError}</p>
-        <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
-      </div>
-    {:else if listing}
-      <FileTable {listing} {place} {showHidden} {href} onNavigate={navigate} />
+    {#if uploads.length}
+      <section class="uploads" aria-label="Uploads">
+        <div class="upload-heading">
+          <span class="micro-label">Uploads</span>
+          {#if !uploads.some((row) => row.state === 'waiting' || row.state === 'uploading')}
+            <Button size="sm" variant="ghost" onclick={() => (uploads = [])}>Dismiss</Button>
+          {/if}
+        </div>
+        <ul>
+          {#each uploads as row}
+            <li class="upload-row">
+              <span class="upload-name"
+                >{row.file.name}<span class="caption"
+                  >My files{row.path ? ` / ${row.path}` : ''}</span
+                ></span
+              >
+              <span
+                class:form-error={row.state === 'error'}
+                class="upload-status"
+                aria-live="polite"
+              >
+                {row.state === 'waiting'
+                  ? 'Waiting'
+                  : row.state === 'uploading'
+                    ? row.progress === 100
+                      ? 'Saving…'
+                      : `${row.progress}%`
+                    : row.message}
+              </span>
+              {#if row.state === 'uploading'}<progress
+                  max="100"
+                  value={row.progress}
+                  aria-label={`Uploading ${row.file.name}`}
+                ></progress>{/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
     {/if}
+    <FileDropZone
+      overlay
+      disabled={place.id !== 'home' || !listing || listingLoading || !!listingError}
+      onFiles={enqueue}
+    >
+      {#if !place.browsable}
+        <div class="center-msg">
+          {place.kind === 'talk'
+            ? 'Talk attachments are available to tasks, but cannot be browsed here.'
+            : 'This connection is reached through a skill during a task.'}
+        </div>
+      {:else if listingLoading}
+        <div class="center-msg">Loading folder…</div>
+      {:else if listingError}
+        <div class="center-msg error">
+          <p>{listingError}</p>
+          <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
+        </div>
+      {:else if listing}
+        <FileTable {listing} {place} {showHidden} {href} onNavigate={navigate} />
+      {/if}
+    </FileDropZone>
   {/if}
 </AppShell>
 
+<Modal
+  bind:open={folderOpen}
+  title="New folder"
+  onOpenAutoFocus={(event) => {
+    event.preventDefault();
+    document.getElementById('workspace-folder-name')?.focus();
+  }}
+  description={`Create in My files${folderPath ? ` / ${folderPath}` : ''}`}
+  dismissible={!folderBusy}
+  width="420px"
+>
+  <form onsubmit={createFolder}>
+    <Field label="Folder name"
+      ><Input
+        id="workspace-folder-name"
+        bind:value={folderName}
+        required
+        disabled={folderBusy}
+      /></Field
+    >
+    {#if folderError}<p class="form-error" role="alert">{folderError}</p>{/if}
+    <div class="form-actions">
+      <Button variant="secondary" onclick={() => (folderOpen = false)} disabled={folderBusy}
+        >Cancel</Button
+      >
+      <Button type="submit" disabled={folderBusy || !folderName.trim()}
+        >{folderBusy ? 'Creating…' : 'Create folder'}</Button
+      >
+    </div>
+  </form>
+</Modal>
+
 <style>
+  .folder-actions,
+  .upload-heading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .uploads {
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+    max-height: 30vh;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  .upload-heading {
+    justify-content: space-between;
+  }
+  .uploads ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .upload-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+    font-size: var(--text-sm);
+  }
+  .upload-name {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .upload-status {
+    text-align: right;
+  }
+  progress {
+    grid-column: 1 / -1;
+    width: 100%;
+    height: var(--space-1);
+    accent-color: var(--accent);
+  }
+  .form-actions {
+    margin-top: var(--space-4);
+  }
+
   .folder-toolbar {
     display: flex;
     align-items: center;

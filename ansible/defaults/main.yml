@@ -2115,6 +2115,10 @@ istota_config: {}
 #     # Never put a public proxy in front of the local no-auth launcher.
 #     # ISTOTA_WEB_AUTH accepts comma-separated method names and overrides this value.
 #     auth: ["nextcloud"]
+#
+#     workspace:
+#       # Maximum size of a Workspace upload.
+#       max_upload_mb: 100
 #     auth_enrol_ttl_hours: 168
 #     auth_reset_ttl_hours: 1
 #

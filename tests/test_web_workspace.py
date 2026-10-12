@@ -88,3 +88,67 @@ async def test_listing_error_mapping_without_path_in_log(client, monkeypatch, ca
     assert "error" in response.json()
     assert "home" in caplog.text and str(error) in caplog.text
     assert "sensitive-name" not in caplog.text and "sensitive-name" not in response.text
+
+
+async def test_upload_and_folder_routes(client, config):
+    response = await client.post("/workspace/folders", json={"place": "home", "path": "/notes/", "name": "Drafts"})
+    assert response.status_code == 200
+    assert response.json() == {"path": "notes/Drafts"}
+    for name in ["draft.bin", "draft (2).bin"]:
+        response = await client.post("/workspace/upload", data={"place": "home", "path": "notes/Drafts"}, files={"file": ("draft.bin", b"hello")})
+        assert response.status_code == 200
+        assert response.json() == {"name": name, "path": f"notes/Drafts/{name}", "size": 5}
+        assert (config.workspace_path / "Users/alice/notes/Drafts" / name).read_bytes() == b"hello"
+
+
+async def test_upload_stops_body_at_cap(client, config):
+    config.web.workspace.max_upload_mb = 1
+    async def body():
+        yield b'--test\r\nContent-Disposition: form-data; name="place"\r\n\r\nhome\r\n--test\r\nContent-Disposition: form-data; name="file"; filename="big.bin"\r\nContent-Type: application/octet-stream\r\n\r\n'
+        yield b"x" * (1024 * 1024)
+        yield b"x" * 1024
+        pytest.fail("route consumed the rest of an oversized body")
+    response = await client.post("/workspace/upload", content=body(), headers={"content-type": "multipart/form-data; boundary=test"})
+    assert response.status_code == 413
+    assert response.json() == {"error": "file exceeds 1 MB"}
+    assert not (config.workspace_path / "Users/alice/big.bin").exists()
+
+
+@pytest.mark.parametrize("place", ["talk", "room:sample", "linked:1", "unknown"])
+async def test_writes_only_accept_home(client, place):
+    assert (await client.post("/workspace/folders", json={"place": place, "path": "", "name": "Drafts"})).status_code == 404
+    assert (await client.post("/workspace/upload", data={"place": place, "path": ""}, files={"file": ("note.txt", b"x")})).status_code == 404
+
+
+async def test_writes_require_origin(client, app):
+    from fastapi import HTTPException
+    from istota.webui.router_stubs import verify_origin
+    def refuse():
+        raise HTTPException(403, "cross-origin request")
+    app.dependency_overrides[verify_origin] = refuse
+    assert (await client.post("/workspace/folders", json={"place": "home", "path": "", "name": "Drafts"})).status_code == 403
+    assert (await client.post("/workspace/upload", files={"file": ("note.txt", b"x")})).status_code == 403
+
+
+@pytest.mark.parametrize("headers,body", [({}, b""), ({"content-type": "text/plain"}, b"no"), ({"content-type": "multipart/form-data; boundary=bad"}, b"malformed")])
+async def test_invalid_upload_is_not_a_server_error(client, headers, body):
+    response = await client.post("/workspace/upload", content=body, headers=headers)
+    assert response.status_code == 422
+
+
+async def test_workspace_write_auth_required(client, app):
+    app.dependency_overrides.clear()
+    assert (await client.post("/workspace/upload")).status_code == 401
+    assert (await client.post("/workspace/folders", json={})).status_code == 401
+
+
+def test_workspace_upload_config_and_nginx_cap(tmp_path):
+    import re
+    from pathlib import Path
+    from istota.config import load_config
+    path = tmp_path / "config.toml"
+    path.write_text("[web.workspace]\nmax_upload_mb = 7\n")
+    assert load_config(path).web.workspace.max_upload_mb == 7
+    compose = (Path(__file__).resolve().parents[1] / "docker/docker-compose.yml").read_text()
+    nginx_mb = int(re.search(r"NGINX_CLIENT_MAX_BODY_SIZE:-([0-9]+)M", compose).group(1))
+    assert nginx_mb >= Config().web.workspace.max_upload_mb

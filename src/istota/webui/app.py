@@ -11970,11 +11970,13 @@ def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     stem = _attachment_stem(filename)
     suffix = uuid.uuid4().hex[:8] if stem else uuid.uuid4().hex
     dest = dest_dir / f"{stem}-{suffix}{ext}" if stem else dest_dir / f"{suffix}{ext}"
-    from istota.workspace.writes import write_new_file
+    from istota.workspace.writes import open_or_create_dirs, write_new_file
 
     anchor = _config.workspace_path or _config.temp_dir
-    write_new_file(anchor, dest.relative_to(anchor).parts, data)
-    return str(dest)
+    parts = list(dest_dir.relative_to(anchor).parts)
+    os.close(open_or_create_dirs(anchor, parts))
+    name = write_new_file(anchor, parts, dest.name, [data], max_bytes=len(data))
+    return str(dest_dir / name)
 
 
 @api_router.post("/chat/attachments")
@@ -12000,10 +12002,12 @@ async def chat_upload_attachment(
         return JSONResponse(
             {"error": f"file exceeds {chat.max_attachment_mb} MB"}, status_code=413,
         )
+    from istota.workspace.listing import ListingError
+
     username = user["username"]
     try:
         path = await asyncio.to_thread(_save_chat_attachment, username, name, data)
-    except OSError:
+    except (OSError, ListingError):
         return JSONResponse({"error": "attachment could not be saved"}, status_code=400)
     # `workspace_path` is what `/chat/files` takes, so the composer can link the
     # chip it renders optimistically instead of waiting for the turn to come

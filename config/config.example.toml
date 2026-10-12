@@ -1889,6 +1889,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # light_style = ""                                 # custom only
 # attribution = ""                                 # custom only
 
+# [web.workspace]
+# max_upload_mb = 100           # Maximum size of a Workspace upload.
+
 # In-app web chat surface (always-on companion to Talk; reachable from the
 # "Chat" tab). All knobs have sensible defaults — this block is only for tuning.
 # [web.chat]

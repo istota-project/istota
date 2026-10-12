@@ -5231,3 +5231,53 @@ export function getWorkspacePlaces(): Promise<{ places: WorkspacePlace[]; notes:
 export function getWorkspaceListing(place: string, path = ''): Promise<WorkspaceListing> {
   return apiFetch(`/workspace/list?${new URLSearchParams({ place, path })}`);
 }
+
+export function createWorkspaceFolder(path: string, name: string): Promise<{ path: string }> {
+  return apiFetch('/workspace/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ place: 'home', path, name }),
+  });
+}
+
+export function uploadWorkspaceFile(
+  path: string,
+  file: File,
+  onProgress: (percent: number) => void,
+): Promise<{ name: string; path: string; size: number }> {
+  const form = new FormData();
+  form.append('place', 'home');
+  form.append('path', path);
+  form.append('file', file);
+  // XHR exposes upload progress; fetch does not.
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${base}/api/workspace/upload`);
+    xhr.timeout = 120_000;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => reject(new UploadUnreachableError());
+    xhr.ontimeout = () => reject(new Error('Upload timed out.'));
+    xhr.onload = async () => {
+      if (xhr.status === 401) {
+        reject(new AuthError());
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(
+          new Error(
+            await errorMessage(new Response(xhr.responseText, { status: xhr.status || 500 })),
+          ),
+        );
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText));
+      } catch {
+        reject(new Error('Could not read the upload response.'));
+      }
+    };
+    xhr.send(form);
+  });
+}

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Upload files and create folders under My files in Workspace. Uploads show progress, preserve existing files by numbering repeated names, and keep errors beside the affected file.
+
 - Files in your room folders, group folders and linked folders now open in Workspace and chat. Access follows your current memberships, including when a membership is removed.
 
 - Workspace shows your file locations and how tasks can reach them. Browse folders, open files under My files in the existing viewer, and check how access changes in shared rooms.

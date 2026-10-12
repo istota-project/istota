@@ -215,3 +215,54 @@ it.each([
   await fireEvent.click(await screen.findByRole('button', { name: 'plan #1.md' }));
   expect(openFile).toHaveBeenCalledWith(`${view_root}/notes/plan #1.md`);
 });
+
+it('creates a folder in the open home directory and refreshes it', async () => {
+  api.createWorkspaceFolder.mockResolvedValue({ path: 'notes & drafts/New folder' });
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'notes & drafts' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'New folder' }));
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Folder name' }), {
+    target: { value: 'New folder' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
+  await waitFor(() =>
+    expect(api.createWorkspaceFolder).toHaveBeenCalledWith('notes & drafts', 'New folder'),
+  );
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('home', 'notes & drafts');
+});
+
+it('uploads sequentially to the captured folder and keeps server errors on each row', async () => {
+  let finish!: (value: unknown) => void;
+  api.uploadWorkspaceFile.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  api.uploadWorkspaceFile.mockRejectedValueOnce(new Error('file exceeds 100 MB'));
+  const { container } = render(Workspace);
+  await screen.findByRole('button', { name: 'Upload' });
+  const files = [new File(['one'], 'one.txt'), new File(['two'], 'two.txt')];
+  await fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files } });
+  await waitFor(() => expect(api.uploadWorkspaceFile).toHaveBeenCalledTimes(1));
+  await fireEvent.click(screen.getByRole('link', { name: 'notes & drafts' }));
+  finish({ name: 'one.txt', path: 'one.txt', size: 3 });
+  await screen.findByText('file exceeds 100 MB');
+  expect(api.uploadWorkspaceFile.mock.calls.map((args) => args[0])).toEqual(['', '']);
+  expect(api.uploadWorkspaceFile.mock.calls.map((args) => args[1])).toEqual(files);
+});
+
+it('shows folder conflicts in the dialog and hides writes for other places', async () => {
+  api.createWorkspaceFolder.mockRejectedValue(new Error('A file or folder already exists.'));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('button', { name: 'New folder' }));
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Folder name' }), {
+    target: { value: 'Notes' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
+  await screen.findByText('A file or folder already exists.');
+  await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  await fireEvent.click(screen.getByRole('link', { name: '<b>Project room</b> Read-write' }));
+  expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
+});
