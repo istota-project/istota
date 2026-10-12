@@ -164,6 +164,10 @@ MODES = {
                                 listen_addr="10.0.0.5", listen_port=8443, tls_cert_source="self-signed"),
     "nextcloud-browser": dict(ingress="local", hostname="localhost:8080",
                               nextcloud_url="https://cloud.example.com", profiles=("browser", "signaling")),
+    # Talk with the workspace on the state volume: the role sets
+    # `istota_storage: local` and leaves `nextcloud_mount_path` out of the plan.
+    "nextcloud-local-workspace": dict(ingress="local", hostname="localhost:8080",
+                                      nextcloud_url="https://cloud.example.com", workspace="local"),
 }
 
 
@@ -176,7 +180,10 @@ def _role_vars(mode: dict) -> dict:
     variables.update(
         istota_ingress=mode["ingress"],
         istota_domain=mode["hostname"],
-        istota_storage="nextcloud" if mode.get("nextcloud_url") else "local",
+        istota_storage=(
+            "nextcloud" if mode.get("nextcloud_url") and mode.get("workspace", "mount") == "mount"
+            else "local"
+        ),
         istota_compose_profiles=list(mode.get("profiles", ())),
     )
     for answer, var in (("tls_cert_source", "istota_tls_cert_source"),

@@ -666,7 +666,7 @@ def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
     return {
         "istota_release": release.tag,
         "istota_release_signing_key": release.signing_key,
-        "istota_storage": "nextcloud" if answers.uses_nextcloud else "local",
+        "istota_storage": setup_wizard.host_env_values(answers)["STORAGE"],
         "istota_ingress": answers.ingress,
         "istota_domain": answers.hostname,
         "istota_tls_cert_source": answers.tls_cert_source,

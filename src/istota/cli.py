@@ -4838,7 +4838,11 @@ def main():
     setup_parser = subparsers.add_parser(
         "setup", help="First-run installer (the container, or a standalone install)",
     )
-    setup_parser.add_argument("--workspace", help="Workspace directory (default ~/.istota)")
+    setup_parser.add_argument(
+        "--workspace",
+        help="Standalone: workspace directory (default ~/.istota). Container, with "
+        "--nextcloud-url: mount (the rclone mount, the default) or local",
+    )
     setup_parser.add_argument(
         "--brain", choices=["claude_code", "native"], help="Model backend (skip detection)",
     )
