@@ -16,7 +16,7 @@
 # The machine's choices come from /srv/app/istota/host.env, written by
 # `istota setup --vm-dir`:
 #
-#   STORAGE              local | nextcloud (the rclone mount)
+#   STORAGE              local | nextcloud (the workspace is the rclone mount; Talk and the nextcloud skill work in both)
 #   INGRESS              local | proxied | direct
 #   DOMAIN, TLS_CERT_SOURCE, UPSTREAM_PROXY, LISTEN_ADDR, LISTEN_PORT
 #   RELEASE_SIGNING_KEY  the release key, one line of an SSH public key

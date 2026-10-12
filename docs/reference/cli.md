@@ -442,7 +442,7 @@ istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web
 istota update [--force] [--channel stable|main]           # Self-update the deprecated standalone install
 ```
 
-On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image; it writes `config.toml`, the admins file, the master key and, in the `--vm-dir`, the stack's `.env`, `host.env` and `secrets/`. `istota setup --help` lists every flag. Outside the image (which sets `ISTOTA_SETUP_SHAPE=container`) and without `--vm-dir`, it is the local wizard: a workspace (default `~/.istota`), one user, and `~/.config/istota/`.
+On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image; it writes `config.toml`, the admins file, the master key and, in the `--vm-dir`, the stack's `.env`, `host.env` and `secrets/`. `istota setup --help` lists every flag. In the image, `--workspace mount|local` says where the workspace lives when `--nextcloud-url` is given (default `mount`, the rclone mount). Outside the image (which sets `ISTOTA_SETUP_SHAPE=container`) and without `--vm-dir`, it is the local wizard: a workspace directory (`--workspace`, default `~/.istota`), one user, and `~/.config/istota/`.
 
 `istota serve` runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). It is the development loop on a Mac checkout, and the deprecated standalone install's launcher; see [development setup](../development/setup.md).
 

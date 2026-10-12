@@ -81,11 +81,12 @@ module_data_dir = "data/modules"
 # File Access Configuration
 # =============================================================================
 # Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
-# Required when [nextcloud] url is set: the files are reached through it.
+# Required when [nextcloud] url is set, whether or not it is the mount.
 workspace_path = "/srv/mount/nextcloud/content"
 
 # The FUSE mountpoint of the bot's Nextcloud files (mount-nextcloud.service),
-# when the workspace is one.
+# when the workspace is one. Set, with a URL, means the workspace is the mount;
+# unset means it is local, and Talk and the nextcloud skill still work.
 # nextcloud_mount_path = "/srv/mount/nextcloud/content"
 
 # Path to skills directory (individual skill files loaded selectively)
@@ -564,10 +565,10 @@ features = []
 # install. See docs/deployment/security.md for what is deliberately uncovered.
 
 [nextcloud]
-# Nextcloud server URL. This also drives storage vocabulary: when set, the bot
-# describes files as Nextcloud; when blank (the local/standalone shape), it
-# describes "your workspace" as a plain local folder instead. A URL needs
-# workspace_path, the mount of the bot's Nextcloud files.
+# Nextcloud server URL: Talk, the nextcloud skill, OCS and DAV. A URL needs
+# workspace_path. Whether the workspace is the bot's Nextcloud files is
+# nextcloud_mount_path's question, not this one: with the mount path set the
+# bot describes files as Nextcloud, without it as a plain local workspace.
 url = "https://nextcloud.example.com"
 # Bot's Nextcloud username
 username = "istota"

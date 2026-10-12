@@ -76,6 +76,8 @@ Robustness spec, Track A. `provision.sh` installs `systemd-zram-generator`, writ
 
 ## Nextcloud mount
 
+The mount is optional under Nextcloud. `istota setup` asks where the workspace lives once a URL is given (`--workspace mount|local`, default `mount`): `local` writes `workspace_path = "/data/workspace"`, no `nextcloud_mount_path`, `auto_share_bot_dir = false` and `STORAGE=local`, so `provision.sh` installs no rclone and Talk and the `nextcloud` skill still use the URL. `host.env`'s `STORAGE` means the rclone mount, not Nextcloud; the management role picks local with `istota_storage: local` and no `nextcloud_mount_path` in its plan.
+
 In full Nextcloud integration the VM mounts the bot's Nextcloud files at `/srv/mount/nextcloud/content` with rclone (`mount-nextcloud.service`, installed by `provision.sh`), and compose binds it into the daemon at `/mnt/shared` (`rslave`). "The config directory is a host bind" above covers the unit's ordering and the pinned rclone.
 
 ## Native web login

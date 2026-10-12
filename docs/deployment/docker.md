@@ -193,14 +193,19 @@ What each devbox gets, and nothing else:
 
 ## Storage
 
-Two modes, chosen by `[nextcloud] url` in `config.toml`, which `istota setup` writes from your answer:
+Two questions decide the storage: whether istota uses a Nextcloud (`[nextcloud] url`), and, if it does, where the workspace lives (`nextcloud_mount_path`). `istota setup` writes both from your answers:
 
-| Mode | `config.toml` | Workspace |
-|---|---|---|
-| Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume |
-| Full Nextcloud integration | `url` names your Nextcloud | the VM's rclone mount of the bot's files, bound at `/mnt/shared` |
+| Mode | `config.toml` | Workspace | `host.env` |
+|---|---|---|---|
+| Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Nextcloud, local workspace | `url` names your Nextcloud, no `nextcloud_mount_path` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Full Nextcloud integration | `url` names your Nextcloud, `nextcloud_mount_path = "/mnt/shared"` | the VM's rclone mount of the bot's files, bound at `/mnt/shared` | `STORAGE=nextcloud` |
 
-In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
+When you connect a Nextcloud, setup asks where the workspace should live: `mount` (the default) or `local`. A scripted run takes `--workspace mount|local` and defaults to `mount` when it is given `--nextcloud-url`. With either answer the bot is a regular user on your Nextcloud: Talk, the `nextcloud` skill's user, group, Talk and share-listing verbs, and avatars all work.
+
+With a local workspace, `provision.sh` installs no rclone and no mount unit, and setup writes no `dav_prefix` and turns `auto_share_bot_dir` off, since nothing of the workspace is in Nextcloud. Users reach their files in the web UI, not in Nextcloud. A file posted in Talk is fetched into the room's folder, `Channels/<room>/media/`, and `nextcloud talk share-file` uploads a copy before posting it. The skill's `files` verbs, `share create` and `share link` refuse, because the file they name is not in Nextcloud. Back up the `istota_data` volume, which now holds the workspace too (see [Backing up a local install](#backing-up-a-local-install)).
+
+In full integration the bot sees what users share with it, and users see their bot folder in Nextcloud. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
 
 The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
 
@@ -246,7 +251,7 @@ To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `
 
 | Volume | Purpose |
 |---|---|
-| `istota_data` | Istota's `/data`: the databases (`/data/db`), and in local storage mode the workspace (`/data/workspace`). `/data/config` is a bind of the VM's config directory, not part of the volume. **This is the one to back up.** |
+| `istota_data` | Istota's `/data`: the databases (`/data/db`), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a bind of the VM's config directory, not part of the volume. **This is the one to back up.** |
 | `browser_profile` | Persistent Chrome profiles per user, including their logins; also the console TLS certificate and parked legacy profile |
 
 In full Nextcloud integration the workspace is not a volume: it is the VM's rclone mount, bound at `/mnt/shared`.

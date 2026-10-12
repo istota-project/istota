@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- On an install with Nextcloud whose workspace is not the Nextcloud mount, a file posted in Talk is fetched into the room's folder, `Channels/<room>/media/<message id>/`, once per message, and removed after `[talk] attachment_retention_days` (default 30). Files over `[talk] attachment_max_mb` (default 50) are skipped. `nextcloud talk share-file` uploads a copy of the workspace file into the bot's `Talk/` folder before posting it, and the `files` verbs, `share create` and `share link` refuse there because the file is not in Nextcloud. This shape is not offered by setup yet.
+- `istota setup` asks where the workspace lives when you connect a Nextcloud: `mount`, the bot's Nextcloud files through the VM's rclone mount, or `local`, a directory on the VM shown in the web UI. Talk and the `nextcloud` skill work with both. `local` writes `STORAGE=local`, so `provision.sh` installs no rclone and no mount unit. A scripted run takes `--workspace mount|local`, and defaults to `mount` when it is given `--nextcloud-url`, so existing scripts get what they got before.
+
+- On an install with Nextcloud whose workspace is not the Nextcloud mount, a file posted in Talk is fetched into the room's folder, `Channels/<room>/media/<message id>/`, once per message, and removed after `[talk] attachment_retention_days` (default 30). Files over `[talk] attachment_max_mb` (default 50) are skipped. `nextcloud talk share-file` uploads a copy of the workspace file into the bot's `Talk/` folder before posting it, and the `files` verbs, `share create` and `share link` refuse there because the file is not in Nextcloud.
 
 - Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
 
