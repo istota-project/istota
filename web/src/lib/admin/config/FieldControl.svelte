@@ -2,6 +2,7 @@
   import type { AdminConfigField, ConfigOp } from '$lib/api';
   import { Badge, Button, Chip, Field, Input, Select, TextArea } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
+  import TableEditor from './TableEditor.svelte';
   import { displayValue, formatValue, opFor, parseList, parseNumber } from './changeSet';
 
   interface Props {
@@ -29,7 +30,7 @@
 
   let kind = $derived(editable ? field.editor : 'readonly');
   let shown = $derived(displayValue(field, op));
-  let pendingSet = $derived(op?.op === 'set');
+  let pendingSet = $derived(op?.op === 'set' || op?.op === 'set_toml');
   let pendingUnset = $derived(op?.op === 'unset');
   let numericList = $derived(
     Array.isArray(field.value)
@@ -164,14 +165,11 @@
         {/each}
       </div>
     </Field>
+  {:else if kind === 'table' && !pendingUnset}
+    <TableEditor {field} {op} {badge} {problem} {onOp} />
   {:else if kind === 'table'}
     <Field label={field.name} {badge} error={problem} labelled={false} wide>
-      {#if field.toml}
-        <pre class="config-value table-toml">{field.toml}</pre>
-      {:else}
-        <span class="config-value dim">Not in config.toml.</span>
-      {/if}
-      <p class="caption">A table is edited as TOML in the table editor, which is not here yet.</p>
+      <span class="config-value dim">Removed from config.toml.</span>
     </Field>
   {:else}
     <Field label={field.name} {badge} error={problem} labelled={false}>
@@ -200,7 +198,7 @@
       {:else if !field.in_file && 'default' in field}
         <span class="caption">Not in config.toml; the default applies.</span>
       {/if}
-      {#if field.in_file && !pendingUnset && field.editor !== 'table'}
+      {#if field.in_file && !pendingUnset}
         <Button variant="ghost" size="sm" onclick={reset}>Reset to default</Button>
       {/if}
     </div>
@@ -254,13 +252,6 @@
 
   .config-value.dim {
     color: var(--text-dim);
-  }
-
-  .table-toml {
-    margin: 0;
-    padding: var(--space-2);
-    background: var(--surface-base);
-    border-radius: var(--radius-sm);
   }
 
   .field-doc summary {

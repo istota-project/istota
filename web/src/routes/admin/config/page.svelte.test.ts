@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { configField, configPreview, configView } from '$lib/test/adminConfig';
-import type { AdminConfigView, User } from '$lib/api';
+import { configField, configPreview, configRequest, configView } from '$lib/test/adminConfig';
+import type { AdminConfigView, ConfigRequest, User } from '$lib/api';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -13,8 +13,9 @@ import Page from './+page.svelte';
 
 const user = { username: 'alice', display_name: 'Alice', is_admin: true } as User;
 
-function mount(view: AdminConfigView) {
+function mount(view: AdminConfigView, history: ConfigRequest[] = []) {
   api.getAdminConfig.mockResolvedValue(view);
+  api.listConfigRequests.mockResolvedValue(history);
   render(Harness, { props: { user, component: Page } });
 }
 
@@ -161,5 +162,153 @@ describe('the change set', () => {
       target: { value: 'k' },
     });
     expect(screen.getByText('1 change')).toBeInTheDocument();
+  });
+});
+
+describe('the current file', () => {
+  it('warns that applying drops the comments', async () => {
+    mount(configView([imapHost], { has_comments: true }));
+    expect(await screen.findByText('config.toml has comments')).toBeInTheDocument();
+  });
+
+  it('removes an unknown key and a credential also set inline', async () => {
+    mount(
+      configView([imapHost], {
+        problems: [
+          {
+            kind: 'unknown',
+            path: ['web', 'typo_key'],
+            message: '[config] web.typo_key is not a recognised key and is ignored',
+            blocking: false,
+            action: 'unset',
+          },
+          {
+            kind: 'warning',
+            path: ['email', 'imap_password'],
+            message: 'email.imap_password is also set in config.toml, where it is ignored',
+            blocking: false,
+            action: 'unset',
+          },
+          { kind: 'retired', path: ['old'], message: 'retired, inside a list', blocking: false },
+        ],
+      }),
+    );
+    expect(await screen.findByText('Warnings about config.toml')).toBeInTheDocument();
+    expect(screen.getByText(/inside a list/)).toBeInTheDocument();
+    const removes = screen.getAllByRole('button', { name: 'Remove' });
+    expect(removes).toHaveLength(2);
+    await fireEvent.click(removes[0]);
+    await fireEvent.click(removes[1]);
+    expect(screen.getByText('2 changes')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Keep' })).toHaveLength(2);
+
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() =>
+      expect(api.previewConfigChange).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ops: [
+            { op: 'unset', path: ['web', 'typo_key'] },
+            { op: 'unset', path: ['email', 'imap_password'] },
+          ],
+          raw: null,
+        }),
+      ),
+    );
+  });
+});
+
+describe('the raw editor', () => {
+  it('locks the form while it holds the file and shows a parse error from the review', async () => {
+    mount(configView([imapHost], { raw_toml: 'bot_name = "Filebot"\n' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit as text' }));
+    await fireEvent.input(screen.getByLabelText(/^config\.toml/), {
+      target: { value: 'bot_name = = "x"\n' },
+    });
+    expect(screen.getByText('1 change')).toBeInTheDocument();
+    // The form shows values only while the whole file is pending.
+    expect(screen.queryByLabelText('imap_host')).toBeNull();
+
+    api.previewConfigChange.mockRejectedValue(
+      new api.ConfigChangeError('The change cannot be read.', 400, 'invalid_change', {
+        errors: ['the TOML does not parse: Invalid value (at line 1, column 12)'],
+        problems: [],
+      }),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    expect(await screen.findByText(/at line 1, column 12/)).toBeInTheDocument();
+    expect(api.previewConfigChange).toHaveBeenCalledWith(
+      expect.objectContaining({ ops: [], raw: 'bot_name = = "x"\n' }),
+    );
+  });
+
+  it('cannot be opened while the form holds changes', async () => {
+    mount(configView([imapHost]));
+    await fireEvent.input(await screen.findByLabelText('imap_host'), {
+      target: { value: 'new' },
+    });
+    expect(screen.getByRole('button', { name: 'Edit as text' })).toBeDisabled();
+  });
+});
+
+describe('history', () => {
+  it('follows a request that is already open when the page loads', async () => {
+    api.getConfigRequest.mockResolvedValue(configRequest({ id: 21, status: 'taken' }));
+    mount(configView([imapHost]), [
+      configRequest({ id: 21, status: 'taken' }),
+      configRequest({ id: 20, status: 'applied' }),
+    ]);
+    expect(await screen.findByText('Change #21')).toBeInTheDocument();
+    await waitFor(() => expect(api.getConfigRequest).toHaveBeenCalledWith(21));
+  });
+
+  it('restores an applied change through preview', async () => {
+    mount(configView([imapHost]), [
+      configRequest({ id: 12, status: 'applied', document_toml: 'bot_name = "Old"\n' }),
+    ]);
+    api.restoreConfigRequest.mockResolvedValue({
+      change_set: { base_digest: 'digest-1', ops: [], raw: 'bot_name = "Old"\n', secrets: {} },
+      preview: configPreview({
+        diff: ['--- config.toml', '+++ config.toml', '-bot_name = "New"', '+bot_name = "Old"'],
+        problems: {
+          blocking: [],
+          warnings: [
+            {
+              kind: 'warning',
+              path: ['email', 'imap_password'],
+              message: 'email.imap_password was cleared after this change; it stays cleared',
+              blocking: false,
+            },
+          ],
+        },
+      }),
+      note: 'Restoring brings back the configuration only.',
+    });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Restore' }));
+    expect(api.restoreConfigRequest).toHaveBeenCalledWith(12);
+    expect(await screen.findByText(/\+bot_name = "Old"/)).toBeInTheDocument();
+    expect(screen.getByText(/was cleared after this change/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/Restoring change #12. Restoring brings back the configuration only./)
+        .length,
+    ).toBeGreaterThan(0);
+    expect(api.previewConfigChange).not.toHaveBeenCalled();
+
+    // Closing the review keeps the restored file as the pending change.
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByText('1 change')).toBeInTheDocument();
+    expect((screen.getByLabelText(/^config\.toml/) as HTMLTextAreaElement).value).toBe(
+      'bot_name = "Old"\n',
+    );
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() =>
+      expect(api.previewConfigChange).toHaveBeenCalledWith({
+        base_digest: 'digest-1',
+        ops: [],
+        raw: 'bot_name = "Old"\n',
+        secrets: {},
+      }),
+    );
   });
 });

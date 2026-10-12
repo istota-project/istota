@@ -179,3 +179,44 @@ describe('applying', () => {
     await waitFor(() => expect(props.onRequestOpen).toHaveBeenCalledWith(9));
   });
 });
+
+describe('a preview already in hand', () => {
+  it('shows it and its note without asking again, and asks on Check again', async () => {
+    const restored = configPreview({
+      problems: {
+        blocking: [],
+        warnings: [
+          {
+            kind: 'warning',
+            path: ['email', 'imap_password'],
+            message: 'email.imap_password was cleared after this change; it stays cleared',
+            blocking: false,
+          },
+        ],
+      },
+    });
+    render(ReviewDialog, {
+      props: {
+        changeSet: { ...changeSet, ops: [], raw: 'bot_name = "x"\n', secrets: {} },
+        initialPreview: restored,
+        note: 'Restoring change #12.',
+        onClose: vi.fn(),
+        onSubmitted: vi.fn(),
+        onConflict: vi.fn(),
+        onRequestOpen: vi.fn(),
+      },
+    });
+    expect(await screen.findByText(/was cleared after this change/)).toBeInTheDocument();
+    expect(screen.getByText('Restoring change #12.')).toBeInTheDocument();
+    expect(api.previewConfigChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Apply…' })).toBeEnabled();
+
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() =>
+      expect(api.previewConfigChange).toHaveBeenCalledWith(
+        expect.objectContaining({ ops: [], raw: 'bot_name = "x"\n' }),
+      ),
+    );
+  });
+});

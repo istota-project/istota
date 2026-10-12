@@ -6,7 +6,7 @@ An admin can change the instance configuration at Admin → Configuration (`/ist
 
 The web container cannot write `config/` (it is bound read-only into every service) and cannot restart the stack. A change is therefore a request that the host applies:
 
-1. The admin edits fields, reviews the change and submits it. The page shows a redacted diff, any problems the configuration check reports, and which credentials change (by name, never by value).
+1. The admin edits fields (or the whole file as text, below), reviews the change and submits it. The page shows a redacted diff, any problems the configuration check reports, and which credentials change (by name, never by value).
 2. The web stores the request in the `config_change_requests` table and writes its id to `requests/config-apply` in the stack directory. Credential values are sealed with the master key until the host takes the request.
 3. A systemd path unit on the host runs `istota-stack config-apply`. Under the stack lock it takes the request, checks everything with a dry run before writing anything, writes credentials and admins through `put-files` and the config through `istota apply` (keeping the newest ten `config.toml.bak.<timestamp>` copies), records the outcome and restarts the stack. A timer runs the same unit every five minutes as a backstop.
 4. The page follows the request through the restart and reloads once the web process is back.
@@ -41,6 +41,14 @@ These keys are shown read-only, each with the reason and where it is changed ins
 ## Managed resources
 
 If the Ansible management role (or a plan with `[meta] managed = true`) owns a resource, the editor shows it read-only, because the next play would revert a web change. Ownership is per resource (config, credentials, admins) and is recorded in `config/managed.json`. To hand a resource to the web, remove it from the role's variables (`istota_config`, `istota_secrets` or `istota_admins`), or run `istota-stack apply` once with `managed = false`. A `managed.json` that cannot be read makes every resource read-only until `istota-stack apply` rewrites it.
+
+## Tables, the whole file, and ignored keys
+
+A table such as `[models.aliases]`, `[[default_briefings]]` or `[[briefing_shared_blocks]]` is edited as TOML that defines that one key, starting from what the file holds. "Reset to default" removes the key; `briefing_shared_blocks = []` is a different edit, and means no shared blocks rather than the shipped ones.
+
+The whole of `config.toml` can also be edited as text. Every credential in it reads `"<unchanged>"`, which keeps the stored value; typing over it sets a new one. The text replaces the whole file, so it cannot be combined with field edits in one change. `[users.*]` can be edited there, but it only seeds users on first start; per-user settings belong on the Users page.
+
+Keys the loader does not recognise, retired keys, and a credential set in `config.toml` while its secrets file is also set (the file wins) are listed under "Warnings about config.toml" with a Remove action. A key inside an array of tables has no Remove action and is removed in the text editor.
 
 ## History and restore
 

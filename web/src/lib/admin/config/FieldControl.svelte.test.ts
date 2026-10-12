@@ -105,17 +105,32 @@ describe('a control per editor kind', () => {
     expect(screen.getByRole('button', { name: 'output' })).toHaveTextContent('both');
   });
 
-  it('a table field shows its TOML and no input', () => {
-    mount(
-      configField({
-        path: ['models', 'aliases'],
-        editor: 'table',
-        value: { fast: 'haiku' },
-        toml: '[aliases]\nfast = "haiku"\n',
-      }),
+  it('a table field is edited as TOML and can be removed from the file', async () => {
+    const field = configField({
+      path: ['models', 'aliases'],
+      editor: 'table',
+      value: { fast: 'haiku' },
+      in_file: true,
+      toml: '[aliases]\nfast = "haiku"\n',
+    });
+    const { onOp } = mount(field);
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(
+      '[aliases]\nfast = "haiku"\n',
     );
-    expect(screen.getByText(/fast = "haiku"/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
+    expect(onOp).toHaveBeenLastCalledWith({ op: 'unset', path: ['models', 'aliases'] }, [
+      'models',
+      'aliases',
+    ]);
+  });
+
+  it('a table pending removal shows no editor', () => {
+    mount(configField({ path: ['models', 'aliases'], editor: 'table', in_file: true, toml: 'x' }), {
+      op: { op: 'unset', path: ['models', 'aliases'] },
+    });
     expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText('Removed from config.toml.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
   });
 });
 

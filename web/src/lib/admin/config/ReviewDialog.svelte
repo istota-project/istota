@@ -20,9 +20,22 @@
     onConflict: () => void;
     /** A request is already open; the page follows that one instead. */
     onRequestOpen: (id: number) => void;
+    /** A preview already in hand (a restore's), shown without asking again:
+     *  its warnings name credentials a second preview could no longer see. */
+    initialPreview?: ConfigPreview | null;
+    /** A line shown above the preview, such as what a restore brings back. */
+    note?: string;
   }
 
-  let { changeSet, onClose, onSubmitted, onConflict, onRequestOpen }: Props = $props();
+  let {
+    changeSet,
+    onClose,
+    onSubmitted,
+    onConflict,
+    onRequestOpen,
+    initialPreview = null,
+    note = '',
+  }: Props = $props();
 
   /** The phrase a risky change is confirmed with. */
   const RISKY_CHALLENGE = 'apply';
@@ -102,7 +115,14 @@
     }
   }
 
-  onMount(load);
+  onMount(() => {
+    if (initialPreview) {
+      preview = initialPreview;
+      loading = false;
+    } else {
+      void load();
+    }
+  });
 </script>
 
 <Modal
@@ -113,6 +133,9 @@
     if (!next && stage === 'review') onClose();
   }}
 >
+  {#if note}
+    <p class="review-note">{note}</p>
+  {/if}
   {#if loading}
     <p class="muted">Checking the change…</p>
   {:else}
@@ -249,5 +272,9 @@
 
   .restart-note {
     font-weight: 600;
+  }
+
+  .review-note {
+    margin: 0 0 var(--space-3);
   }
 </style>

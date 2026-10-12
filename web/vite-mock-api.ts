@@ -3891,10 +3891,16 @@ function mockAdminConfigBase() {
  * way the host applier moves a real one, and the view's `started_at` moves a
  * moment after `applied` so the page's wait for the restart has something to
  * wait for. An applied change is written into `values`, so the page reloads
- * into what it asked for.
+ * into what it asked for. The file starts with comments and one unknown key,
+ * so the comments banner and a remove action have something to show, and the
+ * history starts with one applied change to restore.
  */
+const MOCK_SEED_DOCUMENT = '[brain]\nkind = "claude_code"\n\n[logging]\nlevel = "INFO"\n';
+const MOCK_UNKNOWN_KEY = JSON.stringify(['web', 'old_flag']);
 const mockConfigEditor = {
   digest: 'mock-digest-1',
+  hasComments: true,
+  unknownRemoved: false,
   startedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
   restartAt: 0,
   restartedAt: '',
@@ -3902,9 +3908,58 @@ const mockConfigEditor = {
   values: new Map<string, unknown>(),
   inFile: new Set<string>(['["logging","level"]', '["web","port"]', '["brain","kind"]']),
   secretsSet: new Map<string, boolean>(),
-  nextId: 1,
-  requests: new Map<number, { row: Record<string, any>; polls: number; ops: any[]; body: any }>(),
+  nextId: 2,
+  requests: new Map<number, { row: Record<string, any>; polls: number; ops: any[]; body: any }>([
+    [
+      1,
+      {
+        polls: 0,
+        ops: [],
+        body: {},
+        row: {
+          id: 1,
+          status: 'applied',
+          admin_id: 'alice',
+          base_digest: 'mock-digest-0',
+          document_toml: MOCK_SEED_DOCUMENT,
+          admins: null,
+          admins_changed: false,
+          changed_sections: ['logging'],
+          secret_names: [],
+          diff_text:
+            '--- config.toml\n+++ config.toml\n [logging]\n-level = "DEBUG"\n+level = "INFO"',
+          output_text: 'Updated: config.toml',
+          created_at: '2026-10-01T09:00:00Z',
+          taken_at: '2026-10-01T09:00:05Z',
+          finished_at: '2026-10-01T09:00:40Z',
+        },
+      },
+    ],
+  ]),
 };
+
+/** The file as the raw editor shows it: the in-file keys by section, a
+ *  credential as the sentinel, plus the unknown key until it is removed. */
+function mockRawToml(sections: { key: string; fields: any[] }[]): string {
+  const blocks: string[] = [];
+  for (const section of sections) {
+    const lines = section.fields
+      .filter((field) => field.in_file)
+      .map(
+        (field) =>
+          `${field.name} = ${field.editor === 'secret' ? '"<unchanged>"' : JSON.stringify(field.value)}`,
+      );
+    if (section.key === 'web' && !mockConfigEditor.unknownRemoved) lines.push('old_flag = true');
+    if (!lines.length) continue;
+    blocks.push(
+      section.key === 'general' ? lines.join('\n') : `[${section.key}]\n${lines.join('\n')}`,
+    );
+  }
+  return blocks.length ? `${blocks.join('\n\n')}\n` : '';
+}
+
+/** A line the mock calls TOML: a comment, a header, or `key = value`. */
+const MOCK_TOML_LINE = /^\s*(#.*|\[\[?[^\]]+\]\]?|[A-Za-z0-9_."-]+\s*=\s*[^=\s].*)?\s*$/;
 
 const MOCK_READ_ONLY: Record<string, string> = {
   'web.port':
@@ -4002,8 +4057,19 @@ function mockAdminConfig() {
     },
     document_digest: state.digest,
     started_at: state.startedAt,
-    problems: [],
-    has_comments: false,
+    problems: state.unknownRemoved
+      ? []
+      : [
+          {
+            kind: 'unknown',
+            path: ['web', 'old_flag'],
+            message: '[config] web.old_flag is not a recognised key and is ignored',
+            blocking: false,
+            action: 'unset',
+          },
+        ],
+    has_comments: state.hasComments,
+    raw_toml: mockRawToml(sections),
     secrets: [
       {
         name: 'anthropic_api_key',
@@ -4038,6 +4104,7 @@ function mockConfigPreview(body: any) {
   }
   const ops: any[] = Array.isArray(body.ops) ? body.ops : [];
   const secrets: Record<string, string> = body.secrets ?? {};
+  if (typeof body.raw === 'string') return mockRawPreview(body.raw, ops, secrets);
   const adminsChanged =
     Array.isArray(body.admins) &&
     [...body.admins].sort().join(',') !== [...state.admins].sort().join(',');
@@ -4071,6 +4138,40 @@ function mockConfigPreview(body: any) {
     admins_changed: adminsChanged,
     running_tasks: 1,
     base_digest: state.digest,
+  };
+}
+
+function mockRawPreview(raw: string, ops: any[], secrets: Record<string, string>) {
+  const refuse = (error: string) => ({
+    __status: 400,
+    error: 'invalid_change',
+    detail: 'The change cannot be read.',
+    errors: [error],
+    problems: [],
+  });
+  if (ops.length) return refuse('raw replaces the whole file, so ops must be empty');
+  const lines = raw.split('\n');
+  const bad = lines.findIndex((line) => !MOCK_TOML_LINE.test(line));
+  if (bad >= 0) {
+    return refuse(`the TOML does not parse: Invalid statement (at line ${bad + 1}, column 1)`);
+  }
+  const current = (mockAdminConfig().raw_toml ?? '').split('\n');
+  const diff = [
+    ...current.filter((line) => line && !lines.includes(line)).map((line) => `-${line}`),
+    ...lines.filter((line) => line && !current.includes(line)).map((line) => `+${line}`),
+  ];
+  return {
+    diff: diff.length ? ['--- config.toml', '+++ config.toml', ...diff] : [],
+    problems: { blocking: [], warnings: [] },
+    errors: [],
+    changed: diff.length > 0 || Object.keys(secrets).length > 0,
+    changed_sections: diff.length ? ['(whole file)'] : [],
+    changed_keys: diff.length,
+    risky_keys: [],
+    secret_names: Object.keys(secrets).sort(),
+    admins_changed: false,
+    running_tasks: 1,
+    base_digest: mockConfigEditor.digest,
   };
 }
 
@@ -4143,8 +4244,13 @@ function mockConfigSubmit(body: any) {
 
 function mockConfigApply(entry: { ops: any[]; body: any }) {
   const state = mockConfigEditor;
+  state.hasComments = false;
+  if (typeof entry.body.raw === 'string' && !entry.body.raw.includes('old_flag')) {
+    state.unknownRemoved = true;
+  }
   for (const op of entry.ops) {
     const key = JSON.stringify(op.path);
+    if (key === MOCK_UNKNOWN_KEY && op.op === 'unset') state.unknownRemoved = true;
     if (op.op === 'unset') {
       state.values.delete(key);
       state.inFile.delete(key);
@@ -4174,6 +4280,7 @@ function mockConfigRequest(id: number) {
       row.finished_at = mockIso();
       row.output_text = 'Updated: config.toml';
       mockConfigApply(entry);
+      row.document_toml = entry.body.raw ?? mockAdminConfig().raw_toml;
       // The restarted process answers a few seconds later, and its start
       // time is after the change finished.
       mockConfigEditor.restartAt = Date.now() + 3_000;
@@ -4198,6 +4305,24 @@ function mockConfigCancel(id: number) {
   return { id, status: 'cancelled' };
 }
 
+function mockConfigRestore(id: number) {
+  const entry = mockConfigEditor.requests.get(id);
+  if (!entry) return { __status: 404, error: 'not_found', detail: 'No such request.' };
+  const changeSet = {
+    base_digest: mockConfigEditor.digest,
+    ops: [],
+    raw: entry.row.document_toml,
+    secrets: {},
+  };
+  return {
+    change_set: changeSet,
+    preview: mockConfigPreview(changeSet),
+    note:
+      'Restoring brings back the configuration only; credentials and the admin list stay as ' +
+      'they are now.',
+  };
+}
+
 function configEditorHandler({ url, method, body }: MockReq): unknown | undefined {
   if (url === '/istota/api/settings/step-up' && method === 'POST') {
     return {
@@ -4217,6 +4342,12 @@ function configEditorHandler({ url, method, body }: MockReq): unknown | undefine
   if (status && method === 'GET') return mockConfigRequest(Number(status[1]));
   const cancel = url.match(/^\/istota\/api\/admin\/config\/requests\/(\d+)\/cancel$/);
   if (cancel && method === 'POST') return mockConfigCancel(Number(cancel[1]));
+  if (url.split('?')[0] === '/istota/api/admin/config/requests' && method === 'GET') {
+    const rows = [...mockConfigEditor.requests.values()].map((entry) => ({ ...entry.row }));
+    return { requests: rows.sort((a, b) => b.id - a.id) };
+  }
+  const restore = url.match(/^\/istota\/api\/admin\/config\/requests\/(\d+)\/restore$/);
+  if (restore && method === 'POST') return mockConfigRestore(Number(restore[1]));
   return undefined;
 }
 

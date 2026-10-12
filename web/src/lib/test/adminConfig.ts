@@ -57,6 +57,7 @@ export function configView(
     started_at: '2026-10-12T08:00:00Z',
     problems: [],
     has_comments: false,
+    raw_toml: '',
     secrets: [],
     admins: { users: ['alice'], read_only_reason: null },
     ...overrides,

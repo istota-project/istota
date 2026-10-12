@@ -22,10 +22,17 @@ export interface ConfigDraft {
   secrets: Record<string, string>;
   /** The whole new admin list, or null for unchanged. */
   admins: string[] | null;
+  /** The whole new config.toml from the raw editor, or null. The server takes
+   *  raw or ops, never both, so the page locks one while the other is held. */
+  raw: string | null;
 }
 
+/** What the raw editor and a table snippet show in place of a stored
+ *  credential; left as it is, the credential keeps its value. */
+export const SENTINEL = '<unchanged>';
+
 export function emptyDraft(): ConfigDraft {
-  return { ops: {}, secrets: {}, admins: null };
+  return { ops: {}, secrets: {}, admins: null, raw: null };
 }
 
 export function pathKey(path: string[]): string {
@@ -54,15 +61,25 @@ export function withAdmins(draft: ConfigDraft, admins: string[] | null): ConfigD
   return { ...draft, admins: admins ? [...admins] : null };
 }
 
+/** `draft` with the raw editor's text, or without it when `raw` is null. */
+export function withRaw(draft: ConfigDraft, raw: string | null): ConfigDraft {
+  return { ...draft, raw };
+}
+
 export function changeCount(draft: ConfigDraft): number {
-  return Object.keys(draft.ops).length + Object.keys(draft.secrets).length + (draft.admins ? 1 : 0);
+  return (
+    Object.keys(draft.ops).length +
+    Object.keys(draft.secrets).length +
+    (draft.admins ? 1 : 0) +
+    (draft.raw !== null ? 1 : 0)
+  );
 }
 
 export function buildChangeSet(draft: ConfigDraft, baseDigest: string): ConfigChangeSet {
   const changeSet: ConfigChangeSet = {
     base_digest: baseDigest,
     ops: Object.values(draft.ops),
-    raw: null,
+    raw: draft.raw,
     secrets: { ...draft.secrets },
   };
   if (draft.admins) changeSet.admins = [...draft.admins];
@@ -134,6 +151,7 @@ const EDITABLE: ReadonlySet<ConfigEditorKind> = new Set([
   'choice',
   'multi_choice',
   'secret',
+  'table',
 ]);
 
 /**
@@ -141,8 +159,11 @@ const EDITABLE: ReadonlySet<ConfigEditorKind> = new Set([
  *
  * After `config_changed` the page reloads the view and keeps the local change
  * set where it still applies: an op whose field is gone or became read-only,
- * and a credential no editable field or secrets file names, are dropped.
- * `dropped` counts them so the page can say so.
+ * and a credential no editable field or secrets file names, are dropped. A
+ * removal is kept while the new file still has the problem it removes. Raw
+ * text is dropped: it was written against a file that is no longer there, and
+ * submitting it would undo whatever changed the file. `dropped` counts them
+ * so the page can say so.
  */
 export function retainExisting(
   draft: ConfigDraft,
@@ -160,6 +181,9 @@ export function retainExisting(
   for (const file of view.secrets) {
     if (!file.read_only_reason) credentials.add(file.name);
   }
+  for (const problem of view.problems) {
+    if (problem.action === 'unset') editablePaths.add(pathKey(problem.path));
+  }
 
   let dropped = 0;
   const kept = emptyDraft();
@@ -175,5 +199,6 @@ export function retainExisting(
     if (view.admins.read_only_reason) dropped += 1;
     else kept.admins = [...draft.admins];
   }
+  if (draft.raw !== null) dropped += 1;
   return { draft: kept, dropped };
 }

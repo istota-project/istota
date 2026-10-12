@@ -560,6 +560,9 @@ export interface ConfigProblem {
   blocking: boolean;
   /** In the file before this change; the change can fix it, and must. */
   pre_existing?: boolean;
+  /** `unset` when removing the key at `path` resolves it: an unknown or
+   *  retired key, or a file credential also set inline. */
+  action?: 'unset';
 }
 
 export interface ConfigManagedEntry {
@@ -591,6 +594,9 @@ export interface AdminConfigView {
   started_at: string | null;
   problems: ConfigProblem[];
   has_comments: boolean;
+  /** The whole file for the raw editor, every secret leaf the sentinel
+   *  `"<unchanged>"`. Null when there is no file or it does not parse. */
+  raw_toml: string | null;
   /** One entry per deployment secrets file, never a value. */
   secrets: ConfigSecretFile[];
   admins: { users: string[]; read_only_reason: string | null };
@@ -731,6 +737,26 @@ export function submitConfigChange(changeSet: ConfigChangeSet): Promise<{ id: nu
 
 export function getConfigRequest(id: number): Promise<ConfigRequest> {
   return apiFetch<ConfigRequest>(`/admin/config/requests/${id}`);
+}
+
+/** The newest requests first, with their redacted diffs and host output. */
+export async function listConfigRequests(limit = 50): Promise<ConfigRequest[]> {
+  const { requests } = await apiFetch<{ requests: ConfigRequest[] }>(
+    `/admin/config/requests?limit=${limit}`,
+  );
+  return requests;
+}
+
+/** What restoring an earlier request would do. Nothing is stored: the
+ *  admin submits `change_set` like any other change. */
+export interface ConfigRestore {
+  change_set: ConfigChangeSet;
+  preview: ConfigPreview;
+  note: string;
+}
+
+export function restoreConfigRequest(id: number): Promise<ConfigRestore> {
+  return configChangeWrite<ConfigRestore>(`/requests/${id}/restore`, {});
 }
 
 /** Withdraw a request the host has not taken yet. */

@@ -2,15 +2,22 @@
   import { onMount } from 'svelte';
   import {
     getAdminConfig,
+    listConfigRequests,
+    restoreConfigRequest,
     type AdminConfigField,
     type AdminConfigView,
     type ConfigOp,
+    type ConfigPreview,
+    type ConfigProblem,
+    type ConfigRequest,
     type ConfigResource,
   } from '$lib/api';
   import { Button, Input, NoticeBanner } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
   import FieldControl from '$lib/admin/config/FieldControl.svelte';
+  import HistoryList from '$lib/admin/config/HistoryList.svelte';
+  import RawEditor from '$lib/admin/config/RawEditor.svelte';
   import RequestProgress from '$lib/admin/config/RequestProgress.svelte';
   import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
   import ConfigSecretField from '$lib/admin/config/SecretField.svelte';
@@ -23,6 +30,7 @@
     retainExisting,
     withAdmins,
     withOp,
+    withRaw,
     withSecret,
     type ConfigDraft,
   } from '$lib/admin/config/changeSet';
@@ -39,9 +47,19 @@
   let reviewing = $state(false);
   let requestId = $state<number | null>(null);
   let pageNotice = $state('');
+  let history = $state<ConfigRequest[] | null>(null);
+  let historyError = $state('');
+  let restoring = $state<number | null>(null);
+  /** A restore's preview, shown by the review it opens; its warnings name
+   *  credentials cleared since, which a second preview could not see. */
+  let restored = $state<{ preview: ConfigPreview; note: string } | null>(null);
 
   let editable = $derived(!!view?.editable);
   let count = $derived(changeCount(draft));
+  let configManaged = $derived(!!view?.managed.config.managed);
+  let opCount = $derived(Object.keys(draft.ops).length);
+  /** The form's fields, locked while the raw editor holds the whole file. */
+  let formEditable = $derived(editable && draft.raw === null);
 
   const RESOURCE_LABELS: Record<ConfigResource, string> = {
     config: 'config.toml',
@@ -68,6 +86,32 @@
     }
     return found;
   });
+
+  /** What the current file holds that the loader ignores or only warns about:
+   *  unknown and retired keys, a credential also set inline. */
+  let fileWarnings = $derived(view ? view.problems.filter((p) => !p.blocking) : []);
+
+  let rawLockedReason = $derived(
+    configManaged
+      ? 'A plan manages config.toml, so it is not changed from here.'
+      : opCount > 0
+        ? `The text replaces the whole file. Review or discard the ${
+            opCount === 1 ? 'change' : `${opCount} changes`
+          } made in the form first.`
+        : null,
+  );
+
+  let restoreBlockedReason = $derived(
+    !editable
+      ? 'Changes cannot be made from this page.'
+      : configManaged
+        ? 'A plan manages config.toml, so an earlier one is not restored from here.'
+        : requestId !== null
+          ? 'A change is in progress.'
+          : count > 0
+            ? 'Review or discard your pending changes to restore an earlier configuration.'
+            : null,
+  );
 
   /** File credentials no config key reads, so no section field shows them. */
   let standaloneSecrets = $derived(view ? view.secrets.filter((s) => !s.config_key) : []);
@@ -100,6 +144,46 @@
     } finally {
       loading = false;
     }
+    await loadHistory();
+  }
+
+  /** The history, and the request still open in it: a change submitted from
+   *  another tab, or before a reload, is followed here too. */
+  async function loadHistory() {
+    try {
+      history = await listConfigRequests();
+      historyError = '';
+    } catch (e) {
+      historyError = e instanceof Error ? e.message : 'The history could not be loaded.';
+      return;
+    }
+    const open = history.find((r) => ['pending', 'taken', 'building'].includes(r.status));
+    if (open && requestId === null) requestId = open.id;
+  }
+
+  function removalPending(problem: ConfigProblem): boolean {
+    return draft.ops[pathKey(problem.path)]?.op === 'unset';
+  }
+
+  function toggleRemoval(problem: ConfigProblem) {
+    draft = removalPending(problem)
+      ? withOp(draft, null, problem.path)
+      : withOp(draft, { op: 'unset', path: problem.path });
+  }
+
+  async function restore(id: number) {
+    restoring = id;
+    try {
+      const found = await restoreConfigRequest(id);
+      draft = withRaw(emptyDraft(), found.change_set.raw);
+      restored = { preview: found.preview, note: `Restoring change #${id}. ${found.note}` };
+      pageNotice = restored.note;
+      reviewing = true;
+    } catch (e) {
+      historyError = e instanceof Error ? e.message : 'That change could not be restored.';
+    } finally {
+      restoring = null;
+    }
   }
 
   function setOp(op: ConfigOp | null, path: string[]) {
@@ -112,12 +196,18 @@
 
   function discard() {
     draft = emptyDraft();
+    restored = null;
     pageNotice = '';
+  }
+
+  function closeReview() {
+    reviewing = false;
+    restored = null;
   }
 
   /** config.toml changed under the page: reload, keep what still applies. */
   async function onConflict() {
-    reviewing = false;
+    closeReview();
     await load();
     if (!view) return;
     const kept = retainExisting(draft, view);
@@ -131,14 +221,15 @@
   }
 
   function onSubmitted(id: number) {
-    reviewing = false;
+    closeReview();
     draft = emptyDraft();
     pageNotice = '';
     requestId = id;
+    void loadHistory();
   }
 
   function onRequestOpen(id: number) {
-    reviewing = false;
+    closeReview();
     pageNotice = 'Another change is already waiting for the host. It is shown below.';
     requestId = id;
   }
@@ -191,6 +282,16 @@
       </NoticeBanner>
     {/each}
 
+    {#if editable && view.has_comments}
+      <NoticeBanner title="config.toml has comments" variant="info">
+        <p>
+          Applying a change rewrites the file in Istota's own layout, so its comments and formatting
+          are not kept. The host keeps the previous file as
+          <code>config/config.toml.bak.&lt;timestamp&gt;</code>.
+        </p>
+      </NoticeBanner>
+    {/if}
+
     {#if editable && blockingProblems.length}
       <NoticeBanner
         title="config.toml has problems to fix first"
@@ -219,6 +320,7 @@
           {requestId}
           onApplied={(fresh) => {
             view = fresh;
+            void loadHistory();
           }}
           onDismiss={() => {
             requestId = null;
@@ -247,6 +349,34 @@
           onChange={(admins) => (draft = withAdmins(draft, admins))}
         />
       </section>
+
+      {#if fileWarnings.length}
+        <section class="card">
+          <h2 class="section-title">Warnings about config.toml</h2>
+          <p class="caption">
+            Istota loads the file with these. A key it ignores is kept until it is removed.
+          </p>
+          <ul class="warning-list">
+            {#each fileWarnings as problem, i (i)}
+              <li class="warning-row">
+                <span>
+                  {#if problem.path.length}<code>{problem.path.join('.')}</code>{/if}
+                  {problem.message}
+                </span>
+                {#if editable && problem.action === 'unset'}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={!formEditable}
+                    onclick={() => toggleRemoval(problem)}
+                    >{removalPending(problem) ? 'Keep' : 'Remove'}</Button
+                  >
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
 
       {#if standaloneSecrets.length}
         <section class="card">
@@ -285,7 +415,7 @@
             {field}
             op={draft.ops[pathKey(field.path)]}
             secretPending={field.credential ? draft.secrets[field.credential.name] : undefined}
-            {editable}
+            editable={formEditable}
             problem={problemByKey.get(field.path.join('.'))}
             onOp={setOp}
             onSecret={setSecret}
@@ -293,6 +423,25 @@
         {/each}
       </section>
     {/each}
+
+    {#if editable && !filter.trim()}
+      <RawEditor
+        initial={view.raw_toml}
+        pending={draft.raw}
+        lockedReason={rawLockedReason}
+        onChange={(text) => (draft = withRaw(draft, text))}
+      />
+    {/if}
+
+    {#if !filter.trim()}
+      <HistoryList
+        requests={history}
+        error={historyError}
+        {restoreBlockedReason}
+        {restoring}
+        onRestore={restore}
+      />
+    {/if}
 
     {#if count > 0}
       <div class="change-footer" role="region" aria-label="Pending changes">
@@ -312,7 +461,9 @@
     {#if reviewing && view.document_digest}
       <ReviewDialog
         changeSet={buildChangeSet(draft, view.document_digest)}
-        onClose={() => (reviewing = false)}
+        initialPreview={restored?.preview ?? null}
+        note={restored?.note ?? ''}
+        onClose={closeReview}
         {onSubmitted}
         {onConflict}
         {onRequestOpen}
@@ -348,6 +499,20 @@
   .problem-list {
     margin: var(--space-2) 0 0;
     padding-left: var(--space-4);
+  }
+
+  .warning-list {
+    margin: var(--space-2) 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .warning-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
   }
 
   .change-footer {
