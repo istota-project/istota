@@ -57,6 +57,8 @@ from istota.scheduler import (
 EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("briefings", "briefing_check_interval"),
     ("shared-blocks", "briefing_check_interval"),
+    # Added after the baseline extraction: shared-block Run now (ISSUE-700).
+    ("shared-block-request", None),
     ("briefing-triggers", "tasks_file_poll_interval"),
     ("scheduled-jobs", "briefing_check_interval"),
     ("sleep-cycles", "briefing_check_interval"),
@@ -1174,6 +1176,7 @@ class TestTheOneShotPathTouchesNoDaemonState:
             "scheduler-stats",
             "doctor",
             "doctor-request",
+            "shared-block-request",
             "host-pressure-sample",
             "backup-stale-alert",
         }

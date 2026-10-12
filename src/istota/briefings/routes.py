@@ -417,8 +417,10 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def _shared_block_status(conn, name: str) -> dict:
-    """Per-block runtime status: last generation + current shared_kv preview."""
+    """Per-block runtime status: last generation, current shared_kv preview,
+    and any Run now request with the daemon's last answer to one."""
     from istota import db as fdb
+    from istota.briefings import shared_block_runs
 
     last_run_at = fdb.get_briefing_shared_block_last_run(conn, name)
     val = fdb.shared_kv_get(conn, SHARED_BLOCK_NAMESPACE, name)
@@ -437,7 +439,10 @@ def _shared_block_status(conn, name: str) -> dict:
                     preview = text[:400]
         except (ValueError, TypeError):
             preview = (val.get("value") or "")[:400]
+    runs = shared_block_runs.run_state(conn, name)
     return {
+        "run_pending": runs["pending"],
+        "run_answered": runs["answered"],
         "last_run_at": last_run_at,
         "value_updated_at": updated_at,
         "value_preview": preview,
@@ -568,43 +573,31 @@ def delete_shared_block(
     return {"status": "ok", "deleted_value": bool(delete_value)}
 
 
-@router.post("/shared-blocks/{name}/run")
+@router.post("/shared-blocks/{name}/run", status_code=202)
 def run_shared_block_now(
     name: str,
     request: Request,
     _admin: dict = Depends(require_admin),
     __: None = Depends(verify_origin),
 ) -> dict:
-    """Run-now: regenerate a shared block synchronously, return fresh status.
+    """Run-now: ask the daemon to regenerate a shared block on its next tick.
 
-    Inline on the request thread (v1 — generation is bounded: fail-soft gather +
-    a 180s brain ceiling). A generation error is returned in the payload rather
-    than raising, so one bad block doesn't 500 the page.
+    Never generates here (ISSUE-700). On the Docker stack this process is not on
+    the browser's network, so a ``browse`` source came back empty and replaced
+    the last good block, and its brain breaker is not the daemon's. Joins a
+    request still pending; the page waits for ``status.run_answered`` to name
+    the returned id.
     """
     from istota import db as fdb
-    from istota.config import BriefingSharedBlock
-    from istota.scheduler import _generate_shared_block
+    from istota.briefings import shared_block_runs
 
     cfg = _app_config(request)
     with fdb.get_db(cfg.db_path) as conn:
         row = fdb.get_shared_block_config(conn, name)
     if row is None:
         raise HTTPException(404, "shared block not found")
-
-    block = BriefingSharedBlock(
-        name=row.name, cron=row.cron, title=row.title, directive=row.directive,
-        render_mode=row.render_mode, enabled=row.enabled, trusted=row.trusted,
-        sources=row.sources,
-    )
-    error = None
-    try:
-        _generate_shared_block(cfg, block)
-    except Exception as e:  # noqa: BLE001 — surfaced, not raised
-        logger.error("run-now shared block %s failed: %s", name, e)
-        error = str(e)
-    with fdb.get_db(cfg.db_path) as conn:
-        status = _shared_block_status(conn, name)
-    return {"status": "ok" if error is None else "error", "error": error, **{"block_status": status}}
+    made = shared_block_runs.request_run(cfg, name)
+    return {"id": made["id"]}
 
 
 @router.get("/shared-block-options")

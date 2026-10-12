@@ -4499,7 +4499,17 @@ export async function getBriefingPathSuggestions(q = ''): Promise<{ paths: strin
 
 // --- Shared briefing blocks (admin) + options (any user) ------------------
 
+export interface SharedBlockRunAnswer {
+  id: string;
+  outcome: 'regenerated' | 'kept_prior' | 'brain_unavailable' | 'failed' | 'not_found';
+  at: string;
+}
+
 export interface SharedBlockStatus {
+  // Run now is answered by the daemon (ISSUE-700): the pending request, and
+  // the daemon's last answer to one.
+  run_pending: { id: string; name: string; at: string } | null;
+  run_answered: SharedBlockRunAnswer | null;
   last_run_at: string | null;
   value_updated_at: string | null;
   value_preview: string | null;
@@ -4554,9 +4564,7 @@ export async function deleteSharedBlock(name: string, deleteValue = false): Prom
   await apiFetch(`/briefings/shared-blocks/${encodeURIComponent(name)}${qs}`, { method: 'DELETE' });
 }
 
-export async function runSharedBlock(
-  name: string,
-): Promise<{ status: string; error: string | null; block_status: SharedBlockStatus }> {
+export async function runSharedBlock(name: string): Promise<{ id: string }> {
   return apiFetch(`/briefings/shared-blocks/${encodeURIComponent(name)}/run`, { method: 'POST' });
 }
 

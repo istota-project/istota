@@ -5109,6 +5109,7 @@ const handlers: MockHandler[] = [
       sources: { kind: string; config: Record<string, unknown> }[];
       last_run_at: string | null;
       value: { text: string; updated_at: string } | null;
+      run_answered?: { id: string; outcome: string; at: string | null };
     }
     const sharedBlocks: SharedBlockDef[] = [
       {
@@ -5150,6 +5151,8 @@ const handlers: MockHandler[] = [
       { name: 'film-business-digest', updated_at: new Date(Date.now() - 7200_000).toISOString() },
     ];
     const sharedStatus = (b: SharedBlockDef) => ({
+      run_pending: null,
+      run_answered: b.run_answered ?? null,
       last_run_at: b.last_run_at,
       value_updated_at: b.value?.updated_at ?? null,
       value_preview: b.value?.text?.slice(0, 400) ?? null,
@@ -5505,7 +5508,10 @@ const handlers: MockHandler[] = [
           text: `${b.title}\n(freshly generated ${new Date().toLocaleTimeString()})`,
           updated_at: b.last_run_at,
         };
-        return { status: 'ok', error: null, block_status: sharedStatus(b) };
+        // The mock answers at once, as the daemon would on its next tick.
+        const id = `run-${Date.now()}`;
+        b.run_answered = { id, outcome: 'regenerated', at: b.last_run_at };
+        return { id, __status: 202 };
       }
       const sbDel = p.match(/^\/shared-blocks\/([^/]+)$/);
       if (sbDel && method === 'DELETE') {
