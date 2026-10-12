@@ -573,17 +573,22 @@ class TestGuards:
         assert code == 1
         assert envelope["reason"] == "path_not_allowed"
 
-    def test_tmux_brain_is_skipped_not_errored(
-        self, capsys, worktree, review_env, developer_config, no_brain
+    def test_a_tmux_deployment_reviews_through_claude_code(
+        self, capsys, monkeypatch, worktree, review_env, developer_config, stub_brain
     ):
-        """A tmux deployment has no text-only path at all. Reporting it as an
-        error would block every push on a deployment that can never review."""
+        """The tmux brain has no one-shot path, so the review runs on the
+        claude_code brain with the same subscription, not skipped."""
+        built = []
+        monkeypatch.setattr(
+            "istota.brain.make_brain", lambda cfg: built.append(cfg.kind) or stub_brain
+        )
         cfg = developer_config()
         cfg.brain.kind = "tmux_claude"
         code, envelope = drive(capsys, "run", "--worktree", str(worktree))
         assert code == 0
-        assert envelope["status"] == "skipped"
-        assert envelope["reason"] == "brain_unsupported"
+        assert envelope["status"] == "ok", envelope
+        assert built and set(built) == {"claude_code"}
+        assert cfg.brain.kind == "tmux_claude"
 
     def test_a_refused_run_does_not_increment_the_counter(
         self, capsys, tmp_path, monkeypatch, worktree, review_env, review_db, no_brain

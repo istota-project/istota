@@ -57,7 +57,7 @@ Linux-only and merged-usr compatible for Debian 13+. See [Supported deployment](
 
 Credentials live in the encrypted framework database, which no task sandbox binds. Import reads an uploaded KeePass file in memory and stores only selected entries. Export builds a new file in memory; the user's own KeePass file is never rewritten. A one-time retirement reader handles old configured files through the existing no-symlink path resolver. The stored legacy passphrase is deleted when retirement completes.
 
-A web export, recovery reveal, backup recipient change, history restore or purge needs a fresh emailed code bound to the session and action. The code goes to the native sign-in identity, never a profile address a session holder can edit. Every export is announced by email and in the bell. A stolen session and mailbox together remain outside that protection.
+A web export, recovery reveal, backup recipient change, history restore or purge needs a fresh emailed code bound to the session and action. The code goes to the native sign-in identity, never a profile address a session holder can edit. On an install with no mail set up, the confirmation is the account password instead, bound the same way and counted by the sign-in throttle. Every export is announced by email (where mail is set up) and in the bell. A stolen session and mailbox together remain outside that protection, as does a stolen session and password where there is no mail.
 
 ### Back up the secret key separately
 

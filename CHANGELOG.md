@@ -274,6 +274,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Checking or previewing a configuration plan no longer imports credentials or removes obsolete resources when the plan uses the default database location. Validation leaves existing database state untouched.
 
+- Confirming a sensitive action in the web UI (a credential export, recovery codes, history restore or purge, the backup recipient, or an admin configuration change) works on an install with no mail. Where mail is not set up, the confirmation asks for your account password, bound to your session, with wrong passwords counted by the sign-in throttle; before, the page said a code had been sent when none had, so the action could never be confirmed. An account with no password and no mail is told what the operator can do about it.
+- `istota doctor` no longer reports `security.skill_model_credential.value` as failed on the native brain. Code review runs on the configured brain, so there it uses the native brain's own key and needs no Anthropic credential.
+
+- Code review now runs on a `tmux_claude` deployment instead of skipping with `brain_unsupported`. The tmux brain has no one-shot call, so the review runs on `claude_code` with the same Claude subscription.
+
 - On a VM whose Nextcloud workspace is a folder in the bot's files (`dav_prefix`), the `rclone.conf` that `istota setup` and the management role write now mounts that folder rather than the whole account. Before, files written through the mount landed beside the folder every Nextcloud call reads, including the `MOVED.md` notes `istota-stack localize-workspace` leaves. Re-run `istota-stack setup --force`, or the role, to rewrite it.
 
 - Workspace no longer lists a Talk attachments location on a local workspace, where no `Talk/` folder exists. Files posted in Talk are under each room's own location there.

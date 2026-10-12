@@ -19,6 +19,7 @@ async def mail(config, monkeypatch, signed_client):
     with db.get_db(config.db_path) as conn:
         conn.execute("UPDATE user_profiles SET email_addresses=? WHERE user_id='alice'", ('["different@example.net"]',))
     sent = []
+    config.email.enabled = True
     monkeypatch.setattr(mod.web_auth_mail, "send_auth_email", lambda *args: sent.append(args))
     return sent
 
@@ -68,7 +69,7 @@ async def test_request_masks_address_and_sends_only_to_identity(signed_client, c
     for _ in range(config.web.auth_mail_link_max_email + 1):
         response = await signed_client.post("/istota/api/settings/step-up", json={"action": "export"}, headers=ORIGIN)
         assert response.status_code == 200
-        assert set(response.json()) == {"request_id", "expires_at", "email_hint"}
+        assert set(response.json()) == {"method", "request_id", "expires_at", "email_hint"}
         assert response.json()["email_hint"] == "a•••@example.com"
         assert "alice@example.com" not in response.text
     assert len(mail) == config.web.auth_mail_link_max_email
@@ -115,7 +116,7 @@ async def test_step_up_mail_work_is_deferred_until_after_response(signed_client,
                     conn.execute("INSERT INTO web_auth_attempts (kind, key) VALUES ('mail_link', 'alice@example.com')")
         response = await signed_client.post("/istota/api/settings/step-up", json={"action": "export"}, headers=ORIGIN)
         assert response.status_code == 200
-        assert set(response.json()) == {"request_id", "expires_at", "email_hint"}
+        assert set(response.json()) == {"method", "request_id", "expires_at", "email_hint"}
         assert not mail
         with db.get_db(config.db_path) as conn:
             assert conn.execute("SELECT count(*) FROM web_auth_step_ups").fetchone()[0] == 0

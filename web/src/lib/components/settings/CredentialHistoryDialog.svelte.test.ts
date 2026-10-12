@@ -25,6 +25,7 @@ it('lists fields without values and restores only with a code', async () => {
   vi.mocked(startStepUp).mockResolvedValue({
     request_id: 'r',
     expires_at: 'later',
+    method: 'email' as const,
     email_hint: 'a•••@example.com',
   });
   vi.mocked(restoreCredentialHistory).mockResolvedValue({ restored: ['example'] });

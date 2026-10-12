@@ -19,7 +19,7 @@ login Keychain: istota.local / secret-key-istota (a copy of the master key)
 - Lima 2.0 or later: `brew install lima`. The installer does not install Homebrew or Lima for you.
 - A release tag and the release signing key (one line of an SSH public key). The VM checks the tag's signature before it runs anything from it, as a server does.
 - A model backend: a Claude Code OAuth token, an API key, or an OpenAI-compatible server through the [native brain](../configuration/native-brain.md). A model server on the Mac itself needs one more step, [below](#reaching-a-service-on-your-mac).
-- Room for the VM: 4 CPUs, 6 GiB of memory and a 40 GiB disk by default.
+- Room for the VM: 4 CPUs, 4 GiB of memory and a 40 GiB disk by default.
 
 ## Install
 
@@ -193,7 +193,7 @@ The local VM's boundary protects your Mac from the VM, not the VM from your Mac.
 
 ## Developing on a checkout
 
-From a checkout of the repository, `host/mac/istota-stack create --repo "$PWD"` makes a VM that mounts the checkout read-only and provisions from it at every boot, and installs `update --unsigned latest` (or the `--tag` you give). Run from a checkout, the script does not refresh any installed copy. The `vm` test tier uses its own instance, `istota-vm-1`, so the two never meet; [testing](../development/testing.md) covers it.
+From a checkout of the repository, `host/mac/istota-stack create --repo "$PWD"` makes a VM that mounts the checkout read-only and provisions from it at every boot, and installs `update --unsigned latest` (or the `--tag` you give). Run from a checkout, the script does not refresh any installed copy. The `vm` test tier uses its own instance, `istota-vm-1`, so the two never meet; [testing](../development/testing.md) covers it. To try a whole deployment by hand next to an install you already run, see [a full deployment on a Mac](../development/setup.md#a-full-deployment-on-a-mac).
 
 ## Removing it
 

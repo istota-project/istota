@@ -2309,6 +2309,9 @@ CREATE TABLE IF NOT EXISTS web_auth_step_ups (
     action TEXT NOT NULL,
     session_hash TEXT NOT NULL,
     code_hash TEXT NOT NULL,
+    -- 'email' (a mailed code) or 'password' (the account password, where the
+    -- install cannot mail); a request is redeemed only by its own method.
+    method TEXT NOT NULL DEFAULT 'email',
     credential_epoch INTEGER NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
     expires_at TEXT NOT NULL,

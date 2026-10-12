@@ -39,6 +39,7 @@ cheap to import and so tests can patch them at their real home.
 """
 
 import argparse
+import dataclasses
 import time
 import logging
 import os
@@ -265,14 +266,13 @@ def cmd_run(args):
     if error:
         _fail("path_not_allowed", error)
 
-    # No text-only path on tmux at all, so there is nothing to construct. This
-    # is a property of the deployment and will not change by retrying.
-    if config.brain.kind == "tmux_claude":
-        _skip(
-            "brain_unsupported",
-            "the tmux_claude brain has no text-only call path, so no reviewer "
-            "can be driven on this deployment",
-        )
+    # The tmux brain drives one interactive session, which is busy running the
+    # task that asked for this review, and has no one-shot path. A tmux
+    # deployment runs Claude Code on a subscription, so `claude -p` through the
+    # claude_code brain reviews with the same credential.
+    review_brain = config.brain
+    if review_brain.kind == "tmux_claude":
+        review_brain = dataclasses.replace(review_brain, kind="claude_code")
 
     # Before the cap and the breaker, so an operator whose budget cannot fit
     # learns about it even on a run those short-circuit — a warning that only
@@ -399,7 +399,7 @@ def cmd_run(args):
             bool(db_path),
         )
 
-    available, breaker_reason = primary_brain_unavailable(config.brain)
+    available, breaker_reason = primary_brain_unavailable(review_brain)
     if not available:
         _skip(
             "brain_unavailable",
@@ -464,7 +464,7 @@ def cmd_run(args):
         # it whole runs at default effort and silently drops the operator's
         # setting.
         base_model, effort = split_effort(raw_model)
-        brain = make_brain(config.brain)
+        brain = make_brain(review_brain)
         model = brain.resolve_model_name(base_model)
 
         # Two requests built in two places rather than one with conditional
@@ -536,7 +536,7 @@ def cmd_run(args):
         )
 
         report_brain_result(
-            result, config.brain, config=config, started_at=primary_started_at,
+            result, review_brain, config=config, started_at=primary_started_at,
             started_monotonic=primary_started_monotonic,
         )
         if not result.success:

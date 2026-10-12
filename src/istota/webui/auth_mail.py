@@ -51,9 +51,14 @@ def build_sign_in_code_email(bot_name: str, display_name: str, code: str, ttl_mi
     return subject, plain, html
 
 
+def can_send(config: Config) -> bool:
+    """Whether this install can mail an auth message at all: the rule `send_auth_email` applies."""
+    return bool(config.email.enabled)
+
+
 def send_auth_email(config: Config, to: str, subject: str, plain: str, html: str) -> bool:
     """Send both parts; never log recipient, token or SMTP exception text."""
-    if not config.email.enabled:
+    if not can_send(config):
         logger.warning("Auth email is not configured")
         return False
     try:

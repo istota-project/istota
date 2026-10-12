@@ -69,6 +69,23 @@ If the checkout also has a `config/config.toml`, a bare `istota serve` run from 
 
 To run what operators run, sandbox included, use the Lima VM from the [quickstart](../getting-started/quickstart-server.md#on-a-mac). `scripts/test-vm.sh` drives the same template for the `vm` test tier.
 
+## A full deployment on a Mac
+
+The [local VM](../getting-started/local-install.md) has the same shape as a server: the Docker stack on a Debian VM, set up by `provision.sh`, sandbox included. A throwaway VM built from a checkout is therefore the way to try a whole deployment by hand, first-run setup included, before a release. Give it its own instance name so it never touches an install you already run. The name also keys its state file under `~/.config/istota-stack/` and its Keychain entry.
+
+```bash
+export ISTOTA_LIMA_INSTANCE=istota-try
+host/mac/istota-stack create --repo "$PWD" --workspace ~/IstotaTry --no-setup
+host/mac/istota-stack setup --web --local     # or `setup` for the terminal wizard
+host/mac/istota-stack create                  # finishes: Keychain copy of the key, Mac scripts
+```
+
+`--repo` installs from the checkout rather than a signed release ([developing on a checkout](../getting-started/local-install.md#developing-on-a-checkout)). The first `create` builds the images and takes several minutes. The web setup listens on the Mac's port 8080, so another install must not hold that port; an existing local install on a different `--port` is fine. Each VM takes 4 GiB of memory unless you pass `--memory`.
+
+Remove it with `host/mac/istota-stack destroy`, which asks you to type the instance name. It leaves the workspace folder, the Keychain item (service `istota.local`, account `secret-key-istota-try`) and the state file `~/.config/istota-stack/istota-try.env`; delete those by hand. `--force` only skips the check that the Keychain holds the VM's key, which matters when the last `create` never ran.
+
+This is a manual run. The `vm` test tier (`scripts/test-vm.sh`, instance `istota-vm-1`) is the automated one and does not go through the browser.
+
 ## Initialize by hand
 
 The alternative to the wizard is a config in the checkout.

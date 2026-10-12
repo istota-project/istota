@@ -2743,6 +2743,26 @@ class TestSkillModelCredential:
         assert value.status == OK
         assert "ANTHROPIC_API_KEY" in value.detail
 
+    def test_the_value_half_skips_on_the_native_brain(self, make_config, monkeypatch):
+        """code_review runs on the configured brain, and on native it
+        authenticates with the brain's own key, so an absent Anthropic
+        credential is no failure there."""
+        from istota.config import BrainConfig
+
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        value = self._run(make_config(brain=BrainConfig(kind="native")))[self.VALUE]
+        assert value.status == SKIP
+        assert "native" in value.detail
+
+    def test_the_value_half_still_fails_on_tmux(self, make_config, monkeypatch):
+        """On tmux code_review reviews through claude_code, so it needs the
+        Anthropic credential as claude_code does."""
+        from istota.config import BrainConfig
+
+        _clear_env(monkeypatch, *_MODEL_CREDENTIALS, *_NON_DAEMON_MARKERS)
+        config = make_config(brain=BrainConfig(kind="tmux_claude"))
+        assert self._run(config)[self.VALUE].status == FAIL
+
     def test_the_value_half_skips_with_the_proxy_off(self, make_config, monkeypatch):
         """No injection and no strip: the CLI is re-exec'd with the daemon's
         own environment, so whatever authenticates the daemon authenticates it."""

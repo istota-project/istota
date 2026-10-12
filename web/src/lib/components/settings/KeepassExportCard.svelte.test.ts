@@ -27,6 +27,7 @@ beforeEach(() => {
   });
   vi.mocked(startStepUp).mockResolvedValue({
     request_id: 'request',
+    method: 'email' as const,
     email_hint: 'a•••@example.com',
     expires_at: 'later',
   });
