@@ -24,7 +24,6 @@ from istota import config as config_module
 from istota import setup_wizard
 from istota.config import _NOT_CONFIGURATION, Config
 from istota.config_mapper import _nested_dataclass
-from tests.support.drift import source_of
 from tests.test_config_field_coverage import (
     _AUDIT_ASSIGN,
     _DYNAMIC_HEADER,
@@ -46,17 +45,14 @@ PREAMBLE = [
     "differs. A TOML table is a mapping here and [[x]] a list of mappings.",
 ]
 
-#: One entry of `load_config`'s `_env_secret_overrides`: the credentials that
-#: reach the config from the environment, which is how a stack secrets file
-#: reaches it too.
-_OVERRIDE = re.compile(r'\(\s*"(ISTOTA_[A-Z0-9_]+)",\s*"([a-z_.]+)",\s*"([a-z_]+)",?\s*\)')
-
-
 def credentials() -> dict[str, str]:
-    """Each credential key's dotted path, to its stack secrets file or ""."""
+    """Each credential key's dotted path, to its stack secrets file or "".
+
+    `config.SECRET_ENV_OVERRIDES` is the credentials that reach the config from
+    the environment, which is how a stack secrets file reaches it too.
+    """
     found: dict[str, str] = {}
-    table = source_of(config_module.load_config).split("_env_secret_overrides = [", 1)[1].split("\n    ]", 1)[0]
-    for env, section, key in _OVERRIDE.findall(table):
+    for env, section, key in config_module.SECRET_ENV_OVERRIDES:
         name = env.lower()
         found[f"{section}.{key}"] = name if name in setup_wizard.SECRET_NAMES else ""
     for name in setup_wizard.SECRET_NAMES:

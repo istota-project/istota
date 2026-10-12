@@ -2141,6 +2141,7 @@ istota_config: {}
 #     oauth2_client_id: ""
 #
 #     # or ISTOTA_WEB_OAUTH2_CLIENT_SECRET env var
+#     # A credential: set it as istota_secrets.istota_web_oauth2_client_secret, not here.
 #     oauth2_client_secret: ""
 #
 #     # Optional overrides (defaults derive from oauth2_provider):

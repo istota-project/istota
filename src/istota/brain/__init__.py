@@ -37,6 +37,8 @@ import logging
 from collections.abc import Iterable
 
 from ._aliases import CANONICAL_ROLES, EFFORT_LEVELS, is_portable_alias, split_effort
+from istota.config import BRAIN_KINDS
+
 from ._fallback import (
     COOLDOWN_STOP_REASONS,
     PrimaryAvailabilityBreaker,
@@ -76,7 +78,7 @@ logger = logging.getLogger(__name__)
 # validates override targets against this set so a typo in
 # ``[brain.source_type_overrides]`` falls back to the base kind instead of
 # raising and wedging the task.
-KNOWN_BRAIN_KINDS = frozenset({"claude_code", "native", "tmux_claude"})
+KNOWN_BRAIN_KINDS = frozenset(BRAIN_KINDS)
 
 # Display names for the kinds above, for a surface that offers a brain to a
 # person rather than to code — today `/chat/commands`' `selectable_brains`.

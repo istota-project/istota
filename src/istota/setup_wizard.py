@@ -587,7 +587,7 @@ def read_existing_caldav(config_path: Path, env_path: Path | None = None) -> dic
     **Two files, because the block is split across two by design.** The url and
     the username are ordinary config and live in ``config.toml``; the password
     is a credential and lives in the sibling ``istota.env`` as
-    ``ISTOTA_CALDAV_PASSWORD``, which ``load_config``'s ``_env_secret_overrides``
+    ``ISTOTA_CALDAV_PASSWORD``, which ``config.SECRET_ENV_OVERRIDES``
     table resolves onto ``caldav.password`` — the same channel every other
     credential in the tree uses. Reading only the TOML would recover a server
     it has no password for, and ``_collect_caldav`` would then write a
@@ -659,7 +659,7 @@ def _collect_caldav(a: Answers, prior, *, interactive, input_fn, getpass_fn, out
     ``config.toml`` wholesale and ``render_config_toml`` is a pure function of
     ``Answers``, so a run that collected nothing emits no block — and because
     the password's only home is that file (there is no ``[caldav]`` entry in
-    ``load_config``'s ``_env_secret_overrides`` table), dropping the block
+    ``config.SECRET_ENV_OVERRIDES`` table), dropping the block
     destroys a credential with no copy anywhere else. ``_carry_forward_secrets``
     exists for precisely this hazard on the env file; this is the same rule for
     the one secret that does not live there. So the question becomes "keep the
@@ -1089,7 +1089,7 @@ def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None
     # config.toml holds no credential at all and stays at the umask default, so
     # an operator can read it without sudo. It used to take a private write on
     # the one shape that carried a [caldav] password; that password now has an
-    # `_env_secret_overrides` row and goes to istota.env with the rest, so the
+    # `SECRET_ENV_OVERRIDES` row and goes to istota.env with the rest, so the
     # exception is gone rather than merely unused — one rule, not two.
     config_path.write_text(render_config_toml(a), encoding="utf-8")
     _write_private(env_path, render_env_file(a))

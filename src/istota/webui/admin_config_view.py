@@ -150,6 +150,36 @@ def is_secret_field(key: str, name: str) -> bool:
     return is_secret_name(name)
 
 
+def is_secret_path(path: tuple[str, ...] | list[str]) -> bool:
+    """Whether the value at ``path`` in a config document must be redacted.
+
+    The path-aware form of :func:`is_secret_field`, for a value that may sit
+    inside a field: a header under ``[brain.native.extra_headers]`` or an
+    element of a list. A section (a field holding a nested dataclass) decides
+    nothing by its name, as in the view's own walk, so every key under
+    ``[security.credential_broker]`` is not secret for being there. From the
+    first non-section segment on, the path is secret when any prefix is.
+    """
+    from istota.config import Config
+
+    segments = [str(segment) for segment in path]
+    section: Any = Config
+    for index, name in enumerate(segments):
+        key = ".".join(segments[: index + 1])
+        if key in _ALWAYS_SECRET_KEYS:
+            return True
+        field = None
+        if section is not None:
+            field = next((f for f in dataclasses.fields(section) if f.name == name), None)
+        if field is not None and dataclasses.is_dataclass(field.type):
+            section = field.type
+            continue
+        section = None
+        if is_secret_field(key, name):
+            return True
+    return False
+
+
 def _is_set(value: Any) -> bool:
     """Whether a credential is configured, without inspecting its content."""
     if value is None:
