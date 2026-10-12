@@ -14,7 +14,11 @@ argv and answers the few questions the script asks.
 
 The negative controls are `scripts/test-stack-negative-control.sh`: verification
 skipped, and verification against the user's own git configuration instead of
-`allowed_signers`, each of which must turn named node ids here red.
+`allowed_signers`, each of which must turn named node ids here red. Its
+`setup-web` controls do the same for `setup --web`: staging installed without
+the `setup-done` marker, the code and certificate minted into staging rather
+than root's `.setup/`, and no setup lock. Each must turn exactly its named
+node ids in the setup classes red.
 """
 
 from __future__ import annotations
@@ -59,7 +63,9 @@ case "$args" in
     cp -Rp "$vm" "$STUB_CALLS.staging"
     cp -Rp "$ISTOTA_STACK_DIR/.setup" "$STUB_CALLS.setup-dir"
     if [ -n "${STUB_DURING:-}" ]; then
-      bash -c "$STUB_DURING" > "$STUB_CALLS.during" 2>&1
+      # Unset for the child: a second setup run that is not refused must not
+      # start a third.
+      env -u STUB_DURING bash -c "$STUB_DURING" > "$STUB_CALLS.during" 2>&1
       echo "rc=$?" >> "$STUB_CALLS.during"
     fi
     if [ -n "${STUB_CONFIG:-}" ]; then printf '%s' "$STUB_CONFIG" > "$ISTOTA_CONFIG_DIR/config.toml"; fi
