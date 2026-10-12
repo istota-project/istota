@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The dashboard now has a Workspace card when Workspace is available. Open it to browse your files and pinned items.
+
 - Workspace has file-type icons, saved sorting by name, size or date, a folders-first option, filename filtering and refresh. Select visible files with row checkboxes or select all, then confirm deletion of files and empty folders under My files. Share markers stay beside filenames and use icons on narrow screens.
 
 - **Istota can be set up in the browser.** `istota-stack setup --web` prints an address with a one-use setup code and runs a page of short screens: your name and email, a password, an Anthropic or OpenRouter API key or a Claude subscription, the web address, and optionally Nextcloud, email and a calendar, each of which can be tested before you save it. When you finish it writes the configuration, builds what your answers need, starts the stack and sends you to the sign-in page with your email filled in. A new cloud VM started from `host/cloud-init.yaml` opens it on its own and shows the address on the provider's console; `istota-stack setup-code` prints it again, and the terminal wizard is still there with `istota-stack setup`.
