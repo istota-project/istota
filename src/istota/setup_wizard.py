@@ -192,7 +192,7 @@ def render_config_toml(a: Answers) -> str:
     lines += [
         "",
         "# Trusted single-user posture: no sandbox / proxies. "
-        "See docs/getting-started/local-install.md.",
+        "See docs/getting-started/standalone-install.md.",
         "[security]",
         "sandbox_enabled = false",
         "skill_proxy_enabled = false",

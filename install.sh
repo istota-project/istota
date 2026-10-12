@@ -529,7 +529,7 @@ run_standalone() {
     echo -e "  ${_BOLD}Start it:${_RESET}  istota serve"
     echo -e "             ${_DIM}then open the printed http://127.0.0.1:<port>/istota URL (no login)${_RESET}"
     echo -e "  ${_BOLD}REPL:${_RESET}      istota repl"
-    echo -e "  ${_BOLD}Docs:${_RESET}      docs/getting-started/local-install.md"
+    echo -e "  ${_BOLD}Docs:${_RESET}      docs/getting-started/standalone-install.md"
     echo
     echo -e "  ${_DIM}Standalone runs unsandboxed as your user — only give it content you trust.${_RESET}"
     echo

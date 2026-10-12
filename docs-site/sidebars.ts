@@ -12,6 +12,7 @@ const sidebars: SidebarsConfig = {
       collapsed: false,
       items: [
         'getting-started/quickstart-server',
+        'getting-started/local-install',
         'getting-started/post-install',
       ],
     },
@@ -108,7 +109,7 @@ const sidebars: SidebarsConfig = {
         'deployment/ansible',
         'deployment/migrating-from-bare-metal',
         'deployment/moving-the-bundled-nextcloud',
-        'getting-started/local-install',
+        'getting-started/standalone-install',
       ],
     },
     {

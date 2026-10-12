@@ -1,172 +1,206 @@
-# Standalone install (deprecated)
+# Local install: a Lima VM on your Mac
 
-:::warning[Deprecated]
-The standalone install is not a supported way to run Istota. Istota has one deployment: the Docker stack on a machine of its own, which on a Mac is a Lima VM. See the [quickstart](quickstart-server.md). This page stays for installs that already exist. They keep working and `istota update` still updates them, until a Mac desktop app that wraps the VM replaces this install and migrates its data. Don't start a new install this way.
-:::
+The local install runs Istota on your own Apple silicon Mac. It is the same stack a server runs: the same image, compose file, `provision.sh`, `istota-stack` and bubblewrap sandbox, inside a [Lima](https://lima-vm.io/) VM that is dedicated to it. The one thing a server does not have is a folder in your home, `~/Istota`, which is the bot's workspace. The VM mounts it, the bot writes its files there, and you open them with any Mac app. Time Machine backs it up, and the database snapshots land in it too.
 
-The standalone install runs Istota on your own Mac or Linux machine as one process: no Nextcloud, no sandbox and no login. The workspace is a plain local folder (default `~/.istota`), and the web UI runs on loopback with authentication bypassed. It is always single-user and always trusted.
+A command on the Mac, also called `istota-stack`, creates and controls the VM. It handles the VM's own life (create, start, stop, restore) and passes every other verb to the `istota-stack` inside the VM unchanged, so the [server documentation](../deployment/docker.md) applies as written.
 
-`istota serve` itself stays after this install is gone: it is the development loop on a Mac checkout. See [development setup](../development/setup.md).
-
-## Trust model — read this first
-
-:::warning[A local install runs unsandboxed]
-There is no bubblewrap isolation, no skill proxy, and no network proxy. The agent's subprocesses run with **your user account's full privileges** — full filesystem access and open network. A prompt injection carried in ingested content (an email, a browsed page, a feed item) therefore has real reach.
-:::
-
-Only give a local instance content and instructions you trust. The content-trust guardrails (`untrusted_input` companion on the ingest skills, `sensitive_actions`) stay in place, but they are about content provenance, not process isolation.
-
-If you need isolation between untrusted content and your host, run the stack instead. See [Security](../deployment/security.md) for how it confines the agent.
+```
+Mac                                          Lima VM "istota" (Debian 13)
+~/.local/bin/istota-stack ──limactl shell──▶ istota-stack (the server's command)
+~/.local/bin/istota       ──limactl shell──▶ istota (the CLI, as uid 10001)
+~/Istota/                 ◀── virtiofs ────▶ /srv/mount/host-folder, bound at /mnt/shared
+http://localhost:8080     ◀── port forward ─ nginx on the VM's loopback
+login Keychain: istota.local / secret-key-istota (a copy of the master key)
+```
 
 ## Requirements
 
-- macOS or Linux (Windows is not supported).
-- Python 3.11+ with [`uv`](https://docs.astral.sh/uv/).
-- For the default model backend: the [`claude` CLI](https://docs.anthropic.com/en/docs/build-with-claude/claude-code), installed and logged in (reuses your existing Claude Code subscription). Alternatively, an API key for any OpenAI-compatible endpoint — see the [native brain runbook](../configuration/native-brain.md).
+- A Mac with Apple silicon. An Intel Mac is refused.
+- Lima 2.0 or later: `brew install lima`. The installer does not install Homebrew or Lima for you.
+- A release tag and the release signing key (one line of an SSH public key). The VM checks the tag's signature before it runs anything from it, as a server does.
+- A model backend: a Claude Code OAuth token, an API key, or an OpenAI-compatible server through the [native brain](../configuration/native-brain.md). A model server on the Mac itself needs one more step, [below](#reaching-a-service-on-your-mac).
+- Room for the VM: 4 CPUs, 6 GiB of memory and a 40 GiB disk by default.
 
 ## Install
 
-```bash
-uv tool install 'istota[local]'
-```
-
-The `local` extra is the lean footprint: the core agent, the web UI, and the light pure-Python modules (feeds, calendar, email, markets). The guided `install.sh --standalone` installs `local` plus `money` and `location` — both are light on disk, so there's nothing to gate at install time. Which modules are actually *enabled* is a choice made in `istota setup`, not a packaging one. If you install by hand, add the same extras:
+As yourself, not with `sudo`:
 
 ```bash
-uv tool install 'istota[local,money,location]'
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
+  | bash -s -- --local --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-Heavier, genuinely optional extras (`memory-search`, `whisper`, `transcribe`, `garmin`) stay off unless you name them:
+`--tag` and `--signing-key` are both required. The installer refuses to run as root, on anything but an Apple silicon Mac, or without `limactl` (exit 69, with the `brew install lima` line). It installs `istota-stack` and `istota` into `~/.local/bin` and the Lima template into `~/.local/share/istota/istota.yaml`, prints the `PATH` line to add if `~/.local/bin` is not on yours, and runs `istota-stack create` with the tag, the key and every other flag you gave it:
+
+| Flag | Default | What it sets |
+|---|---|---|
+| `--workspace DIR` | `~/Istota` | the workspace folder ([rules below](#where-the-folder-may-be)) |
+| `--port N` | `8080` | the Mac port the web UI is on, 1024 or higher |
+| `--cpus N` | `4` | the VM's CPUs |
+| `--memory N` | `6` | the VM's memory, in whole GiB |
+| `--adopt` | off | use a folder that already holds files |
+| `--no-setup` | off | stop before the setup questions ([setting up in the browser](#setting-up-in-the-browser)) |
+
+The scripts the installer downloads come from `main`, as with any `curl | bash` installer, and are used only to run `create`. Once the VM has verified the tag, `create` replaces them with the copies from the verified checkout, and every later `istota-stack update` does the same. From then on the Mac scripts are covered by the tag's signature.
+
+## What `create` does
+
+1. Refuses a folder in the wrong place, a port something on the Mac already listens on (it names the process), and an existing non-empty folder without `--adopt`. Nothing is written before these checks pass.
+2. Creates the folder and an empty `.istota-workspace` marker file at its root.
+3. Creates and starts the Lima VM. On first boot the VM clones the repository, verifies the tag against the key, checks it out and runs `host/provision.sh` from it.
+4. Writes the VM's `host.env`: `STORAGE=host-folder`, `INGRESS=local`, and the block on the Mac's loopback (`HOST_LOOPBACK_BLOCK=1`, `HOST_GATEWAY_ADDR=192.168.5.2`).
+5. Builds the images with `istota-stack update <tag>`.
+6. Runs the setup wizard in your terminal, with storage, ingress and the `localhost:<port>` hostname already set. It asks the same questions a server operator answers.
+7. Rebuilds when the config needs Claude Code (`check-image` exits 2), runs `provision.sh` again, and starts `istota-stack.service`.
+8. Refreshes the Mac scripts from the VM's checkout, copies the master key into your login Keychain, and prints a one-use link to set your password, opening it in the browser.
+
+If a step fails, `create` prints the step, the command it ran in the VM, its exit status and its last 20 lines, and exits with that status. It never retries a build or a provision on its own. Run `istota-stack create` again, with no arguments, and it continues from the first step whose effect is missing; it keeps what you gave it the first time in a file under `~/.config/istota/`.
+
+### Setting up in the browser
+
+The [web setup](../deployment/docker.md#in-the-browser) works in the local VM too. It asks fewer questions than the terminal wizard, and can test an API key before saving it:
 
 ```bash
-uv tool install 'istota[local,money,location,memory-search,whisper,transcribe]'
+istota-stack create --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases' --no-setup
+istota-stack setup --web --local
 ```
 
-A module whose extra isn't installed hides itself — the app skips it and its web UI tab doesn't appear rather than showing a broken tab.
+`setup --web --local` prints an `http://localhost:8080/istota/setup#code=…` address. Open it on the Mac and answer the screens; choose "Only on this computer" for how people reach Istota. The page keeps the Mac folder as the workspace. When it finishes, the VM builds what your answers need and starts the stack on the same address. Then run `istota-stack create` once more, with no arguments: it skips the steps that are done, copies the master key into the Keychain and refreshes the Mac scripts. Until you do, there is no copy of the key outside the VM.
 
-:::note[weasyprint (invoice PDFs)]
-The `money` extra pulls weasyprint, whose native libs (pango/cairo) are only touched when you *render an invoice PDF*. Everything else in the money module — the ledger, queries, balances, the Money tab — works without them. On macOS that one path needs `brew install pango`; until then invoice-PDF generation is the only thing that errors.
-:::
+The setup page listens on the VM's port 8080, so this works with the default `--port`. With another port, use the terminal wizard.
 
-## Set up
+## The workspace folder
+
+The folder has the layout every install has: `Users/<id>/` (with `istota/`, `inbox/`, `memories/` and `shared/` under it), `Channels/`, `Groups/` and `Backups/`. Your own files are in `~/Istota/Users/<your id>/`, and `istota-stack open --files` shows that folder in Finder. A file you save there is visible inside the VM within a fraction of a second, and the same holds the other way.
+
+Some things stay on the VM's disk and never go into the folder: the framework and module databases, the master key (`/data/.secret_key`), `config/`, `secrets/`, the session transcripts and the Docker volumes. SQLite does not run on the shared folder.
+
+A few behaviours to know about:
+
+- **The marker.** The stack will not start without `.istota-workspace` at the folder's root. If the folder is renamed, deleted or on a volume that is not plugged in, Lima still mounts an empty directory in its place, and the marker is what tells the two apart. On a running stack, `istota doctor` reports the missing marker as a failure, its hourly run alerts the admins, and backups stop. `istota-stack status` says whether the marker is there.
+- **Case.** The folder is as case-insensitive as the Mac volume it is on, usually APFS's case-insensitive default. `Notes.md` and `notes.md` are the same file to the bot as well.
+- **Both sides editing one file.** If you and a task write the same file at the same time, the last write wins. There is no locking across the VM boundary.
+- **Finder's files.** `.DS_Store` files appear in the folder, and the bot may see them in a file listing.
+
+### Where the folder may be
+
+`create` refuses, before it creates anything:
+
+- a folder in iCloud Drive or a cloud storage provider's folder (`~/Library/Mobile Documents`, `~/Library/CloudStorage`): those providers replace files with placeholders the VM reads as empty;
+- a folder under `~/Documents`, `~/Desktop` or `~/Downloads`: macOS lets an app reach those only with a grant of its own, and Lima has none;
+- `~/.istota`, the standalone install's folder, which `import-standalone` reads;
+- your home folder itself, `/`, a folder that contains `~/.lima` or `~/.ssh`, or one inside them.
+
+A link is followed before these checks, and the comparison ignores case. An external volume is allowed. An existing folder that holds files and has no marker is refused unless you pass `--adopt`; with it, the files stay and the bot sees them.
+
+## Day to day
 
 ```bash
-istota setup
+istota-stack status            # the VM, the deployed tag, the containers, the folder and its marker, autostart
+istota-stack open              # the web UI in your browser
+istota-stack open --files      # your folder in Finder
+istota-stack stop              # stop the stack (at most 60 s), then the VM
+istota-stack start             # start the VM; the stack starts with it
+istota-stack autostart on      # start the VM when you log in (off turns it back off)
+istota-stack shell             # a shell in the VM
+istota-stack update vX.Y.Z     # verify, build and switch to a release, then refresh the Mac scripts
+istota task "..." -u alice -x  # the istota CLI, in the daemon container as uid 10001
 ```
 
-The interactive wizard:
+`stop` stops the stack before the VM so SQLite closes its files cleanly. `autostart on` runs `limactl autostart enable`, which writes a LaunchAgent that starts the VM at your next login; it does not start or stop a running VM.
 
-1. **Workspace** — where your data lives (default `~/.istota`).
-2. **Model backend** — if the `claude` CLI is detected it offers to use it (no extra keys). Otherwise it asks for an OpenAI-compatible base URL, model, and API key.
-3. **Identity** — a user id (default your OS username), display name, timezone.
-4. **Web port** — default `8766`.
-5. **Modules & surfaces** — everything ships installed, so this only chooses what's *enabled*. The rule is simple: a module that works with no further setup is on, and one that needs something external is off.
-    - GPS/location tracking — off, it needs an Overland ingest token to receive pings.
-    - Money, health, feeds and briefings — each on, each an opt-out. A "no" is recorded in your profile's `disabled_modules`, which also hides the tab.
-    - Email (IMAP/SMTP) — off. Answering yes asks for the IMAP host, the user, the SMTP host (defaulting to the IMAP one, since a submission service on another name is ordinary), and the password, which is read without echo.
-    - An external CalDAV server — off. This is the calendar for a machine with no Nextcloud; see below.
+Every other verb is the VM's own `istota-stack`, run as root in the VM with its arguments unchanged and its exit status passed back: `setup`, `rollback`, `exec`, `compose`, `up`, `down`, `check-image` and the rest. `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac: it is copied into a root-only directory in the VM for the call and removed afterwards.
 
-It writes `~/.config/istota/config.toml` and a sibling `~/.config/istota/istota.env` (secrets — the model API key, the secrets-store master key, the calendar and mail passwords; `chmod 600`), plus `~/.config/istota/admins` naming you. Then it creates the directories the config names — the workspace, `Backups/db/snapshots`, and `tmp` under it at `0700` — initializes the database, and seeds your workspace.
+The VM is the Lima instance `istota`, in Lima's default home, so `limactl list` shows it. If you already have an instance of that name, set `ISTOTA_LIMA_INSTANCE` to another name for every `istota-stack` call.
 
-Finally it runs `istota doctor` against what it just wrote and prints anything that failed. A red check never fails the install: the files are written and the database is initialized either way, so it is information rather than a reason to unwind a working install. `istota doctor` gives the full report at any time.
+To change a setting, edit `/srv/app/istota/config/config.toml` in the VM (`istota-stack shell`, then `sudo -e` it) or use `istota-stack apply plan.toml` with a plan on the Mac, and restart with `istota-stack down && istota-stack up`.
 
-`setup` is idempotent. Re-running prompts before touching an existing config; `--force` overwrites. Three things survive a rewrite: the secrets-store master key, because replacing it would make every stored credential permanently unreadable; a CalDAV server you already configured, which you are asked about rather than silently losing; and an explicit database backup destination, so a setup rerun never points restore and retention at an empty directory while the existing history stays behind. For scripted installs, `--yes` takes defaults plus flags:
+### Reaching a service on your Mac
+
+No container in the VM can reach a service listening on your Mac's loopback: your development databases, admin consoles and local model servers stay out of reach. The VM's egress unit drops traffic from every container to the Mac's address as the VM sees it, `192.168.5.2`, except DNS, which Lima serves at that address. To let containers reach one port, for example Ollama for the native brain:
 
 ```bash
-istota setup --yes --workspace ~/.istota --user me --port 8766 --brain claude_code
-# or, with an API-key backend:
-istota setup --yes --brain native --native-model claude-sonnet-4-6 \
-  --native-base-url https://api.anthropic.com/v1 --native-api-key sk-...
-# opting out of modules, which are otherwise all on:
-istota setup --yes --no-money --no-health --no-feeds --no-briefings
+istota-stack allow-host-port 11434     # Ollama; LM Studio is 1234
+istota-stack deny-host-port 11434      # close it again
 ```
 
-`--yes` leaves `[caldav]` off, and there is deliberately no flag for it — a URL without a password is worse than no block at all, so it is an interactive question or nothing. A `--yes --force` re-run over an install that already has one carries it forward rather than dropping it.
+Then point the brain at `http://192.168.5.2:11434/v1`. An allowed port is open to the daemon and the browser container; a devbox cannot reach it.
 
-## Run
+### Sleep and missed jobs
+
+The VM is paused while the Mac sleeps, and Lima's guest agent resets the VM's clock from the Mac's when it runs again. A scheduled job or briefing whose time passed during sleep runs once after wake, as long as its oldest missed time is under 12 hours ago (`[scheduler] cron_max_staleness_minutes = 720`, which setup writes for the local VM). Several missed runs of one job give one run. A job whose oldest missed run is older than that is skipped and runs at its next scheduled time, so a job every five minutes is skipped after a 13-hour sleep. Nothing keeps the Mac awake while a task runs.
+
+## Backups and recovery
+
+Three things together restore a lost VM, and two of them are on the Mac already:
+
+- **The database snapshots**, which the stack writes into `~/Istota/Backups/db/snapshots/` on its normal backup schedule.
+- **The config copies** in `~/Istota/Backups/config/<date>/`: `config.toml` and the admins file, copied with each snapshot, and the stack's `.env` and `host.env` (as `stack.env` and `host.env`), copied on every `update`, `setup` and `apply`. None of these files holds a credential.
+- **The master key**, in your login Keychain as a generic password, service `istota.local`, account `secret-key-istota`. The snapshots cannot be decrypted without it, and it is never in the folder, so a copy of the folder alone does not open the stored credentials.
+
+`create` writes the key through `security -i`, which reads its command on stdin, so the key never appears on a command line where `ps` could show it. It reads the item back and stops if it does not match. If the Keychain already holds a different key for the instance, `create` stops rather than replace it, because that key decrypts an earlier VM's snapshots: rename the old item in Keychain Access first. The login keychain is a file on the Mac, which iCloud Keychain does not sync.
+
+To rebuild from the folder:
 
 ```bash
-istota serve
+istota-stack restore                       # the newest good snapshot
+istota-stack restore --date 2026-10-01     # a given day
 ```
 
-This runs the task worker and the web server in one process. Open the printed URL (`http://127.0.0.1:8766/istota`). There is no login — you are the single configured user, and you are admin. `Ctrl-C` stops both cleanly.
+`restore` checks the folder's marker, the backups and the Keychain item before it touches anything. Then it deletes the existing VM, after you type its name, creates a new one without the setup questions, and in it writes the key from the Keychain (on stdin), the config files, the `.env` and `host.env` copies in effect on the restored config's date, and the databases. Then it starts the stack. `--force` restores a snapshot that looks empty. It takes `create`'s options too (`--tag`, `--signing-key`, `--port`, ...), and without them uses the ones `create` recorded.
 
-`serve` sources `~/.config/istota/istota.env` itself, so you don't need to export anything. Override the bind with `--host`/`--port`, or a different env file with `--env-file`. A non-standard config goes through the global `-c`, which comes before the subcommand: `istota -c /path/to/config.toml serve`.
-
-The **REPL** works too, in a separate terminal, whether or not `serve` is running:
+`secrets/` is never copied into the folder, so after a restore the stack's own credentials (the model key, mail and Nextcloud passwords) are empty. Write them again as files, one per credential (the names are in [Credentials](../deployment/docker.md#credentials)), with `put-files`, which takes JSON on stdin:
 
 ```bash
-istota repl
+istota-stack put-files < credentials.json    # {"secrets": {"anthropic_api_key": "sk-..."}}
+istota-stack down && istota-stack up
 ```
 
-See the [CLI reference](../reference/cli.md) for the full `setup` / `serve` / `repl` flag lists.
+Credentials you stored through the web UI or `istota secret` are in the database and come back with it.
 
-## Updating
+`istota-stack destroy` deletes the VM after you type its name. It refuses when the Keychain has no copy of the master key, since the snapshots in your folder cannot be decrypted without it; `--force` deletes regardless. It leaves the folder and the Keychain item, and says so.
+
+## Moving from the standalone install
+
+`import-standalone` moves a [standalone install](standalone-install.md) (`~/.istota`) into a new local VM, with its history:
 
 ```bash
-istota update
+istota-stack import-standalone --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases' --dry-run
+istota-stack import-standalone --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-Pulls the latest code from the checkout `install.sh` recorded in `~/.config/istota/install.json` (by default a clone under `~/.local/share/istota/src`), reinstalls, and runs any database migrations. When it finishes, restart `istota serve` to pick up the new code — a running process holds the old code in memory until then. Pass `--force` to update even if that checkout has uncommitted changes (it discards them with `git reset --hard`).
+Stop `istota serve` first; the import refuses while it runs. `--from DIR` and `--config FILE` name a standalone install and config other than `~/.istota` and `~/.config/istota/config.toml`, and the import takes `create`'s options for the new VM. `--dry-run` needs a running VM and changes nothing.
 
-By default `update` follows the **stable** channel — the latest tagged release. To ride the development branch instead (newer, less tested), run `istota update --channel main`; switch back with `istota update --channel stable`. The choice is remembered, so you set it once. (An install made before this option existed keeps tracking `main` until you pick a channel.)
+1. It backs up each database with `sqlite3 .backup`, which is consistent while the database is in WAL mode, and stages them, the config, the admins file and the session transcripts in the VM. It creates the VM first, without the setup questions, when there is none.
+2. In the VM it writes a new `config.toml` for the stack: the brain, email, CalDAV and briefing settings and the `[users.*]` blocks are kept, the sandbox is on, and the native login replaces `auth = "none"`. A path under `~/.istota` is moved to the workspace. A setting that pointed anywhere else on the Mac is dropped, since the VM cannot see it, and listed in the report. A loopback URL is listed with the `allow-host-port` it needs.
+3. `istota.env` goes in on stdin, never as a file or an argument. The master key (the first `ISTOTA_SECRET_KEY` line, the one `istota serve` used) becomes `/data/.secret_key`, and every credential in the file goes into the stack's secrets files. A name the import does not know is refused by name rather than dropped.
+4. It restores the databases and rewrites the paths they store.
+5. Back on the Mac it copies your files from `~/.istota` into the workspace folder. Copied, never moved. The databases, scratch, transcripts and snapshots stay behind, and a file already in the folder is never replaced: one that differs is named in the output.
+6. It starts the stack, copies the key into the Keychain, prints your sign-in link and runs `istota doctor`.
 
-:::note[Standalone only]
-`update` applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. The stack is updated with `istota-stack update`, and `istota update` declines to run there.
-:::
+`~/.istota` is not changed. Only after a clean `doctor` does the import tell you how to move it to the Trash, and it never does that itself. User ids that would collide on a case-insensitive folder (`alice` and `Alice`) are refused before anything is written. Your own files that name `~/.istota` paths, such as a `CRON.md` or a script, are not rewritten; the import prints the `istota migrate workspace-paths --map` command that does it.
 
-## What works, what's off
+A refused import exits 1 with nothing written; a partial one exits 2, and running it again resumes.
 
-- **Web chat** — the primary surface. Fully local (SQLite + local files).
-- **REPL** — secondary, fully local, inline execution.
-- **TASKS.md** — the `~/.istota/Users/<user>/<bot>/config/TASKS.md` file, polled while `serve` runs.
-- **Scheduled jobs, briefings, heartbeat, cron** — run in the same process.
-- **Money, health, feeds, briefings** — on unless you said no in `setup`. Each has a tab in the web UI; turn one off later with `disabled_modules` on your profile.
-- **`istota doctor`** — about thirty checks over the paths, the database, the credentials and the model backend. `setup` runs it for you at the end; run it yourself after any config edit. For a config anywhere but the default path, `-c` is a global option and goes *before* the subcommand: `istota -c /path/to/config.toml doctor`.
-- **Session transcripts** — a native-brain task writes its whole run to `<workspace>/logs/<user>/`, one JSONL file per attempt. The `claude` CLI backends write their own instead, so this is empty unless you chose `native`. Read one back with `istota session list` / `show`. They hold the assembled prompt and raw tool output, so `[brain.native.session_log] enabled = false` is the way out.
-- **Nextcloud Talk** — off. Chat is the web UI and REPL.
-- **Email / ntfy** — off by default; enable in `setup` or config.
-- **GPS location webhooks** — off by default.
-- **Calendar** — `setup` offers an external CalDAV server (Radicale, Fastmail, Google). Off if you declined; see below for adding it later.
-- **Per-room brain pinning** — `!brain` and the room settings can pin a room to a specific backend, but only to one the operator listed in `[brain] room_selectable`, which is empty by default and which `setup` does not write. Add the kinds you want pinnable to `config.toml` first.
+## What the VM protects, and what it does not
 
-The Admin pane (`/istota/admin`) shows a "Running in standalone mode" notice listing exactly what's off in your install, so a feature that intentionally doesn't work reads as expected, not broken.
+The local VM's boundary protects your Mac from the VM, not the VM from your Mac. Read [The local VM](../deployment/security.md#the-local-vm) in the security page before you rely on it. In short:
 
-## Enabling optional pieces
+- Anything running as you on the Mac can already run commands as root in the VM (`limactl shell istota sudo ...`), so a Mac process that edits the folder gains nothing it did not have.
+- The folder is the only Mac path the VM mounts. A link in it that points elsewhere on the Mac leads to nothing in the VM.
+- Inside the VM every process can write anywhere in the folder, whatever its uid. Tasks are kept to their own `Users/<id>/` by the sandbox, as on a server.
+- Files the VM writes reach the Mac without the quarantine flag, so macOS does not check a program the bot downloaded before you open it.
 
-**Calendar (external CalDAV).** A local install has no Nextcloud, so there is nothing for calendar to derive from. `setup` asks about this, and re-running it is the easiest way to add one later — it keeps a server you already configured and lets you replace it.
+## Developing on a checkout
 
-By hand, it is two files. The URL and the username go in `config.toml`:
+From a checkout of the repository, `host/mac/istota-stack create --repo "$PWD"` makes a VM that mounts the checkout read-only and provisions from it at every boot, and installs `update --unsigned latest` (or the `--tag` you give). Run from a checkout, the script does not refresh any installed copy. The `vm` test tier uses its own instance, `istota-vm-1`, so the two never meet; [testing](../development/testing.md) covers it.
 
-```toml
-[caldav]
-url = "https://dav.example.com"
-username = "you@example.com"
+## Removing it
+
+```bash
+istota-stack autostart off
+istota-stack destroy
+rm ~/.local/bin/istota-stack ~/.local/bin/istota ~/.local/share/istota/istota.yaml
 ```
 
-and the password goes in `istota.env` beside every other credential:
-
-```
-ISTOTA_CALDAV_PASSWORD=app-specific-password
-```
-
-Not in `config.toml`. That file's generated header says secrets live in the sibling env file and never there, and the environment override is what makes that true without an exception — which is why `config.toml` is left at the usual permissions and only `istota.env` is `0600`.
-
-Set both or neither. The URL, the username and the password each fall back to `[nextcloud]` on their own rather than as a group, so half a block is a mixture rather than an override that is simply off. On this shape there is no Nextcloud to fall back to, so a URL with no password just leaves calendar unable to authenticate — `setup` refuses that pairing, which is why it can only arise from a hand edit. On the stack the same half-block is worse: it names a foreign host and then hands that host the Nextcloud app password.
-
-**Email.** Set `[email] enabled = true` with your IMAP host, user and SMTP host in `config.toml`, and the passwords in `istota.env` (`ISTOTA_EMAIL_IMAP_PASSWORD`, `ISTOTA_EMAIL_SMTP_PASSWORD`). `setup --email` collects these interactively; it asks for the SMTP host separately, defaulting to the IMAP one, and reads the password without echoing it.
-
-**Heavy modules.** Install the matching extra (above), then the module is on by default (opt out per user via `disabled_modules`).
-
-See the [configuration reference](../configuration/reference.md) for every option and [per-user configuration](../configuration/per-user.md) for the workspace files (`USER.md`, `CRON.md`, and the rest) each user owns. The bot's persona is one file for the whole install, `PERSONA.md` at the workspace root (see [Persona](../configuration/persona.md)).
-
-## Notes
-
-- **Loopback only.** No-auth mode refuses to start on a non-loopback bind — you cannot accidentally expose an unauthenticated instance on the network. Run the stack if you need remote access.
-- **One instance.** `serve` holds a lock; a second `serve` reports "already running" and exits.
-- **Backups.** `setup` writes `[scheduler] db_backup_dir` as `Backups/db/snapshots` under the workspace and creates it at `0700`. The mount-liveness check does not apply because `setup` writes `workspace_path` and leaves `workspace_mount_path` unset.
-- **Everything in one folder.** The database, module databases, and workspace all live under the workspace directory — back it up or move it as a unit.
-- **Storage vocabulary follows the backend.** The bot describes storage based on whether a Nextcloud server backs it, keyed on `[nextcloud] url` presence (not the standalone flag). With no URL — the local shape — the prompt and skill docs talk about "your workspace" (a local folder) instead of a Nextcloud mount, and tell the model it also has ordinary access to the rest of the machine's filesystem. Set a `[nextcloud] url` and the vocabulary switches back to Nextcloud/rclone.
-
-
-Room identity migration during `istota update` requires an offline workspace. Stop `istota serve` with Ctrl-C first, and stop any separate web or webhook processes you started. The updater refuses a running scheduler before changing the checkout and invokes the newly installed `istota init --relocate-rooms`. Restart `istota serve` after success. If migration refuses or reports partial work, follow the [refusal and retry procedure](../deployment/docker.md#room-identities-offline-maintenance-required); retry the offline command before restarting.
+The folder and the Keychain item stay until you delete them yourself, the item in Keychain Access.

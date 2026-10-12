@@ -2,7 +2,7 @@
 
 Istota runs one way: the Docker stack from `docker/`, on a Debian 13 machine of its own, with every task in a bubblewrap sandbox. A VM, a VPS or a bare-metal box all work, as long as it runs nothing else. `host/provision.sh` sets the machine up and one command, `istota-stack`, manages it afterwards. Images are built on the machine from a signed release tag; nothing is pulled from a registry.
 
-The machine has to be dedicated to this install. The stack grants its container what bubblewrap needs to build a namespace, which is only acceptable when nothing else shares the host. [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) explains why. For the same reason the stack does not run directly on a workstation, Docker Desktop included. On a Mac, run it in a Lima VM ([below](#on-a-mac)).
+The machine has to be dedicated to this install. The stack grants its container what bubblewrap needs to build a namespace, which is only acceptable when nothing else shares the host. [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) explains why. For the same reason the stack does not run directly on a workstation, Docker Desktop included. On a Mac, it runs in a Lima VM ([below](#on-a-mac)).
 
 ## Requirements
 
@@ -59,26 +59,14 @@ The optional containers (`browser`, `whatsapp-baileys`, `signaling`) are Compose
 
 ## On a Mac
 
-`host/lima/istota.yaml` is a [Lima](https://lima-vm.io/) template for a VM dedicated to one install: Debian 13 under Apple's virtualization framework, with 4 CPUs, 6 GiB of memory and a 40 GiB disk. It mounts an istota checkout from the Mac read-only and runs `host/provision.sh` from it on first boot, so the VM is set up exactly as a server would be. Lima forwards the VM's port 8080 to the Mac's loopback, and the browser container builds natively for arm64. From a checkout of the repository on the Mac:
+On an Apple silicon Mac the same stack runs in a Lima VM dedicated to it, with a folder in your home (`~/Istota`) as the workspace. `install.sh --local` installs a Mac-side `istota-stack` that creates the VM, runs this page's sequence inside it and forwards every command above to it:
 
 ```bash
-limactl create --name istota --param ISTOTA_REPO="$PWD" \
-  --set 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder"))' host/lima/istota.yaml
-limactl start istota
-limactl shell istota sudo istota-stack update --unsigned vX.Y.Z
-limactl shell istota sudo istota-stack setup --web --local
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
+  | bash -s -- --local --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-Open the printed `http://localhost:8080/istota/setup#code=…` address on the Mac and answer the screens; when they finish, the VM builds what the answers need and starts the stack on the same address. To set up in the terminal instead:
-
-```bash
-limactl shell istota sudo istota-stack setup --ingress local --hostname localhost:8080
-limactl shell istota sudo istota-stack check-image || limactl shell istota sudo istota-stack update --unsigned vX.Y.Z
-limactl shell istota sudo /srv/app/istota/src/host/provision.sh
-limactl shell istota sudo systemctl enable --now istota-stack
-```
-
-The VM's own checkout at `/srv/app/istota/src` is a clone of the mounted one, so `istota-stack update` fetches tags from the Mac checkout. The first build runs before `config.toml` exists, so it leaves Claude Code out; `check-image` exits 2 when the config the wizard wrote needs it, and the second `update` rebuilds the image. `--unsigned` is needed until `/srv/app/istota/host.env` names a `RELEASE_SIGNING_KEY`. After adding one, re-run `provision.sh`, which writes the key to `/srv/app/istota/allowed_signers`; then drop the flag and the tag is verified as it is on a server. Then open `http://localhost:8080` and sign in. Everything else on this page applies inside the VM: prefix a command with `limactl shell istota sudo`, or open a shell there with `limactl shell istota`.
+Run it as yourself, without `sudo`. [Local install](local-install.md) covers the requirements, the workspace folder, the browser setup, backups to the Keychain and the folder, and moving a standalone install in.
 
 ## Managing the machine from Ansible
 
