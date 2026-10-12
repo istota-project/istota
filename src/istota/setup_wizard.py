@@ -1823,6 +1823,8 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
             )
         if not a.listen_addr or a.listen_addr in ("0.0.0.0", "::"):
             refuse("listen_addr", "Proxied ingress listens on one private address, never 0.0.0.0.")
+        if not 1 <= a.listen_port <= 65535:
+            refuse("listen_port", f"The listen port must be between 1 and 65535, not {a.listen_port}.")
         if a.tls_cert_source not in ("", *PROXIED_TLS_SOURCES):
             refuse(
                 "tls_cert_source",
@@ -2076,6 +2078,7 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
         a.listen_port = int(flag("listen_port") or (
             _ask_port(input_fn, "Port to listen on", 8080, out=out) if interactive else 8080
         ))
+        _refuse_on(a, "listen_port")
         if interactive:
             out("  The hop from the proxy to this VM: self-signed encrypts it with a")
             out("  certificate made here, which you pin in the proxy (provision.sh prints")

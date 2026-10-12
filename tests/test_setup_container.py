@@ -601,6 +601,14 @@ _REFUSALS = [
         "listen_addr", "never 0.0.0.0",
     ),
     (
+        "proxied-port-out-of-range",
+        {"hostname": "bot.example.test", "ingress": "proxied", "upstream_proxy": "10.0.0.5",
+         "listen_addr": "10.0.0.20", "listen_port": 70000},
+        {"hostname": "bot.example.test", "ingress": "proxied", "upstream_proxy": "10.0.0.5",
+         "listen_addr": "10.0.0.20", "listen_port": 70000},
+        "listen_port", "between 1 and 65535",
+    ),
+    (
         "proxied-acme",
         {"hostname": "bot.example.test", "ingress": "proxied", "upstream_proxy": "10.0.0.5",
          "listen_addr": "10.0.0.20", "tls_cert_source": "acme"},
