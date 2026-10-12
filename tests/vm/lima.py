@@ -673,8 +673,17 @@ def unshare_host_folder(vm: Vm, release: Release) -> None:
     the next mode to set up: a host folder in host.env would otherwise be kept
     by its setup, and the stack would refuse to start without the folder. The
     loopback block goes too, or the other modes' tasks would lose the model
-    whenever its port moved."""
+    whenever its port moved.
+
+    config.toml leaves the mode with host.env, and first: the restart below
+    starts the enabled stack, and STORAGE=local beside a config still naming
+    /mnt/shared as its workspace mount is how a daemon once wrote a workspace
+    into the rclone mount's empty mount point, which rclone then refused."""
+    from istota import setup_wizard
+
     vm.run(f"systemctl stop istota-stack.service || true; rm -f {MODE_FILE}", timeout=600)
+    apply_config(vm, {"workspace_path": setup_wizard.CONTAINER_LOCAL_WORKSPACE},
+                 drop=("workspace_mount_path",))
     env_file_set(vm, f"{STACK}/host.env", {"STORAGE": "local", "HOST_LOOPBACK_BLOCK": "0"})
     vm.run(f"{STACK}/src/host/provision.sh", timeout=1800)
     set_mounts_if_changed(vm, _mounts(release))
@@ -690,12 +699,16 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
-def apply_config(vm: Vm, delta: dict) -> int:
-    """Merge `delta` over config.toml through `istota-stack apply`; its exit code."""
+def apply_config(vm: Vm, delta: dict, *, drop: tuple[str, ...] = ()) -> int:
+    """Merge `delta` over config.toml, less the top-level keys in `drop`,
+    through `istota-stack apply`; its exit code."""
     current = json.loads(vm.out(
         f"python3 -c 'import json,tomllib;print(json.dumps(tomllib.load(open(\"{STACK}/config/config.toml\",\"rb\"))))'"
     ))
-    plan = {"config": _deep_merge(current, delta)}
+    merged = _deep_merge(current, delta)
+    for key in drop:
+        merged.pop(key, None)
+    plan = {"config": merged}
     vm.write(f"{SCRATCH}/plan.json", json.dumps(plan), mode="0600")
     result = vm.run(f"istota-stack apply {SCRATCH}/plan.json", check=False, timeout=1800)
     if result.returncode not in (0, 2):
