@@ -50,8 +50,10 @@ def place_reach(
     for place in places:
         if place.kind == "nextcloud":
             result[place.id] = Reach("none", "none", "none", note=(
-                "You can browse your connected Nextcloud account here. "
-                "Tasks do not use this personal connection."
+                "This browser uses your personal Nextcloud connection. "
+                "The Nextcloud skill uses the bot’s separate account. "
+                "Files available to a task depend on that account’s access "
+                "and the task’s workspace permissions."
             ))
             continue
         if place.kind == "drive":

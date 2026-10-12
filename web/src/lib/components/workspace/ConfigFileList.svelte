@@ -42,7 +42,7 @@
 {/snippet}
 
 <section aria-label="Configuration">
-  <CategoryGroup label="Configuration">
+  <CategoryGroup label="Configuration" collapsible defaultOpen={false}>
     {#if error}
       <div class="config-error">
         <span class="form-error">{error}</span>
@@ -66,7 +66,7 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-1) var(--space-2);
+    padding: var(--space-1) var(--space-3);
   }
   .config-name {
     display: flex;

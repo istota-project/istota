@@ -7,15 +7,17 @@
 <details class="reach-panel">
   <summary>How Istota reaches your files</summary>
   <div class="reach-body">
-    {#each notes as note}<p>{note}</p>{/each}
-    <dl>
-      <dt>Private room</dt>
-      <dd><ReachBadge access={place.reach.private} /></dd>
-      <dt>Your turn in a shared room</dt>
-      <dd><ReachBadge access={place.reach.shared_member} /></dd>
-      <dt>Guest turn or unasked task</dt>
-      <dd><ReachBadge access={place.reach.restricted} /></dd>
-    </dl>
+    {#if place.kind !== 'nextcloud'}
+      {#each notes as note}<p>{note}</p>{/each}
+      <dl>
+        <dt>Private room</dt>
+        <dd><ReachBadge access={place.reach.private} /></dd>
+        <dt>Your turn in a shared room</dt>
+        <dd><ReachBadge access={place.reach.shared_member} /></dd>
+        <dt>Guest turn or unasked task</dt>
+        <dd><ReachBadge access={place.reach.restricted} /></dd>
+      </dl>
+    {/if}
     {#if place.reach.note}<p>{place.reach.note}</p>{/if}
   </div>
 </details>
