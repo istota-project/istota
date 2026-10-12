@@ -103,3 +103,37 @@ def test_the_cleanup_pass_sweeps_a_local_workspace_and_not_the_mount(tmp_path):
         run_cleanup_checks(config)
 
         assert old.exists() is mounted, mounted
+
+
+def test_only_message_id_directories_are_swept(tmp_path, caplog):
+    old = _message_dir(tmp_path, "room1", 1, ["a.jpg"], age_days=40)
+    other = tmp_path / "Channels" / "room1" / "media" / "charts"
+    other.mkdir()
+    stamp = time.time() - 40 * 86400
+    (other / "q1.png").write_bytes(b"x")
+    os.utime(other / "q1.png", (stamp, stamp))
+    (other.parent / "loose.png").write_bytes(b"x")
+
+    assert sweep_talk_media(tmp_path, 30) == 1
+
+    assert not old.exists()
+    assert (other / "q1.png").exists()
+    assert (other.parent / "loose.png").exists()
+    assert "skipped" not in caplog.text
+
+
+def test_the_cleanup_pass_leaves_a_workspace_without_nextcloud_alone(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    db_path = tmp_path / "db" / "istota.db"
+    db_path.parent.mkdir()
+    db.init_db(db_path)
+    config = Config(
+        db_path=db_path, temp_dir=tmp_path / "temp", workspace_path=workspace,
+        talk=TalkConfig(attachment_retention_days=30),
+    )
+    old = _message_dir(workspace, "room1", 1, ["a.jpg"], age_days=40)
+
+    run_cleanup_checks(config)
+
+    assert old.exists()

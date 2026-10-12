@@ -8413,8 +8413,9 @@ def run_cleanup_checks(config: Config) -> None:
             logger.error(f"Error cleaning up temp files: {e}")
 
     # 7a. Talk attachments fetched into room folders. Only a local workspace
-    # writes them; under the mount the room's `media/` is not ours.
-    if (config.has_workspace and not config.storage_is_nextcloud
+    # with Nextcloud writes them; under the mount the room's `media/` is not ours.
+    if (config.has_workspace and config.nextcloud_enabled
+            and not config.storage_is_nextcloud
             and config.talk.attachment_retention_days > 0):
         try:
             from istota.maintenance.talk_media import sweep_talk_media

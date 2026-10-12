@@ -118,6 +118,10 @@ def sweep_talk_media(
                     with os.scandir(media_fd) as messages:
                         names = [entry.name for entry in messages]
                     for name in names:
+                        # Only the `<message id>` directories the fetch writes;
+                        # anything else under `media/` is someone else's.
+                        if not (name.isascii() and name.isdigit()):
+                            continue
                         try:
                             if _sweep_message_dir(
                                 media_fd, name, cutoff, f"Channels/{token}/media",
