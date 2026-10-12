@@ -1,4 +1,4 @@
-"""The local VM's workspace and the Mac's loopback: rows L1 and L2.
+"""The local VM's workspace and the Mac's loopback: rows L1, L2 and L3.
 
 The host-folder mode is the stack the local VM runs: local ingress, and the
 workspace a Mac folder Lima shares in with virtiofs at
@@ -22,13 +22,23 @@ the scripted model's port. A listener on the Mac's loopback the allow list does
 not name is unreachable from the istota and the browser containers, and
 reachable from the VM itself, whose own traffic is not filtered.
 
+Row L3: only the workspace folder, and in developer mode the checkout
+read-only, crosses from the Mac. The VM mounts exactly the template's two
+(this mode shares the folder in with the mounts Lima resolves from
+`host/lima/istota.yaml`); nothing in the VM, the daemon or a task reads a Mac
+file under the Mac home outside the folder, by its Mac path or through a link
+the Mac made in the folder; and the checkout refuses a write.
+
 Controls (`scripts/test-vm-negative-control.sh`):
 
 - `no-workspace-marker`: the daemon service is started from an image whose
   entrypoint has the marker refusal removed
   (`docker/test/Dockerfile.no-workspace-marker`);
 - `host-loopback-unblocked`: HOST_LOOPBACK_BLOCK=0 in host.env and the egress
-  unit re-run, as on a VM set up without the block.
+  unit re-run, as on a VM set up without the block;
+- `default-mounts-in-template`: the VM gets the mounts Lima resolves from the
+  template with `template:_default/mounts` added to its `base:`, which is what
+  `template:debian-13` would bring in: the Mac home, read-only.
 """
 
 from __future__ import annotations
@@ -274,3 +284,112 @@ class TestTheBlockLeavesDnsAlone:
             f"docker run --rm --network bridge --entrypoint python3 istota:{shlex.quote(release.tag)} "
             f"-c {shlex.quote(RESOLVE_PROBE)}", timeout=300)
         assert "RESOLVED=" in out, out
+
+
+L3_MARKER = "istota-vmtier-l3"
+
+
+@pytest.fixture(scope="module")
+def crossing(stack, release, folder):
+    """The host-folder stack with the Mac-side files row L3 reads: a file in
+    the folder, a file outside it, and links to that file from the folder
+    root and from the task's own subtree, absolute and relative."""
+    outside = lima._workdir() / "l3-outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    secret = outside / "secret.txt"
+    secret.write_text(f"{L3_MARKER}-outside\n")
+    task_dir = folder / "Users" / lima.USER
+    task_dir.mkdir(parents=True, exist_ok=True)
+    made = []
+    for directory in (folder, task_dir):
+        inside = directory / "l3-inside.txt"
+        inside.write_text(f"{L3_MARKER}-inside\n")
+        made.append(inside)
+        for name, target in (("l3-link-abs", str(secret)),
+                             ("l3-link-rel", os.path.relpath(secret, directory))):
+            link = directory / name
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(target)
+            made.append(link)
+    applied = lima.control() == "default-mounts-in-template"
+    if applied:
+        stack.set_mounts(lima.template_mounts(release, folder, extra_base="template:_default/mounts"))
+        lima.wait_healthy(stack)
+    try:
+        yield {"outside": str(secret), "task_dir": f"/mnt/shared/Users/{lima.USER}"}
+    finally:
+        for path in made:
+            path.unlink(missing_ok=True)
+        if applied:
+            stack.set_mounts(lima.template_mounts(release, folder))
+            lima.wait_healthy(stack)
+
+
+def _l3_probe(paths: dict[str, str]) -> str:
+    """`name=<state>` per path: `read:<text>`, `unreadable` (there but not
+    readable, a dangling link included) or `absent`."""
+    lines = ["echo PROBE_BEGIN"]
+    for name, path in paths.items():
+        quoted = shlex.quote(path)
+        lines.append(
+            f'if c="$(cat {quoted} 2>/dev/null)"; then echo "{name}=read:$c"; '
+            f"elif test -e {quoted} || test -L {quoted}; then echo {name}=unreadable; "
+            f"else echo {name}=absent; fi")
+    lines.append("echo PROBE_END")
+    return "\n".join(lines)
+
+
+def _l3_paths(root: str, crossing: dict) -> dict[str, str]:
+    # Not the home directory's own path: Lima leaves the directories it made
+    # for an earlier session's mount points on the guest's disk, empty, so the
+    # witness is a Mac file under the home, by its Mac path and through links.
+    return {
+        "inside": f"{root}/l3-inside.txt",
+        "link_abs": f"{root}/l3-link-abs",
+        "link_rel": f"{root}/l3-link-rel",
+        "outside": crossing["outside"],
+    }
+
+
+def _assert_nothing_crossed(seen: dict[str, str], where: str) -> None:
+    # The in-session control: the same probe reads a file in the folder.
+    assert seen.get("inside") == f"read:{L3_MARKER}-inside", f"{where}: {seen}"
+    crossed = {name: state for name, state in seen.items()
+               if name != "inside" and state.startswith("read:")}
+    assert crossed == {}, f"row L3: {where} reads a Mac file outside the folder: {crossed}"
+    assert set(seen) == {"inside", "link_abs", "link_rel", "outside"}, seen
+
+
+@parity.witness("L3")
+class TestOnlyTheFolderCrossesFromTheMac:
+    def test_the_vm_mounts_the_read_only_checkout_and_the_folder_alone(self, crossing, stack):
+        mounts = {fields[0]: fields[1] for fields in (line.split() for line in stack.out(
+            "findmnt -rn -t virtiofs,9p,fuse.sshfs -o TARGET,OPTIONS || true").splitlines())}
+        # Apple's Rosetta runtime, shared for a forced amd64 image (row 7).
+        mounts.pop("/mnt/lima-rosetta", None)
+        assert sorted(mounts) == sorted([lima.REPO_MOUNT, lima.HOST_FOLDER_MOUNT]), (
+            f"row L3: Mac paths mounted in the VM: {mounts}")
+        assert "ro" in mounts[lima.REPO_MOUNT].split(","), mounts
+        assert "rw" in mounts[lima.HOST_FOLDER_MOUNT].split(","), mounts
+
+    def test_the_vm_reads_nothing_of_the_mac_outside_the_folder(self, crossing, stack):
+        seen = lima.marked_block(stack.out(_l3_probe(_l3_paths(lima.HOST_FOLDER_MOUNT, crossing))))
+        _assert_nothing_crossed(seen, "the VM")
+        # The link is there with the Mac's target text; the guest resolves it
+        # in its own namespace, where that path is not the Mac's.
+        target = stack.out(f"readlink {lima.HOST_FOLDER_MOUNT}/l3-link-abs")
+        assert target == crossing["outside"], target
+
+    def test_the_daemon_reads_nothing_of_the_mac_outside_the_folder(self, crossing, stack):
+        out = lima.stack_exec(stack, _l3_probe(_l3_paths("/mnt/shared", crossing))).stdout
+        _assert_nothing_crossed(lima.marked_block(out), "the daemon")
+
+    def test_a_task_reads_nothing_of_the_mac_outside_the_folder(self, crossing, stack, model):
+        out = lima.run_probe_task(stack, model, _l3_probe(_l3_paths(crossing["task_dir"], crossing)))
+        _assert_nothing_crossed(lima.marked_block(out), "a task")
+
+    def test_the_checkout_refuses_a_write(self, crossing, stack):
+        result = stack.run(f"touch {lima.REPO_MOUNT}/.istota-vmtier-l3-write", check=False)
+        assert result.returncode != 0, "row L3: root wrote into the checkout mount"
+        assert "Read-only file system" in result.stderr, result.stderr

@@ -1102,16 +1102,99 @@ class TestBootstrapFiles:
             assert "--server" in result.stderr
         assert "deploy/install.sh" not in (REPO / "install.sh").read_text()
 
-    def test_the_lima_template_provisions_from_the_checkout(self):
-        doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
-        # The image alone: `template:debian-13` adds a mount of the whole Mac home
-        # (parity row 7; the vm tier found it).
+
+class TestTheLimaTemplate:
+    """`host/lima/istota.yaml`, the local VM's template, in its two sources:
+    a verified release tag, or a read-only checkout from the Mac."""
+
+    @pytest.fixture
+    def doc(self):
+        return yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
+
+    @staticmethod
+    def _script(doc) -> str:
+        (entry,) = doc["provision"]
+        assert entry["mode"] == "system"
+        return entry["script"]
+
+    def test_only_the_checkout_and_the_workspace_cross_from_the_mac(self, doc):
+        """Parity row L3's enforcement. The image alone as the base:
+        `template:debian-13` adds a mount of the whole Mac home (row 7; the vm
+        tier found it), and an added mount is the easiest way to break L3."""
         assert doc["base"] == ["template:_images/debian-13"]
-        assert [m["location"] for m in doc["mounts"]] == ["{{.Param.ISTOTA_REPO}}"]
+        assert doc["mountType"] == "virtiofs"
+        assert doc["mounts"] == [
+            {"location": "{{.Param.ISTOTA_REPO}}", "mountPoint": "/mnt/istota-repo", "writable": False},
+            {"location": "{{.Param.WORKSPACE}}", "mountPoint": "/srv/mount/host-folder", "writable": True},
+        ]
+
+    def test_the_workspace_mount_is_where_the_host_folder_storage_reads_it(self, doc):
+        workspace = doc["mounts"][1]["mountPoint"]
+        for script in (HOST / "provision.sh", HOST / "istota-stack"):
+            text = script.read_text()
+            assert f"host-folder) echo {workspace} ;;" in text, script.name
+
+    def test_the_vm_shape(self, doc):
+        assert doc["vmType"] == "vz"
         assert doc["containerd"] == {"system": False, "user": False}
         assert doc["vmOpts"]["vz"]["rosetta"]["enabled"] is True
-        assert doc["mounts"][0]["writable"] is False
-        assert "/mnt/istota-repo/host/provision.sh" in doc["provision"][0]["script"]
+        # Not params: Lima reads them as numbers before it expands one, so a
+        # caller sets them with `--cpus`, `--memory` and `--set`.
+        assert doc["cpus"] == 4 and doc["memory"] == "6GiB"
+        # `--set '.portForwards[0]...'` moves this one forward, both sides.
+        assert doc["portForwards"] == [
+            {"guestIP": "127.0.0.1", "guestPort": 8080, "hostIP": "127.0.0.1", "hostPort": 8080},
+        ]
+
+    def test_every_param_is_read_by_the_provision_script(self, doc):
+        """Lima refuses a declared param nothing reads, and a mount a caller
+        drops at create stops reading its location param."""
+        script = self._script(doc)
+        assert set(doc["param"]) == {"ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO_URL", "ISTOTA_REPO", "WORKSPACE"}
+        for name in doc["param"]:
+            assert f"PARAM_{name}" in script, name
+        assert doc["param"]["ISTOTA_REPO_URL"] == "https://github.com/istota-project/istota.git"
+        assert all(doc["param"][name] == "" for name in ("ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO", "WORKSPACE"))
+
+    def test_a_checkout_provisions_from_the_read_only_mount(self, doc):
+        script = self._script(doc)
+        checkout = script[script.index('if [ -n "${PARAM_ISTOTA_REPO:-}" ]; then'):script.index("STACK=/srv/app/istota")]
+        assert "exec /mnt/istota-repo/host/provision.sh" in checkout
+        # Both sources at once is refused rather than one picked.
+        assert checkout.index('if [ -n "${PARAM_ISTOTA_TAG:-}" ]; then') < checkout.index("exec ")
+
+    def test_a_release_verifies_the_tag_with_istota_stacks_own_code(self, doc):
+        """The third copy of the tag verification, held like cloud-init's: the
+        template runs before any verified code exists, so it cannot source it."""
+        stack = (HOST / "istota-stack").read_text()
+        start = stack.index("# --- release tags ---")
+        end = stack.index("# --- builds and images ---")
+        section = stack[start:end].rstrip() + "\n"
+        script = self._script(doc)
+
+        assert section in script
+        verify = script.index('object="$(verify_release_tag "$TAG")"')
+        checkout = script.index('verified_git checkout --quiet --detach "${object}^{commit}"')
+        provision = script.index('"${SRC}/host/provision.sh"')
+        assert script.index("git clone --quiet --no-checkout") < verify < checkout < provision
+        # Nothing from the clone runs before the verification.
+        assert script.count("${SRC}/") == 2
+        assert script.index("printf 'releases namespaces=\"git\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"") < verify
+
+    def test_a_release_is_bootstrapped_once(self, doc):
+        """After the first provision `istota-stack update` owns the checkout;
+        a later boot that checked ISTOTA_TAG out again would downgrade it."""
+        script = self._script(doc)
+        release = script[script.index("STACK=/srv/app/istota"):]
+        guard = release.index('if [ -e "${STACK}/.lima-bootstrapped" ]; then\n    exit 0')
+        assert guard < release.index("apt-get update")
+        assert release.rstrip().endswith('touch "${STACK}/.lima-bootstrapped"')
+
+    def test_the_script_parses(self, doc, tmp_path):
+        path = tmp_path / "provision.sh"
+        path.write_text(self._script(doc))
+        result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
 
 
 class TestTheProvisionDigest:

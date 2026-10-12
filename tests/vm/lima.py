@@ -55,6 +55,10 @@ MOUNT = "/srv/mount/nextcloud/content"
 SCRATCH = "/srv/istota-vmtier"
 MODE_FILE = f"{SCRATCH}/mode.json"
 REPO_MOUNT = "/mnt/istota-repo"
+#: The template mounts the checkout and the Mac workspace folder; a Lima mount
+#: cannot be optional, so the tier's VM drops the workspace at create and
+#: shares a folder in only for the host-folder mode (`share_host_folder`).
+DROP_WORKSPACE_MOUNT = 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder"))'
 
 #: The first admin every mode's setup names, and the devbox users.
 USER = "admin"
@@ -300,7 +304,7 @@ def ensure_vm(release: Release) -> Vm:
     entry = vm.info()
     if entry is None:
         argv = ["limactl", "create", "--tty=false", f"--name={vm.name}",
-                f"--param=ISTOTA_REPO={release.repo}"]
+                f"--param=ISTOTA_REPO={release.repo}", f"--set={DROP_WORKSPACE_MOUNT}"]
         memory = os.environ.get("ISTOTA_VM_MEMORY", "").strip()
         if memory:
             argv.append(f"--set=.memory = {json.dumps(memory)}")
@@ -617,6 +621,35 @@ def _mounts(release: Release, *extra: dict) -> list[dict]:
     return [{"location": str(release.repo), "mountPoint": REPO_MOUNT, "writable": False}, *extra]
 
 
+def template_mounts(release: Release, folder: Path, *, extra_base: str = "") -> list[dict]:
+    """The mounts Lima resolves from `host/lima/istota.yaml` for the checkout
+    and `folder`, read off a scratch instance that is created and never
+    started. `extra_base` adds a base template, as row L3's control does."""
+    name = f"{vm_name()}-template"
+    template = TEMPLATE
+    if extra_base:
+        # A copy with the base added: `--set` applies after Lima has embedded
+        # the bases, and refuses to touch `base:`.
+        text = TEMPLATE.read_text()
+        base = "base:\n  - template:_images/debian-13\n"
+        if text.count(base) != 1:
+            raise VmError(f"the template's base is not {base!r}")
+        template = _workdir() / "istota-control.yaml"
+        template.write_text(text.replace(base, f"{base}  - {extra_base}\n"))
+    argv = ["limactl", "create", "--tty=false", f"--name={name}",
+            f"--param=ISTOTA_REPO={release.repo}", f"--param=WORKSPACE={folder}", str(template)]
+    _run_host(["limactl", "delete", "--force", name], check=False)
+    try:
+        _run_host(argv, timeout=300)
+        mounts = ((Vm(name).info() or {}).get("config") or {}).get("mounts") or []
+    finally:
+        _run_host(["limactl", "delete", "--force", name], check=False)
+    if not mounts:
+        raise VmError(f"limactl resolved no mounts for {name}")
+    return [{"location": m["location"], "mountPoint": m.get("mountPoint") or m["location"],
+             "writable": bool(m.get("writable"))} for m in mounts]
+
+
 def _current_mounts(vm: Vm) -> list[tuple]:
     mounts = ((vm.info() or {}).get("config") or {}).get("mounts") or []
     return [(m.get("location"), m.get("mountPoint"), bool(m.get("writable"))) for m in mounts]
@@ -630,9 +663,9 @@ def set_mounts_if_changed(vm: Vm, mounts: list[dict]) -> None:
 
 
 def share_host_folder(vm: Vm, release: Release, folder: Path) -> None:
-    """The VM with `folder` shared in writable at HOST_FOLDER_MOUNT, beside the checkout."""
-    set_mounts_if_changed(vm, _mounts(release, {
-        "location": str(folder), "mountPoint": HOST_FOLDER_MOUNT, "writable": True}))
+    """The VM with `folder` shared in writable at HOST_FOLDER_MOUNT, beside the
+    checkout: the template's two mounts, as Lima resolves them."""
+    set_mounts_if_changed(vm, template_mounts(release, folder))
 
 
 def unshare_host_folder(vm: Vm, release: Release) -> None:

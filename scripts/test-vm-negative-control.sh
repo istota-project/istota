@@ -25,7 +25,8 @@
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
-#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2)
+#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
+#              default-mounts-in-template (row L3)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18)
 #
 # Run scripts/test-vm.sh first: the controls reuse its VM and images. No arrays:
@@ -142,6 +143,11 @@ control host-loopback-unblocked \
     "row L2: HOST_LOOPBACK_BLOCK=0, the egress unit re-run" \
     "$H::test_the_daemon_reaches_the_allowed_port_only" \
     "$H::test_the_browser_reaches_the_allowed_port_only"
+L="$VM/test_host_folder.py::TestOnlyTheFolderCrossesFromTheMac"
+control default-mounts-in-template \
+    "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \
+    "$L::test_the_vm_mounts_the_read_only_checkout_and_the_folder_alone" \
+    "$L::test_the_vm_reads_nothing_of_the_mac_outside_the_folder"
 
 P="$VM/test_proxied.py"
 control no-allow-list \

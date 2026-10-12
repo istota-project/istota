@@ -108,6 +108,14 @@ class TestTheLimaTemplate:
         assert "/usr/local/sbin/istota-stack" in probe
         assert "command -v istota-stack" not in probe
 
+    def test_row_l3s_control_finds_the_base_it_extends(self):
+        """`default-mounts-in-template` adds a base by editing this line of a
+        copy; a template that no longer has it would fail the control minutes
+        into a VM session."""
+        template = (REPO / "host" / "lima" / "istota.yaml").read_text()
+        assert template.count("base:\n  - template:_images/debian-13\n") == 1
+        assert "base:\n  - template:_images/debian-13\n" in (VM_DIR / "lima.py").read_text().replace('\\n', "\n")
+
 
 class TestTheEntrypointControls:
     """The vm tier's entrypoint controls `sed` one line of the deployed
