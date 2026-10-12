@@ -248,8 +248,9 @@
 </div>
 <div class="selection-toolbar">
   <span class="muted" role="status"
-    >{selectedEntries.length ? `${selectedEntries.length} selected · ` : ''}{entries.length}
-    {entries.length === 1 ? 'item' : 'items'}</span
+    >{selectedEntries.length
+      ? `${selectedEntries.length} selected`
+      : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}`}</span
   >
   {#if selectedEntries.length}<Button
       variant="ghost"
@@ -420,6 +421,21 @@
     padding: var(--space-2) var(--space-3);
     flex-wrap: wrap;
     font-size: var(--text-sm);
+  }
+  .selection-toolbar {
+    min-height: calc(var(--control-height-md) + 2 * var(--space-2));
+    flex-wrap: nowrap;
+    gap: var(--space-2);
+  }
+  .selection-toolbar [role='status'] {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .selection-toolbar :global(button) {
+    flex-shrink: 0;
   }
   .file-filter {
     flex: 1;
