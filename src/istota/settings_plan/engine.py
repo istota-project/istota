@@ -238,6 +238,7 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     context.units.clear()
     from istota.settings_plan.profiles import plan_profile
     from istota.settings_plan.resources import plan_resources
+    from istota.settings_plan.files import plan_cron
     from istota.settings_plan.briefings import plan_schedules
     from istota.settings_plan.shared_briefings import plan_shared_blocks, validate_references
 
@@ -246,7 +247,8 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     context.profile_claims.clear()
     context.briefing_blocks.clear()
     planners = {"config": _plan_config, "profile": plan_profile, "resources": plan_resources,
-                "briefings": plan_schedules, "shared_briefing_blocks": plan_shared_blocks, **context.planners}
+                "briefings": plan_schedules, "scheduled_jobs": plan_cron,
+                "shared_briefing_blocks": plan_shared_blocks, **context.planners}
     sections = []
     if plan.config is not None:
         sections.append(("config", None))
