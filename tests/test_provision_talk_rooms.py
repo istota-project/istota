@@ -490,6 +490,7 @@ def cfg_file(tmp_path, db_path):
     cfg.write_text(
         f'db_path = "{db_path}"\n'
         f'temp_dir = "{tmp_path / "tmp"}"\n'
+        f'workspace_path = "{tmp_path / "workspace"}"\n'
         "\n[nextcloud]\n"
         'url = "https://nc.example"\n'
         'username = "bot"\n'
