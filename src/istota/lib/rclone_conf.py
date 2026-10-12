@@ -4,7 +4,7 @@ Two writers produce the VM's ``rclone.conf``: the container wizard
 (``setup_wizard.write_container_setup``, which stages it for ``istota-stack``)
 and the management role's variable converter (``maintenance.role_vars``). Both
 render through ``render_webdav_remote``, so the two cannot disagree on the
-path the mount uses. The wizard goes through ``webdav_remote_for``, which keeps
+path the mount uses, ``dav_prefix`` included. The wizard goes through ``webdav_remote_for``, which keeps
 the staged copy of the installed file when it already says the same thing.
 
 ``obscure`` is rclone's own scheme (``fs/config/obscure``): AES-256-CTR under a
@@ -64,27 +64,42 @@ def nextcloud_files_url(url: str, username: str) -> str:
     return f"{url.rstrip('/')}/remote.php/dav/files/{username}/"
 
 
-def render_webdav_remote(remote: str, url: str, username: str, obscured_password: str) -> str:
-    """One ``[remote]`` section for a Nextcloud account at ``url``.
+def render_webdav_remote(
+    remote: str, url: str, username: str, obscured_password: str, *, dav_prefix: str = "",
+) -> str:
+    """The ``[remote]`` the mount serves, for a Nextcloud account at ``url``.
 
     ``url`` is the Nextcloud base address, as the config's ``[nextcloud] url``
-    holds it. A value with a line break would add lines to the file, so it is
-    refused rather than written.
+    holds it. ``dav_prefix`` is the config's ``[nextcloud] dav_prefix``: the
+    folder in the bot's files that is the workspace, which every DAV call adds,
+    so the mount has to start there too. With one, ``remote`` is an alias for
+    that folder on a ``<remote>-root`` WebDAV remote at the account root, the
+    URL rclone's Nextcloud chunked uploads are derived from. Without one the
+    file is the single section it always was, byte for byte (#720). A value
+    with a line break would add lines to the file, so it is refused rather
+    than written.
     """
-    for value in (remote, url, username, obscured_password):
+    for value in (remote, url, username, obscured_password, dav_prefix):
         if "\n" in value or "\r" in value:
             raise ValueError("an rclone.conf value contains a line break")
-    return (
-        f"[{remote}]\n"
+    folder = dav_prefix.strip("/")
+    webdav = f"{remote}-root" if folder else remote
+    text = (
+        f"[{webdav}]\n"
         "type = webdav\n"
         f"url = {nextcloud_files_url(url, username)}\n"
         "vendor = nextcloud\n"
         f"user = {username}\n"
         f"pass = {obscured_password}\n"
     )
+    if folder:
+        text += f"\n[{remote}]\ntype = alias\nremote = {webdav}:{folder}\n"
+    return text
 
 
-def webdav_remote_for(existing: str | None, remote: str, url: str, username: str, password: str) -> str:
+def webdav_remote_for(
+    existing: str | None, remote: str, url: str, username: str, password: str, *, dav_prefix: str = "",
+) -> str:
     """The remote for these answers, keeping ``existing`` when it already says it.
 
     ``obscure`` is salted, so rendering the same answers twice gives two files,
@@ -100,7 +115,9 @@ def webdav_remote_for(existing: str | None, remote: str, url: str, username: str
             same_password = reveal(kept) == password
         except (ValueError, UnicodeDecodeError):
             same_password = False
-        if same_password and render_webdav_remote(remote, url, username, kept) == existing:
+        if same_password and render_webdav_remote(
+            remote, url, username, kept, dav_prefix=dav_prefix,
+        ) == existing:
             return existing
         break
-    return render_webdav_remote(remote, url, username, obscure(password))
+    return render_webdav_remote(remote, url, username, obscure(password), dav_prefix=dav_prefix)
