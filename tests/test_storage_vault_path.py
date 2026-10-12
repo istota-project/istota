@@ -723,8 +723,11 @@ class TestTheFolderListing:
         def _refuse(*args, **kwargs):  # pragma: no cover - the point is no call
             raise AssertionError("the filesystem was touched")
 
-        monkeypatch.setattr(os, "scandir", _refuse)
-        assert list_vault_files(config, "alice") == []
+        # Scoped to the call: the autouse fixtures hold `monkeypatch` from
+        # before `tmp_path`, and the tmp_path teardown's rmtree needs scandir.
+        with monkeypatch.context() as m:
+            m.setattr(os, "scandir", _refuse)
+            assert list_vault_files(config, "alice") == []
 
     @pytest.mark.parametrize("user_id", ["", ".", "..", "a/b"])
     def test_a_user_id_that_names_no_child_lists_nothing(self, tmp_path, user_id):

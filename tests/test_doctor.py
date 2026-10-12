@@ -1739,8 +1739,11 @@ class TestWorkspaceXattr:
     def test_skips_and_touches_nothing_without_probe(self, make_config, tmp_path, monkeypatch):
         config = self._mounted(make_config, tmp_path, monkeypatch)
         calls = []
-        monkeypatch.setattr(doctor.os, "scandir", lambda *a: calls.append(a))
-        r = run_checks(config, only=("runtime.workspace_xattr",), probe=False)[0]
+        # Scoped to the call: the autouse fixtures hold `monkeypatch` from
+        # before `tmp_path`, and the tmp_path teardown's rmtree needs scandir.
+        with monkeypatch.context() as m:
+            m.setattr(doctor.os, "scandir", lambda *a: calls.append(a))
+            r = run_checks(config, only=("runtime.workspace_xattr",), probe=False)[0]
         assert r.status == SKIP
         assert calls == []
 
