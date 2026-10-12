@@ -83,3 +83,20 @@ it('asks for the password, says why, and claims no code was sent', async () => {
   await waitFor(() => expect(done).toHaveBeenCalled());
   expect(submit).toHaveBeenLastCalledWith({ request_id: 'request-2', password: 'the passphrase' });
 });
+
+it('offers a retry when starting the confirmation fails', async () => {
+  vi.mocked(startStepUp)
+    .mockRejectedValueOnce(new Error('Istota could not be reached.'))
+    .mockResolvedValue({ method: 'password', request_id: 'request-3', expires_at: 'later' });
+  render(StepUpDialog, {
+    action: 'export',
+    onConfirm: vi.fn(),
+    onCancel: vi.fn(),
+  });
+  await screen.findByText('Istota could not be reached.');
+  await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  expect(await screen.findByLabelText('Account password')).toBeInTheDocument();
+  expect(startStepUp).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  expect(screen.queryByText('Istota could not be reached.')).toBeNull();
+});

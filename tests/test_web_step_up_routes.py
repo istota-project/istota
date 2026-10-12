@@ -164,3 +164,42 @@ async def test_no_password_and_no_mail_is_unavailable_with_a_way_out(client, con
     assert refused.json()["reason"] == "unavailable"
     assert "mail" in refused.json()["detail"]
     assert mail == []
+
+
+async def test_correct_passwords_leave_the_sign_in_budget_alone(client, configured, recovery):
+    configured._config.web.auth_throttle_max_email = 3
+    assert (await sign_in(client)).status_code == 302
+    for _ in range(12):
+        body = await _start(client)
+        response = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "password": PASSWORD}},
+                                     headers=ORIGIN)
+        assert response.status_code == 200, response.text
+    assert (await sign_in(client)).status_code == 302
+
+
+async def test_a_live_password_request_is_handed_back(client, configured):
+    assert (await sign_in(client)).status_code == 302
+    first, second = await _start(client), await _start(client)
+    assert first == second
+    with db.get_db(configured._config.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM web_auth_step_ups").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("email_sign_in", [True, False])
+async def test_the_unavailable_advice_matches_the_sign_in_methods(client, configured, email_sign_in):
+    if email_sign_in:
+        assert (await sign_in(client)).status_code == 302
+    else:
+        configured._config.web.auth = ["nextcloud"]
+        assert (await client.get("/istota/callback", follow_redirects=False)).status_code == 302
+    with db.get_db(configured._config.db_path) as conn:
+        conn.execute("UPDATE web_auth_identities SET password_hash='' WHERE user_id='alice'")
+    detail = (await client.post(STEP_UP, json={"action": "recovery_reveal"}, headers=ORIGIN)).json()["detail"]
+    refused = (await client.post(RECOVERY, json={"step_up": {"request_id": "x", "password": "x"}},
+                                 headers=ORIGIN)).json()["detail"]
+    assert detail == refused
+    if email_sign_in:
+        assert "istota auth reset alice --print-link" in detail
+    else:
+        assert "auth reset" not in detail
+        assert "email sign-in" in detail and "mail" in detail

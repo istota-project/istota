@@ -115,6 +115,15 @@
     <Button variant="ghost" onclick={onCancel}>Cancel</Button>
     {#if method === 'email'}
       <Button variant="secondary" disabled={busy} onclick={requestCode}>Send new code</Button>
+    {:else if !requestId && !busy}
+      <!-- No live request (the start failed, or no method yet): the only way on. -->
+      <Button
+        variant="secondary"
+        onclick={() => {
+          error = '';
+          void requestCode();
+        }}>Try again</Button
+      >
     {/if}
     <Button
       variant="primary"

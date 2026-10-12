@@ -65,7 +65,7 @@ def with_password(db_path, identity, monkeypatch):
 
 
 def test_password_request_spends_no_mail_budget_and_needs_a_password(db_path, with_password):
-    request_id = auth.start_password_step_up(db_path, with_password, "alice", "export", "session-a")
+    request_id, _ = auth.start_password_step_up(db_path, with_password, "alice", "export", "session-a")
     assert request_id
     assert auth.attempts_in_window(db_path, "mail_link", "alice@example.com", 3600) == 0
     with db.get_db(db_path) as conn:
@@ -77,19 +77,19 @@ def test_password_request_spends_no_mail_budget_and_needs_a_password(db_path, wi
 
 def test_password_redeems_once_bound_to_session_action_and_epoch(db_path, with_password):
     policy = with_password
-    request_id = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    request_id, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
     for user, action, session in (("bob", "export", "session-a"), ("alice", "recovery_reveal", "session-a"),
                                   ("alice", "export", "session-b")):
         assert auth.redeem_password_step_up(db_path, policy, request_id, user, action, session, PASSWORD, ip=None) == "dead"
     assert auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a", PASSWORD, ip=None) == "ok"
     assert auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a", PASSWORD, ip=None) == "dead"
-    request_id = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    request_id, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
     auth.bump_epoch(db_path, "alice")
     assert auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a", PASSWORD, ip=None) == "dead"
 
 
 def test_an_expired_password_request_is_refused(db_path, with_password):
-    request_id = auth.start_password_step_up(db_path, with_password, "alice", "export", "session-a")
+    request_id, _ = auth.start_password_step_up(db_path, with_password, "alice", "export", "session-a")
     with db.get_db(db_path) as conn:
         conn.execute("UPDATE web_auth_step_ups SET expires_at=datetime('now', '-1 second')")
     assert auth.redeem_password_step_up(db_path, with_password, request_id, "alice", "export", "session-a",
@@ -98,7 +98,7 @@ def test_an_expired_password_request_is_refused(db_path, with_password):
 
 def test_a_code_and_a_password_only_redeem_their_own_method(db_path, with_password):
     policy = with_password
-    password_request = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    password_request, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
     with db.get_db(db_path) as conn:
         conn.execute("UPDATE web_auth_step_ups SET code_hash=? WHERE request_id=?",
                      (auth._code_digest(password_request, "123456"), password_request))
@@ -111,7 +111,7 @@ def test_a_code_and_a_password_only_redeem_their_own_method(db_path, with_passwo
 
 def test_wrong_passwords_spend_the_request_and_the_login_budget(db_path, with_password):
     policy = replace(with_password, throttle_max_email=3)
-    request_id = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    request_id, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
     assert auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a",
                                         "not it", ip="192.0.2.1") == "bad"
     assert auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a",
@@ -129,9 +129,42 @@ def test_wrong_passwords_spend_the_request_and_the_login_budget(db_path, with_pa
 
 def test_five_wrong_passwords_kill_the_request(db_path, with_password):
     policy = with_password
-    request_id = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    request_id, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
     results = [auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a",
                                             f"wrong {n}", ip=None) for n in range(5)]
     assert results == ["bad", "bad", "bad", "bad", "dead"]
     assert auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a",
                                         PASSWORD, ip=None) == "dead"
+
+
+def test_correct_passwords_cost_no_sign_in_budget(db_path, with_password):
+    policy = replace(with_password, throttle_max_email=3, throttle_max_ip=3)
+    for _ in range(12):
+        request_id, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+        assert auth.redeem_password_step_up(db_path, policy, request_id, "alice", "export", "session-a",
+                                            PASSWORD, ip="192.0.2.1") == "ok"
+    assert auth.authenticate(db_path, policy, "alice@example.com", PASSWORD, ip="192.0.2.1")[0] == "ok"
+
+
+def test_a_live_password_request_is_reused_until_used_expired_or_stale(db_path, with_password):
+    policy = with_password
+    first = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    assert auth.start_password_step_up(db_path, policy, "alice", "export", "session-a") == first
+    other_action, _ = auth.start_password_step_up(db_path, policy, "alice", "history_purge", "session-a")
+    assert other_action != first[0]
+    with db.get_db(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM web_auth_step_ups").fetchone()[0] == 2
+    assert auth.redeem_password_step_up(db_path, policy, first[0], "alice", "export", "session-a",
+                                        PASSWORD, ip=None) == "ok"
+    second, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    assert second != first[0]
+    with db.get_db(db_path) as conn:
+        conn.execute("UPDATE web_auth_step_ups SET expires_at=datetime('now', '-1 second') WHERE request_id=?",
+                     (second,))
+    third, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    assert third != second
+    auth.bump_epoch(db_path, "alice")
+    fourth, _ = auth.start_password_step_up(db_path, policy, "alice", "export", "session-a")
+    assert fourth != third
+    assert auth.redeem_password_step_up(db_path, policy, fourth, "alice", "export", "session-a",
+                                        PASSWORD, ip=None) == "ok"

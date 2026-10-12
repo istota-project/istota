@@ -971,9 +971,12 @@ def _client_ip(request: Request) -> str | None:
         return None
 
 
-def _admit_password_request(email: str, ip: str | None, policy: web_auth.Policy) -> bool:
-    # Called without an await on the event loop: check and reservation are one
-    # operation. Refusals never extend either window.
+def _admit_password_request(email: str, ip: str | None, policy: web_auth.Policy) -> float | None:
+    """The reservation's stamp (a positive monotonic time), or None when refused.
+
+    Called without an await on the event loop: check and reservation are one
+    operation. Refusals never extend either window.
+    """
     now = time.monotonic()
     keys = [(str(_config.db_path), "email", email, policy.throttle_max_email)]
     if ip is not None:
@@ -984,7 +987,7 @@ def _admit_password_request(email: str, ip: str | None, policy: web_auth.Policy)
             while times and times[0] <= now - policy.throttle_window_seconds:
                 times.popleft()
         if maximum <= 0 or (times is not None and len(times) >= maximum):
-            return False
+            return None
     for root, kind, value, _ in keys:
         key = (root, kind, value)
         if key not in _login_ingress:
@@ -993,7 +996,15 @@ def _admit_password_request(email: str, ip: str | None, policy: web_auth.Policy)
             _login_ingress[key] = deque()
         _login_ingress[key].append(now)
         _login_ingress.move_to_end(key)
-    return True
+    return now
+
+
+def _release_password_request(email: str, ip: str | None, admitted_at: float) -> None:
+    """Give back the reservation `_admit_password_request` stamped `admitted_at`."""
+    for kind, value in (("email", email), ("ip", ip)):
+        times = _login_ingress.get((str(_config.db_path), kind, value)) if value is not None else None
+        if times is not None and admitted_at in times:
+            times.remove(admitted_at)
 
 
 def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str:
@@ -14057,11 +14068,18 @@ def _send_step_up(config, user_id, action, session_key, request_id, name, ip):
         logger.warning("Requested confirmation code could not be sent")
 
 
-_NO_STEP_UP_METHOD = (
-    "Mail isn't set up on this install, so this is confirmed with your account password, "
-    "and your account has none. Ask the operator for a password link "
-    "(istota auth reset --print-link) or to set up mail."
-)
+def _no_step_up_method(user_id: str) -> str:
+    """What a user with no password on an install with no mail can do about it.
+
+    A password link opens only where email sign-in is on (`/auth/reset` 404s
+    otherwise), so the advice follows `[web] auth`.
+    """
+    lead = ("Mail isn't set up on this install, so this is confirmed with your account password, "
+            "and your account has none.")
+    if _config.web.has_method("email"):
+        return f"{lead} Ask the operator for a password link (istota auth reset {user_id} --print-link) or to set up mail."
+    return (f"{lead} A password needs email sign-in enabled on this install; ask the operator to enable it, "
+            "or to set up mail for confirmation codes.")
 
 
 def _step_up_method(identity) -> str | None:
@@ -14099,15 +14117,16 @@ async def settings_step_up(request: Request, user: dict = Depends(_require_api_a
     method = _step_up_method(identity)
     expires_at = web_auth._timestamp(_config.web.auth_step_up_ttl_minutes * 60)
     if method == "password":
-        request_id = await asyncio.to_thread(
+        issued = await asyncio.to_thread(
             web_auth.start_password_step_up, _config.db_path, web_auth.policy_from_config(_config),
             user["username"], action, _step_up_session(request))
-        if request_id is None:
-            raise HTTPException(status_code=403, detail=_NO_STEP_UP_METHOD)
+        if issued is None:
+            raise HTTPException(status_code=403, detail=_no_step_up_method(user["username"]))
+        request_id, expires_at = issued
         return JSONResponse({"method": "password", "request_id": request_id, "expires_at": expires_at},
                             headers={"Cache-Control": "no-store"})
     if method is None:
-        raise HTTPException(status_code=403, detail=_NO_STEP_UP_METHOD)
+        raise HTTPException(status_code=403, detail=_no_step_up_method(user["username"]))
     request_id = secrets.token_urlsafe(18)
     email_hint = identity.email[0] + "•••@" + identity.email.rsplit("@", 1)[-1]
     response = JSONResponse({"method": "email", "request_id": request_id, "email_hint": email_hint,
@@ -14127,10 +14146,14 @@ async def _redeem_password_step_up(request: Request, identity, action: str, proo
     ip = _client_ip(request)
     started = time.monotonic()
     reason = "throttled"
-    if _admit_password_request(identity.email, ip, policy):
+    admitted = _admit_password_request(identity.email, ip, policy)
+    if admitted is not None:
         reason = await _run_password_work(
             web_auth.redeem_password_step_up, _config.db_path, policy, proof.get("request_id"),
             identity.user_id, action, _step_up_session(request), password, ip=ip)
+        if reason == "ok":
+            # A right password is not a sign-in attempt: hand the slot back.
+            _release_password_request(identity.email, ip, admitted)
     if reason != "ok":
         await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
     return reason
@@ -14163,7 +14186,7 @@ async def _require_step_up(request: Request, body: dict, action: str) -> JSONRes
                                              proof.get("request_id"), user_id, action,
                                              _step_up_session(request), proof.get("code"))
         else:
-            detail = _NO_STEP_UP_METHOD
+            detail = _no_step_up_method(user_id)
     if reason == "ok":
         return None
     detail = _STEP_UP_REFUSALS.get((method, reason), detail)
