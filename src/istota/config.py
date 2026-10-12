@@ -6329,7 +6329,7 @@ def _merge_default_briefings(config: "Config") -> None:
                 existing.add(default.name)
 
 
-def _apply_user_briefings(config: "Config") -> None:
+def _apply_user_briefings(config: "Config", *, rows=None) -> None:
     """Merge ``briefing_configs`` rows into ``config.users[*].briefings``.
 
     DB rows replace TOML rows of the same ``name``; distinct names coexist.
@@ -6354,7 +6354,8 @@ def _apply_user_briefings(config: "Config") -> None:
         return
 
     try:
-        rows = _ub.list_briefings(Path(db_path))
+        if rows is None:
+            rows = _ub.list_briefings(Path(db_path))
     except Exception as e:  # pragma: no cover - defensive
         logger.debug("user_briefings overlay skipped: %s", e)
         return

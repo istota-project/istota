@@ -471,3 +471,43 @@ def test_explicit_talk_destination_updates_without_redundant_token(install, outp
         db.add_room_member(conn, "private-alice", "bob")
     with pytest.raises(engine.ExecutionError, match="validation_error"):
         preview(install, declaration)
+
+
+@pytest.mark.parametrize("source", ["config", "defaults", "legacy", "disabled_legacy"])
+def test_empty_content_refuses_pending_seed_before_profile_write(install, source):
+    config, database = install
+    definition = {"name": "morning", "cron": "0 7 * * *", "output": "email",
+                  "blocks": [{"title": "Seeded", "sources": [{"kind": "calendar"}]}]}
+    document = {"db_path": str(database)}
+    if source == "config":
+        document["users"] = {"alice": {"briefings": [definition]}}
+    elif source == "defaults":
+        document["default_briefings"] = [definition]
+    else:
+        schedule(install, components={"calendar": True}, enabled=source != "disabled_legacy")
+    config.write_text(toml_write.dumps(document))
+    before = database.read_bytes()
+    with pytest.raises(engine.ExecutionError) as error:
+        preview(install, [{"name": "morning", "cron": "0 7 * * *", "output": "email", "blocks": [], "enabled": True}],
+                profile={"display_name": "Changed"}, prune=True)
+    assert error.value.code == "briefing_seed_conflict"
+    assert database.read_bytes() == before
+    assert not module_path(install).exists()
+
+
+def test_empty_content_after_seed_migration_stays_empty(install):
+    from istota.briefings import _migrate
+    from istota.briefings.models import BriefingsContext
+    from istota.config import load_config
+
+    schedule(install, components={"calendar": True})
+    live = load_config(install[0])
+    ctx = BriefingsContext("alice", module_path(install).parent, module_path(install))
+    _migrate.ensure_initialised(ctx, app_config=live)
+    context, operations = preview(install, [{"name": "morning", "blocks": []}], prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    _migrate.ensure_initialised(ctx, app_config=load_config(install[0]))
+    with bdb.connect(module_path(install)) as conn:
+        assert bdb.list_blocks(conn, "morning") == []
+    context, operations = preview(install, [{"name": "morning", "blocks": []}], prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 0

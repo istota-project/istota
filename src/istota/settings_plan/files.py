@@ -194,13 +194,14 @@ def plan_cron(plan, user, context, options):
         rendered = content + ("\n" if content and not content.endswith("\n") else "") + "```toml\n" + block + "```\n"
     def validate():
         try:
-            current, _, _ = _cron_document(rendered, config, user)
+            current_config = replace(config, admin_users=load_admin_users())
+            current, _, _ = _cron_document(rendered, current_config, user)
             with closing(connect_read_only(config.db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 conn.execute("BEGIN")
                 for index, job in enumerate(current.jobs):
-                    _validate_cron(conn, config, user, job, [*field_path, index])
-        except ExecutionError:
+                    _validate_cron(conn, current_config, user, job, [*field_path, index])
+        except (ExecutionError, OSError):
             raise ExecutionError("state_changed", field_path) from None
 
     apply_file(context, user, "scheduled_jobs", "CRON.md", rendered, expected, operations, validate=validate)

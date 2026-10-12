@@ -2,14 +2,15 @@
 
 from contextlib import closing, contextmanager
 from copy import deepcopy
+from dataclasses import replace
 import sqlite3
 
 from croniter import croniter
 
 from istota import db, user_briefings
-from istota.briefings import db as bdb
+from istota.briefings import _migrate, db as bdb
 from istota.briefings.models import BriefingBlock, BlockSource, parse_json_dict
-from istota.config import BriefingConfig
+from istota.config import BriefingConfig, _apply_user_briefings
 from istota.config_editor.secrets import redact_document
 from istota.lib.sqlite_util import connect_read_only
 from istota.settings_plan.engine import ExecutionError, Operation, Unit, state_digest
@@ -207,6 +208,22 @@ def _merge_prefix(previous, declarations, defaults, path, context, prune, *, blo
     return merged
 
 
+def _check_content_seeds(config, user, names, declarations):
+    if not names:
+        return
+    prospective = deepcopy(config)
+    with closing(connect_read_only(config.db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        rows = user_briefings.list_briefings(None, user, conn=conn)
+    enabled = {item["name"]: item["enabled"] for item in declarations if "enabled" in item}
+    rows = [replace(row, enabled=enabled.get(row.name, row.enabled)) for row in rows]
+    _apply_user_briefings(prospective, rows=rows)
+    for definition in prospective.users[user].briefings:
+        if definition.name in names and _migrate.block_specs(definition):
+            raise ExecutionError("briefing_seed_conflict", ["users", user, "briefings", definition.name, "blocks"])
+
+
 def plan_blocks(plan, user, context, options):
     declarations = plan.users[user].sections["briefings"]
     selected = {item["name"] for item in declarations if "blocks" in item}
@@ -216,6 +233,7 @@ def plan_blocks(plan, user, context, options):
     database = context.config.module_db_path(user, "briefings")
     path = ["users", user, "briefing_content"]
     before, existing = {}, {}
+    migrated = set()
     # Prune includes orphan definitions left by a partially committed schedule prune.
     scope = None if options.prune else selected
     try:
@@ -229,6 +247,8 @@ def plan_blocks(plan, user, context, options):
                 conn.execute("BEGIN")
                 before = _content_state(conn, scope)
                 existing = {name: snapshot_blocks(conn, name, user) for name in before}
+                migrated = {name for name in selected
+                            if bdb.meta_get(conn, _migrate._briefing_sentinel(name)) == "1"}
     except (sqlite3.Error, OSError):
         raise ExecutionError("briefing_store_unavailable", path) from None
     expected = state_digest(before)
@@ -255,6 +275,9 @@ def plan_blocks(plan, user, context, options):
         retained = {item["name"] for item in declarations}
         for name in sorted(existing.keys() - retained):
             operations.append(Operation("briefing_content", name, "delete", user=user, expected_state=expected))
+    if options.prune:
+        _check_content_seeds(context.config, user,
+                             {name for name, blocks in desired.items() if not blocks} - migrated, declarations)
     context.briefing_blocks[user].update(desired)
     for operation in operations:
         if operation.action == "delete":

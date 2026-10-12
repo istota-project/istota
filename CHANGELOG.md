@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota apply` can reconcile provisionable user credentials from a private sidecar without changing access timestamps during previews. Ordinary pruning preserves credentials; explicit credential pruning is limited to named services and records each deletion.
+
 - `istota apply --patch` rewrites declared file paths when moving settings between installs. Repeated patches use the longest matching prefix, preserve literal placeholders and warn when a patch matches no selected paths.
 
 - `istota apply` preserves hidden configuration credentials and accepts replacements from a private sidecar. Missing values and attempts to replace deployment credentials inline are refused before writing; previews and errors omit credential values.
@@ -23,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `istota apply --format json` reports planned and completed changes, failures, and restart requirements. Direct apply commands serialize writes to the same configuration and refuse an edit made after their preview; config-only text output and marker-only exit codes remain compatible.
 
-- `istota apply --check` accepts the version 1 structure for per-user settings and shared briefing definitions without reading live state. It reports malformed fields through the existing JSON check result; applying these sections remains unavailable until their reconciliation adapters ship.
+- `istota apply --check` accepts the version 1 structure for per-user settings and shared briefing definitions without reading live state. It reports malformed fields through the existing JSON check result.
 
 - **Istota can run in a Lima VM on an Apple silicon Mac.** `install.sh --local` installs a Mac-side `istota-stack` and `istota`, and `istota-stack create` makes a folder in your home (`~/Istota` by default) the workspace, creates the VM and sets up the same stack a server runs inside it. The Mac commands start, stop, update and open it, forward every server command into the VM, and copy the master key into your login Keychain. `istota-stack restore` rebuilds a lost or broken VM from the folder's backups and that key; the stack's own credentials (model key, mail passwords) are not backed up and are entered again afterwards. `istota-stack import-standalone` moves a standalone install (`~/.istota`) into a new VM with its databases, files, settings, credentials and master key, and leaves `~/.istota` untouched for you to remove once `istota doctor` is clean; an older install with no master key gets a new one, as long as nothing it stored was encrypted under one. Under local ingress a scheduled job missed while the Mac slept runs once on wake if it is under twelve hours late.
 
@@ -265,6 +267,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- Applying scheduled jobs now rechecks admin rights before writing, so revoked rights invalidate an earlier preview. Clearing briefing blocks refuses pending legacy or configuration seeds that would restore them on initialization.
 
 - Checking or previewing a configuration plan no longer imports credentials or removes obsolete resources when the plan uses the default database location. Validation leaves existing database state untouched.
 

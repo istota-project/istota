@@ -522,6 +522,16 @@ def test_heartbeat_defaults_match_handler_configuration(install):
     assert checks["shell"]["message"] == "Check failed: {value}"
 
 
+def test_cron_revoked_admin_is_rechecked_before_write(install, tmp_path):
+    context, operations = preview(install, [
+        {"name": "shell", "cron": "0 9 * * *", "command": "echo ok"},
+    ])
+    (tmp_path / "admins").write_text("bob\n")
+    result = engine.execute_plan(operations, context)
+    assert result.errors == [{"code": "state_changed", "path": ["users", "alice", "scheduled_jobs"]}]
+    assert not install[2].exists()
+
+
 def test_heartbeat_revoked_admin_is_rechecked_before_write(install, tmp_path, monkeypatch):
     context, operations = heartbeat_preview(install, {"checks": [
         {"name": "web", "type": "url-health", "url": "https://example.com"},
