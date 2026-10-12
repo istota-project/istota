@@ -102,6 +102,10 @@ A credential is a file under `/srv/app/istota/secrets/` (0400, owned by uid 1000
 
 ## Upgrading an existing deployment
 
+Updates keep the current and previous deployment images for rollback and remove older Istota image tags. Before building and after each update attempt, including a failed build or start, `istota-stack update` removes dangling images labeled for the Istota Compose project and trims unused build cache toward a 2 GB target. Tagged images, containers and volumes are preserved by this cache cleanup. Unlabeled dangling images are left alone because their owner is unknown.
+
+Stack builds use Docker's default builder explicitly. Its cache is shared with other builds on that Docker daemon, so cleanup can make those builds slower too. The target bounds reclaimable cache, not total Docker storage: layers needed by retained images and active builds cannot be reclaimed. Each prune prints the space it reclaimed; a cleanup failure prints a warning without changing the update's exit status.
+
 ### The daemon service is called `daemon`
 
 The scheduler's compose service was called `istota` and is now `daemon`, so its container is `istota-daemon-1` rather than `istota-istota-1`, and the image built for it is `istota:<tag>` rather than `istota-istota:<tag>`. `istota-stack update` brings the stack up with `docker compose up -d --remove-orphans`, which removes the old `istota-istota-1` container. Nothing moves on disk: the state volume is keyed by its own name, `istota_data`, not by the service, so the new container mounts the same data.
