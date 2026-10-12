@@ -304,18 +304,18 @@
     <ShellHeader
       title="Workspace"
       onTitleClick={() => (sidebarOpen = !sidebarOpen)}
-      titleActionLabel="open places"
+      titleActionLabel="open files"
     >
       {#snippet leading()}<SidebarToggle
           open={sidebarOpen}
-          label="Places"
+          label="Files"
           onclick={() => (sidebarOpen = !sidebarOpen)}
         />{/snippet}
     </ShellHeader>
   {/snippet}
   {#snippet sidebar()}
     {#if places.length || pins.length}
-      <Sidebar title="Places" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
+      <Sidebar title="Files" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
         <PinnedList
           {pins}
           {places}

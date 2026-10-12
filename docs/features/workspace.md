@@ -30,6 +30,6 @@ Google Drive has My Drive and Shared with me views. Open folders to browse them 
 
 ## Pins
 
-Open the three-dot menu beside a file or folder and choose Pin to add it to Pinned at the top of Places. The same menu has Download for files and a provider link when available. Pins are references, not copies. Open a pinned file or folder from there, or remove its pin with the adjacent remove button. A file that was deleted or is no longer accessible stays in the list as Unavailable so you can remove it yourself. You can keep up to 50 pins.
+Open the three-dot menu beside a file or folder and choose Pin to add it to Pinned at the top of Files. The same menu has Download for files and a provider link when available. Pins are references, not copies. Open a pinned file or folder from there, or remove its pin with the adjacent remove button. A file that was deleted or is no longer accessible stays in the list as Unavailable so you can remove it yourself. You can keep up to 50 pins.
 
 Istota sees the references on your next private-room task and can read them when needed. Pinning does not load a file's contents. Pins follow the personal-memory rule: they are absent from shared-room member and guest turns, and present in email thread rooms that run as your correspondence. Unavailable references stay in the prompt until you remove their pins.
