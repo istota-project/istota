@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import types
 
 import pytest
@@ -164,6 +165,7 @@ SESSION_ROUTES = [
     ("POST", "/istota/api/setup/validate", {"step": "welcome"}),
     ("POST", "/istota/api/setup/check/model", None),
     ("POST", "/istota/api/setup/finish", None),
+    ("GET", "/istota/api/setup/models", None),
 ]
 STATE_CHANGING = [route for route in SESSION_ROUTES if route[0] != "GET"]
 
@@ -1194,3 +1196,185 @@ class TestNothingSecretIsLogged:
             assert value not in shown and value not in resp.text
         assert "7KQ2M" not in caplog.text
         assert "setup: finish" in caplog.text
+
+
+class TestTheModelDefaults:
+    def test_state_names_each_api_key_services_address_and_model(self, server):
+        _app, client = server
+        models = client.get("/istota/api/setup/state").json()["defaults"]["models"]
+        assert models == {
+            "anthropic": {
+                "base_url": setup_wizard.DEFAULT_ANTHROPIC_BASE_URL,
+                "model": setup_wizard.DEFAULT_ANTHROPIC_MODEL,
+            },
+            "openrouter": {
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": setup_wizard.DEFAULT_OPENROUTER_MODEL,
+            },
+        }
+
+    def test_the_openrouter_default_is_the_same_model_by_its_openrouter_name(self):
+        # OpenRouter writes the version with a dot: claude-sonnet-4-6 is
+        # anthropic/claude-sonnet-4.6. Bumping one default without the other
+        # turns this red.
+        expected = "anthropic/" + re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", setup_wizard.DEFAULT_ANTHROPIC_MODEL)
+        assert setup_wizard.DEFAULT_OPENROUTER_MODEL == expected
+
+    def test_the_terminal_wizard_offers_the_same_anthropic_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY", raising=False)
+        prompts: list[str] = []
+
+        def answer(prompt: str) -> str:
+            prompts.append(prompt)
+            return "carol" if "user id" in prompt else ""
+
+        args = types.SimpleNamespace(
+            shape="container", vm_dir=str(tmp_path / "vm"), data_dir=str(tmp_path / "data"),
+            yes=False, force=False, user=None, display_name=None, timezone=None,
+            user_email=None, bot_name=None, hostname=None, ingress=None,
+            upstream_proxy=None, listen_addr=None, listen_port=None, tls_cert_source=None,
+            nextcloud_url=None, nextcloud_public_url=None, nextcloud_user=None,
+            nextcloud_dav_prefix=None, no_nextcloud_auto_share=False, no_talk=False,
+            oauth_client_id=None, no_email_login=False, brain="native",
+            native_base_url=None, native_model=None, email=False,
+            imap_host=None, imap_user=None, smtp_host=None, bot_email=None,
+            caldav_url=None, caldav_username=None, location=False, developer=False,
+            profile=None, no_money=False, no_health=False, no_feeds=False,
+            no_briefings=False,
+        )
+        a = setup_wizard.collect_container_answers(
+            args, input_fn=answer, out=lambda *_: None, getpass_fn=lambda _prompt: "a-native-key",
+        )
+        assert a.native_model == setup_wizard.DEFAULT_ANTHROPIC_MODEL
+        assert any(setup_wizard.DEFAULT_ANTHROPIC_MODEL in p for p in prompts)
+
+
+class _Catalog:
+    """`fetch_openrouter_catalog` as the setup server sees it, counting calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.fail = False
+
+    async def __call__(self, base_url, **_kwargs):
+        self.calls.append(base_url)
+        if self.fail:
+            raise OSError(f"[Errno 101] Network is unreachable: {UPSTREAM_TEXT}")
+        return {"z-ai/glm-5": object(), "anthropic/claude-sonnet-4.6": object()}
+
+
+@pytest.fixture
+def catalog(monkeypatch):
+    from istota.llm import openrouter_catalog
+
+    fake = _Catalog()
+    monkeypatch.setattr(openrouter_catalog, "fetch_openrouter_catalog", fake)
+    return fake
+
+
+class TestTheModelList:
+    def test_it_lists_openrouters_model_ids_and_asks_once(self, unlocked, catalog):
+        _app, client = unlocked
+        first = client.get("/istota/api/setup/models")
+        assert first.status_code == 200
+        assert first.json() == {"models": ["anthropic/claude-sonnet-4.6", "z-ai/glm-5"]}
+        assert client.get("/istota/api/setup/models").json() == first.json()
+        assert catalog.calls == [setup_wizard.DEFAULT_OPENROUTER_BASE_URL]
+
+    def test_a_failed_fetch_is_an_empty_list_and_is_not_repeated(self, unlocked, catalog):
+        _app, client = unlocked
+        catalog.fail = True
+        resp = client.get("/istota/api/setup/models")
+        assert resp.status_code == 200
+        assert resp.json() == {"models": []}
+        _plain(resp, UPSTREAM_TEXT)
+        assert client.get("/istota/api/setup/models").json() == {"models": []}
+        assert len(catalog.calls) == 1
+
+    def test_it_needs_the_session(self, server, catalog):
+        _app, client = server
+        assert client.get("/istota/api/setup/models").status_code == 401
+        assert catalog.calls == []
+
+
+class TestTheSubscriptionToken:
+    def test_the_web_setup_asks_for_the_token(self, unlocked):
+        _app, client = unlocked
+        _draft(client, brain_kind="claude_code")
+        fields = _validate(client, "model").json()["fields"]
+        assert [e["field"] for e in fields] == ["claude_code_oauth_token"]
+        _draft(client, claude_code_oauth_token=SENTINEL)
+        assert _validate(client, "model").json() == {"ok": True, "fields": []}
+
+
+class TestTheUsername:
+    @pytest.mark.parametrize("user_id", ["ada", "ada.lovelace", "a-1_b", "0" * 32])
+    def test_a_username_the_login_allows_passes(self, unlocked, user_id):
+        _app, client = unlocked
+        _draft(client, user_id=user_id, user_email="ada@example.com")
+        assert _validate(client, "welcome").json() == {"ok": True, "fields": []}
+
+    @pytest.mark.parametrize("user_id", ["Ada", "ada lovelace", "-ada", ".ada", "ada!", "a" * 33])
+    def test_a_username_the_login_refuses_is_a_welcome_error(self, unlocked, user_id):
+        _app, client = unlocked
+        _draft(client, user_id=user_id, user_email="ada@example.com")
+        fields = _validate(client, "welcome").json()["fields"]
+        assert [e["field"] for e in fields] == ["user_id"]
+        assert user_id not in fields[0]["message"]
+
+    def test_finish_refuses_it_too(self, unlocked, dirs):
+        _app, client = unlocked
+        _draft(client, **{**READY, "user_id": "Ada"})
+        resp = _finish(client)
+        assert resp.status_code == 400
+        assert [(e["field"], e["step"]) for e in resp.json()["fields"]] == [("user_id", "welcome")]
+        assert not (dirs.data_dir / "config" / "config.toml").exists()
+
+    def test_the_terminal_rule_is_unchanged(self):
+        a = setup_wizard.answers_from_payload({"user_id": "Ada Lovelace"})
+        assert [e for e in setup_wizard.validate_container_answers(a) if e.field == "user_id"] == []
+
+    def test_the_local_rule_is_not_the_nextcloud_screens(self, unlocked):
+        # With Nextcloud the username is the user's Nextcloud id, which the
+        # Nextcloud screen checks by its own rule (stage 8).
+        _app, client = unlocked
+        _draft(
+            client, user_id="Ada", user_email="ada@example.com",
+            storage="nextcloud", nextcloud_url="https://cloud.example.com",
+        )
+        assert _validate(client, "welcome").json() == {"ok": True, "fields": []}
+
+
+class TestARetryWithAnotherUsername:
+    def _fail_once(self, client, dirs):
+        _draft(client, **READY)
+        (dirs.data_dir / "db").write_text("in the way")
+        assert _finish(client).status_code == 500
+        (dirs.data_dir / "db").unlink()
+
+    def test_it_is_refused_on_the_username(self, unlocked, dirs):
+        _app, client = unlocked
+        self._fail_once(client, dirs)
+        admins = (dirs.data_dir / "config" / "admins").read_bytes()
+
+        _draft(client, user_id="grace")
+        resp = _finish(client)
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["step"] == "welcome"
+        assert [e["field"] for e in body["fields"]] == ["user_id"]
+        assert "“ada”" in body["fields"][0]["message"]
+        assert (dirs.data_dir / "config" / "admins").read_bytes() == admins
+        assert not _db_path(dirs).exists()
+
+        # The welcome screen says so as well, so Next stops there.
+        assert [e["field"] for e in _validate(client, "welcome").json()["fields"]] == ["user_id"]
+
+    def test_keeping_the_first_username_finishes(self, unlocked, dirs):
+        _app, client = unlocked
+        self._fail_once(client, dirs)
+        _draft(client, user_id="grace")
+        assert _finish(client).status_code == 400
+        _draft(client, user_id="ada")
+        assert _finish(client).status_code == 200
+        assert list(user_profiles.list_profiles(_db_path(dirs))) == ["ada"]

@@ -39,6 +39,10 @@ DEFAULT_WORKSPACE = "~/.istota"
 DEFAULT_PORT = 8766
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "istota" / "config.toml"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+#: The same model as `DEFAULT_ANTHROPIC_MODEL`, by OpenRouter's name for it.
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
 
 
 @dataclass
@@ -804,7 +808,7 @@ def _collect_native(a: Answers, args, *, interactive, input_fn, getpass_fn, out)
     key = getattr(args, "native_api_key", None) or os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY", "")
     if interactive:
         base = base or _ask(input_fn, "API base URL", DEFAULT_ANTHROPIC_BASE_URL)
-        model = model or _ask(input_fn, "Model id", "claude-sonnet-4-6")
+        model = model or _ask(input_fn, "Model id", DEFAULT_ANTHROPIC_MODEL)
         if not key:
             # Read as a secret (no echo) and re-prompt on empty — a stray newline
             # from the pasted model id must not silently leave the key blank.
@@ -2143,7 +2147,7 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
     a.brain_kind = kind or "claude_code"
     if a.brain_kind == "native":
         a.native_base_url = text("native_base_url", "API base URL", DEFAULT_ANTHROPIC_BASE_URL)
-        a.native_model = text("native_model", "Model id", "claude-sonnet-4-6" if interactive else "")
+        a.native_model = text("native_model", "Model id", DEFAULT_ANTHROPIC_MODEL if interactive else "")
         a.native_api_key = secret("istota_brain_native_api_key", "API key")
         _refuse_on(a, "brain_kind", "native_model", "native_api_key")
     else:

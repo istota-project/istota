@@ -144,6 +144,9 @@ class SetupState:
     #: Set once Finish has written everything; the server is on its way out.
     finished: bool = False
     finish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: OpenRouter's model ids, asked for once per process; empty if that failed.
+    model_ids: list[str] | None = None
+    model_ids_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def request_exit(state: SetupState, code: int) -> None:
@@ -256,12 +259,71 @@ def _email_errors(draft: dict) -> list[FieldError]:
     return []
 
 
-def draft_errors(draft: dict) -> tuple[setup_wizard.ContainerAnswers | None, list[FieldError]]:
+def _username_errors(a: setup_wizard.ContainerAnswers) -> list[FieldError]:
+    """The username rule for where the files live.
+
+    The terminal wizard keeps accepting the ids it always has; this rule is
+    the web setup's, because the web setup also creates the first login.
+    With local storage the username is the native login's, so it takes
+    ``valid_new_user_id``. With Nextcloud it is the user's Nextcloud id,
+    which the Nextcloud screen checks by that rule instead.
+    """
+    from . import auth  # noqa: PLC0415
+
+    if not a.user_id or a.uses_nextcloud:
+        return []
+    if auth.valid_new_user_id(a.user_id):
+        return []
+    return [FieldError(
+        "user_id",
+        "A username is up to 32 lowercase letters, digits, dots, hyphens or underscores, "
+        "and starts with a letter or digit.",
+    )]
+
+
+def _kept_username_errors(a: setup_wizard.ContainerAnswers, data_dir: Path) -> list[FieldError]:
+    """Refuse a username other than the one an earlier Finish already wrote.
+
+    The admins file is only ever created, so after a Finish that failed past
+    the settings step, a retry under another username would make a first user
+    who is not an admin.
+    """
+    from istota.config import load_admin_users  # noqa: PLC0415
+
+    admins_path = Path(data_dir) / "config" / "admins"
+    if not a.user_id or not admins_path.exists():
+        return []
+    kept = sorted(load_admin_users(str(admins_path)))
+    if a.user_id in kept:
+        return []
+    named = " or ".join(f"“{user_id}”" for user_id in kept) or "another username"
+    return [FieldError(
+        "user_id",
+        f"An earlier try at finishing setup already saved settings for {named}, "
+        "so the username has to stay as it was.",
+    )]
+
+
+def _subscription_errors(a: setup_wizard.ContainerAnswers) -> list[FieldError]:
+    # The terminal keeps an existing token file when the answer is empty; a
+    # first web setup has no file to keep.
+    if a.brain_kind == "claude_code" and not a.claude_code_oauth_token:
+        return [FieldError(
+            "claude_code_oauth_token", "Paste the token that `claude setup-token` printed.",
+        )]
+    return []
+
+
+def draft_errors(
+    draft: dict, *, data_dir: Path | None = None,
+) -> tuple[setup_wizard.ContainerAnswers | None, list[FieldError]]:
     """Every error in the draft, and its answers when there are none.
 
     A payload refusal on one field does not hide the validator's errors on
     the others: the validator runs over what the rest of the payload made,
     and only its errors on a field the payload already refused are dropped.
+    With ``data_dir``, a username other than the one an earlier Finish wrote
+    there is refused too.
     """
     answers = {key: value for key, value in draft.items() if key != PASSWORD_FIELD}
     errors: list[FieldError] = []
@@ -272,15 +334,20 @@ def draft_errors(draft: dict) -> tuple[setup_wizard.ContainerAnswers | None, lis
         a = exc.answers
     if a is not None:
         refused = {e.field for e in errors}
-        errors.extend(e for e in setup_wizard.validate_container_answers(a) if e.field not in refused)
+        web_rules = [*_username_errors(a), *_subscription_errors(a)]
+        if data_dir is not None:
+            web_rules.extend(_kept_username_errors(a, data_dir))
+        for error in (*setup_wizard.validate_container_answers(a), *web_rules):
+            if error.field not in refused:
+                errors.append(error)
     errors.extend(_email_errors(draft))
     errors.extend(_password_errors(draft))
     return (None if errors else a), errors
 
 
-def step_errors(draft: dict, step: str) -> list[FieldError]:
+def step_errors(draft: dict, step: str, *, data_dir: Path | None = None) -> list[FieldError]:
     """The draft's errors on ``step``'s fields, plus any form-level error."""
-    _answers, errors = draft_errors(draft)
+    _answers, errors = draft_errors(draft, data_dir=data_dir)
     wanted = set(SETUP_STEPS[step])
     return [e for e in errors if e.field == "" or e.field in wanted]
 
@@ -379,6 +446,25 @@ async def _run_check(kind: str, a, browser_host: str, seconds: float) -> setup_c
         return setup_checks.CheckResult(False, setup_checks.timed_out_message(host, seconds))
 
 
+async def openrouter_model_ids(seconds: float) -> list[str]:
+    """OpenRouter's model ids, for the model field's suggestions; ``[]`` on
+    any failure, since the list is a convenience and the Test button is what
+    checks a model."""
+    from istota.llm import openrouter_catalog  # noqa: PLC0415
+
+    try:
+        catalog = await asyncio.wait_for(
+            openrouter_catalog.fetch_openrouter_catalog(
+                setup_wizard.DEFAULT_OPENROUTER_BASE_URL, timeout=seconds,
+            ),
+            timeout=seconds + _CHECK_GRACE_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001 - any failure is no suggestions
+        logger.info("setup: no OpenRouter model list (%s)", type(exc).__name__)
+        return []
+    return sorted(catalog)
+
+
 def create_setup_app(
     *, data_dir: Path, vm_dir: Path, code_path: Path, local: bool,
     clock: Callable[[], float] = time.monotonic,
@@ -461,7 +547,20 @@ def create_setup_app(
                 if module_available(module)
             ],
             "memory_total_mib": _memory_total_mib(),
-            "defaults": {"bot_name": "Istota", "storage": "local", "profiles": ["browser"]},
+            "defaults": {
+                "bot_name": "Istota", "storage": "local", "profiles": ["browser"],
+                # The two API-key services on the AI service screen.
+                "models": {
+                    "anthropic": {
+                        "base_url": setup_wizard.DEFAULT_ANTHROPIC_BASE_URL,
+                        "model": setup_wizard.DEFAULT_ANTHROPIC_MODEL,
+                    },
+                    "openrouter": {
+                        "base_url": setup_wizard.DEFAULT_OPENROUTER_BASE_URL,
+                        "model": setup_wizard.DEFAULT_OPENROUTER_MODEL,
+                    },
+                },
+            },
         }
 
     @app.post("/istota/api/setup/unlock")
@@ -534,11 +633,19 @@ def create_setup_app(
         step = body.get("step") if isinstance(body, dict) else None
         if step not in SETUP_STEPS:
             return _error(400, "unknown_step", "Unknown setup step.")
-        errors = step_errors(state.draft, step)
+        errors = step_errors(state.draft, step, data_dir=state.data_dir)
         return {
             "ok": not errors,
             "fields": [{"field": e.field, "message": e.message} for e in errors],
         }
+
+    @app.get("/istota/api/setup/models")
+    async def models(request: Request):
+        _require_session(state, request)
+        async with state.model_ids_lock:
+            if state.model_ids is None:
+                state.model_ids = await openrouter_model_ids(state.check_seconds)
+        return {"models": state.model_ids}
 
     @app.post("/istota/api/setup/check/{kind}")
     async def check(kind: str, request: Request):
@@ -573,7 +680,7 @@ def create_setup_app(
         async with state.finish_lock:
             if state.finished:
                 return _error(409, "finished", "Setup has already finished.")
-            a, errors = draft_errors(state.draft)
+            a, errors = draft_errors(state.draft, data_dir=state.data_dir)
             if errors:
                 return _invalid_at_finish(errors, state.draft)
             try:
