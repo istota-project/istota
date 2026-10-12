@@ -40,6 +40,7 @@ SELF_STATUS=/proc/self/status
 # has happened, so the re-exec'd process never re-execs again.
 AFTER_REMOUNT=--after-remount
 CAP_SYS_ADMIN_BIT=21
+CAP_SETPCAP_BIT=8
 
 log() { echo "[istota-root] $*"; }
 
@@ -124,6 +125,17 @@ require_no_sys_admin() {
     if (( (16#$capbnd >> CAP_SYS_ADMIN_BIT) & 1 )); then
         log "REFUSE: CAP_SYS_ADMIN is still in the bounding set (CapBnd ${capbnd}) after the re-exec that drops it; not walking /data with it."
         return 77
+    fi
+}
+
+# Before the re-exec: dropping a bounding-set bit needs CAP_SETPCAP, and without
+# it setpriv dies with its own error before check_drop can name the fix.
+require_setpcap() {
+    local capbnd
+    capbnd="$(capability_bounding_set "$1")"
+    if [ -z "$capbnd" ] || ! (( (16#$capbnd >> CAP_SETPCAP_BIT) & 1 )); then
+        log "REFUSE: CAP_SETPCAP is missing (CapBnd ${capbnd:-none}); the daemon service needs SETPCAP in its cap_add to drop CAP_SYS_ADMIN."
+        return 71
     fi
 }
 
@@ -231,6 +243,7 @@ main() {
         fi
         # A uid-0 process's sets after exec come from the bounding set, so this
         # takes CAP_SYS_ADMIN out of the effective and permitted sets as well.
+        require_setpcap "$SELF_STATUS" || exit $?
         exec setpriv --bounding-set=-sys_admin --inh-caps=-sys_admin -- "$0" "$AFTER_REMOUNT" "$@"
     fi
     shift

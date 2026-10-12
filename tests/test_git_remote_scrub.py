@@ -22,8 +22,8 @@ ordinary `remote.origin.url` case passes against an implementation that leaks
 through all six, which is what the first one did.
 
 Detection matches a userinfo *password* or a known token prefix, deliberately,
-not a bare `@` — the same rule the deploy side settled on in ISSUE-258
-(`deploy/ansible/tasks/main.yml`, `urlsplit('password')`). `git@github.com:x/y`
+not a bare `@` — the same rule the bare-metal role settled on in ISSUE-258
+(`urlsplit('password')` in its tasks, deleted in 6796ae4a). `git@github.com:x/y`
 and `https://oauth2@host/x` both contain an `@` and neither carries a secret.
 """
 

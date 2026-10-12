@@ -300,7 +300,7 @@ stack_up() {
         [ -n "$id" ] || continue
         if ! printf '%s\n' "$active" | grep -qxF -- "$service"; then
             log "removing the ${service} container: no active profile names it"
-            docker rm -f "$id" >/dev/null
+            docker rm -f "$id" >/dev/null || log "WARNING: could not remove the ${service} container (${id})"
         fi
     done
 }

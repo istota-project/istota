@@ -191,6 +191,21 @@ class TestTheSysAdminCheck:
         assert result.returncode == 77
 
 
+class TestTheSetpcapCheck:
+    def test_a_bounding_set_with_setpcap_passes(self, tmp_path):
+        result = _call("require_setpcap", str(_status(tmp_path / "status", CAPBND_WITH_SYS_ADMIN)))
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_a_bounding_set_without_setpcap_is_refused_by_name(self, tmp_path):
+        without_setpcap = f"{int(CAPBND_WITH_SYS_ADMIN, 16) & ~(1 << 8):016x}"
+
+        result = _call("require_setpcap", str(_status(tmp_path / "status", without_setpcap)))
+
+        assert result.returncode == 71
+        assert "REFUSE" in result.stdout and "SETPCAP" in result.stdout
+
+
 class TestMainDropsSysAdminBeforeTheWalk:
     """`main` end to end, with every step that needs a container replaced.
 
