@@ -173,6 +173,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The admin Logs pane shows the application log on a new Docker stack. `istota setup` now writes `[logging] output = "both"` with `file = "/data/logs/istota.log"`, a file on the volume the daemon and web containers share. **Upgrade note:** an existing stack's `config.toml` is yours and is not rewritten, so add those two lines under `[logging]` and restart the stack to see the log there.
+
 - The admin Health pane shows the daemon's own checks. On the Docker stack it ran them in the web container, which has none of the daemon's sandbox settings, so it reported the sandbox, credential isolation and devbox checks failing on a stack whose tasks were sandboxed. Re-run and deep checks now ask the daemon, which answers on its next tick, and the page says when each result was taken.
 
 - On the containerized stack, Google Workspace commands run again and developer tasks can commit again (#695). The image shipped without the `gws` and `gitleaks` binaries, so every Google Workspace call failed with a traceback and the pre-commit secret scan refused every unattended commit. Both are now in the image at pinned, checksum-verified versions, `istota doctor` reports either one missing where it is needed, and a missing `gws` gives a clear error instead of a crash.

@@ -433,6 +433,36 @@ class TestTheLocalWorkspace:
         assert config.nextcloud_mount_path is None
 
 
+class TestTheAppLog:
+    """ISSUE-703: the daemon writes the app log where the web container reads it."""
+
+    def test_the_daemon_logs_to_a_file_and_the_console(self, tmp_path, monkeypatch):
+        config = _load(tmp_path, render_container_config(_full_answers(), inline_credentials=True), monkeypatch)
+
+        assert config.logging.output == "both"
+        assert config.logging.file == setup_wizard.CONTAINER_APP_LOG
+
+    def test_the_file_is_on_the_volume_daemon_and_web_both_mount(self):
+        log = Path(setup_wizard.CONTAINER_APP_LOG)
+        services = yaml.safe_load(COMPOSE.read_text())["services"]
+
+        for name in ("daemon", "web"):
+            mounts = [v for v in services[name]["volumes"] if isinstance(v, str)]
+            assert f"istota_data:{setup_wizard.CONTAINER_DATA_DIR}" in mounts, name
+        assert log.is_relative_to(setup_wizard.CONTAINER_DATA_DIR)
+
+    def test_the_file_is_outside_every_directory_a_task_or_a_sweep_reaches(self):
+        log = Path(setup_wizard.CONTAINER_APP_LOG)
+        for root in (
+            setup_wizard.CONTAINER_TEMP_DIR,
+            setup_wizard.CONTAINER_LOCAL_WORKSPACE,
+            setup_wizard.CONTAINER_REPOS_DIR,
+            # The session transcripts' root, which their sweep prunes.
+            str(Path(setup_wizard.CONTAINER_DB_PATH).parent),
+        ):
+            assert not log.is_relative_to(root), root
+
+
 def _env(text: str) -> dict[str, str]:
     return dict(
         line.split("=", 1) for line in text.splitlines()

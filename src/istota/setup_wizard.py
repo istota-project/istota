@@ -1276,6 +1276,10 @@ CONTAINER_DATA_DIR = Path("/data")
 CONTAINER_DB_PATH = "/data/db/istota.db"
 CONTAINER_TEMP_DIR = "/data/tmp"
 CONTAINER_REPOS_DIR = "/data/repos"
+#: The daemon's rotating app log. On the state volume because the web container
+#: mounts it too and the admin Logs pane reads the file from there; outside
+#: `db/`, whose `logs/` is the session-transcript root its sweep prunes.
+CONTAINER_APP_LOG = "/data/logs/istota.log"
 #: The devbox socket directories, one per-user volume mounted under each. Under
 #: /data because the root phase hands writable mounts there to uid 10001, and a
 #: fresh volume is root-owned (`devbox/compose_file.py` refuses anywhere else).
@@ -1482,6 +1486,8 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
         ),
         "temp_dir": CONTAINER_TEMP_DIR,
         "security": {"sandbox_enabled": True, "skill_proxy_enabled": True},
+        # Both: `docker logs` keeps the console, and the web container reads the file.
+        "logging": {"output": "both", "file": CONTAINER_APP_LOG},
     }
     if a.uses_nextcloud:
         # A real mount, so `runtime.mount_liveness` and the backup's mount

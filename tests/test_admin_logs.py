@@ -105,6 +105,12 @@ class TestListSources:
         assert sources["app"].available is False
         assert "console" in sources["app"].detail.lower()
 
+    def test_console_only_says_how_to_turn_the_file_on(self, tmp_path):
+        """ISSUE-703: the reason names the setting that fixes it, not only the state."""
+        sources = {s.id: s for s in admin_logs.list_sources(_config(tmp_path, output="console"))}
+        assert 'output = "both"' in sources["app"].detail
+        assert "file = " in sources["app"].detail
+
     def test_tasks_source_is_always_listed(self, tmp_path):
         sources = {s.id: s for s in admin_logs.list_sources(_config(tmp_path))}
         assert sources["tasks"].kind == "db"
