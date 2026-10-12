@@ -567,6 +567,16 @@ class TestErrorEncoding:
         events = [e async for e in p._parse_sse_lines(_aiter([frame]), "m")]
         assert key not in events[-1].message.error_message
 
+    async def test_a_key_straddling_the_cut_leaves_no_prefix(self):
+        # The body is cut at 500 characters; scrubbing after the cut would
+        # leave the part of the key before it.
+        key = "provider-key-straddling-the-cut-" + "x" * 40
+        p = OpenAICompatibleProvider(api_key=key, base_url="https://x/v1")
+        body = "e" * 480 + key
+        p._client = FakeClient(response=FakeStreamResponse(401, body=body.encode()))
+        events = [e async for e in p.stream("", [], [])]
+        assert key[:12] not in events[0].message.error_message
+
     async def test_connection_error_encoded_not_raised(self):
         p = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1")
         p._client = FakeClient(raise_exc=httpx.ConnectError("down"))

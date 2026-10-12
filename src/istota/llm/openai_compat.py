@@ -211,7 +211,7 @@ class OpenAICompatibleProvider:
                     yield StreamError(
                         message=AssistantMessage(
                             stop_reason="error",
-                            error_message=self.scrub(f"HTTP {resp.status_code}: {text[:500]}"),
+                            error_message=f"HTTP {resp.status_code}: {self.scrub(text)[:500]}",
                             model=model,
                         )
                     )
