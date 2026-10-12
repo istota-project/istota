@@ -83,6 +83,15 @@ x-istota-secrets: &istota_secrets
   - istota_sms_telnyx_messaging_profile_id
   - istota_google_workspace_client_secret
 
+# Where container output goes. `istota-stack` sets journald on the VM, so
+# it reaches the journal, and whatever ships the journal, with
+# CONTAINER_NAME and the container's name as its identifier. Docker
+# Desktop, where the test tiers run this file, has no journald.
+x-logging: &logging
+  driver: ${ISTOTA_LOG_DRIVER:-json-file}
+  options:
+    tag: "{{.Name}}"
+
 services:
   daemon:
     build: *istota_build
@@ -185,6 +194,7 @@ services:
     # file or in `docker inspect`. See the top-level `secrets:` below.
     secrets: *istota_secrets
     restart: unless-stopped
+    logging: *logging
 
   # Web UI service. Shares the istota image (built once) and reads the same
   # config.toml the scheduler container generates. Depends on `daemon` so the
@@ -242,6 +252,7 @@ services:
         exec /app/.venv/bin/uvicorn istota.webui.stack_app:app --no-access-log --host 0.0.0.0 --port "$${WEB_PORT}"
     command: []
     restart: unless-stopped
+    logging: *logging
 
   # The only listener the stack publishes, in every ingress mode. INGRESS
   # (host.env: direct, proxied or local) picks the server blocks the start script
@@ -279,6 +290,7 @@ services:
       WEB_PORT: ${WEB_PORT:-8766}
       NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-512M}
     restart: unless-stopped
+    logging: *logging
 
   browser:
     build:
@@ -345,6 +357,7 @@ services:
     networks:
       - browser
     restart: unless-stopped
+    logging: *logging
 
   # The Nextcloud Talk high-performance backend, which is what makes inbound
   # Talk a push rather than a poll. Off by default, behind a compose profile:
@@ -462,6 +475,7 @@ services:
         done
         exec /entrypoint.sh
     restart: unless-stopped
+    logging: *logging
 
   whatsapp-baileys:
     build:
@@ -513,6 +527,7 @@ services:
     # No ports and no expose: it speaks to the daemon over the volume's socket
     # and to WhatsApp outbound, and nothing ever dials it.
     restart: unless-stopped
+    logging: *logging
 
   # The devboxes are not in this file. Compose cannot loop over users, so
   # `istota devbox compose-file` renders them from [devbox] users into a

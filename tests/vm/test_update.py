@@ -108,6 +108,17 @@ class TestAnUpdateToAnotherRef:
         for service in ("daemon", "web"):
             assert lima.running_image(vm, service) == f"{lima.IMAGE}:{update.ref}", service
 
+    def test_the_stack_logs_to_the_journal_under_its_container_names(self, local_stack, update):
+        """#712: on the VM container output reaches the journal, with the
+        container's name as CONTAINER_NAME and as its identifier."""
+        vm = local_stack
+        for service in ("daemon", "web", "nginx"):
+            cid = lima.container(vm, service)
+            assert vm.out(f"docker inspect -f '{{{{.HostConfig.LogConfig.Type}}}}' {cid}") == "journald", service
+            name = f"istota-{service}-1"
+            line = vm.out(f"journalctl CONTAINER_NAME={name} -n1 -o export | grep '^SYSLOG_IDENTIFIER=' || true")
+            assert line == f"SYSLOG_IDENTIFIER={name}", service
+
     def test_the_previous_tags_image_is_kept(self, local_stack, update):
         assert local_stack.ok(f"docker image inspect {lima.IMAGE}:{update.release} >/dev/null")
 

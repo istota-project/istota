@@ -257,6 +257,12 @@ To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `
 
 In full Nextcloud integration the workspace is not a volume: it is the VM's rclone mount, bound at `/mnt/shared`.
 
+## Container logs
+
+On the VM every service logs to the systemd journal, under the container's name: `journalctl CONTAINER_NAME=istota-daemon-1` reads the daemon, and anything that ships the host's journal ships the stack's output with it. `docker logs` and `istota-stack compose logs` still work. The journal's size cap from `provision.sh` (500 MB) bounds it. Devbox containers are the exception: they keep their own rotated `json-file` logs, because build and test output would push the host's own lines out of the journal.
+
+Run outside `istota-stack` (Docker Desktop, the test tiers), the compose file uses Docker's `json-file` driver, since there is no journald there.
+
 ## Browser profiles
 
 Each user has a separate profile under `/data/browser-profile/users/`. Logins and site storage survive task completion, session closure, process reaping and container restarts. They are never shared between users. Later tasks for the same user inherit that user's authenticated access without another vault fetch. Cloudflare clearance warms up separately for each user. Profiles are not automatically deleted.

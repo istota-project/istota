@@ -76,13 +76,17 @@ host_env() {
 }
 
 changed_file() {
-    # Write $2 to $1 when it differs; answer whether it did.
+    # Write $2 to $1 when it differs; answer whether it did. The mode is set
+    # either way: a file written under a hardened umask keeps its content, so
+    # an unchanged one would otherwise stay root-only for good.
     local path="$1" content="$2"
     if [ -f "$path" ] && [ "$(cat "$path")" = "$content" ]; then
+        chmod 0644 "$path"
         return 1
     fi
     install -d "$(dirname "$path")"
     printf '%s\n' "$content" > "$path"
+    chmod 0644 "$path"
     return 0
 }
 
@@ -197,6 +201,7 @@ Signed-By: /etc/apt/keyrings/docker.asc
 EOF
     apt-get update -qq
 fi
+chmod 0644 /etc/apt/sources.list.d/docker.sources
 apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 # Lima's own rootless containerd, where this runs in a Lima VM: nothing but
@@ -226,6 +231,7 @@ if want != conf:
     print("1")
 PY
 )"
+chmod 0644 /etc/docker/daemon.json
 systemctl enable --now docker.service >/dev/null
 if [ -n "$daemon_json_changed" ]; then
     log "docker: userland-proxy off, restarting dockerd"
@@ -334,12 +340,13 @@ fi
 signing_key="$(host_env RELEASE_SIGNING_KEY)"
 if [ -n "$signing_key" ]; then
     changed_file "${STACK}/allowed_signers" "releases namespaces=\"git\" ${signing_key}" || true
-    chmod 0644 "${STACK}/allowed_signers"
 elif [ ! -s "${STACK}/allowed_signers" ]; then
     log "no RELEASE_SIGNING_KEY in ${HOST_ENV} yet: istota-stack update refuses every tag until there is one, except with --unsigned."
 fi
 
 # --- Commands and units ------------------------------------------------------
+stack_command_changed=""
+cmp -s "${HERE}/istota-stack" /usr/local/sbin/istota-stack || stack_command_changed=1
 install -m 0755 "${HERE}/istota-stack" /usr/local/sbin/istota-stack
 install -m 0755 "${HERE}/istota" /usr/local/bin/istota
 install -m 0755 "${HERE}/istota-devbox-egress.sh" /usr/local/sbin/istota-devbox-egress
@@ -447,6 +454,14 @@ if [ -f "${STACK}/config/config.toml" ] && [ -n "$(awk -F= '$1 == "ISTOTA_TAG" {
 else
     log "provisioned. Next: istota-stack update <tag>, istota-stack setup, re-run this script,"
     log "then systemctl start istota-stack."
+fi
+# An update runs the previous release's istota-stack and execs this last, so
+# what the new one's compose() passes reaches a running stack only here. Only
+# then: a play provisions before its apply, and an `up` there would start the
+# stack on a host.env its config does not match yet.
+if [ -n "$stack_command_changed" ] && systemctl is-active --quiet istota-stack.service; then
+    /usr/local/sbin/istota-stack up \
+        || log "WARNING: istota-stack up failed; the stack runs what the previous istota-stack started."
 fi
 
 # Last, so a run that failed anywhere above leaves no record and the next

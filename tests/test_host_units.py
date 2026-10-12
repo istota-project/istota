@@ -268,6 +268,27 @@ class TestProvision:
 
     TEXT = PROVISION.read_text() if PROVISION.exists() else ""
 
+    def test_a_running_stack_is_brought_up_by_the_istota_stack_it_installs(self):
+        """An update runs the previous release's istota-stack, so what the new
+        one's `compose()` sets (the journald driver, #712) reaches the containers
+        only if provision.sh, which `update` execs last, brings them up again."""
+        installed = self.TEXT.index('install -m 0755 "${HERE}/istota-stack" /usr/local/sbin/istota-stack')
+        compared = self.TEXT.index(
+            'cmp -s "${HERE}/istota-stack" /usr/local/sbin/istota-stack || stack_command_changed=1')
+        assert compared < installed, "the comparison must read the old istota-stack, before it is replaced"
+        stack = self.TEXT.split("# --- The stack ---", 1)[1]
+        assert self.TEXT.index("# --- The stack ---") > installed
+        up = re.search(
+            r'^if \[ -n "\$stack_command_changed" \] && systemctl is-active --quiet istota-stack\.service; then\n'
+            r"\s+/usr/local/sbin/istota-stack up \\\n\s+\|\| log ", stack, re.M)
+        assert up, "provision.sh does not bring a running stack up with a new istota-stack"
+        assert stack.index(up.group(0)) < stack.index('"${STACK}/.provisioned.tmp"')
+
+    def test_an_unchanged_istota_stack_leaves_a_running_stack_alone(self):
+        """A play provisions before its apply: an `up` there would start the stack
+        on a host.env its config does not match yet. Only `up` behind the guard."""
+        assert self.TEXT.count("/usr/local/sbin/istota-stack up") == 1
+
     def test_it_carries_the_host_bounds(self):
         """The values the bare-metal role set, ported when the role went."""
         for line in ("SystemMaxUse=500M", "SystemMaxFileSize=50M", "num_logs = 5",
@@ -310,6 +331,42 @@ class TestProvision:
         assert "--cache-dir /var/cache/istota-rclone" in mount["Service"]["ExecStart"]
 
 
+class TestChangedFile:
+    """A file written under a hardened umask before `umask 022` landed keeps its
+    content, so it is never rewritten; the mode has to be set anyway (#714)."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, path: Path, content: str) -> subprocess.CompletedProcess:
+        function = re.search(r"^changed_file\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines changed_file"
+        script = (
+            "set -euo pipefail\numask 027\n"
+            f"{function.group(0)}\n"
+            'if changed_file "$1" "$2"; then echo changed; else echo same; fi\n'
+        )
+        return subprocess.run(["bash", "-c", script, "_", str(path), content],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_an_unchanged_root_only_file_is_made_readable(self, tmp_path):
+        path = tmp_path / "mount.conf"
+        path.write_text("[Unit]\nRequires=mount-nextcloud.service\n")
+        path.chmod(0o640)
+        result = self._run(path, "[Unit]\nRequires=mount-nextcloud.service")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "same"
+        assert path.stat().st_mode & 0o777 == 0o644
+
+    def test_the_files_written_outside_it_get_the_same_mode(self):
+        for path in ("/etc/apt/sources.list.d/docker.sources", "/etc/docker/daemon.json"):
+            assert re.search(rf"^chmod 0644 {re.escape(path)}$", self.TEXT, re.M), path
+
+    def test_a_new_file_is_readable_under_a_hardened_umask(self, tmp_path):
+        path = tmp_path / "d" / "istota.conf"
+        result = self._run(path, "x = 1")
+        assert result.stdout.strip() == "changed"
+        assert path.read_text() == "x = 1\n"
+        assert path.stat().st_mode & 0o777 == 0o644
 
 class TestUpstreamRclone:
     """The mount runs rclone.org's own build, pinned, never Debian's package (#694).
