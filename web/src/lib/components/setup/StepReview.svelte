@@ -93,7 +93,11 @@
     }
 
     const files: Row[] = [
-      { label: 'Files', value: nextcloud ? 'In your Nextcloud' : 'On this server' },
+      {
+        label: 'Files',
+        value:
+          nextcloud && draft.text('workspace') !== 'local' ? 'In your Nextcloud' : 'On this server',
+      },
     ];
     if (nextcloud) {
       files.push(
