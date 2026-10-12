@@ -189,6 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The stack's output reaches the VM's system journal again.** Since the move to containers, Docker wrote every service's output to its own log files, so `journalctl` and any journal-based log shipping saw nothing from Istota or its nginx. On the VM, services now log to the journal under their container name, and the next `istota-stack update` switches them over. `docker logs` keeps working.
+
 - **`provision.sh` now makes the host config files it writes world-readable even when their content is unchanged.** A file written before the script set its own umask stayed root-only, because an unchanged file was never touched again. The Nextcloud mount's drop-in for `istota-stack.service` was one, and systemd warned about it on every reload. The Docker apt source and `daemon.json` had the same problem. The next provisioning run corrects all of them.
 
 - **Reading an uploaded lab result, visit document or immunization list now happens in the daemon's sandbox.** On the Docker stack the extraction ran in the web container, which cannot build a sandbox, so on the Claude Code brains the model's file access was not confined there. The upload pages now hand the document to the daemon and wait for its answer.

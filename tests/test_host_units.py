@@ -268,6 +268,27 @@ class TestProvision:
 
     TEXT = PROVISION.read_text() if PROVISION.exists() else ""
 
+    def test_a_running_stack_is_brought_up_by_the_istota_stack_it_installs(self):
+        """An update runs the previous release's istota-stack, so what the new
+        one's `compose()` sets (the journald driver, #712) reaches the containers
+        only if provision.sh, which `update` execs last, brings them up again."""
+        installed = self.TEXT.index('install -m 0755 "${HERE}/istota-stack" /usr/local/sbin/istota-stack')
+        compared = self.TEXT.index(
+            'cmp -s "${HERE}/istota-stack" /usr/local/sbin/istota-stack || stack_command_changed=1')
+        assert compared < installed, "the comparison must read the old istota-stack, before it is replaced"
+        stack = self.TEXT.split("# --- The stack ---", 1)[1]
+        assert self.TEXT.index("# --- The stack ---") > installed
+        up = re.search(
+            r'^if \[ -n "\$stack_command_changed" \] && systemctl is-active --quiet istota-stack\.service; then\n'
+            r"\s+/usr/local/sbin/istota-stack up \\\n\s+\|\| log ", stack, re.M)
+        assert up, "provision.sh does not bring a running stack up with a new istota-stack"
+        assert stack.index(up.group(0)) < stack.index('"${STACK}/.provisioned.tmp"')
+
+    def test_an_unchanged_istota_stack_leaves_a_running_stack_alone(self):
+        """A play provisions before its apply: an `up` there would start the stack
+        on a host.env its config does not match yet. Only `up` behind the guard."""
+        assert self.TEXT.count("/usr/local/sbin/istota-stack up") == 1
+
     def test_it_carries_the_host_bounds(self):
         """The values the bare-metal role set, ported when the role went."""
         for line in ("SystemMaxUse=500M", "SystemMaxFileSize=50M", "num_logs = 5",
