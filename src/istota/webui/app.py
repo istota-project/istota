@@ -9998,11 +9998,7 @@ async def chat_room_memory(
     room_id: int,
     user: dict = Depends(_require_api_auth),
 ):
-    """The room's `CHANNEL.md` — the standing instructions every task in the
-    room is given. Read-only from `/chat/files`' point of view: that endpoint
-    is confined to `/Users/{user_id}` on purpose (`_resolve_chat_file`), and
-    `/Channels/{token}` sits outside it by design, so this carries its own
-    room-scoped confinement rather than widening that root."""
+    """The room's standing instructions, with room-scoped editor access."""
     result = await asyncio.to_thread(_chat_room_memory, user["username"], room_id)
     if result is None:
         return JSONResponse({"error": "room not found"}, status_code=404)

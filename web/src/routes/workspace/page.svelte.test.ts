@@ -125,7 +125,8 @@ it('persists hidden entries and explains partial listings', async () => {
   expect(await screen.findByRole('button', { name: '.config' })).toBeTruthy();
 });
 
-it('does not offer a file viewer for other roots before the serving stage', async () => {
+it('keeps files without a viewer root inert', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [{ ...room, view_root: null }], notes: [] });
   __history.reset('/istota/workspace?place=room%3Asample&path=notes');
   render(Workspace);
   expect((await screen.findByText('plan #1.md')).closest('a,button')).toBeNull();
@@ -198,4 +199,19 @@ it('shows connection reach without requesting a directory listing', async () => 
   await screen.findByText('This connection is reached through a skill during a task.');
   expect(api.getWorkspaceListing).not.toHaveBeenCalled();
   expect(screen.queryByRole('checkbox', { name: 'Show hidden' })).toBeNull();
+});
+
+it.each([
+  ['room', '/Channels/sample'],
+  ['group', '/Groups/team'],
+  ['linked', '/linked/notes'],
+] as const)('opens %s files in the shared viewer', async (kind, view_root) => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...home, id: kind, kind, view_root }],
+    notes: [],
+  });
+  __history.reset(`/istota/workspace?place=${kind}&path=notes`);
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('button', { name: 'plan #1.md' }));
+  expect(openFile).toHaveBeenCalledWith(`${view_root}/notes/plan #1.md`);
 });

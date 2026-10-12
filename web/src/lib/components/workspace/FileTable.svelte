@@ -53,7 +53,7 @@
                     onclick={(event) => onNavigate(event, place.id, entryPath(entry.name))}
                     >{entry.name}</a
                   >
-                {:else if entry.kind === 'file' && place.kind === 'home' && place.view_root}
+                {:else if entry.kind === 'file' && place.view_root}
                   <button
                     type="button"
                     onclick={() => viewer.openFile(`${place.view_root}/${entryPath(entry.name)}`)}

@@ -12,7 +12,7 @@ Personal memory is not loaded into shared-room prompts, even when your own turn 
 
 ## Browsing
 
-Choose a folder to open it. The breadcrumbs return to its parents, and the address bar keeps the current place and folder so browser Back, Forward and reload work. Files under My files open in the shared viewer. Other workspace locations can be browsed; opening their files is not yet available.
+Choose a folder to open it. The breadcrumbs return to its parents, and the address bar keeps the current place and folder so browser Back, Forward and reload work. Files in My files, linked folders, room folders and group folders open in the shared viewer. Access is checked again when you open a file.
 
 Hidden files are off by default. Show hidden remembers your choice in this browser. Symbolic links are labelled and cannot be opened or followed. Other special entries, such as sockets, are also inert.
 
