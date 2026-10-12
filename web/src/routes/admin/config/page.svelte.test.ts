@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { configField, configPreview, configRequest, configView } from '$lib/test/adminConfig';
 import type { AdminConfigView, ConfigRequest, User } from '$lib/api';
@@ -10,13 +10,14 @@ await fillApiDouble(api);
 
 import Harness from '$lib/currentUserHarness.test.svelte';
 import Page from './+page.svelte';
+import Layout from '../+layout.svelte';
 
 const user = { username: 'alice', display_name: 'Alice', is_admin: true } as User;
 
 function mount(view: AdminConfigView, history: ConfigRequest[] = []) {
   api.getAdminConfig.mockResolvedValue(view);
   api.listConfigRequests.mockResolvedValue(history);
-  render(Harness, { props: { user, component: Page } });
+  render(Harness, { props: { user, component: Page, layout: Layout } });
 }
 
 const imapHost = configField({ path: ['email', 'imap_host'], value: 'old', in_file: true });
@@ -43,6 +44,8 @@ describe('banners', () => {
     expect(screen.getByText(/has no config applier/)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'imap_host' })).toBeNull();
     expect(screen.getByText('old')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review changes' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Discard' })).toBeNull();
   });
 
   it('names the plan that manages a resource', async () => {
@@ -74,7 +77,7 @@ describe('banners', () => {
 });
 
 describe('the change set', () => {
-  it('counts edits in the footer and reviews them as one change set', async () => {
+  it('counts edits in the app bar and reviews them as one change set', async () => {
     const secret = configField({
       path: ['email', 'imap_password'],
       secret: true,
@@ -88,10 +91,13 @@ describe('the change set', () => {
       target: { value: 'new' },
     });
     await fireEvent.input(screen.getByLabelText('imap_password'), { target: { value: 'pw' } });
-    expect(screen.getByText('2 changes')).toBeInTheDocument();
+    const header = document.querySelector('.header-tools') as HTMLElement;
+    expect(header).not.toBeNull();
+    expect(within(header).getByText('2 changes')).toBeInTheDocument();
+    expect(within(header).getByRole('button', { name: 'Discard' })).toBeInTheDocument();
 
     api.previewConfigChange.mockResolvedValue(configPreview());
-    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await fireEvent.click(within(header).getByRole('button', { name: 'Review changes' }));
     await waitFor(() =>
       expect(api.previewConfigChange).toHaveBeenCalledWith({
         base_digest: 'digest-1',
@@ -104,12 +110,17 @@ describe('the change set', () => {
 
   it('discards the change set', async () => {
     mount(configView([imapHost]));
+    await screen.findByLabelText('imap_host');
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeDisabled();
     await fireEvent.input(await screen.findByLabelText('imap_host'), {
       target: { value: 'new' },
     });
     await fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
     expect(screen.queryByText('1 change')).toBeNull();
     expect((screen.getByLabelText('imap_host') as HTMLInputElement).value).toBe('old');
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeDisabled();
   });
 
   it('reloads on a changed file and keeps the edits that still apply', async () => {
@@ -260,6 +271,11 @@ describe('history', () => {
     ]);
     expect(await screen.findByText('Change #21')).toBeInTheDocument();
     await waitFor(() => expect(api.getConfigRequest).toHaveBeenCalledWith(21));
+    await fireEvent.input(screen.getByLabelText('imap_host'), {
+      target: { value: 'new' },
+    });
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeEnabled();
   });
 
   it('restores an applied change through preview', async () => {
