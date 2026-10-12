@@ -85,8 +85,8 @@ exactly this — the daemon listens, something else runs the sidecar.
 It costs one thing at setup time, on the compose shape only. `istota whatsapp
 pair` spawns a sidecar of its own, and the istota image ships neither this
 program nor its dependencies — so **pairing is not reachable from inside that
-stack**. Pair from a checkout with node (the Ansible shape, or a developer
-machine) and move the session directory into the `istota_data` volume at
+stack**. Pair from a checkout with node (a developer machine) and move the
+session directory into the `istota_data` volume at
 `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers
 run as. A listen-only mode for `pair`, which would let the compose sidecar
 supply the QR to a daemon-side listener, is the real fix and is not built.

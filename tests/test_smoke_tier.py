@@ -58,18 +58,17 @@ NEXTCLOUD_OVERLAY = REPO / "testbed" / "compose" / "nextcloud.yml"
 SMOKE_DIR_ONLY = ["tests/smoke/"]
 
 #: And the wider one covers **every** serial tier, not just this file's own.
-#: `SERIAL_TIER_MARKERS` is `("smoke", "full", "testbed", "deploy")`, and the
-#: hook under test raises if *any* selected item carries one of them — so the
-#: whole-tree collect this replaced was, incidentally, the only end-to-end
-#: witness that `testbed` and `deploy` are deselected by `addopts` too. Scoping
-#: to `tests/smoke/` alone silently dropped 104 of the 150 deselected items and
-#: left those two markers guarded by nothing. Found in review; the four
-#: directories cost the same 0.4s as the one did.
+#: `SERIAL_TIER_MARKERS` is `("smoke", "full", "testbed")`, and the hook under
+#: test raises if *any* selected item carries one of them — so the whole-tree
+#: collect this replaced was, incidentally, the only end-to-end witness that
+#: `testbed` is deselected by `addopts` too. Scoping to `tests/smoke/` alone
+#: silently dropped most of the deselected items and left that marker guarded
+#: by nothing. Found in review; the wider scope costs the same 0.4s as the one
+#: directory did.
 SERIAL_TIER_SCOPE = [
     "tests/smoke/",
     "tests/full/",
     "tests/testbed/",
-    "tests/deploy/",
     "tests/test_smoke_tier.py",
 ]
 

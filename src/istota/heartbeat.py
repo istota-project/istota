@@ -718,7 +718,7 @@ _SELF_CHECK_SKIPPED = (
     "runtime.subscription_usage",
     # One exec-transport socket connection per configured user.
     "developer.container",
-    # Spawns `iptables`.
+    # One exec-transport connection per devbox user.
     "security.devbox_netfilter",
 )
 

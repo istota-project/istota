@@ -1833,13 +1833,6 @@ class TestTheDockerApiProxyIsRetired:
         with pytest.raises(ImportError):
             import istota.docker_proxy  # noqa: F401
 
-    @pytest.mark.parametrize("template", [
-        "istota-docker-proxy@.service.j2",
-        "istota-docker-proxy.tmpfiles.j2",
-    ])
-    def test_the_template_is_gone(self, template):
-        assert not (_REPO / "deploy" / "ansible" / "templates" / template).exists()
-
     @pytest.mark.parametrize("key", [
         "api_proxy_enabled",
         "api_proxy_socket_dir",

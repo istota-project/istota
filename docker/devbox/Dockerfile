@@ -166,9 +166,8 @@ ENV PATH="/home/dev/.cargo/bin:/home/dev/.local/bin:${PATH}"
 # archive is opened. Trixie packages both now, where bookworm packaged only gh,
 # but they are 2.46.0 and 1.53.0 — still far behind the versions measured there
 # — so these keep coming from the vendors' release artifacts rather than apt.
-# Same versions as docker/istota/Dockerfile and the Ansible role;
-# tests/test_ansible_forge_cli_install.py holds the three equal, so bump them
-# together.
+# Same versions as docker/istota/Dockerfile; tests/test_docker_forge_clis.py
+# holds the two equal, so bump them together.
 #
 # Extracted from the .deb rather than installed with it: dpkg would put a
 # second, real `gh` at /usr/bin/gh, and the whole point is that the only `gh`

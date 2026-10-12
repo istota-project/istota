@@ -1,18 +1,19 @@
 # Docker quickstart
 
-The Docker setup runs the Istota scheduler, its web app and nginx. It ships no Nextcloud: the workspace is a local directory by default, and `istota setup` can connect it to a Nextcloud you already run (full integration, with Talk). See [Storage](../deployment/docker.md#storage).
+The Docker setup runs the Istota scheduler, its web app and nginx. This page sets the stack up by hand with `docker compose`, which suits a try-out on a machine you already have. For a server, use the [server quickstart](quickstart-server.md): it provisions a dedicated machine, verifies a signed release and installs `istota-stack` to manage it. The stack is the same either way. It ships no Nextcloud: the workspace is a local directory by default, and `istota setup` can connect it to a Nextcloud you already run (full integration, with Talk). See [Storage](../deployment/docker.md#storage).
 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
+git clone https://github.com/istota-project/istota.git ~/istota
+cd ~/istota/docker
 ```
 
-The one-liner clones the repo to `~/istota` and prints the remaining steps. Requires Docker with the `docker compose` plugin. In short, from `~/istota/docker`:
+Requires Docker with the `docker compose` plugin. From `~/istota/docker`:
 
 1. `cp .env.example .env`.
 2. `docker compose build istota`.
-3. Give the image's uid 10001 the stack's `.env`, `host.env` and `secrets/` directory, with an empty file per secret (compose refuses to run a service whose secret file is missing; the installer prints the exact commands).
+3. Give the image's uid 10001 the stack's `.env`, `host.env` and `secrets/` directory, with an empty file per secret (compose refuses to run a service whose secret file is missing). [Docker deployment](../deployment/docker.md#configuration) has the exact commands.
 4. Run the wizard inside the image:
 
    ```bash
@@ -33,40 +34,28 @@ When it's up, open `http://localhost:8080`, log in, and start chatting.
 
 ## Optional services
 
-Four run as Docker Compose profiles: `browser` (Chrome with bot-detection countermeasures), `location` (the shared webhook receiver for GPS), `sms` (the same receiver for SMS), and `signaling` (Talk over a WebSocket instead of polling).
+Three run as Docker Compose profiles: `browser` (Chrome with bot-detection countermeasures), `whatsapp-baileys` (the sidecar for a paired WhatsApp session), and `signaling` (Talk over a WebSocket instead of polling).
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
-docker compose --profile location up -d             # GPS webhook receiver
-docker compose --profile sms up -d                  # SMS webhook receiver
-docker compose --profile browser --profile location up -d  # Combine as needed
+docker compose --profile browser --profile signaling up -d  # Combine as needed
 ```
 
-Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per command; `istota setup` writes it from your answers. The `location` and `sms` profiles share one receiver, so turn the matching feature on in `config.toml` as well (`[location] enabled`, `[sms] enabled`); the wizard does this for location. The browser container requires an x86-64 host, since Chrome has no ARM packages. `signaling` needs its registration in place before the first boot -- see above.
+Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per command; `istota setup` writes it from your answers. GPS, SMS and WhatsApp Cloud webhooks need no profile: the web service serves them when the feature is on in `config.toml` (`[location] enabled`, `[sms] enabled`, `[whatsapp] enabled`); the wizard does this for location. The browser container requires an x86-64 host, since Chrome has no ARM packages. `signaling` needs its registration in place before the first boot -- see above.
 
 ## Configuration after first start
 
 `/data/config/config.toml` is yours: nothing regenerates it. Edit it and restart:
 
 ```bash
-docker compose restart daemon web webhooks   # webhooks for location or SMS
+docker compose restart daemon web
 ```
 
 A credential is a file under `docker/secrets/`; replace it and restart. A release that adds or renames a config key changes nothing until you edit the file; the CHANGELOG says what to write. See [Docker deployment](../deployment/docker.md) for the settings that matter on this stack.
 
-## Differences from bare metal
+## The sandbox
 
-| Aspect | Docker | Bare metal |
-|---|---|---|
-| Task sandbox | bubblewrap, per user, under the shipped seccomp profile | bubblewrap, per user |
-| Network proxy | CONNECT proxy with domain allowlist (the default `istota setup` leaves) | CONNECT proxy with domain allowlist |
-| Users | First admin ensured at boot; more with `istota user ensure` | Multi-user from config |
-| Nextcloud | Bundled (new instance) | Connects to existing instance |
-| Backups | Your responsibility (volume backups) | Ansible sets up cron-based DB backups |
-| Python extras | All installed | Configurable per feature |
-| Devbox | Not shipped; the skill cannot run here | Available |
-
-The `daemon` service carries the run contract that lets bubblewrap work inside the container (a seccomp profile, an AppArmor profile, `systempaths=unconfined`, no capabilities after a short root phase). [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) has the details and why the stack belongs on a host that runs nothing else.
+The `daemon` service carries the run contract that lets bubblewrap work inside the container (a seccomp profile, an AppArmor profile, `systempaths=unconfined`, no capabilities after a short root phase), so every task runs sandboxed per user, with the network allowlist on. That grant is only acceptable on a host that runs nothing else, which is why a server install is a dedicated machine. [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) has the details.
 
 ## Next steps
 

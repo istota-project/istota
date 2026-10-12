@@ -187,6 +187,6 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_WHATSAPP_APP_SECRET` | `whatsapp.cloud.app_secret` |
 | `ISTOTA_WHATSAPP_VERIFY_TOKEN` | `whatsapp.cloud.verify_token` |
 
-The three WhatsApp names kept their un-nested spelling when the block moved under `cloud`, so an existing `secrets.env` keeps working across that upgrade. Each variable is listed in full rather than as a shared prefix and a list of suffixes: this is the page you reach by searching for the variable already sitting in your `secrets.env`, and a suffix matches nothing.
+The three WhatsApp names kept their un-nested spelling when the block moved under `cloud`, so an existing environment file keeps working across that upgrade. Each variable is listed in full rather than as a shared prefix and a list of suffixes: this is the page you reach by searching for a variable already sitting in your environment, and a suffix matches nothing.
 
 See [credentials](../configuration/credentials.md) for what each override covers and the full env var → config mapping.

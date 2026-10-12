@@ -1464,23 +1464,21 @@ class TestAdminStats:
             assert re.match(iso_re, job["last_success_at"])
 
     async def test_admin_stats_storage_backups(self, tmp_path):
-        """Storage card must reflect actual backup files alongside the DB."""
-        import os
+        """Storage card reports db_backup's own snapshots (ISSUE-708).
+
+        Two real runs on two days: the count is the dated snapshot dirs, the
+        timestamp is the last-run record db_backup persists.
+        """
+        from datetime import datetime, timezone
+
+        from istota.maintenance import db_backup
         config = self._config_with_admin(tmp_path)
-        backups = config.db_path.parent / "backups"
-        (backups / "daily").mkdir(parents=True)
-        (backups / "weekly").mkdir(parents=True)
-        old = backups / "daily" / "istota-2026-05-03_020000.db.gz"
-        mid = backups / "daily" / "istota-2026-05-04_020000.db.gz"
-        new = backups / "weekly" / "istota-2026-05-05_020000.db.gz"
-        for p in (old, mid, new):
-            p.write_bytes(b"x")
-        # Force distinct mtimes so "latest" is unambiguous.
-        os.utime(old, (1714694400, 1714694400))   # 2024-05-03 UTC
-        os.utime(mid, (1714780800, 1714780800))   # 2024-05-04 UTC
-        os.utime(new, (1714867200, 1714867200))   # 2024-05-05 UTC
-        # Stray non-backup file must be ignored.
-        (backups / "daily" / "README.txt").write_text("notes")
+        db_backup.backup_databases(config, today="2026-05-04")
+        db_backup.backup_databases(config, today="2026-05-05")
+        recorded = db_backup.last_backup_time(config)
+        assert recorded > 0
+        expected = datetime.fromtimestamp(recorded, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
 
         app = _patch_app(config)
         transport = ASGITransport(app=app)
@@ -1488,14 +1486,24 @@ class TestAdminStats:
             cookies = await self._login(client, "alice")
             resp = await client.get("/istota/api/admin/stats", cookies=cookies)
             data = resp.json()
-            assert data["storage"]["backups_count"] == 3
-            assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
-                            data["storage"]["last_backup"])
-            assert data["storage"]["last_backup"].startswith("2024-05-05T")
+            assert data["storage"]["backups_count"] == 2
+            assert data["storage"]["last_backup"] == expected
 
-    async def test_admin_stats_storage_backups_missing_dir(self, tmp_path):
-        """No backups dir → zero count, null timestamp, no exception."""
+    async def test_admin_stats_storage_backups_none_taken(self, tmp_path):
+        """No good snapshot → zero count, null timestamp. An empty dated dir
+        from a failed run does not count, and the deleted Ansible role's
+        ``backups/{daily,weekly}/*.db.gz`` layout is not read any more."""
+        from istota.maintenance import db_backup
         config = self._config_with_admin(tmp_path)
+        # A run that snapshots nothing still leaves its (empty) dated dir.
+        import dataclasses
+        nothing_to_back_up = dataclasses.replace(
+            config, db_path=tmp_path / "absent" / "istota.db", users={})
+        db_backup.backup_databases(nothing_to_back_up, today="2026-05-04")
+        assert (db_backup.backup_destination(config) / "2026-05-04").is_dir()
+        legacy = config.db_path.parent / "backups" / "daily"
+        legacy.mkdir(parents=True)
+        (legacy / "istota-2026-05-03_020000.db.gz").write_bytes(b"x")
         app = _patch_app(config)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="https://example.com") as client:
@@ -5579,13 +5587,3 @@ class TestBasemapEndpoint:
         assert resp.status_code == 200
         body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
         assert "api_key=typed-in-the-ui" in body["dark"]
-
-
-@_needs_web_deps
-def test_the_old_module_path_serves_the_same_app():
-    """Units rendered before the `webui/` move start uvicorn on the old path,
-    and the auto-update cron restarts them without re-rendering."""
-    import istota.web_app as stub  # move-modules: keep
-    import istota.webui.app as app_module
-
-    assert stub.app is app_module.app

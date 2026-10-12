@@ -22,8 +22,8 @@ ordinary `remote.origin.url` case passes against an implementation that leaks
 through all six, which is what the first one did.
 
 Detection matches a userinfo *password* or a known token prefix, deliberately,
-not a bare `@` — the same rule the deploy side settled on in ISSUE-258
-(`deploy/ansible/tasks/main.yml`, `urlsplit('password')`). `git@github.com:x/y`
+not a bare `@` — the same rule the bare-metal role settled on in ISSUE-258
+(`urlsplit('password')` in its tasks, deleted in 6796ae4a). `git@github.com:x/y`
 and `https://oauth2@host/x` both contain an `@` and neither carries a secret.
 """
 
@@ -74,8 +74,8 @@ GIT_ISOLATION = {
 # a documentation placeholder, so the repo's own scanners read this as an
 # example rather than as a leak.
 FAKE_TOKEN = "glpat-xxxxxxxxxxxxxxxxxxxx"
-FAKE_URL = f"https://oauth2:{FAKE_TOKEN}@gitlab.com/cynium/istota.git"
-CLEAN_URL = "https://gitlab.com/cynium/istota.git"
+FAKE_URL = f"https://oauth2:{FAKE_TOKEN}@gitlab.com/acme/istota.git"
+CLEAN_URL = "https://gitlab.com/acme/istota.git"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -177,7 +177,7 @@ class TestUrlCredential:
         assert url_credential(url) == token
 
     @pytest.mark.parametrize("url", [
-        "https://gitlab.com/cynium/nebula.git",          # no userinfo at all
+        "https://gitlab.com/acme/nebula.git",          # no userinfo at all
         "git@github.com:cynium/istota.git",              # scp-like, no scheme
         "ssh://git@host/path.git",                       # username, no password
         "https://oauth2@gitlab.com/x.git",               # boilerplate username
@@ -239,7 +239,7 @@ class TestStripUrlCredential:
         )
 
     @pytest.mark.parametrize("url", [
-        "https://gitlab.com/cynium/nebula.git",
+        "https://gitlab.com/acme/nebula.git",
         "git@github.com:cynium/istota.git",
         "ssh://git@host/path.git",
         "https://oauth2@gitlab.com/x.git",

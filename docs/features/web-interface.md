@@ -42,7 +42,7 @@ istota user ensure alice --display-name Alice --email alice@example.com
 istota auth add alice --email alice@example.com --print-link
 ```
 
-Add `alice` to `/etc/istota/admins` before inviting more users. An empty allowlist grants every user task-admin privileges for historical compatibility, while the web admin pane requires an explicit entry. Doctor fails this combination when multiple email identities exist. The printed enrolment link opens a password form and signs the user in on submission. Set a password for the first administrator so mail failure cannot prevent login. `istota auth set-password alice` prompts privately; `--password-stdin` reads one line for automation. There is no password argument on the command line.
+Add `alice` to the admins file (`/srv/app/istota/config/admins` on a server, `ISTOTA_ADMINS_FILE` elsewhere) before inviting more users. An empty allowlist grants every user task-admin privileges for historical compatibility, while the web admin pane requires an explicit entry. Doctor fails this combination when multiple email identities exist. The printed enrolment link opens a password form and signs the user in on submission. Set a password for the first administrator so mail failure cannot prevent login. `istota auth set-password alice` prompts privately; `--password-stdin` reads one line for automation. There is no password argument on the command line.
 
 The login page has password and email-code forms whenever email is enabled. Asking for a code opens a pending sign-in tied to that browser: the browser keeps a secret in its session, and the emailed 6-digit code works only together with it. The code is valid for 10 minutes by default and dies after five wrong guesses. Asking again from the same browser retires the earlier code only once a new one is sent, so a request over the mail budget leaves the last code working. Wrong codes are also capped at 20 per address per day across every browser, because anyone can ask for a code for any address; `istota auth sign-in-code` clears that cap. The mail carries no link, so opening it in another app or on another device changes nothing, and the iOS app's sign-in completes in the app. The code sits in the subject and on its own line, which lets Apple's one-time-code autofill offer it from Mail. Enrolment and reset links set a password and sign in on submission, with default lifetimes of seven days and one hour. Anonymous reset links and sign-in codes share a send budget of three mails per address per hour and return the same page for unknown, disabled and throttled addresses. Passwordless identities can sign in by code; they are not incomplete accounts.
 
@@ -65,11 +65,11 @@ Settings has a Security card for email sessions. Password users supply their cur
 
 Run `istota doctor --only web.auth` for method source, hostname, mail configuration, identity counts, admin allowlist, proxy IP throttle and session-secret checks. Mail configuration checks do not send a probe. The IP verification budget is inactive while `web.trusted_proxy_hops` is zero. A positive value selects the client address from the forwarded chain; only enable it when the backend cannot be reached around those proxies.
 
-The shipped proxies suppress access logs for `/istota/auth/set-password`; both web launchers disable uvicorn access logs. An outer proxy must do the same or omit query strings, since the token grants access. Authentication pages are not cached and send no referrer. `["none"]` is reserved for the direct `istota serve` loopback launcher without a public reverse proxy; Docker, Ansible and direct uvicorn refuse it.
+The shipped proxies suppress access logs for `/istota/auth/set-password`; both web launchers disable uvicorn access logs. An outer proxy must do the same or omit query strings, since the token grants access. Authentication pages are not cached and send no referrer. `["none"]` is reserved for the direct `istota serve` loopback launcher without a public reverse proxy; The stack and direct uvicorn refuse it.
 
 ## User settings editor
 
-Admin → Users opens a settings editor for one user: click the user's row, or pick "Edit settings" from its menu. A user you add from the same page opens in the editor once it is created. The editor sets the per-user fields that otherwise come from `istota user ensure` or the Ansible `istota_users` inventory, so a new person can be set up without a deploy. It does not edit the admin list (the admins file), resources, secrets, or the preferences a user owns on their own `/settings` page, such as routing and default rooms.
+Admin → Users opens a settings editor for one user: click the user's row, or pick "Edit settings" from its menu. A user you add from the same page opens in the editor once it is created. The editor sets the per-user fields that otherwise come from `istota user ensure` (or an inventory that runs it), so a new person can be set up without a deploy. It does not edit the admin list (the admins file), resources, secrets, or the preferences a user owns on their own `/settings` page, such as routing and default rooms.
 
 The sections are:
 
@@ -82,7 +82,7 @@ The sections are:
 
 The footer Save sends only the fields you changed, and either all of them are written or none are. A refused field is marked with the server's reason.
 
-**Fields set by the deployment are locked.** With `istota_user_profile_mode: enforce` (the default), every field the inventory names for a user shows "Set by deployment", cannot be edited, and is refused with 409 by the API. The hint names the inventory key to change instead. The user's own `/settings` page shows the same fields as "Set by your administrator". Set the mode to `seed` to hand these fields to the web UI; see [Ansible: who owns a profile field](../deployment/ansible.md#who-owns-a-profile-field-istota_user_profile_mode).
+**Fields set by the deployment are locked.** Every field an `istota user ensure --managed` call sets for a user shows "Set by deployment", cannot be edited, and is refused with 409 by the API. The user's own `/settings` page shows the same fields as "Set by your administrator". `istota user ensure --name <id> --seed` hands them back to the web UI. The [Ansible management role](../deployment/ansible.md) passes `--managed` for a user whose inventory entry sets `managed: true`.
 
 **Addresses and numbers belong to one user.** An email address, SMS number or WhatsApp number that another user already holds is refused, and the refusal names that user. An address counts as held when it is in another user's email addresses or is their login email. A duplicate stored before this check is not refused on resubmit, and `istota doctor --only users.email_address_uniqueness` lists any that remain. A user editing their own addresses on `/settings` gets the same refusal without the holder's name.
 
@@ -111,7 +111,7 @@ The redirect URI must exactly match the callback route. If you're running behind
 
 ### 2. Configure istota
 
-In your `config.toml` (or via Ansible vars):
+In your `config.toml` (`istota setup` asks for these when you connect a Nextcloud):
 
 ```toml
 [web]
@@ -139,17 +139,7 @@ Optional overrides (defaults derive from `oauth2_provider`):
 | `oauth2_userinfo_endpoint` | Server-to-server userinfo URL. Same Docker pattern. |
 | `oauth2_redirect_uri` | Explicit redirect URI override; otherwise derived from request host + scheme. |
 
-When using the Ansible role, set these in your vars:
-
-```yaml
-istota_web_enabled: true
-istota_web_oauth2_provider: "https://cloud.example.com"
-istota_web_oauth2_client_id: "your-client-id"
-istota_web_oauth2_client_secret: "{{ vault_istota_oauth2_secret }}"
-istota_web_secret_key: "{{ vault_istota_web_secret }}"
-```
-
-Secrets stored in `secrets.env` (via `istota_use_environment_file: true`) are injected as env vars by systemd, keeping them out of the config file.
+On a server the two secrets are files under `/srv/app/istota/secrets/` (`istota_web_oauth2_client_secret`, `istota_web_session_secret_key`), which the stack exports as those environment variables, keeping them out of the config file.
 
 ### 3. Build the frontend
 
@@ -158,13 +148,13 @@ uv sync --extra web
 cd web && npm install && npm run build
 ```
 
-The Ansible role handles this automatically when `istota_web_enabled` is set and `istota_nodejs_enabled` is true.
+The image build does this, so a server needs no step here.
 
 ### 4. Reverse proxy
 
 The web app listens on `127.0.0.1:{port}` and should not be exposed directly. Put it behind nginx (or your preferred reverse proxy).
 
-The Ansible role generates an nginx config automatically. The general location is below. Email login also requires the exact token location so query strings never enter access logs:
+The stack's nginx is already configured. For your own proxy, the general location is below. Email login also requires the exact token location so query strings never enter access logs:
 
 ```nginx
 location = /istota/auth/set-password {
@@ -193,13 +183,7 @@ TLS is required — session cookies are set with `secure=true` and the registere
 uvicorn istota.webui.app:app --no-access-log --host 127.0.0.1 --port 8766
 ```
 
-The Ansible role installs this as the `istota-web` systemd service:
-
-```bash
-systemctl enable --now istota-web
-systemctl status istota-web
-journalctl -u istota-web -f
-```
+On a server this is the stack's `web` service; its logs are `istota-stack compose logs -f web`.
 
 ## How Nextcloud authentication works
 
@@ -242,7 +226,7 @@ A **notification bell** sits in the app bar on every page, not only in the chat.
 
 **Money**: accounting dashboard with ledger queries, transaction management, and reports. The Business section is **Work | Invoices | Clients**: Work is a full CRUD surface over the file-based work-entry store (entries addressed by stable id, with per-entry etags so a concurrent agent edit conflicts rather than being silently reverted), and Clients plus the money settings page are the CRUD surface over the invoicing config — clients, entities and services — so nothing about invoicing needs the CLI. Backed by the in-process `money` module (no external service); also covers quarterly tax estimates and portfolio tracking. See [Money](money.md). Requires the `money` module to be enabled (on by default).
 
-**Admin**: read-only system health (task counts by source, worker pool, per-module DB stats, models pane showing the active brain and its resolved role tiers). A banner surfaces a degraded primary brain — when the availability breaker is open, automatic work is being skipped or routed to the fallback. Gated by the `/etc/istota/admins` allowlist, which fails closed when empty.
+**Admin**: read-only system health (task counts by source, worker pool, per-module DB stats, models pane showing the active brain and its resolved role tiers). A banner surfaces a degraded primary brain — when the availability breaker is open, automatic work is being skipped or routed to the fallback. Gated by the admins file, which fails closed when empty.
 
 A **Claude Code subscription** card carries the plan's rate-limit windows — a tile per window, tinted by the configured warn and high thresholds, plus an Extra usage tile where pay-as-you-go credits are enabled. It is the budget the cost column below it cannot report, since pricing plan tokens at list rates would be inventing an invoice. A footer gives the reading's age and, where the last fetch failed, the error behind the stale number. The card is **absent** rather than showing an error when there is no reading to draw — on a deployment that cannot use the subscription it never polls at all. See [the subscription reading](usage.md#the-subscription-reading).
 
@@ -313,4 +297,4 @@ The SvelteKit build is served as static files for all other `/istota/*` paths.
 
 ## Deployment
 
-The Ansible role handles the Node.js build when `istota_web_enabled` is set. The web app runs as a separate systemd service alongside the scheduler.
+The image builds the frontend. The web app runs as its own compose service, `web`, beside the scheduler's `daemon`.

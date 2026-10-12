@@ -94,37 +94,9 @@ Telnyx expects the webhook acknowledgement within two seconds. Istota verifies, 
 
 See Telnyx's [inbound messaging guide](https://developers.telnyx.com/docs/messaging/messages/receive-message), [webhook event guide](https://developers.telnyx.com/docs/messaging/messages/receiving-webhooks), and [send guide](https://developers.telnyx.com/docs/messaging/messages/send-message).
 
-## Docker
+## Deployment
 
-Copy `docker/.env.example`, set the common and provider-qualified `ISTOTA_SMS_*` values, and add `sms` to `COMPOSE_PROFILES`. The `webhooks` service belongs to both the `location` and `sms` profiles, so enabling both still starts one process. Nginx exposes `/webhooks/`; the receiver port is internal to the Compose network.
-
-```dotenv
-COMPOSE_PROFILES=sms
-ISTOTA_SMS_ENABLED=true
-ISTOTA_LOCATION_ENABLED=false
-ISTOTA_SMS_PROVIDER=twilio
-ISTOTA_SMS_SERVICE_NUMBERS=+15551230000
-ISTOTA_SMS_DEFAULT_SENDER_NUMBER=+15551230000
-```
-
-Restart `istota`, `webhooks`, and `nginx` after changing these values. The main service renders `config.toml`; the webhook service waits for that render before accepting requests.
-
-## Ansible
-
-Set the matching `istota_sms_*` role variables. Provider fields are written to the root-readable `secrets.env` file by default and are loaded by the scheduler, web app, and webhook receiver. The role starts the receiver and exposes `/webhooks/` when location is on, SMS is on, or a complete inactive provider block remains for callbacks.
-
-```yaml
-istota_sms_enabled: true
-istota_sms_provider: telnyx
-istota_sms_service_numbers:
-  - "+15551230000"
-istota_sms_default_sender_number: "+15551230000"
-istota_sms_telnyx_api_key: "{{ vault_sms_telnyx_api_key }}"
-istota_sms_telnyx_public_key: "{{ vault_sms_telnyx_public_key }}"
-istota_sms_telnyx_messaging_profile_id: "{{ vault_sms_telnyx_profile_id }}"
-```
-
-Vault provider values in inventory. Do not put them in a public playbook or commit them to the repository.
+Put the `[sms]` block and its provider block in `config.toml` and restart the stack. On a server the three Telnyx credentials can instead be files under `/srv/app/istota/secrets/` (`istota_sms_telnyx_api_key`, `istota_sms_telnyx_public_key`, `istota_sms_telnyx_messaging_profile_id`), which keeps them out of the config file. The web service serves `/webhooks/sms/twilio` and `/webhooks/sms/telnyx` when SMS is on, or when a complete inactive provider block remains for callbacks; no compose profile is needed. Nginx is the public endpoint.
 
 ## Switching providers
 

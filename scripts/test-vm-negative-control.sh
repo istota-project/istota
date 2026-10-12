@@ -17,9 +17,11 @@
 # Controls, grouped by the stack mode they run in:
 #
 #   local:     mac-home-mounted (row 7), secret-owned-by-root (row 12),
-#              apparmor-unconfined (row 20), no-egress-unit (row 10),
+#              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
-#              browser-on-default-network (row 17)
+#              browser-on-default-network (row 17),
+#              update-without-up, update-without-reprovision (istota-stack update),
+#              rollback-without-reprovision (istota-stack rollback)
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
@@ -80,7 +82,12 @@ control apparmor-unconfined \
     "row 20: the daemon service with apparmor=unconfined" \
     "$C::TestTheContainerIsConfinedByAppArmor::test_the_istota_profile_is_in_force" \
     "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_core_pattern" \
-    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_the_sysrq_trigger"
+    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_the_sysrq_trigger" \
+    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_bind_proc_sys_kernel"
+
+control apparmor-unnarrowed \
+    "row 20: the istota profile without its bind and sysfs mount denies" \
+    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_bind_proc_sys_kernel"
 
 D="$VM/test_devbox.py"
 control no-egress-unit \
@@ -98,6 +105,18 @@ control exec-socket-symlink \
 control browser-on-default-network \
     "row 17: the browser container on the default network" \
     "$VM/test_browser.py::TestTheBrowserReachesNoPublishedPort::test_the_browser_reaches_nothing_on_the_default_network_by_address"
+
+U="$VM/test_update.py::TestAnUpdateToAnotherRef"
+control update-without-up \
+    "istota-stack update: .env names the new ref and nothing starts it" \
+    "$U::test_the_stack_runs_the_new_tags_image_and_is_healthy"
+control update-without-reprovision \
+    "istota-stack update: the stack moves and provision.sh never runs from the new checkout" \
+    "$U::test_the_host_runs_the_new_refs_istota_stack"
+R="$VM/test_update.py::TestARollbackToTheRelease"
+control rollback-without-reprovision \
+    "istota-stack rollback: the stack returns and provision.sh never runs from the older checkout" \
+    "$R::test_a_rollback_returns_the_hosts_istota_stack"
 
 control certbot-disabled \
     "row 19: certbot masked before the first issuance" \

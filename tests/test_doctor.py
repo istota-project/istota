@@ -806,13 +806,14 @@ class TestGws:
         assert r.status == FAIL
         assert "gws" in r.detail
 
-    def test_finds_the_roles_install_off_path(self, make_config, tmp_path, monkeypatch):
-        """The role puts gws in ~/.local/bin, which the web unit's PATH lacks."""
+    def test_a_gws_off_path_is_not_looked_for(self, make_config, tmp_path, monkeypatch):
+        """The image installs gws on PATH. ~/.local/bin was where the old
+        Ansible role put it, and nothing installs it there any more."""
         monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
         monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path))
         _fake_bin(tmp_path / ".local" / "bin" / "gws", "gws 0.22.5")
         r = run_checks(self._gws_config(make_config), only=("runtime.gws",))[0]
-        assert r.status == OK, r.detail
+        assert r.status == FAIL, r.detail
 
     def test_a_working_gws_passes(self, make_config, tmp_path, monkeypatch):
         _which_only(monkeypatch, "gws", _fake_bin(tmp_path / "bin" / "gws", "gws 0.22.5"))
@@ -3229,14 +3230,14 @@ class TestWrapperShadowing:
         assert str(real) in gh.detail
         assert gh.remedy
 
-    def test_the_ansible_shape_is_ok(self, make_config, tmp_path, monkeypatch):
-        """The role installs the real binaries into /usr/bin and renders those
-        paths into config.toml, so `which` finding them is correct."""
+    def test_the_configured_binary_on_path_is_ok(self, make_config, tmp_path, monkeypatch):
+        """A real binary on PATH that is also the one config.toml names is the
+        binary the wrapper would exec, so `which` finding it is correct."""
         installed = _fake_bin(tmp_path / "usr-bin" / "gh")
         _which_only(monkeypatch, "gh", installed)
         gh = self._gh(_dev_config(make_config, tmp_path, gh_bin_path=str(installed)))
         assert gh.status == OK
-        assert "Ansible shape" in gh.detail
+        assert "the binary this deployment resolved" in gh.detail
 
     def test_the_real_wrapper_on_path_is_ok(self, make_config, tmp_path, monkeypatch):
         """Copied from `forge_cli.py` itself, not hand-written to match: the

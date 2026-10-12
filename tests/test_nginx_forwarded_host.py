@@ -6,7 +6,7 @@ trailing slash, and Starlette builds that `Location` as
 is entirely whatever the reverse proxy chose to forward. Both halves of that
 authority were wrong.
 
-**The port.** All four nginx sources forwarded ``Host: $host``. `$host` is the
+**The port.** Every nginx source forwarded ``Host: $host``. `$host` is the
 client's host *normalized*, and the normalization strips the port, so a stack
 published on anything but the scheme's default port handed the upstream a bare
 hostname. On the Docker stack at ``:8282``, a direct navigation to
@@ -38,13 +38,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
-#: Every place the repo writes a `proxy_set_header Host`. Two are configs that
-#: get deployed; two are documentation an operator copies into their own nginx,
+#: Every place the repo writes a `proxy_set_header Host`. Two are configs the
+#: stack runs; two are documentation an operator copies into their own nginx,
 #: which is a source of the same defect in a deployment this repo never sees.
 HOST_HEADER_SOURCES = {
     "docker": REPO / "docker" / "nginx" / "istota.conf.template",
     "testbed-nextcloud": REPO / "testbed" / "compose" / "nextcloud-locations.conf",
-    "ansible": REPO / "deploy" / "ansible" / "templates" / "istota.conf.j2",
     "docs-web": REPO / "docs" / "features" / "web-interface.md",
     "docs-location": REPO / "docs" / "features" / "location.md",
 }
@@ -68,12 +67,10 @@ class TestTheProxiesForwardThePort:
         assert set(found) == {"$http_host"}, f"{name}: forwards {sorted(set(found))}"
 
     def test_the_scheme_redirect_still_normalizes_the_port_away(self):
-        """The Ansible template's port-80 block is the one place `$host` is
-        right: it redirects *to* the scheme default, where carrying a port over
-        would produce `https://host:80/...`. A sweep of this file must not
-        take it with the rest."""
-        text = HOST_HEADER_SOURCES["ansible"].read_text()
-        assert "return 301 https://$host$request_uri;" in text
+        """The direct mode's port-80 block is the one place `$host` is right:
+        it redirects *to* the scheme default, where carrying a port over would
+        produce `https://host:80/...`. A sweep of this file must not take it
+        with the rest."""
         direct = (REPO / "docker" / "nginx" / "direct-http.conf").read_text()
         assert "return 301 https://$host$request_uri;" in direct
 

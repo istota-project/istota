@@ -39,7 +39,7 @@ what lets a handler emit-and-exit from inside ``run_skill_cli``'s ``try``
 without the epilogue catching it and rewriting the envelope, and it is why the
 status check outside the ``try`` needs no guard against re-entry.
 
-The one deliberate non-consumer is ``istota/ocr_leaf.py``, which carries the
+The one deliberate non-consumer is ``istota/lib/ocr_leaf.py``, which carries the
 same epilogue and may not import it: that module's whole contract is that it
 imports the standard library, Pillow and pytesseract and nothing from
 ``istota``, pinned by

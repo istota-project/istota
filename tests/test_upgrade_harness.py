@@ -195,12 +195,12 @@ class TestTheDriver:
         from .image.test_upgrade import SHAPES
 
         driver = self.DRIVER.read_text()
-        match = re.search(r"^\s*(code\|volume\|both)\)\s*;;", driver, re.M)
+        match = re.search(r"^\s*(volume)\)\s*;;", driver, re.M)
         assert match, (
             "could not find the `--shape` validation case in "
             f"{self.DRIVER}; if it moved, this guard is no longer watching it"
         )
-        accepted = set(match.group(1).split("|")) - {"both"}
+        accepted = set(match.group(1).split("|"))
         assert accepted == set(SHAPES), (
             f"the driver accepts {sorted(accepted)} but tests/image/test_upgrade.py "
             f"knows {sorted(SHAPES)}. A shape in one and not the other makes the "

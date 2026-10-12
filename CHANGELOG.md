@@ -101,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.
+
+- **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images, runs the setup wizard and starts the stack. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
+
 - **The Docker stack's scheduler service is called `daemon`.** Its container is `istota-daemon-1` and its image `istota:<tag>`, in place of `istota-istota-1` and `istota-istota:<tag>`; the browser, devbox and WhatsApp sidecar images keep their names.
 
   **Upgrade note:** `istota-stack update` removes the old container on its own. By hand, run `docker compose up -d --remove-orphans` once after building, and use `daemon` wherever a command named the `istota` service (`docker compose exec daemon istota-drop istota doctor`). The `istota_data` volume is unchanged.
@@ -172,6 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The bare-metal Ansible install is gone.** A server now runs Istota on a machine dedicated to it, set up by `host/provision.sh` and updated with `istota-stack update`; the optional role in `ansible/` manages such a machine from an inventory. An existing bare-metal install moves over with `istota-stack import-bare-metal`. The standalone Docker helper scripts and the separate browser compose file went with it, and so did the old module paths the bare-metal units started, which the last release still kept.
+
 - **The `!check` chat command is gone.** Sent from web chat it ran the health check inside the web container, which lacks the daemon's sandbox and devbox sockets, so it reported failures that were not there. Run `istota doctor` on the host, or open the admin Health pane, which shows the daemon's own runs.
 
 - **The Docker stack no longer runs its own Nextcloud.** The workspace is a local directory by default, and full Nextcloud integration now points istota at a Nextcloud you run yourself, mounted on the VM. A stack running full integration refuses to start until that mount is up, so nothing is written into an unmounted folder.
@@ -184,6 +190,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Reading an uploaded lab result, visit document or immunization list now happens in the daemon's sandbox.** On the Docker stack the extraction ran in the web container, which cannot build a sandbox, so on the Claude Code brains the model's file access was not confined there. The upload pages now hand the document to the daemon and wait for its answer.
+
+- **The admin dashboard's backup count and last-backup time are real again.** They read a backup layout that only the removed bare-metal deployment wrote, so every current install showed 0 backups and no last backup while backups were being taken. They now report the daily database snapshots: how many dated snapshots are kept, and when the last successful one ran.
+
+- **`istota-stack rollback` puts the host's scripts and units back too.** It returned the stack to the previous release but left `istota-stack` itself, the systemd units and the host scripts at the newer one. Like an update, a rollback now runs the restored checkout's `host/provision.sh` when the host's provisioning inputs differ from the last run.
+
+- Turning off an optional part of the stack, such as the browser, now stops it. Its container kept running after the change, unwatched and still holding memory, until it was removed by hand; the next start or update of the stack now removes it.
 
 - **Notices raised from the web app now reach you on WhatsApp.** The notice that an administrator changed your contact details, and the one asking you to reconnect Nextcloud or Garmin, were sent from the web container, which has no WhatsApp connection. On a paired WhatsApp session the send failed, and that notice could never be sent to WhatsApp again. The daemon sends them now; the notices in the bell are unchanged.
 
@@ -287,6 +299,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ledger writes, workspace file copies and old-layout memory migrations no longer fail with an input/output error on a Nextcloud workspace mount that rejects extended-attribute calls (#694). The containerized stack's mount answers those calls with an error for every file, and each of these copies asked for the file's extended attributes, so a ledger backup failed before the write it protects. They now copy the contents and permissions only, and `istota doctor` warns when the mount behaves this way, since `cp -a` and `cp -p` out of the workspace still fail there.
 
 ### Security
+
+- **The container's AppArmor profile no longer lets a root shell in the container re-expose kernel settings by bind-mounting them.** It now refuses bind and move mounts out of `/proc` and `/sys` and any new `sysfs` mount, which the task sandbox never needs. Reload the profile on the host after updating (`istota-stack update` does it).
+
+- **The daemon container's startup gives up its mount privilege before it touches stored data.** The short root phase needs that privilege only to set up per-task resource limits, and now drops it straight after, so the one-time ownership fix over the state volume runs without it. The container exits at startup if the privilege is still held.
 
 - **The Docker stack now runs every task in the bubblewrap sandbox, and the daemon no longer runs as root.** The `istota` service ships a seccomp profile (Docker's default plus the calls bwrap needs, still denying `bpf`, `keyctl`, `userfaultfd` and the rest) and an AppArmor profile, drops every capability after a short root phase, runs with a read-only root filesystem, and gives each task its own cgroup with `memory.max`, `pids.max` and `cpu.max`. The daemon, `web` and `webhooks` run as uid 10001, and on Linux a daemon whose sandbox cannot be built refuses to start rather than running tasks unconfined.
 
@@ -3428,61 +3444,61 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.43.0...main
-[0.43.0]: https://gitlab.com/cynium/istota/-/releases/v0.43.0
-[0.42.0]: https://gitlab.com/cynium/istota/-/releases/v0.42.0
-[0.41.1]: https://gitlab.com/cynium/istota/-/releases/v0.41.1
-[0.41.0]: https://gitlab.com/cynium/istota/-/releases/v0.41.0
-[0.40.1]: https://gitlab.com/cynium/istota/-/releases/v0.40.1
-[0.40.0]: https://gitlab.com/cynium/istota/-/releases/v0.40.0
-[0.39.0]: https://gitlab.com/cynium/istota/-/releases/v0.39.0
-[0.38.0]: https://gitlab.com/cynium/istota/-/releases/v0.38.0
-[0.37.0]: https://gitlab.com/cynium/istota/-/releases/v0.37.0
-[0.36.0]: https://gitlab.com/cynium/istota/-/releases/v0.36.0
-[0.35.0]: https://gitlab.com/cynium/istota/-/releases/v0.35.0
-[0.34.0]: https://gitlab.com/cynium/istota/-/releases/v0.34.0
-[0.33.0]: https://gitlab.com/cynium/istota/-/releases/v0.33.0
-[0.32.0]: https://gitlab.com/cynium/istota/-/releases/v0.32.0
-[0.31.1]: https://gitlab.com/cynium/istota/-/releases/v0.31.1
-[0.31.0]: https://gitlab.com/cynium/istota/-/releases/v0.31.0
-[0.30.0]: https://gitlab.com/cynium/istota/-/releases/v0.30.0
-[0.29.0]: https://gitlab.com/cynium/istota/-/releases/v0.29.0
-[0.28.0]: https://gitlab.com/cynium/istota/-/releases/v0.28.0
-[0.27.0]: https://gitlab.com/cynium/istota/-/releases/v0.27.0
-[0.26.3]: https://gitlab.com/cynium/istota/-/releases/v0.26.3
-[0.26.2]: https://gitlab.com/cynium/istota/-/releases/v0.26.2
-[0.26.1]: https://gitlab.com/cynium/istota/-/releases/v0.26.1
-[0.26.0]: https://gitlab.com/cynium/istota/-/releases/v0.26.0
-[0.25.0]: https://gitlab.com/cynium/istota/-/releases/v0.25.0
-[0.24.0]: https://gitlab.com/cynium/istota/-/releases/v0.24.0
-[0.23.0]: https://gitlab.com/cynium/istota/-/releases/v0.23.0
-[0.22.0]: https://gitlab.com/cynium/istota/-/releases/v0.22.0
-[0.21.0]: https://gitlab.com/cynium/istota/-/releases/v0.21.0
-[0.20.0]: https://gitlab.com/cynium/istota/-/releases/v0.20.0
-[0.19.0]: https://gitlab.com/cynium/istota/-/releases/v0.19.0
-[0.18.0]: https://gitlab.com/cynium/istota/-/releases/v0.18.0
-[0.17.0]: https://gitlab.com/cynium/istota/-/releases/v0.17.0
-[0.16.0]: https://gitlab.com/cynium/istota/-/releases/v0.16.0
-[0.15.1]: https://gitlab.com/cynium/istota/-/releases/v0.15.1
-[0.15.0]: https://gitlab.com/cynium/istota/-/releases/v0.15.0
-[0.14.0]: https://gitlab.com/cynium/istota/-/releases/v0.14.0
-[0.13.0]: https://gitlab.com/cynium/istota/-/releases/v0.13.0
-[0.12.0]: https://gitlab.com/cynium/istota/-/releases/v0.12.0
-[0.11.1]: https://gitlab.com/cynium/istota/-/releases/v0.11.1
-[0.11.0]: https://gitlab.com/cynium/istota/-/releases/v0.11.0
-[0.10.0]: https://gitlab.com/cynium/istota/-/releases/v0.10.0
-[0.9.0]: https://gitlab.com/cynium/istota/-/releases/v0.9.0
-[0.8.2]: https://gitlab.com/cynium/istota/-/releases/v0.8.2
-[0.8.1]: https://gitlab.com/cynium/istota/-/releases/v0.8.1
-[0.8.0]: https://gitlab.com/cynium/istota/-/releases/v0.8.0
-[0.7.0]: https://gitlab.com/cynium/istota/-/releases/v0.7.0
-[0.6.1]: https://gitlab.com/cynium/istota/-/releases/v0.6.1
-[0.6.0]: https://gitlab.com/cynium/istota/-/releases/v0.6.0
-[0.5.0]: https://gitlab.com/cynium/istota/-/releases/v0.5.0
-[0.4.1]: https://gitlab.com/cynium/istota/-/releases/v0.4.1
-[0.4.0]: https://gitlab.com/cynium/istota/-/releases/v0.4.0
-[0.3.1]: https://gitlab.com/cynium/istota/-/releases/v0.3.1
-[0.3.0]: https://gitlab.com/cynium/istota/-/releases/v0.3.0
-[0.2.0]: https://gitlab.com/cynium/istota/-/releases/v0.2.0
-[0.1.1]: https://gitlab.com/cynium/istota/-/releases/v0.1.1
-[0.1.0]: https://gitlab.com/cynium/istota/-/releases/v0.1.0
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.43.0...main
+[0.43.0]: https://github.com/istota-project/istota/releases/tag/v0.43.0
+[0.42.0]: https://github.com/istota-project/istota/releases/tag/v0.42.0
+[0.41.1]: https://github.com/istota-project/istota/releases/tag/v0.41.1
+[0.41.0]: https://github.com/istota-project/istota/releases/tag/v0.41.0
+[0.40.1]: https://github.com/istota-project/istota/releases/tag/v0.40.1
+[0.40.0]: https://github.com/istota-project/istota/releases/tag/v0.40.0
+[0.39.0]: https://github.com/istota-project/istota/releases/tag/v0.39.0
+[0.38.0]: https://github.com/istota-project/istota/releases/tag/v0.38.0
+[0.37.0]: https://github.com/istota-project/istota/releases/tag/v0.37.0
+[0.36.0]: https://github.com/istota-project/istota/releases/tag/v0.36.0
+[0.35.0]: https://github.com/istota-project/istota/releases/tag/v0.35.0
+[0.34.0]: https://github.com/istota-project/istota/releases/tag/v0.34.0
+[0.33.0]: https://github.com/istota-project/istota/releases/tag/v0.33.0
+[0.32.0]: https://github.com/istota-project/istota/releases/tag/v0.32.0
+[0.31.1]: https://github.com/istota-project/istota/releases/tag/v0.31.1
+[0.31.0]: https://github.com/istota-project/istota/releases/tag/v0.31.0
+[0.30.0]: https://github.com/istota-project/istota/releases/tag/v0.30.0
+[0.29.0]: https://github.com/istota-project/istota/releases/tag/v0.29.0
+[0.28.0]: https://github.com/istota-project/istota/releases/tag/v0.28.0
+[0.27.0]: https://github.com/istota-project/istota/releases/tag/v0.27.0
+[0.26.3]: https://github.com/istota-project/istota/releases/tag/v0.26.3
+[0.26.2]: https://github.com/istota-project/istota/releases/tag/v0.26.2
+[0.26.1]: https://github.com/istota-project/istota/releases/tag/v0.26.1
+[0.26.0]: https://github.com/istota-project/istota/releases/tag/v0.26.0
+[0.25.0]: https://github.com/istota-project/istota/releases/tag/v0.25.0
+[0.24.0]: https://github.com/istota-project/istota/releases/tag/v0.24.0
+[0.23.0]: https://github.com/istota-project/istota/releases/tag/v0.23.0
+[0.22.0]: https://github.com/istota-project/istota/releases/tag/v0.22.0
+[0.21.0]: https://github.com/istota-project/istota/releases/tag/v0.21.0
+[0.20.0]: https://github.com/istota-project/istota/releases/tag/v0.20.0
+[0.19.0]: https://github.com/istota-project/istota/releases/tag/v0.19.0
+[0.18.0]: https://github.com/istota-project/istota/releases/tag/v0.18.0
+[0.17.0]: https://github.com/istota-project/istota/releases/tag/v0.17.0
+[0.16.0]: https://github.com/istota-project/istota/releases/tag/v0.16.0
+[0.15.1]: https://github.com/istota-project/istota/releases/tag/v0.15.1
+[0.15.0]: https://github.com/istota-project/istota/releases/tag/v0.15.0
+[0.14.0]: https://github.com/istota-project/istota/releases/tag/v0.14.0
+[0.13.0]: https://github.com/istota-project/istota/releases/tag/v0.13.0
+[0.12.0]: https://github.com/istota-project/istota/releases/tag/v0.12.0
+[0.11.1]: https://github.com/istota-project/istota/releases/tag/v0.11.1
+[0.11.0]: https://github.com/istota-project/istota/releases/tag/v0.11.0
+[0.10.0]: https://github.com/istota-project/istota/releases/tag/v0.10.0
+[0.9.0]: https://github.com/istota-project/istota/releases/tag/v0.9.0
+[0.8.2]: https://github.com/istota-project/istota/releases/tag/v0.8.2
+[0.8.1]: https://github.com/istota-project/istota/releases/tag/v0.8.1
+[0.8.0]: https://github.com/istota-project/istota/releases/tag/v0.8.0
+[0.7.0]: https://github.com/istota-project/istota/releases/tag/v0.7.0
+[0.6.1]: https://github.com/istota-project/istota/releases/tag/v0.6.1
+[0.6.0]: https://github.com/istota-project/istota/releases/tag/v0.6.0
+[0.5.0]: https://github.com/istota-project/istota/releases/tag/v0.5.0
+[0.4.1]: https://github.com/istota-project/istota/releases/tag/v0.4.1
+[0.4.0]: https://github.com/istota-project/istota/releases/tag/v0.4.0
+[0.3.1]: https://github.com/istota-project/istota/releases/tag/v0.3.1
+[0.3.0]: https://github.com/istota-project/istota/releases/tag/v0.3.0
+[0.2.0]: https://github.com/istota-project/istota/releases/tag/v0.2.0
+[0.1.1]: https://github.com/istota-project/istota/releases/tag/v0.1.1
+[0.1.0]: https://github.com/istota-project/istota/releases/tag/v0.1.0

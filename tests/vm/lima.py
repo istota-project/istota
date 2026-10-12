@@ -216,7 +216,7 @@ class Release:
 
 
 def _git(repo: Path, *args: str, work_tree: Path | None = None, timeout: int = 300,
-         check: bool = True) -> subprocess.CompletedProcess:
+         check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     argv = [
         "git", f"--git-dir={repo / '.git'}", f"--work-tree={work_tree or repo}",
         "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
@@ -224,7 +224,7 @@ def _git(repo: Path, *args: str, work_tree: Path | None = None, timeout: int = 3
         *args,
     ]
     return _run_host(argv, timeout=timeout, check=check, cwd=work_tree or repo,
-                     env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
+                     env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", **(env or {})})
 
 
 def snapshot_release() -> Release:
@@ -256,6 +256,40 @@ def snapshot_release() -> Release:
     _git(repo, "reset", "-q", "--hard", "HEAD")
     _git(repo, "clean", "-fdqx")
     return Release(repo=repo, tag=tag, signing_key=public)
+
+
+#: The line the second ref appends to host/istota-stack, followed by its tag.
+NEXT_REF_MARKER = "# vm tier: the second ref"
+
+
+def next_ref(release: Release) -> str:
+    """A second ref on top of the release, for `istota-stack update --unsigned`.
+
+    The release's tree with one line appended to `host/istota-stack`, committed
+    beside the branch rather than on it (the mounted work tree stays at the
+    release) and tagged lightweight, which only `--unsigned` installs. No image
+    copies `host/`, so its builds are cache hits; the changed script is what
+    shows the update provisioned the host from the new ref.
+    """
+    repo = release.repo
+    tag = f"{release.tag}-next"
+    if _git(repo, "rev-parse", "-q", "--verify", f"refs/tags/{tag}", check=False).returncode == 0:
+        return tag
+    base = _git(repo, "rev-parse", f"{release.tag}^{{commit}}").stdout.strip()
+    mode = _git(repo, "ls-tree", base, "host/istota-stack").stdout.split()[0]
+    script = _git(repo, "show", f"{base}:host/istota-stack").stdout
+    scratch = _workdir() / "next-ref"
+    scratch.mkdir(parents=True, exist_ok=True)
+    changed = scratch / "istota-stack"
+    changed.write_text(script + f"{NEXT_REF_MARKER} {tag}\n")
+    blob = _git(repo, "hash-object", "-w", str(changed)).stdout.strip()
+    index = {"GIT_INDEX_FILE": str(scratch / "index")}
+    _git(repo, "read-tree", f"{base}^{{tree}}", env=index)
+    _git(repo, "update-index", "--cacheinfo", f"{mode},{blob},host/istota-stack", env=index)
+    tree = _git(repo, "write-tree", env=index).stdout.strip()
+    commit = _git(repo, "commit-tree", tree, "-p", base, "-m", f"vm tier second ref over {release.tag}").stdout.strip()
+    _git(repo, "tag", tag, commit)
+    return tag
 
 
 # --- creating and provisioning the VM -------------------------------------------
@@ -330,6 +364,63 @@ def ensure_release(vm: Vm, release: Release) -> None:
 
 
 # --- the stack ------------------------------------------------------------------
+
+
+STACK_COMMAND = "/usr/local/sbin/istota-stack"
+#: The daemon and web image; `istota-stack` tags it with the deployed ref.
+IMAGE = "istota"
+
+#: The update controls (`tests/vm/test_update.py`): each replaces one fragment
+#: of `istota-stack` in a copy the update case runs instead of the installed one.
+UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
+    # .env names the new ref and nothing starts it.
+    "update-without-up": (
+        '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        stack_up\n',
+        '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        :\n',
+    ),
+    # The stack moves and the host's scripts and units stay at the old ref.
+    "update-without-reprovision": (
+        '    log "now on ${tag} (previous: ${previous:-none})"\n    reprovision_if_changed\n',
+        '    log "now on ${tag} (previous: ${previous:-none})"\n',
+    ),
+    # The stack returns to the release and the host's scripts stay at the newer ref.
+    "rollback-without-reprovision": (
+        '    log "rolled back to ${previous} (previous: ${current})"\n    reprovision_if_changed\n',
+        '    log "rolled back to ${previous} (previous: ${current})"\n',
+    ),
+}
+
+
+def stack_command(vm: Vm, name: str = "") -> str:
+    """The installed `istota-stack`, or a copy with control `name` applied."""
+    if not name:
+        return STACK_COMMAND
+    old, new = UPDATE_CONTROLS[name]
+    copy = f"{SCRATCH}/istota-stack.{name}"
+    vm.run(f"""
+python3 - {STACK_COMMAND} {copy} <<'PY'
+import json, sys
+old, new = json.loads({json.dumps([old, new])!r})
+text = open(sys.argv[1]).read()
+if text.count(old) != 1:
+    sys.exit("the control does not apply to " + sys.argv[1])
+open(sys.argv[2], "w").write(text.replace(old, new))
+PY
+chmod 0755 {copy}
+""")
+    return copy
+
+
+def env_value(vm: Vm, path: str, key: str) -> str:
+    """One key of an env file in the VM, '' when absent."""
+    return vm.out(f"awk -F= -v k={shlex.quote(key)} '$1 == k {{ sub(/^[^=]*=/, \"\"); v = $0 }} END {{ print v }}' "
+                  f"{shlex.quote(path)} 2>/dev/null || true")
+
+
+def running_image(vm: Vm, service: str) -> str:
+    """The image reference a stack service's container was created from, or ''."""
+    cid = container(vm, service)
+    return vm.out(f"docker inspect -f '{{{{.Config.Image}}}}' {cid}") if cid else ""
 
 
 def stack_exec(vm: Vm, command: str, *, timeout: int = 300, check: bool = True,

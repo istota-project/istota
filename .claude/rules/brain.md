@@ -22,7 +22,7 @@ The executor composes prompt, env and sandbox and hands a `BrainRequest` to a `B
 
 Defaults live in `[brain.claude_code]`, `[brain.tmux]`, `[brain.native]` `model` / `effort`. The executor sends a task pin or nothing; the brain's own `or` chain applies the default. The old top-level keys were claude_code's defaults applied to every brain, so a native room ran an Anthropic id against OpenRouter.
 
-- Retired top-level keys still load: `config._apply_legacy_brain_defaults` migrates them onto `[brain.claude_code]` and `[brain.tmux]` (same namespace and binary), with a warning, only into an unset block. **Never onto `[brain.native]`**. `render-config.sh` (`ISTOTA_BRAIN_CLAUDE_CODE_MODEL` / `ISTOTA_BRAIN_TMUX_MODEL`, falling back to `ISTOTA_MODEL`) and Ansible (`istota_brain_claude_code_model` / `istota_brain_tmux_model` from `istota_model`) migrate earlier.
+- Retired top-level keys still load: `config._apply_legacy_brain_defaults` migrates them onto `[brain.claude_code]` and `[brain.tmux]` (same namespace and binary), with a warning, only into an unset block. **Never onto `[brain.native]`**.
 - `Brain.with_defaults(req)` is idempotent. Effort: request > block `effort` > effort of the alias the block's `model` names (else the explicit key is unreachable behind an effort-carrying alias).
 - `config._warn_native_lost_its_only_model` warns once when native is reachable with empty `model` and the retired key set; a warning because a failed load stops the daemon.
 - `model_namespace_for_kind(kind)` is a lookup, not a construction (ISSUE-417; constructing tmux probes the CLI). Used by `webui.app._brain_catalogue`, `commands._model_namespace`, the executor's fallback crossing rule, `scheduler_deferred._inherited_model` (ISSUE-421). `None` means not established, never "same namespace". Buildability is still a construction, asked only for allowlisted kinds.
@@ -252,12 +252,12 @@ The CLI brains have their own JSONL (bound into the sandbox on purpose); istota'
 - **Caps**: images as metadata plus `sha256`, never bytes; text head+tail at `max_content_chars`; args over `max_args_chars` become a marker; `0` = no cap.
 - **Never raises**: first failure warns once and disables. No writer when disabled, `task_id <= 0` or empty `user_id`.
 - **Location**: `resolve_session_log_dir`; `""` -> `{db_path.parent}/logs` (`/data/db/logs` on Docker; `/data/logs` would sit outside the mask). Never `user_temp_dir`.
-- **The boundary is that nothing binds it; the DB mask is defence in depth**: Ansible masked; Docker only with both container settings (shipped compose has neither); standalone `_mask_dir` refuses. "Nothing binds it" is a default: a non-empty `sandbox_ro_paths`, or on standalone a `user_resources` row `resource_path = "logs"`, would expose it. `tests/test_sandbox.py::TestSessionLogContainment` pins the defaults. Same residual as the task control tree.
+- **The boundary is that nothing binds it; the DB mask is defence in depth**: masked on the stack, whose run contract lets bwrap run; standalone `_mask_dir` refuses. "Nothing binds it" is a default: a non-empty `sandbox_ro_paths`, or on standalone a `user_resources` row `resource_path = "logs"`, would expose it. `tests/test_sandbox.py::TestSessionLogContainment` pins the defaults. Same residual as the task control tree.
 - **Doctor** `runtime.session_log_dir` asks `executor.mask_shadowed_by` and `effective_sandboxing` (ISSUE-381), reporting both. Under `probe=False` it uses `effective_sandboxing_if_known`; unknown is `_MASK_UNKNOWN`, never OK.
 - **Operator `dir` is trusted** (like `sandbox_cache_dir`); `/`, `.`, `..` and null bytes refused; the sweep unlinks `*.jsonl` at any depth under it.
 - **Retention** (step 7b): `retention_days` or `max_total_gb`, gated on `enabled`, so **`enabled = false` stops the sweep too** (open question). Evict largest user first, then oldest; never inside `LIVE_WINDOW_SECONDS`.
 - **Reading** via `session/session_log_read.py` (one parser for `istota session …` and `istota-skill tasks transcript`; see `.claude/rules/skills.md`).
-- No Ansible block, deliberately; on the container the operator sets them in their own config.
+- The operator sets them in their own config.
 
 ## TmuxClaudeBrain (`brain/tmux_claude.py`)
 

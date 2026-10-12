@@ -633,14 +633,13 @@
   }
 
   /* Layout, hit area, reset and hover all come from the shared `.nav-icon-btn`
-     rule in app.css — these three siblings only differ in resting color and,
-     for the hamburger, in when they are shown at all. */
+     rule in app.css — these three siblings only differ in resting color. The
+     menu shows at every width on purpose (ISSUE-705); do not hide it on desktop. */
   .theme-btn {
     color: var(--text-dim);
   }
 
   .app-nav .nav-right .hamburger-btn {
-    display: none;
     color: var(--text-muted);
   }
 
@@ -649,9 +648,6 @@
   }
 
   @media (max-width: 800px) {
-    .app-nav .nav-right .hamburger-btn {
-      display: inline-flex;
-    }
     .nav-user {
       display: none;
     }

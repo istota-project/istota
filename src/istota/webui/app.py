@@ -3112,7 +3112,7 @@ def _admin_storage_section(db_path: Path) -> dict:
                 mount_healthy = Path(_config.workspace_path).is_dir()
         except OSError:
             mount_healthy = False
-    backups_count, last_backup = _scan_db_backups(db_path.parent / "backups")
+    backups_count, last_backup = _db_backup_summary(_config)
     return {
         "db_size_bytes": db_size,
         "backups_count": backups_count,
@@ -3133,31 +3133,21 @@ def _admin_storage_section(db_path: Path) -> dict:
     }
 
 
-def _scan_db_backups(backups_dir: Path) -> tuple[int, str | None]:
-    """Count *.db.gz files under daily/ and weekly/, return latest mtime as ISO Z.
-
-    Mirrors the layout produced by deploy/ansible/templates/istota-backup.sh.j2.
-    """
-    count = 0
-    latest: float | None = None
-    try:
-        for sub in ("daily", "weekly"):
-            d = backups_dir / sub
-            if not d.is_dir():
-                continue
-            for p in d.glob("*.db.gz"):
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-                count += 1
-                if latest is None or mtime > latest:
-                    latest = mtime
-    except OSError:
+def _db_backup_summary(config) -> tuple[int, str | None]:
+    """Dated snapshot count and last successful run (ISO Z), read through
+    ``maintenance.db_backup``'s own destination and last-run record."""
+    if config is None:
         return 0, None
-    if latest is None:
+    from istota.maintenance import db_backup
+
+    count = db_backup.snapshot_count(config)
+    last_run = db_backup.last_backup_time(config)
+    if last_run <= 0:
         return count, None
-    iso = datetime.fromtimestamp(latest, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        iso = datetime.fromtimestamp(last_run, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return count, None
     return count, iso
 
 

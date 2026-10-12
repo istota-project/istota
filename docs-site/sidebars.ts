@@ -11,8 +11,8 @@ const sidebars: SidebarsConfig = {
       label: 'Getting started',
       collapsed: false,
       items: [
+        'getting-started/quickstart-server',
         'getting-started/quickstart-docker',
-        'getting-started/quickstart-bare-metal',
         'getting-started/local-install',
         'getting-started/post-install',
       ],
@@ -67,7 +67,7 @@ const sidebars: SidebarsConfig = {
       // surface you hold a conversation on.
       //
       // The files stay under `docs/features/`, so these pages keep their URLs.
-      // Their paths are named from the Ansible defaults, the compose comments,
+      // Their paths are named from the compose comments,
       // `.claude/rules/` and several docstrings; moving them is a much larger
       // change than regrouping the nav, and is not what this is.
       type: 'category',

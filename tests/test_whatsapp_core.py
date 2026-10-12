@@ -1369,7 +1369,7 @@ class TestWhatsAppOperatorCommands:
     def test_a_whatsapp_only_change_reports_a_state_the_role_acts_on(
         self, tmp_path, capsys
     ):
-        """`deploy/ansible/tasks/main.yml` keys `changed_when` off this line.
+        """`ansible/tasks/main.yml` keys `changed_when` off this line.
 
         The binding lives in its own table, so `update_profile_with_status`
         answers `noop` about a call that enrolled a number — and a `noop`

@@ -714,7 +714,7 @@ COMPOSE_FILE = REPO / "docker" / "docker-compose.yml"
 LEAN_READY_TIMEOUT = 120
 
 #: The tiers that must run `-n0`, and therefore the ones the guard below covers.
-SERIAL_TIER_MARKERS = ("smoke", "full", "testbed", "deploy")
+SERIAL_TIER_MARKERS = ("smoke", "full", "testbed")
 
 #: The markers `addopts` deselects on an ordinary `uv run pytest`.
 #:
@@ -730,7 +730,7 @@ SERIAL_TIER_MARKERS = ("smoke", "full", "testbed", "deploy")
 #: missing here, which would have an incremental run building Docker images.
 DISCRETIONARY_MARKERS = (
     "integration", "live", "linux", "image", "smoke", "full", "testbed",
-    "deploy", "vm", "ml",
+    "vm", "ml",
 )
 
 #: Every compose project these tiers create starts with it, which is what makes

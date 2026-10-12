@@ -30,7 +30,6 @@ EGRESS_UNIT = HOST / "istota-devbox-egress.service"
 WATCHDOG_SH = HOST / "istota-browser-watchdog.sh"
 WATCHDOG_UNIT = HOST / "istota-browser-watchdog.service"
 WATCHDOG_TIMER = HOST / "istota-browser-watchdog.timer"
-ROLE_EGRESS = REPO / "deploy" / "ansible" / "templates" / "istota-devbox-iptables.sh.j2"
 
 WANTED = {
     "169.254.0.0/16", "168.63.129.16/32", "10.0.0.0/8", "172.16.0.0/12",
@@ -96,10 +95,6 @@ class TestTheEgressRules:
             assert "-A" not in call, call
             if "-I" in call:
                 assert call[call.index("-I") + 1:call.index("-I") + 3] == ["DOCKER-USER", "1"]
-
-    def test_it_asks_for_what_the_role_asks_for(self):
-        role = set(re.findall(r'ensure_drop "([^"]+)"', ROLE_EGRESS.read_text()))
-        assert role == WANTED
 
     def test_the_subnet_default_is_the_renderers(self):
         from istota.config import Config, ContainerConfig, DeveloperConfig
@@ -273,15 +268,8 @@ class TestProvision:
 
     TEXT = PROVISION.read_text() if PROVISION.exists() else ""
 
-    def test_it_ports_the_roles_host_values(self):
-        defaults = (REPO / "deploy" / "ansible" / "defaults" / "main.yml").read_text()
-        for key, value in {
-            "istota_journald_max_use": "500M", "istota_journald_max_file_size": "50M",
-            "istota_auditd_num_logs": "5", "istota_auditd_max_log_file": "6",
-            "istota_zram_size": "ram / 2", "istota_zram_algorithm": "zstd",
-            "istota_zram_priority": "100",
-        }.items():
-            assert re.search(rf"^{key}: \"?{re.escape(value)}\"?", defaults, re.M), key
+    def test_it_carries_the_host_bounds(self):
+        """The values the bare-metal role set, ported when the role went."""
         for line in ("SystemMaxUse=500M", "SystemMaxFileSize=50M", "num_logs = 5",
                      "max_log_file = 6", "max_log_file_action = ROTATE",
                      "zram-size = ram / 2", "compression-algorithm = zstd",
@@ -738,6 +726,42 @@ class TestBootstrapFiles:
         assert 'checkout --quiet --detach "${object}^{commit}"' in script
         assert script.index("verify_release_tag \"$TAG\"") < script.index("host/provision.sh")
 
+    def test_the_root_installer_verifies_the_tag_with_istota_stacks_own_code(self):
+        """`install.sh --server` is the same bootstrap run by hand, so it
+        carries the same copy, held the same way, and runs nothing from the
+        checkout before the tag is verified."""
+        stack = (HOST / "istota-stack").read_text()
+        start = stack.index("# --- release tags ---")
+        end = stack.index("# --- builds and images ---")
+        section = stack[start:end].rstrip() + "\n"
+        script = (REPO / "install.sh").read_text()
+        run_server = script[script.index("run_server() {"):]
+
+        assert section in script
+        verify = run_server.index('object="$(verify_release_tag "$RELEASE_TAG")"')
+        checkout = run_server.index('checkout --quiet --detach "${object}^{commit}"')
+        assert verify < checkout < run_server.index("host/provision.sh")
+        assert run_server.index("host/provision.sh") < run_server.index("istota-stack update")
+        # The first build ran before config.toml existed: a config that needs
+        # Claude Code gets its rebuild after the wizard, before the unit starts.
+        setup = run_server.index("    istota-stack setup\n")
+        check = run_server.index("istota-stack check-image || image_rc=$?")
+        assert setup < check < run_server.index("systemctl enable --now istota-stack\n", check)
+        assert run_server.index('istota-stack update "$RELEASE_TAG"', check) < run_server.index(
+            "systemctl enable --now istota-stack\n", check)
+
+    def test_the_root_installer_has_no_bare_metal_or_docker_arm(self):
+        """The old --bare arm ran the deleted deploy/install.sh; --docker printed
+        hand steps the stack replaced. Both are refused by name now."""
+        for flag in ("--bare", "--docker"):
+            result = subprocess.run(
+                ["bash", str(REPO / "install.sh"), flag],
+                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+            )
+            assert result.returncode == 1, (flag, result.stdout, result.stderr)
+            assert "--server" in result.stderr
+        assert "deploy/install.sh" not in (REPO / "install.sh").read_text()
+
     def test_the_lima_template_provisions_from_the_checkout(self):
         doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
         # The image alone: `template:debian-13` adds a mount of the whole Mac home
@@ -798,9 +822,17 @@ class TestTheProvisionDigest:
 
     def test_a_successful_run_records_it_last(self):
         """Read before anything runs and recorded at the very end, so a run
-        that fails partway leaves the old digest and the next play provisions
+        that fails partway leaves no record and the next play provisions
         again."""
         text = PROVISION.read_text()
         assert 'digest="$(inputs_digest)"' in text
         assert text.index('digest="$(inputs_digest)"') < text.index("apt-get update")
         assert text.rindex('"${STACK}/.provisioned"') > text.index("# --- The stack ---")
+
+    def test_a_run_removes_the_old_record_before_it_acts(self):
+        """ISSUE-710: a run that died after installing the new checkout's host
+        files left the previous release's digest, so a rollback to that release
+        read it as provisioned and kept the newer scripts and units."""
+        text = PROVISION.read_text()
+        removal = text.index('rm -f "${STACK}/.provisioned"')
+        assert text.index('digest="$(inputs_digest)"') < removal < text.index("apt-get update")

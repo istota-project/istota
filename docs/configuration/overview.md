@@ -64,7 +64,7 @@ See [credentials](credentials.md) for the full inventory, runtime flow, and the 
 
 ## Admin users
 
-Admin user IDs are listed in `/etc/istota/admins` (plain text, one per line, `#` comments allowed). Empty file or missing file = all users are admin (backward compatibility).
+Admin user IDs are listed in the admins file (`/srv/app/istota/config/admins` on a server; `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset) (plain text, one per line, `#` comments allowed). Empty file or missing file = all users are admin (backward compatibility).
 
 Override path via `ISTOTA_ADMINS_FILE` env var.
 

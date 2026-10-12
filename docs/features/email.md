@@ -166,7 +166,7 @@ Three policies, ordered `off < untrusted < all`:
 
 The operator sets a floor in `[email] outbound_approval_floor` (default `untrusted`). A user may tighten past it and never loosen below it, and a user who has never set their own policy follows the floor — so raising the floor reaches everyone.
 
-A user's own policy is set with `istota user ensure --outbound-approval <policy>`, which is what Ansible runs, or cleared back to following the floor with `--outbound-approval ""`. The `[users.X] outbound_approval` key in `config.toml` seeds the value **only for a user with no profile row yet**; on any instance that has already started once the DB row wins, so editing the TOML for an existing user does nothing. That is the general rule for per-user fields, and it is the one that bites here — use the CLI.
+A user's own policy is set with `istota user ensure --outbound-approval <policy>`, or cleared back to following the floor with `--outbound-approval ""`. The `[users.X] outbound_approval` key in `config.toml` seeds the value **only for a user with no profile row yet**; on any instance that has already started once the DB row wins, so editing the TOML for an existing user does nothing. That is the general rule for per-user fields, and it is the one that bites here — use the CLI.
 
 An invalid floor fails the config load rather than falling back. There is no safe value to guess: `off` would disable a gate you asked for, and `untrusted` would override an operator who deliberately wrote `off`.
 
@@ -316,4 +316,4 @@ alerts_channel = "room789"  # Talk room for confirmations/alerts
 outbound_approval = "all"   # tighten past the operator floor; "" follows it
 ```
 
-As above, `outbound_approval` here is read only when the user has no profile row yet. For an existing user set it with `istota user ensure --outbound-approval`, which is the path Ansible uses.
+As above, `outbound_approval` here is read only when the user has no profile row yet. For an existing user set it with `istota user ensure --outbound-approval`.

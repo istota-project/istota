@@ -139,7 +139,7 @@ Bridge side: `_handle_replaced`, transient while latched, permanent only with `p
 
 **A permanent `fatal` ends the respawn loop**: sidecar stopped, sends refuse definitely, only `ready` clears it. `sidecar_argv=()` (both deployment shapes) listens and supervises nothing. Unlink alerts once per transition, admin-addressed, pushed off-surface, reason via `task_alert._slug`. `whatsapp.baileys_session` surveys, never repairs.
 
-**The bridge starts from scheduler boot (`baileys_runtime.py`), not `serve.py`**: on Ansible the web unit never sends, and the bridge's asyncio primitives must live on the runtime loop `deliver_whatsapp` uses. `whatsapp.baileys_bridge` SKIPs outside that process (after its `library_version` arm).
+**The bridge starts from scheduler boot (`baileys_runtime.py`), not `serve.py`**: on the stack the web process never sends, and the bridge's asyncio primitives must live on the runtime loop `deliver_whatsapp` uses. `whatsapp.baileys_bridge` SKIPs outside that process (after its `library_version` arm).
 
 ### Pairing
 
@@ -170,13 +170,13 @@ Admin requests from Admin, Connections; the scheduler's poll hands it to the bri
 
 ## Config, credentials and deployment
 
-Structural errors fail the load; **missing credentials do not** (Ansible renders them empty under `istota_use_environment_file`; ISSUE-058). Both are per active provider. `graph_api_version` takes `v25` or `v25.0`. `business_phone_number`: required under Cloud, format-checked under Baileys (lets `address_for_binding` message a number-enrolled user first).
+Structural errors fail the load; **missing credentials do not** (a config may leave them empty for the stack's secret files to supply; ISSUE-058). Both are per active provider. `graph_api_version` takes `v25` or `v25.0`. `business_phone_number`: required under Cloud, format-checked under Baileys (lets `address_for_binding` message a number-enrolled user first).
 
 Cloud settings live in `[whatsapp.cloud]`; the flat spelling loads through `_migrate_whatsapp_flat` (`normalize_legacy_document`), a pre-walk step, not a `config_mapper` hook (a hook would replace the section walk and cannot set `provider`). **The provider signal comes from the resolved `cloud` table**: any Cloud id or credential there selects `whatsapp_cloud` when `provider` is absent.
 
 The transport registers on `enabled` alone. `is_whatsapp_configured` checks transport, binding, opt-out, and when metered the circuit and cap, **not** the window. Generators render `provider` **only when named**; empty is refused.
 
-The sidecar is its own systemd unit / compose service; `sidecar_command` stays empty, and the role refuses both together. `ISTOTA_BAILEYS_SOCKET` and `ISTOTA_BAILEYS_SESSION_DIR` are required and compared to `default_socket_path` / `default_session_dir`. Unit: `Wants=` not `Requires=`; `RestartSec={{ istota_whatsapp_baileys_restart_sec }}` (30), the same variable rendering `restart_interval_seconds`; `ReadWritePaths` narrowed to data.
+The sidecar is its own compose service (`whatsapp-baileys` profile, `restart: unless-stopped`); `sidecar_command` stays empty there. `ISTOTA_BAILEYS_SOCKET` and `ISTOTA_BAILEYS_SESSION_DIR` are required and compared to `default_socket_path` / `default_session_dir`. `restart_interval_seconds` should match how long the supervisor waits before a restart.
 
 ### Logout backoff (ISSUE-498, ISSUE-501)
 

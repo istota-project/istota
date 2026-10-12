@@ -77,11 +77,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48a
 # exercised against. It was bookworm until ISSUE-440, where the gap was wider
 # still (gh 2.23, and no glab packaged at all); the base moved, the reason for
 # vendoring did not.
-# Same versions as docker/devbox/Dockerfile and the Ansible role's
-# istota_developer_gh_version / _glab_version; nothing can share a literal
-# across a Docker build and an Ansible role, so
-# tests/test_ansible_forge_cli_install.py holds the three equal instead. Bump
-# them together.
+# Same versions as docker/devbox/Dockerfile; nothing can share a literal across
+# two Docker builds, so tests/test_docker_forge_clis.py holds the two equal
+# instead. Bump them together.
 #
 # This builds on arm64 as well as amd64, so the asset is chosen per
 # architecture and each has its own pinned checksum. The devbox image does the

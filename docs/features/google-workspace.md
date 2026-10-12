@@ -56,7 +56,7 @@ Changing this list never rewrites an existing grant — nothing revalidates one 
 
 ### 3. Install the gws CLI
 
-The Ansible role downloads a prebuilt `gws` release binary from the `googleworkspace/cli` GitHub releases (the `x86_64-unknown-linux-gnu.tar.gz` asset) to `~/.local/bin/gws` when `istota_google_workspace_enabled` is set. For manual installs, download the matching release binary from the [googleworkspace/cli releases page](https://github.com/googleworkspace/cli/releases) and place it on your `PATH`.
+The istota image ships `gws` on `PATH`, so a server needs no step here. For an install outside the image, download the matching release binary from the [googleworkspace/cli releases page](https://github.com/googleworkspace/cli/releases) and place it on your `PATH`.
 
 ### 4. Connect a user's Google account
 
@@ -98,14 +98,9 @@ The bot invokes `istota-skill google_workspace <args>` (the skill wrapper); the 
 - "Send an email via Gmail to user@example.com"
 - "Read the data from my Budget spreadsheet"
 
-## Ansible variables
+## Settings
 
-| Variable | Default | Description |
-|---|---|---|
-| `istota_google_workspace_enabled` | `false` | Enable the Google Workspace skill |
-| `istota_google_workspace_client_id` | `""` | OAuth client ID |
-| `istota_google_workspace_client_secret` | `""` | OAuth client secret (goes to secrets.env) |
-| `istota_google_workspace_scopes` | (the five read-only scopes) | The ceiling each user's own selection is bounded by |
+`[google_workspace]` in `config.toml` holds `enabled`, `client_id` and `scopes` (the ceiling each user's own selection is bounded by). The client secret is `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET`; on a server it is the secret file `istota_google_workspace_client_secret`.
 
 ## Security
 

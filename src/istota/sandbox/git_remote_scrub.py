@@ -50,8 +50,8 @@ knowingly **not** detected — telling one from a legitimate
 ``https://myname@host/repo`` needs a guess, and guessing wrong rewrites a
 working remote. The rule is otherwise structural, so it has no false positives:
 ``git@github.com:o/r`` and ``https://oauth2@host/x`` carry no secret and are
-left alone. This mirrors what the deploy side settled on in ISSUE-258 — see the
-``urlsplit('password')`` assert in ``deploy/ansible/tasks/main.yml``.
+left alone. This mirrors what the bare-metal role settled on in ISSUE-258 (the
+``urlsplit('password')`` assert in its tasks, deleted in 6796ae4a).
 
 Best-effort by construction. It sits on a task setup path, so no function here
 raises: a repository it cannot read or rewrite is reported, not thrown. A

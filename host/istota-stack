@@ -7,7 +7,8 @@
 #   istota-stack update --unsigned latest
 #                               the tip of main, recorded as main-<commit>
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
-#   istota-stack rollback       back to the previous tag, if its image can run the database
+#   istota-stack rollback       back to the previous tag, if its image can run the database;
+#                               reprovisions the host as update does
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
 #   istota-stack import-bare-metal <dir> [args]
@@ -288,6 +289,24 @@ print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
 PY
 }
 
+# `up -d`, then the containers of services no active profile names removed:
+# compose counts a service whose profile was turned off as defined, so neither
+# `down` nor `--remove-orphans` stops its container. One-off containers (setup,
+# apply) are left alone.
+stack_up() {
+    local active id service
+    compose up -d --remove-orphans
+    active="$(compose config --services)"
+    docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
+            --format '{{.ID}} {{.Label "com.docker.compose.service"}}' | while read -r id service; do
+        [ -n "$id" ] || continue
+        if ! printf '%s\n' "$active" | grep -qxF -- "$service"; then
+            log "removing the ${service} container: no active profile names it"
+            docker rm -f "$id" >/dev/null || log "WARNING: could not remove the ${service} container (${id})"
+        fi
+    done
+}
+
 # The services this stack builds. web runs the daemon service's
 # image, so building them again would only repeat it.
 build_services() {
@@ -440,7 +459,7 @@ cmd_update() {
     env_set "ISTOTA_TAG=${tag}" "ISTOTA_TAG_UNSIGNED=${unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
-        compose up -d --remove-orphans
+        stack_up
     else
         log "no config yet: run \`istota-stack setup\`, then \`systemctl enable --now istota-stack\`."
     fi
@@ -450,8 +469,9 @@ cmd_update() {
 }
 
 # provision.sh installs this script, the units and the host scripts, so a
-# release that changed them is provisioned straight after it is running.
-# Last and by exec: provision.sh replaces the file bash is reading this from.
+# checkout that changed them, by update or by rollback, is provisioned straight
+# after the stack runs it. Last and by exec: provision.sh replaces the file bash
+# is reading this from.
 reprovision_if_changed() {
     local provision="${SRC}/host/provision.sh" digest
     [ -x "$provision" ] || return 0
@@ -459,7 +479,7 @@ reprovision_if_changed() {
     if [ -n "$digest" ] && [ "$digest" = "$(cat "${STACK}/.provisioned" 2>/dev/null || true)" ]; then
         return 0
     fi
-    log "the host's provisioning inputs changed; running ${provision} (the stack already runs the new tag)"
+    log "the host's provisioning inputs changed; running ${provision} (the stack already runs $(env_get "$ENV_FILE" ISTOTA_TAG))"
     exec "$provision"
 }
 
@@ -504,8 +524,9 @@ cmd_rollback() {
     fi
     env_set "ISTOTA_TAG=${previous}" "ISTOTA_TAG_UNSIGNED=${previous_unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}"
-    compose up -d --remove-orphans
+    stack_up
     log "rolled back to ${previous} (previous: ${current})"
+    reprovision_if_changed
 }
 
 # Every credential file compose declares, empty where it does not exist yet:
@@ -674,7 +695,7 @@ restart_for_config() {
         return 0
     fi
     log "the config changed; restarting the stack"
-    compose up -d --remove-orphans
+    stack_up
     compose restart
 }
 
@@ -793,7 +814,7 @@ cmd_up() {
     # loop on it; say what to do instead.
     [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml yet: run \`istota-stack setup\` first."
     load_apparmor || die "the AppArmor profile did not load; the stack was not started."
-    compose up -d --remove-orphans
+    stack_up
     # The first certificate: nginx serves the ACME challenge on port 80 from its
     # bootstrap template until one exists, and certbot's deploy hook restarts it
     # onto the full template.

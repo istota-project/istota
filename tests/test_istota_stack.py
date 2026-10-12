@@ -49,6 +49,7 @@ case "$args" in
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
     else echo '{"services": {}}'; fi ;;
+  *" ps -a --filter label=com.docker.compose.project=istota "*) printf '%b' "${STUB_PROJECT_CONTAINERS:-}" ;;
   *" ps -q daemon"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
@@ -400,6 +401,64 @@ class TestAnUpdateReprovisionsTheHost:
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+class TestARollbackReprovisionsTheHost:
+    """ISSUE-710: a rollback left the host's scripts and units at the newer ref
+    while the stack ran the older one. It now applies update's rule to the
+    checkout it returns to."""
+
+    @pytest.fixture
+    def rolled_forward(self, fx):
+        script = fx.origin / "host" / "provision.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text(PROVISION_STUB)
+        script.chmod(0o755)
+        _git(fx.origin, "add", "host/provision.sh", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        fx.commit("v2")
+        fx.tag("v2", key=fx.release_key)
+        assert fx.run("update", "v1").returncode == 0
+        assert fx.run("update", "v2").returncode == 0
+        v2 = _git(fx.origin, "rev-parse", "v2^{commit}", env=fx.env)
+        (fx.stack / ".provisioned").write_text(f"digest-{v2}\n")
+        fx.calls.unlink()
+        return fx
+
+    def test_the_older_checkouts_provision_runs_after_the_switch(self, rolled_forward):
+        fx = rolled_forward
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        calls = fx.docker_calls()
+        assert "provision ran" in calls, result.stdout + result.stderr
+        up = next(i for i, call in enumerate(calls) if call.endswith("up -d --remove-orphans"))
+        assert up < calls.index("provision ran")
+
+    def test_unchanged_inputs_are_not_provisioned_again(self, rolled_forward):
+        """A record naming v1 means a v1 provision finished: provision.sh drops
+        the record before it acts (`test_host_units.py`)."""
+        fx = rolled_forward
+        v1 = _git(fx.origin, "rev-parse", "v1^{commit}", env=fx.env)
+        (fx.stack / ".provisioned").write_text(f"digest-{v1}\n")
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "provision ran" not in fx.docker_calls()
+
+    def test_a_failed_provision_fails_the_rollback_with_the_stack_on_the_older_tag(self, rolled_forward):
+        fx = rolled_forward
+        result = fx.run("rollback", STUB_PROVISION_RC="1")
+        assert result.returncode == 1
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "provision.sh" in result.stdout + result.stderr
+
+    def test_a_refused_rollback_provisions_nothing(self, rolled_forward):
+        """A guard on the order: the schema refusal comes before any provision."""
+        fx = rolled_forward
+        result = fx.run("rollback", STUB_CHECK_RC="3")
+        assert result.returncode == 3
+        assert "provision ran" not in fx.docker_calls()
+
+
 class TestAHardenedUmask:
     """A host whose umask is 027 (zorg's) checked the tree out root-only, and
     the image copied those modes in: uid 10001 could not import istota.cli."""
@@ -677,6 +736,43 @@ class TestApply:
         assert result.returncode == 2, result.stdout + result.stderr
         calls = fx.docker_calls()
         assert not any(call.endswith(" restart") or " up " in f"{call} " for call in calls), calls
+
+
+class TestAProfileTurnedOffStopsItsService:
+    """Compose leaves a container running when its service's profile is no
+    longer active: `down` and `up --remove-orphans` both count it as defined.
+    Found by the vm tier with the browser profile (ISTOTA_VM_CONTROL unset,
+    `tests/vm/test_management_role.py`)."""
+
+    CONTAINERS = "c-daemon daemon\\nc-web web\\nc-browser browser\\n"
+
+    def test_up_removes_the_container_of_a_service_no_profile_names(self, fx):
+        result = fx.run("up", STUB_PROJECT_CONTAINERS=self.CONTAINERS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        up = next(i for i, call in enumerate(calls) if call.endswith("up -d --remove-orphans"))
+        removed = [i for i, call in enumerate(calls) if call.startswith("rm -f ")]
+        assert [calls[i] for i in removed] == ["rm -f c-browser"], calls
+        assert removed[0] > up
+
+    def test_a_config_change_does_the_same(self, fx, tmp_path):
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_PROJECT_CONTAINERS=self.CONTAINERS)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "rm -f c-browser" in fx.docker_calls()
+
+    def test_an_update_does_the_same(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", STUB_PROJECT_CONTAINERS=self.CONTAINERS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "rm -f c-browser" in fx.docker_calls()
+
+    def test_nothing_is_removed_when_every_service_is_active(self, fx):
+        result = fx.run("up", STUB_PROJECT_CONTAINERS="c-daemon daemon\\nc-web web\\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not [call for call in fx.docker_calls() if call.startswith("rm ")]
 
 
 class TestImportBareMetal:

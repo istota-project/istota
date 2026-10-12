@@ -363,11 +363,10 @@ class Resolved:
 
 
 # What `systemctl list-units --type=service --state=active` prints for a
-# deployment installed under the default namespace, and for one installed
-# under a namespace the operator chose. The Ansible role names every unit
-# `{{ istota_namespace }}-*.service` (deploy/ansible/tasks/main.yml) and
-# `istota_namespace` is an inventory variable, so the second is not an exotic
-# case — it is what the canonical install looks like wherever it was set.
+# bare-metal install under the default namespace, and for one under a namespace
+# the operator chose. The old Ansible role, now deleted, named every unit
+# `<namespace>-*.service` from an inventory variable; a host still running one
+# is what the probe must not miss.
 UNITS_NONE = "systemd-journald.service loaded active running Journal Service"
 UNITS_DEFAULT_NAMESPACE = "istota-scheduler.service loaded active running Istota scheduler"
 UNITS_OTHER_NAMESPACE = "assistant-scheduler.service loaded active running Scheduler"
@@ -599,11 +598,10 @@ class TestNativeModeRefusesOnADeploymentHost:
         assert result.mode != "native"
 
     def test_a_unit_under_a_non_default_namespace_turns_auto_away(self):
-        """The canonical deployment, which the first cut of this probe missed.
+        """The old bare-metal install, which the first cut of this probe missed.
 
-        The Ansible role names every unit `{{ istota_namespace }}-*.service`
-        (`deploy/ansible/tasks/main.yml`, the `dest:` of each systemd
-        template), and `istota_namespace` is an inventory variable. A probe
+        The Ansible role, since deleted, named every unit
+        `<namespace>-*.service` from an inventory variable. A probe
         asking `systemctl is-active istota-scheduler.service` by name is
         therefore blind on any install that set it, and `auto` would have
         resolved to native there, spawning real namespaces and claiming every

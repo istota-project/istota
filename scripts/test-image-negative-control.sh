@@ -46,7 +46,7 @@
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
-# 16 and 17).
+# 16 and 17, and row 20's root-phase half).
 # Its witnesses are smoke tests, because a run contract is a property of a
 # running container rather than of an image, so each control there breaks one
 # line of the contract (a compose overlay on the lean stack, or an image with
@@ -191,6 +191,18 @@ print(lean_image_tag())
         "" \
         "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_doctor_reports_the_delegated_root_ok" \
         "${RUN_CONTRACT_TESTS}::TestATaskIsInItsOwnCgroup::test_a_task_is_placed_limited_and_killed_past_its_limit"
+
+    # Row 20's root-phase half. The root phase keeps SYS_ADMIN through the
+    # ownership walk; the remount and the drop are untouched, so the stack
+    # boots and only the logged bounding set differs.
+    docker build -q -f docker/test/Dockerfile.no-sys-admin-drop \
+        --build-arg "BASE=$lean_tag" -t "istota-test/no-sys-admin-drop:$suffix" docker/test >/dev/null
+    require_smoke_failures \
+        "no-sys-admin-drop" \
+        "$(image_overlay "istota-test/no-sys-admin-drop:$suffix" no-sys-admin-drop)" \
+        "row 20: the root phase walks /data still holding CAP_SYS_ADMIN" \
+        "" \
+        "${RUN_CONTRACT_TESTS}::TestTheRootPhaseWalksDataWithoutSysAdmin::test_the_ownership_walk_runs_without_cap_sys_admin"
 
     require_smoke_failures \
         "cgroup-host-bind" \

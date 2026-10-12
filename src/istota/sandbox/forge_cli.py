@@ -686,15 +686,13 @@ def fetch_forge_credentials(
 
     # Name what provides the socket, not the socket path. The path is a fact
     # about this process's environment and tells the reader nothing about why
-    # it is missing (ISSUE-282). In the stack the daemon runs one listener per
-    # `[devbox] users` entry and the devbox mounts its own; on the bare-metal
-    # role a per-user `istota-devbox-proxy@` unit does.
+    # it is missing (ISSUE-282). The daemon runs one listener per
+    # `[devbox] users` entry and the devbox mounts its own.
     raise NoProxyError(
         "no credential proxy: neither ISTOTA_SKILL_PROXY_SOCK (sandbox) nor "
-        "ISTOTA_CRED_SOCK (devbox) is set in this environment. In the docker "
-        "compose stack istota runs a credential proxy for each user listed in "
-        "[devbox] users, and each devbox mounts its own socket; the Ansible "
-        "deployment runs one per user as a systemd unit. Without one, forge "
+        "ISTOTA_CRED_SOCK (devbox) is set in this environment. istota runs a "
+        "credential proxy for each user listed in [devbox] users, and each "
+        "devbox mounts its own socket. Without one, forge "
         "commands in a container are not available. Report this rather than "
         "retrying — no retry finds a socket that is not configured."
     )

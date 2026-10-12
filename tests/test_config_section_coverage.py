@@ -1,4 +1,4 @@
-"""Every section of the ``Config`` tree is rendered, documented, or exempted.
+"""Every section of the ``Config`` tree is documented or exempted.
 
 The drift this closes is measured rather than supposed. Every artifact in this
 repo that *renders* config stayed current across seven weeks of new sections,
@@ -14,9 +14,11 @@ render → compose → ``.env.example`` chain, each with an exemption map carryi
 reason and a staleness check that refuses an entry the thing no longer has. This
 is the same shape one layer up, over the ``Config`` dataclass tree itself.
 
-**What it requires, and deliberately not more.** A section must be rendered by
-the Ansible template or documented in ``config/config.example.toml``, or be
-named in :data:`EXEMPT` with the reason it is in neither. It does *not* require
+**What it requires, and deliberately not more.** A section must be documented
+in ``config/config.example.toml``, or be named in :data:`EXEMPT` with the reason
+it is not. The Ansible role's ``config.toml.j2`` used to count too; it went
+with the bare-metal shape, and every section it carried was already in the
+example. It does *not* require
 a wizard prompt per key — that would be wrong, since most sections should not be
 asked about at install time. It forces a decision to be recorded when a section
 is added, which is the thing that was missing.
@@ -31,8 +33,8 @@ header (this guard's business), takes ``config._NOT_CONFIGURATION`` as the
 answer to "is this a setting", and scopes coverage to the field's own section.
 ``tests/test_config.py::TestTheExampleDocumentsEveryLiveSection`` is the older
 and narrower version of the same idea, holding six hand-picked sections to a
-stricter rule — a commented assignment in the *example*, where the tree-wide
-guard also accepts a rendered one. Three guards, one question each.
+stricter rule — a commented assignment per field in each of those blocks.
+Three guards, one question each.
 
 **The walk is the loader's own.** ``config_mapper._nested_dataclass`` is the
 predicate ``apply_section`` uses to decide it is looking at a sub-table, so a
@@ -57,23 +59,20 @@ from istota.config import Config
 from istota.config_mapper import _nested_dataclass
 
 REPO = Path(__file__).resolve().parents[1]
-RENDERED = REPO / "deploy" / "ansible" / "templates" / "config.toml.j2"
 DOCUMENTED = REPO / "config" / "config.example.toml"
 
-#: Sections that belong in neither artifact, each with the reason.
+#: Sections the example does not document, each with the reason.
 #:
 #: Empty today, and the emptiness is the point: nothing was excluded to make the
 #: walk pass. Two candidates were checked against the tree while this was
 #: written and neither turned out to need an entry, which is worth recording so
 #: they are not re-added on the strength of the claim alone:
 #:
-#: - ``users`` is deliberately absent from the Ansible template — profiles reach
-#:   a deployment through ``istota user ensure`` and land in ``user_profiles`` —
-#:   but ``config.example.toml`` carries worked ``[users.alice]`` and
-#:   ``[users.bob]`` blocks, so an operator can learn the shape. Documented, not
-#:   exempt.
-#: - ``experimental`` is rendered by the template (``[experimental] features``)
-#:   *and* live in the example. It was never undocumented.
+#: - ``users`` reaches a deployment through ``istota user ensure`` and lands in
+#:   ``user_profiles``, but ``config.example.toml`` carries worked
+#:   ``[users.alice]`` and ``[users.bob]`` blocks, so an operator can learn the
+#:   shape. Documented, not exempt.
+#: - ``experimental`` is live in the example. It was never undocumented.
 #:
 #: An entry here is a claim that an operator has no way to learn the section
 #: exists and that this is correct. Write the reason, not just the name.
@@ -189,8 +188,7 @@ class TestTheWalkItself:
         for expected in ("scheduler", "talk.signaling", "brain.native.web_fetch", "users"):
             assert expected in paths, f"the walk no longer finds {expected}"
 
-    def test_both_artifacts_still_parse_as_headers(self):
-        assert len(headers(RENDERED)) > 30, "config.toml.j2 yielded almost no headers"
+    def test_the_example_still_parses_as_headers(self):
         assert len(headers(DOCUMENTED)) > 30, "config.example.toml yielded almost no headers"
 
     def test_prose_naming_a_section_is_not_documentation(self):
@@ -218,34 +216,29 @@ class TestTheWalkItself:
         )
 
 
-class TestEverySectionIsRenderedDocumentedOrExempted:
+class TestEverySectionIsDocumentedOrExempted:
     """The guard itself.
 
-    Read the failure message rather than this docstring — it says which of the
-    three places to add the section to.
+    Read the failure message rather than this docstring — it says where to add
+    the section.
     """
 
-    def test_no_section_is_reachable_from_neither_artifact(self, sections):
-        rendered = headers(RENDERED)
+    def test_no_section_is_undocumented(self, sections):
         documented = headers(DOCUMENTED)
 
         missing = sorted(
             s.path
             for s in sections
-            if not covered_by(s, rendered)
-            and not covered_by(s, documented)
-            and s.path not in EXEMPT
+            if not covered_by(s, documented) and s.path not in EXEMPT
         )
         assert not missing, (
-            f"{missing} are live sections of the Config dataclass tree that no "
-            "operator-facing artifact mentions. The settings work and there is "
-            "no way to learn they exist. Do one of three things, in this order "
-            "of preference:\n"
-            f"  1. render the section from {RENDERED.relative_to(REPO)}, which "
-            "is what every deployed bare-metal install reads;\n"
-            f"  2. document it in {DOCUMENTED.relative_to(REPO)} — a commented "
+            f"{missing} are live sections of the Config dataclass tree that the "
+            "example does not mention. The settings work and there is no way to "
+            "learn they exist. Do one of two things, in this order of "
+            "preference:\n"
+            f"  1. document it in {DOCUMENTED.relative_to(REPO)} — a commented "
             "block counts, and that is how most of the tree is documented;\n"
-            "  3. if it belongs in neither, add it to EXEMPT in "
+            "  2. if it belongs in no artifact, add it to EXEMPT in "
             f"{Path(__file__).name} with the reason. A name with no reason is "
             "not an exemption.\n"
             "Renaming or merging a section counts as adding it: the new name "
@@ -269,10 +262,10 @@ class TestEverySectionIsRenderedDocumentedOrExempted:
         )
 
     def test_an_exemption_is_not_a_second_home_for_a_documented_section(self, sections):
-        """An exemption that is also rendered or documented is a hole nobody
-        opened on purpose: the section moved into an artifact and the entry
-        stayed, so the next section to take that name is exempt by accident."""
-        present = headers(RENDERED) | headers(DOCUMENTED)
+        """An exemption that is also documented is a hole nobody opened on
+        purpose: the section moved into the example and the entry stayed, so
+        the next section to take that name is exempt by accident."""
+        present = headers(DOCUMENTED)
         by_path = {s.path: s for s in sections}
         redundant = sorted(
             name for name in EXEMPT
