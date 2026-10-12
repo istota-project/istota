@@ -54,7 +54,8 @@ def _make(dirs, clock, *, local=False, **kwargs):
         data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, code_path=dirs.code_path,
         local=local, clock=clock, **kwargs,
     )
-    base = "http://testserver" if local else "https://testserver"
+    # A local run answers only at a loopback name, as its publish is reached.
+    base = "http://localhost:8080" if local else "https://testserver"
     return app, TestClient(app, base_url=base)
 
 
@@ -92,7 +93,7 @@ class TestUnlock:
 
     def test_a_local_run_drops_secure_only(self, dirs, clock):
         _app, client = _make(dirs, clock, local=True)
-        resp = _unlock(client, headers={"origin": "http://testserver"})
+        resp = _unlock(client, headers={"origin": "http://localhost:8080"})
         assert resp.status_code == 200
         lowered = resp.headers["set-cookie"].lower()
         assert "secure" not in lowered
@@ -141,6 +142,34 @@ class TestUnlock:
             assert _unlock(client, code="nope").status_code == 403
         clock.now += 61
         assert _unlock(client).status_code == 403
+
+    def test_the_fiftieth_failure_stops_the_server(self, dirs, clock):
+        # A server nobody can unlock would hold the setup lock and the port
+        # for good, so no new run could start; it stops instead.
+        app, client = _make(dirs, clock)
+        exits = []
+        app.state.setup.on_exit = exits.append
+        for i in range(setup_app.UNLOCK_FAILURES_TOTAL):
+            if i and i % 5 == 0:
+                clock.now += 61
+            resp = _unlock(client, code="nope")
+            assert resp.status_code == 403
+        assert resp.json()["error"] == "locked_out"
+        assert "setup --web" in resp.json()["message"]
+        assert exits == [setup_app.EXIT_LOCKED_OUT]
+
+    @pytest.mark.parametrize("host", ["localhost:8080", "127.0.0.1:8080", "[::1]:8080"])
+    def test_a_local_run_answers_a_loopback_host(self, dirs, clock, host):
+        _app, client = _make(dirs, clock, local=True)
+        resp = _unlock(client, headers={"host": host, "origin": f"http://{host}"})
+        assert resp.status_code == 200
+
+    def test_a_local_run_refuses_a_rebound_name(self, dirs, clock):
+        # A page that rebinds its own name to 127.0.0.1 sends a matching Origin.
+        app, client = _make(dirs, clock, local=True)
+        resp = _unlock(client, headers={"host": "evil.example:8080", "origin": "http://evil.example:8080"})
+        assert resp.status_code == 403
+        assert app.state.setup.failures_total == 0
 
     def test_unlock_refuses_a_cross_site_origin(self, server):
         _app, client = server

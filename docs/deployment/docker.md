@@ -44,8 +44,10 @@ After the page finishes, `istota-stack` installs `.env` and `host.env`, builds w
 - `istota-stack setup-code` prints the address, code and fingerprint again while a setup is running.
 - `--local` serves plain HTTP on `127.0.0.1:8080` with no certificate, for a Lima VM on a Mac or your own SSH tunnel.
 - `ISTOTA_SETUP_PUBLISH=0.0.0.0:8443` moves the page off port 443 when something else holds it.
-- The first browser to use the code gets the only session. To start over, run `istota-stack setup --web` again, which mints a new code.
-- A setup that does not finish changes nothing on the host. After an hour with no request the page stops, and so does the run.
+- The first browser to use the code gets the only session. To start over, stop the running setup (Ctrl-C, or `sudo systemctl stop istota-setup`) and run `istota-stack setup --web` again, which mints a new code.
+- A setup that does not finish installs nothing on the host; if Finish failed partway, the run names any config or secret files it left so you can remove them. After an hour with no request the page stops, and so does the run. Fifty wrong codes stop it too.
+- With `--local` the page answers only at `localhost`, `127.0.0.1` or `[::1]`.
+- On a cloud machine behind its provider's NAT, the printed address is the private one; open the public address instead, and the code still works.
 - It refuses when `config.toml` exists. Change a configured stack by editing `config.toml`, with `istota-stack apply`, or with `istota-stack setup --force`.
 
 `istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `journalctl -u istota-setup` has the same lines.

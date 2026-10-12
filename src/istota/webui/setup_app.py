@@ -50,6 +50,7 @@ SESSION_COOKIE = "istota_setup"
 BODY_LIMIT = 64 * 1024
 IDLE_SECONDS = 60 * 60
 EXIT_TIMED_OUT = 3
+EXIT_LOCKED_OUT = 4
 UNLOCK_WINDOW_SECONDS = 60
 UNLOCK_FAILURES_PER_WINDOW = 5
 UNLOCK_FAILURES_TOTAL = 50
@@ -105,8 +106,13 @@ _ALREADY_SET_UP = (
     "`istota-stack setup --force`."
 )
 _CODE_REFUSED = (
-    "That setup code is not valid, or it has already been used. Run "
-    "`sudo istota-stack setup --web` again for a new one."
+    "That setup code is not valid, or it has already been used. To get a new one, "
+    "stop the running setup (Ctrl-C, or `sudo systemctl stop istota-setup`) and run "
+    "`sudo istota-stack setup --web` again."
+)
+_LOCKED_OUT = (
+    "Too many wrong setup codes; setup has stopped. Run "
+    "`sudo istota-stack setup --web` again for a new code."
 )
 
 # Crockford base32 reads O as 0 and I and L as 1, so a code read off a console
@@ -197,8 +203,24 @@ def _require_session(state: SetupState, request: Request) -> None:
     state.last_activity = state.clock()
 
 
-def _require_origin(request: Request) -> None:
-    if origin_refusal(request.headers, request.headers.get("host", "")):
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _host_name(host: str) -> str:
+    """The name half of a ``Host`` header, IPv6 brackets stripped."""
+    if host.startswith("["):
+        return host[1:].partition("]")[0]
+    return host.rpartition(":")[0] if host.count(":") == 1 else host
+
+
+def _require_origin(state: SetupState, request: Request) -> None:
+    host = request.headers.get("host", "")
+    # A local run is reached only through a loopback publish. Holding Host to a
+    # loopback name stops a page the operator visits from rebinding its own
+    # name to 127.0.0.1 and passing the same-host Origin check.
+    if state.local and _host_name(host).lower() not in _LOOPBACK_HOSTS:
+        raise _Refusal(_error(403, "forbidden", "Open the setup page at localhost."))
+    if origin_refusal(request.headers, host):
         raise _Refusal(_error(403, "forbidden", "This request did not come from the setup page."))
 
 
@@ -634,7 +656,7 @@ def create_setup_app(
 
     @app.post("/istota/api/setup/unlock")
     async def unlock(request: Request):
-        _require_origin(request)
+        _require_origin(state, request)
         client = request.client.host if request.client else ""
         now = state.clock()
         recent = [t for t in state.failures_by_client.get(client, []) if now - t < UNLOCK_WINDOW_SECONDS]
@@ -651,6 +673,13 @@ def create_setup_app(
             state.failures_total += 1
             recent.append(now)
             logger.info("setup: a wrong setup code (%d so far)", state.failures_total)
+            if state.failures_total >= UNLOCK_FAILURES_TOTAL and state.session_id is None:
+                # Stop rather than refuse forever: a server nobody can unlock
+                # holds the setup lock and the port, so no new run could start.
+                logger.info("setup: too many wrong setup codes; stopping")
+                response = _error(403, "locked_out", _LOCKED_OUT)
+                response.background = BackgroundTask(request_exit, state, EXIT_LOCKED_OUT)
+                return response
             return _error(403, "forbidden", _CODE_REFUSED)
         state.code_spent = True
         state.session_id = secrets.token_urlsafe(32)
@@ -671,7 +700,7 @@ def create_setup_app(
     @app.put("/istota/api/setup/draft")
     async def put_draft(request: Request):
         _require_session(state, request)
-        _require_origin(request)
+        _require_origin(state, request)
         body = await _read_json(request)
         if not isinstance(body, dict):
             return _error(400, "bad_body", "The setup answers must be a JSON object.")
@@ -697,7 +726,7 @@ def create_setup_app(
     @app.post("/istota/api/setup/validate")
     async def validate(request: Request):
         _require_session(state, request)
-        _require_origin(request)
+        _require_origin(state, request)
         body = await _read_json(request)
         step = body.get("step") if isinstance(body, dict) else None
         if step not in SETUP_STEPS:
@@ -719,7 +748,7 @@ def create_setup_app(
     @app.post("/istota/api/setup/check/{kind}")
     async def check(kind: str, request: Request):
         _require_session(state, request)
-        _require_origin(request)
+        _require_origin(state, request)
         if kind not in CHECK_KINDS:
             return _error(400, "unknown_check", "Unknown connection check.")
         answers = {key: value for key, value in state.draft.items() if key != PASSWORD_FIELD}
@@ -746,7 +775,7 @@ def create_setup_app(
     @app.post("/istota/api/setup/finish")
     async def finish_route(request: Request):
         _require_session(state, request)
-        _require_origin(request)
+        _require_origin(state, request)
         # One Finish at a time: a double click must not run the writers twice
         # side by side.
         async with state.finish_lock:
