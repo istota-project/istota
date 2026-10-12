@@ -266,3 +266,29 @@ it('shows folder conflicts in the dialog and hides writes for other places', asy
   expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
 });
+
+it('shows share state and a separate Nextcloud action while preserving the viewer', async () => {
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'home',
+    path: '',
+    truncated: false,
+    skipped_names: 0,
+    entries: [
+      {
+        ...entry('plan.md'),
+        share: { kind: 'user', count: 2 },
+        nextcloud_url: 'https://cloud.example.com/apps/files/files?dir=%2FShared',
+      },
+    ],
+    notes: ['Nextcloud share state is unavailable.'],
+  });
+  render(Workspace);
+  const link = await screen.findByRole('link', { name: 'Open plan.md in Nextcloud' });
+  expect(link).toHaveAttribute('href', 'https://cloud.example.com/apps/files/files?dir=%2FShared');
+  expect(link).toHaveAttribute('target', '_blank');
+  expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  expect(screen.getByText('Shared · 2')).toBeTruthy();
+  expect(screen.getByText('Nextcloud share state is unavailable.')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'plan.md' }));
+  expect(openFile).toHaveBeenCalledWith('/Users/alice/plan.md');
+});

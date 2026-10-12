@@ -47,7 +47,7 @@ def write_new_file(
     *, max_bytes: int,
 ) -> str:
     """Write chunks through a pinned parent, removing incomplete uploads."""
-    dir_fd = open_overlay_dir(root, *parts)
+    dir_fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
     if dir_fd is None:
         raise ListingError(404, "Folder not found.")
     try:
@@ -81,7 +81,7 @@ def write_new_file(
 
 
 def make_folder(root: Path, parts: list[str], name: str) -> str:
-    fd = open_overlay_dir(root, *parts)
+    fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
     if fd is None:
         raise ListingError(404, "Folder not found.")
     try:

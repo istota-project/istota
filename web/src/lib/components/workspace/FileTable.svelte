@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { File, Folder, Link, Minus } from '@lucide/svelte';
+  import { ExternalLink, File, Folder, Link, Minus, Users } from '@lucide/svelte';
   import type { WorkspaceListing, WorkspacePlace } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
@@ -62,6 +62,24 @@
                 {:else}
                   <span>{entry.name}</span>
                 {/if}
+                {#if entry.share}
+                  <span class="share-marker" title={`Nextcloud ${entry.share.kind} shares`}>
+                    <Users size={12} aria-hidden="true" /> Shared{entry.share.count > 1
+                      ? ` · ${entry.share.count}`
+                      : ''}
+                  </span>
+                {/if}
+                {#if entry.nextcloud_url && (entry.kind === 'file' || entry.kind === 'dir')}
+                  <a
+                    class="nextcloud-link"
+                    href={entry.nextcloud_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={`Open ${entry.name} in Nextcloud`}
+                  >
+                    Open in Nextcloud <ExternalLink size={12} aria-hidden="true" />
+                  </a>
+                {/if}
                 {#if entry.kind === 'link'}<span class="caption">Symbolic link · not followed</span
                   >{:else if entry.kind === 'other'}<span class="caption">Not a regular file</span
                   >{/if}
@@ -81,8 +99,9 @@
     {listing.entries.length ? 'No visible files in this folder.' : 'This folder is empty.'}
   </div>
 {/if}
-{#if listing.truncated || listing.skipped_names}
+{#if listing.truncated || listing.skipped_names || listing.notes?.length}
   <div class="listing-notes muted" role="status">
+    {#each listing.notes ?? [] as note}<p>{note}</p>{/each}
     {#if listing.truncated}<p>Showing the first 2,000 entries.</p>{/if}
     {#if listing.skipped_names}<p>
         {listing.skipped_names}
@@ -152,6 +171,17 @@
   .entry-label a:hover,
   .entry-label button:hover {
     text-decoration: underline;
+  }
+  .share-marker,
+  .entry-label .nextcloud-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+  .entry-label .nextcloud-link {
+    color: var(--accent);
   }
   tbody tr:hover {
     background: var(--surface-card);

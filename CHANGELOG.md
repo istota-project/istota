@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- My files in Workspace now shows Nextcloud shares and opens files in your Nextcloud when they are shared with you. A disconnected Nextcloud folder reports that it is unreachable when browsing or uploading.
+
 - Upload files and create folders under My files in Workspace. Uploads show progress, preserve existing files by numbering repeated names, and keep errors beside the affected file.
 
 - Files in your room folders, group folders and linked folders now open in Workspace and chat. Access follows your current memberships, including when a membership is removed.

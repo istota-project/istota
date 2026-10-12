@@ -1,4 +1,5 @@
 """Descriptor-relative workspace listings against real filesystem trees."""
+import errno
 import os
 from contextlib import contextmanager
 
@@ -105,3 +106,17 @@ def test_entry_deleted_before_stat_is_skipped(tmp_path, monkeypatch):
 
     monkeypatch.setattr(listing.os, "scandir", removing_scan)
     assert [e.name for e in listing.list_dir(tmp_path, []).entries] == ["kept"]
+
+
+@pytest.mark.parametrize("error", [errno.ENOTCONN, errno.EIO])
+def test_overlay_mount_error_propagation_is_opt_in(tmp_path, monkeypatch, error):
+    from istota.skills._loader import open_overlay_dir
+
+    def fail(*args, **kwargs):
+        raise OSError(error, "disconnected")
+
+    monkeypatch.setattr(os, "open", fail)
+    assert open_overlay_dir(tmp_path) is None
+    with pytest.raises(OSError) as raised:
+        open_overlay_dir(tmp_path, raise_mount_errors=True)
+    assert raised.value.errno == error

@@ -4,6 +4,8 @@ import asyncio
 import errno
 import logging
 from dataclasses import asdict
+from pathlib import PurePosixPath
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -11,6 +13,7 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from istota import db
+from istota.nextcloud import OcsError, shares
 from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir
 from istota.workspace.places import list_places
@@ -56,24 +59,46 @@ async def api_workspace_list(
             selected = next((p for p in places if p.id == place), None)
             if selected is None or not selected.browsable or selected.root is None:
                 raise ListingError(404, "Place not found.")
-            try:
-                listing = list_dir(selected.root, parts)
-            except OSError as exc:
-                logger.warning("Workspace listing failed place=%s errno=%s", selected.id, exc.errno)
-                status, message = 500, "Could not read this folder."
-                if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
-                    status, message = 404, "Folder not found."
-                elif exc.errno == errno.EEXIST:
-                    status, message = 409, "A file or folder already exists."
-                elif exc.errno in {errno.ENOSPC, errno.EDQUOT}:
-                    status, message = 507, "Workspace storage is full."
-                raise ListingError(status, message) from exc
-        return {"place": selected.id, "path": "/".join(parts), **asdict(listing)}
+            listing = list_dir(selected.root, parts)
+        payload = {"place": selected.id, "path": "/".join(parts), **asdict(listing)}
+        if config.storage_is_nextcloud and selected.kind == "home":
+            directory = "/".join([selected.view_root, *parts])
+            _add_nextcloud_shares(config, user["username"], directory, payload)
+        return payload
 
     try:
         return await asyncio.to_thread(query)
-    except ListingError as exc:
-        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    except (ListingError, OSError) as exc:
+        return _filesystem_error(config, exc, place, write=False)
+
+
+def _add_nextcloud_shares(config, username, directory, payload):
+    entries = {}
+    for entry in payload["entries"]:
+        entry.update(share=None, nextcloud_url=None)
+        if entry["kind"] in {"dir", "file"}:
+            entries[f"{directory}/{entry['name']}"] = entry
+    try:
+        rows = shares.list_shares(config, path=directory, subfiles=True, timeout=5)
+    except OcsError:
+        logger.warning("Nextcloud share state is unavailable place=home")
+        payload["notes"] = ["Nextcloud share state is unavailable."]
+        return
+    kinds = {0: "user", 1: "group", 3: "link"}
+    for row in rows:
+        entry = entries.get(row.get("path"))
+        kind = kinds.get(row.get("share_type"))
+        if entry is None or kind is None:
+            continue
+        if entry["share"] is None:
+            entry["share"] = {"kind": kind, "count": 1}
+        else:
+            entry["share"]["count"] += 1
+        target = row.get("file_target")
+        if (kind == "user" and row.get("share_with") == username
+                and isinstance(target, str) and target.startswith("/") and "\0" not in target):
+            query = urlencode({"dir": str(PurePosixPath(target).parent)})
+            entry["nextcloud_url"] = f"{config.nextcloud.url.rstrip('/')}/apps/files/files?{query}"
 
 
 class _CappedMultipartParser(MultiPartParser):
@@ -118,12 +143,15 @@ def _home_root(config, username, place):
     return home.root
 
 
-def _write_error(exc):
+def _filesystem_error(config, exc, place, *, write):
     if isinstance(exc, ListingError):
         return JSONResponse({"error": exc.message}, status_code=exc.status)
-    logger.warning("Workspace write failed place=home errno=%s", exc.errno)
-    status, message = 500, "Could not write to this folder."
-    if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+    logger.warning("Workspace %s failed place=%s errno=%s", "write" if write else "listing", place, exc.errno)
+    status = 500
+    message = "Could not write to this folder." if write else "Could not read this folder."
+    if config.storage_is_nextcloud and exc.errno in {errno.ENOTCONN, errno.EIO}:
+        status, message = 503, "Your Nextcloud folder is not reachable right now."
+    elif exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
         status, message = 404, "Folder not found."
     elif exc.errno == errno.EEXIST:
         status, message = 409, "A file or folder already exists."
@@ -165,7 +193,7 @@ async def api_workspace_upload(
         try:
             return await asyncio.to_thread(write)
         except (ListingError, OSError) as exc:
-            return _write_error(exc)
+            return _filesystem_error(config, exc, "home", write=True)
     finally:
         await form.close()
 
@@ -193,4 +221,4 @@ async def api_workspace_folder(
     try:
         return await asyncio.to_thread(write)
     except (ListingError, OSError) as exc:
-        return _write_error(exc)
+        return _filesystem_error(config, exc, "home", write=True)

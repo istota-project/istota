@@ -5217,8 +5217,11 @@ export interface WorkspaceEntry {
   size: number | null;
   modified: number;
   hidden: boolean;
+  share?: { kind: 'user' | 'group' | 'link'; count: number } | null;
+  nextcloud_url?: string | null;
 }
 export interface WorkspaceListing {
+  notes?: string[];
   place: string;
   path: string;
   entries: WorkspaceEntry[];

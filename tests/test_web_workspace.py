@@ -152,3 +152,90 @@ def test_workspace_upload_config_and_nginx_cap(tmp_path):
     compose = (Path(__file__).resolve().parents[1] / "docker/docker-compose.yml").read_text()
     nginx_mb = int(re.search(r"NGINX_CLIENT_MAX_BODY_SIZE:-([0-9]+)M", compose).group(1))
     assert nginx_mb >= Config().web.workspace.max_upload_mb
+
+
+@pytest.mark.parametrize("error", [errno.ENOTCONN, errno.EIO])
+@pytest.mark.parametrize("operation", ["list", "upload", "folder"])
+async def test_nextcloud_dropped_mount(client, config, monkeypatch, caplog, error, operation):
+    import os
+    config.nextcloud.url = "https://cloud.example.com"
+    root = config.workspace_root("alice")
+    real_open = os.open
+
+    def disconnected(path, flags, *args, **kwargs):
+        if path == root:
+            raise OSError(error, "sensitive-name")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", disconnected)
+    if operation == "list":
+        response = await client.get("/workspace/list", params={"place": "home"})
+    elif operation == "upload":
+        response = await client.post("/workspace/upload", data={"place": "home"}, files={"file": ("note.txt", b"hello")})
+    else:
+        response = await client.post("/workspace/folders", json={"place": "home", "path": "", "name": "Drafts"})
+    assert response.status_code == 503
+    assert response.json() == {"error": "Your Nextcloud folder is not reachable right now."}
+    assert "sensitive-name" not in caplog.text
+    assert "home" in caplog.text and str(error) in caplog.text
+
+
+async def test_nextcloud_share_markers_and_recipient_urls(client, config):
+    from unittest.mock import patch
+    from tests.test_nextcloud_http import _ocs_response
+
+    config.nextcloud.url = "https://cloud.example.com/"
+    config.nextcloud.username = "istota"
+    config.nextcloud.app_password = "example-password"
+    config.nextcloud.dav_prefix = "Shared Files"
+    directory = config.workspace_root("alice") / "notes"
+    for name in ("group.md", "public.md", "other.md", "private.md"):
+        (directory / name).write_text("notes")
+    rows = [
+        {"path": "/Shared Files/Users/alice/notes/plan.md", "share_type": 0, "share_with": "alice", "file_target": "/Shared & notes/plan.md"},
+        {"path": "/Shared Files/Users/alice/notes/plan.md", "share_type": 0, "share_with": "bob", "file_target": "/Bob/plan.md"},
+        {"path": "/Shared Files/Users/alice/notes/group.md", "share_type": 1, "share_with": "alice", "file_target": "/Team/group.md"},
+        {"path": "/Shared Files/Users/alice/notes/public.md", "share_type": 3, "file_target": "/Public/public.md"},
+        {"path": "/Shared Files/Users/alice/notes/other.md", "share_type": 0, "share_with": "bob", "file_target": "/Bob/other.md"},
+        {"path": "/Shared Files/Users/bob/notes/private.md", "share_type": 0, "share_with": "alice", "file_target": "/Wrong/private.md"},
+    ]
+    for row in rows:
+        row["uid_owner"] = "istota"
+    with patch("istota.nextcloud._http.httpx.get", return_value=_ocs_response(rows)) as get:
+        response = await client.get("/workspace/list", params={"place": "home", "path": "notes"})
+    assert response.status_code == 200
+    entries = {entry["name"]: entry for entry in response.json()["entries"]}
+    assert entries["plan.md"]["share"] == {"kind": "user", "count": 2}
+    assert entries["plan.md"]["nextcloud_url"] == "https://cloud.example.com/apps/files/files?dir=%2FShared+%26+notes"
+    for name, kind in (("group.md", "group"), ("public.md", "link"), ("other.md", "user")):
+        assert entries[name]["share"] == {"kind": kind, "count": 1}
+        assert entries[name]["nextcloud_url"] is None
+    assert entries["private.md"]["share"] is None
+    get.assert_called_once()
+    assert get.call_args.kwargs["params"] == {"path": "/Shared Files/Users/alice/notes", "subfiles": "true"}
+    assert get.call_args.kwargs["timeout"] == 5
+    assert get.call_args.kwargs["auth"] == ("istota", "example-password")
+
+
+async def test_nextcloud_share_failure_is_a_note(client, config, caplog):
+    from unittest.mock import patch
+    from httpx import ReadTimeout
+    config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud.username = "istota"
+    config.nextcloud.app_password = "example-password"
+    with patch("istota.nextcloud._http.httpx.get", side_effect=ReadTimeout("sensitive-name")) as get:
+        response = await client.get("/workspace/list", params={"place": "home", "path": "notes"})
+    assert response.status_code == 200
+    assert response.json()["entries"][0]["name"] == "plan.md"
+    assert response.json()["notes"] == ["Nextcloud share state is unavailable."]
+    assert get.call_args.kwargs["timeout"] == 5
+    assert "Nextcloud share state" in caplog.text
+    assert "sensitive-name" not in caplog.text
+
+
+async def test_local_listing_does_not_fetch_share_state(client):
+    from unittest.mock import patch
+    with patch("istota.nextcloud.shares.list_shares") as shares:
+        response = await client.get("/workspace/list", params={"place": "home"})
+    assert response.status_code == 200
+    shares.assert_not_called()

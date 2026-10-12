@@ -34,7 +34,7 @@ class ListingError(Exception):
 
 
 def list_dir(root: Path, parts: list[str], *, limit: int = LIST_MAX_ENTRIES) -> Listing:
-    fd = open_overlay_dir(root, *parts)
+    fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
     if fd is None:
         raise ListingError(404, "Folder not found.")
     entries = []

@@ -4760,7 +4760,11 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
     workspaceEntry('Notes & plans', 'dir'),
     workspaceEntry('Unavailable folder', 'dir'),
     workspaceEntry('.preferences'),
-    workspaceEntry('document.pdf'),
+    {
+      ...workspaceEntry('document.pdf'),
+      share: { kind: 'user', count: 2 },
+      nextcloud_url: 'https://cloud.example.com/apps/files/files?dir=%2FShared',
+    },
     workspaceEntry('image.png'),
     workspaceEntry('note.md'),
     workspaceEntry('outside-link', 'link'),
@@ -4812,7 +4816,10 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
   if (path === '/istota/api/workspace/places')
     return {
       places: workspacePlaces,
-      notes: ['Tasks run in a sandbox.', 'Files are stored in a local folder.'],
+      notes: [
+        'Tasks run in a sandbox.',
+        'Files are stored in your Nextcloud at cloud.example.com.',
+      ],
     };
   if (path !== '/istota/api/workspace/list') return undefined;
   const params = new URLSearchParams(query);
@@ -4830,6 +4837,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     entries,
     truncated: folder === 'Archive',
     skipped_names: folder === 'Archive' ? 2 : 0,
+    notes: folder === 'Archive' ? ['Nextcloud share state is unavailable.'] : [],
   };
 };
 
