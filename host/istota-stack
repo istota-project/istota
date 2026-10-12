@@ -4,6 +4,8 @@
 #   istota-stack update <tag>   verify a signed release tag, build it, switch to it
 #   istota-stack update --unsigned <tag>
 #                               the same for any tag, signed or not, on request
+#   istota-stack update --unsigned latest
+#                               the tip of main, recorded as main-<commit>
 #   istota-stack rollback       back to the previous tag, if its image can run the database
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
@@ -53,6 +55,11 @@
 # signature check, for that run; a branch is still refused, since rollback needs
 # a name that stays put. .env marks the tag, and rollback returns to a marked tag
 # without verifying it, because the operator accepted it when installing it.
+#
+# `update --unsigned latest` is the one way to follow main: it deploys the tip
+# of origin's main and records it as main-<first 12 hex of the commit>, which
+# names that commit for good, so rollback and the image tags work as for a tag.
+# A main-<hex> name resolves only to a commit of main, never to any commit.
 set -euo pipefail
 # A hardened host (umask 027) would check the tree out root-only, and the
 # image builds copy those modes in, out of uid 10001's reach.
@@ -84,6 +91,7 @@ staging=""
 # Exit codes: 1 a failure, 2 `apply` changed something, 3 the older image
 # refused the database (rollback), 64 usage, 65 a tag refused.
 EXIT_REFUSED_TAG=65
+LATEST_BRANCH=main
 
 log() { echo "[istota-stack] $*"; }
 die() { echo "[istota-stack] $*" >&2; exit 1; }
@@ -242,10 +250,20 @@ verify_release_tag() {
 
 # --- builds and images -------------------------------------------------------
 
-# Print the object id of any tag, signed or not: `update --unsigned`.
+# Print the object id of any tag, signed or not: `update --unsigned`. Also a
+# main-<hex> name `update --unsigned latest` recorded, as long as it is a commit
+# of main.
 resolve_unsigned_tag() {
     local tag="$1" object
     check_tag_name "$tag"
+    if [[ "$tag" =~ ^${LATEST_BRANCH}-[0-9a-f]{12}$ ]]; then
+        object="$(verified_git rev-parse -q --verify "${tag#"${LATEST_BRANCH}"-}^{commit}" 2>/dev/null)" \
+            || refuse_tag "${tag} names no commit in the checkout."
+        verified_git merge-base --is-ancestor "$object" "refs/remotes/origin/${LATEST_BRANCH}" \
+            || refuse_tag "${tag} is not a commit of ${LATEST_BRANCH}."
+        echo "$object"
+        return
+    fi
     if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
         refuse_tag "${tag} is not a tag in the checkout. A branch or a commit is never deployed, signed or not."
     fi
@@ -372,7 +390,13 @@ cmd_update() {
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
-    verified_git fetch --quiet --tags origin || die "git fetch failed; nothing was changed."
+    verified_git fetch --quiet --tags origin \
+        "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
+        || die "git fetch failed; nothing was changed."
+    if [ "$tag" = latest ]; then
+        [ -n "$unsigned" ] || refuse_tag "latest follows ${LATEST_BRANCH}, which is never signed: \`istota-stack update --unsigned latest\`."
+        tag="${LATEST_BRANCH}-$(verified_git rev-parse --verify "refs/remotes/origin/${LATEST_BRANCH}^{commit}" | cut -c1-12)"
+    fi
     if [ -n "$unsigned" ]; then
         object="$(resolve_unsigned_tag "$tag")"
         log "${tag}: installing without a signature check (--unsigned)"
