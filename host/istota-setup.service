@@ -1,0 +1,16 @@
+[Unit]
+Description=Istota first-run setup in a browser (istota-stack setup --web)
+Documentation=file:///srv/app/istota/src/docs/deployment/
+# Installed by provision.sh and never enabled: an unattended bootstrap starts
+# it once (cloud-init.yaml), and `istota-stack setup-code` prints its address
+# and code. With a config in place there is nothing to set up.
+ConditionPathExists=!/srv/app/istota/config/config.toml
+Requires=docker.service
+Wants=network-online.target
+After=docker.service network-online.target apparmor.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/istota-stack setup --web
+# It waits for a person in a browser, for up to an hour without a request.
+TimeoutStartSec=infinity

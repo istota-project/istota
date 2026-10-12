@@ -2,6 +2,7 @@
 # Provision a Debian 13 machine dedicated to one istota install. Run as root.
 # Idempotent: a failed run can be re-run, and a run after `istota-stack setup`
 # picks up host.env (the mount, the firewall rules, the certificate units).
+# `istota-stack setup --web` runs it itself when host.env changed.
 #
 #   host/provision.sh                  # from a checkout, by hand or from Lima
 #   ISTOTA_REPO_URL=... provision.sh   # cloud-init clones first, then runs this
@@ -355,7 +356,8 @@ install -m 0755 "${HERE}/istota-certbot" /usr/local/sbin/istota-certbot
 mount_unit_changed=""
 for unit in istota-stack.service istota-devbox-egress.service \
         istota-browser-watchdog.service istota-browser-watchdog.timer \
-        istota-certbot.service istota-certbot.timer mount-nextcloud.service; do
+        istota-certbot.service istota-certbot.timer mount-nextcloud.service \
+        istota-setup.service; do
     if [ "$unit" = mount-nextcloud.service ] && [ -n "$bare_metal_mount" ]; then
         continue
     fi
@@ -452,8 +454,9 @@ if [ -f "${STACK}/config/config.toml" ] && [ -n "$(awk -F= '$1 == "ISTOTA_TAG" {
     systemctl enable istota-stack.service >/dev/null
     log "provisioned. The stack starts with istota-stack.service."
 else
-    log "provisioned. Next: istota-stack update <tag>, istota-stack setup, re-run this script,"
-    log "then systemctl start istota-stack."
+    log "provisioned. Next: istota-stack update <tag>, then istota-stack setup --web, which"
+    log "sets istota up in a browser and starts it. (In the terminal instead: istota-stack setup,"
+    log "re-run this script, then systemctl start istota-stack.)"
 fi
 # An update runs the previous release's istota-stack and execs this last, so
 # what the new one's compose() passes reaches a running stack only here. Only
