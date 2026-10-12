@@ -185,6 +185,7 @@ src/istota/
 │   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 │   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
 │   ├── toml_write.py     # The tree's one TOML writer: the wizard, `istota apply` and the testbed → leaf-modules.md
+│   ├── rclone_conf.py    # The VM's rclone remote for a Nextcloud account, and rclone's `obscure` without rclone → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
