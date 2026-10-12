@@ -73,3 +73,16 @@ def list_dir(root: Path, parts: list[str], *, limit: int = LIST_MAX_ENTRIES) -> 
         os.close(fd)
     entries.sort(key=lambda entry: (entry.kind != "dir", entry.name.casefold()))
     return Listing(entries, truncated, skipped_names)
+
+
+def list_file(root: Path) -> Listing:
+    """List one authorized file without exposing its parent directory."""
+    fd = os.open(root, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ListingError(404, "File not found.")
+        entry = Entry(root.name, "file", info.st_size, info.st_mtime, root.name.startswith("."))
+        return Listing([entry], False)
+    finally:
+        os.close(fd)

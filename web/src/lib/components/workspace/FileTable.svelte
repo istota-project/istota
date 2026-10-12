@@ -56,9 +56,11 @@
           .map((entry) => ({
             ...entry,
             key: entry.name,
-            ref: place.view_root
-              ? [place.view_root, listing?.path, entry.name].filter(Boolean).join('/')
-              : null,
+            ref:
+              entry.view_path ??
+              (place.view_root
+                ? [place.view_root, listing?.path, entry.name].filter(Boolean).join('/')
+                : null),
             mime_type: null,
             modified: new Date(entry.modified * 1000).toISOString(),
             path: [listing?.path, entry.name].filter(Boolean).join('/'),

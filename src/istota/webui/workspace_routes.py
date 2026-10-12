@@ -20,7 +20,7 @@ from istota.nextcloud import OcsError, shares
 from istota.webui.chat_files import servable_roots
 from istota.workspace.pins import validate_pin, workspace_pin_kind
 from istota.webui.router_stubs import require_auth, verify_origin
-from istota.workspace.listing import ListingError, list_dir
+from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places
 from istota.workspace.reach import deployment_notes, place_reach
 from istota.workspace.writes import make_folder, write_new_file
@@ -64,8 +64,16 @@ async def api_workspace_list(
             selected = next((p for p in places if p.id == place), None)
             if selected is None or not selected.browsable or selected.root is None:
                 raise ListingError(404, "Place not found.")
-            listing = list_dir(selected.root, parts)
+            file_root = selected.root.is_file()
+            if file_root:
+                if parts:
+                    raise ListingError(404, "Folder not found.")
+                listing = list_file(selected.root)
+            else:
+                listing = list_dir(selected.root, parts)
         payload = {"place": selected.id, "path": "/".join(parts), **asdict(listing)}
+        if file_root:
+            payload["entries"][0]["view_path"] = selected.view_root
         if config.storage_is_nextcloud and selected.kind == "home":
             directory = "/".join([selected.view_root, *parts])
             _add_nextcloud_shares(config, user["username"], directory, payload)

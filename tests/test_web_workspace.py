@@ -293,3 +293,24 @@ async def test_drive_failed_refresh_returns_reconnect(client, config, monkeypatc
     response = await client.get("/workspace/drive/list")
     assert response.status_code == 502
     assert response.json() == {"error": "Google rejected the stored credential. Reconnect in Settings."}
+
+
+async def test_linked_file_place_lists_only_its_authorized_file(client, config):
+    folder = config.workspace_path / "linked"
+    folder.mkdir()
+    (folder / "report.txt").write_text("report")
+    (folder / "private.txt").write_text("private")
+    with db.get_db(config.db_path) as conn:
+        db.add_user_resource(conn, "alice", "shared_file", "linked/report.txt", permissions="read")
+    places = (await client.get("/workspace/places")).json()["places"]
+    place = next(p for p in places if p["kind"] == "linked")
+    response = await client.get("/workspace/list", params={"place": place["id"]})
+    assert response.status_code == 200
+    entries = response.json()["entries"]
+    assert len(entries) == 1
+    assert entries[0]["name"] == "report.txt"
+    assert entries[0]["size"] == 6
+    assert entries[0]["view_path"] == "/linked/report.txt"
+    for path in ("report.txt", "../private.txt", "child"):
+        response = await client.get("/workspace/list", params={"place": place["id"], "path": path})
+        assert response.status_code == 404

@@ -120,3 +120,18 @@ def test_overlay_mount_error_propagation_is_opt_in(tmp_path, monkeypatch, error)
     with pytest.raises(OSError) as raised:
         open_overlay_dir(tmp_path, raise_mount_errors=True)
     assert raised.value.errno == error
+
+
+def test_file_listing_refuses_link_and_special_file(tmp_path):
+    from istota.workspace.listing import list_file
+
+    target = tmp_path / "target.txt"
+    target.write_text("private")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        list_file(link)
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    with pytest.raises(listing.ListingError):
+        list_file(fifo)

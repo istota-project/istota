@@ -514,3 +514,33 @@ it('pins a Drive item with its provider metadata', async () => {
   expect(link.querySelector('b')).toBeNull();
   expect(link).toHaveAttribute('rel', 'noopener noreferrer');
 });
+
+it('opens and pins a linked single file using its exact server path', async () => {
+  const ref = '/linked/report.txt';
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...home, id: 'linked:1', kind: 'linked', view_root: ref }],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'linked:1',
+    path: '',
+    entries: [{ ...entry('report.txt'), view_path: ref }],
+    truncated: false,
+    skipped_names: 0,
+  });
+  api.putWorkspacePin.mockResolvedValue({
+    pin: {
+      id: 1,
+      provider: 'workspace',
+      ref,
+      name: 'report.txt',
+      available: true,
+      is_dir: false,
+    },
+  });
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('button', { name: 'report.txt', exact: true }));
+  expect(openFile).toHaveBeenCalledWith(ref);
+  await fireEvent.click(screen.getByRole('button', { name: 'Pin report.txt' }));
+  expect(api.putWorkspacePin).toHaveBeenCalledWith(expect.objectContaining({ ref }));
+});

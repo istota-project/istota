@@ -5212,6 +5212,7 @@ export interface WorkspacePlace {
   };
 }
 export interface WorkspaceEntry {
+  view_path?: string;
   name: string;
   kind: 'dir' | 'file' | 'link' | 'other';
   size: number | null;
