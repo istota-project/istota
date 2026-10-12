@@ -4966,6 +4966,78 @@ def check_web_tls(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(name, OK, detail)
 
 
+_CONFIG_PENDING_STALE_SECONDS = 600
+_CONFIG_TAKEN_STALE_SECONDS = 3600
+
+
+def _seconds_since(stamp: object) -> float | None:
+    try:
+        at = datetime.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - at).total_seconds()
+
+
+def check_config_applier(config: "Config", probe: bool) -> CheckResult:
+    """Whether the host applier is taking the web config editor's requests.
+
+    From database state only: doctor runs in the daemon, which has neither the
+    applier variable nor the requests bind the web container gets. A request
+    still `pending` after ten minutes means neither the path unit nor its
+    five-minute timer ran `istota-stack config-apply`; one `taken` or
+    `building` for an hour means a run died before recording an outcome, which
+    the next run marks failed. Reads only, so it is safe under `probe=False`.
+    """
+    import sqlite3
+
+    name = "web.config_applier"
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        return CheckResult(name, SKIP, f"{db_path} does not exist")
+    try:
+        conn = sqlite_util.connect_read_only(db_path)
+    except sqlite3.Error as exc:
+        return CheckResult(name, SKIP, f"{db_path} could not be opened: {exc}")
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM config_change_requests").fetchone()[0]
+        open_rows = conn.execute(
+            "SELECT id, status, created_at, taken_at FROM config_change_requests "
+            "WHERE status IN ('pending','taken','building')"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return CheckResult(name, SKIP, f"the config request table could not be read: {exc}")
+    finally:
+        conn.close()
+    if not total:
+        return CheckResult(name, SKIP, "no configuration change has been requested from the web")
+    for request_id, status, created_at, taken_at in open_rows:
+        if status == "pending":
+            age = _seconds_since(created_at)
+            if age is not None and age > _CONFIG_PENDING_STALE_SECONDS:
+                return CheckResult(
+                    name, WARN,
+                    f"config request {request_id} has waited {int(age // 60)} minutes for the host",
+                    remedy=(
+                        "On the host, check `systemctl status istota-config-apply.path "
+                        "istota-config-apply.timer` and run `istota-stack config-apply`; "
+                        "an admin can cancel the request from Admin → Configuration."
+                    ),
+                )
+        else:
+            age = _seconds_since(taken_at or created_at)
+            if age is not None and age > _CONFIG_TAKEN_STALE_SECONDS:
+                return CheckResult(
+                    name, WARN,
+                    f"config request {request_id} has been {status} for {int(age // 60)} minutes "
+                    "with no outcome recorded",
+                    remedy=(
+                        "On the host, read `journalctl -u istota-config-apply.service`; the next "
+                        "`istota-stack config-apply` run marks the request failed."
+                    ),
+                )
+    return CheckResult(name, OK, f"{total} config request(s) on record, none stuck")
+
+
 def check_web_static(config: "Config", probe: bool) -> CheckResult:
     """The SvelteKit build the web surface serves actually exists.
 
@@ -9305,6 +9377,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
     ("web.avatar_import", check_avatar_import),
+    ("web.config_applier", check_config_applier),
     ("config.skill_overlays", check_skill_overlays),
     ("config.operator_persona", check_operator_persona),
     ("users.email_address_uniqueness", check_email_address_uniqueness),
@@ -9455,6 +9528,8 @@ CHECK_SCOPES: dict[str, str] = {
     # rendered config — the counts in `user_avatars` and what the last import
     # tick wrote down. A bare `docker run` has neither.
     "web.avatar_import": DEPLOYMENT,
+    # Deployment: it reads the config request table in the framework database.
+    "web.config_applier": DEPLOYMENT,
     # Deployment: it walks the workspace mount, which a bare `docker run` has
     # none of.
     "config.skill_overlays": DEPLOYMENT,

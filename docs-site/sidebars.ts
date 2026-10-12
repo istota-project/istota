@@ -91,6 +91,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'configuration/overview',
         'configuration/reference',
+        'configuration/web-editor',
         'configuration/per-user',
         'configuration/credentials',
         'configuration/persona',

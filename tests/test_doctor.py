@@ -7023,3 +7023,61 @@ class TestWallet:
         assert "not checked" in result.detail
         assert "undecryptable" not in result.detail and "re-add" not in result.remedy
         assert key not in repr(result)
+
+
+class TestConfigApplier:
+    """`web.config_applier` — from the request table alone, since the daemon has
+    neither the applier variable nor the requests bind the web container gets."""
+
+    @staticmethod
+    def _run(make_config, db_path):
+        return run_checks(make_config(db_path=db_path), only=("web.config_applier",))[0]
+
+    @staticmethod
+    def _row(db_path, status, *, created_ago=0, taken_ago=None):
+        from datetime import timedelta
+
+        from istota import db as db_module
+
+        def stamp(seconds_ago):
+            at = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+            return at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        with db_module.get_db(db_path) as conn:
+            conn.execute(
+                """INSERT INTO config_change_requests (
+                       status, admin_id, base_digest, document_toml, changed_sections_json,
+                       secret_names_json, diff_text, created_at, taken_at)
+                   VALUES (?, 'alice', 'd', '', '[]', '[]', '', ?, ?)""",
+                (status, stamp(created_ago), stamp(taken_ago) if taken_ago is not None else None),
+            )
+
+    def test_skips_when_nothing_was_ever_requested(self, make_config, db_path):
+        result = self._run(make_config, db_path)
+        assert result.status == SKIP
+        assert "no configuration change" in result.detail
+
+    def test_ok_with_finished_and_fresh_rows(self, make_config, db_path):
+        self._row(db_path, "applied", created_ago=86400)
+        self._row(db_path, "pending", created_ago=60)
+        result = self._run(make_config, db_path)
+        assert result.status == OK
+        assert "none stuck" in result.detail
+
+    def test_warns_on_a_request_pending_past_ten_minutes(self, make_config, db_path):
+        self._row(db_path, "pending", created_ago=11 * 60)
+        result = self._run(make_config, db_path)
+        assert result.status == WARN
+        assert "waited 11 minutes" in result.detail
+        assert "istota-config-apply.path" in result.remedy
+
+    @pytest.mark.parametrize("status", ["taken", "building"])
+    def test_warns_on_a_request_taken_past_an_hour(self, make_config, db_path, status):
+        self._row(db_path, status, created_ago=7300, taken_ago=3700)
+        result = self._run(make_config, db_path)
+        assert result.status == WARN
+        assert f"been {status} for 61 minutes" in result.detail
+
+    def test_a_request_taken_recently_is_fine(self, make_config, db_path):
+        self._row(db_path, "taken", created_ago=7300, taken_ago=60)
+        assert self._run(make_config, db_path).status == OK
