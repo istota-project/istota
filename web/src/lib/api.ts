@@ -5450,6 +5450,12 @@ export function getWorkspaceDriveListing(
   );
 }
 
+export function deleteWorkspaceEntry(path: string, name: string): Promise<{ status: string }> {
+  return apiFetch(`/workspace/files?${new URLSearchParams({ place: 'home', path, name })}`, {
+    method: 'DELETE',
+  });
+}
+
 export function createWorkspaceFolder(path: string, name: string): Promise<{ path: string }> {
   return apiFetch('/workspace/folders', {
     method: 'POST',

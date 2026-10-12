@@ -314,3 +314,38 @@ async def test_linked_file_place_lists_only_its_authorized_file(client, config):
     for path in ("report.txt", "../private.txt", "child"):
         response = await client.get("/workspace/list", params={"place": place["id"], "path": path})
         assert response.status_code == 404
+
+
+async def test_delete_through_workspace_route(client, config):
+    response = await client.delete("/workspace/files", params={"place": "home", "path": "notes", "name": "plan.md"})
+    assert response.status_code == 200
+    assert not (config.workspace_path / "Users/alice/notes/plan.md").exists()
+    listing = await client.get("/workspace/list", params={"place": "home", "path": "notes"})
+    assert listing.json()["entries"] == []
+
+
+@pytest.mark.parametrize("place,path,name,status", [
+    ("room:sample", "notes", "plan.md", 404),
+    ("home", "../alice/notes", "plan.md", 404),
+    ("home", "notes", "../notes/plan.md", 422),
+    ("home", "", "notes", 409),
+])
+async def test_delete_refusal_keeps_files(client, config, place, path, name, status):
+    response = await client.delete("/workspace/files", params={"place": place, "path": path, "name": name})
+    assert response.status_code == status
+    assert (config.workspace_path / "Users/alice/notes/plan.md").read_text() == "plan"
+
+
+async def test_delete_requires_auth_and_origin(client, app, config):
+    from fastapi import HTTPException
+    from istota.webui.router_stubs import verify_origin
+
+    def refuse():
+        raise HTTPException(403, "cross-origin request")
+
+    app.dependency_overrides[verify_origin] = refuse
+    params = {"place": "home", "path": "notes", "name": "plan.md"}
+    assert (await client.delete("/workspace/files", params=params)).status_code == 403
+    app.dependency_overrides.clear()
+    assert (await client.delete("/workspace/files", params=params)).status_code == 401
+    assert (config.workspace_path / "Users/alice/notes/plan.md").exists()
