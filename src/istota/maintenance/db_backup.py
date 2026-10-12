@@ -232,6 +232,8 @@ def _dated_dirs(root: Path) -> list[Path]:
     return sorted(dirs, key=lambda p: p.name, reverse=True)
 
 
+
+
 def _prior_good_snapshot(root: Path, date_str: str, rel: str) -> Path | None:
     """Newest non-suspect snapshot of ``rel`` in a dated dir strictly older than
     ``date_str``. ``rel`` is like ``framework/istota.db`` or ``alice/location.db``."""
@@ -336,6 +338,20 @@ def _good_db_relpaths(dated_dir: Path) -> set[str]:
         if p.is_file():
             out.add(p.relative_to(dated_dir).as_posix())
     return out
+
+
+def snapshot_count(config) -> int:
+    """How many dated dirs hold at least one good snapshot; 0 when there is no
+    destination or it cannot be read. A run creates its dated dir before
+    snapshotting, so a run where every DB failed leaves an empty one that must
+    not count. For the admin dashboard: never raises, never writes."""
+    root = backup_destination(config)
+    if root is None:
+        return 0
+    try:
+        return sum(1 for d in _dated_dirs(root) if _good_db_relpaths(d))
+    except OSError:
+        return 0
 
 
 def _prune_old_snapshots(root: Path, keep: int) -> None:
