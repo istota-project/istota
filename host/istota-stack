@@ -164,6 +164,7 @@ compose() {
         ISTOTA_HOST_ENV="$HOST_ENV" \
         CERTS_DIR="$certs" \
         ACME_WEBROOT="${STACK}/acme" \
+        ISTOTA_LOG_DRIVER=journald \
             docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" "${files[@]}" "$@"
     )
 }

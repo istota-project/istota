@@ -345,6 +345,8 @@ elif [ ! -s "${STACK}/allowed_signers" ]; then
 fi
 
 # --- Commands and units ------------------------------------------------------
+stack_command_changed=""
+cmp -s "${HERE}/istota-stack" /usr/local/sbin/istota-stack || stack_command_changed=1
 install -m 0755 "${HERE}/istota-stack" /usr/local/sbin/istota-stack
 install -m 0755 "${HERE}/istota" /usr/local/bin/istota
 install -m 0755 "${HERE}/istota-devbox-egress.sh" /usr/local/sbin/istota-devbox-egress
@@ -452,6 +454,14 @@ if [ -f "${STACK}/config/config.toml" ] && [ -n "$(awk -F= '$1 == "ISTOTA_TAG" {
 else
     log "provisioned. Next: istota-stack update <tag>, istota-stack setup, re-run this script,"
     log "then systemctl start istota-stack."
+fi
+# An update runs the previous release's istota-stack and execs this last, so
+# what the new one's compose() passes reaches a running stack only here. Only
+# then: a play provisions before its apply, and an `up` there would start the
+# stack on a host.env its config does not match yet.
+if [ -n "$stack_command_changed" ] && systemctl is-active --quiet istota-stack.service; then
+    /usr/local/sbin/istota-stack up \
+        || log "WARNING: istota-stack up failed; the stack runs what the previous istota-stack started."
 fi
 
 # Last, so a run that failed anywhere above leaves no record and the next

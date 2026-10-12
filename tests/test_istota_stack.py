@@ -833,6 +833,28 @@ def _source(fx: Fixture, script: str, **extra_env: str) -> subprocess.CompletedP
     )
 
 
+class TestContainerLogsReachTheJournal:
+    """On the VM container output goes to the journal, which is what a host's
+    log shipping reads; json-file kept it out of it (#712). Docker Desktop has
+    no journald, so the compose file defaults to json-file and only
+    `istota-stack` names journald."""
+
+    def test_every_service_logs_through_the_selected_driver_with_its_name(self):
+        import yaml
+
+        compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
+        for name, service in compose["services"].items():
+            assert service.get("logging") == {
+                "driver": "${ISTOTA_LOG_DRIVER:-json-file}",
+                "options": {"tag": "{{.Name}}"},
+            }, name
+
+    def test_istota_stack_selects_journald(self, fx):
+        result = _source(fx, 'docker() { echo "driver=${ISTOTA_LOG_DRIVER-unset}"; }; compose ps')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "driver=journald"
+
+
 class TestTheMount:
     def test_compose_binds_the_mount_from_outside_the_stack_directory(self, fx):
         result = _source(fx, 'docker() { echo "mount=${ISTOTA_MOUNT_DIR}"; }; compose ps')
