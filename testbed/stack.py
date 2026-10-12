@@ -682,6 +682,7 @@ LEAN_BASE_CONFIG: dict = {
         "token_storage": "encrypted",
     },
     "site": {"hostname": "localhost"},
+    "scheduler": {"cron_max_staleness_minutes": 720},
     "users": {"testuser": {"display_name": "testuser", "timezone": "UTC"}},
 }
 

@@ -1327,6 +1327,12 @@ SECRET_NAMES: tuple[str, ...] = (
 #: for an upstream proxy in `proxied`.
 INGRESS_HOPS = {"direct": 1, "proxied": 2, "local": 1}
 
+#: `[scheduler] cron_max_staleness_minutes` under local ingress, which is the
+#: local VM: it pauses while the Mac sleeps, and a job or briefing missed by
+#: up to twelve hours then runs once on wake, an older one is skipped. A server
+#: keeps the dataclass default.
+LOCAL_CRON_MAX_STALENESS_MINUTES = 720
+
 #: Compose profiles the wizard can turn on; each starts the service of the same
 #: name. `location` starts nothing now that the web process serves the webhook
 #: routes, and stays accepted so an existing `.env` naming it still validates.
@@ -1593,6 +1599,8 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
             web["oauth2_client_secret"] = secret["istota_web_oauth2_client_secret"]
     doc["web"] = web
     doc["site"] = {"hostname": a.hostname}
+    if a.ingress == "local":
+        doc["scheduler"] = {"cron_max_staleness_minutes": LOCAL_CRON_MAX_STALENESS_MINUTES}
 
     user: dict = {
         "display_name": a.display_name or a.user_id,

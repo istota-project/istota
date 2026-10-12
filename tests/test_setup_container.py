@@ -18,7 +18,7 @@ import pytest
 import yaml
 
 from istota import setup_wizard
-from istota.config import load_config
+from istota.config import SchedulerConfig, load_config
 from istota.setup_wizard import (
     SECRET_NAMES,
     ContainerAnswers,
@@ -493,6 +493,26 @@ class TestTheHostFolder:
         setup_wizard.run_setup(_args(tmp_path, force=True, storage="local"), out=lambda *_: None)
 
         assert _env((tmp_path / "vm" / "host.env").read_text())["STORAGE"] == "local"
+
+
+class TestMissedJobsUnderLocalIngress:
+    """Local ingress is the local VM, which pauses while the Mac sleeps. A job
+    or briefing missed by up to twelve hours runs once on wake, an older one
+    is skipped (Stage 1 measured both); a server keeps the dataclass default."""
+
+    def test_local_ingress_catches_up_for_twelve_hours(self, tmp_path, monkeypatch):
+        a = _full_answers(ingress="local", hostname="localhost:8080", nextcloud_url="",
+                          oauth_client_id="", host_folder=True)
+        config = _load(tmp_path, render_container_config(a, inline_credentials=True), monkeypatch)
+        assert config.scheduler.cron_max_staleness_minutes == 720
+
+    @pytest.mark.parametrize("ingress", ["direct", "proxied"])
+    def test_a_server_keeps_the_default(self, tmp_path, monkeypatch, ingress):
+        a = _full_answers(ingress=ingress)
+        text = render_container_config(a, inline_credentials=True)
+        assert "scheduler" not in tomllib.loads(text)
+        default = SchedulerConfig().cron_max_staleness_minutes
+        assert _load(tmp_path, text, monkeypatch).scheduler.cron_max_staleness_minutes == default
 
 
 def _image_default_log_file() -> str:
