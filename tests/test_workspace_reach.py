@@ -182,7 +182,7 @@ def test_shared_file_and_outside_resource(config, conn, tmp_path):
     assert places[f"linked:{resource_id}"].view_root == "/linked/report.txt"
 
 
-def test_no_workspace_and_nextcloud_skill(config, conn):
+def test_no_workspace_and_nextcloud_connection(config, conn):
     from istota.workspace.places import list_places
     from istota.workspace.reach import place_reach
     config.workspace_path = None
@@ -190,7 +190,8 @@ def test_no_workspace_and_nextcloud_skill(config, conn):
     config.nextcloud.url = "https://cloud.example.com"
     places = list_places(config, conn, "alice")
     assert [p.id for p in places] == ["nextcloud"]
-    assert place_reach(config, conn, "alice", places)["nextcloud"].private == "skill"
+    assert places[0].browsable
+    assert place_reach(config, conn, "alice", places)["nextcloud"].private == "none"
     config.disabled_skills = ["nextcloud"]
     assert place_reach(config, conn, "alice", places)["nextcloud"].private == "none"
 
@@ -213,3 +214,13 @@ def test_shared_group_reach_depends_on_every_room_reader(config, conn):
     db.add_group_member(conn, "team", "bob", added_by="alice")
     assert task_group_ids(conn, task) == ["team"]
     assert place_reach(config, conn, "alice", list_places(config, conn, "alice"))["group:team"].shared_member == "conditional"
+
+
+def test_personal_nextcloud_connection_is_not_task_reach(config, conn):
+    from istota.workspace.places import list_places
+    from istota.workspace.reach import place_reach
+    config.nextcloud.url = "https://cloud.example.com"
+    places = list_places(config, conn, "alice")
+    reach = place_reach(config, conn, "alice", places)["nextcloud"]
+    assert (reach.private, reach.shared_member, reach.restricted) == ("none", "none", "none")
+    assert "browse" in reach.note

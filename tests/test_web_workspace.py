@@ -575,3 +575,161 @@ async def test_delete_requires_auth_and_origin(client, app, config):
     app.dependency_overrides.clear()
     assert (await client.delete("/workspace/files", params=params)).status_code == 401
     assert (config.workspace_path / "Users/alice/notes/plan.md").exists()
+
+
+@pytest.fixture
+def nextcloud_connection(config, monkeypatch):
+    from istota.webui import tokens
+    monkeypatch.setenv("ISTOTA_WEB_TOKEN_KEY", "x" * 64)
+    config.web.token_storage = "encrypted"
+    config.web.oauth2_provider = "https://cloud.example.com/nc"
+    config.nextcloud.url = "https://internal.example.com"
+    config.nextcloud.username = "istota"
+    config.nextcloud.app_password = "bot-password"
+    config.nextcloud.dav_prefix = "Shared Files"
+    tokens.store_tokens(config.db_path, "alice", "alice-access", "alice-refresh", 3600)
+    tokens.store_tokens(config.db_path, "bob", "bob-access", "bob-refresh", 3600)
+
+
+@pytest.fixture
+def nextcloud_wire(monkeypatch):
+    from contextlib import contextmanager
+    import httpx
+    calls, replies = [], []
+
+    def handle(request):
+        calls.append(request)
+        return replies.pop(0)
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+            with client.stream(method, url, **kwargs) as response:
+                yield response
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    return calls, replies
+
+
+def nextcloud_xml():
+    return """<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+      <d:response><d:href>/nc/remote.php/dav/files/alice/</d:href>
+        <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+      <d:response><d:href>/nc/remote.php/dav/files/alice/Notes%20%26%20plans/</d:href>
+        <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><oc:fileid>10</oc:fileid></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+      <d:response><d:href>/nc/remote.php/dav/files/alice/report%23.pdf</d:href>
+        <d:propstat><d:prop><d:getcontentlength>42</d:getcontentlength><d:getlastmodified>Sat, 25 Jul 2026 10:00:00 GMT</d:getlastmodified><oc:fileid>11</oc:fileid></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+    </d:multistatus>"""
+
+
+async def test_connected_nextcloud_browses_own_account(client, config, nextcloud_connection, nextcloud_wire):
+    import httpx
+    calls, replies = nextcloud_wire
+    places = (await client.get("/workspace/places")).json()["places"]
+    assert next(p for p in places if p["id"] == "nextcloud")["browsable"]
+    replies.append(httpx.Response(207, text=nextcloud_xml()))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 200
+    entries = response.json()["entries"]
+    assert [(e["name"], e["kind"]) for e in entries] == [("Notes & plans", "dir"), ("report#.pdf", "file")]
+    assert entries[1]["size"] == 42
+    assert entries[1]["nextcloud_url"] == "https://cloud.example.com/nc/index.php/f/11"
+    assert calls[0].url == "https://cloud.example.com/nc/remote.php/dav/files/alice/"
+    assert calls[0].headers["authorization"] == "Bearer alice-access"
+    assert calls[0].headers["depth"] == "1"
+    assert config.nextcloud.username == "istota"
+    assert "alice-access" not in response.text and "bot-password" not in response.text
+    replies.append(httpx.Response(207, text=nextcloud_xml().replace("/alice/", "/alice/Notes%20%26%20plans/")))
+    response = await client.get("/workspace/list", params={"place": "nextcloud", "path": "Notes & plans"})
+    assert response.status_code == 200
+    assert calls[1].url.path == "/nc/remote.php/dav/files/alice/Notes & plans/"
+    assert response.json()["path"] == "Notes & plans"
+
+
+async def test_nextcloud_disconnect_never_uses_another_account(client, config, nextcloud_connection, nextcloud_wire):
+    from istota.webui import tokens
+    tokens.delete_tokens(config.db_path, "alice")
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 409
+    assert "Reconnect in Settings." in response.json()["error"]
+    assert not nextcloud_wire[0]
+
+
+@pytest.mark.parametrize("path", ["../bob", "notes/../bob", "bad" + chr(0) + "name", "notes/./file", "bad" + chr(92) + "name"])
+async def test_nextcloud_rejects_unsafe_paths(client, nextcloud_connection, nextcloud_wire, path):
+    response = await client.get("/workspace/list", params={"place": "nextcloud", "path": path})
+    assert response.status_code == 404
+    assert not nextcloud_wire[0]
+
+
+@pytest.mark.parametrize("status,expected", [(403, 403), (404, 404), (500, 502), (302, 502)])
+async def test_nextcloud_upstream_errors_are_safe(client, nextcloud_connection, nextcloud_wire, status, expected):
+    import httpx
+    nextcloud_wire[1].append(httpx.Response(status, text="private upstream detail", headers={"Location": "https://other.example.com"}))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == expected
+    assert "private upstream detail" not in response.text
+    assert len(nextcloud_wire[0]) == 1
+
+
+async def test_nextcloud_401_refreshes_user_token(client, nextcloud_connection, nextcloud_wire, monkeypatch):
+    import httpx
+    nextcloud_wire[1].extend([httpx.Response(401), httpx.Response(207, text=nextcloud_xml())])
+    def refresh(url, **kwargs):
+        assert kwargs["data"]["refresh_token"] == "alice-refresh"
+        return httpx.Response(200, json={"access_token": "renewed", "refresh_token": "rotated", "expires_in": 3600})
+    monkeypatch.setattr(httpx, "post", refresh)
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 200
+    assert nextcloud_wire[0][1].headers["authorization"] == "Bearer renewed"
+
+
+@pytest.mark.parametrize("disabled", ["storage", "key", "nextcloud"])
+async def test_nextcloud_connection_gate(client, config, nextcloud_connection, nextcloud_wire, monkeypatch, disabled):
+    if disabled == "storage":
+        config.web.token_storage = "ephemeral"
+    elif disabled == "key":
+        monkeypatch.delenv("ISTOTA_WEB_TOKEN_KEY")
+    else:
+        config.nextcloud.url = ""
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 409
+    assert not nextcloud_wire[0]
+
+
+@pytest.mark.parametrize("failure", ["malformed", "oversized", "network", "revoked"])
+async def test_nextcloud_failure_is_bounded(client, nextcloud_connection, nextcloud_wire, monkeypatch, failure):
+    import httpx
+    from istota.webui import nextcloud_files
+    if failure == "network":
+        def fail(*args, **kwargs):
+            raise httpx.ReadTimeout("private upstream detail")
+        monkeypatch.setattr(httpx, "stream", fail)
+    elif failure == "revoked":
+        nextcloud_wire[1].append(httpx.Response(401))
+        monkeypatch.setattr(httpx, "post", lambda *a, **kw: httpx.Response(400))
+    else:
+        if failure == "oversized":
+            monkeypatch.setattr(nextcloud_files, "_MAX_RESPONSE_BYTES", 20)
+        nextcloud_wire[1].append(httpx.Response(207, text=nextcloud_xml() if failure == "oversized" else "<not xml"))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == (409 if failure == "revoked" else 502)
+    assert "private upstream detail" not in response.text
+
+
+async def test_nextcloud_listing_filters_and_caps_entries(client, nextcloud_connection, nextcloud_wire, monkeypatch):
+    import httpx
+    from istota.webui import nextcloud_files
+    xml = nextcloud_xml()
+    extra = xml[xml.index("<d:response><d:href>/nc/remote.php/dav/files/alice/report"):xml.rindex("</d:multistatus>")]
+    xml = xml.replace("</d:multistatus>", extra.replace("/alice/report", "/bob/report") + extra + "</d:multistatus>")
+    nextcloud_wire[1].append(httpx.Response(207, text=xml))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 200
+    assert len(response.json()["entries"]) == 2
+    assert response.json()["skipped_names"] == 2
+    monkeypatch.setattr(nextcloud_files, "LIST_MAX_ENTRIES", 1)
+    nextcloud_wire[1].append(httpx.Response(207, text=nextcloud_xml()))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert len(response.json()["entries"]) == 1
+    assert response.json()["truncated"]
