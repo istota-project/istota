@@ -10,6 +10,7 @@ from istota.credentials import kdbx_import as credential_read
 import asyncio
 import codecs
 import base64
+import hashlib
 import hmac
 import ipaddress
 import secrets
