@@ -151,3 +151,49 @@ class TestARequestOnTheNextTick:
         assert gate.background
         assert gate.enabled(cfg)
         assert gate.interval(cfg) <= cfg.scheduler.poll_interval
+
+
+class TestTheCredentialGateAsksTheDaemon:
+    """`vault_isolation_refusal` gates every credential and wallet route on
+    whether tasks run sandboxed. Asked in the web container it probed bwrap
+    there, where the stack grants no sandbox, and refused every route on a
+    multi-user stack whose tasks were sandboxed in the daemon."""
+
+    @pytest.fixture
+    def multi_user(self, make_config):
+        from istota.config import UserConfig
+
+        cfg = make_config(users={"alice": UserConfig(), "bob": UserConfig()})
+        db.init_db(cfg.db_path)
+        return cfg
+
+    def _local(self, monkeypatch, value):
+        monkeypatch.setattr("istota.executor.effective_sandboxing", lambda config: value)
+
+    def test_the_daemons_verdict_opens_the_gate_where_the_local_probe_fails(self, multi_user, monkeypatch):
+        from istota.credentials.names import vault_isolation_refusal
+
+        self._local(monkeypatch, False)
+        doctor.record_sandbox_verdict(multi_user, True)
+        assert vault_isolation_refusal(multi_user, "alice") is None
+
+    def test_the_daemons_verdict_closes_it_too(self, multi_user, monkeypatch):
+        from istota.credentials.names import VAULT_ISOLATION_REASON, vault_isolation_refusal
+
+        self._local(monkeypatch, True)
+        doctor.record_sandbox_verdict(multi_user, False)
+        assert vault_isolation_refusal(multi_user, "alice") == VAULT_ISOLATION_REASON
+
+    def test_with_no_daemon_verdict_the_local_probe_answers(self, multi_user, monkeypatch):
+        from istota.credentials.names import VAULT_ISOLATION_REASON, vault_isolation_refusal
+
+        self._local(monkeypatch, False)
+        assert vault_isolation_refusal(multi_user, "alice") == VAULT_ISOLATION_REASON
+        self._local(monkeypatch, True)
+        assert vault_isolation_refusal(multi_user, "alice") is None
+
+    def test_the_boot_run_publishes_the_verdict(self, config, monkeypatch, quiet_alerts):
+        monkeypatch.setattr("istota.doctor.run_checks", lambda cfg, **kw: [_ok()])
+        monkeypatch.setattr("istota.executor.effective_sandboxing", lambda c: True)
+        scheduler.run_startup_checks(config)
+        assert doctor.daemon_sandbox_verdict(config) is True

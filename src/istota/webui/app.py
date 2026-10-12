@@ -13190,7 +13190,6 @@ def _credential_settings(username: str, action="list", name="", payload=None):
     from istota.credentials import local as local_credentials
     from istota.credentials import names as secrets_vault
     from istota.credentials.broker import bindings, grants
-    from istota.executor import effective_sandboxing
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -13241,7 +13240,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
         existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
     refusal = secrets_vault.vault_isolation_refusal(_config, username) or ""
     return {"credentials": credentials, "rooms": rooms,
-            "grant_existing_available": existing_available, "sandboxed": effective_sandboxing(_config),
+            "grant_existing_available": existing_available, "sandboxed": secrets_vault.tasks_sandboxed(_config),
             "can_add": not refusal, "add_blocked_reason": refusal,
             "broker_enabled": bool(_config.security.credential_broker.enabled)}
 

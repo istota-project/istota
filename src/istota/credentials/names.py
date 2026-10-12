@@ -135,11 +135,26 @@ def vault_isolation_refusal(config, user_id: str) -> str | None:
         return None
     if config.security.allow_unsandboxed_multi_user_vaults is True:
         return None
-    from istota.executor import effective_sandboxing
-
-    if effective_sandboxing(config):
+    if tasks_sandboxed(config):
         return None
     return VAULT_ISOLATION_REASON
+
+
+def tasks_sandboxed(config) -> bool:
+    """Whether tasks run sandboxed, as the daemon that runs them found at boot.
+
+    The daemon's verdict first: on the Docker stack the web process is another
+    container with no sandbox grant, and its own probe refused every credential
+    route on a stack whose tasks were sandboxed. Its own probe only where no
+    daemon has published one.
+    """
+    from istota import doctor
+    from istota.executor import effective_sandboxing
+
+    verdict = doctor.daemon_sandbox_verdict(config)
+    if verdict is not None:
+        return verdict
+    return effective_sandboxing(config)
 
 
 def has_shared_credentials(db_path, user_id: str) -> bool:

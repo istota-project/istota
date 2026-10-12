@@ -10309,6 +10309,7 @@ REPORT_NAMESPACE = "_doctor"
 _REPORT_KEY = "report"
 _DEEP_REPORT_KEY = "deep_report"
 _REQUEST_KEY = "request"
+_SANDBOX_KEY = "sandbox"
 
 
 def _report_now() -> str:
@@ -10332,6 +10333,41 @@ def record_report(
                              _DEEP_REPORT_KEY if deep else _REPORT_KEY, value, "daemon")
     except Exception as exc:  # noqa: BLE001 - a record of the run, not the run
         logger.warning("doctor_report_unwritten err=%s", exc)
+
+
+def record_sandbox_verdict(config: "Config", effective: bool) -> None:
+    """Publish whether this daemon's tasks run sandboxed. Never raises."""
+    if not Path(config.db_path).exists():
+        return
+    from istota import db
+
+    value = json.dumps({"effective": bool(effective), "at": _report_now()})
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.shared_kv_set(conn, REPORT_NAMESPACE, _SANDBOX_KEY, value, "daemon")
+    except Exception as exc:  # noqa: BLE001 - a record, not the probe
+        logger.warning("doctor_sandbox_verdict_unwritten err=%s", exc)
+
+
+def daemon_sandbox_verdict(config: "Config") -> bool | None:
+    """What the daemon found at boot about its tasks' sandbox, or None.
+
+    For a gate in another process, the web container above all, whose own
+    bwrap probe answers for a container that runs no task.
+    """
+    if not Path(config.db_path).exists():
+        return None
+    from istota import db
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            row = db.shared_kv_get(conn, REPORT_NAMESPACE, _SANDBOX_KEY)
+    except Exception as exc:  # noqa: BLE001 - the caller falls back to its own probe
+        logger.warning("doctor_sandbox_verdict_unread err=%s", exc)
+        return None
+    if row is None:
+        return None
+    return bool(json.loads(row["value"]).get("effective"))
 
 
 def read_reports(config: "Config") -> dict:
