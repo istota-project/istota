@@ -168,6 +168,7 @@ export interface User {
     money: boolean;
     health: boolean;
     briefings: boolean;
+    workspace?: boolean;
     google_workspace: boolean;
     google_workspace_enabled: boolean;
     admin: boolean;
@@ -5193,4 +5194,138 @@ export function search(
   if (options.limit !== undefined) params.set('limit', String(options.limit));
   if (options.offset !== undefined) params.set('offset', String(options.offset));
   return apiFetch(`/search?${params}`, { signal: options.signal });
+}
+
+// Workspace places and safe, one-directory listings.
+export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none' | 'conditional';
+export interface WorkspacePlace {
+  id: string;
+  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud';
+  label: string;
+  browsable: boolean;
+  view_root: string | null;
+  reach: {
+    private: WorkspaceAccess;
+    shared_member: WorkspaceAccess;
+    restricted: WorkspaceAccess;
+    note: string | null;
+  };
+}
+export interface WorkspaceEntry {
+  view_path?: string;
+  name: string;
+  kind: 'dir' | 'file' | 'link' | 'other';
+  size: number | null;
+  modified: number;
+  hidden: boolean;
+  share?: { kind: 'user' | 'group' | 'link'; count: number } | null;
+  nextcloud_url?: string | null;
+}
+export interface WorkspaceListing {
+  notes?: string[];
+  place: string;
+  path: string;
+  entries: WorkspaceEntry[];
+  truncated: boolean;
+  skipped_names: number;
+}
+export function getWorkspacePlaces(): Promise<{ places: WorkspacePlace[]; notes: string[] }> {
+  return apiFetch('/workspace/places');
+}
+export function getWorkspaceListing(place: string, path = ''): Promise<WorkspaceListing> {
+  return apiFetch(`/workspace/list?${new URLSearchParams({ place, path })}`);
+}
+
+export interface DriveItem {
+  id: string;
+  name: string;
+  mime_type: string;
+  modified: string | null;
+  size: number | null;
+  web_url: string | null;
+  is_folder: boolean;
+}
+export interface DriveListing {
+  items: DriveItem[];
+  next_page_token: string | null;
+}
+export function getWorkspaceDriveListing(
+  folder = 'root',
+  pageToken?: string,
+): Promise<DriveListing> {
+  return apiFetch(
+    `/workspace/drive/list?${new URLSearchParams({ folder, ...(pageToken ? { page_token: pageToken } : {}) })}`,
+  );
+}
+
+export function createWorkspaceFolder(path: string, name: string): Promise<{ path: string }> {
+  return apiFetch('/workspace/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ place: 'home', path, name }),
+  });
+}
+
+export function uploadWorkspaceFile(
+  path: string,
+  file: File,
+  onProgress: (percent: number) => void,
+): Promise<{ name: string; path: string; size: number }> {
+  const form = new FormData();
+  form.append('place', 'home');
+  form.append('path', path);
+  form.append('file', file);
+  // XHR exposes upload progress; fetch does not.
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${base}/api/workspace/upload`);
+    xhr.timeout = 120_000;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => reject(new UploadUnreachableError());
+    xhr.ontimeout = () => reject(new Error('Upload timed out.'));
+    xhr.onload = async () => {
+      if (xhr.status === 401) {
+        reject(new AuthError());
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(
+          new Error(
+            await errorMessage(new Response(xhr.responseText, { status: xhr.status || 500 })),
+          ),
+        );
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText));
+      } catch {
+        reject(new Error('Could not read the upload response.'));
+      }
+    };
+    xhr.send(form);
+  });
+}
+
+export interface WorkspacePinInput {
+  provider: 'workspace' | 'drive';
+  ref: string;
+  name: string;
+  mime_type: string | null;
+  web_url: string | null;
+}
+export interface WorkspacePin extends WorkspacePinInput {
+  id: number;
+  available: boolean;
+  is_dir: boolean;
+}
+export function getWorkspacePins(): Promise<{ pins: WorkspacePin[] }> {
+  return apiFetch('/workspace/pins');
+}
+export function putWorkspacePin(pin: WorkspacePinInput): Promise<{ pin: WorkspacePin }> {
+  return apiFetch('/workspace/pins', { method: 'PUT', body: JSON.stringify(pin) });
+}
+export function deleteWorkspacePin(id: number): Promise<{ status: string }> {
+  return apiFetch(`/workspace/pins/${id}`, { method: 'DELETE' });
 }

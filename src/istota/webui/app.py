@@ -1998,6 +1998,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "briefings": False,
         "google_workspace": False,
         "google_workspace_enabled": False,
+        "workspace": False,
         "admin": is_admin,
     }
     if _config:
@@ -2007,6 +2008,16 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         features["health"] = _user_has_health(username)
         features["briefings"] = _user_has_briefings(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
+        features["workspace"] = _config.has_workspace or _config.storage_is_nextcloud
+        if not features["workspace"] and _config.google_workspace.enabled:
+            from istota import db
+            from istota.workspace.places import list_places
+
+            def _has_workspace_connection():
+                with db.get_db(_config.db_path) as conn:
+                    return any(p.kind == "drive" for p in list_places(_config, conn, username))
+
+            features["workspace"] = await asyncio.to_thread(_has_workspace_connection)
         if _config.google_workspace.enabled:
             features["google_workspace"] = _has_google_token(username)
     # Nextcloud user-token status: null when the feature is off (ephemeral /
@@ -9978,11 +9989,7 @@ async def chat_room_memory(
     room_id: int,
     user: dict = Depends(_require_api_auth),
 ):
-    """The room's `CHANNEL.md` — the standing instructions every task in the
-    room is given. Read-only from `/chat/files`' point of view: that endpoint
-    is confined to `/Users/{user_id}` on purpose (`_resolve_chat_file`), and
-    `/Channels/{token}` sits outside it by design, so this carries its own
-    room-scoped confinement rather than widening that root."""
+    """The room's standing instructions, with room-scoped editor access."""
     result = await asyncio.to_thread(_chat_room_memory, user["username"], room_id)
     if result is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
@@ -11954,11 +11961,13 @@ def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     stem = _attachment_stem(filename)
     suffix = uuid.uuid4().hex[:8] if stem else uuid.uuid4().hex
     dest = dest_dir / f"{stem}-{suffix}{ext}" if stem else dest_dir / f"{suffix}{ext}"
-    from istota.workspace.writes import write_new_file
+    from istota.workspace.writes import open_or_create_dirs, write_new_file
 
     anchor = _config.workspace_path or _config.temp_dir
-    write_new_file(anchor, dest.relative_to(anchor).parts, data)
-    return str(dest)
+    parts = list(dest_dir.relative_to(anchor).parts)
+    os.close(open_or_create_dirs(anchor, parts))
+    name = write_new_file(anchor, parts, dest.name, [data], max_bytes=len(data))
+    return str(dest_dir / name)
 
 
 @api_router.post("/chat/attachments")
@@ -11984,10 +11993,12 @@ async def chat_upload_attachment(
         return JSONResponse(
             {"error": f"file exceeds {chat.max_attachment_mb} MB"}, status_code=413,
         )
+    from istota.workspace.listing import ListingError
+
     username = user["username"]
     try:
         path = await asyncio.to_thread(_save_chat_attachment, username, name, data)
-    except OSError:
+    except (OSError, ListingError):
         return JSONResponse({"error": "attachment could not be saved"}, status_code=400)
     # `workspace_path` is what `/chat/files` takes, so the composer can link the
     # chip it renders optimistically instead of waiting for the turn to come
@@ -16227,6 +16238,13 @@ from istota.webui.garmin_routes import verify_origin as _garmin_verify_origin
 app.include_router(_garmin_router, prefix="/istota/api/garmin", tags=["garmin"])
 app.dependency_overrides[_garmin_require_auth] = _require_api_auth
 app.dependency_overrides[_garmin_verify_origin] = _verify_origin
+
+# Workspace is a core page, independent of per-user module switches.
+from istota.webui.workspace_routes import require_auth as _workspace_require_auth
+from istota.webui.workspace_routes import router as _workspace_router
+
+app.include_router(_workspace_router, prefix="/istota/api/workspace", tags=["workspace"])
+app.dependency_overrides[_workspace_require_auth] = _require_api_auth
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

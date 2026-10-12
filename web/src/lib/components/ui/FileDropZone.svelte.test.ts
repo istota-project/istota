@@ -59,3 +59,20 @@ describe('FileDropZone', () => {
     expect(screen.getByRole('button', { name: /choose file/i })).toBeInTheDocument();
   });
 });
+
+it('accepts a multi-file drop over its content and refuses drops when disabled', async () => {
+  const onFiles = vi.fn();
+  const props = { overlay: true, onFiles, children: prompt };
+  const { container, rerender } = render(FileDropZone, props);
+  const files = [new File(['one'], 'one.txt'), new File(['two'], 'two.txt')];
+  await fireEvent.dragEnter(container.querySelector('.dropzone')!, {
+    dataTransfer: { types: ['Files'] },
+  });
+  expect(screen.getByText('Drop files to upload')).toBeTruthy();
+  await fireEvent.drop(container.querySelector('.dropzone')!, { dataTransfer: { files } });
+  expect(onFiles).toHaveBeenCalledWith(files);
+  expect(screen.queryByText('Drop files to upload')).toBeNull();
+  await rerender({ ...props, disabled: true });
+  await fireEvent.drop(container.querySelector('.dropzone')!, { dataTransfer: { files } });
+  expect(onFiles).toHaveBeenCalledTimes(1);
+});
