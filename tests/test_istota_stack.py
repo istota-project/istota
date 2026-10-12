@@ -419,6 +419,62 @@ class TestAHardenedUmask:
         assert text.index("\numask 022\n") < text.index("git clone")
 
 
+class TestLatestFollowsMain:
+    """`update --unsigned latest` deploys the tip of main with no tag at all, so
+    a deployment tracking main needs nothing pushed but the merge. It is
+    recorded as main-<12 hex>, a name for one commit that stays put, so a
+    rollback has something to return to."""
+
+    def _name(self, commit: str) -> str:
+        return f"main-{commit[:12]}"
+
+    def test_latest_deploys_the_tip_of_main(self, fx):
+        commit = fx.commit("next")
+        result = fx.run("update", "--unsigned", "latest")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.head() == commit
+        assert f"ISTOTA_TAG={self._name(commit)}\n" in fx.env_text()
+        assert "ISTOTA_TAG_UNSIGNED=1\n" in fx.env_text()
+        assert any(call.endswith("up -d --remove-orphans") for call in fx.docker_calls())
+
+    def test_a_later_merge_moves_it_and_keeps_the_last(self, fx):
+        first = fx.commit("first")
+        assert fx.run("update", "--unsigned", "latest").returncode == 0
+        second = fx.commit("second")
+        result = fx.run("update", "--unsigned", "latest")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.head() == second
+        assert f"ISTOTA_PREVIOUS_TAG={self._name(first)}\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG_UNSIGNED=1\n" in fx.env_text()
+
+    def test_rollback_returns_to_the_previous_commit_of_main(self, fx):
+        first = fx.commit("first")
+        assert fx.run("update", "--unsigned", "latest").returncode == 0
+        fx.commit("second")
+        assert fx.run("update", "--unsigned", "latest").returncode == 0
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.head() == first
+        assert f"ISTOTA_TAG={self._name(first)}\n" in fx.env_text()
+
+    def test_latest_is_never_a_signed_release(self, fx):
+        fx.commit("next")
+        before = fx.env_text(), fx.head()
+        result = fx.run("update", "latest")
+        assert result.returncode == 65
+        assert "--unsigned" in result.stderr
+        assert (fx.env_text(), fx.head()) == before
+
+    def test_a_named_commit_off_main_is_refused(self, fx):
+        """main-<hex> names a commit of main; it is not a way to deploy any commit."""
+        fx.commit("on main")
+        _git(fx.origin, "checkout", "-q", "-b", "elsewhere", env=fx.env)
+        stray = fx.commit("not on main")
+        _git(fx.origin, "checkout", "-q", "main", env=fx.env)
+        before = fx.env_text(), fx.head()
+        _assert_unchanged(fx, fx.run("update", "--unsigned", self._name(stray)), *before)
+
+
 class TestAnUnsignedTagOnRequest:
     """Only releases are signed. `--unsigned` installs any other tag, for that
     one run, and .env records it so a rollback can return to it."""
