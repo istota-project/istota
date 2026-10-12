@@ -3,6 +3,7 @@ import importlib.util
 import pytest
 from istota import db, doctor
 from istota.config import Config, UserConfig
+from tests.support.drift import source_of
 
 
 def test_libraries_name_missing_extra(monkeypatch):
@@ -36,7 +37,7 @@ def test_environment_only_key_and_renamed_registry(tmp_path):
     db.init_db(path)
     result = doctor.check_secret_key_separation(Config(db_path=path), False)
     assert result.status == doctor.OK
-    source = __import__("inspect").getsource(doctor)
+    source = source_of(doctor)
     assert '("security.credential_isolation", check_credential_isolation)' in source
     assert '("security.vault_contents",' not in source
 

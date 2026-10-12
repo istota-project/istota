@@ -42,12 +42,6 @@ GROUP_BASE = "/Groups"
 #: mount pass still resolves ``config/`` through its own containment check
 #: before it touches anything (ISSUE-339); this supplies the names, never the
 #: rule.
-#:
-#: ``vault`` is where a user drops their KDBX credential vault. It is
-#: provisioned for everybody whether or not they use one, because the whole of
-#: the instruction the settings card gives is "put the file in this folder",
-#: and a folder that has to be created first is an instruction with a step
-#: missing.
 BOT_SUBDIRS = ("config", "exports", "scripts", "notes")
 
 #: The one folder a user's vault file may be chosen from.

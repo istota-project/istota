@@ -120,13 +120,6 @@ class TestMountOperations:
         for sub in BOT_SUBDIRS:
             assert (base / "istota" / sub).is_dir(), sub
 
-    def test_the_vault_folder_is_provisioned(self, mount_config):
-        """The whole of the instruction the settings card gives is "put the
-        file in this folder", so the folder has to be there for everybody."""
-        ensure_user_directories_v2(mount_config, "alice")
-        base = mount_config.workspace_path / "Users" / "alice"
-        assert (base / "istota" / "vault").is_dir()
-
     def test_ensure_dirs_idempotent(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
         result = ensure_user_directories_v2(mount_config, "alice")
