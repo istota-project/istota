@@ -1405,23 +1405,9 @@ class TestDownloadTalkAttachments:
         # Falls back to original path
         assert result[0] == "Talk/missing.jpg"
 
-    @patch("istota.scheduler.subprocess.run")
-    def test_rclone_download(self, mock_run, tmp_path):
-        temp_dir = tmp_path / "temp"
-        temp_dir.mkdir()
-        # Simulate rclone creating the file
-        (temp_dir / "doc.pdf").write_bytes(b"pdf content")
-        mock_run.return_value = MagicMock(returncode=0)
-
-        config = Config(
-            workspace_path=None,
-            rclone_remote="nc",
-            temp_dir=temp_dir,
-        )
-        result = download_talk_attachments(config, ["Talk/doc.pdf"])
-        assert len(result) == 1
-        assert result[0] == str(temp_dir / "doc.pdf")
-        mock_run.assert_called_once()
+    def test_no_workspace_leaves_the_path_as_given(self, tmp_path):
+        config = Config(workspace_path=None, temp_dir=tmp_path / "temp")
+        assert download_talk_attachments(config, ["Talk/doc.pdf"]) == ["Talk/doc.pdf"]
 
     def test_non_talk_path_unchanged(self, tmp_path):
         config = Config(workspace_path=tmp_path)

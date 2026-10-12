@@ -115,7 +115,7 @@ _ROOM = "room"
 #:
 #: Restated rather than imported: this CLI is spawned per write and
 #: deliberately avoids importing `istota.storage`, which pulls in subprocess,
-#: shutil and the rclone paths for a process that runs in hundreds of
+#: shutil and the storage paths for a process that runs in hundreds of
 #: milliseconds. `tests/test_skill_memory_cli.py` holds the two equal — they
 #: must be, or the daemon reads a file this CLI cannot edit, or this CLI writes
 #: one the daemon will not load.

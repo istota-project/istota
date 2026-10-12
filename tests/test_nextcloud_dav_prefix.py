@@ -74,6 +74,7 @@ class TestTheConfigKeys:
 
         path = tmp_path / "config.toml"
         path.write_text(
+            'workspace_path = "/srv/workspace"\n'
             '[nextcloud]\nurl = "https://cloud.example.com"\n'
             f'dav_prefix = "{PREFIX}"\nauto_share_bot_dir = false\n'
         )

@@ -346,12 +346,11 @@ def prepare_image_attachments(
 
     `bind_roots` is what the sandbox can see. With it, the source is opened
     through `sandbox.attachment_source` (ISSUE-610): under one of the roots
-    with no link followed below it, or in a shape the scheduler's Talk
-    fallbacks produce (`/mnt/nc-data/<user>/files/Talk/<name>`, which
-    `build_bwrap_cmd` binds nowhere, or `{temp_dir}/<name>` from the rclone
-    branch). Anything else is omitted with a notice. Every accepted image is
-    then written into `out_dir`, even one that needs no resize and lies under a
-    root: the OCR child and the native brain read the prepared path by name in
+    with no link followed below it, or in the shape the scheduler's Talk
+    fallback produces (`/mnt/nc-data/<user>/files/Talk/<name>`, which
+    `build_bwrap_cmd` binds nowhere). Anything else is omitted with a notice.
+    Every accepted image is then written into `out_dir`, even one that needs no
+    resize and lies under a root: the OCR child and the native brain read the prepared path by name in
     the daemon, and a path in the workspace is one a task can swap for a link
     after this pass. `None` means the caller has not established containment —
     the unsandboxed shape, where the model already reads with the daemon's view

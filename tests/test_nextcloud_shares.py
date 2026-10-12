@@ -412,6 +412,7 @@ class TestConfig:
 
         cfg_file = tmp_path / "config.toml"
         cfg_file.write_text(
+            'workspace_path = "/srv/workspace"\n'
             '[nextcloud]\nurl = "https://nc.example.com"\n'
             'username = "istota"\nshare_default_expire_days = 3\n'
         )

@@ -16,8 +16,8 @@ Two rules decide where a source may be:
   inside the roots: a resolve-then-compare check is a race the model can win.
 - **Under no root, only where the daemon itself writes an attachment**:
   ``{NC_DATA_ROOT}/<user>/files/Talk/<name>`` (``download_talk_attachments``,
-  Nextcloud kept a shared file in the sender's data dir), ``{temp_dir}/<name>``
-  (its rclone branch), ``{temp_dir}/whatsapp-media/<name>`` and
+  Nextcloud kept a shared file in the sender's data dir),
+  ``{temp_dir}/whatsapp-media/<name>`` and
   ``{temp_dir}/attachments_<id>/<name>`` (the WhatsApp and email copies kept
   when the inbox upload fails), and any directory the caller names in
   ``extra`` (a restricted task's own ``room-attachments`` copy). None of these
@@ -147,11 +147,8 @@ def locate(
     if temp_dir:
         anchor = Path(temp_dir)
         parts = _parts_under(pure, anchor)
-        if parts is not None and (
-            len(parts) == 1
-            or (len(parts) == 2 and (
-                parts[0] == "whatsapp-media" or parts[0].startswith("attachments_")
-            ))
+        if parts is not None and len(parts) == 2 and (
+            parts[0] == "whatsapp-media" or parts[0].startswith("attachments_")
         ):
             return AttachmentSource(anchor, parts, False)
     for directory in extra:

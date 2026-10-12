@@ -269,8 +269,8 @@ class TestTheDeployReportsALeftRoom:
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
         cfg.write_text(
-            "db_path = '%s'\n\n[nextcloud]\nurl = 'https://nc.example'\n"
-            "username = 'bot'\napp_password = 'pw'\n" % db_path
+            "db_path = '%s'\nworkspace_path = '%s'\n\n[nextcloud]\nurl = 'https://nc.example'\n"
+            "username = 'bot'\napp_password = 'pw'\n" % (db_path, tmp_path / "workspace")
         )
         monkeypatch.setattr(
             pr, "provision_user_rooms",

@@ -177,6 +177,7 @@ class TestCaldavConfig:
         """
         p = tmp_path / "config.toml"
         p.write_text(
+            'workspace_path = "/srv/workspace"\n'
             "[nextcloud]\n"
             'url = "https://cloud.example.com"\n'
             'username = "ncuser"\n'

@@ -6963,18 +6963,9 @@ def _chat_save_room_memory(
     with db.get_db(_config.db_path) as conn:
         if db.count_active_room_tasks(conn, room.token) > 0:
             return "busy", None
-    if _config.has_workspace:
-        memory_path = _config.workspace_path / "Channels" / room.token / "CHANNEL.md"
-    else:
-        # No local file exists on an rclone deployment, so the anchor is keyed on
-        # a synthetic absolute path. Absolute deliberately: `lock_path_for` hashes
-        # `os.path.abspath`, so a relative one would resolve against the caller's
-        # cwd and two processes would take different anchors. It still excludes
-        # only writers on this host — the object lives on a remote, and
-        # `_rclone_rcat` streams it rather than staging a rename, so a concurrent
-        # reader there can see a partial file. The revision check is what makes
-        # the save safe on that shape; the lock is a local courtesy.
-        memory_path = Path("/") / storage.get_channel_memory_path(room.token).lstrip("/")
+    if not _config.has_workspace:
+        return "failed", None
+    memory_path = _config.workspace_path / "Channels" / room.token / "CHANNEL.md"
     try:
         with memory_md_lock(
             memory_path, timeout_seconds=5.0,

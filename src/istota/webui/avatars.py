@@ -11,8 +11,8 @@ Two things about the shape are worth knowing before changing anything here.
 `{uploads_dir}/{panel_id}/original.{ext}` is the precedent for user *documents*,
 which are large, kept verbatim and served rarely; an avatar is about 10 KB,
 disposable, regenerable and requested on every page load. `Config.workspace_root`
-also returns `None` on an rclone deployment, so a file-backed avatar would be
-unavailable on exactly the deployments with no other place to put it.
+also returns `None` without a workspace, so a file-backed avatar would be
+unavailable on exactly the installs with no other place to put it.
 
 **Every store function takes a connection.** Both callers already hold one: a
 route inside its own, and `user_profiles.delete_profile` inside an open write

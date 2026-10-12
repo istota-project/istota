@@ -13,14 +13,6 @@ from zoneinfo import ZoneInfo
 
 from istota.lib.atomic_write import write_text_atomic
 from istota.lib.filenames import MAX_NAME_BYTES, safe_filename
-from istota.lib.rclone_client import (
-    rclone_cat,
-    rclone_cat_checked,
-    rclone_mkdir,
-    rclone_path_exists,
-    rclone_rcat,
-    rclone_run,
-)
 from istota.sandbox.host_paths import owner_path_parts
 from istota.sandbox.user_scope import is_scopable_user_id
 
@@ -35,13 +27,8 @@ GROUP_BASE = "/Groups"
 
 #: The directories provisioned inside a user's bot directory, in one place.
 #:
-#: Both provisioning passes read this. They used to spell it twice — a list in
-#: the rclone pass and hand-written ``mkdir`` calls in the mount one — which is
-#: how ``config/`` came to be created on one shape and not on the other, and a
-#: third spelling is what adding ``vault/`` would otherwise have been. The
-#: mount pass still resolves ``config/`` through its own containment check
-#: before it touches anything (ISSUE-339); this supplies the names, never the
-#: rule.
+#: Provisioning resolves ``config/`` through its own containment check before
+#: it touches anything (ISSUE-339); this supplies the names, never the rule.
 BOT_SUBDIRS = ("config", "exports", "scripts", "notes")
 
 #: The one folder a user's vault file may be chosen from.
@@ -364,8 +351,7 @@ def resolve_user_skill_overlays_dir(config: "Config", user_id: str) -> Path | No
     path independently is a wrong ``bot_dir`` or a missing ``lstrip`` away from
     leaving one path silently inert while both test suites stay green.
 
-    None without a mount. Overlays are filesystem reads, so an rclone-remote
-    deployment has none.
+    None without a workspace.
 
     None as well when the directory leads outside the user's own tree.
     ``config`` and ``skills`` are ordinary entries under a root bound
@@ -460,7 +446,7 @@ def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
     The **resolved** path comes back and callers must use it, since the check
     and the reads that follow are separated by at least one ``open(2)``.
 
-    None without a mount: an rclone-remote deployment has no such directory.
+    None without a workspace.
     """
     if not config.has_workspace:
         return None
@@ -1755,103 +1741,6 @@ def _build_cron_seed(config: "Config", user_id: str) -> str:
     return CRON_TEMPLATE.format(conversation_token=token)
 
 
-# The rclone API lives in `istota.lib.rclone_client`, a stdlib-only leaf, because
-# `skills/files/__init__.py` carried a byte-identical copy of it and neither
-# module could import the other — that skill runs in a subprocess and this one
-# pulls in the package. The private names are kept as aliases so this module's
-# own callers, and the tests that import them, are unchanged. What that does
-# not preserve is `_rclone_run` as one interception point: the four wrappers
-# below now call the leaf's runner, so patching this name reaches only the
-# one direct call left in this module (`rclone copyto`, in
-# `upload_file_to_inbox`). Patch `rclone_client.rclone_run` for the rest.
-_rclone_run = rclone_run
-_rclone_mkdir = rclone_mkdir
-_rclone_path_exists = rclone_path_exists
-_rclone_cat = rclone_cat
-_rclone_rcat = rclone_rcat
-
-
-def ensure_user_directories(remote: str, user_id: str, bot_dir: str) -> bool:
-    """
-    Create the bot-managed directory structure for a user.
-
-    Returns True if all directories were created or already exist.
-    """
-    base = get_user_base_path(user_id)
-    subdirs = ["inbox", "memories", bot_dir, "shared"]
-
-    success = True
-    for subdir in subdirs:
-        path = f"{base}/{subdir}"
-        if not _rclone_mkdir(remote, path):
-            # mkdir may fail if it already exists, so check existence
-            if not _rclone_path_exists(remote, path):
-                success = False
-
-    # Create bot_dir subdirectories
-    for sub in BOT_SUBDIRS:
-        sub_path = f"{base}/{bot_dir}/{sub}"
-        if not _rclone_mkdir(remote, sub_path):
-            if not _rclone_path_exists(remote, sub_path):
-                success = False
-
-    return success
-
-
-def user_directories_exist(remote: str, user_id: str, bot_dir: str) -> dict[str, bool]:
-    """
-    Check which user directories exist.
-
-    Returns dict mapping directory name to existence status.
-    """
-    base = get_user_base_path(user_id)
-    subdirs = ["inbox", "memories", bot_dir, "shared"]
-
-    result = {}
-    for subdir in subdirs:
-        path = f"{base}/{subdir}"
-        result[subdir] = _rclone_path_exists(remote, path)
-
-    return result
-
-
-def read_user_memory(remote: str, user_id: str, bot_dir: str) -> str | None:
-    """
-    Read the user's memory file.
-
-    Returns the content of the memory file, or None if it doesn't exist or is empty.
-    """
-    memory_path = get_user_memory_path(user_id, bot_dir)
-    content = _rclone_cat(remote, memory_path)
-
-    if content is None or not content.strip():
-        return None
-
-    return content
-
-
-def init_user_memory(remote: str, user_id: str, bot_dir: str) -> bool:
-    """
-    Initialize the user's memory file with a template.
-
-    Returns True on success.
-    """
-    memory_path = get_user_memory_path(user_id, bot_dir)
-    return _rclone_rcat(remote, memory_path, MEMORY_TEMPLATE)
-
-
-def get_memory_line_count(remote: str, user_id: str, bot_dir: str) -> int | None:
-    """
-    Get the line count of a user's memory file.
-
-    Returns None if file doesn't exist.
-    """
-    content = read_user_memory(remote, user_id, bot_dir)
-    if content is None:
-        return None
-    return len(content.splitlines())
-
-
 def get_user_inbox_path(user_id: str) -> str:
     """Get the path to a user's inbox directory."""
     return f"{get_user_base_path(user_id)}/inbox"
@@ -1865,39 +1754,6 @@ def _inbox_name(name: str) -> str:
     distinct names down to one.
     """
     return safe_filename(name, max_stem=MAX_NAME_BYTES)
-
-
-def upload_file_to_inbox(
-    remote: str,
-    user_id: str,
-    local_path: Path,
-    remote_filename: str | None = None,
-) -> str | None:
-    """
-    Upload a local file to the user's inbox directory.
-
-    Args:
-        remote: rclone remote name
-        user_id: User ID
-        local_path: Local file path to upload
-        remote_filename: Optional filename to use on remote (defaults to local filename)
-
-    Returns:
-        The remote path on success, None on failure.
-    """
-    if not local_path.exists():
-        return None
-
-    filename = _inbox_name(remote_filename or local_path.name)
-    inbox_path = get_user_inbox_path(user_id)
-    remote_path = f"{inbox_path}/{filename}"
-
-    result = _rclone_run(["rclone", "copyto", str(local_path), f"{remote}:{remote_path}"])
-
-    if result is None or result.returncode != 0:
-        return None
-
-    return remote_path
 
 
 # =============================================================================
@@ -2072,8 +1928,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
 
         # `config_dir` first and by name: it is the containment-checked path
         # above, and the loop's own `config` entry is then a no-op on the same
-        # directory. The loop is what keeps this pass and the rclone one
-        # reading one list.
+        # directory.
         config_dir.mkdir(exist_ok=True)
         for sub in BOT_SUBDIRS:
             (bot_dir_path / sub).mkdir(exist_ok=True)
@@ -2196,11 +2051,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             share_folder_with_user(config, bot_path, user_id)
 
         return True
-    else:
-        result = ensure_user_directories(config.rclone_remote, user_id, bot_dir)
-        if result:
-            logger.debug("Ensured user directories for %s via rclone", user_id)
-        return result
+    return False
 
 
 def user_directories_exist_v2(config: "Config", user_id: str) -> dict[str, bool]:
@@ -2213,8 +2064,7 @@ def user_directories_exist_v2(config: "Config", user_id: str) -> dict[str, bool]
         base = _get_mount_path(config, get_user_base_path(user_id))
         subdirs = ["inbox", "memories", config.bot_dir_name, "shared"]
         return {subdir: (base / subdir).exists() for subdir in subdirs}
-    else:
-        return user_directories_exist(config.rclone_remote, user_id, config.bot_dir_name)
+    return {subdir: False for subdir in ["inbox", "memories", config.bot_dir_name, "shared"]}
 
 
 def read_user_memory_v2(config: "Config", user_id: str) -> str | None:
@@ -2232,8 +2082,7 @@ def read_user_memory_v2(config: "Config", user_id: str) -> str | None:
         if content is None or not content.strip():
             return None
         return content
-    else:
-        return read_user_memory(config.rclone_remote, user_id, config.bot_dir_name)
+    return None
 
 
 def init_user_memory_v2(config: "Config", user_id: str) -> bool:
@@ -2254,8 +2103,7 @@ def init_user_memory_v2(config: "Config", user_id: str) -> bool:
             return False
         config_dir.mkdir(parents=True, exist_ok=True)
         return write_regular_file(config_dir / "USER.md", MEMORY_TEMPLATE)
-    else:
-        return init_user_memory(config.rclone_remote, user_id, config.bot_dir_name)
+    return False
 
 
 def ensure_workspace_for_user(config: "Config", user_id: str) -> bool:
@@ -2306,7 +2154,7 @@ def upload_file_to_inbox_v2(
         return None
 
     # Every inbox writer goes through here, so the name rule sits here too: a
-    # name Nextcloud refuses stays in the rclone VFS cache for good (ISSUE-593).
+    # name Nextcloud refuses stays in the mount's VFS cache for good (ISSUE-593).
     filename = _inbox_name(remote_filename or local_path.name)
     inbox_path = get_user_inbox_path(user_id)
     remote_path = f"{inbox_path}/{filename}"
@@ -2316,8 +2164,7 @@ def upload_file_to_inbox_v2(
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(local_path), str(dst))
         return remote_path
-    else:
-        return upload_file_to_inbox(config.rclone_remote, user_id, local_path, filename)
+    return None
 
 
 # Date pattern for dated memory files (YYYY-MM-DD.md)
@@ -2486,12 +2333,7 @@ def ensure_channel_directories(config: "Config", conversation_token: str) -> boo
 
         logger.debug("Ensured channel directories for %s via mount", conversation_token)
         return True
-    else:
-        path = get_channel_memories_path(conversation_token)
-        if not _rclone_mkdir(config.rclone_remote, path):
-            if not _rclone_path_exists(config.rclone_remote, path):
-                return False
-        return True
+    return False
 
 
 def channel_memory_tokens(config: "Config", conversation_token: str) -> list[str]:
@@ -2543,32 +2385,27 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
     here would make the same bytes hash two ways and every save read as a
     conflict.
     """
+    if not config.has_workspace:
+        return None
     for token in channel_memory_tokens(config, conversation_token):
-        if config.has_workspace:
-            channel_dir = _contained_channel_dir(config, token)
-            if channel_dir is None:
-                logger.warning("channel_memory_read_refused token=%s reason=outside_channel_root", token)
-                return None
-            try:
-                (channel_dir / "CHANNEL.md").lstat()
-            except FileNotFoundError:
-                continue
-            except OSError:
-                return None
-            content, reason = read_regular_file(channel_dir / "CHANNEL.md")
-            if reason is not None:
-                logger.warning("channel_memory_read_refused token=%s reason=%s", token, reason)
-                return None
-            # Only absence falls back. An intentionally empty canonical file
-            # must not revive notes somebody just cleared.
-            if content is None:
-                continue
-        else:
-            content, missing = rclone_cat_checked(config.rclone_remote, get_channel_memory_path(token))
-            if missing:
-                continue
-            if content is None:
-                return None
+        channel_dir = _contained_channel_dir(config, token)
+        if channel_dir is None:
+            logger.warning("channel_memory_read_refused token=%s reason=outside_channel_root", token)
+            return None
+        try:
+            (channel_dir / "CHANNEL.md").lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        content, reason = read_regular_file(channel_dir / "CHANNEL.md")
+        if reason is not None:
+            logger.warning("channel_memory_read_refused token=%s reason=%s", token, reason)
+            return None
+        # Only absence falls back. An intentionally empty canonical file
+        # must not revive notes somebody just cleared.
+        if content is None:
+            continue
         return content if content.strip() else None
     return None
 
@@ -2597,11 +2434,6 @@ def write_channel_memory(
     lost update, and the tearing happens after it. The per-call staging name
     `atomic_write` mints is what makes the promise above true rather than
     merely intended.
-
-    The rclone branch is **not** atomic: `rclone rcat` streams the object, so a
-    concurrent reader can observe a partial one. Nothing local exists to stage
-    through there, and the caller's lock does not help because a remote is
-    shared across hosts.
     """
     if config.has_workspace:
         memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
@@ -2616,12 +2448,7 @@ def write_channel_memory(
         except OSError as e:
             logger.warning("channel memory write failed for %s: %s", conversation_token, e)
             return False
-    else:
-        return _rclone_rcat(
-            config.rclone_remote,
-            get_channel_memory_path(conversation_token),
-            content,
-        )
+    return False
 
 
 def init_channel_memory(config: "Config", conversation_token: str) -> bool:
@@ -2635,12 +2462,7 @@ def init_channel_memory(config: "Config", conversation_token: str) -> bool:
         memory_path.parent.mkdir(parents=True, exist_ok=True)
         memory_path.write_text(CHANNEL_MEMORY_TEMPLATE)
         return True
-    else:
-        return _rclone_rcat(
-            config.rclone_remote,
-            get_channel_memory_path(conversation_token),
-            CHANNEL_MEMORY_TEMPLATE,
-        )
+    return False
 
 
 # =============================================================================

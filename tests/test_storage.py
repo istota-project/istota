@@ -23,27 +23,21 @@ from istota.storage import (
     get_channel_base_path,
     get_channel_memory_path,
     get_channel_memories_path,
-    ensure_user_directories,
     ensure_user_directories_v2,
     ensure_channel_directories,
-    read_user_memory,
     read_user_memory_v2,
     read_channel_memory,
+    write_channel_memory,
     read_dated_memories,
     init_user_memory_v2,
     init_channel_memory,
     get_memory_line_count_v2,
-    upload_file_to_inbox,
     upload_file_to_inbox_v2,
     user_directories_exist_v2,
     create_file_if_absent,
     write_regular_file,
     MEMORY_TEMPLATE,
     CHANNEL_MEMORY_TEMPLATE,
-    _rclone_mkdir,
-    _rclone_path_exists,
-    _rclone_cat,
-    _rclone_rcat,
 )
 from istota.storage import (
     share_folder_with_user,
@@ -361,125 +355,32 @@ class TestMountOperations:
         assert not (workspace_dir / "old.md").exists()
 
 
-class TestRcloneOperations:
-    """Tests for rclone-based storage functions with mocked subprocess.run."""
+class TestNoWorkspace:
+    """Without a workspace there are no files, and nothing is shelled out."""
 
-    def _mock_run(self, returncode=0, stdout="", stderr=""):
-        mock = MagicMock()
-        mock.returncode = returncode
-        mock.stdout = stdout
-        mock.stderr = stderr
-        return mock
+    @pytest.fixture
+    def config(self, monkeypatch):
+        def refuse(*args, **kwargs):
+            raise AssertionError(f"spawned {args!r}")
 
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_rclone_mkdir(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=0)
-        assert _rclone_mkdir("nc", "/Users/alice/inbox") is True
-        mock_run.assert_called_once_with(
-            ["rclone", "mkdir", "nc:/Users/alice/inbox"],
-            capture_output=True,
-            text=True,
-        )
+        monkeypatch.setattr("subprocess.run", refuse)
+        return Config(workspace_path=None)
 
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_rclone_path_exists_true(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=0)
-        assert _rclone_path_exists("nc", "/Users/alice/inbox") is True
-
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_rclone_path_exists_false(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=1)
-        assert _rclone_path_exists("nc", "/Users/alice/inbox") is False
-
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_rclone_cat_success(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=0, stdout="file content here")
-        result = _rclone_cat("nc", "/Users/alice/context/memory.md")
-        assert result == "file content here"
-
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_rclone_cat_failure(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=1)
-        result = _rclone_cat("nc", "/Users/alice/context/memory.md")
-        assert result is None
-
-    @patch("istota.lib.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
-    def test_a_missing_rclone_binary_is_a_failure_not_a_raise(self, mock_run):
-        """These helpers all promise None/False on failure, and "rclone is not
-        installed" is a failure. `subprocess.run` reports it by raising, so it
-        used to escape every one of them — a mountless deployment without
-        rclone got a FileNotFoundError out of `read_channel_memory` rather than
-        the documented None.
-        """
-        assert _rclone_cat("nc", "/Users/alice/context/memory.md") is None
-        assert _rclone_path_exists("nc", "/Users/alice/inbox") is False
-        assert _rclone_mkdir("nc", "/Users/alice/inbox") is False
-        assert _rclone_rcat("nc", "/Users/alice/context/memory.md", "content") is False
-
-    @patch("istota.lib.rclone_client.subprocess.run", side_effect=FileNotFoundError("rclone"))
-    def test_upload_to_inbox_reports_the_miss_too(self, mock_run, tmp_path):
-        """The sixth caller, and the only one with a public signature."""
+    def test_user_storage_reports_nothing_there(self, config, tmp_path):
         local = tmp_path / "note.txt"
         local.write_text("hello")
 
-        assert upload_file_to_inbox("nc", "alice", local) is None
+        assert ensure_user_directories_v2(config, "alice") is False
+        assert not any(user_directories_exist_v2(config, "alice").values())
+        assert read_user_memory_v2(config, "alice") is None
+        assert init_user_memory_v2(config, "alice") is False
+        assert upload_file_to_inbox_v2(config, "alice", local) is None
 
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_rclone_rcat_success(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=0)
-        assert _rclone_rcat("nc", "/Users/alice/context/memory.md", "content") is True
-        mock_run.assert_called_once_with(
-            ["rclone", "rcat", "nc:/Users/alice/context/memory.md"],
-            input="content",
-            capture_output=True,
-            text=True,
-        )
-
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_rclone_rcat_failure(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=1)
-        assert _rclone_rcat("nc", "/path", "content") is False
-
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_ensure_dirs_via_rclone(self, mock_run):
-        """One mkdir per top-level subdir and one per bot subdirectory.
-
-        The bot half is `BOT_SUBDIRS`, the same constant the mount pass reads:
-        the two used to spell the list separately, which is how `config/` came
-        to be created on one shape and not the other.
-        """
-        from istota.storage import BOT_SUBDIRS
-
-        mock_run.return_value = self._mock_run(returncode=0)
-        Config(workspace_path=None, rclone_remote="nc")
-
-        result = ensure_user_directories("nc", "alice", "istota")
-        assert result is True
-        assert mock_run.call_count == 4 + len(BOT_SUBDIRS)
-        asked = {call.args[0][-1] for call in mock_run.call_args_list}
-        for sub in BOT_SUBDIRS:
-            assert f"nc:/Users/alice/istota/{sub}" in asked, sub
-
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_read_memory_via_rclone(self, mock_run):
-        mock_run.return_value = self._mock_run(returncode=0, stdout="memory data")
-        result = read_user_memory("nc", "alice", "istota")
-        assert result == "memory data"
-
-    @patch("istota.lib.rclone_client.subprocess.run")
-    def test_upload_file_via_rclone(self, mock_run, tmp_path):
-        mock_run.return_value = self._mock_run(returncode=0)
-
-        src = tmp_path / "report.pdf"
-        src.write_text("pdf content")
-
-        result = upload_file_to_inbox("nc", "alice", src)
-        assert result == "/Users/alice/inbox/report.pdf"
-        mock_run.assert_called_once_with(
-            ["rclone", "copyto", str(src), "nc:/Users/alice/inbox/report.pdf"],
-            capture_output=True,
-            text=True,
-        )
+    def test_channel_storage_reports_nothing_there(self, config):
+        assert ensure_channel_directories(config, "room1") is False
+        assert read_channel_memory(config, "room1") is None
+        assert write_channel_memory(config, "room1", "notes") is False
+        assert init_channel_memory(config, "room1") is False
 
 
 class TestDatedMemories:
