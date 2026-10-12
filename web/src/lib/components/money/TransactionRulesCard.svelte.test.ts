@@ -79,14 +79,16 @@ async function mount(rules: TransactionRule[]) {
  * Pick an option from a bits-ui Select.
  *
  * Items commit on pointerup, not click, and jsdom synthesizes neither from a
- * `click()` — the portfolio card's test found the same thing.
+ * `click()` — the portfolio card's test found the same thing. The events name a
+ * mouse: jsdom's default `pointerType` is `''`, which `Select` treats as touch
+ * and so arms its iOS ghost-click guard, swallowing the next click (#677, #728).
  */
 async function pick(triggerName: string, optionName: string) {
   const trigger = screen.getAllByRole('button', { name: triggerName })[0];
   await fireEvent.keyDown(trigger, { key: 'Enter' });
   const option = await screen.findByRole('option', { name: optionName });
-  await fireEvent.pointerDown(option);
-  await fireEvent.pointerUp(option);
+  await fireEvent.pointerDown(option, { pointerType: 'mouse' });
+  await fireEvent.pointerUp(option, { pointerType: 'mouse' });
   await fireEvent.click(option);
 }
 
