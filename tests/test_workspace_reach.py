@@ -85,9 +85,12 @@ def test_places_and_reach_through_live_membership(config, conn):
     rw_id = db.add_user_resource(conn, "alice", "folder", "linked/rw", permissions="readwrite")
     config.users["alice"] = UserConfig(resources=[ResourceConfig(type="folder", path="linked/ro")])
     cfg_id = "linked:cfg:" + hashlib.sha256(b"linked/ro").hexdigest()[:12]
+    # The Talk attachments place exists only on the Nextcloud mount (ISSUE-725).
+    config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     places = list_places(config, conn, "alice")
     by_id = {p.id: p for p in places}
-    assert set(by_id) == {"home", "talk", f"linked:{rw_id}", cfg_id, f"room:{room.token}", "group:team"}
+    assert set(by_id) == {"home", "talk", f"linked:{rw_id}", cfg_id, f"room:{room.token}", "group:team", "nextcloud"}
     assert by_id["home"].view_root == "/Users/alice"
     assert not by_id["talk"].browsable and by_id["talk"].view_root is None
     assert len(by_id[f"room:{room.token}"].label) == 120
@@ -107,7 +110,7 @@ def test_skip_missing_covered_and_nonfile_resources(config, conn):
     for path in ("Users/alice", "missing"):
         db.add_user_resource(conn, "alice", "folder", path)
     db.add_user_resource(conn, "alice", "calendar", "linked/rw")
-    assert {p.id for p in list_places(config, conn, "alice")} == {"home", "talk"}
+    assert {p.id for p in list_places(config, conn, "alice")} == {"home"}
     assert not any(p.kind == "home" for p in list_places(config, conn, ".."))
 
 
@@ -178,7 +181,7 @@ def test_shared_file_and_outside_resource(config, conn, tmp_path):
     (config.workspace_path / "escape").symlink_to(outside, target_is_directory=True)
     db.add_user_resource(conn, "alice", "folder", "escape")
     places = {p.id: p for p in list_places(config, conn, "alice")}
-    assert set(places) == {"home", "talk", f"linked:{resource_id}"}
+    assert set(places) == {"home", f"linked:{resource_id}"}
     assert places[f"linked:{resource_id}"].view_root == "/linked/report.txt"
 
 
