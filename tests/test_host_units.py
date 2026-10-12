@@ -1381,7 +1381,7 @@ class TestTheLimaTemplate:
         assert doc["vmOpts"]["vz"]["rosetta"]["enabled"] is True
         # Not params: Lima reads them as numbers before it expands one, so a
         # caller sets them with `--cpus`, `--memory` and `--set`.
-        assert doc["cpus"] == 4 and doc["memory"] == "6GiB"
+        assert doc["cpus"] == 4 and doc["memory"] == "4GiB"
         # `--set '.portForwards[0]...'` moves this one forward, both sides.
         assert doc["portForwards"] == [
             {"guestIP": "127.0.0.1", "guestPort": 8080, "hostIP": "127.0.0.1", "hostPort": 8080},

@@ -80,7 +80,7 @@ host/mac/istota-stack setup --web --local     # or `setup` for the terminal wiza
 host/mac/istota-stack create                  # finishes: Keychain copy of the key, Mac scripts
 ```
 
-`--repo` installs from the checkout rather than a signed release ([developing on a checkout](../getting-started/local-install.md#developing-on-a-checkout)). The first `create` builds the images and takes several minutes. The web setup listens on the Mac's port 8080, so another install must not hold that port; an existing local install on a different `--port` is fine. Each VM takes 6 GiB of memory unless you pass `--memory`.
+`--repo` installs from the checkout rather than a signed release ([developing on a checkout](../getting-started/local-install.md#developing-on-a-checkout)). The first `create` builds the images and takes several minutes. The web setup listens on the Mac's port 8080, so another install must not hold that port; an existing local install on a different `--port` is fine. Each VM takes 4 GiB of memory unless you pass `--memory`.
 
 Remove it with `host/mac/istota-stack destroy`, which asks you to type the instance name. It leaves the workspace folder, the Keychain item (service `istota.local`, account `secret-key-istota-try`) and the state file `~/.config/istota-stack/istota-try.env`; delete those by hand. `--force` only skips the check that the Keychain holds the VM's key, which matters when the last `create` never ran.
 

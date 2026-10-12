@@ -67,7 +67,7 @@ base:
 
 vmType: vz
 cpus: 4
-memory: 6GiB
+memory: 4GiB
 disk: 40GiB
 
 vmOpts:

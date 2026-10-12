@@ -19,7 +19,7 @@ login Keychain: istota.local / secret-key-istota (a copy of the master key)
 - Lima 2.0 or later: `brew install lima`. The installer does not install Homebrew or Lima for you.
 - A release tag and the release signing key (one line of an SSH public key). The VM checks the tag's signature before it runs anything from it, as a server does.
 - A model backend: a Claude Code OAuth token, an API key, or an OpenAI-compatible server through the [native brain](../configuration/native-brain.md). A model server on the Mac itself needs one more step, [below](#reaching-a-service-on-your-mac).
-- Room for the VM: 4 CPUs, 6 GiB of memory and a 40 GiB disk by default.
+- Room for the VM: 4 CPUs, 4 GiB of memory and a 40 GiB disk by default.
 
 ## Install
 
