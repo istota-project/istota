@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for a configuration change the web config editor requested
+
+[Path]
+# The web writes a request id here (create or truncate); the host reads
+# nothing from the file, the request itself is in the database.
+PathModified=/srv/app/istota/requests/config-apply
+Unit=istota-config-apply.service
+
+[Install]
+WantedBy=paths.target

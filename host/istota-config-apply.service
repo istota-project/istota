@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply the configuration changes the web config editor requested
+Documentation=file:///srv/app/istota/src/docs/configuration/web-editor.md
+# Started by istota-config-apply.path and istota-config-apply.timer. It loops
+# until nothing is pending, so a trigger that fires while it runs is covered,
+# and it exits 0 at once while another istota-stack command holds the lock.
+Requires=docker.service
+After=docker.service istota-stack.service
+
+[Service]
+Type=oneshot
+# Long enough for an image build with Claude Code, short enough that a hung
+# run does not hold the stack lock for good.
+TimeoutStartSec=2h
+ExecStart=/usr/local/sbin/istota-stack config-apply

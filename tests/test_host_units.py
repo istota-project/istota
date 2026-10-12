@@ -303,7 +303,9 @@ class TestProvision:
     def test_it_installs_every_host_file(self):
         for name in ("istota-stack.service", "istota-devbox-egress.service",
                      "istota-browser-watchdog.service", "istota-browser-watchdog.timer",
-                     "istota-certbot.service", "istota-certbot.timer", "mount-nextcloud.service"):
+                     "istota-certbot.service", "istota-certbot.timer", "mount-nextcloud.service",
+                     "istota-config-apply.service", "istota-config-apply.path",
+                     "istota-config-apply.timer"):
             assert (HOST / name).is_file(), name
             assert name in self.TEXT, name
         for script in ("istota-stack", "istota-devbox-egress.sh", "istota-browser-watchdog.sh",
@@ -720,6 +722,58 @@ class TestTheStackUnit:
         assert unit["Service"]["ExecStop"] == "/usr/local/sbin/istota-stack down"
         assert unit["Service"]["Type"] == "oneshot"
         assert "docker.service" in unit["Unit"]["Requires"]
+
+
+class TestTheConfigApplier:
+    """The web config editor's host half: the web writes a request id to
+    `requests/config-apply`; a path unit on that file, and a five-minute timer
+    as a backstop, start one oneshot service running `istota-stack config-apply`."""
+
+    PATH_UNIT = HOST / "istota-config-apply.path"
+    SERVICE = HOST / "istota-config-apply.service"
+    TIMER = HOST / "istota-config-apply.timer"
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def test_the_path_unit_watches_the_trigger_the_web_writes(self):
+        from istota.config_editor import applier
+
+        unit = _unit(self.PATH_UNIT)
+        assert unit["Path"]["PathModified"] == f"{STACK_DIR}/requests/config-apply"
+        assert unit["Path"]["Unit"] == "istota-config-apply.service"
+        assert unit["Install"]["WantedBy"] == "paths.target"
+        # The compose override binds the host directory where the web looks.
+        assert applier.DEFAULT_REQUESTS_DIR == "/data/requests"
+
+    def test_the_service_runs_config_apply_once_after_the_stack(self):
+        unit = _unit(self.SERVICE)
+        assert unit["Service"]["Type"] == "oneshot"
+        assert unit["Service"]["ExecStart"] == "/usr/local/sbin/istota-stack config-apply"
+        assert "istota-stack.service" in unit["Unit"]["After"]
+        assert "docker.service" in unit["Unit"]["Requires"]
+        assert "RemainAfterExit" not in unit["Service"], "a oneshot that stays active never runs again"
+        assert "Install" not in unit, "started by the path unit and the timer, never enabled itself"
+
+    def test_the_timer_is_a_five_minute_backstop(self):
+        unit = _unit(self.TIMER)
+        assert unit["Timer"]["OnBootSec"] == "5min"
+        assert unit["Timer"]["OnUnitActiveSec"] == "5min"
+        assert unit["Timer"]["Unit"] == "istota-config-apply.service"
+        assert unit["Install"]["WantedBy"] == "timers.target"
+
+    def test_provision_installs_all_three_and_enables_the_two_triggers(self):
+        loop = self.TEXT.split("for unit in istota-stack.service", 1)[1].split("; do", 1)[0]
+        for name in ("istota-config-apply.service", "istota-config-apply.path", "istota-config-apply.timer"):
+            assert name in loop, name
+        assert re.search(
+            r"^systemctl enable --now istota-config-apply\.path istota-config-apply\.timer\b",
+            self.TEXT, re.M)
+        # Enabled after the units are installed and systemd has read them.
+        assert self.TEXT.index("systemctl enable --now istota-config-apply.path") > self.TEXT.index(
+            'install -m 0644 "${HERE}/${unit}" "${UNITS}/${unit}"')
+
+    def test_provision_makes_the_requests_directory_uid_10001s(self):
+        assert ('install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/requests"'
+                in self.TEXT)
 
 
 class TestCertbot:

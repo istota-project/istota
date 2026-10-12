@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.host_stubs import install_flock
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "host" / "istota-stack"
 
@@ -101,6 +103,7 @@ def host(tmp_path):
                        ("userdel", RECORD), ("groupdel", RECORD), ("nginx", RECORD)):
         (bindir / name).write_text(body)
         (bindir / name).chmod(0o755)
+    install_flock(bindir)
     calls = tmp_path / "calls"
     env = {
         "PATH": f"{bindir}:{os.environ['PATH']}",

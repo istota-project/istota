@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The dedicated VM can apply configuration changes requested from the web.** `istota-stack config-apply`, run by the new `istota-config-apply.path` and a five-minute timer, takes each change the web config editor stored, checks it with dry runs before writing anything, builds the image when the new config needs Claude Code, then writes the credentials, admins and `config.toml` (keeping ten backups) and restarts the stack. `provision.sh` installs the units and the `requests/` directory, and the stack picks the applier up at the restart after that.
+
+- **`istota-stack` verbs that write now take one lock**, `/srv/app/istota/.stack.lock`, so an update, setup, apply, put-files, import or config change never runs alongside another. A second command waits up to ten minutes and then fails naming the command that holds the lock.
+
 - **The Ansible management role can update the version on its own.** Running the play with `--tags istota_update` performs only the version update and waits for the stack to be healthy, leaving the config, secrets and users alone. `-e istota_update_force=true` runs the update even when the VM is already current, as running `istota-stack update` on the VM does.
 
 - **`istota migrate role-vars` moves an estate from the old Ansible role to the management role.** It reads the old role's decrypted variables and the migrated VM's own files, writes the new role's variables to a private file and prints only names. A credential the new stack has no secrets file for stops it before anything is written.

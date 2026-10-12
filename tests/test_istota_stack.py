@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from tests.support import parity
+from tests.support.host_stubs import HeldLock, install_flock
 
 REPO = Path(__file__).resolve().parent.parent
 #: The script under test. The negative-control driver points this at a broken copy.
@@ -136,6 +137,7 @@ def fx(tmp_path) -> Fixture:
     bindir.mkdir()
     (bindir / "docker").write_text(DOCKER_STUB)
     (bindir / "docker").chmod(0o755)
+    install_flock(bindir)
     calls = tmp_path / "docker-calls"
     env = {
         "PATH": f"{bindir}:{os.environ['PATH']}",
@@ -1200,3 +1202,414 @@ class TestTheWrapperPassesStdin:
         )
         assert result.returncode == 0, result.stderr
         assert seen.read_text() == "the-value"
+
+
+class TestTheStackLock:
+    """Every verb that writes takes one lock, `flock` on `.stack.lock`, so a
+    config-apply cannot interleave with an update, a setup, a put-files or an
+    import. A waiter gives up after a bound and names the holder's verb."""
+
+    def _lock(self, fx) -> Path:
+        return fx.stack / ".stack.lock"
+
+    def test_the_holder_writes_its_verb(self, fx):
+        result = fx.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._lock(fx).read_text().split() == ["up"]
+
+    def test_a_verb_that_writes_waits_then_names_the_holder(self, fx):
+        held = HeldLock(self._lock(fx), "update")
+        try:
+            result = fx.run("up", ISTOTA_STACK_LOCK_WAIT="1")
+        finally:
+            held.release()
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "istota-stack update" in result.stderr
+        assert fx.docker_calls() == []
+
+    def test_a_waiter_proceeds_once_the_holder_finishes(self, fx):
+        import threading
+
+        held = HeldLock(self._lock(fx), "update")
+        timer = threading.Timer(0.5, held.release)
+        timer.start()
+        try:
+            result = fx.run("up", ISTOTA_STACK_LOCK_WAIT="20")
+        finally:
+            timer.join()
+            held.release()
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(call.endswith("up -d --remove-orphans") for call in fx.docker_calls())
+
+    @pytest.mark.parametrize("verb", ["update", "rollback", "setup", "apply", "import-bare-metal",
+                                      "retire-bare-metal", "put-files", "up", "down"])
+    def test_every_writing_verb_is_locked(self, fx, verb):
+        held = HeldLock(self._lock(fx), "update")
+        try:
+            result = fx.run(verb, ISTOTA_STACK_LOCK_WAIT="0")
+        finally:
+            held.release()
+        assert result.returncode == 1, (verb, result.stdout, result.stderr)
+        assert "istota-stack update" in result.stderr, verb
+
+    @pytest.mark.parametrize("args", [("exec", "istota", "doctor"), ("compose", "ps"), ("check-image",)])
+    def test_a_verb_that_writes_nothing_takes_no_lock(self, fx, args):
+        held = HeldLock(self._lock(fx), "update")
+        try:
+            result = fx.run(*args, ISTOTA_STACK_LOCK_WAIT="0")
+        finally:
+            held.release()
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_an_update_releases_the_lock_before_provisioning(self, fx):
+        """provision.sh, exec'd last, runs `istota-stack up` (and may restart
+        istota-stack.service, whose ExecStart is `up`): with the lock still held
+        through the inherited descriptor, that `up` would wait on its own parent."""
+        script = fx.origin / "host" / "provision.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--digest" ]; then echo new; exit 0; fi\n'
+            "python3 -c 'import fcntl, sys\n"
+            "f = open(sys.argv[1], \"a\")\n"
+            "try:\n"
+            "    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "    print(\"lock free\")\n"
+            "except BlockingIOError:\n"
+            "    print(\"lock held\")' \"$ISTOTA_STACK_DIR/.stack.lock\" >> \"$STUB_CALLS\"\n"
+        )
+        script.chmod(0o755)
+        _git(fx.origin, "add", "host/provision.sh", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "lock free" in fx.docker_calls(), fx.docker_calls()
+
+
+#: Arms the config-apply tests add in front of the docker stub's own: `take`
+#: hands over the next request a test queued, as real files in the bound /out,
+#: so no later step can be skipped vacuously; `finish` keeps the output it was
+#: given; the dry run and the real apply answer separately.
+CONFIG_APPLY_ARMS = r"""  *" config-request take "*)
+    out=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ]; then case "$a" in *:/out) out="${a%:/out}" ;; esac; fi
+      prev="$a"
+    done
+    next="$(ls "$STUB_REQUESTS" 2>/dev/null | sort -n | head -n 1)"
+    [ -n "$next" ] || exit 0
+    ls -ld "$out" > "${STUB_CALLS}.staging-$next"
+    for f in plan.json files.json claude-code; do cp "$STUB_REQUESTS/$next/$f" "$out/$f"; chmod 0400 "$out/$f"; done
+    rm -rf "${STUB_REQUESTS:?}/$next"
+    echo "$next"
+    exit 0 ;;
+  *" config-request finish "*)
+    out=""; prev=""; id=""
+    for a in "$@"; do
+      if [ "$prev" = -v ]; then case "$a" in *:/out:ro) out="${a%:/out:ro}" ;; esac; fi
+      if [ "$prev" = --id ]; then id="$a"; fi
+      prev="$a"
+    done
+    cp "$out/output" "${STUB_CALLS}.output-$id"
+    exit 0 ;;
+  *" istota apply "*" --dry-run "*) exit "${STUB_DRY_RC:-0}" ;;
+  *" istota apply "*" --backup "*)
+    ls "$STUB_SECRETS" > "${STUB_CALLS}.secrets-at-apply"
+    exit "${STUB_APPLY_RC:-0}" ;;
+"""
+
+
+class TestConfigApply:
+    """`istota-stack config-apply`: the host half of the web config editor.
+
+    Under the stack lock it loops: take a request in a one-shot, check
+    everything (both dry runs), build the image if the new config needs Claude
+    Code and the image lacks it, write credentials and admins through put-files
+    and the config through `istota apply --backup`, record the outcome, restart.
+    Nothing is written unless every check passed."""
+
+    @pytest.fixture
+    def ca(self, fx, tmp_path):
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(
+            DOCKER_STUB
+            .replace('case "$args" in\n', 'case "$args" in\n' + CONFIG_APPLY_ARMS, 1)
+            .replace('*" build "*) exit',
+                     '*" build "*) echo "INSTALL_CLAUDE_CODE=${INSTALL_CLAUDE_CODE:-}" >> "${STUB_CALLS}.build-env"; exit')
+        )
+        queue = tmp_path / "queue"
+        queue.mkdir()
+        run = tmp_path / "run"
+        run.mkdir()
+        secrets = fx.stack / "secrets"
+        secrets.mkdir(mode=0o700)
+        fx.env.update(STUB_REQUESTS=str(queue), STUB_SECRETS=str(secrets),
+                      ISTOTA_CONFIG_APPLY_RUN_DIR=str(run))
+        fx.queue, fx.rundir, fx.secrets = queue, run, secrets
+        return fx
+
+    def _queue(self, fx, request_id: int, *, secrets=None, admins=None, claude_code=False):
+        import json
+
+        d = fx.queue / str(request_id)
+        d.mkdir()
+        brain = {"kind": "claude_code" if claude_code else "native"}
+        (d / "plan.json").write_text(json.dumps(
+            {"meta": {"managed": False, "source": "web", "request": request_id},
+             "config": {"brain": brain}}))
+        files = {}
+        if secrets:
+            files["secrets"] = secrets
+        if admins is not None:
+            files["admins"] = admins
+        resources = {name: False for name in ("secrets", "admins") if name in files}
+        if resources:
+            files["managed"] = {"source": "web", **resources}
+        (d / "files.json").write_text(json.dumps(files))
+        (d / "claude-code").write_text("1\n" if claude_code else "0\n")
+
+    def _index(self, calls, needle):
+        return next(i for i, call in enumerate(calls) if needle in call)
+
+    def test_the_order_and_the_outcome(self, ca):
+        fx = ca
+        self._queue(fx, 7, secrets={"istota_email_imap_password": "pw-7"}, claude_code=True)
+
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="2",
+                        STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        take = self._index(calls, "config-request take --out /out")
+        dry = self._index(calls, "istota apply -f /plan/plan.json --dry-run")
+        mark = self._index(calls, "config-request mark --id 7 --status building")
+        build = self._index(calls, " build ")
+        apply = self._index(calls, "istota apply -f /plan/plan.json --backup 10")
+        finish = self._index(calls, "config-request finish --id 7 --status applied --output-file /out/output")
+        restart = next(i for i, call in enumerate(calls) if call.endswith(" restart"))
+        assert take < dry < mark < build < apply < finish < restart, calls
+        assert "--entrypoint istota-drop" in calls[apply]
+        assert (fx.root / "docker-calls.build-env").read_text().split() == ["INSTALL_CLAUDE_CODE=1"]
+        # put-files wrote the credential before the config was applied, and
+        # never through the dry run.
+        assert (fx.root / "docker-calls.secrets-at-apply").read_text().split() == ["istota_email_imap_password"]
+        assert (fx.secrets / "istota_email_imap_password").read_text() == "pw-7"
+        assert "pw-7" not in result.stdout + result.stderr
+        output = (fx.root / "docker-calls.output-7").read_text()
+        assert "would write istota_email_imap_password" in output
+        assert "wrote istota_email_imap_password" in output
+        assert "pw-7" not in output
+        assert list(fx.rundir.iterdir()) == []
+
+    def test_an_unchanged_config_records_unchanged_and_does_not_restart(self, ca):
+        fx = ca
+        self._queue(fx, 3)
+        result = fx.run("config-apply")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any("config-request finish --id 3 --status unchanged" in call for call in calls), calls
+        assert not any(call.endswith(" restart") for call in calls), calls
+        assert not any(" build " in f"{call} " for call in calls), calls
+
+    def test_no_build_when_the_image_already_has_claude_code(self, ca):
+        fx = ca
+        self._queue(fx, 4, claude_code=True)
+        result = fx.run("config-apply", STUB_APPLY_RC="2",
+                        STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=1\nISTOTA_CLAUDE_CODE_VERSION=2.1.296")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert not any(" build " in f"{call} " for call in calls), calls
+        assert not any("--status building" in call for call in calls), calls
+        assert any("config-request finish --id 4 --status applied" in call for call in calls), calls
+
+    def test_a_refused_dry_run_writes_nothing_and_does_not_restart(self, ca):
+        fx = ca
+        self._queue(fx, 5, secrets={"istota_email_imap_password": "pw-5"}, admins="alice\n")
+        result = fx.run("config-apply", STUB_DRY_RC="1", STUB_APPLY_RC="2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any("config-request finish --id 5 --status refused" in call for call in calls), calls
+        assert not any("--backup" in call for call in calls), calls
+        assert not any(call.endswith(" restart") for call in calls), calls
+        assert list(fx.secrets.iterdir()) == []
+        assert not (fx.stack / "config" / "admins").exists()
+
+    def test_a_refused_put_files_dry_run_writes_nothing(self, ca):
+        fx = ca
+        self._queue(fx, 6, secrets={"../escape": "x"})
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any("config-request finish --id 6 --status refused" in call for call in calls), calls
+        assert not any("--backup" in call for call in calls), calls
+        assert not any(call.endswith(" restart") for call in calls), calls
+
+    def test_a_failed_build_writes_nothing(self, ca):
+        fx = ca
+        self._queue(fx, 8, secrets={"istota_email_imap_password": "pw-8"}, claude_code=True)
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="2", STUB_BUILD_RC="1",
+                        STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any("--status building" in call for call in calls), calls
+        assert any("config-request finish --id 8 --status refused" in call for call in calls), calls
+        assert not any("--backup" in call for call in calls), calls
+        assert not any(call.endswith(" restart") for call in calls), calls
+        assert list(fx.secrets.iterdir()) == []
+        assert "build" in (fx.root / "docker-calls.output-8").read_text()
+
+    def test_a_failure_after_put_files_wrote_restarts(self, ca):
+        fx = ca
+        self._queue(fx, 9, secrets={"istota_email_imap_password": "pw-9"})
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any("config-request finish --id 9 --status failed" in call for call in calls), calls
+        assert any(call.endswith(" restart") for call in calls), calls
+        assert (fx.secrets / "istota_email_imap_password").read_text() == "pw-9"
+
+    def test_the_loop_takes_two_requests_in_one_run(self, ca):
+        fx = ca
+        self._queue(fx, 11)
+        self._queue(fx, 12)
+        result = fx.run("config-apply")
+        assert result.returncode == 0, result.stdout + result.stderr
+        finished = [call for call in fx.docker_calls() if "config-request finish" in call]
+        assert [call.split("--id ")[1].split()[0] for call in finished] == ["11", "12"]
+        takes = [call for call in fx.docker_calls() if "config-request take" in call]
+        assert len(takes) == 3, takes
+
+    def test_nothing_pending_ends_at_once(self, ca):
+        fx = ca
+        result = fx.run("config-apply")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert len([call for call in calls if "config-request take" in call]) == 1
+        assert not any("istota apply" in call for call in calls), calls
+        assert list(fx.rundir.iterdir()) == []
+
+    def test_a_busy_lock_exits_0_without_a_container(self, ca):
+        fx = ca
+        self._queue(fx, 13)
+        held = HeldLock(fx.stack / ".stack.lock", "update")
+        try:
+            result = fx.run("config-apply")
+        finally:
+            held.release()
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.docker_calls() == []
+        assert (fx.queue / "13").is_dir()
+
+    def test_before_setup_it_takes_no_lock_and_starts_nothing(self, ca):
+        fx = ca
+        (fx.stack / "config" / "config.toml").unlink()
+        result = fx.run("config-apply")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.docker_calls() == []
+        assert not (fx.stack / ".stack.lock").exists()
+
+    def test_staging_is_private_and_removed_when_a_step_fails(self, ca):
+        fx = ca
+        self._queue(fx, 14)
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        take = next(call for call in fx.docker_calls() if "config-request take" in call)
+        staging = Path(take.split("-v ", 1)[1].split(":/out", 1)[0])
+        assert staging.parent == fx.rundir
+        assert staging.name.startswith("istota-config.")
+        assert (fx.root / "docker-calls.staging-14").read_text().startswith("drwx------")
+        assert list(fx.rundir.iterdir()) == []
+
+    def test_staging_defaults_to_run(self, fx):
+        result = _source(fx, 'echo "$CONFIG_APPLY_RUN"')
+        assert result.stdout.strip() == "/run"
+
+    def test_a_failed_take_stops_the_loop(self, ca):
+        fx = ca
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(stub.read_text().replace('  *" config-request take "*)\n',
+                                                 '  *" config-request take "*)\n    exit 1\n', 1))
+        self._queue(fx, 15)
+        result = fx.run("config-apply")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert len([call for call in fx.docker_calls() if "config-request take" in call]) == 1
+        assert list(fx.rundir.iterdir()) == []
+
+
+class TestTheConfigApplyComposeFile:
+    """The web container gets the requests bind and ISTOTA_CONFIG_APPLIER=host
+    only from docker-compose.config-apply.yml, and istota-stack adds that file
+    only on a VM provision.sh has made a requests directory on."""
+
+    PROBE = 'docker() { echo "requests=${ISTOTA_REQUESTS_DIR-unset} $*"; }; compose ps'
+
+    def test_it_is_added_only_when_the_requests_directory_exists(self, fx):
+        shutil.copy(REPO / "docker" / "docker-compose.config-apply.yml", fx.src / "docker")
+
+        without = _source(fx, self.PROBE)
+        assert without.returncode == 0, without.stderr
+        assert "docker-compose.config-apply.yml" not in without.stdout
+        assert "requests=unset" in without.stdout
+
+        (fx.stack / "requests").mkdir()
+        with_dir = _source(fx, self.PROBE)
+        assert with_dir.returncode == 0, with_dir.stderr
+        assert f"-f {fx.src}/docker/docker-compose.config-apply.yml" in with_dir.stdout
+        assert f"requests={fx.stack}/requests" in with_dir.stdout
+
+    def test_a_checkout_without_the_file_is_not_given_it(self, fx):
+        """A rollback to a release from before the applier."""
+        (fx.stack / "requests").mkdir()
+        result = _source(fx, self.PROBE)
+        assert result.returncode == 0, result.stderr
+        assert "config-apply" not in result.stdout
+
+    def test_the_file_binds_the_requests_directory_into_web_alone(self):
+        import yaml
+
+        doc = yaml.safe_load((REPO / "docker" / "docker-compose.config-apply.yml").read_text())
+        assert set(doc["services"]) == {"web"}
+        web = doc["services"]["web"]
+        assert web["environment"] == {"ISTOTA_CONFIG_APPLIER": "host"}
+        assert len(web["volumes"]) == 1
+        source, target = web["volumes"][0].rsplit(":", 1)
+        assert target == "/data/requests"
+        assert source.startswith("${ISTOTA_REQUESTS_DIR")
+
+    def test_the_base_file_carries_no_applier(self):
+        text = (REPO / "docker" / "docker-compose.yml").read_text()
+        assert "ISTOTA_CONFIG_APPLIER" not in text
+        assert "/data/requests" not in text
+
+    def test_the_web_writes_where_the_bind_lands(self):
+        from istota.config_editor import applier
+
+        assert applier.DEFAULT_REQUESTS_DIR == "/data/requests"
+
+
+class TestNeedsClaudeCode:
+    """`needs_claude_code` reads a config path, or a plan's `config` table, so
+    config-apply decides on the new config rather than the one on disk."""
+
+    @pytest.mark.parametrize(("kind", "expected"), [("native", "0"), ("claude_code", "1")])
+    def test_it_reads_a_plan(self, fx, tmp_path, kind, expected):
+        import json
+
+        plan = tmp_path / "plan.json"
+        plan.write_text(json.dumps({"meta": {}, "config": {"brain": {"kind": kind}}}))
+        result = _source(fx, f'needs_claude_code "{plan}"')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected
+
+    def test_it_defaults_to_the_config_on_disk(self, fx):
+        assert _source(fx, "needs_claude_code").stdout.strip() == "0"
+        (fx.stack / "config" / "config.toml").write_text('[brain]\nkind = "claude_code"\n')
+        assert _source(fx, "needs_claude_code").stdout.strip() == "1"
+
+    def test_an_explicit_install_claude_code_wins_in_a_build(self, fx):
+        result = _source(
+            fx, 'docker() { case " $* " in *" build "*) echo "icc=$INSTALL_CLAUDE_CODE" ;; esac; }; '
+                'INSTALL_CLAUDE_CODE=1 build_images v0')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "icc=1"
