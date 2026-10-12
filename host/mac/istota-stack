@@ -1,0 +1,783 @@
+#!/bin/bash
+# istota-stack on the Mac: the local VM's command. Run as yourself, never sudo.
+#
+#   istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB]
+#                       (--tag TAG --signing-key KEY | --repo DIR [--tag TAG]) [--adopt]
+#                               make the workspace folder and the VM, then set up the
+#                               stack in it; a re-run continues where one stopped
+#   istota-stack start          start the VM
+#   istota-stack stop           stop the stack, then the VM
+#   istota-stack status         the VM, the deployed tag, the containers, the folder
+#   istota-stack open [--files] the web UI in the browser; --files the folder in Finder
+#   istota-stack shell          a shell in the VM
+#   istota-stack autostart on|off
+#                               start the VM when you log in, or not
+#   istota-stack allow-host-port N | deny-host-port N
+#                               let containers reach TCP port N on the Mac's loopback, or not
+#   istota-stack update [args]  the VM's `update`, then these scripts from its checkout
+#   istota-stack destroy [--force]
+#                               delete the VM; the folder and the Keychain key stay
+#
+# Every other verb is the VM's own `istota-stack`, run as root in the VM with
+# its arguments unchanged and its exit status passed back (setup, apply,
+# rollback, exec, compose, up, down, ...). `apply <plan>` and
+# `import-bare-metal <dir>` take a path on the Mac, copied into the VM for the
+# call and removed afterwards. `istota` beside this script is the VM's `istota`.
+#
+# --- end usage ---
+#
+# The VM is the Lima instance `istota` (ISTOTA_LIMA_INSTANCE overrides it), in
+# the default LIMA_HOME so `limactl list` shows it. The template is the one
+# beside this script in a checkout (host/lima/istota.yaml), else the copy in
+# ~/.local/share/istota, which `install.sh --local` writes and every update
+# refreshes along with these scripts, from the checkout the VM verified.
+#
+# What `create` was given is kept in ~/.config/istota/<instance>.env, so a
+# re-run needs no arguments and `open` and `status` know the port and folder.
+#
+# The master key is copied into the login Keychain (service istota.local,
+# account secret-key-<instance>) and never put on a command line: `security
+# -i` reads its command from stdin. The file-based login keychain is not one
+# iCloud syncs.
+#
+# Exit codes: a forwarded verb's own; 64 usage, 69 no usable limactl, 78 a
+# refusal of the folder, the port, the machine or the Keychain.
+#
+# macOS ships bash 3.2: no associative arrays, and an empty array is expanded
+# with ${a[@]+"${a[@]}"}.
+set -euo pipefail
+
+INSTANCE="${ISTOTA_LIMA_INSTANCE:-istota}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="${ISTOTA_MAC_BIN_DIR:-${HOME}/.local/bin}"
+DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/istota"
+STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/istota"
+STATE_FILE="${STATE_DIR}/${INSTANCE}.env"
+VM_STACK=/srv/app/istota
+VM_SRC="${VM_STACK}/src"
+KEYCHAIN_SERVICE=istota.local
+KEYCHAIN_ACCOUNT="secret-key-${INSTANCE}"
+MARKER=.istota-workspace
+# Lima's user-mode network: the Mac's loopback as the guest sees it.
+HOST_GATEWAY_ADDR=192.168.5.2
+DEFAULT_PORT=8080
+STOP_TIMEOUT="${ISTOTA_STOP_TIMEOUT:-60}"
+EX_USAGE=64
+EX_UNAVAILABLE=69
+EX_CONFIG=78
+
+log() { echo "[istota-stack] $*"; }
+fail() {
+    local code="$1"
+    shift
+    echo "[istota-stack] $*" >&2
+    exit "$code"
+}
+
+usage() {
+    sed -n '2,/^# --- end usage ---$/p' "${BASH_SOURCE[0]}" | grep -v '^# --- end usage ---$' | sed 's/^# \{0,1\}//'
+}
+
+usage_error() {
+    [ "$#" -eq 0 ] || echo "[istota-stack] $*" >&2
+    usage >&2
+    exit "$EX_USAGE"
+}
+
+case "$INSTANCE" in
+    ""|-*|*[!A-Za-z0-9._-]*) fail "$EX_USAGE" "ISTOTA_LIMA_INSTANCE '${INSTANCE}' is not an instance name." ;;
+esac
+
+# --- the VM ------------------------------------------------------------------
+
+# A command as root in the VM. limactl quotes each argument for the guest's
+# shell and gives the session a terminal only when stdin is one.
+vm() {
+    limactl shell --workdir / "$INSTANCE" sudo "$@"
+}
+
+vm_stack() {
+    vm istota-stack "$@"
+}
+
+# Every verb this script does not handle: the VM's istota-stack, with its exit
+# status, by exec so nothing of this script stands between them.
+forward() {
+    exec limactl shell --workdir / "$INSTANCE" sudo istota-stack "$@"
+}
+
+# The instance's status (Running, Stopped, ...), or nothing when there is none.
+instance_status() {
+    limactl list --format '{{.Status}}' "$INSTANCE" 2>/dev/null | tail -n 1 || true
+}
+
+require_running() {
+    local status
+    status="$(instance_status)"
+    [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}: \`istota-stack create\` makes one."
+    [ "$status" = Running ] || fail 1 "${INSTANCE} is ${status}: \`istota-stack start\` first."
+}
+
+# What the create steps ask of the VM, in one call: the deployed tag, whether
+# it was installed unsigned, whether setup has written a config, and the first
+# admin. Constant text, so nothing from the Mac is interpreted by the guest.
+# Expanded in the VM, not here.
+# shellcheck disable=SC2016
+VM_PROBE='s=/srv/app/istota
+printf "tag=%s\n" "$(sed -n "s/^ISTOTA_TAG=//p" "$s/.env" 2>/dev/null | tail -n 1)"
+printf "unsigned=%s\n" "$(sed -n "s/^ISTOTA_TAG_UNSIGNED=//p" "$s/.env" 2>/dev/null | tail -n 1)"
+if [ -f "$s/config/config.toml" ]; then echo config=1; else echo config=0; fi
+printf "admin=%s\n" "$(sed -n "/^[[:space:]]*[^#[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*\$//;p;q;}" "$s/config/admins" 2>/dev/null)"'
+
+probe_value() {
+    printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -n 1
+}
+
+# Run one step of create, its output shown and kept; on failure say which
+# step, what it ran, its status and its last 20 lines, and exit with it.
+run_step() {
+    local name="$1" what="$2"
+    shift 2
+    local out rc
+    out="$(mktemp "${TMPDIR:-/tmp}/istota-stack.XXXXXX")"
+    set +e
+    "$@" 2>&1 | tee "$out"
+    rc="${PIPESTATUS[0]}"
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        echo "[istota-stack] step '${name}' failed: \`${what}\` (exit ${rc}). Its last 20 lines:" >&2
+        tail -n 20 "$out" >&2
+        rm -f "$out"
+        exit "$rc"
+    fi
+    rm -f "$out"
+}
+
+# --- the Mac -----------------------------------------------------------------
+
+require_mac() {
+    local system arch
+    system="$(uname -s)"
+    arch="$(uname -m)"
+    if [ "$system" != Darwin ] || [ "$arch" != arm64 ]; then
+        fail "$EX_CONFIG" "the local VM is for an Apple silicon Mac; this is ${system} ${arch}."
+    fi
+}
+
+require_limactl() {
+    command -v limactl >/dev/null 2>&1 \
+        || fail "$EX_UNAVAILABLE" "limactl is not installed: \`brew install lima\`, then run this again."
+    local version major
+    version="$(limactl --version 2>/dev/null | sed -n 's/^limactl version v\{0,1\}\([0-9][0-9.]*\).*/\1/p' | head -n 1)"
+    major="${version%%.*}"
+    case "$major" in
+        ""|*[!0-9]*) fail "$EX_UNAVAILABLE" "could not read limactl's version; Lima 2.0 or later is needed." ;;
+    esac
+    [ "$major" -ge 2 ] \
+        || fail "$EX_UNAVAILABLE" "limactl ${version} is too old; Lima 2.0 or later is needed (\`brew upgrade lima\`)."
+}
+
+lower() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Whether path $1 is $2 or below it. Lowercased: the Mac's volumes are
+# usually case-insensitive, so ~/documents is ~/Documents.
+within() {
+    local child parent
+    child="$(lower "$1")"
+    parent="$(lower "$2")"
+    [ "$child" = "$parent" ] && return 0
+    [ "$parent" = / ] && return 0
+    case "$child" in "${parent}"/*) return 0 ;; esac
+    return 1
+}
+
+# An absolute path with every link in its existing part resolved, so a link
+# into a refused place is judged by where it leads. A part that does not exist
+# yet is appended as given, and may not hold `.` or `..`.
+resolve_dir() {
+    local path="$1" rest="" base
+    # A literal ~ the shell did not expand (a quoted --workspace "~/Istota").
+    # shellcheck disable=SC2088
+    case "$path" in
+        "~") path="$HOME" ;;
+        "~/"*) path="${HOME}/${path#"~/"}" ;;
+    esac
+    case "$path" in /*) ;; *) path="${PWD}/${path}" ;; esac
+    while [ "$path" != / ] && [ "${path%/}" != "$path" ]; do path="${path%/}"; done
+    while [ ! -d "$path" ]; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            fail "$EX_CONFIG" "${path} is not a directory."
+        fi
+        case "$(basename "$path")" in
+            .|..) fail "$EX_CONFIG" "give the folder without . or .. in its new part: $1" ;;
+        esac
+        rest="/$(basename "$path")${rest}"
+        path="$(dirname "$path")"
+    done
+    base="$(cd "$path" && pwd -P)"
+    [ "$base" != / ] || base=""
+    path="${base}${rest}"
+    printf '%s\n' "${path:-/}"
+}
+
+# The places the workspace may not be, refused before anything is made.
+refuse_location() {
+    local folder="$1" home lima_home
+    home="$(cd "$HOME" && pwd -P)"
+    lima_home="$(resolve_dir "${LIMA_HOME:-${HOME}/.lima}")"
+    local cloud
+    for cloud in "Library/Mobile Documents" "Library/CloudStorage"; do
+        if within "$folder" "${home}/${cloud}"; then
+            fail "$EX_CONFIG" "${folder} is in iCloud Drive or a cloud storage provider's folder, which evicts files into placeholders the VM reads as empty. Choose a folder outside ~/Library."
+        fi
+    done
+    local private
+    for private in Documents Desktop Downloads; do
+        if within "$folder" "${home}/${private}"; then
+            fail "$EX_CONFIG" "${folder} is under ~/${private}, which macOS lets an app reach only with a grant of its own, and Lima has none. Choose a folder outside it, such as ~/Istota."
+        fi
+    done
+    if within "$folder" "${home}/.istota"; then
+        fail "$EX_CONFIG" "${folder} is the standalone install's state root (~/.istota), which its import reads. Choose another folder, such as ~/Istota."
+    fi
+    if [ "$folder" = / ] || within "$home" "$folder" || within "$lima_home" "$folder" \
+            || within "${home}/.ssh" "$folder"; then
+        fail "$EX_CONFIG" "${folder} would share your home, ~/.lima or ~/.ssh with the VM. Choose a folder of its own, such as ~/Istota."
+    fi
+    if within "$folder" "$lima_home" || within "$folder" "${home}/.ssh"; then
+        fail "$EX_CONFIG" "${folder} is inside ~/.lima or ~/.ssh. Choose a folder of its own, such as ~/Istota."
+    fi
+}
+
+# The folder and its marker. An existing folder with anything in it and no
+# marker is the user's, and is taken over only with --adopt.
+prepare_folder() {
+    local folder="$1" adopt="$2" marker="${1}/${MARKER}"
+    if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
+        fail "$EX_CONFIG" "${marker} is not a plain file; remove it and run this again."
+    fi
+    [ ! -f "$marker" ] || return 0
+    if [ -d "$folder" ] && [ -z "$adopt" ] \
+            && [ -n "$(find "$folder" -mindepth 1 -maxdepth 1 ! -name .DS_Store | head -n 1)" ]; then
+        fail "$EX_CONFIG" "${folder} already holds files and is not an istota workspace. Pass --adopt to make it one (its files stay, and the bot sees them), or choose another folder."
+    fi
+    mkdir -p "$folder"
+    : > "$marker"
+    log "workspace: ${folder}"
+}
+
+require_port_free() {
+    local port="$1" holders
+    if ! command -v lsof >/dev/null 2>&1; then
+        log "WARNING: no lsof to check that port ${port} is free"
+        return 0
+    fi
+    holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    if [ -n "$holders" ]; then
+        fail "$EX_CONFIG" "port ${port} on this Mac is taken:
+${holders}
+Stop that, or choose another port with --port."
+    fi
+}
+
+state_get() {
+    [ -f "$STATE_FILE" ] || return 0
+    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { if (v != "") print v }' "$STATE_FILE"
+}
+
+state_write() {
+    local tmp
+    mkdir -p "$STATE_DIR"
+    tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in *$'\n'*) rm -f "$tmp"; fail "$EX_USAGE" "a value holds a newline" ;; esac
+        printf '%s\n' "$1" >> "$tmp"
+        shift
+    done
+    mv "$tmp" "$STATE_FILE"
+}
+
+workspace_or_default() {
+    local folder
+    folder="$(state_get WORKSPACE)"
+    printf '%s\n' "${folder:-${HOME}/Istota}"
+}
+
+port_or_default() {
+    local port
+    port="$(state_get PORT)"
+    printf '%s\n' "${port:-$DEFAULT_PORT}"
+}
+
+valid_port() {
+    case "$1" in ""|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 5 ] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+check_tag_name() {
+    case "$1" in
+        ""|-*|*[!A-Za-z0-9._-]*|*..*) fail "$EX_USAGE" "'$1' is not a tag name." ;;
+    esac
+}
+
+# --- the scripts and the key -------------------------------------------------
+
+template_path() {
+    if [ -n "${ISTOTA_LIMA_TEMPLATE:-}" ]; then
+        printf '%s\n' "$ISTOTA_LIMA_TEMPLATE"
+    elif [ -f "${SCRIPT_DIR}/../lima/istota.yaml" ]; then
+        printf '%s\n' "$(cd "${SCRIPT_DIR}/../lima" && pwd -P)/istota.yaml"
+    else
+        printf '%s\n' "${DATA_DIR}/istota.yaml"
+    fi
+}
+
+# Copy one file out of the VM's checkout over a Mac copy, through a file
+# beside it and a rename, so a script running from the old copy reads on.
+refresh_one() {
+    local guest="$1" target="$2" mode="$3" first tmp
+    mkdir -p "$(dirname "$target")"
+    tmp="$(mktemp "$(dirname "$target")/.$(basename "$target").XXXXXX")"
+    if ! limactl copy "${INSTANCE}:${guest}" "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        fail 1 "could not copy ${guest} out of the VM; the Mac scripts were not refreshed."
+    fi
+    first="$(head -c 64 "$tmp" | head -n 1)"
+    case "$target:$first" in
+        *.yaml:?*|*:'#!'*) ;;
+        *) rm -f "$tmp"; fail 1 "${guest} in the VM is not what it should be; the Mac scripts were not refreshed." ;;
+    esac
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$target"
+}
+
+# The scripts on PATH and the template, from the checkout the VM verified.
+# Only an install is refreshed: run from a checkout, this script leaves both.
+refresh_scripts() {
+    if [ ! -e "${BIN_DIR}/istota-stack" ]; then
+        log "no install in ${BIN_DIR}; the Mac scripts were not refreshed."
+        return 0
+    fi
+    refresh_one "${VM_SRC}/host/mac/istota-stack" "${BIN_DIR}/istota-stack" 0755
+    refresh_one "${VM_SRC}/host/mac/istota" "${BIN_DIR}/istota" 0755
+    refresh_one "${VM_SRC}/host/lima/istota.yaml" "${DATA_DIR}/istota.yaml" 0644
+    log "refreshed ${BIN_DIR}/istota-stack, ${BIN_DIR}/istota and the template from the VM's checkout"
+}
+
+keychain_has_item() {
+    security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" >/dev/null 2>&1
+}
+
+keychain_value() {
+    security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null
+}
+
+# The VM's master key into the login Keychain, read back and compared, since
+# a short write stores an empty item and still exits 0. The value is only
+# ever in this shell's memory and on security's stdin. A different key
+# already there is not replaced: it decrypts the snapshots of the VM it came
+# from.
+escrow_key() {
+    local key stored
+    key="$(vm_stack exec cat /data/.secret_key </dev/null)" \
+        || fail 1 "could not read the master key from the VM; run \`istota-stack create\` again once the stack is up."
+    key="$(printf '%s' "$key" | tr -d '\r\n')"
+    case "$key" in
+        ""|*[!A-Za-z0-9._=+/-]*) fail "$EX_CONFIG" "the VM's master key is not in a form this can store; copy /data/.secret_key by hand." ;;
+    esac
+    [ "${#key}" -ge 32 ] || fail "$EX_CONFIG" "the VM's master key is shorter than a usable key; nothing was stored."
+    if keychain_has_item; then
+        stored="$(keychain_value || true)"
+        if [ "$stored" = "$key" ]; then
+            log "the master key is already in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})"
+            return 0
+        fi
+        fail "$EX_CONFIG" "the login Keychain already holds a different master key under ${KEYCHAIN_SERVICE} / ${KEYCHAIN_ACCOUNT}, from an earlier VM; it decrypts that VM's snapshots, so it was not replaced. Rename that item in Keychain Access, then run \`istota-stack create\` again."
+    fi
+    printf 'add-generic-password -s %s -a %s -w %s\n' "$KEYCHAIN_SERVICE" "$KEYCHAIN_ACCOUNT" "$key" \
+        | security -i >/dev/null 2>&1 || true
+    stored="$(keychain_value || true)"
+    if [ "$stored" != "$key" ]; then
+        fail 1 "the master key did not read back from the login Keychain as written; check ${KEYCHAIN_SERVICE} / ${KEYCHAIN_ACCOUNT} in Keychain Access."
+    fi
+    log "copied the master key into the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})"
+}
+
+# The first admin's way in: an enrolment link for an identity with no
+# password yet, or how to make one.
+enrolment() {
+    local admin="$1" port="$2" url listing line email="" link=""
+    url="http://localhost:${port}/istota"
+    if [ -z "$admin" ]; then
+        log "open ${url}"
+        return 0
+    fi
+    listing="$(vm_stack exec istota auth list </dev/null || true)"
+    line="$(printf '%s\n' "$listing" | awk -v u="$admin" '$1 == u' | head -n 1)"
+    case "$line" in
+        *" password_set=True"*)
+            log "${admin} already has a password: sign in at ${url}"
+            return 0 ;;
+        *" email="*)
+            link="$(vm_stack exec istota auth invite "$admin" --print-link </dev/null | grep -E '^https?://' | tail -n 1 || true)" ;;
+        *)
+            if [ -t 0 ]; then
+                read -r -p "[istota-stack] the email address ${admin} signs in with: " email
+            fi
+            if [ -z "$email" ]; then
+                log "make ${admin}'s login with: istota auth add ${admin} --email <your address> --print-link"
+                log "then open the link it prints; the web UI is ${url}"
+                return 0
+            fi
+            link="$(vm_stack exec istota auth add "$admin" --email "$email" --print-link </dev/null | grep -E '^https?://' | tail -n 1 || true)" ;;
+    esac
+    if [ -z "$link" ]; then
+        log "no enrolment link came back; \`istota auth invite ${admin} --print-link\` makes one."
+        return 0
+    fi
+    log "set ${admin}'s password here (the link works once): ${link}"
+    if [ -t 1 ]; then open "$link" || true; fi
+}
+
+# --- verbs -------------------------------------------------------------------
+
+cmd_create() {
+    local folder="" port="" cpus="" memory="" tag="" repo="" key="${RELEASE_SIGNING_KEY:-}" adopt=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
+                [ "$#" -ge 2 ] || usage_error "$1 needs a value"
+                case "$1" in
+                    --workspace) folder="$2" ;;
+                    --port) port="$2" ;;
+                    --cpus) cpus="$2" ;;
+                    --memory) memory="$2" ;;
+                    --tag) tag="$2" ;;
+                    --repo) repo="$2" ;;
+                    --signing-key) key="$2" ;;
+                esac
+                shift 2 ;;
+            --adopt) adopt=1; shift ;;
+            *) usage_error "create takes no '$1'" ;;
+        esac
+    done
+
+    # A re-run takes what the first run was given.
+    [ -n "$folder" ] || folder="$(workspace_or_default)"
+    [ -n "$port" ] || port="$(port_or_default)"
+    if [ -z "$tag" ] && [ -z "$repo" ]; then
+        tag="$(state_get TAG)"
+        repo="$(state_get REPO)"
+    fi
+    if ! valid_port "$port" || [ "$port" -lt 1024 ]; then
+        usage_error "--port takes a port from 1024 to 65535, not '${port}'"
+    fi
+    case "$cpus" in ""|[1-9]|[1-9][0-9]) ;; *) usage_error "--cpus takes a number of CPUs, not '${cpus}'" ;; esac
+    memory="${memory%GiB}"
+    case "$memory" in ""|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--memory takes whole GiB, not '${memory}'" ;; esac
+    case "$key" in *$'\n'*) usage_error "the signing key is one line of an SSH public key" ;; esac
+
+    local source
+    if [ -n "$repo" ]; then
+        source=checkout
+        [ -z "$tag" ] || check_tag_name "$tag"
+        [ -f "${repo}/host/lima/istota.yaml" ] || usage_error "${repo} is not an istota checkout"
+        repo="$(cd "$repo" && pwd -P)"
+    elif [ -n "$tag" ]; then
+        source=release
+        check_tag_name "$tag"
+    else
+        usage_error "give --tag and --signing-key (a release), or --repo (a checkout)"
+    fi
+
+    require_mac
+    folder="$(resolve_dir "$folder")"
+    refuse_location "$folder"
+    require_limactl
+
+    local status
+    status="$(instance_status)"
+    if [ -z "$status" ]; then
+        if [ "$source" = release ] && [ -z "$key" ]; then
+            usage_error "a release needs the key its tag is signed by: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)"
+        fi
+        require_port_free "$port"
+    fi
+    prepare_folder "$folder" "$adopt"
+    state_write "WORKSPACE=${folder}" "PORT=${port}" "TAG=${tag}" "REPO=${repo}"
+
+    if [ -z "$status" ]; then
+        local template expression args
+        if [ "$source" = checkout ]; then
+            template="${repo}/host/lima/istota.yaml"
+        else
+            template="$(template_path)"
+        fi
+        [ -f "$template" ] || fail 1 "no Lima template at ${template}; run install.sh --local again."
+        expression=".portForwards[0].guestPort = ${port} | .portForwards[0].hostPort = ${port}"
+        args=(create --tty=false "--name=${INSTANCE}")
+        [ -z "$cpus" ] || args+=(--cpus "$cpus")
+        [ -z "$memory" ] || args+=(--memory "$memory")
+        args+=("--param=WORKSPACE=${folder}")
+        if [ "$source" = checkout ]; then
+            args+=("--param=ISTOTA_REPO=${repo}")
+        else
+            # The template names both mounts; a release has no checkout to share.
+            expression="${expression} | del(.mounts[] | select(.mountPoint == \"/mnt/istota-repo\"))"
+            args+=("--param=ISTOTA_TAG=${tag}" "--param=RELEASE_SIGNING_KEY=${key}")
+        fi
+        args+=(--set "$expression" "$template")
+        run_step "create the VM" "limactl create --name=${INSTANCE} ..." limactl "${args[@]}"
+        status=Stopped
+    fi
+    if [ "$status" != Running ]; then
+        run_step "start the VM" "limactl start ${INSTANCE}" limactl start --tty=false "$INSTANCE"
+    fi
+
+    run_step "write host.env" "istota-stack host-env ..." \
+        vm_stack host-env STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}"
+
+    local probe deployed update=(update)
+    probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
+    deployed="$(probe_value "$probe" tag)"
+    if [ "$source" = checkout ]; then
+        update+=(--unsigned "${tag:-latest}")
+    else
+        update+=("$tag")
+    fi
+    if [ -z "$deployed" ] || { [ -n "$tag" ] && [ "$deployed" != "$tag" ]; }; then
+        run_step "build ${tag:-latest}" "istota-stack ${update[*]}" vm_stack "${update[@]}" </dev/null
+        probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
+    fi
+
+    if [ "$(probe_value "$probe" config)" != 1 ]; then
+        local setup=(setup --storage host-folder --ingress local --hostname "localhost:${port}")
+        # The wizard asks its questions on this terminal, as on a server.
+        vm_stack "${setup[@]}" || fail $? "step 'setup' failed: \`istota-stack ${setup[*]}\`"
+        probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
+    fi
+
+    # The first build ran before config.toml existed: a config that needs
+    # Claude Code gets its rebuild now.
+    local image_rc=0
+    vm_stack check-image </dev/null || image_rc=$?
+    if [ "$image_rc" -eq 2 ]; then
+        deployed="$(probe_value "$probe" tag)"
+        local rebuild=(update)
+        [ -z "$(probe_value "$probe" unsigned)" ] || rebuild+=(--unsigned)
+        rebuild+=("$deployed")
+        run_step "rebuild ${deployed}" "istota-stack ${rebuild[*]}" vm_stack "${rebuild[@]}" </dev/null
+    elif [ "$image_rc" -ne 0 ]; then
+        fail "$image_rc" "step 'check the image' failed: \`istota-stack check-image\` (exit ${image_rc})"
+    fi
+    run_step "provision the VM" "${VM_SRC}/host/provision.sh" vm "${VM_SRC}/host/provision.sh" </dev/null
+    run_step "start the stack" "systemctl enable --now istota-stack" \
+        vm systemctl enable --now istota-stack </dev/null
+
+    refresh_scripts
+    escrow_key
+    enrolment "$(probe_value "$probe" admin)" "$port"
+    log "done. \`istota-stack status\` shows the VM; files are in ${folder}."
+}
+
+cmd_start() {
+    [ "$#" -eq 0 ] || usage_error
+    local status folder
+    status="$(instance_status)"
+    [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}: \`istota-stack create\` makes one."
+    folder="$(workspace_or_default)"
+    if [ ! -f "${folder}/${MARKER}" ]; then
+        log "WARNING: ${folder} has no ${MARKER}; the stack refuses to start without it."
+    fi
+    [ "$status" = Running ] || exec limactl start --tty=false "$INSTANCE"
+    log "${INSTANCE} is already running"
+}
+
+# The stack first, so SQLite closes cleanly, bounded so a hung stack cannot
+# keep the VM up; then the VM.
+cmd_stop() {
+    [ "$#" -eq 0 ] || usage_error
+    local status pid watchdog rc=0
+    status="$(instance_status)"
+    [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}."
+    if [ "$status" = Running ]; then
+        log "stopping the stack (at most ${STOP_TIMEOUT}s)"
+        # A plain command, so $! is limactl itself and the watchdog's kill reaches it.
+        limactl shell --workdir / "$INSTANCE" sudo istota-stack down </dev/null &
+        pid=$!
+        ( sleep "$STOP_TIMEOUT"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+        watchdog=$!
+        wait "$pid" || rc=$?
+        kill "$watchdog" 2>/dev/null || true
+        wait "$watchdog" 2>/dev/null || true
+        if [ "$rc" -ne 0 ]; then
+            log "WARNING: \`istota-stack down\` did not finish (exit ${rc}); stopping the VM regardless"
+        fi
+    fi
+    exec limactl stop "$INSTANCE"
+}
+
+cmd_status() {
+    [ "$#" -eq 0 ] || usage_error
+    local status folder port marker autostart probe holders
+    status="$(instance_status)"
+    folder="$(workspace_or_default)"
+    port="$(port_or_default)"
+    if [ -f "${folder}/${MARKER}" ]; then marker="its marker is there"; else marker="NO ${MARKER} marker: the stack will not start"; fi
+    if [ -e "${HOME}/Library/LaunchAgents/io.lima-vm.autostart.${INSTANCE}.plist" ]; then
+        autostart=on
+    else
+        autostart=off
+    fi
+    echo "VM:         ${INSTANCE}, ${status:-not created}"
+    echo "Workspace:  ${folder} (${marker})"
+    echo "Web UI:     http://localhost:${port}/istota"
+    echo "Autostart:  ${autostart}"
+    [ "$status" = Running ] || return 0
+    probe="$(vm sh -c "$VM_PROBE" </dev/null || true)"
+    echo "Deployed:   $(probe_value "$probe" tag)"
+    if command -v lsof >/dev/null 2>&1; then
+        holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u || true)"
+        if [ -z "$holders" ]; then
+            echo "Port:       nothing listens on ${port}: Lima's forward is not up"
+        elif printf '%s\n' "$holders" | grep -qvxE 'limactl|ssh'; then
+            echo "Port:       ${port} is held by $(printf '%s' "$holders" | tr '\n' ' ')and not by Lima"
+        fi
+    fi
+    echo
+    vm_stack compose ps </dev/null || true
+}
+
+cmd_open() {
+    local folder users only
+    case "${1:-}" in
+        "") open "http://localhost:$(port_or_default)/istota" ;;
+        --files)
+            folder="$(workspace_or_default)"
+            users="${folder}/Users"
+            if [ -d "$users" ]; then
+                only="$(find "$users" -mindepth 1 -maxdepth 1 -type d ! -name '.*')"
+                if [ -n "$only" ] && [ "$(printf '%s\n' "$only" | wc -l | tr -d ' ')" = 1 ]; then
+                    open "$only"
+                    return
+                fi
+                open "$users"
+                return
+            fi
+            open "$folder" ;;
+        *) usage_error ;;
+    esac
+}
+
+cmd_autostart() {
+    [ "$#" -eq 1 ] || usage_error
+    case "$1" in
+        on) exec limactl autostart enable "$INSTANCE" ;;
+        off) exec limactl autostart disable "$INSTANCE" ;;
+        *) usage_error "autostart takes on or off" ;;
+    esac
+}
+
+# HOST_LOOPBACK_ALLOW in the VM's host.env, then the egress unit re-run so
+# the rules follow it.
+cmd_host_port() {
+    local action="$1"
+    shift
+    if [ "$#" -ne 1 ] || ! valid_port "$1"; then
+        usage_error "${action}-host-port takes one TCP port, 1 to 65535"
+    fi
+    local port="$1" current word list=""
+    current="$(vm_stack host-env HOST_LOOPBACK_ALLOW </dev/null)" || fail 1 "could not read host.env in the VM."
+    for word in $(printf '%s' "$current" | tr ',' ' '); do
+        [ "$word" != "$port" ] || continue
+        list="${list:+${list} }${word}"
+    done
+    if [ "$action" = allow ]; then list="${list:+${list} }${port}"; fi
+    if [ "$(vm_stack host-env HOST_LOOPBACK_BLOCK </dev/null)" != 1 ]; then
+        log "WARNING: HOST_LOOPBACK_BLOCK is not 1 in the VM, so every port on the Mac's loopback is open to containers"
+    fi
+    vm_stack host-env "HOST_LOOPBACK_ALLOW=${list}" </dev/null
+    vm systemctl restart istota-devbox-egress.service </dev/null
+    log "containers may reach these ports on the Mac's loopback: ${list:-none}"
+}
+
+cmd_update() {
+    local rc=0
+    vm_stack update "$@" || rc=$?
+    [ "$rc" -eq 0 ] || exit "$rc"
+    refresh_scripts
+}
+
+cmd_destroy() {
+    local force=""
+    case "${1:-}" in
+        "") ;;
+        --force) force=1 ;;
+        *) usage_error ;;
+    esac
+    [ -n "$(instance_status)" ] || fail 1 "there is no Lima instance ${INSTANCE}."
+    local folder answer=""
+    folder="$(workspace_or_default)"
+    if ! keychain_has_item && [ -z "$force" ]; then
+        fail "$EX_CONFIG" "the login Keychain holds no copy of ${INSTANCE}'s master key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): the snapshots in ${folder} cannot be decrypted without this key. \`istota-stack create\` copies it while the VM runs; --force deletes the VM regardless."
+    fi
+    printf '[istota-stack] this deletes the VM %s, its database and its config. Type %s to go on: ' \
+        "$INSTANCE" "$INSTANCE" >&2
+    read -r answer || true
+    [ "$answer" = "$INSTANCE" ] || fail 1 "not deleted."
+    limactl delete --force "$INSTANCE"
+    log "deleted ${INSTANCE}. Left in place: the workspace ${folder} and the master key in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})."
+}
+
+# `apply <plan>` and `import-bare-metal <dir>`: the Mac path copied into a
+# directory of the VM user's, moved by the VM's `istota-stack stage` into a
+# fresh root-only one under /srv/app/istota/staging, run, and removed.
+cmd_with_path() {
+    local verb="$1"
+    shift
+    [ "$#" -ge 1 ] || usage_error "${verb} takes a path on this Mac"
+    local path="$1" copy=() stage=(stage) tmp staged rc=0
+    shift
+    case "$verb" in
+        apply) [ -f "$path" ] || usage_error "no plan file at ${path}" ;;
+        import-bare-metal)
+            [ -d "$path" ] || usage_error "no unpacked export at ${path}"
+            copy=(-r)
+            # The one-shot container reads the export as uid 10001.
+            stage+=(--daemon) ;;
+    esac
+    require_running
+    tmp="$(limactl shell --workdir / "$INSTANCE" mktemp -d </dev/null)" || fail 1 "could not make a directory in the VM."
+    limactl copy ${copy[@]+"${copy[@]}"} "$path" "${INSTANCE}:${tmp}/" || fail 1 "could not copy ${path} into the VM."
+    staged="$(vm_stack "${stage[@]}" "${tmp}/$(basename "$path")" </dev/null)" || fail 1 "could not stage ${path} in the VM."
+    limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null || true
+    vm_stack "$verb" "$staged" "$@" || rc=$?
+    vm_stack unstage "$staged" </dev/null || log "WARNING: ${staged} was left in the VM"
+    exit "$rc"
+}
+
+main() {
+    local command="${1:-}"
+    [ "$#" -eq 0 ] || shift
+    case "$command" in
+        create) cmd_create "$@" ;;
+        start) cmd_start "$@" ;;
+        stop) cmd_stop "$@" ;;
+        status) cmd_status "$@" ;;
+        open) cmd_open "$@" ;;
+        shell) [ "$#" -eq 0 ] || usage_error; exec limactl shell "$INSTANCE" ;;
+        autostart) cmd_autostart "$@" ;;
+        allow-host-port) cmd_host_port allow "$@" ;;
+        deny-host-port) cmd_host_port deny "$@" ;;
+        update) cmd_update "$@" ;;
+        destroy) cmd_destroy "$@" ;;
+        apply|import-bare-metal) cmd_with_path "$command" "$@" ;;
+        restore|import-standalone) fail "$EX_USAGE" "${command} is not in this release." ;;
+        ""|-h|--help|help) usage ;;
+        *) forward "$command" "$@" ;;
+    esac
+}
+
+main "$@"

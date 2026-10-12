@@ -21,6 +21,12 @@
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
 #   istota-stack exec <cmd...>  run a command in the daemon container as uid 10001
 #   istota-stack compose <...>  docker compose, with this stack's files and settings
+#   istota-stack host-env KEY | KEY=VALUE...
+#                               print one host.env value, or set some, keeping every other line
+#   istota-stack stage [--daemon] <path>
+#                               move a file or directory into a fresh root-only directory
+#                               under staging/ and print its new path (--daemon: uid 10001's)
+#   istota-stack unstage <path> remove what `stage` made
 #
 # --- end usage ---
 #
@@ -80,6 +86,9 @@ SECRETS_DIR="${STACK}/secrets"
 # is uid 10001's to write.
 DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
 LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
+# Where the Mac CLI's file arguments (`apply <plan>`, `import-bare-metal <dir>`)
+# are handed over: one fresh directory per call, removed after it.
+STAGING_DIR="${STACK}/staging"
 ISTOTA_UID=10001
 PROJECT=istota
 # The daemon, web and webhooks image. Releases before the service was renamed
@@ -126,12 +135,13 @@ mount_dir_for_storage() {
 
 MOUNT_DIR="${ISTOTA_MOUNT_DIR:-$(mount_dir_for_storage "$(env_get "$HOST_ENV" STORAGE)")}"
 
-# Set KEY=VALUE pairs in .env, keeping every other line, through a rename so a
-# reader never sees half a file.
-env_set() {
-    local tmp
-    tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
-    if [ -f "$ENV_FILE" ]; then cat "$ENV_FILE" > "$tmp"; fi
+# Set KEY=VALUE pairs in an env file, keeping every other line, through a
+# rename so a reader never sees half a file.
+env_file_set() {
+    local file="$1" tmp
+    shift
+    tmp="$(mktemp "${file}.XXXXXX")"
+    if [ -f "$file" ]; then cat "$file" > "$tmp"; fi
     while [ "$#" -gt 0 ]; do
         local key="${1%%=*}" value="${1#*=}"
         case "$value" in *$'\n'*) rm -f "$tmp"; die "a value for ${key} holds a newline" ;; esac
@@ -143,7 +153,11 @@ env_set() {
         shift
     done
     chmod 0644 "$tmp"
-    mv "$tmp" "$ENV_FILE"
+    mv "$tmp" "$file"
+}
+
+env_set() {
+    env_file_set "$ENV_FILE" "$@"
 }
 
 # --- compose -----------------------------------------------------------------
@@ -839,6 +853,61 @@ cmd_put_files() {
     "${drop[@]}" python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
 }
 
+# host.env is root's and read by provision.sh and the units; the Mac CLI
+# writes the local VM's keys through this. Keys are host.env's own shape,
+# upper case; nothing here restarts anything.
+cmd_host_env() {
+    [ "$#" -ge 1 ] || { usage >&2; exit 64; }
+    local pair key
+    if [ "$#" -eq 1 ] && [[ "$1" != *=* ]]; then
+        case "$1" in ""|*[!A-Z0-9_]*) die "'$1' is not a host.env key" ;; esac
+        env_get "$HOST_ENV" "$1"
+        return 0
+    fi
+    for pair in "$@"; do
+        key="${pair%%=*}"
+        [[ "$pair" == *=* ]] || { usage >&2; exit 64; }
+        case "$key" in ""|*[!A-Z0-9_]*) die "'${key}' is not a host.env key" ;; esac
+    done
+    env_file_set "$HOST_ENV" "$@"
+}
+
+# Move a path the Mac CLI copied into the VM into a fresh directory under
+# staging/, 0700, so the verb it is for reads it from a place no other account
+# can change. A plan stays root's (apply copies it on for 10001); an export is
+# 10001's, which is what import-bare-metal's one-shot container reads it as.
+cmd_stage() {
+    local daemon=""
+    if [ "${1:-}" = --daemon ]; then daemon=1; shift; fi
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    local source="$1" name dir
+    if [ -L "$source" ] || [ ! -e "$source" ]; then
+        die "nothing to stage at ${source}"
+    fi
+    name="$(basename "$source")"
+    install -d -m 0700 "$STAGING_DIR"
+    dir="$(mktemp -d "${STAGING_DIR}/XXXXXXXX")"
+    mv -- "$source" "${dir}/${name}"
+    if [ "$(id -u)" -eq 0 ]; then
+        if [ -n "$daemon" ]; then
+            chown -hR "${ISTOTA_UID}:${ISTOTA_UID}" "$dir"
+        else
+            chown -hR 0:0 "${dir}/${name}"
+        fi
+    fi
+    echo "${dir}/${name}"
+}
+
+# Remove the directory `stage` made for a path, and nothing outside staging/.
+cmd_unstage() {
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    local dir
+    dir="$(dirname "$1")"
+    case "/${dir}/" in */../*|*/./*) die "${1} is not a staged path" ;; esac
+    [ "$(dirname "$dir")" = "$STAGING_DIR" ] || die "${1} is not under ${STAGING_DIR}"
+    rm -rf -- "$dir"
+}
+
 cmd_up() {
     # Without a config the entrypoint refuses, and the restart policy would
     # loop on it; say what to do instead.
@@ -989,6 +1058,9 @@ main() {
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;
+        host-env) cmd_host_env "$@" ;;
+        stage) cmd_stage "$@" ;;
+        unstage) cmd_unstage "$@" ;;
         -h|--help|help) usage ;;
         *) usage >&2; exit 64 ;;
     esac

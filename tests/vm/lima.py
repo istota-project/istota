@@ -395,6 +395,39 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
 }
 
 
+#: The Mac's `istota-stack` (row L4), run on this Mac against the tier's VM.
+MAC_CLI = REPO / "host" / "mac" / "istota-stack"
+MAC_SHIM = REPO / "host" / "mac" / "istota"
+
+#: Row L4's control: a Mac CLI whose `exec` forward goes to `compose exec
+#: daemon` itself, past the VM's `istota-stack exec` and its `istota-drop`.
+MAC_SHIM_CONTROL: tuple[str, str] = (
+    '    exec limactl shell --workdir / "$INSTANCE" sudo istota-stack "$@"\n',
+    '    if [ "$1" = exec ]; then shift; set -- compose exec -T daemon "$@"; fi\n'
+    '    exec limactl shell --workdir / "$INSTANCE" sudo istota-stack "$@"\n',
+)
+
+
+def mac_cli(name: str = "") -> Path:
+    """`host/mac/istota-stack`, or a copy beside the shim with control `name`
+    applied, so the shim's own lookup of its sibling finds it."""
+    if name != "mac-shim-without-drop":
+        return MAC_CLI
+    old, new = MAC_SHIM_CONTROL
+    text = MAC_CLI.read_text()
+    if text.count(old) != 1:
+        raise VmError("the mac-shim-without-drop control does not apply to host/mac/istota-stack")
+    bindir = _workdir() / "mac-shim-control"
+    bindir.mkdir(parents=True, exist_ok=True)
+    copy = bindir / "istota-stack"
+    copy.write_text(text.replace(old, new))
+    copy.chmod(0o755)
+    shim = bindir / "istota"
+    shim.write_text(MAC_SHIM.read_text())
+    shim.chmod(0o755)
+    return copy
+
+
 def stack_command(vm: Vm, name: str = "") -> str:
     """The installed `istota-stack`, or a copy with control `name` applied."""
     if not name:

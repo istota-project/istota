@@ -1,4 +1,4 @@
-"""The local VM's workspace and the Mac's loopback: rows L1, L2 and L3.
+"""The local VM's workspace, the Mac's loopback and the Mac's commands: rows L1 to L4.
 
 The host-folder mode is the stack the local VM runs: local ingress, and the
 workspace a Mac folder Lima shares in with virtiofs at
@@ -29,6 +29,13 @@ read-only, crosses from the Mac. The VM mounts exactly the template's two
 file under the Mac home outside the folder, by its Mac path or through a link
 the Mac made in the folder; and the checkout refuses a write.
 
+Row L4: the Mac's `istota-stack` and `istota` run as uid 10001 with no
+capabilities. They are run here, on this Mac, against the tier's VM
+(`ISTOTA_LIMA_INSTANCE`), as an operator runs them: the Mac CLI's `exec`
+reports uid 10001 and every capability set empty, and the `istota` shim
+beside it reaches the CLI through that same `exec` (the default suite holds
+the argv it forwards, `tests/test_mac_istota_stack.py`).
+
 Controls (`scripts/test-vm-negative-control.sh`):
 
 - `no-workspace-marker`: the daemon service is started from an image whose
@@ -38,7 +45,9 @@ Controls (`scripts/test-vm-negative-control.sh`):
   unit re-run, as on a VM set up without the block;
 - `default-mounts-in-template`: the VM gets the mounts Lima resolves from the
   template with `template:_default/mounts` added to its `base:`, which is what
-  `template:debian-13` would bring in: the Mac home, read-only.
+  `template:debian-13` would bring in: the Mac home, read-only;
+- `mac-shim-without-drop`: a copy of the Mac CLI whose `exec` goes straight to
+  `compose exec daemon`, past the VM's `istota-stack exec` and `istota-drop`.
 """
 
 from __future__ import annotations
@@ -47,6 +56,7 @@ import json
 import os
 import shlex
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -393,3 +403,54 @@ class TestOnlyTheFolderCrossesFromTheMac:
         result = stack.run(f"touch {lima.REPO_MOUNT}/.istota-vmtier-l3-write", check=False)
         assert result.returncode != 0, "row L3: root wrote into the checkout mount"
         assert "Read-only file system" in result.stderr, result.stderr
+
+
+STATUS = "grep -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb):' /proc/self/status"
+EMPTY_CAPS = "0000000000000000"
+
+
+def _on_the_mac(script: Path, vm: lima.Vm, *argv: str) -> subprocess.CompletedProcess:
+    """A Mac command against the tier's VM, run as the operator runs it."""
+    return subprocess.run(
+        [str(script), *argv], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        timeout=300, env={**os.environ, "ISTOTA_LIMA_INSTANCE": vm.name},
+    )
+
+
+def _status_fields(text: str) -> dict[str, str]:
+    fields = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if value.split():
+            fields[key.strip()] = value.split()[0]
+    return fields
+
+
+@pytest.fixture(scope="module")
+def mac_commands(stack) -> tuple[Path, Path]:
+    """The Mac CLI and the shim beside it; under row L4's control, a copy of
+    the CLI with the drop skipped, and the shim beside that copy."""
+    applied = lima.control() == "mac-shim-without-drop"
+    cli = lima.mac_cli("mac-shim-without-drop" if applied else "")
+    return cli, cli.parent / "istota"
+
+
+@parity.witness("L4")
+class TestTheMacCliExecsAsTheDaemon:
+    def test_the_mac_cli_execs_as_10001_with_no_capabilities(self, stack, mac_commands):
+        cli, _ = mac_commands
+        result = _on_the_mac(cli, stack, "exec", "sh", "-c", STATUS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        fields = _status_fields(result.stdout)
+        assert fields.get("Uid") == "10001" and fields.get("Gid") == "10001", (
+            f"row L4: the Mac CLI's exec ran as {fields}")
+        for cap in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+            assert fields.get(cap) == EMPTY_CAPS, f"row L4: {cap} is {fields.get(cap)} through the Mac CLI"
+
+    def test_the_istota_shim_reaches_the_cli(self, stack, mac_commands):
+        """Without this a shim that ran nothing would leave the case above as
+        the only evidence; the shim's route is that same `exec`."""
+        _, shim = mac_commands
+        result = _on_the_mac(shim, stack, "user", "list")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert lima.USER in result.stdout, result.stdout

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Istota can run in a Lima VM on an Apple silicon Mac.** `install.sh --local` installs a Mac-side `istota-stack` and `istota`, and `istota-stack create` makes a folder in your home (`~/Istota` by default) the workspace, creates the VM and sets up the same stack a server runs inside it. The Mac commands start, stop, update and open it, forward every server command into the VM, and copy the master key into your login Keychain so a lost VM can be rebuilt from the folder's snapshots. Under local ingress a scheduled job missed while the Mac slept runs once on wake if it is under twelve hours late.
+
 - **The daily database backup also keeps a copy of the config.** Where the workspace is a mounted store, `config.toml` and the admins list are copied, private, into `Backups/config/<date>/` beside the database snapshots and kept for as many days, so a lost VM can be rebuilt from the store. Credentials files and the master key are never copied there.
 
 - **The Ansible management role can update the version on its own.** Running the play with `--tags istota_update` performs only the version update and waits for the stack to be healthy, leaving the config, secrets and users alone. `-e istota_update_force=true` runs the update even when the VM is already current, as running `istota-stack update` on the VM does.

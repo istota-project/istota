@@ -1179,3 +1179,73 @@ class TestTheWrapperPassesStdin:
         )
         assert result.returncode == 0, result.stderr
         assert seen.read_text() == "the-value"
+
+
+class TestHostEnv:
+    """`istota-stack host-env`: how the Mac CLI writes the local VM's host.env
+    keys (STORAGE, INGRESS, the loopback block) and edits the allow list."""
+
+    def test_it_sets_keys_and_keeps_every_other_line(self, fx):
+        (fx.stack / "host.env").write_text("# operator's note\nINGRESS=direct\nCLAUDE_CODE_VERSION=2.1.296\n")
+        result = fx.run("host-env", "INGRESS=local", "HOST_LOOPBACK_ALLOW=1234 11434")
+        assert result.returncode == 0, result.stderr
+        assert (fx.stack / "host.env").read_text() == (
+            "# operator's note\nINGRESS=local\nCLAUDE_CODE_VERSION=2.1.296\nHOST_LOOPBACK_ALLOW=1234 11434\n")
+
+    def test_it_prints_one_value(self, fx):
+        result = fx.run("host-env", "CLAUDE_CODE_VERSION")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "2.1.296\n"
+
+    @pytest.mark.parametrize("arg", ["lower=1", "=1", "A-B=1", "lower"])
+    def test_a_key_not_in_host_envs_shape_is_refused(self, fx, arg):
+        before = (fx.stack / "host.env").read_text()
+        result = fx.run("host-env", arg)
+        assert result.returncode != 0
+        assert (fx.stack / "host.env").read_text() == before
+
+    def test_a_mix_of_reads_and_writes_is_a_usage_error(self, fx):
+        assert fx.run("host-env", "INGRESS=local", "STORAGE").returncode == 64
+
+
+class TestStaging:
+    """`stage` and `unstage`: the Mac CLI's file arguments land in a fresh
+    0700 directory under staging/, and only such a directory is removed."""
+
+    def test_stage_moves_the_path_into_a_fresh_private_directory(self, fx, tmp_path):
+        incoming = tmp_path / "incoming"
+        incoming.mkdir()
+        (incoming / "plan.toml").write_text("[config]\n")
+        result = fx.run("stage", str(incoming / "plan.toml"))
+        assert result.returncode == 0, result.stderr
+        staged = Path(result.stdout.strip())
+        assert staged.name == "plan.toml"
+        assert staged.parent.parent == fx.stack / "staging"
+        assert staged.read_text() == "[config]\n"
+        assert staged.parent.stat().st_mode & 0o777 == 0o700
+        assert not (incoming / "plan.toml").exists()
+
+    def test_a_link_is_not_staged(self, fx, tmp_path):
+        link = tmp_path / "plan.toml"
+        link.symlink_to("/etc/hosts")
+        result = fx.run("stage", str(link))
+        assert result.returncode != 0
+        assert not (fx.stack / "staging").exists() or not any((fx.stack / "staging").iterdir())
+
+    def test_unstage_removes_the_staged_directory(self, fx, tmp_path):
+        source = tmp_path / "export"
+        source.mkdir()
+        staged = Path(fx.run("stage", "--daemon", str(source)).stdout.strip())
+        assert staged.is_dir()
+        result = fx.run("unstage", str(staged))
+        assert result.returncode == 0, result.stderr
+        assert not staged.parent.exists()
+        assert (fx.stack / "staging").is_dir()
+
+    @pytest.mark.parametrize("path", ["{stack}/config/config.toml", "{stack}/staging/x/../../config/x", "/tmp/x"])
+    def test_unstage_removes_nothing_outside_staging(self, fx, path):
+        (fx.stack / "staging" / "x").mkdir(parents=True)
+        result = fx.run("unstage", path.format(stack=fx.stack))
+        assert result.returncode != 0
+        assert (fx.stack / "config" / "config.toml").exists()
+        assert (fx.stack / "staging" / "x").is_dir()

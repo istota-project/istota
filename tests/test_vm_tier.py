@@ -99,6 +99,17 @@ class TestTheUpdateControls:
             assert old != new, name
 
 
+class TestTheMacShimControl:
+    def test_it_applies_once_to_the_mac_cli(self):
+        """Row L4's control edits a copy of the Mac CLI; a forward line that
+        no longer matches would fail the control minutes into a VM session."""
+        from tests.vm import lima
+
+        old, new = lima.MAC_SHIM_CONTROL
+        assert lima.MAC_CLI.read_text().count(old) == 1
+        assert old in new and old != new
+
+
 class TestTheLimaTemplate:
     def test_the_probe_does_not_rely_on_roots_path(self):
         """Lima runs the probe as the user, whose PATH has no /usr/local/sbin, so

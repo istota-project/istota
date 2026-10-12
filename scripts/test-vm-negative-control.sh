@@ -26,7 +26,7 @@
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
 #   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
-#              default-mounts-in-template (row L3)
+#              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18)
 #
 # Run scripts/test-vm.sh first: the controls reuse its VM and images. No arrays:
@@ -148,6 +148,9 @@ control default-mounts-in-template \
     "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \
     "$L::test_the_vm_mounts_the_read_only_checkout_and_the_folder_alone" \
     "$L::test_the_vm_reads_nothing_of_the_mac_outside_the_folder"
+control mac-shim-without-drop \
+    "row L4: the Mac CLI's exec sent to compose exec daemon, past istota-drop" \
+    "$VM/test_host_folder.py::TestTheMacCliExecsAsTheDaemon::test_the_mac_cli_execs_as_10001_with_no_capabilities"
 
 P="$VM/test_proxied.py"
 control no-allow-list \

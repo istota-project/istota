@@ -63,6 +63,7 @@ ROWS: dict[int | str, str] = {
     "L1": "the daemon never writes into a workspace that is not the user's folder",
     "L2": "no container reaches a host loopback service unless its port is allowed",
     "L3": "only the workspace folder, and in developer mode the read-only checkout, crosses from the Mac",
+    "L4": "the Mac shims run as uid 10001 with no capabilities",
 }
 
 NOT_WITNESSED: dict[int, str] = {
