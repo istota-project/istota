@@ -1,10 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import Page from './+page.svelte';
 
 vi.mock('$lib/userContext', () => ({ getCurrentUser: () => ({ expireSession: vi.fn() }) }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   getCredentialGrants: vi.fn(async () => ({
     credentials: [],
     rooms: [],
@@ -21,7 +23,7 @@ vi.mock('$lib/api', async (original) => ({
     available: true,
   })),
   getCredentialActivity: vi.fn(async () => []),
-}));
+});
 
 afterEach(cleanup);
 it('shows import and export without loading the retired shared-file card', async () => {
