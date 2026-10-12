@@ -3117,9 +3117,9 @@ def _admin_storage_section(db_path: Path) -> dict:
         "db_size_bytes": db_size,
         "backups_count": backups_count,
         "last_backup": last_backup,
-        # Only meaningful when a Nextcloud server backs the workspace; a local
-        # (standalone) install has no mount, so the frontend hides the row.
-        "nextcloud_configured": bool(_config and _config.storage_is_nextcloud),
+        # Whether a Nextcloud server is configured at all; the frontend hides
+        # the row on an install with none.
+        "nextcloud_configured": bool(_config and _config.nextcloud_enabled),
         "nextcloud_mount_healthy": mount_healthy,
         # The bot's own Nextcloud account, so the bot-icon control can name the
         # picture it is *not* changing rather than implying the two are linked.
@@ -3128,7 +3128,7 @@ def _admin_storage_section(db_path: Path) -> dict:
         # OCS — so the divergence is permanent and worth stating.
         "nextcloud_username": (
             (_config.nextcloud.username or None)
-            if (_config and _config.storage_is_nextcloud) else None
+            if (_config and _config.nextcloud_enabled) else None
         ),
     }
 

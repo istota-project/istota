@@ -1132,6 +1132,7 @@ class TestAdminPromptIsolation:
             # feature — the "mounted at" wording requires a Nextcloud backend.
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             workspace_path=mount_path,
+            nextcloud_mount_path=mount_path,
             admin_users=set() if is_admin else {"bob"},
         )
         if sandbox_enabled:

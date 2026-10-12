@@ -141,13 +141,22 @@ class TestWorkspaceLocalFolder:
         storage.ensure_user_directories_v2(cfg, "alice")
         called.assert_not_called()
 
-    def test_share_called_when_nc_configured(self, tmp_path, monkeypatch):
+    def test_share_called_when_the_workspace_is_the_mount(self, tmp_path, monkeypatch):
+        import istota.storage as storage
+        called = MagicMock(return_value=True)
+        monkeypatch.setattr(storage, "share_folder_with_user", called)
+        cfg = _local_config(tmp_path, nc_url="https://cloud.example.com")
+        cfg.nextcloud_mount_path = cfg.workspace_path
+        storage.ensure_user_directories_v2(cfg, "alice")
+        called.assert_called_once()
+
+    def test_no_share_from_a_local_workspace_beside_nextcloud(self, tmp_path, monkeypatch):
         import istota.storage as storage
         called = MagicMock(return_value=True)
         monkeypatch.setattr(storage, "share_folder_with_user", called)
         cfg = _local_config(tmp_path, nc_url="https://cloud.example.com")
         storage.ensure_user_directories_v2(cfg, "alice")
-        called.assert_called_once()
+        called.assert_not_called()
 
     def test_ensure_workspace_seeds_memory_once(self, tmp_path):
         from istota.storage import (

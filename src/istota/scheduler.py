@@ -1121,10 +1121,11 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
                 logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
             else:
                 # File may be in a user's Talk folder (NC stores shared files
-                # in the sender's data dir). Check NC data dir if available.
+                # in the sender's data dir). Check NC data dir if available;
+                # only beside the mount, since that data dir is Nextcloud's.
                 nc_data = attachment_source.NC_DATA_ROOT
                 found = False
-                if nc_data.is_dir():
+                if config.storage_is_nextcloud and nc_data.is_dir():
                     filename = att.split("/", 1)[1] if "/" in att else att
                     for user_dir in nc_data.iterdir():
                         candidate = user_dir / "files" / "Talk" / filename
@@ -6682,13 +6683,13 @@ def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
     """
     if not (
         config.web.enabled
-        and config.storage_is_nextcloud
+        and config.nextcloud_enabled
         and config.web.avatar_import_from_nextcloud
         and config.scheduler.avatar_import_interval
     ):
         return []
 
-    # `storage_is_nextcloud` is `bool(url)` and `nc_configured` is
+    # `nextcloud_enabled` is `bool(url)` and `nc_configured` is
     # `bool(url and username)`, so a config carrying a URL and no username
     # passes every gate above and then raises "Nextcloud is not configured" for
     # every user, once per tick, forever. Refusing here makes that one skip
@@ -10011,7 +10012,7 @@ def build_interval_gates(
             field="avatar_import_interval",
             enabled=lambda c: bool(
                 c.web.enabled
-                and c.storage_is_nextcloud
+                and c.nextcloud_enabled
                 and c.web.avatar_import_from_nextcloud
                 and c.scheduler.avatar_import_interval
             ),

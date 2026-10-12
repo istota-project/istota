@@ -2228,16 +2228,26 @@ class Config:
         return self.workspace_path is not None
 
     @property
-    def storage_is_nextcloud(self) -> bool:
-        """Whether a Nextcloud server backs the file workspace.
+    def nextcloud_enabled(self) -> bool:
+        """Whether a Nextcloud server is configured: Talk, the ``nextcloud``
+        skill, OCS, avatars and DAV calls are possible.
 
-        This selects storage vocabulary, not whether the workspace is mounted.
-        Keyed on the presence of a Nextcloud URL — deliberately NOT
-        ``is_standalone`` (which folds in web auth, an axis orthogonal to file
-        storage). A URL means the files are Nextcloud, reached through the
-        workspace mount; no URL means a plain local folder.
+        Says nothing about where the workspace lives; that is
+        :attr:`storage_is_nextcloud`.
         """
         return bool(self.nextcloud.url)
+
+    @property
+    def storage_is_nextcloud(self) -> bool:
+        """Whether the workspace *is* the bot's Nextcloud files, through the mount.
+
+        A URL and ``nextcloud_mount_path`` both set. A URL alone is a Nextcloud
+        install with a local workspace, which is described as a workspace, not
+        as Nextcloud. Selects storage vocabulary and every path that only makes
+        sense when the files are in Nextcloud. Deliberately not
+        ``is_standalone``, which folds in web auth.
+        """
+        return self.nextcloud_enabled and self.nextcloud_mount_path is not None
 
     @property
     def storage_backend(self) -> str:
@@ -2718,10 +2728,9 @@ class Config:
             caps.add("devbox")
         if self.whatsapp.enabled:
             caps.add("whatsapp")
-        # Keyed on the URL for the same reason storage_is_nextcloud is: a
-        # standalone local install has no Nextcloud at all, and every verb of
-        # the nextcloud skill would fail there.
-        if self.nextcloud.url:
+        # A standalone local install has no Nextcloud at all, and every verb
+        # of the nextcloud skill would fail there.
+        if self.nextcloud_enabled:
             caps.add("nextcloud")
         return caps
 
@@ -4802,16 +4811,20 @@ def sms_config_errors(config: Config) -> list[str]:
 
 
 def _validate_nextcloud_workspace(config: Config) -> None:
-    """A Nextcloud URL needs a workspace: the files are reached through it.
+    """A Nextcloud URL needs a workspace, local or the mount.
 
     There used to be a third shape, a URL with no workspace, where each file
     operation shelled out to the rclone CLI. Most of the daemon skipped itself
     there and the image never shipped rclone, so it is refused rather than run.
+    Keyed on the URL, not on ``storage_is_nextcloud``: that one requires the
+    mount path, which fills ``workspace_path`` when it is unset, so a refusal
+    keyed on it could never fire.
     """
-    if config.storage_is_nextcloud and config.workspace_path is None:
+    if config.nextcloud_enabled and config.workspace_path is None:
         raise ValueError(
             "[nextcloud] url is set but no workspace is configured: set "
-            "workspace_path to the mount of the bot's Nextcloud files"
+            "workspace_path to a local directory, or to the mount of the bot's "
+            "Nextcloud files together with nextcloud_mount_path"
         )
 
 

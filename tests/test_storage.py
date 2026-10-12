@@ -612,6 +612,7 @@ class TestShareFolderWithUser:
         mount.mkdir()
         return Config(
             workspace_path=mount,
+            nextcloud_mount_path=mount,
             nextcloud=NextcloudConfig(
                 url="https://nc.example.com",
                 username="istota",

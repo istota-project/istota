@@ -11,8 +11,11 @@ from istota.config import Config, NextcloudConfig, WebConfig
 
 
 class TestStorageIdentity:
-    def test_nextcloud_backed_when_url_set(self):
-        cfg = Config(nextcloud=NextcloudConfig(url="https://cloud.example.com"))
+    def test_nextcloud_backed_when_url_and_mount_set(self):
+        cfg = Config(
+            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            nextcloud_mount_path=Path("/srv/mount/nc"),
+        )
         assert cfg.storage_is_nextcloud is True
         assert cfg.storage_backend == "nextcloud"
         assert cfg.storage_label == "Nextcloud"
@@ -29,18 +32,21 @@ class TestStorageIdentity:
         none_auth = Config(
             web=WebConfig(auth="none"),
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            nextcloud_mount_path=Path("/srv/mount/nc"),
         )
         assert none_auth.storage_backend == "nextcloud"
 
         nc_auth_local = Config(web=WebConfig(auth="nextcloud"))
         assert nc_auth_local.storage_backend == "local"
 
-    def test_a_nextcloud_url_is_the_nextcloud_backend(self):
-        mounted = Config(
+    def test_a_nextcloud_url_alone_is_a_local_workspace(self):
+        beside = Config(
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            workspace_path=Path("/srv/mount/nc"),
+            workspace_path=Path("/data/workspace"),
         )
-        assert mounted.storage_backend == "nextcloud"
+        assert beside.nextcloud_enabled is True
+        assert beside.storage_backend == "local"
+        assert beside.storage_label == "your workspace"
 
 
 class TestWorkspaceRoot:
@@ -140,6 +146,7 @@ class TestPromptStorageFramingNextcloud:
             tmp_path,
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             workspace_path=tmp_path / "mnt",
+            nextcloud_mount_path=tmp_path / "mnt",
         )
         assert config.storage_backend == "nextcloud"
         return build_prompt(_task(), [], config).system
