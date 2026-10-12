@@ -214,6 +214,17 @@ class TestTheStoppedExport:
         assert _manifest(result.stdout)["mode"] == "stopped"
         assert host.leftovers() == []
 
+    def test_the_mount_is_released_under_its_new_key_name(self, host):
+        config_file = host.home / "istota" / "config" / "config.toml"
+        config = tomllib.loads(config_file.read_text())
+        config["workspace_mount_path"] = config.pop("nextcloud_mount_path")
+        config_file.write_text(toml_write.dumps(config))
+        host.disable_cron()
+        result = host.run()
+        assert result.returncode == 0, result.stderr.decode()
+        assert "stop mount-nextcloud" in host.system_calls()
+        assert not host.mounted.exists()
+
     def test_the_devbox_users_are_read_off_their_home_volumes(self, host):
         host.disable_cron()
         docker = host.stubs / "docker"

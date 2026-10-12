@@ -682,6 +682,7 @@ LEAN_BASE_CONFIG: dict = {
         "token_storage": "encrypted",
     },
     "site": {"hostname": "localhost"},
+    "scheduler": {"cron_max_staleness_minutes": 720},
     "users": {"testuser": {"display_name": "testuser", "timezone": "UTC"}},
 }
 
@@ -1164,7 +1165,7 @@ def full_config(
     public = f"http://localhost:{credentials.nc_port}"
     base = _copy(LEAN_BASE_CONFIG)
     base["workspace_path"] = "/mnt/shared"
-    base["nextcloud_mount_path"] = "/mnt/shared"
+    base["workspace_mount_path"] = "/mnt/shared"
     base["nextcloud"] = {
         "url": "http://nextcloud",
         "username": FULL_IDENTITY["BOT_USER"],

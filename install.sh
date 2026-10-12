@@ -6,6 +6,11 @@
 #               bubblewrap isolation, set up by host/provision.sh and run by
 #               istota-stack. Needs root.
 #
+#   Local       Istota in a Lima VM on your Apple silicon Mac: the same stack as a
+#               server, with a folder in your home (~/Istota) as its workspace.
+#               Installs the Mac's istota-stack and istota into ~/.local/bin and
+#               runs `istota-stack create`. Needs Lima (brew install lima); no root.
+#
 #   Standalone  Single-user install on your own machine (macOS or Linux). No
 #               server, no Nextcloud, no login, no sandbox. You chat through
 #               the local web UI and the REPL; everything runs as your user in
@@ -16,17 +21,24 @@
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
 #       | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 #
+# Local (WITHOUT sudo, on the Mac):
+#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
+#       | bash -s -- --local --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+#
 # Standalone (WITHOUT sudo; it installs into your user):
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --standalone
 #
 # Usage:
-#   install.sh [--server | --standalone] [other flags...]
+#   install.sh [--server | --local | --standalone] [other flags...]
 #     --server             Server install (needs root, Debian 13)
 #       --tag TAG          the signed release tag to install (or ISTOTA_RELEASE_TAG)
 #       --signing-key KEY  the release signing key, one line of an SSH public key
 #                          (or RELEASE_SIGNING_KEY; read from host.env once it has one)
 #       --terminal-setup   set up in the terminal (`istota-stack setup`) rather
 #                          than in a browser
+#     --local              Local VM install on an Apple silicon Mac (no root); takes
+#                          --tag and --signing-key too, and forwards every other flag
+#                          to `istota-stack create` (--workspace, --port, --cpus, ...)
 #     --standalone         Local single-user install (uv tool install + istota setup)
 #     --help               Show this help
 #   With no mode flag on a terminal you are asked to choose; with no mode flag
@@ -56,6 +68,8 @@
 #   ISTOTA_REPO_BRANCH  Branch or tag the standalone clone takes (default: main)
 #   ISTOTA_CLONE_DIR    Where standalone clones the repo (default:
 #                       ${XDG_DATA_HOME:-~/.local/share}/istota/src)
+#   ISTOTA_RAW_URL      Where --local fetches the Mac scripts when not run from a
+#                       checkout (default: raw.githubusercontent.com, this branch)
 
 set -euo pipefail
 
@@ -94,6 +108,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --server)     MODE="server";     MODE_EXPLICIT=true; shift ;;
         --standalone) MODE="standalone"; MODE_EXPLICIT=true; shift ;;
+        --local)      MODE="local";      MODE_EXPLICIT=true; shift ;;
         --tag)
             [ $# -ge 2 ] || die "--tag needs a value"
             RELEASE_TAG="$2"; shift 2 ;;
@@ -362,6 +377,60 @@ run_server() {
     server_setup
 }
 
+# --- Local VM (macOS) ---------------------------------------------------------
+
+# One file of the Mac half, from the checkout this ran from or else from the
+# branch this script was fetched from, put in place through a rename. Only to
+# run `create`: after the VM's first verified update, istota-stack replaces
+# itself and the template with the copies from the tag the VM verified.
+install_mac_file() {
+    local source="$1" target="$2" mode="$3" tmp
+    tmp="$(mktemp "$(dirname "$target")/.$(basename "$target").XXXXXX")"
+    if [ -n "$REPO_ROOT" ]; then
+        cp "${REPO_ROOT}/${source}" "$tmp"
+    elif ! curl -fsSL "${ISTOTA_RAW_URL:-https://raw.githubusercontent.com/istota-project/istota/${REPO_BRANCH}}/${source}" -o "$tmp"; then
+        rm -f "$tmp"
+        die "could not fetch ${source}."
+    fi
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$target"
+}
+
+run_local() {
+    [ "$(id -u)" -ne 0 ] || die "The local install runs as you, not root. Re-run it without sudo."
+    if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+        die "The local install is for an Apple silicon Mac. A Debian 13 machine takes --server."
+    fi
+    if ! command -v limactl >/dev/null 2>&1; then
+        error "Lima is not installed: brew install lima, then re-run this."
+        exit 69
+    fi
+    [ -n "$RELEASE_TAG" ] || die "Name the release to install: --tag vX.Y.Z (or ISTOTA_RELEASE_TAG)."
+    [ -n "$SIGNING_KEY" ] \
+        || die "Give the release signing key: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)."
+
+    local bin="${ISTOTA_MAC_BIN_DIR:-$HOME/.local/bin}"
+    local data="${XDG_DATA_HOME:-$HOME/.local/share}/istota"
+    section "Local install: ${RELEASE_TAG}"
+    mkdir -p "$bin" "$data"
+    install_mac_file host/mac/istota-stack "${bin}/istota-stack" 0755
+    install_mac_file host/mac/istota "${bin}/istota" 0755
+    install_mac_file host/lima/istota.yaml "${data}/istota.yaml" 0644
+    ok "istota-stack and istota in ${bin}"
+    case ":${PATH}:" in
+        *":${bin}:"*) ;;
+        *) warn "${bin} is not on your PATH; add it in your shell's profile: export PATH=\"${bin}:\$PATH\"" ;;
+    esac
+
+    # The setup wizard runs in the VM and asks on this terminal.
+    reattach_tty_if_needed
+    local rc=0
+    "${bin}/istota-stack" create --tag "$RELEASE_TAG" --signing-key "$SIGNING_KEY" \
+        "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}" || rc=$?
+    # stdin may now be the terminal; exit rather than read on from it.
+    exit "$rc"
+}
+
 # --- Standalone (local single-user) helpers --------------------------------
 
 ensure_uv() {
@@ -520,7 +589,7 @@ run_standalone() {
     echo -e "  ${_BOLD}Start it:${_RESET}  istota serve"
     echo -e "             ${_DIM}then open the printed http://127.0.0.1:<port>/istota URL (no login)${_RESET}"
     echo -e "  ${_BOLD}REPL:${_RESET}      istota repl"
-    echo -e "  ${_BOLD}Docs:${_RESET}      docs/getting-started/local-install.md"
+    echo -e "  ${_BOLD}Docs:${_RESET}      docs/getting-started/standalone-install.md"
     echo
     echo -e "  ${_DIM}Standalone runs unsandboxed as your user — only give it content you trust.${_RESET}"
     echo
@@ -561,16 +630,22 @@ prompt_install_mode() {
     echo "     One install on a Debian 13 machine of its own, multi-user, with"
     echo "     per-user bubblewrap isolation. Needs root, --tag and --signing-key."
     echo
-    echo -e "  ${_BOLD}2) Standalone${_RESET}${root_note}"
+    echo -e "  ${_BOLD}2) Local VM${_RESET}${root_note}"
+    echo "     Istota in a Lima VM on your Apple silicon Mac: the server's stack,"
+    echo "     sandbox included, with ~/Istota as its workspace. Needs Lima,"
+    echo "     --tag and --signing-key."
+    echo
+    echo -e "  ${_BOLD}3) Standalone${_RESET}${root_note}"
     echo "     Single-user install on your own machine (macOS or Linux). No"
     echo "     server, no Nextcloud, no login, no sandbox. You chat through the"
     echo "     local web UI and the REPL; everything runs as you in one process."
     echo "     Unsandboxed: only give it content and instructions you trust."
     echo
     local choice=""
-    read -rp "  Choose [1/2, default 1]: " choice < "$tty_src" || true
+    read -rp "  Choose [1/2/3, default 1]: " choice < "$tty_src" || true
     case "$choice" in
-        2|s|S|standalone|Standalone) MODE="standalone" ;;
+        2|l|L|local|Local)           MODE="local" ;;
+        3|s|S|standalone|Standalone) MODE="standalone" ;;
         ""|1|server|Server)          MODE="server" ;;
         *) warn "Unrecognized choice '$choice'; defaulting to Server."; MODE="server" ;;
     esac
@@ -586,6 +661,7 @@ fi
 
 case "$MODE" in
     server)     run_server ;;
+    local)      run_local ;;
     standalone) run_standalone ;;
     *)          die "Unknown mode: $MODE" ;;
 esac

@@ -291,10 +291,11 @@ Prints the stack's second compose file: a `devbox-<user>` service per user and t
 ```bash
 istota workspace localize --from /mnt/shared --to /data/workspace --scheduler-stopped   # Copy the mounted workspace
 istota workspace localize-config [--check]                                              # Point config.toml at /data/workspace
+istota workspace moved-note --from /mnt/shared [--remove]                               # MOVED.md in each user's Nextcloud bot folder
 istota workspace reindex --forget-root /mnt/shared                                      # Rebuild the memory index on the new paths
 ```
 
-The three steps of `istota-stack localize-workspace`, which runs them in order with the stack stopped. `localize` exits 0 copied, 1 refused, 2 copied with entries skipped, 3 stopped on an I/O error. See [Moving to a local workspace](../deployment/moving-to-a-local-workspace.md).
+The four steps of `istota-stack localize-workspace`, which runs them in order with the stack stopped. `localize` exits 0 copied, 1 refused, 2 copied with entries skipped, 3 stopped on an I/O error; `--check` only answers whether it would start. `moved-note` refuses while the config still names `--from` as the workspace, and `--remove` takes the notes off again when going back; either exits 2 when a user's own `MOVED.md` was left in place. See [Moving to a local workspace](../deployment/moving-to-a-local-workspace.md).
 
 ### Nextcloud
 
@@ -445,7 +446,7 @@ A streamed, full-stack terminal assistant. Each line becomes a `source_type="rep
 
 ```bash
 istota setup --vm-dir DIR [--hostname HOST] [--ingress local|proxied|direct] \
-    [--nextcloud-url URL] [--yes] [--force] ...          # The stack's wizard, run by `istota-stack setup`
+    [--storage local|host-folder] [--nextcloud-url URL] [--yes] [--force] ...   # The stack's wizard, run by `istota-stack setup`
 istota setup [--yes] [--workspace DIR] [--brain claude_code|native] \
     [--user ID] [--port N] [--email] [--location] [--force] ...   # The local wizard, for `istota serve`
 istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web server in one process
@@ -456,13 +457,26 @@ On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image
 
 `istota serve` runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). It is the development loop on a Mac checkout, and the deprecated standalone install's launcher; see [development setup](../development/setup.md).
 
-`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on the stack, which is updated with `istota-stack update`. See [Standalone install](../getting-started/local-install.md).
+`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on the stack, which is updated with `istota-stack update`. See [Standalone install](../getting-started/standalone-install.md).
 
 ### Database
 
 ```bash
 istota init                                  # Initialize database
 ```
+
+### Migrations into the stack
+
+These run in a one-shot container with the stack down, started by `istota-stack`; you do not run them by hand.
+
+```bash
+istota migrate import-bare-metal ...                     # an old bare-metal install; see Migrating a bare-metal install
+istota migrate restore-workspace [--date YYYY-MM-DD] [--force]   # the local VM's restore, master key on stdin
+istota migrate import-standalone --source DIR --hostname HOST [--dry-run]   # a staged standalone install, istota.env on stdin
+istota migrate workspace-paths [--map OLD=NEW] ...       # rewrite old host paths in users' bot directories
+```
+
+`restore-workspace` puts back the master key, `config.toml`, the admins file, the `.env` and `host.env` copies and the databases from the workspace's `Backups/`, refusing before it writes anything when a check fails. `import-standalone` writes a stack config from the standalone one, moves every `istota.env` credential into the secrets files, restores the databases and rebases their stored paths. Both exit 0 when done, 1 when refused with nothing written, 2 when partial. See [Local install](../getting-started/local-install.md#backups-and-recovery).
 
 ## istota-scheduler
 
@@ -486,6 +500,28 @@ istota-skill markets quote AAPL
 ```
 
 Used by Claude Code inside the sandbox to invoke skill CLIs with credentials injected server-side.
+
+## istota-stack on the Mac
+
+The [local install](../getting-started/local-install.md) puts a Mac-side `istota-stack` and `istota` into `~/.local/bin`. Run them as yourself, never with `sudo`. The VM is the Lima instance `istota`, or `ISTOTA_LIMA_INSTANCE`.
+
+```bash
+istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB] \
+    (--tag TAG --signing-key KEY | --repo DIR [--tag TAG]) [--adopt] [--no-setup]
+istota-stack start | stop | status | shell
+istota-stack open [--files]                 # the web UI; --files the workspace in Finder
+istota-stack autostart on|off               # limactl autostart enable|disable
+istota-stack allow-host-port N | deny-host-port N
+istota-stack update [args]                  # the VM's update, then the Mac scripts from its checkout
+istota-stack destroy [--force]              # refuses without the master key in the Keychain
+istota-stack restore [--date YYYY-MM-DD] [--force] [create's options]
+istota-stack import-standalone [--from DIR] [--config FILE] [--dry-run] [create's options]
+istota ...                                  # the istota CLI in the daemon container, as uid 10001
+```
+
+Every other verb is passed to the VM's `istota-stack` as root, with its arguments and exit status unchanged; `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac. Exit codes: a forwarded verb's own, else 64 for a usage error, 69 when `limactl` is missing or older than 2.0, 78 for a refused folder, port, machine or Keychain item.
+
+The VM's `istota-stack` has five verbs the Mac CLI uses: `host-env KEY | KEY=VALUE...` (read or set `host.env`), `stage [--daemon] PATH` and `unstage PATH` (a root-only, or uid 10001's, directory under `/srv/app/istota/staging/` for a file from the Mac), `restore` and `import-standalone`.
 
 ## `istota` on the machine (host wrapper)
 

@@ -2225,7 +2225,9 @@ class Config:
     briefing_shared_blocks: list[BriefingSharedBlock] = field(default_factory=list)
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     workspace_path: Path | None = None  # On-disk root of the bot's file tree
-    nextcloud_mount_path: Path | None = None  # FUSE mountpoint, when one exists
+    # The mount the workspace lives on, when it is one: checked for liveness by
+    # doctor and the backup guard. Read under its old name, nextcloud_mount_path.
+    workspace_mount_path: Path | None = None
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
     bundled_skills_dir: Path | None = None  # Override bundled skills dir (for testing)
     disabled_skills: list[str] = field(default_factory=list)  # instance-wide skills to exclude
@@ -2249,7 +2251,7 @@ class Config:
 
     def __post_init__(self) -> None:
         if self.workspace_path is None:
-            self.workspace_path = self.nextcloud_mount_path
+            self.workspace_path = self.workspace_mount_path
 
     @property
     def bot_dir_name(self) -> str:
@@ -2283,13 +2285,13 @@ class Config:
     def storage_is_nextcloud(self) -> bool:
         """Whether the workspace *is* the bot's Nextcloud files, through the mount.
 
-        A URL and ``nextcloud_mount_path`` both set. A URL alone is a Nextcloud
+        A URL and ``workspace_mount_path`` both set. A URL alone is a Nextcloud
         install with a local workspace, which is described as a workspace, not
         as Nextcloud. Selects storage vocabulary and every path that only makes
         sense when the files are in Nextcloud. Deliberately not
         ``is_standalone``, which folds in web auth.
         """
-        return self.nextcloud_enabled and self.nextcloud_mount_path is not None
+        return self.nextcloud_enabled and self.workspace_mount_path is not None
 
     @property
     def storage_backend(self) -> str:
@@ -2340,9 +2342,10 @@ class Config:
         ``{db_path.parent}/modules`` — alongside the framework DB, which is
         already local, so it needs no guard. An *explicitly* configured
         ``module_data_dir`` is refused if it resolves under a configured
-        ``nextcloud_mount_path``. That field names a real FUSE mountpoint, and
-        a WAL DB there would SIGBUS the process, so a misconfigured value fails
-        loud rather than at runtime.
+        ``workspace_mount_path``. That field names a real mountpoint (an rclone
+        FUSE mount, or a host folder shared into a VM), and a WAL DB on the rclone
+        mount would SIGBUS the process, so a misconfigured value fails loud
+        rather than at runtime.
 
         Split out of ``module_db_path`` because the sandbox needs the root on
         its own: ``build_bwrap_cmd`` masks it, and ``_validate_workspace_dir``
@@ -2352,12 +2355,12 @@ class Config:
         if self.module_data_dir is None:
             return Path(self.db_path).parent.resolve() / "modules"
         root = Path(self.module_data_dir).resolve()
-        mount = self.nextcloud_mount_path
+        mount = self.workspace_mount_path
         if mount is not None and root.is_relative_to(Path(mount).resolve()):
             raise ValueError(
-                f"module_data_dir {root} is under nextcloud_mount_path "
+                f"module_data_dir {root} is under workspace_mount_path "
                 f"{mount}; per-module DBs must live on local disk (WAL -shm "
-                "SIGBUSes on the FUSE mount — ISSUE-157)"
+                "SIGBUSes on the rclone FUSE mount — ISSUE-157)"
             )
         return root
 
@@ -3657,6 +3660,7 @@ _RETIRED = frozenset({
     "security.sandbox_admin_db_write",
     "rooms",
     "devbox.docker_cli",
+    "scheduler.vault_sync_interval",
     # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
     "scheduler.istota_file_poll_interval",
 })
@@ -3735,23 +3739,28 @@ def _apply_renamed_keys(data: dict, config: "Config") -> None:
             setattr(target, new, value)
 
 
-def _migrate_workspace_fields(data: dict, config: "Config") -> None:
+def _migrate_workspace_fields(
+    data: dict, config: "Config", *, old_mount_spelling: bool,
+) -> None:
     """Give a pre-split config the same storage meaning it had before.
 
-    A config naming ``workspace_path`` already uses the split fields. Without
-    that key, ``nextcloud_mount_path`` used to mean the workspace root and only
-    named a real mount when the Nextcloud URL heuristic said it did.
+    A config naming ``workspace_path`` already uses the split fields, and so
+    does one spelling the mount ``workspace_mount_path``, a name that postdates
+    the split. Otherwise ``nextcloud_mount_path`` used to mean the workspace
+    root and only named a real mount when the Nextcloud URL heuristic said so.
     """
-    if "workspace_path" in data or config.nextcloud_mount_path is None:
+    if not old_mount_spelling:
         return
-    config.workspace_path = config.nextcloud_mount_path
+    if "workspace_path" in data or config.workspace_mount_path is None:
+        return
+    config.workspace_path = config.workspace_mount_path
     if not config.storage_is_nextcloud:
-        config.nextcloud_mount_path = None
+        config.workspace_mount_path = None
     report_problem(
         "retired", ("nextcloud_mount_path",),
-        "nextcloud_mount_path now means the FUSE mountpoint only. Set "
-        "workspace_path to the workspace root; keep nextcloud_mount_path only "
-        "if that path is a real mount."
+        "nextcloud_mount_path now means the mountpoint only, and is renamed "
+        "workspace_mount_path. Set workspace_path to the workspace root; keep "
+        "workspace_mount_path only if that path is a real mount."
     )
 
 
@@ -3921,6 +3930,47 @@ def normalize_legacy_document(data: dict) -> None:
     """
     _migrate_whatsapp_flat(data)
     _migrate_web_login_link_ttl(data)
+    _migrate_workspace_mount_path(data)
+
+
+def _migrate_workspace_mount_path(data: dict) -> None:
+    """Read ``nextcloud_mount_path`` as ``workspace_mount_path``.
+
+    The key was renamed when a second kind of mount (a host folder shared into
+    a VM) began producing it. Both spellings with different values is a load
+    error rather than a precedence rule: one of them is a mistake, and either
+    answer would point the liveness check and the backup guard at a path the
+    operator did not mean.
+    """
+    if "nextcloud_mount_path" not in data:
+        return
+    legacy = data.pop("nextcloud_mount_path")
+    if "workspace_mount_path" not in data:
+        data["workspace_mount_path"] = legacy
+        # "warning", not "retired": the editor offers to unset a retired key,
+        # and dropping the only mount path changes the storage mode.
+        report_problem(
+            "warning", ("nextcloud_mount_path",),
+            "nextcloud_mount_path was renamed to workspace_mount_path. The old "
+            "name still works; rename the key."
+        )
+        return
+    current = data["workspace_mount_path"]
+    if isinstance(legacy, str) and isinstance(current, str):
+        same = Path(legacy) == Path(current)
+    else:
+        same = legacy == current
+    if not same:
+        raise ValueError(
+            "config sets both workspace_mount_path and its old name "
+            "nextcloud_mount_path, to different paths; keep workspace_mount_path "
+            "and remove nextcloud_mount_path"
+        )
+    report_problem(
+        "retired", ("nextcloud_mount_path",),
+        "nextcloud_mount_path was renamed to workspace_mount_path and both are "
+        "set; remove nextcloud_mount_path."
+    )
 
 
 def _migrate_web_login_link_ttl(data: dict) -> None:
@@ -4450,6 +4500,11 @@ def _map_document(data: dict, config: Config) -> list[str]:
     # Before the walk, not after: this rewrites a pre-adapter `[whatsapp]` into
     # the nested shape the dataclasses now declare, so what the walk sees is an
     # ordinary section and the unknown-key report stays honest about it.
+    # Read before the rename below rewrites it: only the old spelling can be a
+    # pre-split config, so only it gets `_migrate_workspace_fields`'s reading.
+    old_mount_spelling = (
+        "nextcloud_mount_path" in data and "workspace_mount_path" not in data
+    )
     normalize_legacy_document(data)
 
     unknown: list[str] = []
@@ -4457,9 +4512,9 @@ def _map_document(data: dict, config: Config) -> list[str]:
         config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
-    _migrate_workspace_fields(data, config)
+    _migrate_workspace_fields(data, config, old_mount_spelling=old_mount_spelling)
     if config.workspace_path is None:
-        config.workspace_path = config.nextcloud_mount_path
+        config.workspace_path = config.workspace_mount_path
     _apply_renamed_keys(data, config)
     # After the walk, so a `[brain.claude_code] model` in the same file wins
     # over the top-level key it replaces, and before anything reads a brain
@@ -5089,7 +5144,7 @@ def _validate_nextcloud_workspace(config: Config) -> None:
         raise ValueError(
             "[nextcloud] url is set but no workspace is configured: set "
             "workspace_path to a local directory, or to the mount of the bot's "
-            "Nextcloud files together with nextcloud_mount_path"
+            "Nextcloud files together with workspace_mount_path"
         )
 
 

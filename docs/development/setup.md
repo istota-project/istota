@@ -63,7 +63,7 @@ uv run istota serve              # scheduler + web app at http://127.0.0.1:8766/
 npm --prefix web run dev         # optional: the Vite dev server, proxying the API to :8766
 ```
 
-`serve` serves `web/build` when it exists, so `npm --prefix web run build` is the other way to see frontend changes. `setup` here is the same wizard the deprecated [standalone install](../getting-started/local-install.md) uses; that page lists what it writes and what is off in this shape.
+`serve` serves `web/build` when it exists, so `npm --prefix web run build` is the other way to see frontend changes. `setup` here is the same wizard the deprecated [standalone install](../getting-started/standalone-install.md) uses; that page lists what it writes and what is off in this shape.
 
 If the checkout also has a `config/config.toml`, a bare `istota serve` run from the repo root loads that file and ignores the one the wizard wrote. Name the wizard's file with the global `-c`, which goes before the subcommand: `uv run istota -c ~/.config/istota/config.toml serve`.
 
@@ -122,7 +122,7 @@ uv run istota list [-s STATUS] [-u USER]              # List tasks
 uv run istota show <task-id>                          # Task details
 ```
 
-`istota update` belongs to the deprecated [standalone install](../getting-started/local-install.md) and does nothing for a dev checkout. The full command surface is in the [CLI reference](../reference/cli.md).
+`istota update` belongs to the deprecated [standalone install](../getting-started/standalone-install.md) and does nothing for a dev checkout. The full command surface is in the [CLI reference](../reference/cli.md).
 
 ## Project layout
 

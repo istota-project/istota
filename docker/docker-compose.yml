@@ -12,7 +12,9 @@
 # refuses `rslave` on a macOS path ("not a shared or slave mount"), which is one
 # reason this file runs in a VM; the test tiers replace the mount.
 # ISTOTA_MOUNT_DIR defaults to ./mount; on the VM `istota-stack` sets it to
-# /srv/mount/nextcloud/content, outside the stack directory.
+# /srv/mount/nextcloud/content, or for the local VM's host folder (a third mode,
+# the workspace a folder on the Mac) /srv/mount/host-folder, both outside the
+# stack directory.
 x-workspace-mount: &workspace_mount
   type: bind
   source: ${ISTOTA_MOUNT_DIR:-./mount}
@@ -174,9 +176,8 @@ services:
         required: false
     # No istota configuration here. config.toml is an input: `istota setup`
     # writes /data/config/config.toml on the state volume once, and the
-    # operator owns it after that. What remains are three facts about the
-    # container that every process in it, `docker compose exec` included,
-    # has to agree on.
+    # operator owns it after that. What remains are facts about the container
+    # that every process in it, `docker compose exec` included, has to agree on.
     environment:
       # Where the root phase delegated the container's cgroup. Declared here as
       # well as exported by the root phase, so a process started by
@@ -189,6 +190,11 @@ services:
       # So `docker compose exec daemon istota-drop istota <verb>` finds the
       # config: /data/config/config.toml is on none of the four search paths.
       ISTOTA_CONFIG_PATH: /data/config/config.toml
+      # What the VM mounted at /mnt/shared, set by `istota-stack` from host.env's
+      # STORAGE: the filesystem type the entrypoint requires there, and whether
+      # it must carry .istota-workspace (a host folder). Empty everywhere else.
+      ISTOTA_WORKSPACE_FSTYPE: ${ISTOTA_WORKSPACE_FSTYPE:-}
+      ISTOTA_WORKSPACE_MARKER_REQUIRED: ${ISTOTA_WORKSPACE_MARKER_REQUIRED:-}
     # Credentials, one file each, mounted under /run/secrets and read into the
     # environment by `istota-secrets` after the drop, so no value is in this
     # file or in `docker inspect`. See the top-level `secrets:` below.
@@ -232,6 +238,9 @@ services:
       # The config, where the daemon service reads it; the root filesystem is
       # read-only, so nothing links it into /app/config.
       ISTOTA_CONFIG_PATH: /data/config/config.toml
+      # The workspace mount, as the daemon service is told it.
+      ISTOTA_WORKSPACE_FSTYPE: ${ISTOTA_WORKSPACE_FSTYPE:-}
+      ISTOTA_WORKSPACE_MARKER_REQUIRED: ${ISTOTA_WORKSPACE_MARKER_REQUIRED:-}
     # The web process calls a model on its own (the biomarker explainer, which
     # grants no tool) and talks to Nextcloud, so it needs the daemon's
     # credentials: the same files, read the same way.

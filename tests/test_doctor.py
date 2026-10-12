@@ -1649,25 +1649,75 @@ class TestMountLiveness:
     def test_skips_when_no_mount_configured(self, make_config, url):
         from istota.config import NextcloudConfig
 
-        config = make_config(nextcloud=NextcloudConfig(url=url), nextcloud_mount_path=None)
+        config = make_config(nextcloud=NextcloudConfig(url=url), workspace_mount_path=None)
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == SKIP
 
     def test_configured_but_not_mounted_fails_without_nextcloud_url(
-        self, make_config, tmp_path,
+        self, make_config, tmp_path, monkeypatch,
     ):
-        # `make_config` points nextcloud_mount_path at a plain tmp_path dir,
+        # `make_config` points workspace_mount_path at a plain tmp_path dir,
         # which is on the same filesystem as its parent and so is not a mount.
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
         config = make_config()
         assert config.storage_is_nextcloud is False
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == FAIL
+        assert "not a mount point" in r.detail
         assert r.remedy
 
     def test_a_real_mount_is_ok(self, make_config, tmp_path, monkeypatch):
         monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
         config = self._nextcloud_backed(make_config)
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
+        assert r.status == OK
+
+    def test_a_mount_nothing_vouches_for_fails(self, make_config, tmp_path, monkeypatch):
+        """config.toml names a workspace mount and the stack passes no type for
+        it (host.env STORAGE=local): a bind of a plain host directory is a mount
+        point too, so `ismount` alone reads it as the workspace."""
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_FSTYPE", raising=False)
+        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+        assert r.status == FAIL
+        assert str(tmp_path / "mount") in r.detail
+        assert "ISTOTA_WORKSPACE_FSTYPE" in r.detail
+        assert r.remedy
+
+    def test_a_mount_whose_type_is_declared_is_ok(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+        assert r.status == OK
+
+    def test_a_host_folder_without_its_marker_fails(self, make_config, tmp_path, monkeypatch):
+        """The folder shared into the local VM went away under a running stack:
+        the mount point stays a mount of the same type, and only the marker
+        says the folder is not the workspace any more (row L1)."""
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+        config = make_config()
+        r = run_checks(config, only=("runtime.mount_liveness",))[0]
+        assert r.status == FAIL
+        assert ".istota-workspace" in r.detail
+        assert str(tmp_path / "mount") in r.detail
+        assert r.remedy
+
+    def test_a_host_folder_with_its_marker_is_ok(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+        (tmp_path / "mount" / ".istota-workspace").parent.mkdir(exist_ok=True)
+        (tmp_path / "mount" / ".istota-workspace").write_text("")
+        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+        assert r.status == OK
+
+    def test_a_mount_that_needs_no_marker_is_not_asked_for_one(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        r = run_checks(self._nextcloud_backed(make_config), only=("runtime.mount_liveness",))[0]
         assert r.status == OK
 
 
@@ -1727,7 +1777,7 @@ class TestWorkspaceXattr:
         assert r.status == WARN, r.detail
 
     def test_skips_without_a_mount(self, make_config):
-        r = run_checks(make_config(nextcloud_mount_path=None), only=("runtime.workspace_xattr",))[0]
+        r = run_checks(make_config(workspace_mount_path=None), only=("runtime.workspace_xattr",))[0]
         assert r.status == SKIP
 
     def test_skips_where_listxattr_does_not_exist(self, make_config, tmp_path, monkeypatch):
@@ -1770,17 +1820,40 @@ class TestWorkspaceMode:
         workspace = tmp_path / "mount"
         config = make_config(
             nextcloud=NextcloudConfig(url=url),
-            nextcloud_mount_path=workspace if mount_key else None,
+            workspace_mount_path=workspace if mount_key else None,
         )
         self._mounts(monkeypatch, tmp_path, workspace, fstype)
         monkeypatch.delenv("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE", raising=False)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_FSTYPE", raising=False)
         return config
+
+    def test_a_host_folder_on_its_declared_type_is_ok(self, make_config, monkeypatch, tmp_path):
+        """The local VM: a mount and no URL, the type from host.env's STORAGE."""
+        config = self._run(make_config, monkeypatch, tmp_path, url="", mount_key=True, fstype="virtiofs")
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        assert not config.storage_is_nextcloud
+        assert run_checks(config, only=("runtime.workspace_mode",))[0].status == OK
+
+    def test_a_host_folder_on_another_type_warns_without_naming_rclone(self, make_config, monkeypatch, tmp_path):
+        config = self._run(make_config, monkeypatch, tmp_path, url="", mount_key=True, fstype="ext4")
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        r = run_checks(config, only=("runtime.workspace_mode",))[0]
+        assert r.status == WARN
+        assert "virtiofs" in r.detail
+        assert "mount-nextcloud" not in r.remedy
+
+    def test_the_declared_type_without_the_key_fails(self, make_config, monkeypatch, tmp_path):
+        config = self._run(make_config, monkeypatch, tmp_path, url="", mount_key=False, fstype="virtiofs")
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        r = run_checks(config, only=("runtime.workspace_mode",))[0]
+        assert r.status == FAIL
+        assert "workspace_mount_path" in r.remedy
 
     def test_the_rclone_mount_without_the_key_fails(self, make_config, monkeypatch, tmp_path):
         config = self._run(make_config, monkeypatch, tmp_path, url=self.URL, mount_key=False, fstype="fuse.rclone")
         r = run_checks(config, only=("runtime.workspace_mode",))[0]
         assert r.status == FAIL
-        assert "nextcloud_mount_path" in r.remedy
+        assert "workspace_mount_path" in r.remedy
 
     def test_the_mount_with_the_key_is_ok(self, make_config, monkeypatch, tmp_path):
         config = self._run(make_config, monkeypatch, tmp_path, url=self.URL, mount_key=True, fstype="fuse.rclone")
@@ -1820,7 +1893,7 @@ class TestWorkspaceMode:
         assert run_checks(config, only=("runtime.workspace_mode",))[0].status == SKIP
 
     def test_skips_without_a_workspace(self, make_config):
-        config = make_config(workspace_path=None, nextcloud_mount_path=None)
+        config = make_config(workspace_path=None, workspace_mount_path=None)
         assert run_checks(config, only=("runtime.workspace_mode",))[0].status == SKIP
 
 
@@ -1842,7 +1915,7 @@ class TestBackupsOffVolume:
         monkeypatch.setattr(doctor, "_device_of", fake)
 
     def _local(self, make_config, tmp_path, **overrides):
-        return make_config(nextcloud_mount_path=None, **overrides)
+        return make_config(workspace_mount_path=None, **overrides)
 
     def test_a_local_workspace_on_one_volume_warns(self, make_config, tmp_path):
         # Real devices: the database, the workspace and the default
@@ -1875,13 +1948,22 @@ class TestBackupsOffVolume:
         self._devices(monkeypatch, {str(tmp_path): 2, str(tmp_path / "mount"): 9})
         assert run_checks(config, only=(self.NAME,))[0].status == OK
 
+    def test_a_host_folder_is_the_target_too(self, make_config, monkeypatch, tmp_path):
+        """The local VM's folder is on the Mac: a mount, not Nextcloud."""
+        config = make_config(workspace_mount_path=tmp_path / "mount")
+        assert not config.storage_is_nextcloud
+        self._devices(monkeypatch, {str(tmp_path): 2, str(tmp_path / "mount"): 9})
+        config.scheduler.db_backup_dir = ""
+        config.workspace_path = tmp_path / "mount"
+        assert run_checks(config, only=(self.NAME,))[0].status == OK
+
     def test_skips_when_backups_are_disabled(self, make_config, tmp_path):
         config = self._local(make_config, tmp_path)
         config.scheduler.db_backup_enabled = False
         assert run_checks(config, only=(self.NAME,))[0].status == SKIP
 
     def test_skips_without_a_destination(self, make_config):
-        config = make_config(workspace_path=None, nextcloud_mount_path=None)
+        config = make_config(workspace_path=None, workspace_mount_path=None)
         assert run_checks(config, only=(self.NAME,))[0].status == SKIP
 
     def test_the_destination_need_not_exist_yet(self, tmp_path):
@@ -1904,7 +1986,7 @@ class TestWorkspaceDisk:
 
     def _run(self, make_config, monkeypatch, **space):
         self._statvfs(monkeypatch, **space)
-        config = make_config(nextcloud_mount_path=None)
+        config = make_config(workspace_mount_path=None)
         return run_checks(config, only=(self.NAME,))[0]
 
     def test_plenty_of_room_is_ok(self, make_config, monkeypatch):
@@ -1931,11 +2013,11 @@ class TestWorkspaceDisk:
         assert run_checks(config, only=(self.NAME,))[0].status == SKIP
 
     def test_skips_without_a_workspace(self, make_config):
-        config = make_config(workspace_path=None, nextcloud_mount_path=None)
+        config = make_config(workspace_path=None, workspace_mount_path=None)
         assert run_checks(config, only=(self.NAME,))[0].status == SKIP
 
     def test_the_real_volume_is_measured(self, make_config):
-        r = run_checks(make_config(nextcloud_mount_path=None), only=(self.NAME,))[0]
+        r = run_checks(make_config(workspace_mount_path=None), only=(self.NAME,))[0]
         assert r.status in (OK, WARN, FAIL)
         assert "GiB free" in r.detail
 
@@ -6846,7 +6928,7 @@ class TestOperatorPersona:
         assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
 
     def test_skips_without_a_file_root(self, make_config):
-        config = self._config(make_config, workspace_path=None, nextcloud_mount_path=None)
+        config = self._config(make_config, workspace_path=None, workspace_mount_path=None)
         assert not config.has_workspace
         r = self._run(config)
         assert r.status == SKIP

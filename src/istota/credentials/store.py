@@ -135,6 +135,44 @@ def secret_key_available() -> bool:
     return bool(secret) and len(secret) >= _MIN_KEY_LEN
 
 
+#: Every framework table holding ciphertext under the master key, with its
+#: ciphertext columns: the store's two and Google's OAuth tokens
+#: (``db.upsert_google_token``). ``tests/test_standalone_import.py`` holds the
+#: list to the code that takes this module's Fernet.
+MASTER_KEY_COLUMNS = {
+    "secrets": ("encrypted_value",),
+    "secrets_history": ("encrypted_value",),
+    "google_oauth_tokens": ("access_token", "refresh_token"),
+}
+
+# A Fernet token is base64url of version byte 0x80 and a big-endian
+# timestamp, so every one begins with these bytes.
+_FERNET_PREFIX = b"gAAAAA"
+
+
+def count_master_key_rows(conn: sqlite3.Connection) -> dict[str, int]:
+    """Rows per table holding a Fernet token, for each table that has any.
+
+    Counted by shape, not by decrypting, so it needs no key: what it answers
+    is whether a database would lose anything without the key it was written
+    under. Google tokens stored before an install had a key are plaintext
+    (``db._migrate_google_oauth_encryption`` encrypts them once one exists),
+    so they do not count. A table the database predates is skipped.
+    """
+    counts: dict[str, int] = {}
+    for table, columns in MASTER_KEY_COLUMNS.items():
+        where = " OR ".join(f"substr(CAST({column} AS BLOB), 1, {len(_FERNET_PREFIX)}) = ?" for column in columns)
+        try:
+            (count,) = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {where}", (_FERNET_PREFIX,) * len(columns)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        if count:
+            counts[table] = count
+    return counts
+
+
 @dataclass(frozen=True)
 class SecretRef:
     """Identifies a stored secret. Plaintext value is never stored on this dataclass."""

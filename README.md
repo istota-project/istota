@@ -239,9 +239,9 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
   | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-On a Mac, the same stack runs in a Lima VM from the template in `host/lima/`. Read an installer before piping it into a shell. For prerequisites, setup choices, the Mac and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
+On an Apple silicon Mac, `install.sh --local` runs the same stack in a Lima VM, with a folder in your home as the workspace; see the [local install](https://istota.cynium.com/docs/getting-started/local-install/). Read an installer before piping it into a shell. For prerequisites, setup choices and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
 
-The older standalone single-user install is deprecated. Existing installs keep working; see the [standalone page](https://istota.cynium.com/docs/getting-started/local-install/).
+The older standalone single-user install is deprecated. Existing installs keep working, and `istota-stack import-standalone` moves one into the local VM; see the [standalone page](https://istota.cynium.com/docs/getting-started/standalone-install/).
 
 ## Configuration
 

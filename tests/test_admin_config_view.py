@@ -580,6 +580,27 @@ class TestRawDocument:
 
 
 class TestRemovableProblems:
+    @pytest.mark.parametrize("interval", [0, 60])
+    async def test_retired_interval_warns_once_through_the_real_check(self, interval):
+        from istota.config_editor.check import run_check
+        from istota.lib import toml_write
+
+        document = {
+            "rclone_remote": "remote",
+            "scheduler": {"vault_sync_interval": interval, "poll_interval": 7},
+        }
+        check = await run_check(document)
+        assert check.error is None
+        problems = view.build_config_view(
+            Config(), document=toml_write.dumps(document), check=check,
+        )["problems"]
+        assert [(p["kind"], p["path"]) for p in problems] == [
+            ("retired", ["scheduler", "vault_sync_interval"]),
+            ("unknown", ["rclone_remote"]),
+        ]
+        assert problems[0]["message"] == "[scheduler] vault_sync_interval is retired and ignored"
+        assert all(p["action"] == "unset" and not p["blocking"] for p in problems)
+
     def _check(self, *problems):
         from istota.apply import CheckResult
 

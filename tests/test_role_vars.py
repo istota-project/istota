@@ -51,6 +51,9 @@ ACME_EMAIL=
 ACME_SERVER=
 RCLONE_REMOTE=nextcloud
 ZRAM_ENABLED=1
+HOST_LOOPBACK_BLOCK=1
+HOST_GATEWAY_ADDR=192.168.5.2
+HOST_LOOPBACK_ALLOW=11434 1234
 ISTOTA_DEVBOX_SUBNET=172.30.0.0/24
 """
 
@@ -168,6 +171,14 @@ def test_rclone_conf_is_rendered_from_the_old_variables_and_the_live_remote():
         "user = helper\n"
         "pass = obscured-0008\n"
     )
+
+
+def test_rclone_conf_is_rooted_at_the_configs_dav_prefix():
+    config = tomllib.loads(CONFIG_TOML)
+    config["nextcloud"]["dav_prefix"] = "Shared Files"
+    conf = _convert(config=config).vars["istota_rclone_conf"]
+    assert conf.startswith("[nextcloud-root]\n")
+    assert conf.endswith("[nextcloud]\ntype = alias\nremote = nextcloud-root:Shared Files\n")
 
 
 def test_a_given_rclone_conf_wins():

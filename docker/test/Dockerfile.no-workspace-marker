@@ -1,0 +1,16 @@
+# Negative control for row L1 in the vm tier: an entrypoint that no longer
+# refuses a host folder's workspace without its .istota-workspace marker.
+#
+# Only that one condition changes; the filesystem-type refusal before it and
+# the DOMAIN refusal after it stay. Built in the VM from the deployed image:
+#
+#   docker build -f docker/test/Dockerfile.no-workspace-marker \
+#       --build-arg BASE=istota:<tag> -t istota:<tag>-no-workspace-marker docker/test
+#
+# Expected: tests/vm/test_host_folder.py::TestAFolderThatWentAwayIsNotWritten fails.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's/^    elif marker_required() and not marker_present(config.workspace_mount_path):$/    elif False:/' \
+        /entrypoint.sh \
+    && grep -q '^    elif False:$' /entrypoint.sh

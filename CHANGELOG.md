@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `istota apply --check` accepts the version 1 structure for per-user settings and shared briefing definitions without reading live state. It reports malformed fields through the existing JSON check result; applying these sections remains unavailable until their reconciliation adapters ship.
 
+- **Istota can run in a Lima VM on an Apple silicon Mac.** `install.sh --local` installs a Mac-side `istota-stack` and `istota`, and `istota-stack create` makes a folder in your home (`~/Istota` by default) the workspace, creates the VM and sets up the same stack a server runs inside it. The Mac commands start, stop, update and open it, forward every server command into the VM, and copy the master key into your login Keychain. `istota-stack restore` rebuilds a lost or broken VM from the folder's backups and that key; the stack's own credentials (model key, mail passwords) are not backed up and are entered again afterwards. `istota-stack import-standalone` moves a standalone install (`~/.istota`) into a new VM with its databases, files, settings, credentials and master key, and leaves `~/.istota` untouched for you to remove once `istota doctor` is clean; an older install with no master key gets a new one, as long as nothing it stored was encrypted under one. Under local ingress a scheduled job missed while the Mac slept runs once on wake if it is under twelve hours late.
+
+- **The daily database backup also keeps a copy of the config.** Where the workspace is a mounted store, `config.toml` and the admins list are copied, private, into `Backups/config/<date>/` beside the database snapshots and kept for as many days, so a lost VM can be rebuilt from the store. Credentials files and the master key are never copied there.
+
 - **Admins can change the configuration from Admin → Configuration.** Settings, deployment credentials and the admin list are edited in place, reviewed as a diff with any problems shown against their keys, confirmed with an emailed code (and a typed phrase for settings that affect sign-in or confinement), then applied by the host. The page follows the change through the restart and reloads into the new values; settings the host owns, or that a plan manages, stay read-only with the reason shown. Tables are edited as TOML, the whole file can be edited as text with credentials hidden, ignored keys can be removed, and an earlier applied configuration can be restored from the history.
 
 - **The dedicated VM can apply configuration changes requested from the web.** `istota-stack config-apply`, run by the new `istota-config-apply.path` and a five-minute timer, takes each change the web config editor stored, checks it with dry runs before writing anything, builds the image when the new config needs Claude Code, then writes the credentials, admins and `config.toml` (keeping ten backups) and restarts the stack. `provision.sh` installs the units and the `requests/` directory, and the stack picks the applier up at the restart after that.
@@ -30,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `istota-stack localize-workspace` moves an install whose workspace is the Nextcloud mount onto the VM's own disk, with Talk and the `nextcloud` skill still connected. It stops the stack, copies the files, points the config at the local copy, turns the mount off and starts the stack again; the Nextcloud copy is left as it was, apart from a `MOVED.md` in each user's bot folder, so going back is a config change. Run it with `--dry-run` first to see what it would skip.
 
-  **Upgrade note:** nothing changes until you run it. A VM managed by the Ansible role moves by its plan instead: `--copy-only`, then `istota_storage: local` and no `nextcloud_mount_path`. A hand-written config with a Nextcloud URL and `workspace_path = "/mnt/shared"` but no `nextcloud_mount_path` is now refused at boot, since it would run as a local workspace with the mount checks off; add `nextcloud_mount_path = "/mnt/shared"` to keep the mount.
+  **Upgrade note:** nothing changes until you run it. A VM managed by the Ansible role moves by its plan instead: `--copy-only`, then `istota_storage: local` and no `workspace_mount_path`. A hand-written config with a Nextcloud URL and `workspace_path = "/mnt/shared"` but no `nextcloud_mount_path` is now refused at boot, since it would run as a local workspace with the mount checks off; add `nextcloud_mount_path = "/mnt/shared"` to keep the mount.
 
 - Edit your `USER.md`, `CRON.md`, `TASKS.md`, `HEARTBEAT.md` and your instructions for each skill from the Configuration section of Workspace. A save is checked the way Istota reads the file, so a broken `CRON.md` or `HEARTBEAT.md` is refused with the reasons listed, and a save never overwrites a change Istota made while you were editing. New jobs in `CRON.md` start at the next sync.
 
@@ -149,6 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
+
+- Location History now opens on yesterday. Dates and ranges selected through links still take precedence.
+
 - **`istota apply` refuses a plan with a value the loader would throw away.** It used to match the loader's wording and missed several cases, so a typo in a closed choice (`web.token_storage = "plain"`), `scheduler.talk_poll_timeout = 0` or an unknown `[web] auth` method was applied and then silently replaced by the default. Those plans now fail with nothing written. **Upgrade note:** check your plan with `istota apply --check -f plan.json` (or an Ansible `--check` run) before upgrading, since a play that passed before can now fail. Four config shapes that were ignored in silence now log a warning: a `[web] auth` that is not a list, a `[brain] fallback` that is not a string, a `[brain.source_type_overrides]` that is not a table, and a `[[briefings]]` entry that is not a table.
 
 - **`istota apply` gains `--check`, `--json`, `--backup N` and plans on stdin.** `--check` validates a plan without reading or writing any config, and with `--json` prints its problems as one JSON object; `-f -` reads the plan from stdin; `--backup N` keeps the replaced `config.toml` as a dated 0600 copy, and the newest N of those. A plan's `[meta]` can now say who manages the config (`managed`, `source`), recorded in `config/managed.json`; `istota setup` marks everything unmanaged, `istota-stack put-files` records who manages the secrets and the admins, and the Ansible role marks all three as its own. Changing only that record exits 0, so it does not restart the stack.
@@ -253,6 +261,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Checking or previewing a configuration plan no longer imports credentials or removes obsolete resources when the plan uses the default database location. Validation leaves existing database state untouched.
+
+- On a VM whose Nextcloud workspace is a folder in the bot's files (`dav_prefix`), the `rclone.conf` that `istota setup` and the management role write now mounts that folder rather than the whole account. Before, files written through the mount landed beside the folder every Nextcloud call reads, including the `MOVED.md` notes `istota-stack localize-workspace` leaves. Re-run `istota-stack setup --force`, or the role, to rewrite it.
+
+- Workspace no longer lists a Talk attachments location on a local workspace, where no `Talk/` folder exists. Files posted in Talk are under each room's own location there.
+
+- Admin Configuration showed two warnings for the retired vault sync interval. It now shows only the retirement warning. Review changes and Discard now sit in the app bar, in the same place as the other settings pages' Save button.
+
+- `istota-stack localize-workspace` writes `MOVED.md` into the users' Nextcloud bot folders only after the config has moved, so a copy that stops, or a `--copy-only` run, no longer leaves a note saying edits there are ignored on an install still running on the mount. A user's own `MOVED.md` is kept and copied instead of being overwritten and left out. A non-empty `/data/workspace` is refused before the stack stops, and the rollback steps now remove the notes (`istota workspace moved-note --remove`) and the memory index entries for the local copy.
 
 - A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.
 

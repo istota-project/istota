@@ -43,7 +43,7 @@ The old services used five named volumes, prefixed with the old compose project 
 4. Edit `/data/config/config.toml`:
 
    ```toml
-   nextcloud_mount_path = "/mnt/shared"
+   workspace_mount_path = "/mnt/shared"
    workspace_path = "/mnt/shared"
 
    [nextcloud]
@@ -67,7 +67,7 @@ The old services used five named volumes, prefixed with the old compose project 
 
    Removing `/data/.ownership-10001` makes the next boot hand the copied files to the daemon's uid, which it does once.
 
-2. Edit `/data/config/config.toml`: remove the `[nextcloud]` table and any `nextcloud_mount_path`, set `workspace_path = "/data/workspace"`, set `[talk] enabled = false`, and if users logged in through Nextcloud, switch `[web] auth` to `["email"]` and give each user an email identity first (see [email login](../features/web-interface.md#email-login)).
+2. Edit `/data/config/config.toml`: remove the `[nextcloud]` table and any `workspace_mount_path` (or its old name, `nextcloud_mount_path`), set `workspace_path = "/data/workspace"`, set `[talk] enabled = false`, and if users logged in through Nextcloud, switch `[web] auth` to `["email"]` and give each user an email identity first (see [email login](../features/web-interface.md#email-login)).
 
 3. Start the stack. The Nextcloud volumes are now unused; keep them until you are sure, then remove them by hand.
 

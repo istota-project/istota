@@ -1397,7 +1397,7 @@ def _mount_config(tmp_path):
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
     return Config(
-        workspace_path=mount, nextcloud_mount_path=mount,
+        workspace_path=mount, workspace_mount_path=mount,
         nextcloud=NextcloudConfig(url="https://cloud.test", username="istota", app_password="pw"),
     )
 

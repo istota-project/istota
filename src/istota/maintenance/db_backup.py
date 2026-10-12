@@ -47,6 +47,9 @@ from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
+from istota.lib.workspace_marker import (
+    FSTYPE_ENV, MARKER_NAME, marker_present, marker_required, undeclared_mount,
+)
 from istota.modules import MODULE_NAMES
 from istota.sandbox.user_scope import is_within
 
@@ -158,7 +161,7 @@ def _destination_is_under_mount(dest: Path, mount: Path) -> bool:
     one value for this test *and* for ``os.path.ismount``. Resolving here
     instead would split them, and the two answers disagree in a way that is not
     obvious: ``posixpath.ismount`` short-circuits to False for a symlink ("a
-    symlink can never be a mount point"), so a symlinked ``nextcloud_mount_path``
+    symlink can never be a mount point"), so a symlinked ``workspace_mount_path``
     would be judged to contain the destination and to be permanently down, and
     every backup under a healthy mount would be skipped forever.
 
@@ -192,7 +195,7 @@ def _destination_is_durable(config) -> bool:
     dest = backup_destination(config)
     if dest is None:
         return False
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_mount_path", None)
     if not mount:
         return True
     # Resolved once, then used for both the containment test and the liveness
@@ -202,14 +205,110 @@ def _destination_is_durable(config) -> bool:
     resolved_mount = _resolve_or_none(mount) or Path(mount)
     if not _destination_is_under_mount(dest, resolved_mount):
         return True
-    if not os.path.ismount(str(resolved_mount)):
+    problem = _mount_problem(config, resolved_mount)
+    if problem:
         logger.error(
-            "db_backup skipped: backup destination %s is under Nextcloud mount %s "
-            "and that mount is not mounted — refusing to write backups to local "
-            "disk under a stale mountpoint", dest, resolved_mount,
+            "db_backup skipped: backup destination %s is under the workspace mount, "
+            "and %s — refusing to write backups where they would be lost", dest, problem,
         )
         return False
     return True
+
+
+def _mount_problem(config, resolved_mount: Path) -> str | None:
+    """Why the workspace mount cannot take a backup now, or None.
+
+    Undeclared: nothing says what is mounted there, and a bind of a plain host
+    directory passes ``ismount`` (the entrypoint's rule). Not mounted: the
+    mountpoint reverts to local disk (ISSUE-480). A host folder without its
+    marker: an empty stand-in for a folder that went away, which a snapshot
+    would vanish with when the folder comes back (row L1).
+    """
+    nextcloud = bool(getattr(config, "storage_is_nextcloud", False))
+    if undeclared_mount(resolved_mount, nextcloud):
+        return f"nothing says what is mounted at {resolved_mount} ({FSTYPE_ENV} is empty)"
+    if not os.path.ismount(str(resolved_mount)):
+        return f"{resolved_mount} is not mounted"
+    if marker_required() and not marker_present(resolved_mount):
+        return f"{resolved_mount} has no {MARKER_NAME}"
+    return None
+
+
+#: Where the config copies go, beside ``Backups/db/snapshots``.
+_CONFIG_COPY_DIR = Path("Backups") / "config"
+#: The names ``istota-stack`` gives the stack's ``.env`` and ``host.env`` in a
+#: dated config copy (``copy_stack_env_out``); a restore puts them back.
+STACK_ENV_COPY = "stack.env"
+HOST_ENV_COPY = "host.env"
+
+
+def _config_sources(config) -> list[Path]:
+    """``config.toml`` and the admins file, as this process loaded them."""
+    sources = []
+    config_path = getattr(config, "config_path", None)
+    if config_path:
+        sources.append(Path(config_path))
+    admins = os.environ.get("ISTOTA_ADMINS_FILE")
+    if admins:
+        sources.append(Path(admins))
+    elif config_path:
+        sources.append(Path(config_path).parent / "admins")
+    return sources
+
+
+def copy_config_files(config, date_str: str) -> Path | None:
+    """Copy ``config.toml`` and ``admins`` to ``Backups/config/<date>/`` in the workspace.
+
+    A restore after the VM is lost needs the config as well as the databases,
+    and the snapshots alone cannot rebuild a stack. Only where the workspace is
+    a mount (it is then off the machine the stack runs on) and the mount can
+    take a write now. ``secrets/`` and the master key are never copied: a
+    credential beside the snapshots would put both halves in one place. Kept
+    to the snapshots' retention, newest first. Never raises.
+    """
+    mount = getattr(config, "workspace_mount_path", None)
+    workspace = getattr(config, "workspace_path", None)
+    if not mount or not workspace:
+        return None
+    resolved_mount = _resolve_or_none(mount) or Path(mount)
+    root = Path(workspace) / _CONFIG_COPY_DIR
+    if not _destination_is_under_mount(root, resolved_mount):
+        return None
+    problem = _mount_problem(config, resolved_mount)
+    if problem:
+        logger.error("db_backup config copy skipped: %s", problem)
+        return None
+    dated = root / date_str
+    try:
+        _secure_mkdir(root)
+        _secure_mkdir(dated)
+        for source in _config_sources(config):
+            if not source.is_file():
+                continue
+            tmp = dated / f".{source.name}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, _FILE_MODE)
+            with os.fdopen(fd, "wb") as out:
+                out.write(source.read_bytes())
+            os.chmod(tmp, _FILE_MODE)
+            os.replace(tmp, dated / source.name)
+    except OSError as exc:
+        logger.error("db_backup config copy failed dir=%s err=%s", dated, exc)
+        return None
+    keep = getattr(config.scheduler, "db_backup_retention", 7)
+    if keep > 0:
+        dated_dirs = _dated_dirs(root)
+        # istota-stack copies the stack's .env and host.env in only when it
+        # changes them, so the newest set can be older than every day kept.
+        newest_stack_files = next(
+            (d for d in dated_dirs if (d / STACK_ENV_COPY).is_file()), None)
+        for old in dated_dirs[keep:]:
+            if old == newest_stack_files:
+                continue
+            try:
+                shutil.rmtree(old)
+            except OSError as exc:
+                logger.warning("db_backup_config_prune_failed dir=%s err=%s", old, exc)
+    return dated
 
 
 def _date_str(today: str | None) -> str:
@@ -400,7 +499,7 @@ def backup_databases(
     root = backup_destination(config)
     if root is None:
         logger.warning(
-            "db_backup skipped: no db_backup_dir and no nextcloud_mount_path — "
+            "db_backup skipped: no db_backup_dir and no workspace_path — "
             "local DBs have no durable backup target configured"
         )
         return []
@@ -460,6 +559,7 @@ def backup_databases(
             _run(src, f"{user_id}/{module}.db", f"{module}:{user_id}")
 
     _prune_old_snapshots(root, getattr(config.scheduler, "db_backup_retention", 7))
+    copy_config_files(config, date_str)
 
     ok = sum(1 for r in results if r["status"] == "ok")
     suspect = sum(1 for r in results if r["status"] == "suspect")

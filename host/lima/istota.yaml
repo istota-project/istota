@@ -1,8 +1,44 @@
 # A Lima VM dedicated to one istota install, on a Mac.
 #
-#   limactl create --name istota --param ISTOTA_REPO=/path/to/istota host/lima/istota.yaml
-#   limactl start istota
-#   limactl shell istota sudo istota-stack update --unsigned <tag>
+# The code comes from one of two sources, chosen by the params:
+#
+#   Release (ISTOTA_TAG and RELEASE_SIGNING_KEY): the first boot clones
+#   ISTOTA_REPO_URL into /srv/app/istota/src, verifies the tag's signature
+#   against the key before running anything from it, checks the tag out and
+#   runs host/provision.sh from that checkout, as host/cloud-init.yaml does on
+#   a server. Later boots leave the checkout to `istota-stack update`.
+#
+#     limactl create --name istota \
+#       --param ISTOTA_TAG=vX.Y.Z --param RELEASE_SIGNING_KEY='ssh-ed25519 AAAA... releases' \
+#       --param WORKSPACE="$HOME/Istota" \
+#       --set 'del(.mounts[] | select(.mountPoint == "/mnt/istota-repo"))' \
+#       host/lima/istota.yaml
+#
+#   Checkout (ISTOTA_REPO, for development and the vm test tier): the
+#   checkout is mounted read-only at /mnt/istota-repo and host/provision.sh
+#   runs from it at every boot; /srv/app/istota/src is a clone of it, and
+#   `istota-stack update` fetches tags from there.
+#
+#     limactl create --name istota --param ISTOTA_REPO="$PWD" \
+#       --set 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder"))' \
+#       host/lima/istota.yaml
+#
+# The mounts below are everything that may cross from the Mac
+# (tests/test_host_units.py holds the list): the checkout, read-only, and
+# WORKSPACE, the Mac folder that is the workspace (STORAGE=host-folder),
+# writable at /srv/mount/host-folder. A Lima mount cannot be optional, since
+# an empty location is refused, so a VM that has no use for one drops it at
+# create with the `--set` shown above, which can only narrow the list.
+#
+# cpus, memory and the forwarded port cannot be params (Lima reads them as
+# numbers before it expands one). Give them at create instead:
+# `--cpus 6 --memory 8` and
+# `--set '.portForwards[0].guestPort = 8181 | .portForwards[0].hostPort = 8181'`,
+# then `istota-stack setup --hostname localhost:8181` to match.
+#
+# Then, in the VM, the server sequence:
+#
+#   limactl shell istota sudo istota-stack update <tag>
 #   limactl shell istota sudo istota-stack setup --web --local
 #
 # `setup --web --local` prints an http://localhost:8080 address and a setup
@@ -12,16 +48,14 @@
 #
 #   limactl shell istota sudo istota-stack setup --hostname localhost:8080 ...
 #   limactl shell istota sudo istota-stack check-image ||
-#     limactl shell istota sudo istota-stack update --unsigned <tag>
+#     limactl shell istota sudo istota-stack update <tag>
 #   limactl shell istota sudo /srv/app/istota/src/host/provision.sh
-#   limactl shell istota sudo systemctl start istota-stack
+#   limactl shell istota sudo systemctl enable --now istota-stack
 #
-# The checkout at ISTOTA_REPO is mounted read-only and host/provision.sh runs
-# from it as root on first boot; /srv/app/istota/src is a clone of it, and
-# `istota-stack update` fetches release tags from that origin. Ingress is
-# `local`: nginx publishes on the VM's loopback and Lima forwards that port to
-# the Mac's loopback. The browser image builds natively for arm64; Rosetta is
-# there for an amd64 image forced with BROWSER_PLATFORM=linux/amd64.
+# A checkout's tags are unsigned unless you sign them: `update --unsigned`.
+# Ingress is `local`: nginx publishes on the VM's loopback and Lima forwards
+# that port to the Mac's loopback. The browser image builds natively for arm64;
+# Rosetta is there for an amd64 image forced with BROWSER_PLATFORM=linux/amd64.
 
 minimumLimaVersion: 2.0.0
 
@@ -48,14 +82,24 @@ containerd:
   system: false
   user: false
 
+# Lima refuses a param that nothing reads, so the provision script reads each.
 param:
-  # The istota checkout on the Mac (required).
+  # Release: the tag to provision from, and the key it must be signed by.
+  ISTOTA_TAG: ""
+  RELEASE_SIGNING_KEY: ""
+  ISTOTA_REPO_URL: "https://github.com/istota-project/istota.git"
+  # Checkout: the istota checkout on the Mac.
   ISTOTA_REPO: ""
+  # The Mac folder that is the workspace.
+  WORKSPACE: ""
 
 mounts:
   - location: "{{.Param.ISTOTA_REPO}}"
     mountPoint: /mnt/istota-repo
     writable: false
+  - location: "{{.Param.WORKSPACE}}"
+    mountPoint: /srv/mount/host-folder
+    writable: true
 
 mountType: virtiofs
 
@@ -63,9 +107,116 @@ provision:
   - mode: system
     script: |
       #!/bin/bash
-      set -eux -o pipefail
-      test -n "${PARAM_ISTOTA_REPO}" || { echo "ISTOTA_REPO is required (--param ISTOTA_REPO=...)" >&2; exit 1; }
-      /mnt/istota-repo/host/provision.sh
+      set -euo pipefail
+      echo "[istota-lima] workspace: ${PARAM_WORKSPACE:-none}"
+
+      if [ -n "${PARAM_ISTOTA_REPO:-}" ]; then
+          if [ -n "${PARAM_ISTOTA_TAG:-}" ]; then
+              echo "[istota-lima] give ISTOTA_REPO or ISTOTA_TAG, not both" >&2
+              exit 64
+          fi
+          exec /mnt/istota-repo/host/provision.sh
+      fi
+
+      STACK=/srv/app/istota
+      SRC="${STACK}/src"
+      ALLOWED_SIGNERS="${STACK}/allowed_signers"
+      HOST_ENV="${STACK}/host.env"
+      TAG="${PARAM_ISTOTA_TAG:-}"
+      REPO_URL="${PARAM_ISTOTA_REPO_URL:-}"
+      SIGNING_KEY="${PARAM_RELEASE_SIGNING_KEY:-}"
+      refuse_tag() { echo "[istota-lima] REFUSE: $*" >&2; exit 65; }
+
+      # The first provision from the verified tag is done; from here on the
+      # checkout is `istota-stack update`'s, and a boot must not move it back.
+      if [ -e "${STACK}/.lima-bootstrapped" ]; then
+          exit 0
+      fi
+      if [ -z "$TAG" ] || [ -z "$SIGNING_KEY" ] || [ -z "$REPO_URL" ]; then
+          echo "[istota-lima] give ISTOTA_TAG and RELEASE_SIGNING_KEY (a release), or ISTOTA_REPO (a checkout)" >&2
+          exit 64
+      fi
+
+      # Copied from host/istota-stack, which is authoritative: nothing from the
+      # checkout may run before its tag is verified, so this cannot source it.
+      # tests/test_host_units.py holds the copy byte for byte equal to the original.
+      # --- release tags ------------------------------------------------------------
+
+      # git against the checkout, reading no configuration but this.
+      verified_git() {
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$SRC" \
+              -c gpg.format=ssh \
+              -c "gpg.ssh.allowedSignersFile=${ALLOWED_SIGNERS}" \
+              -c gpg.openpgp.program=false \
+              -c gpg.x509.program=false \
+              "$@"
+      }
+
+      check_tag_name() {
+          case "$1" in
+              ""|-*|*[!A-Za-z0-9._-]*|*..*) refuse_tag "'$1' is not a release tag name." ;;
+          esac
+      }
+
+      # Print the object id of a release tag that passes every check, or refuse.
+      verify_release_tag() {
+          local tag="$1" object kind named
+          check_tag_name "$tag"
+          if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
+              refuse_tag "${tag} is not a tag in the checkout. Only a signed release tag is deployed, never a branch or a commit."
+          fi
+          kind="$(verified_git cat-file -t "$object")"
+          if [ "$kind" != "tag" ]; then
+              refuse_tag "${tag} is a lightweight tag; a release tag is annotated and signed."
+          fi
+          named="$(verified_git cat-file tag "$object" | awk '/^tag / { print $2; exit } /^$/ { exit }')"
+          if [ "$named" != "$tag" ]; then
+              refuse_tag "the ref ${tag} points at a tag object named '${named}'."
+          fi
+          if ! verified_git cat-file tag "$object" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+              refuse_tag "${tag} carries no SSH signature."
+          fi
+          if [ ! -s "$ALLOWED_SIGNERS" ]; then
+              refuse_tag "${ALLOWED_SIGNERS} is missing or empty; provision.sh writes it from RELEASE_SIGNING_KEY."
+          fi
+          if ! verified_git verify-tag "$object" >/dev/null 2>&1; then
+              refuse_tag "${tag} is not signed by the key in ${ALLOWED_SIGNERS}."
+          fi
+          echo "$object"
+      }
+
+      case "$SIGNING_KEY" in
+          *$'\n'*) echo "[istota-lima] RELEASE_SIGNING_KEY is one line of an SSH public key" >&2; exit 64 ;;
+      esac
+      install -d -m 0755 "$STACK"
+      # host.env keeps the key provision.sh and `istota-stack update` read; a
+      # different one already there is not swapped out from under them.
+      recorded=""
+      if [ -f "$HOST_ENV" ]; then
+          recorded="$(sed -n 's/^RELEASE_SIGNING_KEY=//p' "$HOST_ENV" | tail -n 1)"
+      fi
+      if [ -z "$recorded" ]; then
+          printf 'RELEASE_SIGNING_KEY=%s\n' "$SIGNING_KEY" >> "$HOST_ENV"
+          chmod 0644 "$HOST_ENV"
+      elif [ "$recorded" != "$SIGNING_KEY" ]; then
+          echo "[istota-lima] ${HOST_ENV} already names a different RELEASE_SIGNING_KEY" >&2
+          exit 78
+      fi
+
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
+      # The file provision.sh writes from host.env, in the same form.
+      printf 'releases namespaces="git" %s\n' "$SIGNING_KEY" > "$ALLOWED_SIGNERS"
+      chmod 0644 "$ALLOWED_SIGNERS"
+      if [ -d "${SRC}/.git" ]; then
+          verified_git fetch --quiet --tags origin
+      else
+          git clone --quiet --no-checkout "$REPO_URL" "$SRC"
+      fi
+      object="$(verify_release_tag "$TAG")"
+      verified_git checkout --quiet --detach "${object}^{commit}"
+      ISTOTA_REPO_URL="$REPO_URL" "${SRC}/host/provision.sh"
+      touch "${STACK}/.lima-bootstrapped"
 
 probes:
   - script: |
@@ -76,11 +227,13 @@ probes:
       timeout 600s bash -c "until test -x /usr/local/sbin/istota-stack; do sleep 5; done"
     hint: See /var/log/cloud-init-output.log in the guest
 
+# One forward, both sides the same port: `istota setup --hostname
+# localhost:8080` publishes nginx there. Another port is set at create (above).
 portForwards:
   - guestIP: 127.0.0.1
     # `istota-stack setup --web --local` publishes the setup page here, and
     # `istota setup --hostname localhost:8080` publishes nginx here after it;
-    # another port needs this pair changed too.
+    # another port is set at create (see the header).
     guestPort: 8080
     hostIP: 127.0.0.1
     hostPort: 8080

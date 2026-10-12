@@ -47,6 +47,8 @@ def dev_config(make_config, tmp_path):
         developer=DeveloperConfig(enabled=True, repos_dir=str(repos)),
     )
     (repos / "alice").mkdir(parents=True)
+    config.nextcloud.url = "https://cloud.example.com"
+    config.workspace_mount_path = config.workspace_path
     (config.workspace_path / "Users" / "alice").mkdir(parents=True)
     (config.workspace_path / "Talk").mkdir()
     assert config.is_admin("alice")

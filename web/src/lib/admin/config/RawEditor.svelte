@@ -34,7 +34,7 @@
   sent together: the page locks each while the other holds changes.
 -->
 <section class="card">
-  <h2 class="section-title">config.toml as text</h2>
+  <header class="section-header"><h2>config.toml as text</h2></header>
   {#if !shown}
     <p class="caption">
       Edit the whole file at once: for a key the form does not show, a key inside an array of

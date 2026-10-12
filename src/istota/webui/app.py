@@ -1960,7 +1960,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         features["health"] = _user_has_health(username)
         features["briefings"] = _user_has_briefings(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
-        features["workspace"] = _config.has_workspace or _config.storage_is_nextcloud
+        features["workspace"] = _config.has_workspace
         if not features["workspace"] and _config.google_workspace.enabled:
             from istota import db
             from istota.workspace.places import list_places
@@ -3072,8 +3072,8 @@ def _admin_storage_section(db_path: Path) -> dict:
     mount_healthy = False
     if _config:
         try:
-            if _config.nextcloud_mount_path is not None:
-                mount_healthy = os.path.ismount(_config.nextcloud_mount_path)
+            if _config.workspace_mount_path is not None:
+                mount_healthy = os.path.ismount(_config.workspace_mount_path)
             elif _config.workspace_path is not None:
                 mount_healthy = Path(_config.workspace_path).is_dir()
         except OSError:

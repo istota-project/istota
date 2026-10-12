@@ -545,7 +545,7 @@ class TestTheAutoShareGuard:
         config = _config()
         config.nextcloud.auto_share_bot_dir = auto_share
         config.workspace_path = tmp_path
-        config.nextcloud_mount_path = tmp_path
+        config.workspace_mount_path = tmp_path
         return config
 
     def test_the_share_is_made_when_the_key_is_left_alone(self, tmp_path):

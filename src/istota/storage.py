@@ -602,7 +602,7 @@ def resolve_user_vault_path(
     is the list, and refusal is the only remedy available here: there is no
     per-user root to walk for a path the operator wrote whole.
 
-    ``workspace_path`` and not ``nextcloud_mount_path``: the sandbox binds and
+    ``workspace_path`` and not ``workspace_mount_path``: the sandbox binds and
     every workspace path this module builds are derived from the former, and on
     a deployment where the two differ a vault on the mount but outside the
     workspace is both phone-editable and sandbox-unreachable, which is the best

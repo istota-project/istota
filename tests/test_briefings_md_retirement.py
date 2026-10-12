@@ -315,7 +315,7 @@ class TestTheOneShotImport:
         config = Config(
             db_path=db_path,
             workspace_path=mount,
-            nextcloud_mount_path=mount,
+            workspace_mount_path=mount,
         )
         config.users["alice"] = UserConfig(briefings=[])
 

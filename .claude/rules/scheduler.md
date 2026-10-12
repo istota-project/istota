@@ -195,7 +195,7 @@ Snapshots framework + module DBs to `db_backup_dir/<date>/` (default `{workspace
 - Dated dirs (ISSUE-159); `_prune_old_snapshots` never prunes the newest good copy of any DB.
 - `_apply_collapse_guard` marks `*.suspect` when a DB that held data comes back empty (exact zero).
 - `0700`/`0600`; cold copies in DELETE journal mode (WAL on FUSE SIGBUSes).
-- `_destination_is_durable`: a destination resolving under `nextcloud_mount_path` is written only if `os.path.ismount`; keyed on the resolved path, not the config branch (ISSUE-480); `sandbox.user_scope.is_within`; mount resolved once (`ismount` is False on a symlink). Outside the mount is trusted.
+- `_destination_is_durable`: a destination resolving under `workspace_mount_path` is written only if `os.path.ismount`; keyed on the resolved path, not the config branch (ISSUE-480); `sandbox.user_scope.is_within`; mount resolved once (`ismount` is False on a symlink). Outside the mount is trusted.
 - Clock persisted at `{db_path.parent}/.db_backup_last_run`, advances only when ≥1 DB succeeded. `_alert_backup_problems` and `_maybe_alert_backup_stale` (> 2x interval, after a prior success) use `_send_operator_alert` (thread with join timeout, ISSUE-143 class).
 - `python -m istota.maintenance.db_backup` forces a run; `python -m istota.maintenance.db_restore --all` (or `--date`) clears sidecars, refuses empty snapshots without `--force`, refuses while `_daemon_running`.
 

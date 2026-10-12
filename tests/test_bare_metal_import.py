@@ -278,7 +278,10 @@ class TestTheConfigRewrite:
         assert new["db_path"] == "/data/db/istota.db"
         assert new["temp_dir"] == "/data/tmp"
         assert new["workspace_path"] == "/mnt/shared"
-        assert new["nextcloud_mount_path"] == "/mnt/shared"
+        assert new["workspace_mount_path"] == "/mnt/shared"
+        # The role wrote the old name; left beside the new one it would be a
+        # conflicting second spelling, which `load_config` refuses.
+        assert "nextcloud_mount_path" not in new
         dev = new["developer"]
         assert dev["repos_dir"] == "/data/repos"
         assert dev["gh_bin_path"] == "/usr/local/lib/istota_forge/gh"

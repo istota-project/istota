@@ -12,13 +12,17 @@ runs in order with the stack's writers stopped:
   socket or device is skipped and reported, never followed or copied. File
   data moves with `copyfileobj` on the two descriptors, with no xattr call
   (#694). mtimes are kept, modes are the workspace's 0644 and 0755.
-  `write_notes` then leaves `MOVED.md` in each user's bot folder on the mount,
-  the only write to the source.
+  `check_destination` is the refusal half alone, which `istota-stack` asks
+  before it stops anything.
 - `localize_config` (`istota workspace localize-config`): the wizard's
   `config.toml` with `workspace_path` set to the local tree,
-  `nextcloud_mount_path` removed and `auto_share_bot_dir` off, the previous
+  `workspace_mount_path` (or its old name) removed and `auto_share_bot_dir` off, the previous
   file kept as `config.toml.pre-localize`. A config `istota apply` wrote is
   refused: the plan owns it and would undo the edit.
+- `write_notes` (`istota workspace moved-note`): `MOVED.md` in each user's bot
+  folder on the old tree, the only write to it, refused while the config still
+  names that tree as the workspace, so it runs once the config edit has landed.
+  `remove_notes` (`--remove`) takes them off again when the move is undone.
 - `reindex_moved_workspace` (`istota workspace reindex --forget-root`): runs the
   memory reindex for every user on the new tree, then `forget_root` deletes the
   chunk rows still keyed under the old root. `index_file` keys a row on the
@@ -37,6 +41,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -88,8 +93,6 @@ class Report:
     dry_run: bool
     entries: dict[str, EntryCount] = field(default_factory=dict)
     skipped: list[tuple[str, str]] = field(default_factory=list)
-    noted: list[str] = field(default_factory=list)
-    note_failures: list[tuple[str, str]] = field(default_factory=list)
     error: str | None = None
 
     def exit_code(self) -> int:
@@ -106,8 +109,6 @@ class Report:
             "dry_run": self.dry_run,
             "entries": {name: vars(count) for name, count in self.entries.items()},
             "skipped": [{"path": path, "reason": reason} for path, reason in self.skipped],
-            "noted": self.noted,
-            "note_failures": [{"user": user, "reason": reason} for user, reason in self.note_failures],
             "error": self.error,
             "exit_code": self.exit_code(),
         }
@@ -122,8 +123,6 @@ class Report:
             lines.append(line)
         for path, reason in self.skipped:
             lines.append(f"skipped {path}: {reason}")
-        for user, reason in self.note_failures:
-            lines.append(f"no {NOTE_NAME} for {user}: {reason}")
         if self.error is not None:
             lines.append(f"stopped: {self.error}")
         return lines
@@ -165,13 +164,13 @@ class _Copier:
         self.resume = resume
         self.bot_dir_name = bot_dir_name
 
-    def _is_our_note(self, rel: tuple[str, ...], name: str) -> bool:
-        """`Users/<uid>/<bot_dir>/MOVED.md`, which an earlier run left on the
-        source and which the local tree must not carry."""
-        return (
-            name == NOTE_NAME and len(rel) == 3
-            and rel[0] == "Users" and rel[2] == self.bot_dir_name
-        )
+    def _is_our_note(self, src_dir: int, rel: tuple[str, ...], name: str) -> bool:
+        """`Users/<uid>/<bot_dir>/MOVED.md` holding the note an earlier move
+        left, which the local tree must not carry. A user's own file of that
+        name is theirs and is copied."""
+        if not (name == NOTE_NAME and len(rel) == 3 and rel[0] == "Users" and rel[2] == self.bot_dir_name):
+            return False
+        return is_our_note(_read_small(src_dir, name))
 
     def copy_file(self, src_dir: int, dst_dir: int | None, name: str, rel: str,
                   count: EntryCount) -> None:
@@ -227,7 +226,7 @@ class _Copier:
             try:
                 info = entry.stat(follow_symlinks=False)
                 if stat.S_ISREG(info.st_mode):
-                    if self._is_our_note(rel, name):
+                    if self._is_our_note(src_dir, rel, name):
                         continue
                     self.copy_file(src_dir, dst_dir, name, path, count)
                 elif stat.S_ISDIR(info.st_mode):
@@ -274,6 +273,21 @@ class _Copier:
                 os.close(dst)
 
 
+def check_destination(source: Path, destination: Path, *, resume: bool) -> None:
+    """Raise `LocalizeRefused` when the copy would refuse; writes nothing."""
+    source = Path(os.path.abspath(source))
+    destination = Path(os.path.abspath(destination))
+    if not source.is_dir():
+        raise LocalizeRefused(f"{source} is not a directory")
+    if _overlaps(Path(os.path.realpath(source)), Path(os.path.realpath(destination))):
+        raise LocalizeRefused(f"{source} and {destination} overlap")
+    if not resume and not _is_empty_dir(destination):
+        raise LocalizeRefused(
+            f"{destination} already holds files; pass --resume to continue an earlier copy "
+            "(it keeps every file already there), or move them aside first"
+        )
+
+
 def copy_workspace(
     source: Path, destination: Path, *, bot_dir_name: str,
     dry_run: bool = False, resume: bool = False,
@@ -285,14 +299,7 @@ def copy_workspace(
     """
     source = Path(os.path.abspath(source))
     destination = Path(os.path.abspath(destination))
-    if not source.is_dir():
-        raise LocalizeRefused(f"{source} is not a directory")
-    if _overlaps(Path(os.path.realpath(source)), Path(os.path.realpath(destination))):
-        raise LocalizeRefused(f"{source} and {destination} overlap")
-    if not resume and not _is_empty_dir(destination):
-        raise LocalizeRefused(
-            f"{destination} already holds files; pass --resume to continue an earlier copy"
-        )
+    check_destination(source, destination, resume=resume)
     report = Report(str(source), str(destination), dry_run)
     copier = _Copier(report, dry_run=dry_run, resume=resume, bot_dir_name=bot_dir_name)
     src_root = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
@@ -337,11 +344,49 @@ def note_text(bot_name: str, when: datetime) -> str:
     )
 
 
-def write_notes(source: Path, report: Report, *, bot_dir_name: str, text: str) -> None:
-    """`MOVED.md` in each `Users/<uid>/<bot_dir>/` on the source.
+# `note_text` for any bot name and date, and nothing else: what tells a note a
+# move wrote from a user's own file of the same name.
+_NOTE_RE = re.compile(
+    r"These files now live on (.+)'s own server, and you reach them in \1's web UI\. "
+    r"This folder is a frozen copy from \d{4}-\d{2}-\d{2}: a change made here does not reach \1\.\n"
+)
+_NOTE_MAX = 4096
+
+
+def is_our_note(data: bytes | None) -> bool:
+    if data is None or len(data) > _NOTE_MAX:
+        return False
+    try:
+        return _NOTE_RE.fullmatch(data.decode("utf-8")) is not None
+    except UnicodeDecodeError:
+        return False
+
+
+def _read_small(dir_fd: int, name: str) -> bytes | None:
+    """Up to `_NOTE_MAX + 1` bytes of a regular file, or None."""
+    try:
+        fd = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        return handle.read(_NOTE_MAX + 1)
+
+
+@dataclass
+class Notes:
+    done: list[str] = field(default_factory=list)
+    failures: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _each_bot_dir(source: Path, bot_dir_name: str, notes: Notes, act) -> None:
+    """Call `act(bot_fd)` for each `Users/<uid>/<bot_dir>/` on `source`.
 
     Users are read off the source's `Users/` directory, opened without
-    following a link at any level, and a user without a bot folder gets none.
+    following a link at any level; a user without a bot folder is passed over.
+    `act` returns None when it acted, the reason when it could not, or "" when
+    there was nothing to do.
     """
     users_fd = None
     try:
@@ -350,9 +395,11 @@ def write_notes(source: Path, report: Report, *, bot_dir_name: str, text: str) -
             users_fd = os.open("Users", _DIR_FLAGS, dir_fd=root)
         finally:
             os.close(root)
-    except OSError:
+    except OSError as exc:
+        # An rclone mount that is not up yet is an empty directory; say so
+        # rather than report every user done.
+        notes.failures.append(("Users", exc.strerror or str(exc)))
         return
-    data = text.encode("utf-8")
     try:
         with os.scandir(users_fd) as listing:
             names = sorted(entry.name for entry in listing if entry.is_dir(follow_symlinks=False))
@@ -364,20 +411,74 @@ def write_notes(source: Path, report: Report, *, bot_dir_name: str, text: str) -
                     bot_fd = os.open(bot_dir_name, _DIR_FLAGS, dir_fd=user_fd)
                 except FileNotFoundError:
                     continue
-                fd = os.open(NOTE_NAME, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644, dir_fd=bot_fd)
-                try:
-                    os.write(fd, data)
-                finally:
-                    os.close(fd)
-                report.noted.append(user)
+                reason = act(bot_fd)
+                if reason is None:
+                    notes.done.append(user)
+                elif reason:
+                    notes.failures.append((user, reason))
             except OSError as exc:
-                report.note_failures.append((user, exc.strerror or str(exc)))
+                notes.failures.append((user, exc.strerror or str(exc)))
             finally:
                 for fd in (bot_fd, user_fd):
                     if fd is not None:
                         os.close(fd)
     finally:
         os.close(users_fd)
+
+
+def write_notes(source: Path, *, bot_dir_name: str, text: str) -> Notes:
+    """`MOVED.md` in each `Users/<uid>/<bot_dir>/` on the source.
+
+    Created `O_EXCL`: a user's own `MOVED.md` is left as it is and reported.
+    An earlier move's note is replaced, so the date is this move's.
+    """
+    data = text.encode("utf-8")
+
+    def write(bot_fd: int) -> str | None:
+        try:
+            fd = os.open(NOTE_NAME, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=bot_fd)
+        except FileExistsError:
+            if not is_our_note(_read_small(bot_fd, NOTE_NAME)):
+                return f"a {NOTE_NAME} is already there; left as it is"
+            tmp = f".{NOTE_NAME}.{os.getpid()}"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=bot_fd)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(tmp, NOTE_NAME, src_dir_fd=bot_fd, dst_dir_fd=bot_fd)
+            return None
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return None
+
+    notes = Notes()
+    _each_bot_dir(source, bot_dir_name, notes, write)
+    return notes
+
+
+def remove_notes(source: Path, *, bot_dir_name: str) -> Notes:
+    """Remove each `MOVED.md` on the source that holds a move's note.
+
+    A file of that name holding anything else is the user's and is left. The
+    read and the unlink are two steps on a name in a folder its owner can
+    write, so a file swapped in between them goes too; run it with the stack
+    down to narrow that to what Nextcloud itself writes.
+    """
+    def remove(bot_fd: int) -> str | None:
+        data = _read_small(bot_fd, NOTE_NAME)
+        if data is None:
+            return ""
+        if not is_our_note(data):
+            return f"{NOTE_NAME} is not a move's note; left as it is"
+        os.unlink(NOTE_NAME, dir_fd=bot_fd)
+        return None
+
+    notes = Notes()
+    _each_bot_dir(source, bot_dir_name, notes, remove)
+    return notes
 
 
 def write_report(report: Report, path: Path) -> None:
@@ -400,7 +501,7 @@ def localized_config_text(text: str, workspace: str) -> str | None:
     if any(APPLY_HEADER_MARK in line for line in head):
         raise LocalizeRefused(
             "config.toml was written by `istota apply`; the plan owns it. Move by changing the plan: "
-            f"workspace_path = \"{workspace}\", no nextcloud_mount_path, "
+            f"workspace_path = \"{workspace}\", no workspace_mount_path, "
             "[nextcloud] auto_share_bot_dir = false, and STORAGE local"
         )
     try:
@@ -410,13 +511,16 @@ def localized_config_text(text: str, workspace: str) -> str | None:
     nextcloud = document.get("nextcloud")
     if not isinstance(nextcloud, dict) or not nextcloud.get("url"):
         raise LocalizeRefused("config.toml has no [nextcloud] url: there is no mount to move from")
-    if "nextcloud_mount_path" not in document:
+    # Either spelling: nextcloud_mount_path is workspace_mount_path's old name.
+    mount_keys = [key for key in ("workspace_mount_path", "nextcloud_mount_path") if key in document]
+    if not mount_keys:
         if document.get("workspace_path") == workspace:
             return None
         raise LocalizeRefused(
-            "config.toml has no nextcloud_mount_path: the workspace is not the mount"
+            "config.toml has no workspace_mount_path: the workspace is not the mount"
         )
-    document.pop("nextcloud_mount_path")
+    for key in mount_keys:
+        document.pop(key)
     document["workspace_path"] = workspace
     nextcloud["auto_share_bot_dir"] = False
     comments = []

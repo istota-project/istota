@@ -53,7 +53,7 @@ describe('the table editor', () => {
     const { onOp, textarea } = mount(aliases);
     await fireEvent.input(textarea, { target: { value: '  \n' } });
     expect(onOp).toHaveBeenLastCalledWith(null, ['models', 'aliases']);
-    expect(screen.getByText(/Use Reset to default to remove the key/)).toBeInTheDocument();
+    expect(screen.getByText(/Use Reset to remove the key/)).toBeInTheDocument();
   });
 
   it('keeps an empty list distinct from an absent key', async () => {

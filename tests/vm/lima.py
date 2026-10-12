@@ -55,6 +55,10 @@ MOUNT = "/srv/mount/nextcloud/content"
 SCRATCH = "/srv/istota-vmtier"
 MODE_FILE = f"{SCRATCH}/mode.json"
 REPO_MOUNT = "/mnt/istota-repo"
+#: The template mounts the checkout and the Mac workspace folder; a Lima mount
+#: cannot be optional, so the tier's VM drops the workspace at create and
+#: shares a folder in only for the host-folder mode (`share_host_folder`).
+DROP_WORKSPACE_MOUNT = 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder"))'
 
 #: The first admin every mode's setup names, and the devbox users.
 USER = "admin"
@@ -300,7 +304,7 @@ def ensure_vm(release: Release) -> Vm:
     entry = vm.info()
     if entry is None:
         argv = ["limactl", "create", "--tty=false", f"--name={vm.name}",
-                f"--param=ISTOTA_REPO={release.repo}"]
+                f"--param=ISTOTA_REPO={release.repo}", f"--set={DROP_WORKSPACE_MOUNT}"]
         memory = os.environ.get("ISTOTA_VM_MEMORY", "").strip()
         if memory:
             argv.append(f"--set=.memory = {json.dumps(memory)}")
@@ -396,6 +400,39 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
         '    true \\\n',
     ),
 }
+
+
+#: The Mac's `istota-stack` (row L4), run on this Mac against the tier's VM.
+MAC_CLI = REPO / "host" / "mac" / "istota-stack"
+MAC_SHIM = REPO / "host" / "mac" / "istota"
+
+#: Row L4's control: a Mac CLI whose `exec` forward goes to `compose exec
+#: daemon` itself, past the VM's `istota-stack exec` and its `istota-drop`.
+MAC_SHIM_CONTROL: tuple[str, str] = (
+    '    exec limactl shell --workdir / "$INSTANCE" sudo istota-stack "$@"\n',
+    '    if [ "$1" = exec ]; then shift; set -- compose exec -T daemon "$@"; fi\n'
+    '    exec limactl shell --workdir / "$INSTANCE" sudo istota-stack "$@"\n',
+)
+
+
+def mac_cli(name: str = "") -> Path:
+    """`host/mac/istota-stack`, or a copy beside the shim with control `name`
+    applied, so the shim's own lookup of its sibling finds it."""
+    if name != "mac-shim-without-drop":
+        return MAC_CLI
+    old, new = MAC_SHIM_CONTROL
+    text = MAC_CLI.read_text()
+    if text.count(old) != 1:
+        raise VmError("the mac-shim-without-drop control does not apply to host/mac/istota-stack")
+    bindir = _workdir() / "mac-shim-control"
+    bindir.mkdir(parents=True, exist_ok=True)
+    copy = bindir / "istota-stack"
+    copy.write_text(text.replace(old, new))
+    copy.chmod(0o755)
+    shim = bindir / "istota"
+    shim.write_text(MAC_SHIM.read_text())
+    shim.chmod(0o755)
+    return copy
 
 
 def stack_command(vm: Vm, name: str = "") -> str:
@@ -585,6 +622,113 @@ def nextcloud_mode(model_url: str, nc_url: str, bot_password: str, rclone_conf: 
     )
 
 
+#: Where Lima shares the Mac folder in, in the host-folder mode (provision.sh's
+#: directory for STORAGE=host-folder).
+HOST_FOLDER_MOUNT = "/srv/mount/host-folder"
+#: The marker the entrypoint, doctor and the backup ask the folder for.
+HOST_FOLDER_MARKER = ".istota-workspace"
+
+
+def host_folder_mode(model_url: str, *, gateway: str, allow_ports: list[int]) -> Mode:
+    """The local VM's shape: local ingress, the workspace a folder on the Mac,
+    and the Mac's loopback closed to every container (row L2) but for
+    `allow_ports`, which holds the scripted model's port. The browser profile
+    is on, since row L2 is witnessed from the browser container too."""
+    return Mode(
+        name="host-folder",
+        setup_args=common_args(model_url) + [
+            "--ingress", "local", "--hostname", "localhost:8080", "--storage", "host-folder",
+            "--profile", "browser",
+        ],
+        host_env={
+            "HOST_LOOPBACK_BLOCK": "1",
+            "HOST_GATEWAY_ADDR": gateway,
+            "HOST_LOOPBACK_ALLOW": " ".join(str(port) for port in allow_ports),
+        },
+        build=True,
+    )
+
+
+def host_folder() -> Path:
+    """The Mac folder the host-folder mode shares in, kept between sessions so
+    an unchanged mount list costs no VM restart."""
+    folder = _workdir() / "host-folder"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _mounts(release: Release, *extra: dict) -> list[dict]:
+    return [{"location": str(release.repo), "mountPoint": REPO_MOUNT, "writable": False}, *extra]
+
+
+def template_mounts(release: Release, folder: Path, *, extra_base: str = "") -> list[dict]:
+    """The mounts Lima resolves from `host/lima/istota.yaml` for the checkout
+    and `folder`, read off a scratch instance that is created and never
+    started. `extra_base` adds a base template, as row L3's control does."""
+    name = f"{vm_name()}-template"
+    template = TEMPLATE
+    if extra_base:
+        # A copy with the base added: `--set` applies after Lima has embedded
+        # the bases, and refuses to touch `base:`.
+        text = TEMPLATE.read_text()
+        base = "base:\n  - template:_images/debian-13\n"
+        if text.count(base) != 1:
+            raise VmError(f"the template's base is not {base!r}")
+        template = _workdir() / "istota-control.yaml"
+        template.write_text(text.replace(base, f"{base}  - {extra_base}\n"))
+    argv = ["limactl", "create", "--tty=false", f"--name={name}",
+            f"--param=ISTOTA_REPO={release.repo}", f"--param=WORKSPACE={folder}", str(template)]
+    _run_host(["limactl", "delete", "--force", name], check=False)
+    try:
+        _run_host(argv, timeout=300)
+        mounts = ((Vm(name).info() or {}).get("config") or {}).get("mounts") or []
+    finally:
+        _run_host(["limactl", "delete", "--force", name], check=False)
+    if not mounts:
+        raise VmError(f"limactl resolved no mounts for {name}")
+    return [{"location": m["location"], "mountPoint": m.get("mountPoint") or m["location"],
+             "writable": bool(m.get("writable"))} for m in mounts]
+
+
+def _current_mounts(vm: Vm) -> list[tuple]:
+    mounts = ((vm.info() or {}).get("config") or {}).get("mounts") or []
+    return [(m.get("location"), m.get("mountPoint"), bool(m.get("writable"))) for m in mounts]
+
+
+def set_mounts_if_changed(vm: Vm, mounts: list[dict]) -> None:
+    """`Vm.set_mounts`, skipped when the VM already has exactly these."""
+    wanted = [(m["location"], m["mountPoint"], m["writable"]) for m in mounts]
+    if _current_mounts(vm) != wanted:
+        vm.set_mounts(mounts)
+
+
+def share_host_folder(vm: Vm, release: Release, folder: Path) -> None:
+    """The VM with `folder` shared in writable at HOST_FOLDER_MOUNT, beside the
+    checkout: the template's two mounts, as Lima resolves them."""
+    set_mounts_if_changed(vm, template_mounts(release, folder))
+
+
+def unshare_host_folder(vm: Vm, release: Release) -> None:
+    """Back to the checkout alone, which row 7 asserts, leaving the stack for
+    the next mode to set up: a host folder in host.env would otherwise be kept
+    by its setup, and the stack would refuse to start without the folder. The
+    loopback block goes too, or the other modes' tasks would lose the model
+    whenever its port moved.
+
+    config.toml leaves the mode with host.env, and first: the restart below
+    starts the enabled stack, and STORAGE=local beside a config still naming
+    /mnt/shared as its workspace mount is how a daemon once wrote a workspace
+    into the rclone mount's empty mount point, which rclone then refused."""
+    from istota import setup_wizard
+
+    vm.run(f"systemctl stop istota-stack.service || true; rm -f {MODE_FILE}", timeout=600)
+    apply_config(vm, {"workspace_path": setup_wizard.CONTAINER_LOCAL_WORKSPACE},
+                 drop=("workspace_mount_path",))
+    env_file_set(vm, f"{STACK}/host.env", {"STORAGE": "local", "HOST_LOOPBACK_BLOCK": "0"})
+    vm.run(f"{STACK}/src/host/provision.sh", timeout=1800)
+    set_mounts_if_changed(vm, _mounts(release))
+
+
 def nextcloud_wizard_mode(model_url: str, nc_url: str, bot_password: str) -> Mode:
     """Full integration as `istota-stack setup` writes it, not the role.
 
@@ -613,12 +757,16 @@ def _deep_merge(base: dict, over: dict) -> dict:
     return out
 
 
-def apply_config(vm: Vm, delta: dict) -> int:
-    """Merge `delta` over config.toml through `istota-stack apply`; its exit code."""
+def apply_config(vm: Vm, delta: dict, *, drop: tuple[str, ...] = ()) -> int:
+    """Merge `delta` over config.toml, less the top-level keys in `drop`,
+    through `istota-stack apply`; its exit code."""
     current = json.loads(vm.out(
         f"python3 -c 'import json,tomllib;print(json.dumps(tomllib.load(open(\"{STACK}/config/config.toml\",\"rb\"))))'"
     ))
-    plan = {"config": _deep_merge(current, delta)}
+    merged = _deep_merge(current, delta)
+    for key in drop:
+        merged.pop(key, None)
+    plan = {"config": merged}
     vm.write(f"{SCRATCH}/plan.json", json.dumps(plan), mode="0600")
     result = vm.run(f"istota-stack apply {SCRATCH}/plan.json", check=False, timeout=1800)
     if result.returncode not in (0, 2):

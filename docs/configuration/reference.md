@@ -14,8 +14,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default. That file — and nothing else in the config directory — is bind-mounted read-only into the sandbox, since the CLI opens it there |
 | `db_path` | `"data/istota.db"` | SQLite database path |
 | `module_data_dir` | derived | Root for per-user module DBs; defaults to `{db_path.parent}/modules` |
-| `workspace_path` | `nextcloud_mount_path` | On-disk root of the bot's file tree. Required when `[nextcloud] url` is set |
-| `nextcloud_mount_path` | not set | FUSE mountpoint, when the workspace is mounted |
+| `workspace_path` | `workspace_mount_path` | On-disk root of the bot's file tree. Required when `[nextcloud] url` is set |
+| `workspace_mount_path` | not set | The mountpoint the workspace lives on, when it is one (the rclone mount of Nextcloud, or a host folder shared into a VM); doctor and the backup guard check it is mounted. `nextcloud_mount_path` is read as its old name; both set to different paths is a load error |
 | `skills_dir` | `"config/skills"` | Operator skill overrides directory |
 | `disabled_skills` | `[]` | Instance-wide skills to exclude |
 | `temp_dir` | `"/tmp/istota"` | Temporary directory for task execution |
@@ -314,7 +314,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 |---|---|---|
 | `db_backup_enabled` | `true` | Take timed online-backup snapshots of the local DBs |
 | `db_backup_interval` | `86400` | Seconds between snapshots (24h) |
-| `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty derives `{workspace_path}/Backups/db/snapshots`. Any destination resolving at or under a configured `nextcloud_mount_path` is skipped while that mount is not mounted, rather than written to local disk under a stale mountpoint. Symlinks on either side are followed, so how the path is spelled does not change the answer. A destination outside the mount is taken at face value. Use `db_backup_enabled = false` to disable |
+| `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty derives `{workspace_path}/Backups/db/snapshots`. Any destination resolving at or under a configured `workspace_mount_path` is skipped while that mount is not mounted, rather than written to local disk under a stale mountpoint. Symlinks on either side are followed, so how the path is spelled does not change the answer. A destination outside the mount is taken at face value. Use `db_backup_enabled = false` to disable |
 | `db_backup_retention` | `7` | Keep this many snapshot dirs |
 
 ### Host memory: breadcrumb, admission gate, snapshots

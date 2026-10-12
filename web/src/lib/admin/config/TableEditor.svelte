@@ -8,11 +8,12 @@
     /** This table's pending `set_toml`, if any. */
     op: ConfigOp | undefined;
     badge?: string;
+    hint?: string;
     problem?: string;
     onOp: (op: ConfigOp | null, path: string[]) => void;
   }
 
-  let { field, op, badge, problem, onOp }: Props = $props();
+  let { field, op, badge, hint, problem, onOp }: Props = $props();
 
   let original = $derived(field.toml ?? '');
   let text = $derived(op?.op === 'set_toml' ? op.toml : original);
@@ -30,7 +31,7 @@
     }
     // An empty snippet defines nothing; removing the key is its own edit.
     if (!value.trim()) {
-      emptyError = 'Empty TOML defines nothing. Use Reset to default to remove the key.';
+      emptyError = 'Empty TOML defines nothing. Use Reset to remove the key.';
       onOp(null, field.path);
       return;
     }
@@ -42,11 +43,11 @@
 <!--
   One table edited as TOML, starting from what config.toml holds for it. The
   snippet's only top-level key is the field's own name, which is what keeps
-  "remove the key" (Reset to default) and "set it empty" (`name = []`) two
+  "remove the key" (Reset) and "set it empty" (`name = []`) two
   different edits. The server parses it; a snippet that does not parse comes
   back from the review as a refusal with the parser's message.
 -->
-<Field label={field.name} {badge} error={emptyError || problem} wide>
+<Field label={field.name} {hint} {badge} inline error={emptyError || problem} wide>
   <TextArea
     monospace
     rows={Math.min(Math.max(text.split('\n').length + 1, 4), 16)}
@@ -75,5 +76,12 @@
 <style>
   .table-note {
     margin: var(--space-1) 0 0;
+  }
+
+  /* Under the control, in its column, as FieldControl's notes are. */
+  @media (min-width: 641px) {
+    .table-note {
+      margin-left: calc(var(--field-label-width) + var(--space-3));
+    }
   }
 </style>

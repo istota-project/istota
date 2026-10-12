@@ -191,7 +191,7 @@ def render_config_toml(a: Answers) -> str:
     lines += [
         "",
         "# Trusted single-user posture: no sandbox / proxies. "
-        "See docs/getting-started/local-install.md.",
+        "See docs/getting-started/standalone-install.md.",
         "[security]",
         "sandbox_enabled = false",
         "skill_proxy_enabled = false",
@@ -1293,8 +1293,9 @@ CONTAINER_DEVBOX_EXEC_DIR = "/data/devbox/exec"
 CONTAINER_DEVBOX_CRED_DIR = "/data/devbox/cred"
 #: The workspace in local storage mode: a directory on the state volume.
 CONTAINER_LOCAL_WORKSPACE = "/data/workspace"
-#: The workspace in full Nextcloud integration: the VM's rclone mount of the
-#: bot's files, bound here. The entrypoint refuses to start unless it is one.
+#: The workspace when the VM provides it as a mount, bound here: the rclone
+#: mount of the bot's files in full Nextcloud integration, or the local VM's
+#: host folder. The entrypoint refuses to start unless it is the mount expected.
 CONTAINER_NEXTCLOUD_WORKSPACE = "/mnt/shared"
 #: Where the workspace lives when Nextcloud is configured: the rclone mount of
 #: the bot's files, or a directory on the state volume. Talk and the nextcloud
@@ -1340,6 +1341,12 @@ SECRET_NAMES: tuple[str, ...] = (
 #: for an upstream proxy in `proxied`.
 INGRESS_HOPS = {"direct": 1, "proxied": 2, "local": 1}
 
+#: `[scheduler] cron_max_staleness_minutes` under local ingress, which is the
+#: local VM: it pauses while the Mac sleeps, and a job or briefing missed by
+#: up to twelve hours then runs once on wake, an older one is skipped. A server
+#: keeps the dataclass default.
+LOCAL_CRON_MAX_STALENESS_MINUTES = 720
+
 #: Compose profiles the wizard can turn on; each starts the service of the same
 #: name. `location` starts nothing now that the web process serves the webhook
 #: routes, and stays accepted so an existing `.env` naming it still validates.
@@ -1363,6 +1370,9 @@ class ContainerAnswers:
     listen_addr: str = ""
     listen_port: int = 0
     tls_cert_source: str = "acme"
+    #: The workspace is a folder the host shares in (the local VM's ~/Istota),
+    #: rather than the state volume. Never with a Nextcloud.
+    host_folder: bool = False
     # Nextcloud, full integration only. Empty url = local storage.
     nextcloud_url: str = ""
     nextcloud_public_url: str = ""
@@ -1423,7 +1433,19 @@ class ContainerAnswers:
 
     @property
     def workspace_is_mount(self) -> bool:
+        """The workspace is the bot's Nextcloud files, on the rclone mount."""
         return self.uses_nextcloud and self.workspace == "mount"
+
+    @property
+    def storage(self) -> str:
+        """host.env's STORAGE: what the VM provides at /mnt/shared, if anything."""
+        if self.workspace_is_mount:
+            return "nextcloud"
+        return "host-folder" if self.host_folder else "local"
+
+    @property
+    def mounted_workspace(self) -> bool:
+        return self.storage != "local"
 
     @property
     def public_scheme(self) -> str:
@@ -1498,15 +1520,15 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
         "bot_name": a.bot_name,
         "db_path": CONTAINER_DB_PATH,
         "workspace_path": (
-            CONTAINER_NEXTCLOUD_WORKSPACE if a.workspace_is_mount else CONTAINER_LOCAL_WORKSPACE
+            CONTAINER_NEXTCLOUD_WORKSPACE if a.mounted_workspace else CONTAINER_LOCAL_WORKSPACE
         ),
         "temp_dir": CONTAINER_TEMP_DIR,
         "security": {"sandbox_enabled": True, "skill_proxy_enabled": True},
     }
-    if a.workspace_is_mount:
+    if a.mounted_workspace:
         # A real mount, so `runtime.mount_liveness` and the backup's mount
         # guard have something to check.
-        doc["nextcloud_mount_path"] = CONTAINER_NEXTCLOUD_WORKSPACE
+        doc["workspace_mount_path"] = CONTAINER_NEXTCLOUD_WORKSPACE
 
     brain: dict = {"kind": a.brain_kind}
     if a.brain_kind == "native":
@@ -1598,6 +1620,8 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
             web["oauth2_client_secret"] = secret["istota_web_oauth2_client_secret"]
     doc["web"] = web
     doc["site"] = {"hostname": a.hostname}
+    if a.ingress == "local":
+        doc["scheduler"] = {"cron_max_staleness_minutes": LOCAL_CRON_MAX_STALENESS_MINUTES}
 
     user: dict = {
         "display_name": a.display_name or a.user_id,
@@ -1694,7 +1718,7 @@ def host_env_values(a: ContainerAnswers) -> dict[str, str]:
     """The ``host.env`` keys: what the VM's provisioning reads, and what the nginx
     and daemon containers read for the ingress mode."""
     return {
-        "STORAGE": "nextcloud" if a.workspace_is_mount else "local",
+        "STORAGE": a.storage,
         "INGRESS": a.ingress,
         "DOMAIN": a.hostname,
         "TLS_CERT_SOURCE": tls_cert_source(a),
@@ -1739,6 +1763,24 @@ def merge_env_text(existing: str, owned: dict[str, str], header: str) -> str:
             out.append(line)
     out.extend(f"{key}={value}" for key, value in owned.items() if key not in seen)
     return "\n".join(out) + "\n"
+
+
+def _host_env_value(text: str, key: str) -> str:
+    """One key of ``host.env`` as provision.sh's ``host_env`` reads it: the
+    last non-empty value wins, and the file is never executed."""
+    value = ""
+    for line in text.splitlines():
+        name, sep, rest = line.partition("=")
+        if sep and name == key and rest:
+            value = rest
+    return value
+
+
+def current_storage(vm_dir: Path | None) -> str:
+    """host.env's STORAGE as it stands before a setup run, or ``""``."""
+    if vm_dir is None or not (vm_dir / "host.env").is_file():
+        return ""
+    return _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "STORAGE")
 
 
 def render_stack_env(a: ContainerAnswers, existing: str = "") -> str:
@@ -2036,13 +2078,20 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
     return a
 
 
-def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAnswers:
+def collect_container_answers(
+    args, *, input_fn, out, getpass_fn, current_storage: str = "",
+) -> ContainerAnswers:
     """Build ``ContainerAnswers`` from flags and (unless ``--yes``) prompts.
 
     Non-interactively, credentials come from the environment under the names
     the daemon reads them by (``ISTOTA_NEXTCLOUD_APP_PASSWORD``,
     ``ANTHROPIC_API_KEY``, ...), never from argv. Every refusal is
     ``validate_container_answers``'s, raised at the question it is about.
+
+    ``current_storage`` is host.env's STORAGE before this run. A host folder
+    is kept when ``--storage`` is not given, so a re-run does not move the
+    workspace off the user's folder; it is asked for by no question, since only
+    the local VM's ``create`` sets one up.
     """
     interactive = not getattr(args, "yes", False)
     a = ContainerAnswers()
@@ -2118,9 +2167,23 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
         ) if flag("tls_cert_source") is None and interactive else (flag("tls_cert_source") or "acme")
         _refuse_on(a, "tls_cert_source")
 
+    # Where the workspace is: a folder the host shares in, a Nextcloud, or the
+    # state volume.
+    storage = flag("storage")
+    if storage is None and current_storage == "host-folder":
+        storage = "host-folder"
+    if storage not in (None, "local", "host-folder"):
+        raise SetupError(f"Unknown storage {storage!r}; use local or host-folder.")
+    a.host_folder = storage == "host-folder"
+    if a.host_folder and flag("nextcloud_url"):
+        raise SetupError(
+            "--storage host-folder is a folder the host shares in as the workspace; "
+            "it cannot be combined with a Nextcloud (--nextcloud-url)."
+        )
+
     # Nextcloud, or none; with it, the workspace on the mount or local.
     nc_url = flag("nextcloud_url")
-    if nc_url is None and interactive:
+    if nc_url is None and interactive and not a.host_folder:
         use_nc = _ask_yes_no(
             input_fn, "Connect to an existing Nextcloud (files and Talk)?", False, out=out,
         )
@@ -2327,7 +2390,10 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
             out("Setup aborted; the existing config is untouched.")
             return 1
 
-    a = collect_container_answers(args, input_fn=input_fn, out=out, getpass_fn=getpass_fn)
+    a = collect_container_answers(
+        args, input_fn=input_fn, out=out, getpass_fn=getpass_fn,
+        current_storage=current_storage(vm_dir),
+    )
     write_container_setup(a, data_dir=data_dir, vm_dir=vm_dir, out=out)
 
     out("")
@@ -2358,7 +2424,10 @@ def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out
     except (OSError, UnicodeDecodeError):
         existing = None
     try:
-        text = webdav_remote_for(existing, RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, password)
+        text = webdav_remote_for(
+            existing, RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, password,
+            dav_prefix=a.nextcloud_dav_prefix,
+        )
     except ValueError as exc:
         raise SetupError(f"The Nextcloud answers cannot go into rclone.conf: {exc}.") from None
     _write_private(path, text)

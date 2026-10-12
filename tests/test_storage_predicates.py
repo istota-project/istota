@@ -3,7 +3,7 @@
 `Config.nextcloud_enabled` is "a Nextcloud server is configured" (the URL):
 Talk, the `nextcloud` skill, OCS, avatars. `Config.storage_is_nextcloud` is
 "the workspace is the bot's Nextcloud files" (the URL and
-`nextcloud_mount_path`). The local-workspace spec's stage 1 assigned every
+`workspace_mount_path`). The local-workspace spec's stage 1 assigned every
 reader to one of them; a source grep would hold that table invisibly to
 testmon, so each reassigned caller is driven here under the three configs that
 matter and asserted on the branch it takes. A new caller is not caught by this.
@@ -40,7 +40,7 @@ def _config(tmp_path: Path, shape: str, **overrides) -> Config:
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "temp",
         workspace_path=workspace,
-        nextcloud_mount_path=workspace if shape == MOUNT else None,
+        workspace_mount_path=workspace if shape == MOUNT else None,
         nextcloud=NextcloudConfig(
             url="" if shape == LOCAL else URL,
             username="istota",
@@ -66,7 +66,7 @@ class TestThePredicateMatrix:
         config = Config(
             nextcloud=NextcloudConfig(url=url),
             workspace_path=Path("/data/workspace"),
-            nextcloud_mount_path=mount,
+            workspace_mount_path=mount,
         )
         assert config.nextcloud_enabled is enabled
         assert config.storage_is_nextcloud is is_nextcloud

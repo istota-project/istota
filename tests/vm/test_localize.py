@@ -56,13 +56,15 @@ def moved(vm, release, model) -> dict:
         prepare=place_rclone_conf,
     )
     bot = lima.stack_exec(
-        vm, f"for d in /mnt/shared/Users/{lima.USER}/*/; do [ -d \"$d/config\" ] && basename \"$d\"; done"
+        vm, f"for d in /mnt/shared/Users/{lima.USER}/*/; do if [ -d \"$d/config\" ]; then basename \"$d\"; fi; done"
     ).stdout.split()[0]
     name = f"vmtier-{uuid.uuid4().hex[:10]}.txt"
     lima.stack_exec(vm, f"mkdir -p /mnt/shared/Users/{lima.USER}/{bot}/notes && "
                         f"echo before-the-move > /mnt/shared/Users/{lima.USER}/{bot}/notes/{name}")
-    vm.run("istota-stack compose run --rm --no-deps -T --entrypoint sh daemon "
-           "-c 'mkdir -p /data/workspace && find /data/workspace -mindepth 1 -delete'", timeout=600)
+    # As 10001: the daemon service drops CAP_DAC_OVERRIDE, so its root cannot
+    # delete what a local-mode session left under 10001's directories.
+    vm.run("istota-stack compose run --rm --no-deps -T --entrypoint istota-drop daemon "
+           "sh -c 'mkdir -p /data/workspace && find /data/workspace -mindepth 1 -delete'", timeout=600)
     command = lima.stack_command(vm, CONTROL if lima.control() == CONTROL else "")
     try:
         result = vm.run(f"{command} localize-workspace", check=False, timeout=lima.BUILD_TIMEOUT)
@@ -79,8 +81,8 @@ class TestAMountedVmMovesToALocalWorkspace:
     def test_the_config_names_the_local_workspace(self, vm, moved):
         workspace = vm.out(
             "python3 -c 'import tomllib; c = tomllib.load(open(\"/srv/app/istota/config/config.toml\", \"rb\")); "
-            "print(c.get(\"workspace_path\"), c.get(\"nextcloud_mount_path\"))'")
-        assert workspace == "/data/workspace None", workspace
+            "print(c.get(\"workspace_path\"), c.get(\"workspace_mount_path\"), c.get(\"nextcloud_mount_path\"))'")
+        assert workspace == "/data/workspace None None", workspace
         assert vm.ok(f"test -f {lima.STACK}/config/config.toml.pre-localize")
         assert lima.env_value(vm, f"{lima.STACK}/host.env", "STORAGE") == "local"
 

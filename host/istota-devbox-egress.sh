@@ -1,6 +1,8 @@
 #!/bin/bash
 # Re-apply the devbox egress rules in DOCKER-USER: no devbox reaches link-local
-# and cloud metadata, the Azure host agent, RFC 1918 or CGNAT addresses.
+# and cloud metadata, the Azure host agent, RFC 1918 or CGNAT addresses. The
+# host-loopback block and the proxied listener's rule, further down, are the
+# stack's other DOCKER-USER rules, kept here so one script owns the chain.
 #
 # Ported from the Ansible role's istota-devbox-iptables.sh.j2, with the same
 # rules and the same three properties, each found on a live host:
@@ -47,6 +49,76 @@ ensure_drop "192.168.0.0/16" "istota-devbox: block 192.168.0.0/16"
 # joins a tailnet the devbox would otherwise masquerade straight into it.
 ensure_drop "100.64.0.0/10" "istota-devbox: block 100.64.0.0/10"
 
+# --- The host's loopback (HOST_LOOPBACK_BLOCK=1, the local VM) ---
+#
+# Lima forwards its host gateway (HOST_GATEWAY_ADDR) to the Mac's loopback, so
+# without this every container reaches the user's local databases and admin
+# consoles. Dropped for every container, except the TCP ports in
+# HOST_LOOPBACK_ALLOW (a model server on the Mac) and port 53: Lima serves DNS
+# at the gateway itself, and a container on the default bridge (an image
+# build's RUN step) resolves through it. The VM's own traffic is not forwarded
+# and is not filtered.
+#
+# These rules land in front of the devbox drops, so their RETURNs exclude the
+# devbox subnet, which then meets the drop below or its own. One comment on
+# every rule, removed as a set first. Anything this cannot read fails the unit
+# after applying what it can: an unreadable allow list allows no port, and an
+# unknown switch value blocks. IPv4 only.
+LOOPBACK_COMMENT="istota-host-loopback: containers reach the host gateway on allowed ports only"
+loopback_failed=0
+
+iptables -w 5 -S DOCKER-USER | { grep -F -- "--comment \"${LOOPBACK_COMMENT}\"" || true; } \
+    | sed 's/^-A /-D /' | while read -r rule; do
+        eval "iptables -w 5 ${rule}"
+    done
+
+is_ipv4() {
+    local IFS=.
+    local -a octets
+    [[ "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    read -r -a octets <<< "$1"
+    for octet in "${octets[@]}"; do
+        [ "$((10#$octet))" -le 255 ] || return 1
+    done
+}
+
+is_port() {
+    [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$1" -le 65535 ]
+}
+
+loopback_block="${HOST_LOOPBACK_BLOCK:-0}"
+if [ "$loopback_block" != "0" ] && [ -n "$loopback_block" ]; then
+    if [ "$loopback_block" != "1" ]; then
+        echo "HOST_LOOPBACK_BLOCK is 0 or 1, not '${loopback_block}'; blocking" >&2
+        loopback_failed=1
+    fi
+    gateway="${HOST_GATEWAY_ADDR:-}"
+    if ! is_ipv4 "$gateway"; then
+        echo "HOST_LOOPBACK_BLOCK needs HOST_GATEWAY_ADDR, an IPv4 address, not '${gateway}'" >&2
+        loopback_failed=1
+    else
+        allowed=""
+        for port in $(printf '%s' "${HOST_LOOPBACK_ALLOW:-}" | tr ',' ' '); do
+            if ! is_port "$port"; then
+                echo "HOST_LOOPBACK_ALLOW: '${port}' is not a TCP port; allowing none" >&2
+                loopback_failed=1
+                allowed=""
+                break
+            fi
+            allowed="${allowed} ${port}"
+        done
+        loopback_rule() {
+            iptables -w 5 -I DOCKER-USER 1 -d "$gateway" "$@" -m comment --comment "$LOOPBACK_COMMENT"
+        }
+        loopback_rule -j DROP
+        for port in $allowed; do
+            loopback_rule ! -s "$SUBNET" -p tcp --dport "$port" -j RETURN
+        done
+        loopback_rule ! -s "$SUBNET" -p udp --dport 53 -j RETURN
+        loopback_rule ! -s "$SUBNET" -p tcp --dport 53 -j RETURN
+    fi
+fi
+
 # --- The proxied listener (INGRESS=proxied) ---
 #
 # Only the upstream proxy may reach the published nginx port: with
@@ -81,3 +153,5 @@ if [ "${INGRESS:-}" = "proxied" ]; then
             -m comment --comment "$PROXIED_COMMENT" -j RETURN
     done
 fi
+
+[ "$loopback_failed" = 0 ] || exit 1
