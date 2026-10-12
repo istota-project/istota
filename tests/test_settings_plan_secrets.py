@@ -222,3 +222,183 @@ def test_non_utf8_current_config_is_a_safe_refusal(tmp_path):
     (tmp_path / "config.toml").write_bytes(b'private-current-value\xff')
     code, out, err = invoke(tmp_path, {"config": {}}, output_format="text")
     assert code == 1 and "private-current-value" not in out + err
+
+
+@pytest.fixture
+def user_install(tmp_path, monkeypatch):
+    from istota import db, user_profiles
+
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-plan-key-" * 4)
+    database = tmp_path / "framework.db"
+    db.init_db(database)
+    (tmp_path / "config.toml").write_text(toml_write.dumps({"db_path": str(database)}))
+    user_profiles.provision_user(database, "alice", {})
+    return database
+
+
+def test_user_secret_apply_dry_run_and_no_touch(user_install, tmp_path, caplog):
+    from istota.credentials import store
+
+    store.set_secret(user_install, "alice", "karakeep", "api_key", "old-placeholder")
+    before = user_install.read_bytes()
+    document = {"users": {"alice": {"secrets": [{"service": "karakeep", "keys": ["api_key", "base_url"]}]}}}
+    sidecar = {"users": {"alice": {"karakeep": {"api_key": "new-placeholder", "base_url": "https://example.com"}}}}
+    for dry_run, expected in [(True, 2), (False, 2), (True, 0), (False, 0)]:
+        code, out, err = invoke(tmp_path, document, sidecar=sidecar, dry_run=dry_run)
+        assert code == expected
+        report = json.loads(out)
+        assert not report["restart_required"]
+        assert "new-placeholder" not in out + err + caplog.text
+        if dry_run and expected == 2:
+            assert user_install.read_bytes() == before
+        assert all(item["last_accessed_at"] is None for item in store.list_user_services(user_install, "alice")["karakeep"])
+
+
+
+def secret_preview(tmp_path, declarations, values=None, **options):
+    from istota.settings_plan import engine
+    from istota.settings_plan.schema import parse_plan, parse_sidecar
+
+    context = engine.Context(tmp_path / "config.toml", sidecar=parse_sidecar({"users": {"alice": values or {}}}))
+    operations = engine.build_plan(parse_plan({"users": {"alice": {"secrets": declarations}}}),
+                                   context, engine.Options(**options))
+    return context, operations
+
+
+def test_prune_requires_explicit_service_and_preserves_other_credentials(user_install, tmp_path):
+    from istota import db
+    from istota.credentials import audit, store
+    from istota.settings_plan import engine
+
+    slots = [("alice", "karakeep", "api_key"), ("alice", "karakeep", "base_url"),
+             ("alice", "karakeep", "legacy_key"), ("alice", "ntfy", "token"),
+             ("alice", "vault_entries", "generated_example"), ("alice", "google_workspace", "token"),
+             ("alice", "monarch", "session_id"), ("bob", "karakeep", "api_key")]
+    for user, service, key in slots:
+        store.set_secret(user_install, user, service, key, "stored-placeholder")
+    declarations = [{"service": "karakeep", "keys": ["api_key"]}]
+    for entries, prune_secrets in [(declarations, False), ([], True)]:
+        context, ops = secret_preview(tmp_path, entries, prune=True, prune_secrets=prune_secrets)
+        assert engine.execute_plan(ops, context).exit_code == 0
+    context, ops = secret_preview(tmp_path, declarations, prune=True, prune_secrets=True, dry_run=True)
+    before = user_install.read_bytes()
+    assert [(op.identity, op.action) for op in ops] == [("karakeep.base_url", "delete")]
+    assert engine.execute_plan(ops, context).exit_code == 2
+    assert user_install.read_bytes() == before
+    context, ops = secret_preview(tmp_path, declarations, prune=True, prune_secrets=True)
+    assert engine.execute_plan(ops, context).exit_code == 2
+    context, ops = secret_preview(tmp_path, [{"service": "karakeep", "keys": []}], prune=True, prune_secrets=True)
+    assert [(op.identity, op.action) for op in ops] == [("karakeep.api_key", "delete")]
+    assert engine.execute_plan(ops, context).exit_code == 2
+    with db.get_db(user_install) as conn:
+        remaining = {tuple(row) for row in conn.execute("SELECT user_id, service, key FROM secrets")}
+        assert remaining == set(slots) - {("alice", "karakeep", "base_url"), ("alice", "karakeep", "api_key")}
+        records = audit.recent(conn, "alice")
+        assert {entry["name"] for entry in records} == {"karakeep.base_url", "karakeep.api_key"}
+        assert all(entry["actor"] == "apply" and entry["action"] == "delete" and entry["detail"] == {"count": 1}
+                   for entry in records)
+
+
+@pytest.mark.parametrize("failure", ["ciphertext", "missing_key", "weak_key"])
+def test_comparison_failure_refuses_whole_plan_without_disclosure(user_install, tmp_path, monkeypatch, failure, caplog):
+    from istota import db
+    from istota.credentials import store
+
+    store.set_secret(user_install, "alice", "karakeep", "api_key", "old-placeholder")
+    if failure == "ciphertext":
+        with db.get_db(user_install) as conn:
+            conn.execute("UPDATE secrets SET encrypted_value=?", (b"private-invalid-ciphertext",))
+    elif failure == "missing_key":
+        monkeypatch.delenv("ISTOTA_SECRET_KEY")
+    else:
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "weak-placeholder")
+    before = user_install.read_bytes()
+    code, out, err = invoke(tmp_path, {"users": {"alice": {"profile": {"display_name": "Changed"},
+                            "secrets": [{"service": "karakeep", "keys": ["api_key"]}]}}},
+                            sidecar={"users": {"alice": {"karakeep": {"api_key": "private-replacement"}}}})
+    assert code == 1 and json.loads(out)["errors"][0]["code"] == "secret_comparison_failed"
+    assert user_install.read_bytes() == before
+    assert "private-replacement" not in out + err + caplog.text
+    assert "private-invalid-ciphertext" not in out + err + caplog.text
+
+
+def test_missing_slots_warn_without_creating_rows_or_requiring_master_key(user_install, tmp_path, monkeypatch):
+    monkeypatch.delenv("ISTOTA_SECRET_KEY")
+    code, out, err = invoke(tmp_path, {"users": {"alice": {"secrets": [{"service": "karakeep", "keys": ["api_key"]}]}}})
+    assert code == 0
+    report = json.loads(out)
+    assert report["operations"] == [] and "missing" in report["warnings"][0]
+
+
+def test_snapshot_slots_are_metadata_only_and_registry_is_explicit(user_install, monkeypatch):
+    from contextlib import closing
+    from istota.credentials import store
+    from istota.credentials.schema import known_service_keys
+    from istota.lib.sqlite_util import connect_read_only
+    from istota.settings_plan.secrets import provisionable_keys, snapshot_secrets
+
+    assert provisionable_keys() == {
+        "karakeep": {"api_key", "base_url"}, "ntfy": {"server_url", "topic", "token", "username", "password"},
+        "native_brain": {"api_key"}, "feeds": {"tumblr_api_key"}, "overland": {"ingest_token"}, "carto": {"api_key"},
+    }
+    assert set(known_service_keys()) - set(provisionable_keys()) == {"google_workspace", "garmin", "monarch"}
+    for service, key in [("karakeep", "api_key"), ("karakeep", "base_url"), ("vault_entries", "private_name"),
+                         ("monarch", "session_id"), ("google_workspace", "token")]:
+        store.set_secret(user_install, "alice", service, key, "stored-placeholder")
+    monkeypatch.delenv("ISTOTA_SECRET_KEY")
+    before = user_install.read_bytes()
+    warnings = []
+    with closing(connect_read_only(user_install)) as conn:
+        conn.execute("BEGIN")
+        assert snapshot_secrets(conn, "alice", warnings) == [{"service": "karakeep", "keys": ["api_key", "base_url"]}]
+    assert user_install.read_bytes() == before
+    assert warnings and "private_name" not in str(warnings)
+
+
+@pytest.mark.parametrize("service,keys", [("vault_entries", []), ("monarch", ["session_id"]),
+                                          ("google_workspace", []), ("karakeep", ["unknown"])])
+def test_ineligible_slots_refused(user_install, tmp_path, service, keys):
+    from istota.settings_plan import engine
+
+    with pytest.raises(engine.ExecutionError, match="not_provisionable"):
+        secret_preview(tmp_path, [{"service": service, "keys": keys}], prune=True, prune_secrets=True)
+
+
+@pytest.mark.parametrize("edit", ["value", "access", "unrelated"])
+def test_revision_detects_values_but_ignores_access_and_unrelated_slots(user_install, tmp_path, edit):
+    from istota.credentials import store
+    from istota.settings_plan import engine
+
+    store.set_secret(user_install, "alice", "karakeep", "api_key", "old-placeholder")
+    context, ops = secret_preview(tmp_path, [{"service": "karakeep", "keys": ["api_key"]}],
+                                  {"karakeep": {"api_key": "new-placeholder"}})
+    if edit == "value":
+        store.set_secret(user_install, "alice", "karakeep", "api_key", "concurrent-placeholder")
+    elif edit == "access":
+        store.get_secret(user_install, "alice", "karakeep", "api_key")
+    else:
+        store.set_secret(user_install, "alice", "ntfy", "topic", "unrelated-placeholder")
+    result = engine.execute_plan(ops, context)
+    assert result.exit_code == (1 if edit == "value" else 2)
+    if edit == "value":
+        assert result.errors[0]["code"] == "state_changed"
+        assert store.get_secret(user_install, "alice", "karakeep", "api_key") == "concurrent-placeholder"
+
+
+def test_failed_audit_rolls_back_upsert_and_delete(user_install, tmp_path, monkeypatch):
+    from istota.credentials import audit, store
+    from istota.settings_plan import engine
+
+    store.set_secret(user_install, "alice", "karakeep", "api_key", "old-placeholder")
+    context, ops = secret_preview(tmp_path, [{"service": "karakeep", "keys": ["base_url"]}],
+                                  {"karakeep": {"base_url": "https://example.com"}}, prune=True, prune_secrets=True)
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("private-failure")
+
+    monkeypatch.setattr(audit, "record", refuse)
+    result = engine.execute_plan(ops, context)
+    assert result.exit_code == 1 and not result.partial
+    assert "private-failure" not in str(result)
+    assert store.get_secret(user_install, "alice", "karakeep", "api_key") == "old-placeholder"
+    assert not store.secret_exists(user_install, "alice", "karakeep", "base_url")

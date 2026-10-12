@@ -289,3 +289,32 @@ class TestExists:
         with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "k2" * 16}):
             assert secrets_store.secret_exists(db_path, "alice", "monarch", "email") is True
             assert secrets_store.get_secret(db_path, "alice", "monarch", "email") is None
+
+
+
+def test_read_only_comparison_and_metadata_do_not_create_missing_db(tmp_path, secret_key_env):
+    import sqlite3
+
+    missing = tmp_path / "absent.db"
+    with pytest.raises(sqlite3.OperationalError):
+        secrets_store.list_user_services(missing, "alice")
+    with pytest.raises(sqlite3.OperationalError):
+        secrets_store.get_secret(missing, "alice", "karakeep", "api_key", touch=False, strict=True)
+    assert not missing.exists()
+
+
+def test_no_touch_binding_read_and_strict_failure(db_path, secret_key_env):
+    from contextlib import closing
+    from istota.lib.sqlite_util import connect_read_only
+
+    secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "placeholder")
+    before = db_path.read_bytes()
+    with closing(connect_read_only(db_path)) as conn:
+        assert secrets_store.get_secret(None, "alice", "karakeep", "api_key", touch=False,
+                                        strict=True, binding=True, connection=conn) == {"value": "placeholder", "bound_hosts": []}
+        assert secrets_store.list_user_services(db_path, "alice", connection=conn)["karakeep"][0]["last_accessed_at"] is None
+    assert db_path.read_bytes() == before
+    with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "different-key-" * 4}):
+        with pytest.raises(secrets_store.SecretDecryptionError, match="secret decryption failed"):
+            secrets_store.get_secret(db_path, "alice", "karakeep", "api_key", touch=False, strict=True)
+    assert db_path.read_bytes() == before

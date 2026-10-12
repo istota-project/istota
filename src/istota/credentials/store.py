@@ -21,7 +21,7 @@ import hashlib
 import logging
 import json
 import secrets
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -53,6 +53,10 @@ _SCRYPT_SALT = b"istota-secrets-store-v1"
 _SCRYPT_N = 2 ** 14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
+
+
+class SecretDecryptionError(RuntimeError):
+    """A stored value cannot be decrypted; no credential data in the error."""
 
 
 class SecretKeyMissingError(RuntimeError):
@@ -280,26 +284,32 @@ def set_secret(
 
 def get_secret(
     db_path: Path, user_id: str, service: str, key: str,
-    *, binding: bool = False, connection=None,
+    *, binding: bool = False, connection=None, touch: bool = True, strict: bool = False,
 ) -> str | dict | None:
     """Decrypt and return a stored secret, or None if missing.
 
     ``binding=True`` returns the value and bound hosts from one transaction.
     Bumps ``last_accessed_at`` on every successful read so admins can see
-    which credentials are actually in use.
+    which credentials are actually in use. ``touch=False`` opens read-only and
+    skips that write. ``strict=True`` raises safe errors instead of treating an
+    unavailable key or undecryptable row as missing.
     """
-    if not secret_key_available():
+    if not strict and not secret_key_available():
         return None
 
     try:
         fernet = _get_fernet()
     except SecretKeyMissingError:
+        if strict:
+            raise
         return None
 
-    with (nullcontext(connection) if connection is not None else _connect(db_path)) as conn:
+    manager = (nullcontext(connection) if connection is not None else
+               _connect(db_path) if touch else closing(sqlite_util.connect_read_only(db_path)))
+    with manager as conn:
         if binding and not conn.in_transaction:
             # Hold a consistent value/binding view through the access-time write.
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN IMMEDIATE" if touch else "BEGIN")
         row = conn.execute(
             "SELECT id, encrypted_value FROM secrets "
             "WHERE user_id = ? AND service = ? AND key = ?",
@@ -312,6 +322,8 @@ def get_secret(
         try:
             plaintext = fernet.decrypt(ciphertext).decode("utf-8")
         except Exception as e:
+            if strict:
+                raise SecretDecryptionError("secret decryption failed") from None
             logger.warning(
                 "secret decrypt failed user=%s service=%s key=%s: %s "
                 "(stale ISTOTA_SECRET_KEY?)",
@@ -323,14 +335,15 @@ def get_secret(
         # another writer holds the lock (e.g. a long-lived in-task
         # transaction), don't stall the read on it. Drop busy_timeout to
         # 100ms for this UPDATE so we fail fast and skip the bump.
-        try:
-            conn.execute("PRAGMA busy_timeout = 100")
-            conn.execute(
-                "UPDATE secrets SET last_accessed_at = datetime('now') WHERE id = ?",
-                (secret_id,),
-            )
-        except sqlite3.OperationalError as e:
-            logger.debug("skipped last_accessed_at update (locked?): %s", e)
+        if touch:
+            try:
+                conn.execute("PRAGMA busy_timeout = 100")
+                conn.execute(
+                    "UPDATE secrets SET last_accessed_at = datetime('now') WHERE id = ?",
+                    (secret_id,),
+                )
+            except sqlite3.OperationalError as e:
+                logger.debug("skipped last_accessed_at update (locked?): %s", e)
         if binding:
             from istota.credentials.broker.bindings import get_binding
             metadata = get_binding(conn, user_id, key)
@@ -587,7 +600,7 @@ def get_service_secrets(db_path: Path, user_id: str, service: str) -> dict[str, 
     return out
 
 
-def list_user_services(db_path: Path, user_id: str) -> dict[str, list[dict]]:
+def list_user_services(db_path: Path, user_id: str, *, connection=None) -> dict[str, list[dict]]:
     """List which (service, key) pairs the user has configured.
 
     Returns ``{service: [{"key": ..., "updated_at": ..., "last_accessed_at": ...}]}``.
@@ -595,7 +608,7 @@ def list_user_services(db_path: Path, user_id: str) -> dict[str, list[dict]]:
     uses to render "configured" / "missing" status badges.
     """
     out: dict[str, list[dict]] = {}
-    with _connect(db_path) as conn:
+    with (nullcontext(connection) if connection is not None else closing(sqlite_util.connect_read_only(db_path))) as conn:
         rows = conn.execute(
             "SELECT service, key, updated_at, last_accessed_at FROM secrets "
             "WHERE user_id = ? ORDER BY service, key",

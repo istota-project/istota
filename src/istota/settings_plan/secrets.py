@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
+import sqlite3
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from pathlib import Path
 
@@ -99,3 +101,110 @@ def resolve_config(document: dict, config_path: Path, sidecar: Sidecar) -> dict:
             path.append(key)
             node = node[key]
         raise SchemaError(path, f"{exc}; supply an inline replacement through --secrets-file") from None
+
+
+# Deliberate subset of secret ensure's registry: session cookies, OAuth material,
+# vault entries and generated credentials are outside declarative settings.
+PROVISIONABLE_SERVICES = frozenset({"karakeep", "ntfy", "native_brain", "feeds", "overland", "carto"})
+
+
+def provisionable_keys():
+    from istota.credentials.schema import known_service_keys
+
+    registry = known_service_keys()
+    return {service: registry[service] for service in sorted(PROVISIONABLE_SERVICES)}
+
+
+def snapshot_secrets(conn, user, warnings):
+    """Eligible stored slots only, without decrypting or disclosing other names."""
+    from istota.credentials import store
+
+    allowed = provisionable_keys()
+    declarations = []
+    excluded = False
+    for service, entries in store.list_user_services(None, user, connection=conn).items():
+        keys = sorted(entry["key"] for entry in entries if entry["key"] in allowed.get(service, ()))
+        excluded |= len(keys) != len(entries)
+        if keys:
+            declarations.append({"service": service, "keys": keys})
+    if excluded:
+        warnings.append(f"users.{user}.secrets: excluded vault, generated, session or other non-provisionable credentials")
+    return declarations
+
+
+def _secret_state(conn, user, scopes):
+    """Ciphertext revisions detect replacement without decrypting unrelated slots."""
+    rows = conn.execute("SELECT service, key, encrypted_value FROM secrets WHERE user_id=? ORDER BY service, key",
+                        (user,)).fetchall()
+    return [[service, key, bytes(value).hex()] for service, key, value in rows if key in scopes.get(service, ())]
+
+
+def plan_secrets(plan, user, context, options):
+    from istota import db
+    from istota.credentials import audit, store
+    from istota.lib.sqlite_util import connect_read_only
+    from istota.settings_plan.engine import ExecutionError, Operation, Unit, state_digest
+
+    path = ["users", user, "secrets"]
+    allowed = provisionable_keys()
+    declared = {}
+    for index, entry in enumerate(plan.users[user].sections["secrets"]):
+        service = entry["service"]
+        if service not in allowed:
+            raise ExecutionError("secret_service_not_provisionable", [*path, index, "service"])
+        for offset, key in enumerate(entry["keys"]):
+            if key not in allowed[service]:
+                raise ExecutionError("secret_key_not_provisionable", [*path, index, "keys", offset])
+        declared[service] = set(entry["keys"])
+    scopes = {service: allowed[service] if options.prune_secrets else keys for service, keys in declared.items()}
+    supplied = context.sidecar.users.get(user, {})
+    database = context.config.db_path
+    operations = []
+    try:
+        with closing(connect_read_only(database)) as conn:
+            conn.execute("BEGIN")
+            before = _secret_state(conn, user, scopes)
+            expected = state_digest(before)
+            existing = {(service, key) for service, key, value in before}
+            for service, keys in sorted(declared.items()):
+                for key in sorted(keys):
+                    value = supplied.get(service, {}).get(key)
+                    present = (service, key) in existing
+                    if value is None:
+                        if not present:
+                            context.warnings.append(f"users.{user}.secrets.{service}.{key}: missing; supply a value through --secrets-file")
+                        continue
+                    try:
+                        current = store.get_secret(database, user, service, key, connection=conn, touch=False, strict=True)
+                    except (store.SecretKeyMissingError, store.SecretKeyTooWeakError, store.SecretDecryptionError):
+                        raise ExecutionError("secret_comparison_failed", [*path, service, key]) from None
+                    if current != value:
+                        operations.append(Operation("secrets", f"{service}.{key}", "update" if present else "create",
+                                                    user=user, expected_state=expected))
+            if options.prune_secrets:
+                for service, key in sorted(existing):
+                    if key not in declared[service]:
+                        operations.append(Operation("secrets", f"{service}.{key}", "delete", user=user, expected_state=expected))
+    except (sqlite3.Error, OSError):
+        raise ExecutionError("secret_store_unavailable", path) from None
+    if not operations:
+        return
+
+    @contextmanager
+    def transaction():
+        with db.get_db(database) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+
+    def write(conn, operations):
+        for operation in operations:
+            service, key = operation.identity.split(".", 1)
+            if operation.action == "delete":
+                removed = store.delete_secret(database, user, service, key, connection=conn, actor="apply")
+                if removed:
+                    audit.record(conn, user, action="delete", actor="apply", name=operation.identity, detail={"count": 1})
+            else:
+                store.set_secret(database, user, service, key, supplied[service][key], connection=conn, actor="apply")
+
+    context.units.append(Unit("secrets", user, operations, transaction,
+                              lambda conn: state_digest(_secret_state(conn, user, scopes)), write, expected_state=expected))

@@ -234,7 +234,7 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     """Adapters validate all resulting definitions before execution is allowed."""
     if options.prune_secrets and not options.prune:
         raise ExecutionError("prune_required", ["prune_secrets"])
-    from istota.settings_plan.secrets import resolve_config, select_sidecar
+    from istota.settings_plan.secrets import plan_secrets, resolve_config, select_sidecar
 
     context.sidecar = select_sidecar(plan, context.sidecar, options.users)
     plan = select_users(plan, options.users)
@@ -255,7 +255,7 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     context.briefing_blocks.clear()
     planners = {"config": _plan_config, "profile": plan_profile, "resources": plan_resources,
                 "briefings": plan_schedules, "scheduled_jobs": plan_cron, "heartbeat": plan_heartbeat,
-                "shared_briefing_blocks": plan_shared_blocks, **context.planners}
+                "shared_briefing_blocks": plan_shared_blocks, "secrets": plan_secrets, **context.planners}
     sections = []
     if plan.config is not None:
         sections.append(("config", None))
