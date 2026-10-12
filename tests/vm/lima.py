@@ -383,6 +383,11 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
         '    log "now on ${tag} (previous: ${previous:-none})"\n    reprovision_if_changed\n',
         '    log "now on ${tag} (previous: ${previous:-none})"\n',
     ),
+    # The stack returns to the release and the host's scripts stay at the newer ref.
+    "rollback-without-reprovision": (
+        '    log "rolled back to ${previous} (previous: ${current})"\n    reprovision_if_changed\n',
+        '    log "rolled back to ${previous} (previous: ${current})"\n',
+    ),
 }
 
 

@@ -189,6 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`istota-stack rollback` puts the host's scripts and units back too.** It returned the stack to the previous release but left `istota-stack` itself, the systemd units and the host scripts at the newer one. Like an update, a rollback now runs the restored checkout's `host/provision.sh` when the host's provisioning inputs differ from the last run.
+
 - Turning off an optional part of the stack, such as the browser, now stops it. Its container kept running after the change, unwatched and still holding memory, until it was removed by hand; the next start or update of the stack now removes it.
 
 - **Notices raised from the web app now reach you on WhatsApp.** The notice that an administrator changed your contact details, and the one asking you to reconnect Nextcloud or Garmin, were sent from the web container, which has no WhatsApp connection. On a paired WhatsApp session the send failed, and that notice could never be sent to WhatsApp again. The daemon sends them now; the notices in the bell are unchanged.
