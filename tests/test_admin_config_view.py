@@ -557,6 +557,84 @@ class TestTopLevel:
         ))
 
 
+class TestRawDocument:
+    def test_the_raw_document_has_a_sentinel_at_every_secret_leaf(self):
+        import tomllib
+
+        from istota.config_editor.secrets import SENTINEL
+
+        raw = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)["raw_toml"]
+        parsed = tomllib.loads(raw)
+        assert parsed["bot_name"] == "Filebot"
+        assert parsed["email"]["imap_password"] == SENTINEL
+        assert parsed["brain"]["native"]["extra_headers"] == {"x-tenant": SENTINEL}
+        assert "HEADER-VALUE-SENTINEL" not in raw
+        assert "INLINE-PASSWORD-SENTINEL" not in raw
+
+    def test_no_raw_document_without_a_parsable_file(self):
+        assert view.build_config_view(Config())["raw_toml"] is None
+        assert view.build_config_view(Config(), document="x = = 1\n")["raw_toml"] is None
+
+    def test_an_empty_file_is_an_empty_raw_document(self):
+        assert view.build_config_view(Config(), document="")["raw_toml"] == ""
+
+
+class TestRemovableProblems:
+    def _check(self, *problems):
+        from istota.apply import CheckResult
+
+        return CheckResult(problems=list(problems))
+
+    def test_unknown_and_retired_keys_in_the_file_can_be_removed(self, monkeypatch):
+        monkeypatch.delenv("ISTOTA_EMAIL_IMAP_PASSWORD", raising=False)
+        document = '[web]\ntypo_key = 1\n\n[scheduler]\nvault_sync_interval = 5\n'
+        check = self._check(
+            {"kind": "unknown", "path": ["web", "typo_key"], "message": "m1"},
+            {"kind": "retired", "path": ["scheduler", "vault_sync_interval"], "message": "m2"},
+        )
+        problems = view.build_config_view(Config(), document=document, check=check)["problems"]
+        assert [(p["path"], p.get("action")) for p in problems] == [
+            (["web", "typo_key"], "unset"),
+            (["scheduler", "vault_sync_interval"], "unset"),
+        ]
+
+    def test_no_remove_action_for_a_key_the_file_does_not_hold_by_table(self):
+        # Inside an array of tables: an unset op cannot reach it, so the raw
+        # editor is where it is removed.
+        document = '[[default_briefings]]\nname = "m"\nbogus = 1\n'
+        check = self._check(
+            {"kind": "unknown", "path": ["default_briefings", "0", "bogus"], "message": "m"},
+            {"kind": "discarded", "path": ["scheduler", "poll_interval"], "message": "m"},
+        )
+        problems = view.build_config_view(Config(), document=document, check=check)["problems"]
+        assert all("action" not in p for p in problems)
+
+    def test_no_remove_action_when_a_plan_manages_the_config(self):
+        document = '[web]\ntypo_key = 1\n'
+        check = self._check({"kind": "unknown", "path": ["web", "typo_key"], "message": "m"})
+        problems = view.build_config_view(
+            Config(), document=document, check=check,
+            managed={"config": {"managed": True, "source": "ansible", "at": "t"}},
+        )["problems"]
+        assert "action" not in problems[0]
+
+    def test_a_file_credential_also_set_inline_is_a_removable_warning(self, monkeypatch):
+        monkeypatch.setenv("ISTOTA_EMAIL_IMAP_PASSWORD", "from-the-file")
+        problems = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)["problems"]
+        inline = [p for p in problems if p["path"] == ["email", "imap_password"]]
+        assert len(inline) == 1
+        assert inline[0]["kind"] == "warning"
+        assert inline[0]["blocking"] is False
+        assert inline[0]["action"] == "unset"
+        assert "also set in config.toml" in inline[0]["message"]
+        assert "INLINE-PASSWORD-SENTINEL" not in str(problems)
+
+    def test_no_inline_warning_when_the_secrets_file_is_empty(self, monkeypatch):
+        monkeypatch.delenv("ISTOTA_EMAIL_IMAP_PASSWORD", raising=False)
+        problems = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)["problems"]
+        assert problems == []
+
+
 class TestManaged:
     def test_a_managed_config_makes_config_fields_read_only(self):
         payload = view.build_config_view(

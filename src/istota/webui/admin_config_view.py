@@ -424,6 +424,49 @@ def _problems(check: Any) -> list[dict]:
     return [] if check is None else problems_of(check)
 
 
+_REMOVABLE_KINDS = frozenset({"unknown", "retired"})
+
+
+def _file_problems(check: Any, document: dict | None, *, config_managed: bool) -> list[dict]:
+    """The current file's problems, with a remove action where one works.
+
+    An unknown or retired key, and a file credential also set inline, carry
+    `action: "unset"` when the file holds the key through tables alone, which
+    is what an `unset` op can reach; one inside an array of tables is removed
+    in the raw editor. A managed config offers no action.
+    """
+    import os
+
+    from istota.config_editor.edits import file_credential_problems
+
+    found = _problems(check)
+    if document is None:
+        return found
+    found += file_credential_problems(document, os.environ)
+    for problem in found:
+        path = tuple(problem.get("path") or ())
+        removable = problem.get("action") == "unset" or problem.get("kind") in _REMOVABLE_KINDS
+        if removable and path and not config_managed and _lookup(document, path)[0]:
+            problem["action"] = "unset"
+        else:
+            problem.pop("action", None)
+    return found
+
+
+def _raw_document(redacted: dict | None) -> str | None:
+    """The whole file for the raw editor, a sentinel at every secret leaf."""
+    from istota.lib import toml_write
+
+    if redacted is None:
+        return None
+    if not redacted:
+        return ""
+    try:
+        return toml_write.dumps(redacted)
+    except toml_write.TomlWriteError:
+        return None
+
+
 def _value_at(config: Any, path: tuple[str, ...]) -> Any:
     node = config
     for segment in path:
@@ -540,7 +583,10 @@ def build_config_view(
         "managed": managed_by,
         "document_digest": document_digest,
         "started_at": started_at,
-        "problems": _problems(check),
+        "problems": _file_problems(
+            check, parsed, config_managed=ctx["managed_reasons"]["config"] is not None,
+        ),
+        "raw_toml": _raw_document(ctx["redacted"]),
         "has_comments": edits.has_comments(document) if document is not None else False,
         "secrets": _secret_files(config, ctx),
         "admins": {

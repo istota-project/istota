@@ -460,7 +460,7 @@ def _read_admins(raw: Any) -> list[str] | None:
     return admins
 
 
-def _file_credential_problems(new: dict, environ: Mapping[str, str]) -> list[dict]:
+def file_credential_problems(new: dict, environ: Mapping[str, str]) -> list[dict]:
     """A file credential also set in `config.toml`, where the set file wins."""
     from istota.config_editor import schema
 
@@ -671,7 +671,7 @@ async def preview(
     for problem in problems:
         path = tuple(problem.get("path") or ())
         problem["pre_existing"] = bool(path) and not any(_related(path, item) for item in changed)
-    problems += _file_credential_problems(new, environ)
+    problems += file_credential_problems(new, environ)
 
     risky = {secrets.label(path) for path in schema.RISKY_KEYS if _differs(new, base, path)}
     for name in file_secrets:
