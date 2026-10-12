@@ -932,7 +932,10 @@ def check_workspace_xattr(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(
             name, SKIP, f"{path} is not mounted; runtime.mount_liveness reports it"
         )
-    sample = _first_file_under(path)
+    # Users/ first: every user has files at its top, where Channels/ can hold
+    # hundreds of directories with none and use up the walk's bound.
+    users = path / "Users"
+    sample = (_first_file_under(users) if users.is_dir() else None) or _first_file_under(path)
     if sample is None:
         return CheckResult(name, SKIP, f"no file found near the top of {path} to probe")
     try:

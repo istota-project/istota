@@ -127,11 +127,13 @@ def _perform_migration(old_path: Path, new_path: Path, module: str, user_id: str
     new_path.parent.mkdir(parents=True, exist_ok=True)
     # DELETE-mode DB is a single file (no live -wal/-shm with services stopped),
     # but copy any sidecars defensively before flipping the journal.
-    shutil.copy2(old_path, new_path)
+    # copyfile, not copy2: the old path is on the workspace mount, whose xattr
+    # calls can fail with EIO (#694), and init_db sets up the new file anyway.
+    shutil.copyfile(old_path, new_path)
     for suffix in ("-wal", "-shm"):
         side = old_path.with_name(old_path.name + suffix)
         if side.exists():
-            shutil.copy2(side, new_path.with_name(new_path.name + suffix))
+            shutil.copyfile(side, new_path.with_name(new_path.name + suffix))
 
     # init_db flips journal_mode to WAL and re-asserts the schema/migrations.
     _init_funcs()[module](new_path)

@@ -113,7 +113,9 @@ def copy_to_remote(config: "Config", local_path: Path, remote_path: str) -> None
     if config.has_workspace:
         dst = config.workspace_path / remote_path.lstrip("/")
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(local_path), str(dst))
+        # Not copy2: a local file's user.* xattrs would be set on the mount (#694).
+        shutil.copyfile(str(local_path), str(dst))
+        shutil.copymode(str(local_path), str(dst))
     else:
         rclone_upload(config.rclone_remote, local_path, remote_path)
 

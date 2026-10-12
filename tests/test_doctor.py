@@ -1683,15 +1683,17 @@ class TestWorkspaceXattr:
 
     @staticmethod
     def _listxattr_raises(monkeypatch, err):
+        """Files answer `err`; directories answer ENOTSUP, as the mount's did."""
         import errno as _errno
 
         def _raise(path, *a, **kw):
-            raise OSError(err, os.strerror(err), str(path))
+            code = err if os.path.isfile(path) else _errno.ENOTSUP
+            raise OSError(code, os.strerror(code), str(path))
 
-        monkeypatch.setattr(doctor.os, "listxattr", _raise)
+        # raising=False: macOS has no os.listxattr, and the check is the same there.
+        monkeypatch.setattr(doctor.os, "listxattr", _raise, raising=False)
         return _errno
 
-    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
     def test_eio_warns(self, make_config, tmp_path, monkeypatch):
         import errno as _errno
 
@@ -1702,7 +1704,6 @@ class TestWorkspaceXattr:
         assert "EIO" in r.detail
         assert r.remedy
 
-    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
     @pytest.mark.parametrize("name", ["ENOTSUP", "ENODATA"])
     def test_a_clean_refusal_is_ok(self, make_config, tmp_path, monkeypatch, name):
         import errno as _errno
@@ -1711,6 +1712,18 @@ class TestWorkspaceXattr:
         self._listxattr_raises(monkeypatch, getattr(_errno, name))
         r = run_checks(config, only=("runtime.workspace_xattr",))[0]
         assert r.status == OK, r.detail
+
+    def test_a_wide_channels_directory_does_not_hide_the_users(self, make_config, tmp_path, monkeypatch):
+        """Channels/ sorts first and can hold hundreds of directories with no
+        file at their top; the walk's bound must not run out on them."""
+        import errno as _errno
+
+        config = self._mounted(make_config, tmp_path, monkeypatch)
+        for i in range(doctor._XATTR_PROBE_ENTRIES + 10):
+            (tmp_path / "mount" / "Channels" / f"room{i:04d}").mkdir(parents=True)
+        self._listxattr_raises(monkeypatch, _errno.EIO)
+        r = run_checks(config, only=("runtime.workspace_xattr",))[0]
+        assert r.status == WARN, r.detail
 
     def test_skips_without_a_mount(self, make_config):
         r = run_checks(make_config(nextcloud_mount_path=None), only=("runtime.workspace_xattr",))[0]
