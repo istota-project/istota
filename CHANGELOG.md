@@ -172,6 +172,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The `!check` chat command is gone.** Sent from web chat it ran the health check inside the web container, which lacks the daemon's sandbox and devbox sockets, so it reported failures that were not there. Run `istota doctor` on the host, or open the admin Health pane, which shows the daemon's own runs.
+
 - **The Docker stack no longer runs its own Nextcloud.** The workspace is a local directory by default, and full Nextcloud integration now points istota at a Nextcloud you run yourself, mounted on the VM. A stack running full integration refuses to start until that mount is up, so nothing is written into an unmounted folder.
 
   **Upgrade note:** An install that ran the bundled Nextcloud is refused at boot until you choose: move that Nextcloud into a compose project of its own, which keeps Talk rooms and files, or copy the workspace into local storage. The deployment docs' page on moving the bundled Nextcloud walks through both.

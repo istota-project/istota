@@ -3,7 +3,6 @@
 import json
 import re
 import sqlite3
-import threading
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 
@@ -18,7 +17,7 @@ from istota.commands import (
     _build_export_metadata, _cancel_one, _format_history_markdown,
     _format_history_text, _parse_export_metadata, _parse_search_args,
     _search_memory, _search_talk_api,
-    brain_for_room, cmd_brain, cmd_check, cmd_cron, cmd_export, cmd_help,
+    brain_for_room, cmd_brain, cmd_cron, cmd_export, cmd_help,
     cmd_memory, cmd_models, cmd_more, cmd_room, cmd_search, cmd_skills,
     cmd_status, cmd_stop, cmd_trust, cmd_untrust, cmd_usage,
     dispatch, is_model_prefix, parse_command, parse_task_id,
@@ -122,23 +121,6 @@ def _set_created_at(conn, stamps):
             "UPDATE tasks SET created_at = ? WHERE id = ?", (created_at, task_id)
         )
     conn.commit()
-
-
-class _RecordingConn:
-    """A real connection that writes `"commit"` into a shared list when it is
-    committed, so a handler's ordering can be asserted rather than only the
-    fact of a commit. Everything else is delegated."""
-
-    def __init__(self, conn, order):
-        self._conn = conn
-        self._order = order
-
-    def commit(self):
-        self._order.append("commit")
-        return self._conn.commit()
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
 
 
 # =============================================================================
@@ -380,7 +362,7 @@ class TestCmdHelp:
         # "opus": at least one alias surfaces so users can discover them from !help
         for needle in (
             "!help", "!stop", "!status", "!memory", "!model", "opus",
-            "!check", "!export", "!search",
+            "!export", "!search",
         ):
             assert needle in result, needle
 
@@ -1516,20 +1498,6 @@ class TestPersonalCommandsInSharedRooms:
         assert _PRIVATE_TEXT not in refused.text
         assert "trace text" in shown.text
 
-    async def test_an_admins_check_in_a_shared_room_is_the_verdict_only(self, make_config):
-        from istota.doctor import CheckResult
-
-        config = make_config(admin_users=["alice"])
-        token, _ = _shared_room(config)
-        clean = [CheckResult(name="runtime.platform", status="ok", detail=_PRIVATE_TEXT)]
-
-        with patch("istota.doctor.run_checks", return_value=clean):
-            result = await dispatch(config, "alice", token, "!check", surface="web")
-
-        assert "OK" in result.text
-        assert "runtime.platform" not in result.text
-        assert _PRIVATE_TEXT not in result.text
-
     async def test_the_surfaces_group_flag_is_enough(self, make_config):
         """A Talk group the registry has not recorded is still a group."""
         config = make_config()
@@ -1768,235 +1736,47 @@ class TestCmdSkills:
 
 
 # =============================================================================
-# TestCmdCheck
+# !check is gone
 # =============================================================================
 
 
-class TestCmdCheck:
-    """`!check` renders `doctor.run_checks` and asserts nothing of its own.
+class TestCheckRemoved:
+    """`!check` was removed in favour of `istota doctor` (ISSUE-698).
 
-    Every case patches `doctor.run_checks` and reads the call, rather than
-    running the registry: what the checks do is `tests/test_doctor.py`'s job,
-    and the three properties that matter here are which flags the command asks
-    for, what it does before it blocks, and what a non-admin is shown.
+    Dispatched from web chat it ran the registry in the web container, which
+    lacks the daemon's sandbox profile, cgroup and devbox sockets, so its verdict
+    was wrong there. The daemon's checks are read from `istota doctor` or the
+    admin Health pane instead.
     """
 
-    def _result(self, name, status, detail="detail", remedy=""):
-        from istota.doctor import CheckResult as DoctorResult
+    def test_not_registered(self):
+        assert "check" not in COMMANDS
+        assert "check" not in _COMMAND_ALIASES
 
-        return DoctorResult(name, status, detail, remedy=remedy)
-
-    def _clean(self):
-        from istota.doctor import OK, SKIP
-
-        return [
-            self._result("runtime.platform", OK, "linux"),
-            self._result("runtime.bwrap", SKIP, "sandbox disabled"),
-        ]
-
-    async def _check(self, config, results=None, side_effect=None, user_id="alice"):
-        if side_effect is not None:
-            patcher = patch("istota.doctor.run_checks", side_effect=side_effect)
-        else:
-            patcher = patch(
-                "istota.doctor.run_checks",
-                return_value=self._clean() if results is None else results,
-            )
-        with db.get_db(config.db_path) as conn, patcher:
-            return await cmd_check(_ctx(config, conn, user_id))
-
-    def _recorder(self, calls):
-        def fake_run_checks(cfg, **kwargs):
-            calls["kwargs"] = kwargs
-            return self._clean()
-        return fake_run_checks
-
-    async def test_an_admin_gets_the_whole_registry_fenced(self, make_config):
-        """`render_text`'s alignment is the information, and posted as markdown
-        its two-space indents collapse into one paragraph. Hence the fence."""
-        result = await self._check(make_config(admin_users=["alice"]))
-
-        assert result.startswith("**Health Check**\n\n```\n")
-        assert result.endswith("\n```")
-        assert "runtime.platform" in result
-        assert "runtime.bwrap" in result
-
-    async def test_an_admin_asks_for_live_and_not_deep(self, make_config):
-        """The resolved open question, pinned.
-
-        `live=True` restores the execution test the hand-rolled probe ran.
-        `deep=True` is deliberately absent: the web chat client aborts the very
-        POST that runs this inline at 30s (`web/src/lib/api.ts`), and the Talk
-        path runs dispatch on the process-global loop inside the poll batch's
-        open write transaction. A second 30-second check does not fit either.
-        Asserted as an absence, because a later tidy-up adding it back would
-        otherwise go unnoticed until an admin's `!check` started timing out.
-        """
-        calls = {}
-        await self._check(
-            make_config(admin_users=["alice"]), side_effect=self._recorder(calls),
-        )
-
-        assert calls["kwargs"]["live"] is True
-        assert calls["kwargs"].get("deep", False) is False
-
-    async def test_a_non_admin_gets_one_line_and_neither_flag(self, make_config):
-        calls = {}
-        result = await self._check(
-            make_config(admin_users=["boss"]), side_effect=self._recorder(calls),
-        )
-
-        assert calls["kwargs"].get("live", False) is False
-        assert calls["kwargs"].get("deep", False) is False
-        assert "```" not in result
-        assert "OK" in result
-        assert "1 ok" in result
-        # One line of content under the header, not a registry.
-        body = result.split("\n\n", 1)[1]
-        assert "\n" not in body, f"the non-admin arm rendered more than a line: {body!r}"
-
-    async def test_a_non_admin_is_told_when_something_failed(self, make_config):
-        from istota.doctor import FAIL
-
-        results = self._clean() + [self._result("web.static", FAIL, "missing")]
-        result = await self._check(make_config(admin_users=["boss"]), results)
-
-        assert "PROBLEMS" in result
-        assert "1 fail" in result
-
-    async def test_a_non_admin_is_told_no_cross_user_facts(self, make_config):
-        """The reason for the split.
-
-        The whole registry is a different thing from the five lines a non-admin
-        used to get. `runtime.subscription_usage` reports plan utilization,
-        which `cmd_usage` deliberately withholds from a non-admin;
-        `config.skill_overlays` labels overlays by user id across users;
-        `developer.*` describes other people's trees. `redact` covers
-        configured credential values, not cross-user facts.
-        """
-        from istota.doctor import OK, WARN
-
-        results = [
-            self._result(
-                "runtime.subscription_usage", WARN, "session window at 91% utilization"
-            ),
-            self._result(
-                "config.skill_overlays", OK, "bob: 2 overlays; carol: 1 overlay"
-            ),
-        ]
-        result = await self._check(make_config(admin_users=["boss"]), results)
-
-        assert "91%" not in result
-        assert "utilization" not in result
-        assert "bob" not in result
-        assert "carol" not in result
-        assert "runtime.subscription_usage" not in result
-
-    async def test_an_admin_does_see_those_details(self, make_config):
-        """The control for the case above: without it, a non-admin assertion
-        about an absent string passes against a command that renders nothing at
-        all."""
-        from istota.doctor import WARN
-
-        results = [
-            self._result(
-                "runtime.subscription_usage", WARN, "session window at 91% utilization"
-            )
-        ]
-        result = await self._check(make_config(admin_users=["alice"]), results)
-
-        assert "91% utilization" in result
-
-    async def test_the_admin_render_redacts(self, make_config):
-        """`render_text` takes `secrets` and redacts internally, so the command
-        passes `config_secrets` rather than calling `redact` as well."""
-        from istota.doctor import FAIL
-
-        config = make_config(
-            admin_users=["alice"],
-            nextcloud=NextcloudConfig(
-                url="https://cloud.example.com",
-                username="bot",
-                app_password="s3cr3t-app-password",
-            ),
-        )
-        results = [
-            self._result("web.static", FAIL, "upstream said s3cr3t-app-password")
-        ]
-        result = await self._check(config, results)
-
-        assert "s3cr3t-app-password" not in result
-        assert "web.static" in result
-
-    @pytest.mark.parametrize("user_id", ["alice", "nobody"])
-    async def test_it_commits_before_it_blocks(self, make_config, user_id):
-        """Both arms, since both block.
-
-        The Talk poller wraps its whole batch in one write transaction and
-        hands `dispatch` that connection already mid-write, so holding its lock
-        across a multi-second probe stalls every other writer in the daemon on
-        its busy timeout. `cmd_usage` does the same thing for the same reason.
-
-        The ordering is the assertion, not the fact of a commit: a commit that
-        happens after the probe is the bug wearing a label.
-        """
+    async def test_web_chat_answers_unknown_command(self, make_config):
         config = make_config(admin_users=["alice"])
-        order = []
+        with patch("istota.doctor.run_checks") as run_checks:
+            result = await dispatch(config, "alice", "room1", "!check", surface="web")
 
-        def fake_run_checks(cfg, **kwargs):
-            order.append("run_checks")
-            return self._clean()
+        assert result.handled is True
+        assert "Unknown command `!check`" in (result.text or "")
+        run_checks.assert_not_called()
 
+    async def test_talk_answers_unknown_command(self, make_config):
+        transport = _FakePushTransport()
+        with patch("istota.doctor.run_checks") as run_checks:
+            result = await _dispatch(make_config(admin_users=["alice"]), "!check", transport)
+
+        assert result.handled is True
+        assert "Unknown command `!check`" in transport.delivered[0][1]
+        run_checks.assert_not_called()
+
+    async def test_help_does_not_list_it(self, make_config):
+        config = make_config()
         with db.get_db(config.db_path) as conn:
-            recording = _RecordingConn(conn, order)
-            with patch("istota.doctor.run_checks", side_effect=fake_run_checks):
-                await cmd_check(_ctx(config, recording, user_id, "room1", ""))
+            result = await cmd_help(_ctx(config, conn))
 
-        assert order == ["commit", "run_checks"], (
-            f"expected the caller's transaction committed before the probe, got {order}"
-        )
-
-    class _Broken:
-        """Reads work; only the commit fails."""
-
-        def __init__(self, conn):
-            self._conn = conn
-
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-        def commit(self):
-            raise sqlite3.OperationalError("cannot commit - no transaction is active")
-
-    # A connection we could not commit is the caller's problem, not a reason to
-    # refuse a read-only report. And `ctx.conn` is typed non-optional while
-    # `cmd_usage` still guards for None, because a surface can build a context
-    # without one.
-    @pytest.mark.parametrize("broken", [True, False], ids=["uncommittable", "none"])
-    async def test_an_unusable_connection_is_not_fatal(self, make_config, broken):
-        config = make_config(admin_users=["alice"])
-
-        with db.get_db(config.db_path) as real, \
-                patch("istota.doctor.run_checks", return_value=self._clean()):
-            conn = self._Broken(real) if broken else None
-            result = await cmd_check(_ctx(config, conn, "alice", "room1", ""))
-
-        assert "runtime.platform" in result
-
-    async def test_it_runs_the_registry_off_the_event_loop(self, make_config):
-        """`run_checks` is entirely synchronous and this coroutine runs on the
-        loop that polls every Talk conversation. `cmd_usage`'s own comment
-        names this command's bare `subprocess.run` as what it is not doing."""
-        loop_thread = threading.get_ident()
-        seen = {}
-
-        def fake_run_checks(cfg, **kwargs):
-            seen["thread"] = threading.get_ident()
-            return self._clean()
-
-        await self._check(make_config(admin_users=["alice"]), side_effect=fake_run_checks)
-
-        assert seen["thread"] != loop_thread
+        assert "!check" not in result
 
 
 # =============================================================================

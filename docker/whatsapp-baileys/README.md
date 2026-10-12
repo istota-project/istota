@@ -116,5 +116,5 @@ adapter carries. The short version, for somebody already in this directory:
    sidecar connected.
 5. Start the scheduler. `istota doctor --only whatsapp.` should report
    `whatsapp.baileys_session` ok; the bridge check answers only inside the
-   daemon, so read that one from the admin Health pane or `!check`.
+   daemon, so read that one from the admin Health pane.
 6. Message the number from a bound user's phone and confirm a reply arrives.

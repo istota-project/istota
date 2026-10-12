@@ -1397,7 +1397,7 @@ class TestCheckSelf:
 
 
     def test_a_non_admin_gets_the_count_and_no_details(self, db_path):
-        """The disclosure boundary `cmd_check` draws, drawn here too.
+        """The disclosure boundary the removed `!check` drew, kept here.
 
         `self-check` is not admin-gated and `check_heartbeats` delivers the
         message to whichever user's `HEARTBEAT.md` defined the check, so a

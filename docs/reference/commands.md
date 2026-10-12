@@ -29,7 +29,6 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!cron` | List scheduled jobs with status |
 | `!cron enable NAME` | Re-enable a disabled job |
 | `!cron disable NAME` | Disable a job |
-| `!check` | Run an inline system health check: model binary, bwrap, DB connectivity, recent-task stats, and a live sandboxed execution test |
 | `!export [markdown\|text]` | Export conversation history to a file |
 | `!skills` | List available skills (grouped: available, unavailable, disabled) |
 | `!skills NAME` | Show details for a specific skill |

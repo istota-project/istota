@@ -3533,7 +3533,7 @@ def build_model_cli_env(config: Config) -> dict[str, str]:
     """Build the env for a daemon-side model call that is not a task.
 
     Used by every call that reaches a model outside `execute_task` — the
-    `!check` / self-check execution test and conversation-context triage,
+    self-check execution test and conversation-context triage,
     which spawn or wrap the `claude` CLI directly, and the modules that build a
     `BrainRequest` of their own (the three OCR extractors, the biomarker
     explainer, the nightly sleep cycle, shared briefing blocks and the
