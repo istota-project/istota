@@ -399,6 +399,19 @@ def cmd_apply(args):
     )
 
 
+def cmd_snapshot(args):
+    """Export verified settings without opening the mutating config loader."""
+    from istota.settings_plan import snapshot
+
+    target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
+    if not target:
+        print("istota snapshot: name the config file with -c (or ISTOTA_CONFIG_PATH).", file=sys.stderr)
+        return 1
+    return snapshot.run(Path(target), output=args.output, output_format=args.format,
+                        users=args.user, no_meta=args.no_meta, patches=args.patch,
+                        out=print, err=lambda line: print(line, file=sys.stderr))
+
+
 def _config_request_config(args):
     config = load_config(Path(args.config) if args.config else None)
     if config.config_path is None:
@@ -4758,6 +4771,13 @@ def main():
         help="Before replacing config.toml, keep it as config.toml.bak.<UTC time>, and the newest N of those",
     )
 
+    snapshot_parser = subparsers.add_parser("snapshot", help="Export application settings without credential values")
+    snapshot_parser.add_argument("-o", "--output", help="Private output file (default: stdout)")
+    snapshot_parser.add_argument("--format", choices=("toml", "json"), default="toml")
+    snapshot_parser.add_argument("--user", action="append", help="Export only this user; repeat for several users")
+    snapshot_parser.add_argument("--no-meta", action="store_true", help="Omit snapshot metadata")
+    snapshot_parser.add_argument("--patch", action="append", metavar="SOURCE=DEST", help="Rewrite selected path prefixes")
+
     # config-request: the host applier's half of the web config editor
     config_request_parser = subparsers.add_parser(
         "config-request",
@@ -5791,12 +5811,13 @@ def main():
 
     # Load config and setup logging (except for init/setup/apply, which don't need — or
     # may pre-date — a config file).
-    if args.command not in ("init", "setup", "apply", "migrate"):
+    if args.command not in ("init", "setup", "apply", "snapshot", "migrate"):
         config = load_config(Path(args.config) if args.config else None)
         setup_logging(config, verbose=args.verbose)
 
     commands = {
         "apply": cmd_apply,
+        "snapshot": cmd_snapshot,
         "migrate": cmd_migrate,
         "init": cmd_init,
         "doctor": cmd_doctor,

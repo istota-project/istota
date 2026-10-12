@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota snapshot` exports deterministic application settings for preview and reapplication, with private file output and selected-user exports. It preserves ownership, omits credential values and runtime history, and refuses embedded briefing credentials or settings that change during export.
+
 - `istota apply` can reconcile provisionable user credentials from a private sidecar without changing access timestamps during previews. Ordinary pruning preserves credentials; explicit credential pruning is limited to named services and records each deletion.
 
 - `istota apply --patch` rewrites declared file paths when moving settings between installs. Repeated patches use the longest matching prefix, preserve literal placeholders and warn when a patch matches no selected paths.

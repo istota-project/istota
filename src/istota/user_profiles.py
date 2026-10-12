@@ -410,7 +410,16 @@ def _connect(
         yield conn
 
 
-def _row_to_profile(row: sqlite3.Row) -> UserProfile:
+def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
+    if strict:
+        for name in _LIST_COLUMNS | (_DICT_COLUMNS - {"google_scopes"}):
+            value = json.loads(row[name])
+            expected = list if name in _LIST_COLUMNS else dict
+            items = value if isinstance(value, list) else value.values() if isinstance(value, dict) else ()
+            if not isinstance(value, expected) or any(not isinstance(item, str) for item in items):
+                raise ValueError("invalid profile collection")
+        if any(row[name] not in (0, 1) for name in _BOOL_COLUMNS):
+            raise ValueError("invalid profile boolean")
     return UserProfile(
         user_id=row["user_id"],
         display_name=row["display_name"] or "",
@@ -540,16 +549,20 @@ def read_profile_generation(
 
 
 def list_profiles(
-    db_path: Path, *, busy_timeout_ms: int | None = None,
+    db_path: Path, *, busy_timeout_ms: int | None = None, conn: sqlite3.Connection | None = None,
+    users: list[str] | None = None, strict: bool = False,
 ) -> dict[str, UserProfile]:
     """Return all stored profiles keyed by user_id."""
+    from contextlib import nullcontext
+
     out: dict[str, UserProfile] = {}
-    with _connect(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
-        rows = conn.execute(
-            "SELECT * FROM user_profiles ORDER BY user_id"
-        ).fetchall()
+    with nullcontext(conn) if conn is not None else _connect(db_path, busy_timeout_ms=busy_timeout_ms) as conn:
+        query = "SELECT * FROM user_profiles"
+        if users is not None:
+            query += " WHERE user_id IN (" + ",".join("?" for _ in users) + ")"
+        rows = conn.execute(query + " ORDER BY user_id", users or ()).fetchall()
     for row in rows:
-        profile = _row_to_profile(row)
+        profile = _row_to_profile(row, strict=strict)
         out[profile.user_id] = profile
     return out
 
