@@ -113,8 +113,9 @@ testbed/             # Staging environment for the deployment tiers -- compose
                      #   beside src/ rather than inside tests/ because it is not
                      #   part of the shipped application
 web/                 # SvelteKit frontend
-deploy/              # Ansible role + install script
-docker/              # Docker Compose stack
+docker/              # Docker Compose stack and images
+host/                # Provisioning and istota-stack for the dedicated VM
+ansible/             # Optional management role for an estate-managed VM
 scripts/             # Setup and runner scripts
 schema.sql           # Database schema
 pyproject.toml       # Project metadata and dependencies
