@@ -218,7 +218,7 @@ def _check_target_roots(plan, context):
             proposed = load_config(path, apply_db_overlays=False)
         except Exception:
             raise ExecutionError("validation_error", ["config"]) from None
-    for name in ("db_path", "workspace_path", "nextcloud_mount_path", "temp_dir"):
+    for name in ("db_path", "workspace_path", "workspace_mount_path", "temp_dir"):
         if getattr(current, name) != getattr(proposed, name):
             raise ExecutionError("target_roots_changed", ["config", name])
     if current.module_db_root() != proposed.module_db_root():

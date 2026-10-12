@@ -212,3 +212,32 @@ def test_scoped_plan_never_reads_instance_sections_or_other_users(store, tmp_pat
     result = engine.execute_plan(operations, context)
     assert result.exit_code == 2 and planned == ["bob"]
     assert not context.config_path.exists()
+
+
+@pytest.mark.parametrize("change_mount", [False, True])
+def test_mixed_plan_checks_current_workspace_mount_field(tmp_path, change_mount):
+    from istota import db, user_profiles
+    from istota.lib import toml_write
+
+    database = tmp_path / "framework.db"
+    db.init_db(database)
+    user_profiles.provision_user(database, "alice", {})
+    document = {"db_path": str(database), "workspace_path": str(tmp_path / "workspace"),
+                "workspace_mount_path": str(tmp_path / "mount")}
+    config = tmp_path / "config.toml"
+    config.write_text(toml_write.dumps(document))
+    before = database.read_bytes()
+    proposed = dict(document)
+    if change_mount:
+        proposed["workspace_mount_path"] = str(tmp_path / "other")
+    plan = parse_plan({"config": proposed, "users": {"alice": {}}})
+    context = engine.Context(config)
+    if change_mount:
+        with pytest.raises(engine.ExecutionError) as caught:
+            engine.build_plan(plan, context, engine.Options(dry_run=True))
+        assert caught.value.code == "target_roots_changed"
+        assert caught.value.path == ["config", "workspace_mount_path"]
+    else:
+        operations = engine.build_plan(plan, context, engine.Options(dry_run=True))
+        assert engine.execute_plan(operations, context).exit_code == 0
+    assert database.read_bytes() == before
