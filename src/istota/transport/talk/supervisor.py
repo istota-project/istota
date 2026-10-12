@@ -34,7 +34,9 @@ the listing is fetched for the watcher set anyway. On a deployment where the
 event stream is working it is empty, so the check issues no fetches at all, and
 a non-zero count is the one number that says the stream has silently stopped
 delivering while every socket still looks fine. `doctor` reads it as
-`rooms_behind`.
+`rooms_behind`. The first pass after start is left out of it (reported as
+`caught_up_at_start`), since it fetches whatever arrived while the daemon was
+down and the boot-time `doctor` run reads it a second later.
 
 **The drain's error contract is part of the coalescing rule rather than an
 afterthought.** `poll_one_conversation` wraps the results transaction, whose
@@ -478,6 +480,7 @@ class SignalingSupervisor:
         self._stop = asyncio.Event()
 
         self._rooms_behind = 0
+        self._caught_up_at_start: int | None = None
         # token -> the monotonic time before which a fatally-stopped watcher is
         # not tried again.
         self._fatal_until: dict[str, float] = {}
@@ -980,7 +983,13 @@ class SignalingSupervisor:
         # empty room — so counting it here would have `doctor` report the event
         # stream as failing for ever on a deployment where it works. Both are
         # still fetched.
-        self._rooms_behind = len(room_pass.behind_cursor)
+        # The first completed pass after start is catch-up, not evidence: any
+        # room that took a message while the daemon was down is behind here,
+        # and `doctor` runs at boot right after it.
+        if self._caught_up_at_start is None:
+            self._caught_up_at_start = len(room_pass.behind_cursor)
+        else:
+            self._rooms_behind = len(room_pass.behind_cursor)
 
         await self._stop_departed()
         await self._restart_never_connected()
@@ -1229,6 +1238,7 @@ class SignalingSupervisor:
                 token for token, w in watchers if not w.connected
             ),
             "rooms_behind": self._rooms_behind,
+            "caught_up_at_start": self._caught_up_at_start or 0,
             # Distinct from `disconnected`, which a watcher joins for a second
             # between reconnects. These are rooms nothing has ever delivered
             # for, which reads the same as a healthy one on every other number
