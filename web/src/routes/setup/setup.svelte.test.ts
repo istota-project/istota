@@ -33,7 +33,12 @@ const MODELS = {
   anthropic: { base_url: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-6' },
   openrouter: { base_url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.6' },
 };
-const CREDENTIALS = new Set(['password', 'native_api_key', 'claude_code_oauth_token']);
+const CREDENTIALS = new Set([
+  'password',
+  'native_api_key',
+  'claude_code_oauth_token',
+  'nextcloud_app_password',
+]);
 
 function state(phase: SetupState['phase']): SetupState {
   return {
@@ -276,6 +281,13 @@ async function openAt(step: string) {
 }
 
 const next = () => fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+// The button shows with the failed result, while Next's own request is still
+// winding down and both are disabled; a person cannot click it before then.
+async function continueWithoutTesting() {
+  const button = await screen.findByRole('button', { name: 'Continue without testing' });
+  await waitFor(() => expect(button).toBeEnabled());
+  await fireEvent.click(button);
+}
 const type = (label: RegExp, value: string) =>
   fireEvent.input(screen.getByLabelText(label), { target: { value } });
 
@@ -475,7 +487,7 @@ describe('the AI service screen', () => {
     expect(await screen.findByText('That API key was not accepted.')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'AI service' })).toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Continue without testing' }));
+    await continueWithoutTesting();
     expect(await screen.findByRole('heading', { name: 'Web address' })).toBeInTheDocument();
     expect(checkSetupConnection).toHaveBeenCalledTimes(1);
     expect(validateSetupStep).toHaveBeenCalledTimes(2);
@@ -600,5 +612,373 @@ describe('the AI service screen', () => {
     await next();
     expect(await screen.findByText('Enter a model name.')).toBeVisible();
     expect(checkSetupConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe('the Web address screen', () => {
+  const pointsHere = {
+    ok: true,
+    warning: false,
+    message: 'istota.example.com points at this server.',
+  };
+  const elsewhere = {
+    ok: false,
+    warning: true,
+    message:
+      'istota.example.com points at 198.51.100.7, not at this server’s address, 203.0.113.5.',
+  };
+
+  function openedFrom(host: string) {
+    vi.mocked(getSetupState).mockResolvedValue({ ...state('open'), local: false, host });
+    __history.reset('/setup/?step=address');
+    render(Page);
+  }
+
+  it('starts on this computer when the page was opened here, and says nothing more', async () => {
+    await openAt('address');
+    const cards = await screen.findAllByRole('radio');
+    expect(cards.map((c) => c.textContent)).toEqual([
+      expect.stringContaining('Only on this computer'),
+      expect.stringContaining('On the internet, at my own web address'),
+      expect.stringContaining('Behind a proxy I run'),
+    ]);
+    expect(cards[0]).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByText(/opened this page from another computer/)).toBeNull();
+
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Nextcloud' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ ingress: 'local', hostname: 'localhost:8080' });
+    expect(validateSetupStep).toHaveBeenCalledWith('address');
+  });
+
+  it('starts on the internet when opened from another computer, and warns about this one', async () => {
+    openedFrom('203.0.113.5');
+    const cards = await screen.findAllByRole('radio');
+    expect(cards[1]).toHaveAttribute('aria-checked', 'true');
+
+    await fireEvent.click(cards[0]);
+    expect(
+      await screen.findByText(/You opened this page from another computer/),
+    ).toBeInTheDocument();
+  });
+
+  it('asks for the name, says where to point it, and saves it bare', async () => {
+    openedFrom('203.0.113.5:443');
+    await screen.findByLabelText(/^Web address/);
+    expect(
+      screen.getByText(/Point this name at this server's address, 203\.0\.113\.5, with your/),
+    ).toBeInTheDocument();
+
+    await type(/^Web address/, 'https://istota.example.com/');
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Nextcloud' })).toBeInTheDocument();
+    expect(saved).toMatchObject({
+      ingress: 'direct',
+      hostname: 'istota.example.com',
+      tls_cert_source: 'acme',
+    });
+  });
+
+  it('tests the name and shows a mismatch as a warning, which does not hold Next', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(elsewhere);
+    openedFrom('203.0.113.5');
+    await screen.findByLabelText(/^Web address/);
+    await type(/^Web address/, 'istota.example.com');
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    expect(await screen.findByText(elsewhere.message)).toHaveClass('warn');
+    expect(checkSetupConnection).toHaveBeenCalledWith('address');
+    expect(saved).toMatchObject({ hostname: 'istota.example.com' });
+
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Nextcloud' })).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a name that points here as passed', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(pointsHere);
+    openedFrom('203.0.113.5');
+    await screen.findByLabelText(/^Web address/);
+    await type(/^Web address/, 'istota.example.com');
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+    expect(await screen.findByText(pointsHere.message)).toHaveClass('ok');
+  });
+
+  it('asks a proxy for its fields and shows the server’s refusals under them', async () => {
+    vi.mocked(validateSetupStep).mockResolvedValue({
+      ok: false,
+      fields: [{ field: 'upstream_proxy', message: 'Enter your proxy’s address.' }],
+    });
+    await openAt('address');
+    const cards = await screen.findAllByRole('radio');
+    await fireEvent.click(cards[2]);
+    await type(/^Web address/, 'istota.example.com');
+    await type(/^Listen address/, '10.0.0.5');
+    await next();
+
+    expect(await screen.findByText('Enter your proxy’s address.')).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Upstream proxy address/)).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(saved).toMatchObject({
+      ingress: 'proxied',
+      hostname: 'istota.example.com',
+      listen_addr: '10.0.0.5',
+      listen_port: 8080,
+      tls_cert_source: 'self-signed',
+    });
+  });
+});
+
+describe('the Nextcloud screen', () => {
+  const LINES = [
+    { key: 'server', ok: true, warning: false, message: 'Found Nextcloud 30.0.4.' },
+    { key: 'signin', ok: true, warning: false, message: 'Signed in as istota.' },
+    {
+      key: 'admin',
+      ok: true,
+      warning: true,
+      message:
+        'This account is an administrator. Istota works better with an ordinary account (step 1).',
+    },
+    { key: 'files', ok: true, warning: false, message: 'The account’s files are reachable.' },
+    { key: 'talk', ok: true, warning: false, message: 'Talk is installed.' },
+    {
+      key: 'user',
+      ok: true,
+      warning: true,
+      message: 'Couldn’t find a Nextcloud user named Ada.Lovelace.',
+    },
+  ];
+  const passed = {
+    ok: true,
+    warning: true,
+    message: 'Signed in, and Talk is available.',
+    lines: LINES,
+    talk_available: true,
+  };
+  const noTalk = {
+    ok: true,
+    warning: false,
+    message: 'Signed in.',
+    lines: [
+      LINES[0],
+      LINES[1],
+      {
+        key: 'talk',
+        ok: true,
+        warning: false,
+        message: 'Talk isn’t installed, so you will chat with Istota in the web app.',
+      },
+    ],
+    talk_available: false,
+  };
+  const failed = {
+    ok: false,
+    warning: false,
+    message: 'Couldn’t sign in.',
+    lines: [
+      LINES[0],
+      {
+        key: 'signin',
+        ok: false,
+        warning: false,
+        message: 'That username and app password weren’t accepted. Check step 3.',
+      },
+    ],
+    talk_available: false,
+  };
+
+  async function openWithWelcomeDone() {
+    const welcome = { user_email: 'ada@example.com', user_id: 'ada', bot_name: 'Marlowe' };
+    vi.mocked(getSetupDraft).mockResolvedValue({ draft: welcome });
+    saved = { ...welcome };
+    await openAt('nextcloud');
+    return screen.findAllByRole('radio');
+  }
+
+  async function chooseNextcloud() {
+    const cards = await openWithWelcomeDone();
+    await fireEvent.click(cards[1]);
+    await screen.findByLabelText(/^Nextcloud address/);
+  }
+
+  async function fillIn() {
+    await type(/^Nextcloud address/, 'cloud.example.com/index.php/apps/files/');
+    await type(/^The assistant's app password/, 'app-password-1');
+    await type(/^Your own Nextcloud username/, 'Ada.Lovelace');
+  }
+
+  it('keeps files here by default and moves on without a test', async () => {
+    const cards = await openWithWelcomeDone();
+    expect(cards.map((c) => c.textContent)).toEqual([
+      expect.stringContaining('Keep files on this server'),
+      expect.stringContaining('Use my Nextcloud'),
+    ]);
+    expect(cards[0]).toHaveAttribute('aria-checked', 'true');
+
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ storage: 'local', user_id: 'ada' });
+    expect(checkSetupConnection).not.toHaveBeenCalled();
+  });
+
+  it('shows the checklist and the fields, the username field replacing the email’s', async () => {
+    await chooseNextcloud();
+
+    expect(screen.getByText(/Create a new user for your assistant/)).toHaveTextContent('“Marlowe”');
+    expect(screen.getByText(/create an app password named “Istota”/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^The assistant's Nextcloud username/)).toHaveValue('istota');
+    // Not `ada`: the Welcome screen's guess from the email is not a Nextcloud id.
+    expect(screen.getByLabelText(/^Your own Nextcloud username/)).toHaveValue('');
+  });
+
+  it('tests on Next, renders every line of the result, and saves the Nextcloud username', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await chooseNextcloud();
+    await fillIn();
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledWith('nextcloud');
+    expect(saved).toMatchObject({
+      storage: 'nextcloud',
+      user_id: 'Ada.Lovelace',
+      nextcloud_url: 'https://cloud.example.com',
+      nextcloud_public_url: 'https://cloud.example.com',
+      nextcloud_username: 'istota',
+      nextcloud_app_password: 'app-password-1',
+      talk_enabled: true,
+    });
+  });
+
+  it('renders each line of the check in place, marked by how it went', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await chooseNextcloud();
+    await fillIn();
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    await screen.findByText(passed.message);
+    const lines = [...document.querySelectorAll('[data-check-line]')];
+    expect(lines.map((l) => l.getAttribute('data-check-line'))).toEqual([
+      'server',
+      'signin',
+      'admin',
+      'files',
+      'talk',
+      'user',
+    ]);
+    expect(lines.map((l) => l.textContent?.trim())).toEqual(
+      LINES.map((l) => expect.stringContaining(l.message)),
+    );
+    expect(lines[0]).toHaveClass('ok');
+    expect(lines[2]).toHaveClass('warn');
+    expect(lines[5]).toHaveClass('warn');
+  });
+
+  it('offers Talk, checked, when the test finds it', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await chooseNextcloud();
+    expect(screen.queryByLabelText(/^Chat with Marlowe in Nextcloud Talk/)).toBeNull();
+    await fillIn();
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    const talk = await screen.findByLabelText(/^Chat with Marlowe in Nextcloud Talk/);
+    expect(talk).toBeChecked();
+    await fireEvent.click(talk);
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ talk_enabled: false });
+    expect(checkSetupConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it('turns Talk off and offers no checkbox when Nextcloud has no Talk', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(noTalk);
+    await chooseNextcloud();
+    await fillIn();
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    expect(await screen.findByText(/chat with Istota in the web app/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Chat with Marlowe in Nextcloud Talk/)).toBeNull();
+    expect(saved).toMatchObject({ talk_enabled: false });
+  });
+
+  it('stays on a failed test, marks the failing line, and offers to continue without it', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(failed);
+    await chooseNextcloud();
+    await fillIn();
+    await next();
+
+    expect(await screen.findByText(failed.lines[1].message)).toBeInTheDocument();
+    expect(document.querySelector('[data-check-line="signin"]')).toHaveClass('bad');
+    expect(screen.getByRole('heading', { name: 'Nextcloud' })).toBeInTheDocument();
+
+    await continueWithoutTesting();
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledTimes(1);
+    expect(saved).toMatchObject({ storage: 'nextcloud', talk_enabled: false });
+  });
+
+  it('shows a refused username under the Nextcloud username field', async () => {
+    const message = 'Istota can’t use this username, even where Nextcloud accepts it.';
+    vi.mocked(validateSetupStep).mockResolvedValue({
+      ok: false,
+      fields: [{ field: 'user_id', message }],
+    });
+    await chooseNextcloud();
+    await fillIn();
+    await next();
+
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Your own Nextcloud username/)).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(checkSetupConnection).not.toHaveBeenCalled();
+  });
+
+  it('keeps an internal address apart from the one browsers use', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await chooseNextcloud();
+    await fillIn();
+    await fireEvent.click(screen.getByText('More'));
+    await type(/^Address this server uses to reach Nextcloud/, 'http://nextcloud.internal:8080/');
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(saved).toMatchObject({
+      nextcloud_url: 'http://nextcloud.internal:8080',
+      nextcloud_public_url: 'https://cloud.example.com',
+    });
+  });
+
+  it('is not overwritten by the Welcome screen once Nextcloud holds it', async () => {
+    const draft = {
+      user_email: 'ada@example.com',
+      user_id: 'Ada.Lovelace',
+      storage: 'nextcloud',
+    };
+    vi.mocked(getSetupDraft).mockResolvedValue({ draft });
+    saved = { ...draft };
+    await openAt('welcome');
+    await screen.findByLabelText(/^Your email/);
+    expect(screen.queryByLabelText(/^Username/)).toBeNull();
+    expect(screen.getByText(/Your username is your Nextcloud username/)).toBeInTheDocument();
+
+    await type(/^Your email/, 'countess@example.com');
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Your account' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ user_email: 'countess@example.com', user_id: 'Ada.Lovelace' });
+  });
+
+  it('gives the email’s username back on switching to keeping files here', async () => {
+    await chooseNextcloud();
+    await type(/^Your own Nextcloud username/, 'Ada.Lovelace');
+    await fireEvent.click(screen.getAllByRole('radio')[0]);
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ storage: 'local', user_id: 'ada' });
   });
 });

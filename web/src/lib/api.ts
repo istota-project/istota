@@ -5264,6 +5264,8 @@ export interface SetupCheckResult {
   message: string;
   /** The Nextcloud check's per-step results. */
   lines?: SetupCheckLine[];
+  /** The Nextcloud check: whether Talk is installed there. */
+  talk_available?: boolean;
 }
 export interface SetupValidation {
   ok: boolean;

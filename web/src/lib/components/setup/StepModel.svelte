@@ -1,16 +1,10 @@
 <script lang="ts">
-  import {
-    checkSetupConnection,
-    getSetupModels,
-    SetupApiError,
-    type SetupCheckResult,
-    type SetupModelDefaults,
-  } from '$lib/api';
+  import { getSetupModels, type SetupCheckResult, type SetupModelDefaults } from '$lib/api';
   import { AutocompleteInput, Button, Field, Input, OptionCards } from '$lib/components/ui';
   import { SecretField } from '$lib/components/settings';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import SetupMore from './SetupMore.svelte';
-  import type { SetupDraftStore } from './setupDraft.svelte';
+  import { runSetupCheck, type SetupDraftStore } from './setupDraft.svelte';
 
   type Service = 'anthropic' | 'openrouter' | 'subscription';
 
@@ -112,16 +106,7 @@
     testing = true;
     forget();
     try {
-      await draft.save();
-      result = await checkSetupConnection('model');
-    } catch (e) {
-      if (e instanceof SetupApiError && e.status === 401) throw e;
-      const fields: Record<string, string> = {};
-      if (e instanceof SetupApiError) {
-        for (const f of e.fields) if (f.field && !(f.field in fields)) fields[f.field] = f.message;
-      }
-      testErrors = fields;
-      result = { ok: false, warning: false, message: e instanceof Error ? e.message : String(e) };
+      ({ result, fields: testErrors } = await runSetupCheck(draft, 'model'));
     } finally {
       testing = false;
     }

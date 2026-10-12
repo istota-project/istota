@@ -37,18 +37,24 @@
   }
   fillDefaults();
 
+  // With Nextcloud the username is the Nextcloud screen's, not the email's.
+  const fromNextcloud = $derived(draft.text('storage') === 'nextcloud');
+
   // The username follows the email until somebody types one of their own:
   // it is still the email's suggestion as long as it equals it.
   function setEmail(value: string) {
     const suggested = deriveUsername(draft.text('user_email'));
     const username = draft.text('user_id');
     draft.set('user_email', value);
+    if (fromNextcloud) return;
     if (!username || username === suggested) draft.set('user_id', deriveUsername(value));
   }
 
   /** Before Next: a username even when nobody opened "More". */
   export function precheck(): Record<string, string> | null {
-    if (!draft.text('user_id')) draft.set('user_id', deriveUsername(draft.text('user_email')));
+    if (!fromNextcloud && !draft.text('user_id')) {
+      draft.set('user_id', deriveUsername(draft.text('user_email')));
+    }
     return null;
   }
 </script>
@@ -91,20 +97,24 @@
     />
   </Field>
   <SetupMore open={!!errors.user_id}>
-    <Field
-      label="Username"
-      hint="Istota's name for your account, made from your email. Lowercase letters, digits, dots, hyphens and underscores."
-      error={errors.user_id}
-    >
-      <Input
-        value={draft.text('user_id')}
-        monospace
-        autocapitalize="none"
-        spellcheck={false}
-        invalid={!!errors.user_id}
-        oninput={(e: Event) => draft.set('user_id', (e.currentTarget as HTMLInputElement).value)}
-      />
-    </Field>
+    {#if fromNextcloud}
+      <p class="caption">Your username is your Nextcloud username, set on the Nextcloud screen.</p>
+    {:else}
+      <Field
+        label="Username"
+        hint="Istota's name for your account, made from your email. Lowercase letters, digits, dots, hyphens and underscores."
+        error={errors.user_id}
+      >
+        <Input
+          value={draft.text('user_id')}
+          monospace
+          autocapitalize="none"
+          spellcheck={false}
+          invalid={!!errors.user_id}
+          oninput={(e: Event) => draft.set('user_id', (e.currentTarget as HTMLInputElement).value)}
+        />
+      </Field>
+    {/if}
   </SetupMore>
 </div>
 

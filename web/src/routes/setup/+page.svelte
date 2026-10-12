@@ -18,6 +18,8 @@
   import StepWelcome from '$lib/components/setup/StepWelcome.svelte';
   import StepAccount from '$lib/components/setup/StepAccount.svelte';
   import StepModel from '$lib/components/setup/StepModel.svelte';
+  import StepAddress from '$lib/components/setup/StepAddress.svelte';
+  import StepNextcloud from '$lib/components/setup/StepNextcloud.svelte';
   import {
     DEFAULT_BOT_NAME,
     createSetupDraft,
@@ -214,6 +216,8 @@
   const title = $derived(stepInfo(step).title);
   const isFirst = $derived(neighbourStep(step, -1) === null);
   const isLast = $derived(neighbourStep(step, 1) === null);
+  // The screens whose Next runs a connection test that has not passed yet.
+  const testsOnNext = $derived(step === 'model' || step === 'nextcloud');
 </script>
 
 {#if view === 'loading'}
@@ -250,10 +254,10 @@
     onBack={isFirst ? undefined : () => go(-1)}
     onNext={isLast ? undefined : () => advance()}
     nextLoading={busy}
-    nextLoadingLabel={step === 'model' ? 'Testing…' : 'Saving…'}
+    nextLoadingLabel={testsOnNext ? 'Testing…' : 'Saving…'}
   >
     {#snippet actions()}
-      {#if step === 'model' && offerSkip}
+      {#if testsOnNext && offerSkip}
         <Button variant="secondary" disabled={busy} onclick={() => advance(true)}
           >Continue without testing</Button
         >
@@ -279,6 +283,10 @@
         models={setup?.defaults?.models}
         bind:offerSkip
       />
+    {:else if step === 'address'}
+      <StepAddress bind:this={stepRef} {draft} {errors} host={setup?.host} />
+    {:else if step === 'nextcloud'}
+      <StepNextcloud bind:this={stepRef} {draft} {errors} {botName} bind:offerSkip />
     {:else}
       <!-- The remaining screens arrive in later stages. -->
       <p class="muted">This screen is not built yet.</p>

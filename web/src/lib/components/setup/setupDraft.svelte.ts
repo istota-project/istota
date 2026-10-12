@@ -11,7 +11,16 @@
  * outlive the screen they were typed on: Back keeps them, and the next Next
  * saves them.
  */
-import { getSetupDraft, putSetupDraft, type SetupDraft, type SetupDraftValue } from '$lib/api';
+import {
+  checkSetupConnection,
+  getSetupDraft,
+  putSetupDraft,
+  SetupApiError,
+  type SetupCheckKind,
+  type SetupCheckResult,
+  type SetupDraft,
+  type SetupDraftValue,
+} from '$lib/api';
 
 export const SETUP_STEPS = [
   { id: 'welcome', title: 'Welcome' },
@@ -61,6 +70,30 @@ export function deriveUsername(email: string): string {
     .replace(/[^a-z0-9._-]/g, '')
     .slice(0, 32);
   return /^[a-z0-9]/.test(kept) ? kept : 'admin';
+}
+
+/**
+ * A screen's Test button: save what the screen holds, then have the server
+ * test the draft. A test the server refused to run (fields missing, answers
+ * it cannot use) comes back as a failed result plus the fields it named; a
+ * lost session is thrown, for the page to send the user back to the code.
+ */
+export async function runSetupCheck(
+  draft: SetupDraftStore,
+  kind: SetupCheckKind,
+): Promise<{ result: SetupCheckResult; fields: Record<string, string> }> {
+  try {
+    await draft.save();
+    return { result: await checkSetupConnection(kind), fields: {} };
+  } catch (e) {
+    if (e instanceof SetupApiError && e.status === 401) throw e;
+    const fields: Record<string, string> = {};
+    if (e instanceof SetupApiError) {
+      for (const f of e.fields) if (f.field && !(f.field in fields)) fields[f.field] = f.message;
+    }
+    const message = e instanceof Error ? e.message : String(e);
+    return { result: { ok: false, warning: false, message }, fields };
+  }
 }
 
 type Answer = string | number | boolean | string[];

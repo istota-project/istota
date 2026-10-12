@@ -4686,6 +4686,21 @@ function mockSetupErrors(step: string): { field: string; message: string }[] {
     if (!text('user_email').includes('@'))
       errors.push({ field: 'user_email', message: "That doesn't look like an email address." });
   }
+  if (
+    (step === 'address' || step === 'review') &&
+    (d.ingress === 'direct' || d.ingress === 'proxied') &&
+    ['', 'localhost', 'localhost:8080'].includes(text('hostname'))
+  )
+    errors.push({
+      field: 'hostname',
+      message: 'Enter the web address people will use, like istota.example.com.',
+    });
+  if ((step === 'nextcloud' || step === 'review') && d.storage === 'nextcloud') {
+    if (!text('nextcloud_url'))
+      errors.push({ field: 'nextcloud_url', message: "Enter your Nextcloud's address." });
+    if (!text('user_id'))
+      errors.push({ field: 'user_id', message: 'Enter your own Nextcloud username.' });
+  }
   if ((step === 'account' || step === 'review') && text('password').length < 12)
     errors.push({ field: 'password', message: 'Use at least 12 characters.' });
   if (
@@ -4794,7 +4809,7 @@ const setupHandler: MockHandler = ({ url, method, body }) => {
             warning: false,
             message: 'Found a Nextcloud at this address.',
           },
-          { key: 'login', ok: true, warning: false, message: 'Signed in as istota.' },
+          { key: 'signin', ok: true, warning: false, message: 'Signed in as istota.' },
           {
             key: 'admin',
             ok: true,
@@ -4806,12 +4821,14 @@ const setupHandler: MockHandler = ({ url, method, body }) => {
           { key: 'talk', ok: true, warning: false, message: 'Talk is installed.' },
           { key: 'user', ok: true, warning: false, message: 'Found your Nextcloud account.' },
         ],
+        talk_available: true,
       };
     if (check[1] === 'address')
       return {
-        ok: true,
+        ok: false,
         warning: true,
-        message: 'That name does not point at this server yet. DNS can take a while to update.',
+        message:
+          'istota.example.com points at 203.0.113.9, not at this server’s address, localhost. If you changed it recently, it can take a while to take effect.',
       };
     return { ok: true, warning: false, message: 'Connected.' };
   }
