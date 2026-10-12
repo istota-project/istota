@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota apply` can now reconcile user profiles and WhatsApp enrollment, with read-only previews, identity and destination checks, and explicit update, managed and seed modes. Reapplying unchanged settings reports no change; profile or enrollment changes report that a restart is needed.
+
 - `istota apply --format json` reports planned and completed changes, failures, and restart requirements. Direct apply commands serialize writes to the same configuration and refuse an edit made after their preview; config-only text output and marker-only exit codes remain compatible.
 
 - `istota apply --check` accepts the version 1 structure for per-user settings and shared briefing definitions without reading live state. It reports malformed fields through the existing JSON check result; applying these sections remains unavailable until their reconciliation adapters ship.

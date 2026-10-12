@@ -183,7 +183,7 @@ def test_execution_still_refuses_unimplemented_sections_before_writing(tmp_path)
     target = tmp_path / "config.toml"
     out, err = [], []
     code = apply.run("-", target, dry_run=False, out=out.append, err=err.append,
-                     stdin=io.StringIO('{"config": {}, "users": {"alice": {}}}'))
+                     stdin=io.StringIO('{"config": {}, "users": {"alice": {"resources": []}}}'))
     assert code == 1 and not target.exists()
     assert "[users]" in "".join(err)
 

@@ -198,6 +198,7 @@ def test_scoped_plan_never_reads_instance_sections_or_other_users(store, tmp_pat
         planned.append(user)
         prepare(context, store, "resources", user, user)
 
+    context.planners["profile"] = lambda *args: None
     context.planners["resources"] = plan_resources
     plan = parse_plan({"config": {}, "shared_briefing_blocks": [], "users": {
         "alice": {"profile": {}}, "bob": {"resources": []}}})

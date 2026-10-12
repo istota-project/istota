@@ -79,6 +79,9 @@ class Context:
     units: list[Unit] = field(default_factory=list, repr=False)
     planners: dict[str, Callable] = field(default_factory=dict, repr=False)
     warnings: list[str] = field(default_factory=list)
+    config: object | None = field(default=None, repr=False)
+    profiles: dict = field(default_factory=dict, repr=False)
+    profile_claims: dict = field(default_factory=dict, repr=False)
     marker_pending: bool = False
     marker_updated: bool = False
 
@@ -232,18 +235,21 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     plan = select_users(plan, options.users)
     context.options = options
     context.units.clear()
-    planners = {"config": _plan_config, **context.planners}
+    from istota.settings_plan.profiles import plan_profile
+
+    context.config = None
+    context.profiles.clear()
+    context.profile_claims.clear()
+    planners = {"config": _plan_config, "profile": plan_profile, **context.planners}
     sections = []
     if plan.config is not None:
         sections.append(("config", None))
     if plan.shared_briefing_blocks is not None:
         sections.append(("shared_briefing_blocks", None))
     for user, user_plan in sorted((plan.users or {}).items()):
-        if not user_plan.sections:
-            sections.append(("profile", user))
-        for section in USER_SECTIONS:
-            if section in user_plan.sections or (section == "profile" and
-                    any(name in user_plan.sections for name in ("enrollment", "profile_mode"))):
+        sections.append(("profile", user))
+        for section in USER_SECTIONS[1:]:
+            if section in user_plan.sections:
                 sections.append((section, user))
     for section, user in sections:
         if section not in planners:
@@ -253,8 +259,13 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     config_revision = _file_digest(context.config_path) if mixed else None
     if mixed:
         _check_target_roots(plan, context)
+    # Every adapter sees all selected users after their profile updates.
     for section, user in sections:
-        planners[section](plan, user, context, options)
+        if section == "profile":
+            planners[section](plan, user, context, options)
+    for section, user in sections:
+        if section != "profile":
+            planners[section](plan, user, context, options)
     if mixed and config_revision != _file_digest(context.config_path):
         raise ExecutionError("state_changed", ["config"])
     context.units.sort(key=_unit_order)
