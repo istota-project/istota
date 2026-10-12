@@ -858,6 +858,7 @@ async def test_recovery_codes_need_step_up_on_an_email_session(client, configure
     assert (await sign_in(client)).status_code == 302
     url = "/istota/api/settings/credentials/generated_acme/recovery"
     origin = {"Origin": "https://example.com"}
+    configured._config.email.enabled = True
     for body in ({"confirm": True}, {"confirm": True, "password": "wrong password"}):
         refused = await client.post(url, json=body, headers=origin)
         assert refused.status_code == 403

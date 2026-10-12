@@ -71,6 +71,8 @@ def setup(tmp_path, monkeypatch):
     )
     config.config_path = config_file
     config.admin_users = {"alice", "dave"}
+    # The emailed-code step-up; `TestPasswordStepUp` turns mail off.
+    config.email.enabled = True
     db.init_db(config.db_path)
     for user_id in ("alice", "bob", "carol"):
         user_profiles.ensure_profile(config.db_path, user_id, display_name=user_id.title())
@@ -137,6 +139,47 @@ async def _submit(client, setup, **extra):
         # A new code retires the last one, so only ask when none was given.
         body["step_up"] = await _step_up(client, setup)
     return await client.post(f"{BASE}/requests", json=body, headers=ORIGIN)
+
+
+class TestPasswordStepUp:
+    """Without mail the admin confirms the change with their account password."""
+
+    PASSWORD = "a long example passphrase"
+
+    @pytest.fixture
+    def no_mail(self, setup, monkeypatch):
+        monkeypatch.setattr(web_auth, "_N", 1024)
+        setup["config"].email.enabled = False
+        with db.get_db(setup["config"].db_path) as conn:
+            conn.execute("UPDATE web_auth_identities SET password_hash=? WHERE user_id='alice'",
+                         (web_auth.hash_password(self.PASSWORD),))
+        return setup
+
+    async def _start(self, client):
+        response = await client.post(
+            "/istota/api/settings/step-up", json={"action": "admin_config_change"}, headers=ORIGIN,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["method"] == "password"
+        return response.json()["request_id"]
+
+    async def test_the_password_submits_the_change(self, alice, no_mail):
+        missing = await alice.post(f"{BASE}/requests", json=_change(no_mail), headers=ORIGIN)
+        assert missing.status_code == 403
+        assert missing.json()["field"] == "password"
+        request_id = await self._start(alice)
+        wrong = await alice.post(f"{BASE}/requests", headers=ORIGIN, json=_change(
+            no_mail, step_up={"request_id": request_id, "password": "not the password"}))
+        assert wrong.status_code == 403
+        assert wrong.json()["field"] == "password"
+        assert wrong.json()["reason"] == "bad"
+        with db.get_db(no_mail["config"].db_path) as conn:
+            assert config_requests.list_recent(conn) == []
+        response = await alice.post(f"{BASE}/requests", headers=ORIGIN, json=_change(
+            no_mail, step_up={"request_id": request_id, "password": self.PASSWORD}))
+        assert response.status_code == 202, response.text
+        assert no_mail["mail"] == []
+        assert self.PASSWORD not in json.dumps(response.json())
 
 
 class TestTheGates:

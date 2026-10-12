@@ -672,7 +672,7 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 | `auth` | `["nextcloud"]` | Login methods: any of `"nextcloud"` (OAuth2 against Nextcloud) and `"email"` (an email identity with a password or an emailed sign-in code), or `["none"]` alone. A bare string is still accepted, and unknown names are dropped with a warning. `"none"` disables auth entirely; it is exclusive and only the loopback `istota serve` launcher accepts it (the stack and direct uvicorn refuse it). Email identities are managed with [`istota auth`](../reference/cli.md#web-login-identities). Env override: `ISTOTA_WEB_AUTH`, comma-separated. See [email login](../features/web-interface.md#email-login) |
 | `auth_enrol_ttl_hours` | `168` | Lifetime of an enrolment link |
 | `auth_reset_ttl_hours` | `1` | Lifetime of a password-reset link |
-| `auth_step_up_ttl_minutes` | `10` | Lifetime of an emailed sensitive-action confirmation |
+| `auth_step_up_ttl_minutes` | `10` | Lifetime of a sensitive-action confirmation (an emailed code, or the password where mail is not set up) |
 | `auth_sign_in_code_ttl_minutes` | `10` | Lifetime of an emailed sign-in code. The code works only in the browser that asked for it |
 | `auth_min_password_length` | `12` | Minimum password length. Never below 8; a value above 128 is refused |
 | `auth_throttle_window_seconds` | `900` | Window for the two password-attempt budgets below |

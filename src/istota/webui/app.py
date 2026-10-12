@@ -14057,6 +14057,27 @@ def _send_step_up(config, user_id, action, session_key, request_id, name, ip):
         logger.warning("Requested confirmation code could not be sent")
 
 
+_NO_STEP_UP_METHOD = (
+    "Mail isn't set up on this install, so this is confirmed with your account password, "
+    "and your account has none. Ask the operator for a password link "
+    "(istota auth reset --print-link) or to set up mail."
+)
+
+
+def _step_up_method(identity) -> str | None:
+    """How this install confirms a sensitive action for this identity.
+
+    A mailed code wherever the install can mail one; otherwise the account
+    password; ``None`` when the identity has no password either. The one rule
+    both issuing and redeeming read, so the client never picks.
+    """
+    if web_auth_mail.can_send(_config):
+        return "email"
+    if identity.password_hash:
+        return "password"
+    return None
+
+
 @api_router.post("/settings/step-up")
 async def settings_step_up(request: Request, user: dict = Depends(_require_api_auth),
                            _csrf: None = Depends(_verify_origin)):
@@ -14075,35 +14096,79 @@ async def settings_step_up(request: Request, user: dict = Depends(_require_api_a
     identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user["username"])
     if identity is None or identity.disabled:
         raise HTTPException(status_code=403, detail="step_up_unavailable")
+    method = _step_up_method(identity)
+    expires_at = web_auth._timestamp(_config.web.auth_step_up_ttl_minutes * 60)
+    if method == "password":
+        request_id = await asyncio.to_thread(
+            web_auth.start_password_step_up, _config.db_path, web_auth.policy_from_config(_config),
+            user["username"], action, _step_up_session(request))
+        if request_id is None:
+            raise HTTPException(status_code=403, detail=_NO_STEP_UP_METHOD)
+        return JSONResponse({"method": "password", "request_id": request_id, "expires_at": expires_at},
+                            headers={"Cache-Control": "no-store"})
+    if method is None:
+        raise HTTPException(status_code=403, detail=_NO_STEP_UP_METHOD)
     request_id = secrets.token_urlsafe(18)
     email_hint = identity.email[0] + "•••@" + identity.email.rsplit("@", 1)[-1]
-    response = JSONResponse({"request_id": request_id, "email_hint": email_hint,
-                             "expires_at": web_auth._timestamp(_config.web.auth_step_up_ttl_minutes * 60)},
+    response = JSONResponse({"method": "email", "request_id": request_id, "email_hint": email_hint,
+                             "expires_at": expires_at},
                             headers={"Cache-Control": "no-store"})
     response.background = BackgroundTask(_send_step_up, _config, user["username"], action,
                                          _step_up_session(request), request_id, name, _client_ip(request))
     return response
 
 
+async def _redeem_password_step_up(request: Request, identity, action: str, proof: dict) -> str:
+    """The login form's admission and KDF slots, then the redeem; never logs the password."""
+    password = proof.get("password")
+    if not isinstance(password, str) or not password:
+        return "dead"
+    policy = web_auth.policy_from_config(_config)
+    ip = _client_ip(request)
+    started = time.monotonic()
+    reason = "throttled"
+    if _admit_password_request(identity.email, ip, policy):
+        reason = await _run_password_work(
+            web_auth.redeem_password_step_up, _config.db_path, policy, proof.get("request_id"),
+            identity.user_id, action, _step_up_session(request), password, ip=ip)
+    if reason != "ok":
+        await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
+    return reason
+
+
+_STEP_UP_REFUSALS = {
+    ("email", "bad"): "That code was not accepted. Try again.",
+    ("email", "dead"): "That code has expired. Request a new code.",
+    ("password", "bad"): "That password was not accepted. Try again.",
+    ("password", "dead"): "This confirmation has expired. Start again.",
+    ("password", "throttled"): "Too many attempts. Wait a few minutes and try again.",
+}
+
+
 async def _require_step_up(request: Request, body: dict, action: str) -> JSONResponse | None:
     user_id = _require_api_auth(request)["username"]
     identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
-    reason = "unavailable"
+    reason, method = "unavailable", None
+    detail = ("This needs a code sent to your sign-in email address, and your account has none. "
+              "Ask the operator to add one.")
     if identity is not None and not identity.disabled:
         proof = body.get("step_up")
         if not isinstance(proof, dict):
             proof = {}
-        reason = await asyncio.to_thread(web_auth.redeem_step_up, _config.db_path,
-                                         proof.get("request_id"), user_id, action,
-                                         _step_up_session(request), proof.get("code"))
+        method = _step_up_method(identity)
+        if method == "password":
+            reason = await _redeem_password_step_up(request, identity, action, proof)
+        elif method == "email":
+            reason = await asyncio.to_thread(web_auth.redeem_step_up, _config.db_path,
+                                             proof.get("request_id"), user_id, action,
+                                             _step_up_session(request), proof.get("code"))
+        else:
+            detail = _NO_STEP_UP_METHOD
     if reason == "ok":
         return None
-    detail = ("This needs a code sent to your sign-in email address, and your account has none. "
-              "Ask the operator to add one." if reason == "unavailable" else
-              "That code was not accepted. Try again." if reason == "bad" else
-              "That code has expired. Request a new code.")
-    return JSONResponse({"detail": detail, "field": "code", "reason": reason}, status_code=403,
-                        headers={"Cache-Control": "no-store"})
+    detail = _STEP_UP_REFUSALS.get((method, reason), detail)
+    return JSONResponse({"detail": detail, "field": "password" if method == "password" else "code",
+                         "reason": reason}, status_code=403, headers={"Cache-Control": "no-store"})
 
 
 @api_router.get("/settings/credentials/activity")

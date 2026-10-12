@@ -38,6 +38,7 @@ async function enterCode(code = '123456') {
 beforeEach(() => {
   api.startStepUp.mockResolvedValue({
     request_id: 'step-1',
+    method: 'email' as const,
     email_hint: 'a•••@example.com',
     expires_at: 'later',
   });
@@ -155,6 +156,35 @@ describe('applying', () => {
     await enterCode();
     expect(await screen.findByText('That code was not accepted. Try again.')).toBeInTheDocument();
     expect(screen.getByLabelText('Confirmation code')).toBeInTheDocument();
+    expect(props.onSubmitted).not.toHaveBeenCalled();
+  });
+
+  it('keeps a refused password in the step-up dialog', async () => {
+    api.startStepUp.mockResolvedValue({
+      request_id: 'step-2',
+      method: 'password' as const,
+      expires_at: 'later',
+    });
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    api.submitConfigChange.mockRejectedValue(
+      new api.ConfigChangeError('That password was not accepted. Try again.', 403, null, {
+        field: 'password',
+        reason: 'bad',
+      }),
+    );
+    const props = mount();
+    await fireEvent.click(await screen.findByRole('button', { name: 'Apply…' }));
+    await fireEvent.input(await screen.findByLabelText('Account password'), {
+      target: { value: 'not it' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(
+      await screen.findByText('That password was not accepted. Try again.'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Account password')).toBeInTheDocument();
+    expect(api.submitConfigChange).toHaveBeenCalledWith(
+      expect.objectContaining({ step_up: { request_id: 'step-2', password: 'not it' } }),
+    );
     expect(props.onSubmitted).not.toHaveBeenCalled();
   });
 

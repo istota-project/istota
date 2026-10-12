@@ -528,6 +528,7 @@ describe('generated credentials', () => {
     vi.mocked(startStepUp).mockResolvedValue({
       request_id: 'r',
       expires_at: 'later',
+      method: 'email' as const,
       email_hint: 'a•••@example.com',
     });
     vi.mocked(showRecoveryCodes).mockResolvedValue({
