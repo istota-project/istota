@@ -205,6 +205,7 @@ def cmd_doctor(args):
 def cmd_task(args):
     """Submit a task directly."""
     config = load_config(Path(args.config) if args.config else None)
+    args.user = config.resolve_user_id(args.user) or args.user
 
     if args.prompt:
         prompt = args.prompt
@@ -332,6 +333,7 @@ def cmd_repl(args):
             "Error: could not infer a user; pass -u/--user.", file=sys.stderr,
         )
         sys.exit(1)
+    user_id = config.resolve_user_id(user_id) or user_id
     # Checked once here rather than caught per turn: `db.create_task` refuses a
     # user id that cannot name a directory of its own (ISSUE-402), and a session
     # that accepted `-u` and then failed on every line is worse than one that
@@ -1374,9 +1376,8 @@ def cmd_auth(args):
             if not email:
                 raise ValueError("Email must not be empty")
             profiles = user_profiles.list_profiles(db_path)
-            for existing_id in profiles:
-                if existing_id != user_id and existing_id.casefold() == user_id.casefold():
-                    raise ValueError(f"User id differs only by case from {existing_id}")
+            from .lib.user_ids import user_id_index
+            user_id_index([*config.users, *profiles, user_id])
             if user_id not in profiles:
                 if not args.create_user:
                     raise ValueError("No user profile; use `istota user ensure` or --create-user")
@@ -1676,6 +1677,11 @@ def cmd_user_ensure(args):
     config = load_config(Path(args.config) if args.config else None)
     user_id = args.name
     db_path = config.db_path
+
+    canonical = config.resolve_user_id(user_id)
+    if canonical is not None and canonical != user_id:
+        print(f"Error: User ID differs only in case from {canonical!r}", file=sys.stderr)
+        sys.exit(1)
 
     if not Path(db_path).exists():
         print(f"Error: DB not found at {db_path}; run `istota init` first", file=sys.stderr)

@@ -108,14 +108,14 @@ def exact_recipient_users(config: Config, email) -> list[str]:
     for addr in list(getattr(email, "to", ()) or ()) + list(getattr(email, "cc", ()) or ()):
         match = pattern.match(addr)
         if match:
-            candidate = match.group(1).lower()
-            if candidate in config.users:
+            candidate = config.resolve_user_id(match.group(1))
+            if candidate is not None:
                 if candidate not in users:
                     users.append(candidate)
             else:
                 logger.warning(
                     "Plus-address user '%s' not found in config (from %s)",
-                    candidate, addr,
+                    match.group(1), addr,
                 )
     return users
 
@@ -287,7 +287,7 @@ def resolve_email_owner(config: Config, conn, email) -> str | None:
     # Only an exact user ID with a plus sign may use the ordinary mailbox.
     # Known signup tags stay private after they close or while they are pending.
     for tail in tails:
-        if tail not in config.users:
+        if config.resolve_user_id(tail) is None:
             return _SIGNUP_PRIVATE_OWNER
         if conn is not None and conn.execute(
             "SELECT 1 FROM signup_tags WHERE tag = ?", (tail,),
