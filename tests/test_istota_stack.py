@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1878,6 +1879,22 @@ class TestSetupWebRefuses:
         assert "systemctl enable --now istota-stack" in web.docker_calls()
         assert len([c for c in web.docker_calls() if " setup --web " in f"{c} "]) == 1
 
+    def test_another_verb_holding_the_stack_lock_refuses_at_once(self, web):
+        """A setup --web can hold the lock for an hour, so it never queues
+        behind another verb either: it refuses straight away, naming it."""
+        held = HeldLock(web.stack / ".stack.lock", "update")
+        try:
+            started = time.monotonic()
+            result = web.run("setup", "--web", ISTOTA_STACK_LOCK_WAIT="30", **_finished())
+            elapsed = time.monotonic() - started
+        finally:
+            held.release()
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "istota-stack update" in result.stderr
+        assert elapsed < 15
+        assert web.docker_calls() == []
+        assert not (web.stack / ".setup").exists()
+
     def test_up_without_a_config_names_both_ways_in(self, web):
         result = web.run("up")
         assert result.returncode == 1
@@ -2108,6 +2125,42 @@ class TestSetupWebFinished:
         assert result.returncode == 1
         assert "provision.sh failed" in result.stderr
         assert not any(call.startswith("systemctl") for call in fx.docker_calls())
+
+
+#: Runs `istota-stack up` as the unit's ExecStart would, with no wait: an `up`
+#: that inherited the caller's held lock fails at once instead of hanging.
+STACK_UP_PROBE = f'ISTOTA_STACK_LOCK_WAIT=0 bash "{SCRIPT}" up >/dev/null 2>&1; echo "up rc=$?" >> "$STUB_CALLS"\n'
+
+
+@needs_openssl
+class TestSetupWebReleasesTheStackLock:
+    """setup --web holds the stack lock, and both of its last steps start
+    `istota-stack up`: provision.sh directly, `systemctl enable --now` through
+    the unit. Neither may wait on the lock its caller still holds."""
+
+    def test_before_the_unit_is_started(self, web):
+        (Path(web.env["PATH"].split(":")[0]) / "systemctl").write_text(
+            '#!/bin/bash\necho "systemctl $*" >> "$STUB_CALLS"\n'
+            'if [ "$*" = "enable --now istota-stack" ]; then ' + STACK_UP_PROBE.rstrip("\n") + "; fi\n")
+        result = web.run("setup", "--web", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = web.docker_calls()
+        assert "up rc=0" in calls, calls
+        assert calls.index("systemctl enable --now istota-stack") < calls.index("up rc=0")
+
+    def test_before_provision_sh(self, web):
+        script = web.src / "host" / "provision.sh"
+        script.parent.mkdir()
+        script.write_text(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--digest" ]; then echo new; exit 0; fi\n'
+            'echo "provision ran" >> "$STUB_CALLS"\n' + STACK_UP_PROBE)
+        script.chmod(0o755)
+        result = web.run("setup", "--web", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = web.docker_calls()
+        assert calls.index("provision ran") < calls.index("up rc=0"), calls
+        assert calls.index("up rc=0") < calls.index("systemctl enable --now istota-stack")
 
 
 @needs_openssl
