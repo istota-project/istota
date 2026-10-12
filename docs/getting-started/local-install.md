@@ -54,7 +54,7 @@ The scripts the installer downloads come from `main`, as with any `curl | bash` 
 7. Rebuilds when the config needs Claude Code (`check-image` exits 2), runs `provision.sh` again, and starts `istota-stack.service`.
 8. Refreshes the Mac scripts from the VM's checkout, copies the master key into your login Keychain, and prints a one-use link to set your password, opening it in the browser.
 
-If a step fails, `create` prints the step, the command it ran in the VM, its exit status and its last 20 lines, and exits with that status. It never retries a build or a provision on its own. Run `istota-stack create` again, with no arguments, and it continues from the first step whose effect is missing; it keeps what you gave it the first time in a file under `~/.config/istota/`.
+If a step fails, `create` prints the step, the command it ran in the VM, its exit status and its last 20 lines, and exits with that status. It never retries a build or a provision on its own. Run `istota-stack create` again, with no arguments, and it continues from the first step whose effect is missing; it keeps what you gave it the first time in a file under `~/.config/istota-stack/`.
 
 ### Setting up in the browser
 

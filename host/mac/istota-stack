@@ -41,8 +41,11 @@
 # ~/.local/share/istota, which `install.sh --local` writes and every update
 # refreshes along with these scripts, from the checkout the VM verified.
 #
-# What `create` was given is kept in ~/.config/istota/<instance>.env, so a
-# re-run needs no arguments and `open` and `status` know the port and folder.
+# What `create` was given is kept in ~/.config/istota-stack/<instance>.env,
+# so a re-run needs no arguments and `open` and `status` know the port and
+# folder. Not ~/.config/istota/: that is the standalone install's directory
+# (config.toml, istota.env with its master key, install.json), and with the
+# default instance the state file there was its istota.env.
 #
 # The master key is copied into the login Keychain (service istota.local,
 # account secret-key-<instance>) and never put on a command line: `security
@@ -60,8 +63,11 @@ INSTANCE="${ISTOTA_LIMA_INSTANCE:-istota}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${ISTOTA_MAC_BIN_DIR:-${HOME}/.local/bin}"
 DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/istota"
-STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/istota"
+STATE_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/istota-stack"
 STATE_FILE="${STATE_DIR}/${INSTANCE}.env"
+# Where the first releases of this script kept it. Read only when it holds
+# nothing but state, and never written, moved or removed.
+OLD_STATE_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/istota/${INSTANCE}.env"
 VM_STACK=/srv/app/istota
 VM_SRC="${VM_STACK}/src"
 KEYCHAIN_SERVICE=istota.local
@@ -291,9 +297,32 @@ Stop that, or choose another port with --port."
     fi
 }
 
+# A plain file of create's keys and no other: the test that keeps the
+# standalone install's istota.env from being read as this script's state.
+is_state_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    awk -F= '
+        /^[[:space:]]*$/ { next }
+        $1 == "WORKSPACE" { workspace = 1; next }
+        $1 == "PORT" || $1 == "TAG" || $1 == "REPO" || $1 == "SIGNING_KEY" { next }
+        { other = 1 }
+        END { exit !(workspace && !other) }
+    ' "$1"
+}
+
+state_source() {
+    if [ -f "$STATE_FILE" ]; then
+        printf '%s\n' "$STATE_FILE"
+    elif is_state_file "$OLD_STATE_FILE"; then
+        printf '%s\n' "$OLD_STATE_FILE"
+    fi
+}
+
 state_get() {
-    [ -f "$STATE_FILE" ] || return 0
-    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { if (v != "") print v }' "$STATE_FILE"
+    local file
+    file="$(state_source)"
+    [ -n "$file" ] || return 0
+    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { if (v != "") print v }' "$file"
 }
 
 state_write() {

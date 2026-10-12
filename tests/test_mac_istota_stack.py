@@ -313,7 +313,9 @@ def mac(tmp_path) -> Mac:
         # The system directories only: nothing here may find a real limactl.
         "PATH": f"{stubs}:/usr/bin:/bin:/usr/sbin:/sbin",
         "HOME": str(home),
-        "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
+        # No XDG_CONFIG_HOME, as on a Mac: ~/.config is shared with the
+        # standalone install's ~/.config/istota, and a fixture that moved it
+        # away hid a state file written over that install's istota.env.
         "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
         "TMPDIR": str(tmp_path),
         "LANG": "C",
@@ -1125,6 +1127,75 @@ class TestImportStandalone:
         assert not (mac.home / "Istota" / "Users").exists()
         assert ["systemctl", "enable", "--now", "istota-stack"] not in mac.vm_calls()
         assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
+
+
+class TestTheStandaloneConfigIsNeverWritten:
+    """`~/.config/istota/` is the standalone install's: `config.toml`,
+    `istota.env` (the master key and every credential) and `install.json`. The
+    Mac CLI keeps what `create` was given somewhere else, and nothing it does
+    changes a byte there."""
+
+    @staticmethod
+    def _config_dir(mac: Mac) -> dict[str, bytes]:
+        root = mac.home / ".config" / "istota"
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+    def test_create_import_and_destroy_leave_it_byte_identical(self, mac, standalone):
+        (mac.home / ".config" / "istota" / "install.json").write_text('{"source": "checkout"}\n')
+        before = self._config_dir(mac)
+        assert "istota.env" in before
+
+        assert _create(mac, "--no-setup").returncode == 0
+        assert self._config_dir(mac) == before
+        result = _import(mac, "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.state()["import_stdin"] == standalone.env_text
+        assert self._config_dir(mac) == before
+        result = _import(mac)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.state()["import_stdin"] == standalone.env_text
+        assert self._config_dir(mac) == before
+        result = mac.run("destroy", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._config_dir(mac) == before
+
+    def test_an_import_with_no_vm_yet_carries_the_key(self, mac, standalone):
+        """The import makes the VM itself; what goes on stdin is still the
+        standalone istota.env, not create's state."""
+        before = self._config_dir(mac)
+        result = _import(mac)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.state()["import_stdin"] == standalone.env_text
+        assert self._config_dir(mac) == before
+
+    def test_the_state_is_kept_in_a_directory_of_its_own(self, mac):
+        assert _create(mac, "--port", "9090", "--no-setup").returncode == 0
+        state = mac.home / ".config" / "istota-stack" / "istota.env"
+        assert "PORT=9090\n" in state.read_text()
+        assert not (mac.home / ".config" / "istota").exists()
+
+    def test_a_state_file_at_the_old_path_is_read_and_left(self, mac):
+        old = mac.home / ".config" / "istota" / "istota.env"
+        old.parent.mkdir(parents=True)
+        text = f"WORKSPACE={mac.home / 'Elsewhere'}\nPORT=9191\nTAG=v1.2.0\nREPO=\nSIGNING_KEY={SIGNING_KEY}\n"
+        old.write_text(text)
+        result = mac.run("status")
+        assert result.returncode == 0, result.stderr
+        assert "localhost:9191" in result.stdout
+        assert str(mac.home / "Elsewhere") in result.stdout
+        assert _create(mac, "--no-setup").returncode == 0
+        assert old.read_text() == text
+        assert "PORT=9191\n" in (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
+
+    def test_a_standalone_env_at_the_old_path_is_not_read_as_state(self, mac, standalone):
+        """A key=value file with WORKSPACE in it is still not state when it
+        carries the standalone install's names."""
+        env = standalone.config.parent / "istota.env"
+        env.write_text(f"ISTOTA_SECRET_KEY={KEY}\nWORKSPACE=/tmp/nowhere\nPORT=9393\n")
+        result = mac.run("status")
+        assert result.returncode == 0, result.stderr
+        assert "localhost:8080" in result.stdout
+        assert "/tmp/nowhere" not in result.stdout
 
 
 class TestInstallLocal:
