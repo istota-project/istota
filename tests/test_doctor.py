@@ -709,6 +709,91 @@ class TestTmux:
         assert "exited 3 on -V" in r.detail
 
 
+class TestGitleaks:
+    """#695: the image shipped without gitleaks, and the pre-commit hook then
+    refused every unattended commit with nothing in doctor to say why."""
+
+    def test_skips_with_the_developer_skill_off(self, make_config):
+        r = run_checks(make_config(), only=("runtime.gitleaks",))[0]
+        assert r.status == SKIP
+        assert r.scope == IMAGE
+
+    def test_missing_gitleaks_fails(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        r = run_checks(_dev_config(make_config, tmp_path), only=("runtime.gitleaks",))[0]
+        assert r.status == FAIL
+        assert "pre-commit" in r.remedy
+
+    def test_asks_the_hooks_own_question(self, make_config, tmp_path, monkeypatch):
+        """Passes only on `gitleaks git --help`, the probe the hook runs."""
+        fake = tmp_path / "bin" / "gitleaks"
+        fake.parent.mkdir(parents=True, exist_ok=True)
+        fake.write_text('#!/bin/sh\ntest "$1" = "git" -a "$2" = "--help" || exit 64\n')
+        fake.chmod(0o755)
+        _which_only(monkeypatch, "gitleaks", fake)
+
+        r = run_checks(_dev_config(make_config, tmp_path), only=("runtime.gitleaks",))[0]
+
+        assert r.status == OK, r.detail
+
+    def test_a_gitleaks_without_the_git_subcommand_fails(
+        self, make_config, tmp_path, monkeypatch
+    ):
+        """Debian's 8.16: on PATH, answers `version`, has no `git`."""
+        _which_only(monkeypatch, "gitleaks", _fake_bin(tmp_path / "bin" / "gitleaks", "unknown command", exit_code=1))
+
+        r = run_checks(_dev_config(make_config, tmp_path), only=("runtime.gitleaks",))[0]
+
+        assert r.status == FAIL
+        assert "8.19" in r.detail
+
+    def test_spawns_nothing_without_probe(self, make_config, tmp_path, monkeypatch):
+        _which_only(monkeypatch, "gitleaks", _fake_bin(tmp_path / "bin" / "gitleaks", exit_code=1))
+        spawns = _spawn_spy(monkeypatch, "run")
+
+        r = run_checks(
+            _dev_config(make_config, tmp_path), only=("runtime.gitleaks",), probe=False
+        )[0]
+
+        assert spawns == []
+        assert r.status == OK
+        assert "probe disabled" in r.detail
+
+
+class TestGws:
+    @staticmethod
+    def _gws_config(make_config):
+        from istota.config import GoogleWorkspaceConfig
+
+        return make_config(google_workspace=GoogleWorkspaceConfig(enabled=True))
+
+    def test_skips_with_google_workspace_off(self, make_config):
+        r = run_checks(make_config(), only=("runtime.gws",))[0]
+        assert r.status == SKIP
+        assert r.scope == IMAGE
+
+    def test_missing_gws_fails_when_enabled(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path))
+        r = run_checks(self._gws_config(make_config), only=("runtime.gws",))[0]
+        assert r.status == FAIL
+        assert "gws" in r.detail
+
+    def test_finds_the_roles_install_off_path(self, make_config, tmp_path, monkeypatch):
+        """The role puts gws in ~/.local/bin, which the web unit's PATH lacks."""
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: tmp_path))
+        _fake_bin(tmp_path / ".local" / "bin" / "gws", "gws 0.22.5")
+        r = run_checks(self._gws_config(make_config), only=("runtime.gws",))[0]
+        assert r.status == OK, r.detail
+
+    def test_a_working_gws_passes(self, make_config, tmp_path, monkeypatch):
+        _which_only(monkeypatch, "gws", _fake_bin(tmp_path / "bin" / "gws", "gws 0.22.5"))
+        r = run_checks(self._gws_config(make_config), only=("runtime.gws",))[0]
+        assert r.status == OK, r.detail
+        assert "gws 0.22.5" in r.detail
+
+
 class TestTheBinaryChecksFollowTheReachableSet:
     """`runtime.model_cli` and `runtime.tmux` ask which kinds a task could run
     under, not which one is the base kind.

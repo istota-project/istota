@@ -146,6 +146,49 @@ RUN set -eux; \
     /usr/local/lib/istota_forge/gh --version; \
     /usr/local/lib/istota_forge/glab --version
 
+# gitleaks and gws, the two binaries the Ansible role installed and this image
+# did not (#695). gitleaks is the credential half of .githooks/pre-commit, which
+# refuses every unattended commit when it cannot run; gws is what the
+# google_workspace skill execs. Both from the upstream release, pinned by
+# version and per-arch SHA-256 for the same reason as gh/glab above — and gws
+# in particular holds the user's Google OAuth session, so an unpinned
+# `releases/latest` fetch at build time (what the role did) is not acceptable.
+# gitleaks: same version and digests as the role's
+# istota_developer_gitleaks_version / _checksums; >= 8.19 for `gitleaks git`.
+# Both on PATH in /usr/local/bin: the hook and the skill find them by name, and
+# the sandbox binds /usr read-only. The release tarballs name amd64 "x64"
+# (gitleaks) and "x86_64"/"aarch64" (gws).
+ARG GITLEAKS_VERSION=8.30.1
+ARG GITLEAKS_SHA256_AMD64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ARG GITLEAKS_SHA256_ARM64=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
+ARG GWS_VERSION=0.22.5
+ARG GWS_SHA256_AMD64=de78ecdbd2f1a84cca0063a7ecbc440240fc14b6ebccbb17f4646b792a8c5c1f
+ARG GWS_SHA256_ARM64=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) gl_arch=x64; gl_sha="${GITLEAKS_SHA256_AMD64}"; \
+               gws_arch=x86_64; gws_sha="${GWS_SHA256_AMD64}" ;; \
+        arm64) gl_arch=arm64; gl_sha="${GITLEAKS_SHA256_ARM64}"; \
+               gws_arch=aarch64; gws_sha="${GWS_SHA256_ARM64}" ;; \
+        *) echo "no pinned gitleaks/gws checksum for ${arch}" >&2; exit 1 ;; \
+    esac; \
+    tmp="$(mktemp -d)"; \
+    curl -fsSL -o "${tmp}/gitleaks.tgz" \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${gl_arch}.tar.gz"; \
+    echo "${gl_sha}  ${tmp}/gitleaks.tgz" | sha256sum -c -; \
+    tar -xzf "${tmp}/gitleaks.tgz" -C "${tmp}" gitleaks; \
+    install -m 0755 "${tmp}/gitleaks" /usr/local/bin/gitleaks; \
+    curl -fsSL -o "${tmp}/gws.tgz" \
+        "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-${gws_arch}-unknown-linux-gnu.tar.gz"; \
+    echo "${gws_sha}  ${tmp}/gws.tgz" | sha256sum -c -; \
+    tar -xzf "${tmp}/gws.tgz" -C "${tmp}" ./gws; \
+    install -m 0755 "${tmp}/gws" /usr/local/bin/gws; \
+    rm -rf "${tmp}"; \
+    gitleaks version; \
+    gitleaks git --help >/dev/null; \
+    gws --version
+
 # Project files
 WORKDIR /app
 COPY pyproject.toml uv.lock schema.sql README.md ./
