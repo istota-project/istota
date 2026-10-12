@@ -156,7 +156,7 @@ Each poller runs on its same-named interval key: `_talk_poll_loop()`, `poll_emai
 1. Expire stale confirmations; notify via the user's `alert` route (ISSUE-241) after the transaction closes.
 2. Warn on stale pending. 3. Fail ancient pending; notify only user-submitted types, never `_AUTOMATED_SOURCE_TYPES` (flood when the queue wedges).
 4. `cleanup_old_tasks`. 4a. Prune `processed_emails`. 4b. `prune_old_usage` in its own transaction: steps 1-4a are one long write transaction and a large delete under it stalls readers. Failures log at WARNING.
-5. IMAP cleanup. 6. Temp files.
+5. IMAP cleanup. 6. Temp files. 7a. Talk media retention (`maintenance/talk_media.py`), local workspace only.
 
 ## Memory Search Integration
 After completion with `auto_index_conversations`: index under `user_id`, and `channel:{token}` in a channel.

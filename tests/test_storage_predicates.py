@@ -10,6 +10,7 @@ matter and asserted on the branch it takes. A new caller is not caught by this.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -165,6 +166,11 @@ class TestTheNextcloudDataFallback:
         sent.write_bytes(b"jpeg")
         monkeypatch.setattr(attachment_source, "NC_DATA_ROOT", nc_data)
 
-        result = scheduler.download_talk_attachments(_config(tmp_path, shape), ["Talk/photo.jpg"])
+        # No token: beside the mount the WebDAV fetch has nowhere to write, so
+        # the only way to find the file would be the sender's tree.
+        task = SimpleNamespace(id=1, conversation_token=None, talk_message_id=None)
+        result = scheduler.download_talk_attachments(
+            _config(tmp_path, shape), task, ["Talk/photo.jpg"],
+        )
 
         assert result == ([str(sent)] if found else ["Talk/photo.jpg"])

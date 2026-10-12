@@ -128,6 +128,11 @@ class TalkSignalingConfig:
 class TalkConfig:
     enabled: bool = True
     bot_username: str = "istota"  # istota's Nextcloud username (to filter own messages)
+    # On a local workspace a Talk attachment is fetched over WebDAV into
+    # `Channels/<token>/media/<message id>/`; larger files are skipped.
+    attachment_max_mb: int = 50
+    # Days a fetched attachment's message directory is kept; 0 keeps them.
+    attachment_retention_days: int = 30
     signaling: TalkSignalingConfig = field(default_factory=TalkSignalingConfig)
 
 

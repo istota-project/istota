@@ -629,6 +629,14 @@ auto_share_bot_dir = true
 enabled = true
 # Bot's Nextcloud username (to filter its own messages)
 bot_username = "istota"
+# When the workspace is not the Nextcloud mount, a file posted in Talk is
+# fetched over WebDAV into the room's folder, Channels/<room>/media/<message id>/,
+# once per message. Files larger than this many megabytes are skipped, and the
+# task runs without them.
+attachment_max_mb = 50
+# Days a fetched attachment is kept before the cleanup pass removes it. 0 keeps
+# them. Not used when the workspace is the mount.
+attachment_retention_days = 30
 
 [talk.signaling]
 # Receive Talk messages over Nextcloud's standalone signaling server (the

@@ -168,6 +168,7 @@ src/istota/
 │   ├── room_relocate.py, room_mount_reconcile.py  # The room-identity migration and its mount sweep
 │   ├── persona_retire.py # Deletes or retires the old per-user PERSONA.md copies, from `istota init` → maintenance.md
 │   ├── worktree_reaper.py   # Removes a developer worktree once its work has landed → maintenance.md
+│   ├── talk_media.py     # Retention for Talk attachments fetched into `Channels/<token>/media/` on a local workspace → maintenance.md
 │   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
 │   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
 ├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications
