@@ -668,6 +668,9 @@
     padding: var(--space-3);
     text-align: center;
   }
+  .folder-actions {
+    min-height: var(--control-height-sm);
+  }
   .folder-actions,
   .upload-heading {
     display: flex;
