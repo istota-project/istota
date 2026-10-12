@@ -66,13 +66,13 @@ class TestStaticCacheControl:
     nothing fails loudly). The two classes need opposite policies."""
 
     def test_hashed_assets_are_immutable(self):
-        from istota.webui.app import _static_cache_control
+        from istota.webui.static_dir import static_cache_control as _static_cache_control
         got = _static_cache_control("/istota/_app/immutable/entry/app.B53rWCQM.js")
         assert "immutable" in got
         assert "max-age=31536000" in got
 
     def test_shell_and_stable_names_revalidate(self):
-        from istota.webui.app import _static_cache_control
+        from istota.webui.static_dir import static_cache_control as _static_cache_control
         for path in (
             "/istota/chat/",
             "/istota/index.html",
@@ -83,20 +83,20 @@ class TestStaticCacheControl:
 
     def test_classification_is_path_relative(self):
         """The mount strips the prefix, so the raw scope path may be relative."""
-        from istota.webui.app import _static_cache_control
+        from istota.webui.static_dir import static_cache_control as _static_cache_control
         assert "immutable" in _static_cache_control("_app/immutable/chunks/x.js")
 
     def test_mounted_statics_stamp_the_header(self, tmp_path, monkeypatch):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from istota.webui.app import _CacheHeaderStatics
+        from istota.webui.static_dir import cache_header_statics
         root = tmp_path / "build"
         (root / "_app" / "immutable").mkdir(parents=True)
         (root / "index.html").write_text("<html></html>")
         (root / "_app" / "immutable" / "a.js").write_text("//")
         probe = FastAPI()
-        probe.mount("/istota", _CacheHeaderStatics(directory=str(root), html=True))
+        probe.mount("/istota", cache_header_statics(root))
         client = TestClient(probe)
         assert client.get("/istota/").headers["cache-control"] == "no-cache"
         assert "immutable" in client.get(
