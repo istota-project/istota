@@ -48,6 +48,7 @@ pytestmark = pytest.mark.skipif(
 
 DOCKER_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
+[ -z "${COMPOSE_IGNORE_ORPHANS:-}" ] || printf '%s\n' "$*" >> "$STUB_CALLS.ignore-orphans"
 args=" $* "
 for ref in ${STUB_MISSING_IMAGES:-}; do
   case "$args" in *" image inspect $ref "*) exit 1 ;; esac
@@ -570,6 +571,74 @@ class TestAnUpdateReprovisionsTheHost:
         fx.tag("v1", key=fx.release_key)
         result = fx.run("update", "v1")
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+RELEASE_STACK_STUB = """#!/bin/bash
+# ISTOTA_STACK_LOCK_INHERITED
+echo "release istota-stack: $* inherited=$(printenv | grep -c '^ISTOTA_STACK_LOCK_INH')" >> "$STUB_CALLS"
+"""
+
+
+class TestTheReleasesOwnScriptBringsTheStackUp:
+    """The istota-stack running an update is the previous release's. When its
+    `up` and the new one's (run by provision.sh) pass compose different
+    variables, the containers were recreated twice. The checkout's own script
+    brings the stack up instead, on the lock the update holds."""
+
+    def _release_with(self, fx, script: str) -> None:
+        path = fx.origin / "host" / "istota-stack"
+        path.parent.mkdir(parents=True)
+        path.write_text(script)
+        path.chmod(0o755)
+        _git(fx.origin, "add", "host/istota-stack", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+
+    def test_the_checkouts_script_runs_up_under_the_held_lock(self, fx):
+        self._release_with(fx, RELEASE_STACK_STUB)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert "release istota-stack: up inherited=1" in calls
+        assert not any(" up -d " in f"{c} " for c in calls), calls
+
+    def test_a_script_that_cannot_inherit_the_lock_is_not_asked_to(self, fx):
+        """A rollback checks out an older script, which would wait on the lock."""
+        self._release_with(fx, RELEASE_STACK_STUB.replace("# ISTOTA_STACK_LOCK_INHERITED\n", ""))
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert not any(c.startswith("release istota-stack") for c in calls)
+        assert any(c.endswith("up -d --remove-orphans") for c in calls)
+
+    def test_the_real_script_comes_up_without_waiting_on_its_parent(self, fx):
+        self._release_with(fx, SCRIPT.read_text())
+        result = fx.run("update", "v1", ISTOTA_STACK_LOCK_WAIT="2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c.endswith("up -d --remove-orphans") for c in fx.docker_calls())
+
+    def test_the_variable_alone_does_not_skip_a_held_lock(self, fx):
+        held = HeldLock(fx.stack / ".stack.lock", "update")
+        try:
+            result = fx.run("up", ISTOTA_STACK_LOCK_WAIT="0", ISTOTA_STACK_LOCK_INHERITED="1")
+        finally:
+            held.release()
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "istota-stack update" in result.stderr
+        assert fx.docker_calls() == []
+
+
+def test_the_steps_without_the_devbox_file_ignore_its_running_containers(fx):
+    """Without compose.devbox.yml, compose sees the devbox's containers as
+    orphans and warns on every `run`; nothing in those steps removes orphans."""
+    (fx.stack / "compose.devbox.yml").write_text('{"services": {"devbox-alice": {"image": "x"}}}\n')
+    fx.commit("v1")
+    fx.tag("v1", key=fx.release_key)
+    result = fx.run("update", "v1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    ignoring = Path(f"{fx.calls}.ignore-orphans").read_text().splitlines()
+    assert any("devbox compose-file" in c for c in ignoring), ignoring
+    assert not any("--remove-orphans" in c for c in ignoring), ignoring
 
 
 class TestARollbackReprovisionsTheHost:
