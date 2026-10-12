@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Admins can change the configuration from Admin → Configuration.** Settings, deployment credentials and the admin list are edited in place, reviewed as a diff with any problems shown against their keys, confirmed with an emailed code (and a typed phrase for settings that affect sign-in or confinement), then applied by the host. The page follows the change through the restart and reloads into the new values; settings the host owns, or that a plan manages, stay read-only with the reason shown. Tables are edited as TOML, the whole file can be edited as text with credentials hidden, ignored keys can be removed, and an earlier applied configuration can be restored from the history.
+
+- **The dedicated VM can apply configuration changes requested from the web.** `istota-stack config-apply`, run by the new `istota-config-apply.path` and a five-minute timer, takes each change the web config editor stored, checks it with dry runs before writing anything, builds the image when the new config needs Claude Code, then writes the credentials, admins and `config.toml` (keeping ten backups) and restarts the stack. `provision.sh` installs the units and the `requests/` directory, and the stack picks the applier up at the restart after that.
+
+- **`istota-stack` verbs that write now take one lock**, `/srv/app/istota/.stack.lock`, so an update, setup, apply, put-files, import, workspace move or config change never runs alongside another. A second command waits up to ten minutes and then fails naming the command that holds the lock; `setup --web`, which can hold it for an hour, refuses at once instead of waiting.
 - Workspace puts My files directly below Pinned. My files starts expanded; Pinned and the other sections start collapsed. Filename rows use the same side margins as locations in the Location sidebar.
 
 - Browse your connected Nextcloud files under Workspace → Connections. Open folders in Workspace and files in Nextcloud; if the connection expires, Workspace links you back to Connections to sign in again. The access note explains that browsing uses your personal account while tasks use the bot’s account and their workspace permissions.
@@ -133,6 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A `## ` section of `USER.md` whose heading ends in `<!-- pinned -->` is kept from the nightly memory curator.** The curator may add to it but cannot remove, rewrite or drop anything in it, and cannot create one; you, or the bot when you ask, still can. A pin covers one `## ` section, so use `### ` for its subsections.
 
 ### Changed
+
+- **`istota apply` refuses a plan with a value the loader would throw away.** It used to match the loader's wording and missed several cases, so a typo in a closed choice (`web.token_storage = "plain"`), `scheduler.talk_poll_timeout = 0` or an unknown `[web] auth` method was applied and then silently replaced by the default. Those plans now fail with nothing written. **Upgrade note:** check your plan with `istota apply --check -f plan.json` (or an Ansible `--check` run) before upgrading, since a play that passed before can now fail. Four config shapes that were ignored in silence now log a warning: a `[web] auth` that is not a list, a `[brain] fallback` that is not a string, a `[brain.source_type_overrides]` that is not a table, and a `[[briefings]]` entry that is not a table.
+
+- **`istota apply` gains `--check`, `--json`, `--backup N` and plans on stdin.** `--check` validates a plan without reading or writing any config, and with `--json` prints its problems as one JSON object; `-f -` reads the plan from stdin; `--backup N` keeps the replaced `config.toml` as a dated 0600 copy, and the newest N of those. A plan's `[meta]` can now say who manages the config (`managed`, `source`), recorded in `config/managed.json`; `istota setup` marks everything unmanaged, `istota-stack put-files` records who manages the secrets and the admins, and the Ansible role marks all three as its own. Changing only that record exits 0, so it does not restart the stack.
 
 - Workspace remembers which sidebar sections you leave open. File rows share consistent spacing and menus with Reveal, Edit where supported, and Remove pin for pinned items; pinned filenames no longer have icons.
 

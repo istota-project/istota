@@ -116,7 +116,7 @@ class TestTheExampleReader:
 
 
 def test_credentials_point_at_their_secrets_file():
-    secrets = ref.credentials()
+    secrets = ref.credential_files()
     assert secrets["nextcloud.app_password"] == "istota_nextcloud_app_password"
     assert secrets["web.session_secret_key"] == "istota_web_session_secret_key"
     assert secrets["brain.native.api_key"] == "istota_brain_native_api_key"

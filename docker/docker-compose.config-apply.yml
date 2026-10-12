@@ -1,0 +1,15 @@
+# The web config editor's host applier, on the dedicated VM only.
+#
+# istota-stack adds this file with -f when /srv/app/istota/requests exists,
+# which provision.sh creates (0700, uid 10001), and exports ISTOTA_REQUESTS_DIR
+# for it. The web process writes a request's id to /data/requests/config-apply;
+# istota-config-apply.path on the host runs `istota-stack config-apply`. The
+# base compose file carries none of this, so a plain `docker compose up` (the
+# smoke and full tiers, an older istota-stack running a newer file) neither
+# binds nor creates the directory, and the editor stays read-only.
+services:
+  web:
+    environment:
+      ISTOTA_CONFIG_APPLIER: host
+    volumes:
+      - ${ISTOTA_REQUESTS_DIR:?istota-stack sets ISTOTA_REQUESTS_DIR}:/data/requests

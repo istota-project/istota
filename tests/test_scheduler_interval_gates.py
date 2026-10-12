@@ -1291,6 +1291,12 @@ def test_credential_maintenance_prunes_history_and_audit(db_path):
     assert gate.fixed_interval == 86400
     with db.get_db(db_path) as conn:
         conn.execute("INSERT INTO credential_audit (user_id, action, actor, at) VALUES ('alice', 'reveal', 'web:alice', datetime('now', '-366 days'))")
+        conn.execute(
+            """INSERT INTO config_change_requests (status, admin_id, base_digest, document_toml,
+               changed_sections_json, secret_names_json, diff_text, created_at)
+               VALUES ('applied', 'alice', 'd', '', '[]', '[]', '', '2020-01-01T00:00:00Z')"""
+        )
     gate.run(0)
     with db.get_db(db_path) as conn:
         assert conn.execute("SELECT count(*) FROM credential_audit").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM config_change_requests").fetchone()[0] == 0

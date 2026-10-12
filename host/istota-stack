@@ -23,6 +23,7 @@
 #                               move a mounted workspace onto the state volume, offline
 #   istota-stack put-files [--dry-run]
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
+#   istota-stack config-apply   apply what the web config editor requested (istota-config-apply.service)
 #   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
 #   istota-stack exec <cmd...>  run a command in the daemon container as uid 10001
@@ -41,6 +42,8 @@
 #   config/           bound at /data/config, read-only to every running service
 #   compose.devbox.yml   the devbox services, rendered by `istota devbox compose-file`
 #   secrets/          one file per credential, 0400, owned by uid 10001
+#   requests/         the web config editor's trigger, uid 10001's, bound into web alone
+#   .stack.lock       held by every verb that writes; names the verb holding it
 #   certs/ letsencrypt/ acme/   nginx's certificate sources and the ACME webroot
 #
 # The rclone mount, in full Nextcloud integration, is outside it at
@@ -146,6 +149,56 @@ file_set() {
     mv "$tmp" "$file"
 }
 
+# --- the stack lock ----------------------------------------------------------
+
+# One lock for every verb that writes, taken in main()'s dispatch so internal
+# calls never take it again: flock(2) on .stack.lock through descriptor 9, which
+# the holder keeps until it exits. The holder writes its verb into the file for
+# the message a waiter prints. ISTOTA_STACK_LOCK_WAIT is the tests'.
+STACK_LOCK="${STACK}/.stack.lock"
+STACK_LOCK_WAIT="${ISTOTA_STACK_LOCK_WAIT:-600}"
+
+lock_holder() {
+    local verb
+    verb="$(head -n 1 "$STACK_LOCK" 2>/dev/null || true)"
+    echo "${verb:-another command}"
+}
+
+# take_stack_lock <verb> [--try]: wait up to STACK_LOCK_WAIT seconds for the
+# lock, then fail naming the holder; with --try, answer 1 at once instead.
+take_stack_lock() {
+    local verb="$1" try="${2:-}"
+    command -v flock >/dev/null 2>&1 || die "flock (util-linux) is missing; every command that writes holds the stack lock."
+    exec 9>>"$STACK_LOCK" || die "could not open ${STACK_LOCK}"
+    if ! flock -n 9; then
+        if [ -n "$try" ]; then
+            exec 9>&-
+            return 1
+        fi
+        log "waiting for \`istota-stack $(lock_holder)\` to finish (up to ${STACK_LOCK_WAIT}s)"
+        flock -w "$STACK_LOCK_WAIT" 9 \
+            || die "\`istota-stack $(lock_holder)\` still holds ${STACK_LOCK}; nothing was done. Run this again once it has finished."
+    fi
+    printf '%s\n' "$verb" > "$STACK_LOCK"
+}
+
+refuse_busy_setup_web() {
+    local holder
+    holder="$(lock_holder)"
+    case "$holder" in
+        "setup --web") die "a setup is already running: \`istota-stack setup-code\` prints its address." ;;
+        setup) die "a setup is already running (\`istota-stack setup\`)." ;;
+        *) die "\`istota-stack ${holder}\` is running; run this again once it has finished." ;;
+    esac
+}
+
+# Closing the descriptor drops the lock. Before handing control to anything
+# that starts istota-stack.service: its ExecStart, `istota-stack up`, is not a
+# child of this process and would wait for the lock this one holds.
+release_stack_lock() {
+    exec 9>&-
+}
+
 # --- compose -----------------------------------------------------------------
 
 # Refuse a file this script would act on as root unless it is a regular file
@@ -158,7 +211,13 @@ require_own_file() {
 }
 
 compose() {
-    local files=(-f "${SRC}/docker/docker-compose.yml")
+    local files=(-f "${SRC}/docker/docker-compose.yml") requests=""
+    # The web config editor's trigger directory, on a VM provision.sh made one
+    # on, and only from a checkout that has the file (a rollback may not).
+    if [ -d "${STACK}/requests" ] && [ -f "${SRC}/docker/docker-compose.config-apply.yml" ]; then
+        files+=(-f "${SRC}/docker/docker-compose.config-apply.yml")
+        requests="${STACK}/requests"
+    fi
     # WITHOUT_DEVBOX=1: the release's own file alone, for the steps of an
     # update that run before compose.devbox.yml is rendered again.
     if [ -z "${WITHOUT_DEVBOX:-}" ] && { [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; }; then
@@ -173,6 +232,7 @@ compose() {
         # Only a pin that is set: compose passes an empty variable as an empty
         # build arg, which overrides the Dockerfile's default and fails the build.
         if [ -n "$pin" ]; then export CLAUDE_CODE_VERSION="$pin"; else unset CLAUDE_CODE_VERSION; fi
+        if [ -n "$requests" ]; then export ISTOTA_REQUESTS_DIR="$requests"; fi
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
         ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
         ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
@@ -290,14 +350,21 @@ resolve_unsigned_tag() {
     echo "$object"
 }
 
-# Whether config.toml names a brain that runs Claude Code. With no config yet,
-# no: `istota-stack setup` says so when the answers need it.
+# Whether a config names a brain that runs Claude Code: config.toml, or the path
+# given, which may be a plan.json (its `config` table is read). With no config
+# yet, no: `istota-stack setup` says so when the answers need it.
+# config_editor/handoff.py's needs_claude_code is the request's copy of the rule.
 needs_claude_code() {
-    [ -f "${CONFIG_DIR}/config.toml" ] || { echo 0; return; }
-    python3 - "${CONFIG_DIR}/config.toml" <<'PY'
-import sys, tomllib
+    local path="${1:-${CONFIG_DIR}/config.toml}"
+    [ -f "$path" ] || { echo 0; return; }
+    python3 - "$path" <<'PY'
+import json, sys, tomllib
 with open(sys.argv[1], "rb") as f:
-    brain = tomllib.load(f).get("brain", {})
+    if sys.argv[1].endswith(".json"):
+        document = json.load(f).get("config") or {}
+    else:
+        document = tomllib.load(f)
+brain = document.get("brain", {})
 kinds = {brain.get("kind", "claude_code"), brain.get("fallback", "")}
 kinds |= set((brain.get("source_type_overrides") or {}).values())
 kinds |= set(brain.get("room_selectable") or [])
@@ -333,11 +400,14 @@ build_services() {
 # compose.devbox.yml on disk was rendered by the previous release and may name
 # what this one no longer has, which compose refuses for the whole project.
 # Then the devbox file is rendered with the new image, and its images built.
+# An INSTALL_CLAUDE_CODE already set wins over config.toml: config-apply builds
+# for the config it is about to write.
 build_images() {
     local tag="$1" services
     services="$(WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" build_services)"
     # shellcheck disable=SC2086
-    BUILDX_BUILDER=default WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="$(needs_claude_code)" compose build $services
+    BUILDX_BUILDER=default WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="${INSTALL_CLAUDE_CODE:-$(needs_claude_code)}" \
+        compose build $services
 }
 
 build_devbox_images() {
@@ -350,13 +420,14 @@ build_devbox_images() {
     BUILDX_BUILDER=default ISTOTA_TAG="$tag" compose build $devbox
 }
 
-# Why the tag's image cannot run what config.toml asks for, or nothing when it
-# can: Claude Code missing where a brain needs it, or at another version than
-# host.env's pin. A build reads the config, so the image follows whatever the
-# config said at build time; this is what catches a config that changed since.
+# Why the tag's image cannot run what config.toml (or the config path given)
+# asks for, or nothing when it can: Claude Code missing where a brain needs it,
+# or at another version than host.env's pin. A build reads the config, so the
+# image follows whatever the config said at build time; this is what catches a
+# config that changed since.
 image_lacks_what_config_needs() {
-    local tag="$1" env installed version pin
-    [ "$(needs_claude_code)" = 1 ] || return 0
+    local tag="$1" config="${2:-}" env installed version pin
+    [ "$(needs_claude_code ${config:+"$config"})" = 1 ] || return 0
     env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${IMAGE}:${tag}" 2>/dev/null || true)"
     installed="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_INSTALLED=//p')"
     version="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_VERSION=//p')"
@@ -530,6 +601,10 @@ cmd_update() {
 reprovision_if_changed() {
     provision_outdated || return 0
     log "the host's provisioning inputs changed; running ${SRC}/host/provision.sh (the stack already runs $(env_get "$ENV_FILE" ISTOTA_TAG))"
+    # provision.sh runs `istota-stack up` and may restart istota-stack.service,
+    # whose ExecStart is `up`; with the lock held across the exec, through the
+    # inherited descriptor, that `up` would wait on its own parent.
+    release_stack_lock
     exec "${SRC}/host/provision.sh"
 }
 
@@ -737,6 +812,10 @@ refuse_if_set_up() {
     fi
 }
 
+# The setup lock is what `setup-code` asks, so its question never touches the
+# stack lock, which every writing verb takes; which setup runs is the stack
+# lock's to decide, so `take` waits rather than refusing: the only other
+# holder can be a `held` probe, for an instant.
 # flock(2) through python3, since the lock outlives the call: `take` locks
 # descriptor 8, which this shell opened and its children inherit, and a flock
 # belongs to the open file, so it is held until this shell exits. `held` asks,
@@ -752,9 +831,9 @@ else:
     except OSError:
         sys.exit(1)
 try:
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fcntl.flock(fd, fcntl.LOCK_EX if mode == "take" else fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    sys.exit(1 if mode == "take" else 0)
+    sys.exit(0)
 if mode == "held":
     sys.exit(1)
 # A run that finished between the open and the lock removed the file it held.
@@ -925,7 +1004,7 @@ cmd_setup_web() {
 
     install -d -m 0700 "$SETUP_DIR"
     exec 8>>"${SETUP_DIR}/lock"
-    setup_lock take || die "a setup is already running: \`istota-stack setup-code\` prints its address."
+    setup_lock take || die "could not take ${SETUP_DIR}/lock; nothing was done."
     trap 'rm -rf "${staging:-}" "$SETUP_DIR"' EXIT
     rm -f "${SETUP_DIR}/code" "${SETUP_DIR}/cert.pem" "${SETUP_DIR}/key.pem" "${SETUP_DIR}/instructions"
 
@@ -956,6 +1035,11 @@ cmd_setup_web() {
     env_set "ISTOTA_TAG=${tag}"
     render_devbox_compose "$tag"
     build_what_setup_needs "$tag"
+    # Both steps below start `istota-stack up`: provision.sh directly, and the
+    # unit's ExecStart in a process systemd starts. That `up` opens the lock
+    # afresh, so either would wait on the one this process holds. The setup
+    # lock stays held, so `setup-code` still answers until this exits.
+    release_stack_lock
     # A first setup choosing direct ingress or Nextcloud changes what is
     # provisioned. Run as a child, not exec'd as an update does it, because the
     # start comes after it.
@@ -983,6 +1067,17 @@ cmd_setup_code() {
     cat "${SETUP_DIR}/instructions"
 }
 
+# `istota apply` a plan in a one-shot container with the config directory open,
+# the plan's directory bound read-only at /plan, where uid 10001 must be able
+# to read it. The caller decides about a restart. Exit codes are istota
+# apply's: 0 nothing changed, 2 changed (or would, under --dry-run), 1 refused.
+apply_plan_file() {
+    local plan="$1"
+    shift
+    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "$(dirname "$plan"):/plan:ro" \
+        "$(main_service)" istota apply -f "/plan/$(basename "$plan")" "$@"
+}
+
 cmd_apply() {
     [ "$#" -ge 1 ] || { usage >&2; exit 64; }
     local plan="$1" name rc=0
@@ -994,8 +1089,7 @@ cmd_apply() {
     # Readable by uid 10001 alone: a plan can hold credentials.
     install -m 0400 "$plan" "${staging}/${name}"
     if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
-    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/plan:ro" \
-        "$(main_service)" istota apply -f "/plan/${name}" "$@" || rc=$?
+    apply_plan_file "${staging}/${name}" "$@" || rc=$?
     if [ "$rc" -eq 2 ]; then
         case " $* " in
             *" --dry-run "*) ;;
@@ -1116,7 +1210,10 @@ cmd_localize_workspace() {
     file_set "$HOST_ENV" STORAGE=local
     log "host.env: STORAGE=local"
     if [ -x "${SRC}/host/provision.sh" ]; then
+        # provision.sh may start istota-stack.service, whose `up` takes the lock.
+        release_stack_lock
         "${SRC}/host/provision.sh" || die "provision.sh failed after the config change; run it again, then \`istota-stack up\`."
+        take_stack_lock localize-workspace
     fi
     cmd_up
     stack_exec istota workspace reindex --forget-root "$CONTAINER_MOUNT" \
@@ -1161,10 +1258,30 @@ cmd_check_image() {
 # nothing changed, 2 when something did (or would, under --dry-run). Nothing
 # printed names a value.
 PUT_FILES_PY='
-import json, os, re, stat, sys, tempfile
+import datetime, json, os, re, stat, sys, tempfile
 
 secrets_dir, config_dir, dry_run = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 request = json.load(sys.stdin)
+
+# Who manages the secrets and the admins, for config/managed.json, in the
+# format istota.apply.write_managed writes (the authoritative copy), restated
+# here because this runs with no istota to import. Checked before anything is
+# written.
+claims = {}
+managed = request.get("managed")
+if managed is not None:
+    if not isinstance(managed, dict):
+        sys.exit("[istota-stack] REFUSE: managed is not an object")
+    source = managed.get("source")
+    if not isinstance(source, str) or len(source) > 64:
+        sys.exit("[istota-stack] REFUSE: managed.source is not a string of at most 64 characters")
+    for key, value in managed.items():
+        if key == "source":
+            continue
+        if key not in ("secrets", "admins") or not isinstance(value, bool):
+            sys.exit(f"[istota-stack] REFUSE: managed.{key} is not secrets or admins set to true or false")
+        claims[key] = value
+
 wanted = []
 for name, value in (request.get("secrets") or {}).items():
     if not re.fullmatch(r"[a-z0-9_]+", name):
@@ -1218,6 +1335,41 @@ for path, label, value, mode in wanted:
 verb = "would write" if dry_run else "wrote"
 for label in changed:
     print(f"[istota-stack] {verb} {label}")
+
+# A change to who manages a file is not a change to the file: it is written,
+# and the exit code says nothing about it, so nothing restarts for it.
+if claims:
+    marker_path = os.path.join(config_dir, "managed.json")
+    marker = {}
+    found = current(marker_path)
+    if found is not None:
+        try:
+            marker = json.loads(found[0])
+        except ValueError:
+            marker = {}
+        if not isinstance(marker, dict):
+            marker = {}
+    updated = dict(marker)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for resource, value in claims.items():
+        entry = marker.get(resource)
+        if isinstance(entry, dict) and entry.get("managed") is value and entry.get("source") == managed["source"]:
+            continue
+        updated[resource] = {"managed": value, "source": managed["source"], "at": stamp}
+    if updated != marker:
+        if dry_run:
+            print("[istota-stack] would update the management marker")
+        else:
+            fd, tmp = tempfile.mkstemp(dir=config_dir, prefix=".put.")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    os.fchmod(fh.fileno(), 0o600)
+                    fh.write(json.dumps(updated, indent=2, sort_keys=True) + "\n")
+                os.replace(tmp, marker_path)
+            except BaseException:
+                os.unlink(tmp)
+                raise
+            print("[istota-stack] updated the management marker")
 sys.exit(2 if changed else 0)
 '
 
@@ -1233,6 +1385,176 @@ cmd_put_files() {
     fi
     "${drop[@]}" python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
 }
+
+# --- config-apply: the web config editor's requests ---------------------------
+
+# Where a request's files are staged: tmpfs, so a host that dies mid-apply
+# leaves no credential on disk. The override is the tests'.
+CONFIG_APPLY_RUN="${ISTOTA_CONFIG_APPLY_RUN_DIR:-/run}"
+CONFIG_APPLY_BACKUPS=10
+# config_apply_one's exit code when nothing was pending.
+CONFIG_APPLY_NOTHING=10
+
+# The web stores a request and touches requests/config-apply; the path unit,
+# or the five-minute timer, runs this. Each request: take it in a one-shot,
+# check everything with both dry runs, build the image if the new config needs
+# Claude Code and the image lacks it, then write credentials and admins
+# (put-files) and the config (istota apply --backup), record the outcome and
+# restart. Nothing is written until every check has passed. The journal gets
+# verbs, ids and exit codes; the commands' own output goes to the request's
+# row, through `istota config-request finish`, which redacts it again.
+cmd_config_apply() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    # The timer runs from first boot, before setup has written anything.
+    [ -f "${CONFIG_DIR}/config.toml" ] || return 0
+    if ! take_stack_lock config-apply --try; then
+        log "config-apply: \`istota-stack $(lock_holder)\` holds the stack lock; the next trigger or the timer retries"
+        return 0
+    fi
+    local rc
+    while :; do
+        rc=0
+        config_apply_one || rc=$?
+        if [ "$rc" -eq "$CONFIG_APPLY_NOTHING" ]; then
+            return 0
+        elif [ "$rc" -ne 0 ]; then
+            log "config-apply: stopped (exit ${rc}); a request left taken is failed by the next run"
+            return 1
+        fi
+    done
+}
+
+# Record request $1's outcome $2, with the output in staging directory $3, in a
+# one-shot. A failure here leaves the row taken, which the next run's take
+# marks failed.
+config_apply_finish() {
+    local id="$1" status="$2" dir="$3"
+    if [ "$(id -u)" -eq 0 ]; then chown "$ISTOTA_UID:$ISTOTA_UID" "${dir}/output"; fi
+    chmod 0400 "${dir}/output"
+    log "config-apply: request ${id}: ${status}"
+    oneshot -v "${dir}:/out:ro" "$(main_service)" istota config-request finish \
+            --id "$id" --status "$status" --output-file /out/output >/dev/null \
+        || log "config-apply: request ${id}'s outcome was not recorded; the next run marks it failed"
+}
+
+# Whether files.json names anything for put-files to write.
+files_name_anything() {
+    python3 -I -c 'import json, sys
+request = json.load(open(sys.argv[1]))
+sys.exit(0 if request.get("secrets") or request.get("admins") is not None else 1)' "$1"
+}
+
+# One request. A subshell, so the trap that removes its staging directory is
+# its own: the caller's EXIT trap and the global `staging` are left alone.
+# Called on the left of `||`, where bash ignores set -e, so every step that
+# can fail says what then happens. Exit 0 having handled a request,
+# CONFIG_APPLY_NOTHING when none was pending, anything else to stop the loop.
+config_apply_one() (
+    local dir out id service tag name lacking status written="" rc=0 rc_put=0 rc_apply=0 puts=""
+    dir="$(mktemp -d "${CONFIG_APPLY_RUN}/istota-config.XXXXXX")" \
+        || die "config-apply: could not make a staging directory in ${CONFIG_APPLY_RUN}"
+    trap 'rm -rf "$dir"' EXIT
+    chmod 0700 "$dir" || exit 1
+    if [ "$(id -u)" -eq 0 ]; then chown "$ISTOTA_UID:$ISTOTA_UID" "$dir" || exit 1; fi
+    service="$(main_service)"
+
+    id="$(oneshot -v "${dir}:/out" "$service" istota config-request take --out /out)" \
+        || { log "config-apply: take failed"; exit 1; }
+    [ -n "$id" ] || exit "$CONFIG_APPLY_NOTHING"
+    [[ "$id" =~ ^[0-9]+$ ]] || { log "config-apply: take answered something other than a request id"; exit 1; }
+    log "config-apply: request ${id}: taken"
+
+    # Root reads these from here on, so nothing running as 10001 may change
+    # them: the directory becomes root's, which 10001 can still pass through to
+    # read its own 0400 files in the later one-shots.
+    if [ "$(id -u)" -eq 0 ]; then
+        chown root:root "$dir" && chmod 0711 "$dir" || exit 1
+    fi
+    out="${dir}/output"
+    : > "$out" || exit 1
+    for name in plan.json files.json claude-code; do
+        if [ -z "$(find -P "${dir}/${name}" -maxdepth 0 -type f 2>/dev/null)" ]; then
+            echo "take left ${name} missing or not a plain file" >> "$out"
+            config_apply_finish "$id" refused "$dir"
+            exit 0
+        fi
+    done
+
+    # Everything is checked before anything is written.
+    echo "\$ istota apply --dry-run" >> "$out"
+    apply_plan_file "${dir}/plan.json" --dry-run >> "$out" 2>&1 || rc=$?
+    echo "(exit ${rc})" >> "$out"
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then status=refused; fi
+    if files_name_anything "${dir}/files.json"; then
+        puts=1
+        rc=0
+        echo "\$ istota-stack put-files --dry-run" >> "$out"
+        cmd_put_files --dry-run < "${dir}/files.json" >> "$out" 2>&1 || rc=$?
+        echo "(exit ${rc})" >> "$out"
+        if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then status=refused; fi
+    fi
+    if [ "${status:-}" = refused ]; then
+        echo "a check failed; nothing was written" >> "$out"
+        config_apply_finish "$id" refused "$dir"
+        exit 0
+    fi
+
+    # The image the new config needs, built before anything is written, so a
+    # failed build leaves the install as it was.
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    if [ "$(cat "${dir}/claude-code")" = 1 ] && [ -n "$tag" ]; then
+        lacking="$(image_lacks_what_config_needs "$tag" "${dir}/plan.json")"
+        if [ -n "$lacking" ]; then
+            echo "${lacking}: building ${tag} with Claude Code" >> "$out"
+            log "config-apply: request ${id}: building ${tag}"
+            oneshot "$service" istota config-request mark --id "$id" --status building >/dev/null \
+                || log "config-apply: request ${id} was not marked building"
+            rc=0
+            INSTALL_CLAUDE_CODE=1 build_images "$tag" >> "$out" 2>&1 || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                tail -n 40 "$out" > "${out}.tail" && mv "${out}.tail" "$out"
+                echo "the build failed (exit ${rc}); nothing was written" >> "$out"
+                config_apply_finish "$id" refused "$dir"
+                exit 0
+            fi
+        fi
+    fi
+
+    if [ -n "$puts" ]; then
+        echo "\$ istota-stack put-files" >> "$out"
+        cmd_put_files < "${dir}/files.json" >> "$out" 2>&1 || rc_put=$?
+        echo "(exit ${rc_put})" >> "$out"
+    fi
+    if [ "$rc_put" -eq 0 ] || [ "$rc_put" -eq 2 ]; then
+        echo "\$ istota apply --backup ${CONFIG_APPLY_BACKUPS}" >> "$out"
+        apply_plan_file "${dir}/plan.json" --backup "$CONFIG_APPLY_BACKUPS" >> "$out" 2>&1 || rc_apply=$?
+        echo "(exit ${rc_apply})" >> "$out"
+    fi
+
+    # A put-files that failed may have written some files before it did.
+    if [ "$rc_put" -ne 0 ] && [ "$rc_put" -ne 2 ]; then
+        status=failed
+        written="credentials or admins, possibly"
+    elif [ "$rc_apply" -ne 0 ] && [ "$rc_apply" -ne 2 ]; then
+        status=failed
+        if [ "$rc_put" -eq 2 ]; then written="credentials or admins"; fi
+    elif [ "$rc_put" -eq 2 ] || [ "$rc_apply" -eq 2 ]; then
+        status=applied
+        written="the change"
+    else
+        status=unchanged
+    fi
+    if [ "$status" = failed ]; then
+        echo "failed; written before the failure: ${written:-nothing}" >> "$out"
+    fi
+    config_apply_finish "$id" "$status" "$dir"
+    # What is on disk is what runs, a partial write included, rather than
+    # waiting for some later unrelated restart.
+    if [ -n "$written" ]; then
+        restart_for_config || log "config-apply: request ${id}: the restart failed"
+    fi
+    exit 0
+)
 
 cmd_up() {
     # Without a config the entrypoint refuses, and the restart policy would
@@ -1370,6 +1692,18 @@ cmd_retire_bare_metal() {
 main() {
     local command="${1:-}"
     [ "$#" -gt 0 ] && shift
+    # config-apply takes the lock itself, without waiting, and only once there
+    # is a config to apply to. setup --web may hold it for an hour while it
+    # waits on a browser, so it never queues either: it refuses at once.
+    case "$command" in
+        setup)
+            case " $* " in
+                *" --web "*) take_stack_lock "setup --web" --try || refuse_busy_setup_web ;;
+                *) take_stack_lock setup ;;
+            esac ;;
+        update|rollback|apply|import-bare-metal|retire-bare-metal|put-files|localize-workspace|up|down)
+            take_stack_lock "$command" ;;
+    esac
     case "$command" in
         update) cmd_update "$@" ;;
         rollback) cmd_rollback "$@" ;;
@@ -1380,6 +1714,7 @@ main() {
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
         localize-workspace) cmd_localize_workspace "$@" ;;
         put-files) cmd_put_files "$@" ;;
+        config-apply) cmd_config_apply "$@" ;;
         check-image) cmd_check_image "$@" ;;
         latest-tag) cmd_latest_tag "$@" ;;
         up) cmd_up ;;
