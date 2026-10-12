@@ -276,6 +276,12 @@ The compose file passes these settings to the browser service:
 | `MAX_BROWSER_SESSIONS` | `2` | Session limit per user |
 | `BROWSER_MAX_TOTAL_SESSIONS` | `4` | Session limit across all users |
 | `BROWSER_DISK_CACHE_BYTES` | `104857600` | Chrome disk-cache limit per profile, not a limit on total profile size |
+| `BROWSE_WATCHDOG_DEADLINE_S` | `90` | Seconds a request may run before Chrome is killed and relaunched; `0` disables the watchdog. Keep it between about 65 and 120: lower cuts off long `type` actions and Cloudflare challenge solving, and above 120 the skill's own client gives up first |
+| `BROWSE_WATCHDOG_POLL_S` | `5` | Seconds between the watchdog's checks of the in-flight request; at least `1` |
+| `BROWSER_CDP_FAILURE_THRESHOLD` | `3` | Consecutive CDP failures that mark the container unhealthy; `0` disables this check |
+| `BROWSER_CDP_FAILURE_WINDOW_S` | `900` | How long that verdict stays red after the last failure; values below `210` are raised to `210` |
+| `BROWSER_WEDGE_RECOVERY_THRESHOLD` | `3` | Watchdog recoveries within the window that mark the container unhealthy; `0` disables this check |
+| `BROWSER_WEDGE_RECOVERY_WINDOW_S` | `900` | Window for counting those recoveries; values below `210` are raised to `210` |
 
 The container retains its 3 GiB memory limit. Setting `BROWSER_MAX_INSTANCES=1` reduces process memory while keeping separate profiles; switching users can require a cold start. A full process pool evicts only an instance with no live sessions, otherwise it returns a capacity error with a retry delay. Session limits are separate: opening a session evicts the requesting user's oldest first, and can evict another user's oldest at the global cap when the requester has none. Browser requests still execute serially.
 
