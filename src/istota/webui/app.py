@@ -10,7 +10,6 @@ from istota.credentials import kdbx_import as credential_read
 import asyncio
 import codecs
 import base64
-import hashlib
 import hmac
 import ipaddress
 import secrets
@@ -78,6 +77,7 @@ from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.lib.audio_sniff import AUDIO_EXTENSIONS, sniff_audio
 from istota.lib.video_sniff import sniff_video
 from istota.storage import NOTES_MAX_BYTES
+from istota.workspace import text_files
 from istota.nextcloud.ocs import OcsError, ocs_data
 from istota.usage.telemetry import SYSTEM_USER_ID
 from istota.location.logic import (
@@ -6860,37 +6860,6 @@ def _chat_room_group(
 _CHANNEL_MEMORY_MAX_BYTES = NOTES_MAX_BYTES
 
 
-def _channel_memory_revision(content: str) -> str:
-    """Opaque revision tag for what a reader will see as the file's content.
-
-    Hashes what `read_channel_memory` **returns**, not the bytes on disk: that
-    reader collapses absent and whitespace-only to None, so a file saved as
-    `"  \\n"` reads back as `""`. Hashing the submitted bytes instead would hand
-    the client a tag the next read can never reproduce, and every subsequent
-    save would be refused as a conflict with no way out but discarding the
-    user's text.
-
-    The save is optimistic: the client sends back the revision it loaded, and a
-    mismatch means something else wrote in between. That check — not the lock —
-    is what covers the case the lock cannot: the anchor dir is per-user
-    (`ISTOTA_DEFERRED_DIR`), so a second member's task writing the same shared
-    Talk-room file takes a *different* anchor and excludes nobody.
-    """
-    normalized = content if content.strip() else ""
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _channel_memory_lock_dir(username: str):
-    """The flock anchor dir the memory skill CLI and the nightly curator use.
-
-    Same expression as `sleep_cycle` and `skills/memory._lock_dir` so a web
-    save and a runtime CLI write against this user's own tasks land on one
-    anchor inode instead of two.
-    """
-    from istota.memory.curation.file_lock import deferred_lock_dir
-    return deferred_lock_dir(_config.temp_dir / username)
-
-
 def _chat_memory_room(username: str, room_id: int):
     """Resolve `room_id` for a channel-memory read or write, or None.
 
@@ -6947,7 +6916,7 @@ def _chat_room_memory(username: str, room_id: int) -> dict | None:
         # Served from the server so the pane's "start from template" can't
         # drift from what `init_channel_memory` writes.
         "template": storage.CHANNEL_MEMORY_TEMPLATE,
-        "revision": _channel_memory_revision(content or ""),
+        "revision": text_files.revision(content or ""),
     }
 
 
@@ -6967,7 +6936,6 @@ def _chat_save_room_memory(
     room, so a per-user count would refuse nothing in the shared case.
     """
     from istota import db, storage
-    from istota.memory.curation.file_lock import MemoryMdLocked, memory_md_lock
     room = _chat_memory_room(username, room_id)
     if room is None:
         return "not_found", None
@@ -6976,30 +6944,15 @@ def _chat_save_room_memory(
             return "busy", None
     if not _config.has_workspace:
         return "failed", None
-    memory_path = _config.workspace_path / "Channels" / room.token / "CHANNEL.md"
-    try:
-        with memory_md_lock(
-            memory_path, timeout_seconds=5.0,
-            lock_dir=_channel_memory_lock_dir(username),
-        ):
-            # Re-read *inside* the lock: the revision the client carries was
-            # taken before it, so comparing outside would leave exactly the
-            # window the check exists to close.
-            current = storage.read_channel_memory(_config, room.token) or ""
-            if _channel_memory_revision(current) != revision:
-                return "conflict", None
-            try:
-                written = storage.write_channel_memory(_config, room.token, content)
-            except OSError as e:
-                # A full disk or a dropped mount is a reportable failure with a
-                # code the client understands, not an unstructured 500.
-                logger.warning("chat room memory save failed for %s: %s", room.token, e)
-                return "failed", None
-            if not written:
-                return "failed", None
-    except MemoryMdLocked:
-        return "locked", None
-    return "ok", _channel_memory_revision(content)
+    outcome = text_files.save(
+        _config, username,
+        _config.workspace_path / "Channels" / room.token / "CHANNEL.md",
+        content, revision,
+        read=lambda: storage.read_channel_memory(_config, room.token),
+        write=lambda text: storage.write_channel_memory(_config, room.token, text),
+        max_bytes=_CHANNEL_MEMORY_MAX_BYTES,
+    )
+    return outcome.status, outcome.revision
 
 
 def _chat_room_notes(username: str, room_id: int) -> dict | None:
@@ -7019,7 +6972,7 @@ def _chat_room_notes(username: str, room_id: int) -> dict | None:
         "token": room.token,
         "content": content or "",
         "exists": content is not None,
-        "revision": _channel_memory_revision(content or ""),
+        "revision": text_files.revision(content or ""),
     }
 
 
@@ -7033,26 +6986,20 @@ def _chat_save_room_notes(
     skill takes for ``memory --room``, keyed on the same resolved path.
     """
     from istota import storage
-    from istota.memory.curation.file_lock import MemoryMdLocked, memory_md_lock
     room = _chat_memory_room(username, room_id)
     if room is None:
         return "not_found", None
     path = storage.room_notes_path(_config, username, room.token)
     if path is None:
         return "failed", None
-    try:
-        with memory_md_lock(
-            path, timeout_seconds=5.0,
-            lock_dir=_channel_memory_lock_dir(username),
-        ):
-            current = storage.read_room_notes(_config, username, room.token) or ""
-            if _channel_memory_revision(current) != revision:
-                return "conflict", None
-            if not storage.write_room_notes(_config, username, room.token, content):
-                return "failed", None
-    except MemoryMdLocked:
-        return "locked", None
-    return "ok", _channel_memory_revision(content)
+    outcome = text_files.save(
+        _config, username, path, content, revision,
+        read=lambda: storage.read_room_notes(_config, username, room.token),
+        write=lambda text: storage.write_room_notes(
+            _config, username, room.token, text),
+        max_bytes=NOTES_MAX_BYTES,
+    )
+    return outcome.status, outcome.revision
 
 
 def _room_talk_binding(username: str, room_id: int) -> str | None:

@@ -12,6 +12,8 @@ from pathlib import Path
 import tomli
 
 from . import db
+from .workspace import text_files
+from .workspace.text_files import MemoryMdLocked
 from .workspace.writes import open_or_create_dirs as _open_or_create_dirs
 from istota.sandbox.host_paths import owner_path_parts
 from .storage import OWNER_FILE_MAX_BYTES, get_user_scripts_path, read_owner_text
@@ -1367,6 +1369,11 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
 
     Returns True if a file was written — which now includes the write
     itself having succeeded, not just having been attempted.
+
+    Under the file's lock, and the "absent or template" judgement is made again
+    inside it: the sync decided to restore from a read taken outside the lock,
+    and a web save of real jobs in between must not be overwritten by the
+    table.
     """
     if not config.has_workspace:
         return False
@@ -1376,8 +1383,29 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     config_dir = resolve_user_config_dir(config, user_id)
     if config_dir is None:
         return False
-    if (config_dir / "CRON.md").exists() and not overwrite:
+    try:
+        with text_files.file_lock(config, user_id, config_dir / "CRON.md"):
+            return _migrate_db_jobs_locked(conn, config, user_id, config_dir, overwrite)
+    except MemoryMdLocked:
+        logger.warning("cron_md_write_refused user=%s reason=locked", user_id)
         return False
+    except OSError as e:
+        # The anchor could not be made or opened. False, never an exception:
+        # the contract `remove_job_from_cron_md`'s caller depends on.
+        logger.warning(
+            "cron_md_write_refused user=%s reason=lock_unavailable errno=%s",
+            user_id, e.errno,
+        )
+        return False
+
+
+def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: bool) -> bool:
+    if (config_dir / "CRON.md").exists():
+        if not overwrite:
+            return False
+        current = load_cron_document(config, user_id)
+        if current is None or not current.is_template:
+            return False
 
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     # Module-managed jobs are owned by their integrations and must not be
@@ -1428,6 +1456,34 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     return True
 
 
+def _with_cron_md_lock(config, user_id: str, fn) -> bool:
+    """Run a CRON.md read-modify-write under the file's lock. False if held.
+
+    The read has to be inside the lock, not only the write: a web save landing
+    between the two would otherwise be overwritten by a document built from
+    the text it replaced.
+    """
+    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        return False
+    try:
+        with text_files.file_lock(config, user_id, config_dir / "CRON.md"):
+            return fn()
+    except MemoryMdLocked:
+        logger.warning("cron_md_write_refused user=%s reason=locked", user_id)
+        return False
+    except OSError as e:
+        # The anchor could not be made or opened. False, never an exception:
+        # the contract `remove_job_from_cron_md`'s caller depends on.
+        logger.warning(
+            "cron_md_write_refused user=%s reason=lock_unavailable errno=%s",
+            user_id, e.errno,
+        )
+        return False
+
+
 def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: bool) -> bool:
     """
     Update a job's enabled state in the user's CRON.md file.
@@ -1442,7 +1498,13 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     """
     if not config.has_workspace:
         return False
+    return _with_cron_md_lock(
+        config, user_id,
+        lambda: _update_job_enabled_locked(config, user_id, job_name, enabled),
+    )
 
+
+def _update_job_enabled_locked(config, user_id: str, job_name: str, enabled: bool) -> bool:
     doc = load_cron_document(config, user_id)
     if doc is None:
         return False
@@ -1488,7 +1550,12 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     """
     if not config.has_workspace:
         return False
+    return _with_cron_md_lock(
+        config, user_id, lambda: _remove_job_locked(config, user_id, job_name),
+    )
 
+
+def _remove_job_locked(config, user_id: str, job_name: str) -> bool:
     doc = load_cron_document(config, user_id)
     if doc is None:
         return False
