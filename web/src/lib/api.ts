@@ -168,6 +168,7 @@ export interface User {
     money: boolean;
     health: boolean;
     briefings: boolean;
+    workspace?: boolean;
     google_workspace: boolean;
     google_workspace_enabled: boolean;
     admin: boolean;
@@ -5193,4 +5194,40 @@ export function search(
   if (options.limit !== undefined) params.set('limit', String(options.limit));
   if (options.offset !== undefined) params.set('offset', String(options.offset));
   return apiFetch(`/search?${params}`, { signal: options.signal });
+}
+
+// Workspace places and safe, one-directory listings.
+export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none';
+export interface WorkspacePlace {
+  id: string;
+  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud';
+  label: string;
+  browsable: boolean;
+  view_root: string | null;
+  reach: {
+    private: WorkspaceAccess;
+    shared_member: WorkspaceAccess;
+    restricted: WorkspaceAccess;
+    note: string | null;
+  };
+}
+export interface WorkspaceEntry {
+  name: string;
+  kind: 'dir' | 'file' | 'link' | 'other';
+  size: number | null;
+  modified: number;
+  hidden: boolean;
+}
+export interface WorkspaceListing {
+  place: string;
+  path: string;
+  entries: WorkspaceEntry[];
+  truncated: boolean;
+  skipped_names: number;
+}
+export function getWorkspacePlaces(): Promise<{ places: WorkspacePlace[]; notes: string[] }> {
+  return apiFetch('/workspace/places');
+}
+export function getWorkspaceListing(place: string, path = ''): Promise<WorkspaceListing> {
+  return apiFetch(`/workspace/list?${new URLSearchParams({ place, path })}`);
 }

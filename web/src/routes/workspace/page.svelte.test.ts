@@ -1,0 +1,201 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
+import { __history } from '../../../vitest-stubs/app-navigation';
+import type { WorkspacePlace } from '$lib/api';
+import Workspace from './+page.svelte';
+
+const api = vi.hoisted(() => ({}) as ApiDouble);
+const openFile = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api', () => api);
+vi.mock('$lib/fileViewer/store.svelte', () => ({ viewer: { openFile } }));
+await fillApiDouble(api);
+
+const home: WorkspacePlace = {
+  id: 'home',
+  kind: 'home',
+  label: 'My files',
+  browsable: true,
+  view_root: '/Users/alice',
+  reach: {
+    private: 'rw',
+    shared_member: 'rw',
+    restricted: 'none',
+    note: 'Personal memory is not loaded into the prompt in shared rooms.',
+  },
+};
+const room: WorkspacePlace = {
+  ...home,
+  id: 'room:sample',
+  kind: 'room',
+  label: '<b>Project room</b>',
+  view_root: '/Channels/sample',
+};
+const entry = (name: string, kind = 'file', hidden = false) => ({
+  name,
+  kind,
+  hidden,
+  size: kind === 'file' ? 1024 : null,
+  modified: 1767268800,
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  localStorage.clear();
+  __history.reset('/istota/workspace');
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [home, room],
+    notes: ['Files are stored in a local folder.'],
+  });
+  api.getWorkspaceListing.mockImplementation(async (place, path) => ({
+    place,
+    path,
+    entries: path
+      ? [entry('plan #1.md')]
+      : [
+          entry('notes & drafts', 'dir'),
+          entry('.config', 'file', true),
+          entry('outside', 'link'),
+          entry('socket', 'other'),
+        ],
+    truncated: false,
+    skipped_names: 0,
+  }));
+});
+afterEach(cleanup);
+
+it('renders place badges and untrusted labels as text, with reach behind a disclosure', async () => {
+  const { container } = render(Workspace);
+  const link = await screen.findByRole('link', { name: '<b>Project room</b> Read-write' });
+  expect(link.querySelector('b')).toBeNull();
+  await screen.findByRole('link', { name: 'notes & drafts' });
+  expect(container.querySelector('details')).not.toHaveAttribute('open');
+  expect(screen.getByText('Files are stored in a local folder.')).toBeTruthy();
+  expect(screen.getByText('Guest turn or unasked task')).toBeTruthy();
+  expect(screen.getByText('No access')).toBeTruthy();
+});
+
+it('navigates encoded folders and breadcrumbs through history, and opens home files in the viewer', async () => {
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'notes & drafts' }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'plan #1.md' }));
+  expect(openFile).toHaveBeenCalledWith('/Users/alice/notes & drafts/plan #1.md');
+  expect(new URL(location.href).searchParams.get('path')).toBe('notes & drafts');
+  const breadcrumbs = screen.getByRole('navigation', { name: 'Folder path' });
+  await fireEvent.click(within(breadcrumbs).getByRole('link', { name: 'My files' }));
+  await screen.findByRole('link', { name: 'notes & drafts' });
+  __history.back();
+  await screen.findByRole('button', { name: 'plan #1.md' });
+  __history.forward();
+  await screen.findByRole('link', { name: 'notes & drafts' });
+});
+
+it('loads the folder from a direct URL and keeps symbolic links and other entries inert', async () => {
+  __history.reset('/istota/workspace?place=home&path=notes%20%26%20drafts');
+  const first = render(Workspace);
+  await screen.findByRole('button', { name: 'plan #1.md' });
+  expect(api.getWorkspaceListing).toHaveBeenCalledWith('home', 'notes & drafts');
+  first.unmount();
+  __history.reset('/istota/workspace');
+  render(Workspace);
+  const link = await screen.findByText('outside');
+  expect(link.closest('a,button')).toBeNull();
+  await fireEvent.click(link);
+  expect(openFile).not.toHaveBeenCalled();
+  expect(screen.getByText('socket').closest('a,button')).toBeNull();
+});
+
+it('persists hidden entries and explains partial listings', async () => {
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'home',
+    path: '',
+    entries: [entry('.config', 'file', true)],
+    truncated: true,
+    skipped_names: 2,
+  });
+  const first = render(Workspace);
+  await screen.findByText('No visible files in this folder.');
+  expect(screen.queryByRole('button', { name: '.config' })).toBeNull();
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Show hidden' }));
+  await screen.findByRole('button', { name: '.config' });
+  expect(screen.getByText('Showing the first 2,000 entries.')).toBeTruthy();
+  expect(screen.getByText("2 entries with names that can't be shown.")).toBeTruthy();
+  first.unmount();
+  render(Workspace);
+  expect(await screen.findByRole('button', { name: '.config' })).toBeTruthy();
+});
+
+it('does not offer a file viewer for other roots before the serving stage', async () => {
+  __history.reset('/istota/workspace?place=room%3Asample&path=notes');
+  render(Workspace);
+  expect((await screen.findByText('plan #1.md')).closest('a,button')).toBeNull();
+});
+
+it('shows an unavailable place without falling back to home', async () => {
+  __history.reset('/istota/workspace?place=room%3Aremoved');
+  render(Workspace);
+  await screen.findByText('This place is no longer available.');
+  expect(api.getWorkspaceListing).not.toHaveBeenCalled();
+});
+
+it('keeps a failed folder retryable and ignores a late result after navigation', async () => {
+  let resolve!: (value: unknown) => void;
+  api.getWorkspaceListing.mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  render(Workspace);
+  await fireEvent.click(
+    await screen.findByRole('link', { name: '<b>Project room</b> Read-write' }),
+  );
+  await screen.findByRole('link', { name: 'notes & drafts' });
+  resolve({
+    place: 'home',
+    path: '',
+    entries: [entry('stale.txt')],
+    truncated: false,
+    skipped_names: 0,
+  });
+  await waitFor(() => expect(screen.queryByText('stale.txt')).toBeNull());
+  api.getWorkspaceListing.mockRejectedValueOnce(new Error('Folder not found.'));
+  await fireEvent.click(screen.getByRole('link', { name: 'notes & drafts' }));
+  await screen.findByText('Folder not found.');
+  await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await screen.findByText('plan #1.md');
+});
+
+it('shows the empty state when there are no places', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [], notes: [] });
+  render(Workspace);
+  await screen.findByText('No workspace files or connections are available.');
+});
+
+it('recovers from a failed places request', async () => {
+  api.getWorkspacePlaces.mockRejectedValueOnce(new Error('Unavailable'));
+  render(Workspace);
+  await screen.findByText('Could not load your workspace.');
+  await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await screen.findByRole('link', { name: 'notes & drafts' });
+});
+
+it('shows connection reach without requesting a directory listing', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      {
+        ...home,
+        id: 'drive',
+        kind: 'drive',
+        label: 'Google Drive',
+        browsable: false,
+        view_root: null,
+        reach: { private: 'skill', shared_member: 'skill', restricted: 'none', note: null },
+      },
+    ],
+    notes: [],
+  });
+  render(Workspace);
+  await screen.findByText('This connection is reached through a skill during a task.');
+  expect(api.getWorkspaceListing).not.toHaveBeenCalled();
+  expect(screen.queryByRole('checkbox', { name: 'Show hidden' })).toBeNull();
+});

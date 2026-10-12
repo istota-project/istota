@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workspace shows your file locations and how tasks can reach them. Browse folders, open files under My files in the existing viewer, and check how access changes in shared rooms.
+
 - The workspace API lists your file locations, their task access, and folder contents. Room membership is checked on every request, and symbolic links are shown without being followed.
 
 - **The Ansible management role can update the version on its own.** Running the play with `--tags istota_update` performs only the version update and waits for the stack to be healthy, leaving the config, secrets and users alone. `-e istota_update_force=true` runs the update even when the VM is already current, as running `istota-stack update` on the VM does.

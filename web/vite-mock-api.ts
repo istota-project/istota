@@ -1,5 +1,12 @@
 import type { Plugin } from 'vite';
-import type { AdminStats, AdminUserDetail, AdminUserProfile, AdminUsers } from './src/lib/api';
+import type {
+  WorkspacePlace,
+  WorkspaceEntry,
+  AdminStats,
+  AdminUserDetail,
+  AdminUserProfile,
+  AdminUsers,
+} from './src/lib/api';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
@@ -405,6 +412,7 @@ const user = {
   features: {
     chat: true,
     briefings: true,
+    workspace: true,
     feeds: true,
     location: true,
     money: true,
@@ -4168,6 +4176,7 @@ const VIEWER_MEDIA: Record<string, { kind: 'image' | 'audio' | 'video' | 'pdf'; 
   'cjk-cmap.pdf': { kind: 'pdf', mime: 'application/pdf' },
 };
 const VIEWER_TEXT: Record<string, string> = {
+  '.preferences': 'An example hidden workspace file.\n',
   'note.md': '---\ntitle: Example note\n---\n# Workspace note\n\nA **Markdown** document.\n',
   'note.txt': 'A plain text file.\nSecond line.\n',
   'source.html': '<script>alert("example")</script><h1>Source only</h1>',
@@ -4651,7 +4660,149 @@ const searchHandler: MockHandler = ({ url }) => {
   };
 };
 
+// Workspace: home, read-only linked files, shared roots and connection reach.
+const workspaceReach = {
+  private: 'rw',
+  shared_member: 'rw',
+  restricted: 'none',
+  note: null,
+} as const;
+const workspacePlaces: WorkspacePlace[] = [
+  {
+    id: 'home',
+    kind: 'home',
+    label: 'My files',
+    browsable: true,
+    view_root: '/Users/carol',
+    reach: {
+      ...workspaceReach,
+      note: 'Personal memory is not loaded into the prompt in shared rooms.',
+    },
+  },
+  {
+    id: 'linked:1',
+    kind: 'linked',
+    label: 'Reference library',
+    browsable: true,
+    view_root: '/Reference',
+    reach: { ...workspaceReach, private: 'ro', shared_member: 'ro' },
+  },
+  {
+    id: 'room:project',
+    kind: 'room',
+    label: 'Project room',
+    browsable: true,
+    view_root: '/Channels/project',
+    reach: {
+      ...workspaceReach,
+      restricted: 'rw',
+      note: "A room folder is reachable only from that room's own tasks.",
+    },
+  },
+  {
+    id: 'room:markup',
+    kind: 'room',
+    label: '<b>Planning & notes</b>',
+    browsable: true,
+    view_root: '/Channels/markup',
+    reach: {
+      ...workspaceReach,
+      restricted: 'rw',
+      note: "A room folder is reachable only from that room's own tasks.",
+    },
+  },
+  {
+    id: 'group:team',
+    kind: 'group',
+    label: 'Team',
+    browsable: true,
+    view_root: '/Groups/team',
+    reach: workspaceReach,
+  },
+  {
+    id: 'drive',
+    kind: 'drive',
+    label: 'Google Drive',
+    browsable: false,
+    view_root: null,
+    reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
+  },
+  {
+    id: 'nextcloud',
+    kind: 'nextcloud',
+    label: 'Nextcloud',
+    browsable: false,
+    view_root: null,
+    reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
+  },
+  {
+    id: 'talk',
+    kind: 'talk',
+    label: 'Talk attachments',
+    browsable: false,
+    view_root: null,
+    reach: workspaceReach,
+  },
+];
+function workspaceEntry(name: string, kind: WorkspaceEntry['kind'] = 'file'): WorkspaceEntry {
+  return {
+    name,
+    kind,
+    size: kind === 'file' ? 2048 : null,
+    modified: 1767268800,
+    hidden: name.startsWith('.'),
+  };
+}
+const workspaceTree: Record<string, WorkspaceEntry[]> = {
+  '': [
+    workspaceEntry('Archive', 'dir'),
+    workspaceEntry('Empty folder', 'dir'),
+    workspaceEntry('Notes & plans', 'dir'),
+    workspaceEntry('Unavailable folder', 'dir'),
+    workspaceEntry('.preferences'),
+    workspaceEntry('document.pdf'),
+    workspaceEntry('image.png'),
+    workspaceEntry('note.md'),
+    workspaceEntry('outside-link', 'link'),
+    workspaceEntry('task-socket', 'other'),
+  ],
+  'Notes & plans': [
+    workspaceEntry('note.md'),
+    workspaceEntry('note.txt'),
+    workspaceEntry('source.html'),
+  ],
+  'Empty folder': [],
+  Archive: [workspaceEntry('note.txt')],
+};
+const workspaceHandler: MockHandler = ({ url, method }) => {
+  const [path, query] = url.split('?');
+  if (method !== 'GET') return undefined;
+  if (path === '/istota/api/workspace/places')
+    return {
+      places: workspacePlaces,
+      notes: ['Tasks run in a sandbox.', 'Files are stored in a local folder.'],
+    };
+  if (path !== '/istota/api/workspace/list') return undefined;
+  const params = new URLSearchParams(query);
+  const place = params.get('place') || '';
+  const folder = params.get('path') || '';
+  const selected = workspacePlaces.find((item) => item.id === place);
+  if (!selected?.browsable) return { __status: 404, error: 'Place not found.' };
+  if (folder === 'Unavailable folder') return { __status: 404, error: 'Folder not found.' };
+  const entries =
+    place === 'home' ? workspaceTree[folder] : folder ? undefined : [workspaceEntry('note.md')];
+  if (!entries) return { __status: 404, error: 'Folder not found.' };
+  return {
+    place,
+    path: folder,
+    entries,
+    truncated: folder === 'Archive',
+    skipped_names: folder === 'Archive' ? 2 : 0,
+  };
+};
+
 const handlers: MockHandler[] = [
+  workspaceHandler,
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
