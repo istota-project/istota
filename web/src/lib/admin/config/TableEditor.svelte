@@ -31,7 +31,7 @@
     }
     // An empty snippet defines nothing; removing the key is its own edit.
     if (!value.trim()) {
-      emptyError = 'Empty TOML defines nothing. Use Reset to default to remove the key.';
+      emptyError = 'Empty TOML defines nothing. Use Reset to remove the key.';
       onOp(null, field.path);
       return;
     }
@@ -43,7 +43,7 @@
 <!--
   One table edited as TOML, starting from what config.toml holds for it. The
   snippet's only top-level key is the field's own name, which is what keeps
-  "remove the key" (Reset to default) and "set it empty" (`name = []`) two
+  "remove the key" (Reset) and "set it empty" (`name = []`) two
   different edits. The server parses it; a snippet that does not parse comes
   back from the review as a refusal with the parser's message.
 -->
@@ -76,5 +76,12 @@
 <style>
   .table-note {
     margin: var(--space-1) 0 0;
+  }
+
+  /* Under the control, in its column, as FieldControl's notes are. */
+  @media (min-width: 641px) {
+    .table-note {
+      margin-left: calc(var(--field-label-width) + var(--space-3));
+    }
   }
 </style>

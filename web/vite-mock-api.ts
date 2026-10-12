@@ -4003,6 +4003,15 @@ const MOCK_FILE_CREDENTIALS: Record<string, string> = {
 const MOCK_DOCS: Record<string, string> = {
   'logging.level': 'Minimum level written to the log.',
   'brain.native.base_url': 'An OpenAI-compatible endpoint the native brain talks to.',
+  bot_name: 'The name the bot answers to and signs with.',
+  db_path: 'Where the framework SQLite database lives.',
+  'sms.enabled': 'Turns the SMS surface on.',
+  'sms.provider': 'Which SMS provider sends and receives messages.',
+  'sms.service_numbers': 'The numbers the bot sends from, one per line.',
+  'sms.max_segments': 'The longest reply sent, in SMS segments.',
+  'sms.twilio.auth_token': 'The Twilio auth token. Stored sealed, never shown.',
+  'logging.max_size_mb': 'The size at which the log file rotates.',
+  'web.session_secret_key': 'Signs web session cookies. Changing it signs everyone out.',
 };
 
 function mockIso(ms = Date.now()): string {

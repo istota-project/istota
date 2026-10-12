@@ -11,6 +11,7 @@
   } from '$lib/api';
   import { Badge, Button, ConfirmDialog, Modal } from '$lib/components/ui';
   import { StepUpDialog } from '$lib/components/settings';
+  import DiffBlock from './DiffBlock.svelte';
 
   interface Props {
     changeSet: ConfigChangeSet;
@@ -188,7 +189,7 @@
 
       {#if preview.diff.length}
         <h3 class="micro-label">config.toml</h3>
-        <pre class="diff">{preview.diff.join('\n')}</pre>
+        <div class="diff-wrap"><DiffBlock lines={preview.diff} /></div>
       {/if}
 
       {#if preview.secret_names.length}
@@ -258,16 +259,8 @@
     margin-bottom: var(--space-1);
   }
 
-  .diff {
+  .diff-wrap {
     margin: 0 0 var(--space-3);
-    padding: var(--space-2);
-    max-height: 20rem;
-    overflow: auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--surface-base);
-    border-radius: var(--radius-sm);
-    white-space: pre;
   }
 
   .restart-note {

@@ -43,7 +43,7 @@
   <Field {label} {hint} {inline} labelled={false}>
     <div class="secret-state">
       <span class="muted">Will be cleared.</span>
-      <Button variant="ghost" size="sm" onclick={() => onChange(null)}>Undo</Button>
+      <Button variant="secondary" size="sm" onclick={() => onChange(null)}>Undo</Button>
     </div>
   </Field>
 {:else}
@@ -63,5 +63,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    min-height: var(--control-height-lg);
   }
 </style>

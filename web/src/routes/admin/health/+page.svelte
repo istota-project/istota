@@ -181,7 +181,7 @@
 
     {#each groups as group (group.name)}
       <section class="card">
-        <h2 class="section-title">{group.name}</h2>
+        <header class="section-header"><h2>{group.name}</h2></header>
         <ul class="check-list">
           {#each group.checks as check (check.name)}
             <li class="check" class:muted={check.status === 'skip'}>

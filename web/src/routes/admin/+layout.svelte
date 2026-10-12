@@ -106,18 +106,4 @@
   :global(.settings.logs-page) {
     max-width: var(--content-max);
   }
-
-  /* The card heading Configuration and Health both use. It lived scoped inside
-     Configuration, so Health's identically-classed `<h2>` rendered as a bare
-     default-size heading beside it — Svelte scopes a rule to the file that
-     declares it, and an unmatched class in markup produces no warning at all.
-     Here, where the other cross-page admin rules already are. */
-  :global(.settings.config-page .section-title),
-  :global(.settings.health-page .section-title) {
-    margin: 0 0 var(--space-3);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
 </style>

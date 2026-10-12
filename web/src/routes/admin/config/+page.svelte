@@ -356,7 +356,7 @@
 
     {#if !filter.trim()}
       <section class="card">
-        <h2 class="section-title">Admins</h2>
+        <header class="section-header"><h2>Admins</h2></header>
         <AdminsEditor
           users={view.admins.users}
           pending={draft.admins}
@@ -369,7 +369,7 @@
 
       {#if fileWarnings.length}
         <section class="card">
-          <h2 class="section-title">Warnings about config.toml</h2>
+          <header class="section-header"><h2>Warnings about config.toml</h2></header>
           <p class="caption">
             Istota loads the file with these. A key it ignores is kept until it is removed.
           </p>
@@ -397,7 +397,7 @@
 
       {#if standaloneSecrets.length}
         <section class="card">
-          <h2 class="section-title">Credentials</h2>
+          <header class="section-header"><h2>Credentials</h2></header>
           {#each standaloneSecrets as secret (secret.name)}
             {#if editable && !secret.read_only_reason}
               <ConfigSecretField
@@ -426,7 +426,7 @@
 
     {#each sections as section (section.key)}
       <section class="card">
-        <h2 class="section-title">{section.label}</h2>
+        <header class="section-header"><h2>{section.label}</h2></header>
         {#each section.fields as field (field.key)}
           <FieldControl
             {field}
@@ -493,10 +493,6 @@
     color: var(--text-dim);
     white-space: nowrap;
   }
-
-  /* `.section-title` lives in the admin layout now — Health uses it too, and a
-     scoped copy here would have been invisible to it (Svelte scopes to the
-     file, and an unmatched class in markup raises no warning). */
 
   .problem-list {
     margin: var(--space-2) 0 0;
