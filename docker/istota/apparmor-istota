@@ -12,6 +12,11 @@
 #     (`--disable-userns`, inside the sandbox's own user namespace). Every other
 #     /proc/sys write docker-default refuses stays refused, so a uid-0
 #     `docker exec` still cannot write kernel/core_pattern or sysrq-trigger.
+#   - `mount,` narrowed: no bind or move out of /proc or /sys, and no sysfs
+#     mount. A root exec holds the root phase's SYS_ADMIN, and without these
+#     could bind /proc/sys/kernel elsewhere and write core_pattern there. It
+#     can still mount a fresh procfs, which bwrap needs too; row 5 (nothing
+#     runs as uid 0 after the root phase) is what covers that.
 #
 # No `userns,` rule: the profile keeps docker-default's `abi <abi/3.0>`, under
 # which user namespace creation is not mediated (measured on Debian 13; the
@@ -62,6 +67,9 @@ profile "istota" flags=(attach_disconnected,mediate_deleted) {
   deny @{PROC}/kcore rwklx,
 
   mount,
+  deny mount options in (bind,rbind,move) /proc/** -> /**,
+  deny mount options in (bind,rbind,move) /sys/** -> /**,
+  deny mount fstype=sysfs,
   pivot_root,
 
   deny /sys/[^f]*/** wklx,

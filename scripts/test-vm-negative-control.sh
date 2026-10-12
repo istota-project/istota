@@ -80,7 +80,8 @@ control apparmor-unconfined \
     "row 20: the daemon service with apparmor=unconfined" \
     "$C::TestTheContainerIsConfinedByAppArmor::test_the_istota_profile_is_in_force" \
     "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_core_pattern" \
-    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_the_sysrq_trigger"
+    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_the_sysrq_trigger" \
+    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_bind_proc_sys_kernel"
 
 D="$VM/test_devbox.py"
 control no-egress-unit \

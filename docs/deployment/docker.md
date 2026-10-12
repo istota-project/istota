@@ -309,7 +309,7 @@ The `daemon` service in `docker-compose.yml` carries the grant bubblewrap needs 
     cgroup: private
 ```
 
-`seccomp-istota.json` is Docker's default profile plus the six calls bwrap needs to build a namespace (`clone`, `clone3`, `mount`, `pivot_root`, `umount2`, `unshare`), without the default's `CAP_SYS_ADMIN` rule, so `bpf`, `keyctl`, `userfaultfd`, `perf_event_open` and the rest of the default denylist stay refused for every task. `apparmor-istota` is Docker's `docker-default` plus `mount` and `pivot_root`; it keeps `docker-default`'s refusal of writes to `/proc/sys` and `/proc/sysrq-trigger`, which `systempaths=unconfined` would otherwise leave open to a root `docker exec`. On a host with AppArmor, load it before the stack starts:
+`seccomp-istota.json` is Docker's default profile plus the six calls bwrap needs to build a namespace (`clone`, `clone3`, `mount`, `pivot_root`, `umount2`, `unshare`), without the default's `CAP_SYS_ADMIN` rule, so `bpf`, `keyctl`, `userfaultfd`, `perf_event_open` and the rest of the default denylist stay refused for every task. `apparmor-istota` is Docker's `docker-default` plus `mount` (with no bind or move out of `/proc` or `/sys` and no `sysfs` mount) and `pivot_root`; it keeps `docker-default`'s refusal of writes to `/proc/sys` and `/proc/sysrq-trigger`, which `systempaths=unconfined` would otherwise leave open to a root `docker exec`. On a host with AppArmor, load it before the stack starts:
 
 ```bash
 sudo apparmor_parser -r -W docker/istota/apparmor-istota

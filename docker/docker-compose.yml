@@ -98,11 +98,12 @@ services:
     #     CAP_SYS_ADMIN rule (Docker applies it per container, so with the root
     #     phase's SYS_ADMIN below it would open bpf and perf_event_open to every
     #     sandbox). bpf, keyctl, userfaultfd and the rest stay denied.
-    #   - apparmor=istota is docker-default plus mount and pivot_root. It has to
-    #     be loaded on the host (provision.sh does it); a host without AppArmor
-    #     ignores the option. It keeps docker-default's denial of writes to
-    #     /proc/sys, which systempaths=unconfined would otherwise open to a
-    #     uid-0 `docker exec`.
+    #   - apparmor=istota is docker-default plus mount (no bind or move out of
+    #     /proc or /sys, no sysfs) and pivot_root. It has to be loaded on the
+    #     host (provision.sh does it); a host without AppArmor ignores the
+    #     option. It keeps docker-default's denial of writes to /proc/sys,
+    #     which systempaths=unconfined would otherwise open to a uid-0
+    #     `docker exec`.
     #   - systempaths=unconfined unmasks /proc, without which the kernel refuses
     #     a procfs mount in a nested user namespace.
     #

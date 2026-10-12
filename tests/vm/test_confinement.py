@@ -8,7 +8,8 @@ the containers do not see either.
 Row 20: the daemon container runs under the shipped AppArmor profile, so a
 root `docker exec` (which does not inherit the daemon's drop, and holds the
 root phase's capabilities in a container with a writable /proc/sys) still
-cannot write a VM sysctl or the sysrq trigger, while bwrap still starts.
+cannot write a VM sysctl or the sysrq trigger, nor bind /proc/sys/kernel
+somewhere else to write it there, while bwrap still starts.
 
 Row 12, the owner half: read from inside the container, every secret file is
 0400 and owned by uid 10001. Docker Desktop shows every bind as uid 0, so the
@@ -156,6 +157,20 @@ _WRITE_SYSCTL = (
 )
 
 
+# LIBMOUNT_FORCE_MOUNT2: the seccomp profile refuses the new mount API, so
+# mount(8) has to use mount(2), as the root phase's cgroup remount does.
+_BIND_PROBE = """
+export LIBMOUNT_FORCE_MOUNT2=always
+d=/tmp/istota-row20; mkdir -p $d/src $d/k $d/t
+echo PROBE_BEGIN
+if mount --bind $d/src $d/t; then echo tmp=bound; umount $d/t; else echo tmp=refused; fi
+if mount --bind /proc/sys/kernel $d/k; then echo /proc/sys/kernel=bound; umount $d/k; \
+else echo /proc/sys/kernel=refused; fi
+echo PROBE_END
+rm -rf $d
+"""
+
+
 @parity.witness(20)
 class TestTheContainerIsConfinedByAppArmor:
     def test_the_istota_profile_is_in_force(self, stack):
@@ -176,6 +191,16 @@ class TestTheContainerIsConfinedByAppArmor:
         result = stack.run(f"docker exec -u 0 {cid} sh -c 'echo h > /proc/sysrq-trigger'", check=False)
         assert result.returncode != 0, "row 20: a root exec wrote /proc/sysrq-trigger"
         assert "Permission denied" in result.stderr, result.stderr
+
+    def test_a_root_exec_cannot_bind_proc_sys_kernel(self, stack):
+        cid = lima.container(stack, "daemon")
+        result = stack.run(f"docker exec -u 0 {cid} sh -c {shlex.quote(_BIND_PROBE)}", check=False)
+        outcome = lima.marked_block(result.stdout)
+        # The in-session control: a root exec can bind-mount at all, so a
+        # refusal below is the profile's and not a missing capability.
+        assert outcome.get("tmp") == "bound", (outcome, result.stderr)
+        assert outcome.get("/proc/sys/kernel") == "refused", (
+            f"row 20: a root exec bound /proc/sys/kernel: {outcome} {result.stderr}")
 
     def test_bwrap_still_starts(self, stack):
         for check in ("runtime.bwrap", "security.sandbox_effective"):
