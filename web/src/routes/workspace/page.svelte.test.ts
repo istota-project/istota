@@ -611,3 +611,96 @@ it('offers file downloads and keeps non-regular entries without actions', async 
     encodeURIComponent('/Users/alice/notes & drafts/plan #1.md'),
   );
 });
+
+it('sorts folders first, toggles date order and remembers it', async () => {
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'home',
+    path: '',
+    entries: [
+      { ...entry('z.txt'), modified: 100 },
+      { ...entry('a.txt'), modified: 200 },
+      entry('Folder', 'dir'),
+    ],
+    truncated: false,
+    skipped_names: 0,
+  });
+  const { unmount } = render(Workspace);
+  const table = await screen.findByRole('table', { name: 'Files' });
+  const names = () =>
+    within(table)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => row.textContent);
+  expect(names()[0]).toContain('Folder');
+  expect(names()[1]).toContain('a.txt');
+  await fireEvent.click(screen.getByRole('button', { name: 'Sort by modified' }));
+  expect(names()[1]).toContain('a.txt');
+  await fireEvent.click(screen.getByRole('button', { name: 'Sort by modified' }));
+  expect(names()[1]).toContain('z.txt');
+  unmount();
+  render(Workspace);
+  const restored = await screen.findByRole('table', { name: 'Files' });
+  expect(within(restored).getAllByRole('row')[2]).toHaveTextContent('z.txt');
+  expect(screen.getByRole('button', { name: 'Sort by modified' }).closest('th')).toHaveAttribute(
+    'aria-sort',
+    'ascending',
+  );
+});
+
+it('selects only visible files and confirms deletion, retaining failed items', async () => {
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'home',
+    path: '',
+    entries: [entry('a.txt'), entry('b.txt'), entry('.hidden', 'file', true)],
+    truncated: false,
+    skipped_names: 0,
+  });
+  api.deleteWorkspaceEntry = vi
+    .fn()
+    .mockResolvedValueOnce({ status: 'ok' })
+    .mockRejectedValueOnce(new Error('Permission denied.'));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Select all visible items' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+  expect(api.deleteWorkspaceEntry).not.toHaveBeenCalled();
+  await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
+  await waitFor(() => expect(api.deleteWorkspaceEntry).toHaveBeenCalledTimes(2));
+  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(1, '', 'a.txt');
+  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(2, '', 'b.txt');
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'a.txt' })).toBeNull());
+  expect(screen.getByRole('checkbox', { name: 'Select b.txt' })).toBeChecked();
+  expect(screen.getByRole('alert')).toHaveTextContent('b.txt: Permission denied.');
+});
+
+it('clears selection when filtering and never exposes deletion in shared places', async () => {
+  api.getWorkspaceListing.mockImplementation(async (place) => ({
+    place,
+    path: '',
+    entries: [entry('a.txt'), entry('b.txt')],
+    truncated: false,
+    skipped_names: 0,
+  }));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Select a.txt' }));
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Filter files' }), {
+    target: { value: 'b.txt' },
+  });
+  expect(screen.queryByRole('button', { name: 'a.txt' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
+  await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
+  await screen.findByRole('button', { name: 'a.txt' });
+  expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull();
+});
+
+it('cancels deletion without a request and clears selection on navigation', async () => {
+  api.deleteWorkspaceEntry = vi.fn();
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Select notes & drafts' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+  await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+  expect(api.deleteWorkspaceEntry).not.toHaveBeenCalled();
+  await fireEvent.click(screen.getByRole('link', { name: 'notes & drafts' }));
+  await screen.findByRole('button', { name: 'plan #1.md' });
+  expect(screen.getByRole('checkbox', { name: 'Select plan #1.md' })).not.toBeChecked();
+  expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
+});

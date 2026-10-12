@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workspace has file-type icons, saved sorting by name, size or date, a folders-first option, filename filtering and refresh. Select visible files with row checkboxes or select all, then confirm deletion of files and empty folders under My files. Share markers stay beside filenames and use icons on narrow screens.
+
 - **Istota can be set up in the browser.** `istota-stack setup --web` prints an address with a one-use setup code and runs a page of short screens: your name and email, a password, an Anthropic or OpenRouter API key or a Claude subscription, the web address, and optionally Nextcloud, email and a calendar, each of which can be tested before you save it. When you finish it writes the configuration, builds what your answers need, starts the stack and sends you to the sign-in page with your email filled in. A new cloud VM started from `host/cloud-init.yaml` opens it on its own and shows the address on the provider's console; `istota-stack setup-code` prints it again, and the terminal wizard is still there with `istota-stack setup`.
 
 - Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
@@ -212,6 +214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- File previews now place their scrollbar at the viewer’s right edge instead of over the document. Text and PDF content keep their padding inside the scrolling area.
 
 - Running `istota-stack setup --force` again with the same Nextcloud answers no longer reprovisions the VM. Setup re-encoded the app password into `rclone.conf` on every run, so the file changed each time even though nothing about the mount had. It now keeps the existing file when it already holds the same address, user and password.
 

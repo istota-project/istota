@@ -46,6 +46,7 @@
   variant="viewer"
   title={name}
   bodyKey={path}
+  bodyPadding="0"
   onOpenChange={(open) => {
     if (!open) onClose();
   }}
@@ -76,11 +77,13 @@
       {:else if preview.kind === 'pdf'}
         <PdfPreview url={chatFileUrl(path)} />
       {:else if preview.kind === 'audio' || preview.kind === 'video'}
-        <MediaPreview
-          kind={preview.kind}
-          url={chatFileUrl(path)}
-          failureMessage="Your browser could not play this file. Download it to open in another app."
-        />
+        <div class="file-media">
+          <MediaPreview
+            kind={preview.kind}
+            url={chatFileUrl(path)}
+            failureMessage="Your browser could not play this file. Download it to open in another app."
+          />
+        </div>
       {:else if preview.kind === 'text'}
         <TextPreview {name} text={preview.text ?? ''} bind:source fill />
       {/if}
@@ -97,5 +100,10 @@
   }
   .file-content > p {
     flex-shrink: 0;
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+  }
+  .file-media {
+    padding: var(--space-2) var(--space-3);
   }
 </style>
