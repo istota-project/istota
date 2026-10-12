@@ -270,6 +270,7 @@ run_server() {
 No terminal for the setup wizard. On the machine, as root:
 
   istota-stack setup
+  istota-stack check-image || istota-stack update ${RELEASE_TAG}
   ${SRC}/host/provision.sh
   systemctl enable --now istota-stack
 
@@ -279,6 +280,15 @@ EOF
 
     section "Setup"
     istota-stack setup
+    # The build ran before config.toml existed, so it left Claude Code out.
+    local image_rc=0
+    istota-stack check-image || image_rc=$?
+    if [ "$image_rc" -eq 2 ]; then
+        section "Rebuilding ${RELEASE_TAG} for the new config"
+        istota-stack update "$RELEASE_TAG"
+    elif [ "$image_rc" -ne 0 ]; then
+        die "istota-stack check-image failed (exit ${image_rc})."
+    fi
     "${SRC}/host/provision.sh"
     systemctl enable --now istota-stack
 

@@ -28,7 +28,7 @@ less install.sh
 sudo bash install.sh --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-It clones the repository into `/srv/app/istota/src`, verifies the tag's signature before running anything from it, runs `host/provision.sh` (Docker Engine, the AppArmor and seccomp profiles, zram, the journald cap, the systemd units), builds the images with `istota-stack update <tag>`, runs the setup wizard with `istota-stack setup`, runs `provision.sh` again for the wizard's host settings, and starts `istota-stack.service`. Without a terminal it stops after the build and prints the rest.
+It clones the repository into `/srv/app/istota/src`, verifies the tag's signature before running anything from it, runs `host/provision.sh` (Docker Engine, the AppArmor and seccomp profiles, zram, the journald cap, the systemd units), builds the images with `istota-stack update <tag>`, runs the setup wizard with `istota-stack setup`, rebuilds the images when `istota-stack check-image` reports the new config needs Claude Code (the first build ran before the config existed), runs `provision.sh` again for the wizard's host settings, and starts `istota-stack.service`. Without a terminal it stops after the build and prints the rest.
 
 For a cloud VM, `host/cloud-init.yaml` does the same first half as user data: fill in the signing key, the repository and the tag, and run the printed steps once the machine is up.
 

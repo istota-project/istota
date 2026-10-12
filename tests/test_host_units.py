@@ -742,6 +742,13 @@ class TestBootstrapFiles:
         checkout = run_server.index('checkout --quiet --detach "${object}^{commit}"')
         assert verify < checkout < run_server.index("host/provision.sh")
         assert run_server.index("host/provision.sh") < run_server.index("istota-stack update")
+        # The first build ran before config.toml existed: a config that needs
+        # Claude Code gets its rebuild after the wizard, before the unit starts.
+        setup = run_server.index("    istota-stack setup\n")
+        check = run_server.index("istota-stack check-image || image_rc=$?")
+        assert setup < check < run_server.index("systemctl enable --now istota-stack\n", check)
+        assert run_server.index('istota-stack update "$RELEASE_TAG"', check) < run_server.index(
+            "systemctl enable --now istota-stack\n", check)
 
     def test_the_root_installer_has_no_bare_metal_or_docker_arm(self):
         """The old --bare arm ran the deleted deploy/install.sh; --docker printed

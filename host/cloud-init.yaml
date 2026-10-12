@@ -9,6 +9,7 @@
 #
 #   istota-stack update <tag>     # builds the images from the verified tag
 #   istota-stack setup            # the wizard: config.toml, secrets, host.env
+#   istota-stack check-image || istota-stack update <tag>   # rebuild if the config needs Claude Code
 #   /srv/app/istota/src/host/provision.sh   # picks up host.env
 #   systemctl start istota-stack
 #
