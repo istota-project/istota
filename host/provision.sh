@@ -25,6 +25,12 @@
 #   ACME_EMAIL, ACME_SERVER   optional, for certbot in direct mode
 #   RCLONE_REMOTE        the rclone remote name in /srv/app/istota/rclone.conf
 #   ZRAM_ENABLED         0 to leave swap alone
+#   HOST_LOOPBACK_BLOCK  1 to drop container traffic to HOST_GATEWAY_ADDR but
+#                        its DNS and HOST_LOOPBACK_ALLOW (the local VM, where
+#                        Lima's gateway is the Mac's loopback); the egress unit
+#   HOST_GATEWAY_ADDR    the host gateway's IPv4 address, for that block
+#   HOST_LOOPBACK_ALLOW  TCP ports on it containers may still reach, separated
+#                        by spaces or commas
 set -euo pipefail
 # The checkout it clones is what the images are built from: under a hardened
 # umask (027) it would be root-only, and out of uid 10001's reach in them.
@@ -458,7 +464,7 @@ if [ "$(host_env INGRESS)" = "proxied" ] && [ "$(host_env TLS_CERT_SOURCE)" = "s
     ensure_self_signed_cert "${STACK}/certs" "$(host_env DOMAIN)" "$(host_env LISTEN_ADDR)"
 fi
 
-# --- Firewall: devbox egress and the proxied listener ------------------------
+# --- Firewall: devbox egress, the proxied listener, the host's loopback ------
 systemctl enable istota-devbox-egress.service >/dev/null
 systemctl restart istota-devbox-egress.service
 

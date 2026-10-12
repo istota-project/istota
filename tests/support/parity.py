@@ -61,6 +61,7 @@ ROWS: dict[int | str, str] = {
     20: "container MAC confinement",
     # The local-VM spec's rows, each added with its witness.
     "L1": "the daemon never writes into a workspace that is not the user's folder",
+    "L2": "no container reaches a host loopback service unless its port is allowed",
 }
 
 NOT_WITNESSED: dict[int, str] = {

@@ -25,7 +25,7 @@
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
-#   host-folder: no-workspace-marker (row L1)
+#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18)
 #
 # Run scripts/test-vm.sh first: the controls reuse its VM and images. No arrays:
@@ -136,6 +136,12 @@ control no-storage-refusal \
 control no-workspace-marker \
     "row L1: an entrypoint without the host folder's marker refusal" \
     "$VM/test_host_folder.py::TestAFolderThatWentAwayIsNotWritten::test_without_its_marker_the_daemon_does_not_start"
+
+H="$VM/test_host_folder.py::TestTheMacLoopbackIsClosedToContainers"
+control host-loopback-unblocked \
+    "row L2: HOST_LOOPBACK_BLOCK=0, the egress unit re-run" \
+    "$H::test_the_daemon_reaches_the_allowed_port_only" \
+    "$H::test_the_browser_reaches_the_allowed_port_only"
 
 P="$VM/test_proxied.py"
 control no-allow-list \

@@ -585,13 +585,23 @@ HOST_FOLDER_MOUNT = "/srv/mount/host-folder"
 HOST_FOLDER_MARKER = ".istota-workspace"
 
 
-def host_folder_mode(model_url: str) -> Mode:
-    """The local VM's shape: local ingress, the workspace a folder on the Mac."""
+def host_folder_mode(model_url: str, *, gateway: str, allow_ports: list[int]) -> Mode:
+    """The local VM's shape: local ingress, the workspace a folder on the Mac,
+    and the Mac's loopback closed to every container (row L2) but for
+    `allow_ports`, which holds the scripted model's port. The browser profile
+    is on, since row L2 is witnessed from the browser container too."""
     return Mode(
         name="host-folder",
         setup_args=common_args(model_url) + [
             "--ingress", "local", "--hostname", "localhost:8080", "--storage", "host-folder",
+            "--profile", "browser",
         ],
+        host_env={
+            "HOST_LOOPBACK_BLOCK": "1",
+            "HOST_GATEWAY_ADDR": gateway,
+            "HOST_LOOPBACK_ALLOW": " ".join(str(port) for port in allow_ports),
+        },
+        build=True,
     )
 
 
@@ -628,9 +638,11 @@ def share_host_folder(vm: Vm, release: Release, folder: Path) -> None:
 def unshare_host_folder(vm: Vm, release: Release) -> None:
     """Back to the checkout alone, which row 7 asserts, leaving the stack for
     the next mode to set up: a host folder in host.env would otherwise be kept
-    by its setup, and the stack would refuse to start without the folder."""
+    by its setup, and the stack would refuse to start without the folder. The
+    loopback block goes too, or the other modes' tasks would lose the model
+    whenever its port moved."""
     vm.run(f"systemctl stop istota-stack.service || true; rm -f {MODE_FILE}", timeout=600)
-    env_file_set(vm, f"{STACK}/host.env", {"STORAGE": "local"})
+    env_file_set(vm, f"{STACK}/host.env", {"STORAGE": "local", "HOST_LOOPBACK_BLOCK": "0"})
     vm.run(f"{STACK}/src/host/provision.sh", timeout=1800)
     set_mounts_if_changed(vm, _mounts(release))
 

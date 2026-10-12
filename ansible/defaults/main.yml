@@ -64,6 +64,12 @@ istota_acme_server: ""
 # nextcloud only: the remote's name in rclone.conf.
 istota_rclone_remote: ""
 istota_zram_enabled: true
+# Drop container traffic to istota_host_gateway_addr, except its DNS and the
+# TCP ports in istota_host_loopback_allow. The local VM's setting (Lima's
+# gateway is the Mac's loopback); an estate VM has no such address.
+istota_host_loopback_block: false
+istota_host_gateway_addr: ""
+istota_host_loopback_allow: []
 
 # The keys, as provision.sh documents them. Derived for the ingress mode the
 # same way `istota setup` derives them, so a role-managed host.env matches a
@@ -82,6 +88,9 @@ istota_host_env:
   ACME_SERVER: "{{ istota_acme_server }}"
   RCLONE_REMOTE: "{{ istota_rclone_remote }}"
   ZRAM_ENABLED: "{{ '1' if istota_zram_enabled | bool else '0' }}"
+  HOST_LOOPBACK_BLOCK: "{{ '1' if istota_host_loopback_block | bool else '0' }}"
+  HOST_GATEWAY_ADDR: "{{ istota_host_gateway_addr }}"
+  HOST_LOOPBACK_ALLOW: "{{ istota_host_loopback_allow | join(' ') }}"
 # Optional keys only a unit reads (ISTOTA_DEVBOX_SUBNET, the browser watchdog's
 # ISTOTA_BROWSER_WATCHDOG_*), written beside the ones above.
 istota_host_env_extra: {}

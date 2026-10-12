@@ -263,6 +263,233 @@ class TestTheProxiedListenerRule:
         assert result.returncode != 0
 
 
+# A stateful `iptables` for DOCKER-USER alone: `-C`, `-I`, `-A`, `-D` and `-S`
+# against a JSON list, so a second run meets the first run's rules the way the
+# unit meets the chain on a re-run, and the comment-keyed removal is exercised.
+STATEFUL_IPTABLES = r'''
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["IPT_CALLS"], "a") as log:
+    log.write(json.dumps(args) + "\n")
+if args[:2] == ["-w", "5"]:
+    args = args[2:]
+path = os.environ["IPT_STATE"]
+rules = json.load(open(path)) if os.path.exists(path) else [["-j", "RETURN"]]
+op, chain, rest = args[0], args[1], args[2:]
+if chain != "DOCKER-USER":
+    sys.exit(2)
+if op == "-S":
+    print("-N DOCKER-USER")
+    for rule in rules:
+        print("-A DOCKER-USER " + " ".join('"%s"' % t if " " in t else t for t in rule))
+    sys.exit(0)
+if op == "-C":
+    sys.exit(0 if rest in rules else 1)
+if op == "-D":
+    if rest not in rules:
+        sys.exit(1)
+    rules.remove(rest)
+elif op == "-I":
+    position = 1
+    if rest and rest[0].isdigit():
+        position, rest = int(rest[0]), rest[1:]
+    rules.insert(position - 1, rest)
+elif op == "-A":
+    rules.append(rest)
+else:
+    sys.exit(2)
+json.dump(rules, open(path, "w"))
+'''
+
+LOOPBACK_COMMENT_PREFIX = "istota-host-loopback:"
+GATEWAY = "192.168.5.2"
+#: A compose network's container, and one on the devbox network's default subnet.
+CONTAINER = "172.18.0.5"
+DEVBOX = "172.30.0.5"
+
+
+def _first_verdict(chain: list[list[str]], src: str, dst: str, proto: str, dport: int) -> str | None:
+    """The target of the first DOCKER-USER rule a new packet matches, as iptables
+    walks the chain. Only the matches these scripts write are modelled; any other
+    token fails the test rather than being skipped."""
+    import ipaddress
+
+    for rule in chain:
+        if "--ctorigdst" in rule:
+            continue
+        matched = True
+        negate = False
+        i = 0
+        while i < len(rule) and rule[i] != "-j":
+            token = rule[i]
+            if token == "!":
+                negate = True
+                i += 1
+                continue
+            if token in ("-s", "-d"):
+                net = ipaddress.ip_network(rule[i + 1], strict=False)
+                addr = ipaddress.ip_address(src if token == "-s" else dst)
+                hit = addr in net
+            elif token == "-p":
+                hit = rule[i + 1] == proto
+            elif token == "--dport":
+                hit = int(rule[i + 1]) == dport
+            elif token in ("-m", "--comment"):
+                i += 2
+                continue
+            else:
+                raise AssertionError(f"unmodelled token {token!r} in {rule}")
+            if hit == negate:
+                matched = False
+            negate = False
+            i += 2
+        if matched:
+            return rule[rule.index("-j") + 1]
+    return None
+
+
+class TestTheHostLoopbackBlock:
+    """HOST_LOOPBACK_BLOCK=1: no container reaches the host gateway (on the local
+    VM, Lima's address for the Mac's loopback) but on its DNS port and the TCP
+    ports in HOST_LOOPBACK_ALLOW. Stage 1 of the local-VM spec measured Lima's DNS
+    at the gateway itself, so port 53 there stays open; a devbox gets neither."""
+
+    def _run(self, tmp_path: Path, env: dict, *, ok: bool = True) -> subprocess.CompletedProcess:
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        stub = bindir / "iptables"
+        stub.write_text(f"#!{shutil.which('python3')}\n" + STATEFUL_IPTABLES)
+        stub.chmod(0o755)
+        run_env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("HOST_", "INGRESS", "ISTOTA_DEVBOX_SUBNET"))
+        }
+        run_env.update(PATH=f"{bindir}:{os.environ['PATH']}",
+                       IPT_STATE=str(tmp_path / "chain.json"), IPT_CALLS=str(tmp_path / "calls"))
+        run_env.update(env)
+        result = subprocess.run(["bash", str(EGRESS_SH)], capture_output=True,
+                                text=True, env=run_env, timeout=30)
+        if ok:
+            assert result.returncode == 0, result.stderr
+        return result
+
+    def _chain(self, tmp_path: Path) -> list[list[str]]:
+        import json
+
+        return json.loads((tmp_path / "chain.json").read_text())
+
+    def _loopback_rules(self, tmp_path: Path) -> list[list[str]]:
+        return [r for r in self._chain(tmp_path)
+                if any(t.startswith(LOOPBACK_COMMENT_PREFIX) for t in r)]
+
+    def _verdict(self, tmp_path: Path, src: str, proto: str, dport: int, dst: str = GATEWAY):
+        return _first_verdict(self._chain(tmp_path), src, dst, proto, dport)
+
+    def test_off_unless_asked(self, tmp_path):
+        self._run(tmp_path, {"HOST_GATEWAY_ADDR": GATEWAY})
+        assert self._loopback_rules(tmp_path) == []
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 8080) != "DROP"
+
+    def test_the_gateway_is_closed_but_for_its_dns(self, tmp_path):
+        self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY})
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 8080) == "DROP"
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 22) == "DROP"
+        assert self._verdict(tmp_path, CONTAINER, "udp", 53) == "RETURN"
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 53) == "RETURN"
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 443, dst="1.1.1.1") != "DROP"
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 8080, dst="192.168.5.3") != "DROP"
+
+    @pytest.mark.parametrize("allow", ["11434 1234", "11434,1234", " 11434  1234 "])
+    def test_an_allowed_port_stays_open_to_a_container_and_not_to_a_devbox(self, tmp_path, allow):
+        self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY,
+                             "HOST_LOOPBACK_ALLOW": allow})
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 11434) == "RETURN"
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 1234) == "RETURN"
+        assert self._verdict(tmp_path, CONTAINER, "udp", 1234) == "DROP"
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 8080) == "DROP"
+        assert self._verdict(tmp_path, DEVBOX, "tcp", 11434) == "DROP"
+        assert self._verdict(tmp_path, DEVBOX, "udp", 53) == "DROP"
+
+    def test_the_devbox_exception_follows_the_subnet(self, tmp_path):
+        self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY,
+                             "HOST_LOOPBACK_ALLOW": "11434", "ISTOTA_DEVBOX_SUBNET": "172.31.0.0/24"})
+        assert self._verdict(tmp_path, "172.31.0.5", "tcp", 11434) == "DROP"
+        assert self._verdict(tmp_path, DEVBOX, "tcp", 11434) == "RETURN"
+        assert self._verdict(tmp_path, DEVBOX, "tcp", 8080) == "DROP"
+
+    def test_a_changed_allow_list_replaces_the_old_set(self, tmp_path):
+        on = {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY}
+        self._run(tmp_path, {**on, "HOST_LOOPBACK_ALLOW": "11434 1234"})
+        self._run(tmp_path, {**on, "HOST_LOOPBACK_ALLOW": "1234"})
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 11434) == "DROP"
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 1234) == "RETURN"
+        fresh = tmp_path / "fresh"
+        fresh.mkdir()
+        self._run(fresh, {**on, "HOST_LOOPBACK_ALLOW": "1234"})
+        assert self._chain(tmp_path) == self._chain(fresh)
+
+    def test_a_rerun_converges(self, tmp_path):
+        env = {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY, "HOST_LOOPBACK_ALLOW": "11434"}
+        self._run(tmp_path, env)
+        first = self._chain(tmp_path)
+        assert self._loopback_rules(tmp_path)
+        self._run(tmp_path, env)
+        assert self._chain(tmp_path) == first
+
+    def test_turning_it_off_removes_only_its_rules(self, tmp_path):
+        self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY})
+        assert self._loopback_rules(tmp_path)
+        self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "0", "HOST_GATEWAY_ADDR": GATEWAY})
+        assert self._loopback_rules(tmp_path) == []
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 8080) != "DROP"
+        assert self._verdict(tmp_path, DEVBOX, "tcp", 8080) == "DROP"
+
+    def test_every_rule_carries_the_one_comment_and_goes_to_the_front(self, tmp_path):
+        self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY,
+                             "HOST_LOOPBACK_ALLOW": "11434"})
+        rules = self._loopback_rules(tmp_path)
+        assert len(rules) == 4
+        assert {r[r.index("--comment") + 1] for r in rules} == {rules[0][rules[0].index("--comment") + 1]}
+        assert all(r[r.index("-d") + 1] == GATEWAY for r in rules)
+        import json
+
+        for line in (tmp_path / "calls").read_text().splitlines():
+            call = json.loads(line)
+            assert call[:2] == ["-w", "5"], call
+            assert "-A" not in call, call
+            if "-I" in call:
+                assert call[call.index("-I") + 1:call.index("-I") + 3] == ["DOCKER-USER", "1"]
+
+    @pytest.mark.parametrize("gateway", ["", "lima-host", "192.168.5", "192.168.5.256"])
+    def test_without_a_usable_gateway_it_fails_and_the_devbox_drops_stand(self, tmp_path, gateway):
+        result = self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": gateway}, ok=False)
+        assert result.returncode != 0
+        assert "HOST_GATEWAY_ADDR" in result.stderr
+        assert self._verdict(tmp_path, DEVBOX, "tcp", 8080) == "DROP"
+
+    @pytest.mark.parametrize("allow", ["11434 http", "0", "65536", "11434 -1", "1e3"])
+    def test_an_unreadable_allow_list_allows_nothing(self, tmp_path, allow):
+        result = self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY,
+                                      "HOST_LOOPBACK_ALLOW": allow}, ok=False)
+        assert result.returncode != 0
+        assert "HOST_LOOPBACK_ALLOW" in result.stderr
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 11434) == "DROP"
+        assert self._verdict(tmp_path, CONTAINER, "udp", 53) == "RETURN"
+
+    def test_a_switch_that_is_not_0_or_1_still_blocks(self, tmp_path):
+        result = self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "yes", "HOST_GATEWAY_ADDR": GATEWAY}, ok=False)
+        assert result.returncode != 0
+        assert "HOST_LOOPBACK_BLOCK" in result.stderr
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 8080) == "DROP"
+
+    def test_a_proxied_listener_failure_does_not_skip_the_block(self, tmp_path):
+        result = self._run(tmp_path, {"HOST_LOOPBACK_BLOCK": "1", "HOST_GATEWAY_ADDR": GATEWAY,
+                                      "INGRESS": "proxied", "LISTEN_ADDR": "10.0.0.5",
+                                      "UPSTREAM_PROXY": ""}, ok=False)
+        assert result.returncode != 0
+        assert self._verdict(tmp_path, CONTAINER, "tcp", 8080) == "DROP"
+
+
 class TestProvision:
     """What provision.sh installs, read off the script: running it is the VM's."""
 
