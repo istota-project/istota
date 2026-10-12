@@ -283,23 +283,23 @@ host_bwrap_failure() {
 # unsandboxed suite next to it. A false positive costs one environment
 # variable, which the refusal names.
 #
-# **The units cannot be named in advance.** The Ansible role writes
-# `/etc/systemd/system/{{ istota_namespace }}-scheduler.service` and the same
-# for `-web`, `-webhooks`, `-devbox-proxy@` and `-devbox-iptables`, and
-# `istota_namespace` is an inventory variable — so a
-# probe asking `is-active istota-scheduler.service` by name is blind on every
-# install that set it, which includes the production host. Enumerate what is
-# running and match on the suffix instead. Both managers, since a per-user
-# install has its units under `--user`.
+# **The units cannot be named in advance.** The old Ansible role, gone with
+# the bare-metal shape, named its units `<namespace>-scheduler.service` and the
+# same for `-web`, `-webhooks`, `-devbox-proxy@` and `-devbox-iptables`, with
+# the namespace an inventory variable. A host still running such an install is
+# exactly one this must not miss, so it enumerates what is running and matches
+# on the suffix rather than asking for `istota-scheduler.service` by name.
+# Both managers, since a per-user install has its units under `--user`. The
+# stack itself is the third arm below.
 #
 # Captured into a variable rather than piped into `grep -q`: `grep -q` exits on
 # the first match and SIGPIPEs the producer, which under `set -o pipefail`
 # reads as a failed probe — the same trap documented on the `--progress` flag
 # selector below, and here it would fail in the unsafe direction.
 #
-# **The config is not at one known path either.** The Ansible role renders it
-# to `{{ istota_repo_dir }}/config/config.toml`, under a home this script
-# cannot guess; what it can check is the two search-order paths from
+# **The config is not at one known path either.** The old role rendered it
+# under a home this script cannot guess; what it can check is the two
+# search-order paths from
 # `config.py` that are absolute or HOME-relative. `~/.config/istota/config.toml`
 # is what `istota setup` writes (`setup_wizard.DEFAULT_CONFIG_PATH`) and is the
 # shape most likely to be on a Linux workstation, where it has no unit at all.
