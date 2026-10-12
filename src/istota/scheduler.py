@@ -1154,7 +1154,8 @@ def _fetch_talk_attachment(config: Config, task: "db.Task", att: str) -> str:
     participants, who have all seen the file posted, and every task in the
     room already has it bound, a guest's turn included. The message id makes
     the destination deterministic: a retry, a confirmed re-run or a second
-    attempt finds the first copy and fetches nothing.
+    attempt finds the first copy and fetches nothing. `write_new_file` stages
+    the bytes, so a copy found at that name is always a complete one.
     """
     from istota import storage  # noqa: PLC0415 - import cycle
     from istota.lib.filenames import safe_filename  # noqa: PLC0415
