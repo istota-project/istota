@@ -2958,6 +2958,21 @@ def check_skill_model_credential(
     if not live:
         return results
 
+    # code_review runs on the configured brain, and on tmux on claude_code, so
+    # these Anthropic names authenticate it only there. On native the brain's
+    # own key does, which `brain.native` checks.
+    brain_kind = getattr(getattr(config, "brain", None), "kind", "claude_code")
+    if brain_kind not in ("claude_code", "tmux_claude"):
+        results.append(
+            CheckResult(
+                f"{prefix}.value",
+                SKIP,
+                f"{', '.join(live)} runs on the {brain_kind} brain, which needs "
+                f"none of {', '.join(sorted(SKILL_MODEL_CREDENTIAL_VARS))}",
+            )
+        )
+        return results
+
     present = sorted(n for n in SKILL_MODEL_CREDENTIAL_VARS if os.environ.get(n))
     if present:
         results.append(
