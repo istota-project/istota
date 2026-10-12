@@ -129,13 +129,23 @@ def vault_has_other_users(config, user_id: str = "") -> bool:
     return len(users) > 1
 
 
-def vault_isolation_refusal(config, user_id: str) -> str | None:
-    """Gate the whole credential store on deployment isolation."""
+def vault_isolation_refusal(config, user_id: str, *, sandboxed: bool | None = None) -> str | None:
+    """Gate the whole credential store on deployment isolation.
+
+    ``sandboxed`` is for a process that runs no task, which passes
+    ``tasks_sandboxed(config)``. Left out, this process's own probe decides,
+    which is the only right answer in the daemon: a verdict a previous boot
+    published says nothing about this one.
+    """
     if not vault_has_other_users(config, user_id):
         return None
     if config.security.allow_unsandboxed_multi_user_vaults is True:
         return None
-    if tasks_sandboxed(config):
+    if sandboxed is None:
+        from istota.executor import effective_sandboxing
+
+        sandboxed = effective_sandboxing(config)
+    if sandboxed:
         return None
     return VAULT_ISOLATION_REASON
 
@@ -143,10 +153,10 @@ def vault_isolation_refusal(config, user_id: str) -> str | None:
 def tasks_sandboxed(config) -> bool:
     """Whether tasks run sandboxed, as the daemon that runs them found at boot.
 
-    The daemon's verdict first: on the Docker stack the web process is another
-    container with no sandbox grant, and its own probe refused every credential
-    route on a stack whose tasks were sandboxed. Its own probe only where no
-    daemon has published one.
+    For the web process only: on the Docker stack it is another container with
+    no sandbox grant, and its own probe refused every credential route on a
+    stack whose tasks were sandboxed. Its own probe only where no daemon has
+    published a verdict. The daemon never calls this.
     """
     from istota import doctor
     from istota.executor import effective_sandboxing

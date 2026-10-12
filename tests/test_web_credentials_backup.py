@@ -31,5 +31,5 @@ async def test_invalid_recipient_and_isolation(signed_client, config, mail, monk
     response = await signed_client.put(BASE, json={"recipient": "ssh-key", **await step_up(signed_client, mail, "backup_recipient")}, headers=ORIGIN)
     assert response.status_code == 400
     assert response.json()["field"] == "recipient"
-    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *args: "isolation-required")
+    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *args, **k: "isolation-required")
     assert (await signed_client.get(BASE, headers=ORIGIN)).status_code == 403

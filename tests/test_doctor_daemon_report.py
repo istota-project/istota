@@ -46,7 +46,9 @@ class TestTheStore:
         assert reports["deep_report"]["request_id"] == "r1"
 
     def test_nothing_recorded_reads_as_none(self, config):
-        assert doctor.read_reports(config) == {"report": None, "deep_report": None, "request": None}
+        assert doctor.read_reports(config) == {
+            "report": None, "deep_report": None, "request": None, "answered": None,
+        }
 
     def test_a_missing_database_reads_as_none_and_records_nothing(self, make_config):
         cfg = make_config()
@@ -142,22 +144,93 @@ class TestARequestOnTheNextTick:
         assert deep_report["request_id"] == made["id"]
         assert [c["name"] for c in deep_report["checks"]] == ["sandbox.masks"]
 
-    def test_the_gate_runs_every_tick_whatever_the_sweep_interval(self, make_config):
+    def test_a_requested_run_includes_the_framework_db(self, config, monkeypatch, quiet_alerts):
+        """The sweep leaves the full database scan to the daily health check;
+        a run somebody asked for does not."""
+        calls = self._calls(monkeypatch)
+        doctor.request_run(config, deep=False)
+        scheduler.check_doctor_request(config, {})
+        assert calls[0].get("skip", ()) == ()
+
+    def test_a_request_is_marked_answered(self, config, monkeypatch, quiet_alerts):
+        self._calls(monkeypatch)
+        made = doctor.request_run(config, deep=True)
+        scheduler.check_doctor_request(config, {})
+        answered = doctor.read_reports(config)["answered"]
+        assert answered["id"] == made["id"] and answered["deep"] is True
+
+    def test_a_failed_requested_run_is_still_answered(self, config, monkeypatch, quiet_alerts):
+        """Without this the pane waited two minutes and then said the daemon
+        was not answering, about a daemon that had answered with a failure."""
+        def boom(*a, **k):
+            raise RuntimeError("registry exploded")
+
+        monkeypatch.setattr("istota.doctor.run_checks", boom)
+        made = doctor.request_run(config, deep=False)
+        scheduler.check_doctor_request(config, {})
+        reports = doctor.read_reports(config)
+        assert reports["answered"]["id"] == made["id"]
+        assert reports["report"]["request_id"] == made["id"]
+        assert [(c["name"], c["status"]) for c in reports["report"]["checks"]] == [("doctor.run", FAIL)]
+
+    def test_the_deep_phase_runs_under_the_sweeps_lock(self, config, monkeypatch, quiet_alerts):
+        """So an hourly sweep cannot land between a request's two records."""
+        import threading
+
+        seen = {}
+
+        def run_checks(cfg, **kw):
+            if kw.get("deep"):
+                result = []
+                probe = threading.Thread(
+                    target=lambda: result.append(scheduler._DOCTOR_RUN_LOCK.acquire(blocking=False)))
+                probe.start()
+                probe.join()
+                seen["free_during_deep"] = result[0]
+                if result[0]:
+                    scheduler._DOCTOR_RUN_LOCK.release()
+            return [_ok()]
+
+        monkeypatch.setattr("istota.doctor.run_checks", run_checks)
+        doctor.request_run(config, deep=True)
+        scheduler.check_doctor_request(config, {})
+        assert seen == {"free_during_deep": False}
+
+    def _gate(self, cfg, monkeypatch):
         from istota.scheduler import build_interval_gates
 
-        cfg = make_config()
-        cfg.scheduler.doctor_check_interval = 0
-        gate = next(g for g in build_interval_gates(cfg) if g.name == "doctor-request")
-        assert gate.background
-        assert gate.enabled(cfg)
-        assert gate.interval(cfg) <= cfg.scheduler.poll_interval
+        spawned = []
+        monkeypatch.setattr(
+            scheduler, "_spawn_background_check",
+            lambda name, fn, inflight, **kw: spawned.append((name, kw)) or True,
+        )
+        gate = next(g for g in build_interval_gates(cfg, background_checks={}, doctor_state={})
+                    if g.name == "doctor-request")
+        return gate, spawned
+
+    def test_the_gate_reads_on_the_loop_and_spawns_only_for_a_request(self, config, monkeypatch):
+        """An every-tick poll of a row that is almost always empty is not worth
+        a thread per tick (the `_whatsapp_pairing` rule)."""
+        config.scheduler.doctor_check_interval = 0
+        gate, spawned = self._gate(config, monkeypatch)
+        assert not gate.background
+        assert gate.enabled(config)
+        assert gate.interval(config) <= config.scheduler.poll_interval
+        gate.run(1.0)
+        assert spawned == []
+        doctor.request_run(config, deep=False)
+        gate.run(2.0)
+        assert spawned == [("doctor-request", {"overlap_expected": True})]
 
 
 class TestTheCredentialGateAsksTheDaemon:
     """`vault_isolation_refusal` gates every credential and wallet route on
     whether tasks run sandboxed. Asked in the web container it probed bwrap
     there, where the stack grants no sandbox, and refused every route on a
-    multi-user stack whose tasks were sandboxed in the daemon."""
+    multi-user stack whose tasks were sandboxed in the daemon. The web routes
+    therefore pass the daemon's published verdict; the daemon, which runs the
+    tasks, decides with its own probe and never with a verdict a previous boot
+    left behind."""
 
     @pytest.fixture
     def multi_user(self, make_config):
@@ -170,30 +243,64 @@ class TestTheCredentialGateAsksTheDaemon:
     def _local(self, monkeypatch, value):
         monkeypatch.setattr("istota.executor.effective_sandboxing", lambda config: value)
 
-    def test_the_daemons_verdict_opens_the_gate_where_the_local_probe_fails(self, multi_user, monkeypatch):
-        from istota.credentials.names import vault_isolation_refusal
+    def test_the_web_routes_use_the_daemons_verdict(self, multi_user, monkeypatch):
+        from istota.credentials.names import tasks_sandboxed, vault_isolation_refusal
 
         self._local(monkeypatch, False)
         doctor.record_sandbox_verdict(multi_user, True)
-        assert vault_isolation_refusal(multi_user, "alice") is None
+        assert vault_isolation_refusal(
+            multi_user, "alice", sandboxed=tasks_sandboxed(multi_user)) is None
 
     def test_the_daemons_verdict_closes_it_too(self, multi_user, monkeypatch):
-        from istota.credentials.names import VAULT_ISOLATION_REASON, vault_isolation_refusal
+        from istota.credentials.names import VAULT_ISOLATION_REASON, tasks_sandboxed
 
         self._local(monkeypatch, True)
         doctor.record_sandbox_verdict(multi_user, False)
-        assert vault_isolation_refusal(multi_user, "alice") == VAULT_ISOLATION_REASON
+        assert tasks_sandboxed(multi_user) is False
+        from istota.credentials.names import vault_isolation_refusal
+        assert vault_isolation_refusal(
+            multi_user, "alice", sandboxed=tasks_sandboxed(multi_user)) == VAULT_ISOLATION_REASON
 
     def test_with_no_daemon_verdict_the_local_probe_answers(self, multi_user, monkeypatch):
-        from istota.credentials.names import VAULT_ISOLATION_REASON, vault_isolation_refusal
+        from istota.credentials.names import tasks_sandboxed
 
         self._local(monkeypatch, False)
-        assert vault_isolation_refusal(multi_user, "alice") == VAULT_ISOLATION_REASON
+        assert tasks_sandboxed(multi_user) is False
         self._local(monkeypatch, True)
-        assert vault_isolation_refusal(multi_user, "alice") is None
+        assert tasks_sandboxed(multi_user) is True
+
+    def test_the_daemon_never_trusts_a_stale_verdict(self, multi_user, monkeypatch, quiet_alerts):
+        """A previous boot published True; this one has no sandbox and its
+        doctor run raised. The gate in the daemon must still refuse."""
+        from istota.credentials.names import VAULT_ISOLATION_REASON, vault_isolation_refusal
+
+        doctor.record_sandbox_verdict(multi_user, True)
+        self._local(monkeypatch, False)
+
+        def boom(*a, **k):
+            raise RuntimeError("registry exploded")
+
+        monkeypatch.setattr("istota.doctor.run_checks", boom)
+        scheduler.run_startup_checks(multi_user)
+        assert vault_isolation_refusal(multi_user, "alice") == VAULT_ISOLATION_REASON
+        # And what the web routes read was replaced, before the run that raised.
+        assert doctor.daemon_sandbox_verdict(multi_user) is False
 
     def test_the_boot_run_publishes_the_verdict(self, config, monkeypatch, quiet_alerts):
         monkeypatch.setattr("istota.doctor.run_checks", lambda cfg, **kw: [_ok()])
         monkeypatch.setattr("istota.executor.effective_sandboxing", lambda c: True)
         scheduler.run_startup_checks(config)
         assert doctor.daemon_sandbox_verdict(config) is True
+
+    def test_every_web_route_goes_through_the_daemon_verdict(self):
+        """The web process must not call the gate without a verdict: its own
+        probe answers for a container that runs no task."""
+        import re
+        from pathlib import Path
+
+        import istota.webui.app as web
+
+        text = Path(web.__file__).read_text()
+        bare = [m.group(0) for m in re.finditer(r"vault_isolation_refusal\b[^\n]*", text)
+                if "sandboxed=" not in m.group(0)]
+        assert bare == [], bare

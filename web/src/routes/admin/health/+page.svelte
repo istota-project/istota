@@ -63,8 +63,10 @@
     }
   }
 
-  function answered(r: DoctorReport, id: string, deep: boolean): boolean {
-    return r.request_id === id && (!deep || r.deep_request_id === id);
+  // The daemon's own marker, not a report's request_id: the next sweep
+  // overwrites that, and a failed run still answers.
+  function answered(r: DoctorReport, id: string): boolean {
+    return r.answered?.id === id;
   }
 
   async function rerun(deep: boolean) {
@@ -79,7 +81,7 @@
         await new Promise((resolve) => setTimeout(resolve, POLL_MS));
         const next = await getAdminDoctor();
         report = next;
-        if (answered(next, asked.id, wantDeep)) {
+        if (answered(next, asked.id)) {
           error = '';
           if (wantDeep) {
             notice =

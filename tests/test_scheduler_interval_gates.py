@@ -117,7 +117,6 @@ EXPECTED_BACKGROUND = {
     "email-poll",
     "db-health",
     "doctor",
-    "doctor-request",
     "worktree-reap",
     "sandbox-cache-sweep",
     "avatar-import",

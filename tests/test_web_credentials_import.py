@@ -45,10 +45,10 @@ async def test_auth_origin_isolation_and_bounds(signed_client, config, monkeypat
     if suffix:
         fields = {"passphrase": PASSPHRASE}
     assert (await signed_client.post(BASE + suffix, files=upload(data), data=fields)).status_code == 403
-    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a: "isolation-required")
+    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a, **k: "isolation-required")
     r = await signed_client.post(BASE + suffix, files=upload(data), data=fields, headers=ORIGIN)
     assert r.status_code == 403
-    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a: None)
+    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a, **k: None)
     r = await signed_client.post(BASE + suffix, files=upload(b"x" * (credential_read.VAULT_READ_CAP_BYTES + 1)),
                                  data=fields, headers=ORIGIN)
     assert r.status_code == 413
