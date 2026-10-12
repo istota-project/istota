@@ -7859,17 +7859,11 @@ def execute_task(
         logger.error("Task %s: %s", task.id, exc)
         return False, str(exc), None, None
 
-    # Build resources: merge config-defined resources with dynamic DB resources
+    # Keep the caller's task resource snapshot and append configured resources.
+    from .workspace.places import user_resources_for
+
     user_config = config.get_user(task.user_id)
-    all_resources = list(user_resources)  # start with passed resources (e.g. shared_file from DB)
-    if user_config:
-        for rc in user_config.resources:
-            all_resources.append(db.UserResource(
-                id=0, user_id=task.user_id,
-                resource_type=rc.type, resource_path=rc.path,
-                display_name=rc.name or None, permissions=rc.permissions,
-            ))
-    user_resources = all_resources
+    user_resources = user_resources_for(config, conn, task.user_id, resources=user_resources)
 
     # Briefing tasks defer their prompt build to here (ISSUE-143): building a
     # briefing prompt does slow network I/O (news, yfinance, FinViz, IMAP).

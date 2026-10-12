@@ -313,6 +313,90 @@ def plan_masks(config: Config, protected: list[Path]) -> tuple[list[Path], list[
     return masks, refused
 
 
+def user_data_mounts(
+    config: Config,
+    *,
+    user_id: str,
+    conversation_token: str | None,
+    user_resources: list[db.UserResource],
+    withheld_scopes: frozenset[str] | set[str],
+    group_ids: list[str] | None,
+) -> list[Mount]:
+    """User-data binds, in their original order, without writes or logging.
+
+    The planner inserts the resource entries later than the other entries;
+    those two positions preserve the precedence of overlapping binds.
+    """
+    mounts: list[Mount] = []
+
+    def _rw(source: Path, reason: str, *, user_data: bool) -> None:
+        mounts.append(Mount("rw", source, None, reason, user_data=user_data))
+
+    def _ro(source: Path, reason: str, *, user_data: bool) -> None:
+        mounts.append(Mount("ro", source, None, reason, user_data=user_data))
+
+    # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
+    mount = config.workspace_path
+    user_dir: Path | None = None
+    if mount:
+        mount = mount.resolve()
+        # `scoped_user_dir`, not a plain join: `PurePath` drops an empty
+        # component and a `.`, so `mount / "Users" / ""` is `{mount}/Users` —
+        # the parent of every user's directory — and this bind is read-write.
+        # An absolute `user_id` replaces the root outright. None means the id
+        # did not name a child, and the bind is dropped rather than falling
+        # back to something wider (ISSUE-402).
+        user_dir = scoped_user_dir(mount / "Users", user_id)
+        if user_dir is not None and user_dir.exists() and "files" not in withheld_scopes:
+            _rw(user_dir, "nextcloud_user_dir", user_data=True)
+        # Talk attachments directory (flat, shared across conversations). Not
+        # for a task its room restricts: it holds every conversation's files,
+        # and `execute_task` copies the task's own into its temp dir instead.
+        talk_dir = mount / "Talk"
+        if talk_dir.exists() and not withheld_scopes:
+            _ro(talk_dir, "nextcloud_talk_dir", user_data=True)
+        if conversation_token:
+            channel_dir = mount / "Channels" / conversation_token
+            if channel_dir.exists():
+                _rw(channel_dir, "nextcloud_channel_dir", user_data=True)
+        # `scoped_user_dir` for the same reason as the user bind above: a
+        # collapsing id would bind `{mount}/Groups`, every group, read-write.
+        for group_id in sorted(set(group_ids or ())):
+            group_dir = scoped_user_dir(mount / "Groups", group_id)
+            if group_dir is not None and group_dir.exists():
+                _rw(group_dir, "nextcloud_group_dir", user_data=True)
+
+    # --- Per-resource mounts ---
+    if mount and "files" not in withheld_scopes:
+        for r in user_resources:
+            if not r.resource_path:
+                continue
+            rpath = (mount / r.resource_path.lstrip("/")).resolve()
+            if not rpath.exists():
+                continue
+            # Skip if already covered by the user dir bind above. `user_dir` is
+            # that bind's own source, not a second derivation of it: with a
+            # plain join here an unscoped id made this `{mount}/Users`, so
+            # every resource anywhere under it read as covered — by a bind that
+            # is not emitted at all. None means no bind was emitted from a
+            # scoped id. (Not the same as "no bind was emitted": a scoped
+            # `user_dir` that does not exist emits none either and still skips
+            # here. Harmless — the loop has already refused a `rpath` that does
+            # not exist, and a resource under a missing directory cannot.)
+            if user_dir is not None:
+                try:
+                    rpath.relative_to(user_dir.resolve())
+                    continue  # Already inside user dir
+                except ValueError:
+                    pass
+            if r.permissions == "readwrite":
+                _rw(rpath, "user_resource", user_data=True)
+            else:
+                _ro(rpath, "user_resource", user_data=True)
+
+    return mounts
+
+
 def build_mount_plan(
     config: Config,
     task: db.Task,
@@ -668,48 +752,29 @@ def build_mount_plan(
     # there and is gone with the rest; what a task cannot do is reach a daemon,
     # because no socket is bound at any path and no `DOCKER_HOST` is exported.
 
-    # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
-    mount = config.workspace_path
-    user_dir: Path | None = None
-    if mount:
-        mount = mount.resolve()
-        # `scoped_user_dir`, not a plain join: `PurePath` drops an empty
-        # component and a `.`, so `mount / "Users" / ""` is `{mount}/Users` —
-        # the parent of every user's directory — and this bind is read-write.
-        # An absolute `user_id` replaces the root outright. None means the id
-        # did not name a child, and the bind is dropped rather than falling
-        # back to something wider (ISSUE-402).
-        user_dir = scoped_user_dir(mount / "Users", task.user_id)
-        if user_dir is None:
+    # User-data binds retain their original positions around the runtime binds.
+    data_mounts = user_data_mounts(
+        config, user_id=task.user_id, conversation_token=task.conversation_token,
+        user_resources=user_resources, withheld_scopes=withheld_scopes,
+        group_ids=group_ids,
+    )
+    mounts.extend(entry for entry in data_mounts if entry.reason != "user_resource")
+    # Diagnostics belong to task planning, never to the read-only projection.
+    if config.workspace_path:
+        mount = config.workspace_path.resolve()
+        if scoped_user_dir(mount / "Users", task.user_id) is None:
             logger.warning(
                 "sandbox: user id %r does not name a directory under "
                 "%s/Users; binding no user directory for task %s.",
                 task.user_id, mount, task.id,
             )
-        elif user_dir.exists() and "files" not in withheld_scopes:
-            _rw(user_dir, "nextcloud_user_dir", user_data=True)
-        # Talk attachments directory (flat, shared across conversations). Not
-        # for a task its room restricts: it holds every conversation's files,
-        # and `execute_task` copies the task's own into its temp dir instead.
-        talk_dir = mount / "Talk"
-        if talk_dir.exists() and not withheld_scopes:
-            _ro(talk_dir, "nextcloud_talk_dir", user_data=True)
-        if task.conversation_token:
-            channel_dir = mount / "Channels" / task.conversation_token
-            if channel_dir.exists():
-                _rw(channel_dir, "nextcloud_channel_dir", user_data=True)
-        # `scoped_user_dir` for the same reason as the user bind above: a
-        # collapsing id would bind `{mount}/Groups`, every group, read-write.
         for group_id in sorted(set(group_ids or ())):
-            group_dir = scoped_user_dir(mount / "Groups", group_id)
-            if group_dir is None:
+            if scoped_user_dir(mount / "Groups", group_id) is None:
                 logger.warning(
                     "sandbox: group id %r does not name a directory under "
                     "%s/Groups; binding no group directory for task %s.",
                     group_id, mount, task.id,
                 )
-            elif group_dir.exists():
-                _rw(group_dir, "nextcloud_group_dir", user_data=True)
 
     # --- Huggingface model cache (RO) ---
     hf_cache = home / ".cache" / "huggingface"
@@ -866,32 +931,7 @@ def build_mount_plan(
             _rw(exec_dir, "devbox_exec_socket")
 
     # --- Per-resource mounts ---
-    if mount and "files" not in withheld_scopes:
-        for r in user_resources:
-            if not r.resource_path:
-                continue
-            rpath = (mount / r.resource_path.lstrip("/")).resolve()
-            if not rpath.exists():
-                continue
-            # Skip if already covered by the user dir bind above. `user_dir` is
-            # that bind's own source, not a second derivation of it: with a
-            # plain join here an unscoped id made this `{mount}/Users`, so
-            # every resource anywhere under it read as covered — by a bind that
-            # is not emitted at all. None means no bind was emitted from a
-            # scoped id. (Not the same as "no bind was emitted": a scoped
-            # `user_dir` that does not exist emits none either and still skips
-            # here. Harmless — the loop has already refused a `rpath` that does
-            # not exist, and a resource under a missing directory cannot.)
-            if user_dir is not None:
-                try:
-                    rpath.relative_to(user_dir.resolve())
-                    continue  # Already inside user dir
-                except ValueError:
-                    pass
-            if r.permissions == "readwrite":
-                _rw(rpath, "user_resource", user_data=True)
-            else:
-                _ro(rpath, "user_resource", user_data=True)
+    mounts.extend(entry for entry in data_mounts if entry.reason == "user_resource")
 
     # --- Extra RO binds (e.g. service sockets for same-host APIs, and the
     # document a task-less OCR call reads) ---
