@@ -3,8 +3,10 @@
 #
 #   istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB]
 #                       (--tag TAG --signing-key KEY | --repo DIR [--tag TAG]) [--adopt]
+#                       [--no-setup]
 #                               make the workspace folder and the VM, then set up the
-#                               stack in it; a re-run continues where one stopped
+#                               stack in it; a re-run continues where one stopped;
+#                               --no-setup stops before the setup questions
 #   istota-stack start          start the VM
 #   istota-stack stop           stop the stack, then the VM
 #   istota-stack status         the VM, the deployed tag, the containers, the folder
@@ -17,6 +19,10 @@
 #   istota-stack update [args]  the VM's `update`, then these scripts from its checkout
 #   istota-stack destroy [--force]
 #                               delete the VM; the folder and the Keychain key stay
+#   istota-stack restore [--date YYYY-MM-DD] [--force] [create's options]
+#                               a new VM from the folder's backups and the Keychain's
+#                               key, the old VM deleted first; --force restores an
+#                               empty database snapshot
 #
 # Every other verb is the VM's own `istota-stack`, run as root in the VM with
 # its arguments unchanged and its exit status passed back (setup, apply,
@@ -374,6 +380,13 @@ keychain_value() {
     security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null
 }
 
+# The form a master key may take on its way in or out of the Keychain: it goes
+# into a `security -i` command line, so nothing that line would split or quote.
+valid_key() {
+    case "$1" in ""|*[!A-Za-z0-9._=+/-]*) return 1 ;; esac
+    [ "${#1}" -ge 32 ]
+}
+
 # The VM's master key into the login Keychain, read back and compared, since
 # a short write stores an empty item and still exits 0. The value is only
 # ever in this shell's memory and on security's stdin. A different key
@@ -384,10 +397,8 @@ escrow_key() {
     key="$(vm_stack exec cat /data/.secret_key </dev/null)" \
         || fail 1 "could not read the master key from the VM; run \`istota-stack create\` again once the stack is up."
     key="$(printf '%s' "$key" | tr -d '\r\n')"
-    case "$key" in
-        ""|*[!A-Za-z0-9._=+/-]*) fail "$EX_CONFIG" "the VM's master key is not in a form this can store; copy /data/.secret_key by hand." ;;
-    esac
-    [ "${#key}" -ge 32 ] || fail "$EX_CONFIG" "the VM's master key is shorter than a usable key; nothing was stored."
+    valid_key "$key" \
+        || fail "$EX_CONFIG" "the VM's master key is not in a form this can store (32 or more of A-Z a-z 0-9 . _ = + / -); copy /data/.secret_key by hand."
     if keychain_has_item; then
         stored="$(keychain_value || true)"
         if [ "$stored" = "$key" ]; then
@@ -444,7 +455,7 @@ enrolment() {
 # --- verbs -------------------------------------------------------------------
 
 cmd_create() {
-    local folder="" port="" cpus="" memory="" tag="" repo="" key="${RELEASE_SIGNING_KEY:-}" adopt=""
+    local folder="" port="" cpus="" memory="" tag="" repo="" key="${RELEASE_SIGNING_KEY:-}" adopt="" setup=1
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
@@ -460,6 +471,7 @@ cmd_create() {
                 esac
                 shift 2 ;;
             --adopt) adopt=1; shift ;;
+            --no-setup) setup=""; shift ;;
             *) usage_error "create takes no '$1'" ;;
         esac
     done
@@ -471,6 +483,7 @@ cmd_create() {
         tag="$(state_get TAG)"
         repo="$(state_get REPO)"
     fi
+    [ -n "$key" ] || key="$(state_get SIGNING_KEY)"
     if ! valid_port "$port" || [ "$port" -lt 1024 ]; then
         usage_error "--port takes a port from 1024 to 65535, not '${port}'"
     fi
@@ -506,7 +519,8 @@ cmd_create() {
         require_port_free "$port"
     fi
     prepare_folder "$folder" "$adopt"
-    state_write "WORKSPACE=${folder}" "PORT=${port}" "TAG=${tag}" "REPO=${repo}"
+    # The signing key is public; kept so a re-run or a restore can make the VM again.
+    state_write "WORKSPACE=${folder}" "PORT=${port}" "TAG=${tag}" "REPO=${repo}" "SIGNING_KEY=${key}"
 
     if [ -z "$status" ]; then
         local template expression args
@@ -552,18 +566,38 @@ cmd_create() {
         probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
     fi
 
+    if [ -z "$setup" ]; then
+        run_step "provision the VM" "${VM_SRC}/host/provision.sh" vm "${VM_SRC}/host/provision.sh" </dev/null
+        refresh_scripts
+        log "the VM is built and the stack is not set up (--no-setup); files are in ${folder}."
+        return 0
+    fi
+
     if [ "$(probe_value "$probe" config)" != 1 ]; then
         local setup=(setup --storage host-folder --ingress local --hostname "localhost:${port}")
         # The wizard asks its questions on this terminal, as on a server.
         vm_stack "${setup[@]}" || fail $? "step 'setup' failed: \`istota-stack ${setup[*]}\`"
-        probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
     fi
 
-    # The first build ran before config.toml existed: a config that needs
-    # Claude Code gets its rebuild now.
-    local image_rc=0
+    rebuild_if_lacking
+    run_step "provision the VM" "${VM_SRC}/host/provision.sh" vm "${VM_SRC}/host/provision.sh" </dev/null
+    run_step "start the stack" "systemctl enable --now istota-stack" \
+        vm systemctl enable --now istota-stack </dev/null
+
+    refresh_scripts
+    escrow_key
+    probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
+    enrolment "$(probe_value "$probe" admin)" "$port"
+    log "done. \`istota-stack status\` shows the VM; files are in ${folder}."
+}
+
+# The first build ran before config.toml existed: a config that needs Claude
+# Code gets its rebuild of the deployed tag now.
+rebuild_if_lacking() {
+    local probe deployed image_rc=0
     vm_stack check-image </dev/null || image_rc=$?
     if [ "$image_rc" -eq 2 ]; then
+        probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
         deployed="$(probe_value "$probe" tag)"
         local rebuild=(update)
         [ -z "$(probe_value "$probe" unsigned)" ] || rebuild+=(--unsigned)
@@ -572,14 +606,6 @@ cmd_create() {
     elif [ "$image_rc" -ne 0 ]; then
         fail "$image_rc" "step 'check the image' failed: \`istota-stack check-image\` (exit ${image_rc})"
     fi
-    run_step "provision the VM" "${VM_SRC}/host/provision.sh" vm "${VM_SRC}/host/provision.sh" </dev/null
-    run_step "start the stack" "systemctl enable --now istota-stack" \
-        vm systemctl enable --now istota-stack </dev/null
-
-    refresh_scripts
-    escrow_key
-    enrolment "$(probe_value "$probe" admin)" "$port"
-    log "done. \`istota-stack status\` shows the VM; files are in ${folder}."
 }
 
 cmd_start() {
@@ -723,12 +749,93 @@ cmd_destroy() {
     if ! keychain_has_item && [ -z "$force" ]; then
         fail "$EX_CONFIG" "the login Keychain holds no copy of ${INSTANCE}'s master key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): the snapshots in ${folder} cannot be decrypted without this key. \`istota-stack create\` copies it while the VM runs; --force deletes the VM regardless."
     fi
+    delete_instance
+    log "deleted ${INSTANCE}. Left in place: the workspace ${folder} and the master key in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})."
+}
+
+# The instance, once the user has typed its name.
+delete_instance() {
+    local answer=""
     printf '[istota-stack] this deletes the VM %s, its database and its config. Type %s to go on: ' \
         "$INSTANCE" "$INSTANCE" >&2
     read -r answer || true
     [ "$answer" = "$INSTANCE" ] || fail 1 "not deleted."
     limactl delete --force "$INSTANCE"
-    log "deleted ${INSTANCE}. Left in place: the workspace ${folder} and the master key in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})."
+}
+
+# What a restore reads from the folder, looked for before anything is deleted:
+# a config copy and a framework snapshot, of the date given or of any date.
+# The layout is db_backup's default; the VM's restore reads the config's own.
+require_backups() {
+    local folder="$1" date="$2" pattern="${2:-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]}" found what path
+    for what in "Backups/config/%s/config.toml" "Backups/db/snapshots/%s/framework/istota.db"; do
+        found=""
+        # shellcheck disable=SC2059
+        for path in "${folder}"/$(printf "$what" "$pattern"); do
+            if [ -f "$path" ]; then found=1; break; fi
+        done
+        if [ -z "$found" ]; then
+            # shellcheck disable=SC2059
+            fail "$EX_CONFIG" "no ${folder}/$(printf "$what" "${date:-<date>}"): nothing to restore${date:+ for ${date}}. Nothing was changed."
+        fi
+    done
+}
+
+# A new VM from the folder's backups: the old VM deleted (asked first), a VM
+# made without the setup questions, then in it the master key from the
+# Keychain on stdin, the config copy and the databases, and the stack started.
+# Every refusal that does not need the VM comes before the delete.
+cmd_restore() {
+    local date="" force="" folder="" create_args=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --date)
+                [ "$#" -ge 2 ] || usage_error "--date needs a value"
+                date="$2"; shift 2 ;;
+            --force) force=1; shift ;;
+            --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
+                [ "$#" -ge 2 ] || usage_error "$1 needs a value"
+                [ "$1" != --workspace ] || folder="$2"
+                create_args+=("$1" "$2"); shift 2 ;;
+            *) usage_error "restore takes no '$1'" ;;
+        esac
+    done
+    case "$date" in
+        ""|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+        *) usage_error "--date takes YYYY-MM-DD, not '${date}'" ;;
+    esac
+
+    require_mac
+    [ -n "$folder" ] || folder="$(workspace_or_default)"
+    folder="$(resolve_dir "$folder")"
+    refuse_location "$folder"
+    [ -f "${folder}/${MARKER}" ] \
+        || fail "$EX_CONFIG" "${folder} has no ${MARKER}: it is not a workspace a stack backed up into. Nothing was changed."
+    require_backups "$folder" "$date"
+    keychain_has_item \
+        || fail "$EX_CONFIG" "the login Keychain holds no copy of the master key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): the snapshots in ${folder} cannot be decrypted without it. Nothing was changed."
+    local key
+    key="$(keychain_value || true)"
+    valid_key "$key" \
+        || fail "$EX_CONFIG" "the Keychain item ${KEYCHAIN_SERVICE} / ${KEYCHAIN_ACCOUNT} does not hold a usable master key. Nothing was changed."
+    require_limactl
+
+    if [ -n "$(instance_status)" ]; then
+        log "a restore makes a new VM; ${INSTANCE} goes first, with anything it holds that is newer than the backup"
+        delete_instance
+    fi
+    cmd_create ${create_args[@]+"${create_args[@]}"} --workspace "$folder" --no-setup
+
+    local restore=(restore)
+    [ -z "$date" ] || restore+=(--date "$date")
+    [ -z "$force" ] || restore+=(--force)
+    # printf is a builtin, so the key is on no command line.
+    printf '%s\n' "$key" | run_step "restore the backups" "istota-stack ${restore[*]}" vm_stack "${restore[@]}"
+    rebuild_if_lacking
+    run_step "start the stack" "systemctl enable --now istota-stack" \
+        vm systemctl enable --now istota-stack </dev/null
+    log "restored from ${folder}. secrets/ is not in the backups: the stack's own credentials (the model's key, mail and Nextcloud passwords) are empty until you write them again with \`istota-stack put-files\`."
+    log "open http://localhost:$(port_or_default)/istota"
 }
 
 # `apply <plan>` and `import-bare-metal <dir>`: the Mac path copied into a
@@ -774,7 +881,8 @@ main() {
         update) cmd_update "$@" ;;
         destroy) cmd_destroy "$@" ;;
         apply|import-bare-metal) cmd_with_path "$command" "$@" ;;
-        restore|import-standalone) fail "$EX_USAGE" "${command} is not in this release." ;;
+        restore) cmd_restore "$@" ;;
+        import-standalone) fail "$EX_USAGE" "${command} is not in this release." ;;
         ""|-h|--help|help) usage ;;
         *) forward "$command" "$@" ;;
     esac

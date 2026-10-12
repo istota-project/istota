@@ -125,6 +125,7 @@ if verb in ("start", "stop"):
     sys.exit(0)
 if verb == "delete":
     state["instance"] = None
+    state["vm"] = {}
     save()
     sys.exit(0)
 if verb == "autostart":
@@ -197,6 +198,13 @@ if verb == "shell":
                 env[key] = value
             save()
         sys.exit(0)
+    if stack[:1] == ["restore"]:
+        state["restore_stdin"] = sys.stdin.read()
+        rc = state.get("restore_rc", 0)
+        if rc == 0:
+            vm["config"] = True
+        save()
+        sys.exit(rc)
     if stack[:1] == ["stage"]:
         out(f"/srv/app/istota/staging/AbCd1234/{os.path.basename(stack[-1])}\n")
         sys.exit(0)
@@ -336,9 +344,8 @@ class TestForwarding:
 
     def test_the_verbs_of_later_stages_are_not_forwarded(self, mac):
         mac.set(instance={"name": "istota", "status": "Running"})
-        for verb in ("restore", "import-standalone"):
-            result = mac.run(verb)
-            assert result.returncode == 64, result.stderr
+        result = mac.run("import-standalone")
+        assert result.returncode == 64, result.stderr
         assert mac.stack_calls() == []
 
 
@@ -739,6 +746,145 @@ class TestDestroy:
         assert (made.home / "Istota" / ".istota-workspace").is_file()
         assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
         assert "Keychain" in result.stdout
+
+
+BACKUP_DATE = "2026-10-10"
+
+
+def _back_up(mac: Mac, date: str = BACKUP_DATE) -> Path:
+    """What db_backup leaves in the folder: a config copy and a framework snapshot."""
+    folder = mac.home / "Istota"
+    copy = folder / "Backups" / "config" / date
+    copy.mkdir(parents=True)
+    (copy / "config.toml").write_text("bot_name = 'Istota'\n")
+    (copy / "admins").write_text("alice\n")
+    snapshot = folder / "Backups" / "db" / "snapshots" / date / "framework"
+    snapshot.mkdir(parents=True)
+    (snapshot / "istota.db").write_bytes(b"SQLite format 3\x00")
+    return folder
+
+
+class TestCreateWithoutSetup:
+    def test_no_setup_leaves_the_stack_unconfigured_and_stopped(self, mac):
+        result = _create(mac, "--no-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        verbs = [c[0] for c in mac.stack_calls()]
+        assert verbs == ["host-env", "update"]
+        vm = mac.vm_calls()
+        assert ["/srv/app/istota/src/host/provision.sh"] in vm
+        assert ["systemctl", "enable", "--now", "istota-stack"] not in vm
+        assert "keychain" not in mac.state()
+
+    def test_the_signing_key_is_kept_for_a_rerun(self, mac):
+        assert _create(mac).returncode == 0
+        mac.set(instance=None)
+        mac.calls_path.unlink()
+        result = mac.run("create")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"--param=RELEASE_SIGNING_KEY={SIGNING_KEY}" in _limactl_create(mac)
+
+
+class TestRestore:
+    """A new VM from the folder's backups and the Keychain's copy of the key.
+    Everything that can refuse is asked before the old VM is deleted."""
+
+    @pytest.fixture
+    def made(self, mac):
+        assert _create(mac).returncode == 0
+        _back_up(mac)
+        mac.calls_path.unlink()
+        return mac
+
+    def test_it_replaces_the_vm_from_the_folder_and_the_keychain(self, made):
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        limactl = [c[0] for c in made.calls("limactl") if c[0] not in ("shell", "list", "--version", "copy")]
+        assert limactl[:3] == ["delete", "create", "start"], limactl
+        calls = made.stack_calls()
+        verbs = [c[0] for c in calls]
+        assert "setup" not in verbs
+        assert verbs.index("update") < verbs.index("restore") < verbs.index("check-image")
+        assert ["restore"] in calls
+        assert made.state()["restore_stdin"] == KEY + "\n"
+        vm = made.vm_calls()
+        restore = vm.index(["istota-stack", "restore"])
+        assert restore < vm.index(["systemctl", "enable", "--now", "istota-stack"])
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+
+    def test_the_key_is_on_no_argv(self, made):
+        assert made.run("restore", stdin="istota\n").returncode == 0
+        for call in made.all_calls():
+            assert not any(KEY in arg for arg in call["argv"]), call
+
+    def test_a_date_and_force_reach_the_vm(self, made):
+        result = made.run("restore", "--date", BACKUP_DATE, "--force", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["restore", "--date", BACKUP_DATE, "--force"] in made.stack_calls()
+
+    def test_with_no_vm_it_makes_one_without_asking(self, made):
+        made.set(instance=None)
+        result = made.run("restore")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] == ["delete"] for c in made.calls("limactl"))
+        assert ["restore"] in made.stack_calls()
+
+    def test_without_the_keychain_item_nothing_is_touched(self, made):
+        made.set(keychain={})
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "Keychain" in result.stderr
+        assert [c[0] for c in made.calls("limactl")
+                if c[0] in ("delete", "create", "start", "shell")] == []
+
+    def test_without_backups_nothing_is_touched(self, made):
+        import shutil
+
+        shutil.rmtree(made.home / "Istota" / "Backups" / "config")
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "Backups/config" in result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
+
+    def test_a_date_with_no_snapshot_is_refused_first(self, made):
+        result = made.run("restore", "--date", "2026-01-01", stdin="istota\n")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
+
+    def test_a_folder_without_its_marker_is_refused_first(self, made):
+        (made.home / "Istota" / ".istota-workspace").unlink()
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
+
+    @pytest.mark.parametrize("date", ["yesterday", "2026-1-1", "2026-10-10x"])
+    def test_a_date_that_is_not_one_is_a_usage_error(self, made, date):
+        assert made.run("restore", "--date", date).returncode == 64
+        assert made.calls("limactl") == []
+
+    def test_the_name_has_to_be_typed_before_the_old_vm_goes(self, made):
+        result = made.run("restore", stdin="yes\n")
+        assert result.returncode != 0
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
+
+    def test_a_failed_restore_does_not_start_the_stack(self, made):
+        made.set(restore_rc=2)
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "istota-stack restore" in result.stderr
+        assert ["systemctl", "enable", "--now", "istota-stack"] not in made.vm_calls()
+
+    def test_a_restored_config_that_needs_claude_code_gets_its_rebuild(self, made):
+        made.set(check_image_rcs=[2])
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = made.stack_calls()
+        check = calls.index(["check-image"])
+        assert calls[check + 1] == ["update", "v1.2.0"]
+
+    def test_it_says_what_the_backups_do_not_hold(self, made):
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0
+        assert "secrets/" in result.stdout
 
 
 class TestInstallLocal:

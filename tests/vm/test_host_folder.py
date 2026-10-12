@@ -454,3 +454,59 @@ class TestTheMacCliExecsAsTheDaemon:
         result = _on_the_mac(shim, stack, "user", "list")
         assert result.returncode == 0, result.stdout + result.stderr
         assert lima.USER in result.stdout, result.stdout
+
+
+def _newest_task(vm: lima.Vm, db_file: str, *, task_id: int | None = None) -> str:
+    """`<id>|<created_at>` of the newest task in a database file, or of `task_id`."""
+    where = f"WHERE id = {int(task_id)}" if task_id is not None else "ORDER BY id DESC LIMIT 1"
+    script = (
+        "import sqlite3, sys\n"
+        "row = sqlite3.connect(sys.argv[1]).execute("
+        f"'SELECT id, created_at FROM tasks {where}').fetchone()\n"
+        "print('|'.join(map(str, row)) if row else '')\n"
+    )
+    return lima.stack_exec(vm, f"python3 -c {shlex.quote(script)} {shlex.quote(db_file)}").stdout.strip()
+
+
+class TestARestoreFromTheFolder:
+    """Recovery, the VM half: the state volume and the config are thrown away,
+    and `istota-stack restore` puts them back from the folder's own backups,
+    with the master key on stdin as the Mac CLI passes it from the Keychain
+    (the Mac half, `destroy` and `create --no-setup` around it, is the default
+    suite's `tests/test_mac_istota_stack.py::TestRestore`). Last in the module:
+    it takes the stack down and brings it back."""
+
+    def test_the_key_the_config_and_the_database_come_back(self, stack, folder):
+        key = lima.stack_exec(stack, "cat /data/.secret_key").stdout.strip()
+        config_before = stack.out(f"cat {lima.STACK}/config/config.toml")
+        lima.stack_exec(stack, "python3 -m istota.maintenance.db_backup")
+        snapshot = lima.stack_exec(
+            stack, "ls -1d /mnt/shared/Backups/db/snapshots/*/ | tail -1").stdout.strip()
+        newest = _newest_task(stack, f"{snapshot}framework/istota.db")
+        assert newest, "the snapshot holds no task to look for afterwards"
+        saved = f"{lima.SCRATCH}/restore-config"
+        stack.run(
+            "systemctl stop istota-stack.service\n"
+            f"install -d -m 0700 {saved}\n"
+            f"cp -p {lima.STACK}/config/config.toml {lima.STACK}/config/admins {saved}/\n"
+            f"rm -f {lima.STACK}/config/config.toml {lima.STACK}/config/admins\n"
+            "docker volume rm istota_istota_data\n",
+            timeout=600)
+        try:
+            restored = stack.run('printf "%s\\n" "$KEY" | istota-stack restore', env={"KEY": key},
+                                 timeout=900, check=False)
+            assert restored.returncode == 0, restored.stdout + restored.stderr
+            stack.run("systemctl start istota-stack.service", timeout=1800)
+            lima.wait_healthy(stack)
+            assert lima.stack_exec(stack, "cat /data/.secret_key").stdout.strip() == key
+            assert stack.out(f"cat {lima.STACK}/config/config.toml") == config_before
+            task_id = int(newest.split("|", 1)[0])
+            assert _newest_task(stack, "/data/db/istota.db", task_id=task_id) == newest, (
+                "the snapshot's newest task is not in the restored database")
+            assert lima.doctor(stack, "runtime.mount_liveness")["status"] == "ok"
+        finally:
+            stack.run(
+                f"[ -e {lima.STACK}/config/config.toml ] || "
+                f"cp -p {saved}/config.toml {saved}/admins {lima.STACK}/config/\n"
+                "systemctl start istota-stack.service\n",
+                timeout=1800, check=False)
