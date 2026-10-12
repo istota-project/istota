@@ -11343,6 +11343,19 @@ def is_istota_task_tracked(conn: sqlite3.Connection, user_id: str, content_hash:
     return cursor.fetchone() is not None
 
 
+def get_istota_file_task_by_hash(
+    conn: sqlite3.Connection, user_id: str, content_hash: str,
+) -> IstotaFileTask | None:
+    """Get a user's TASKS.md file task by its content hash."""
+    row = conn.execute(
+        "SELECT id FROM istota_file_tasks WHERE user_id = ? AND content_hash = ?",
+        (user_id, content_hash),
+    ).fetchone()
+    if not row:
+        return None
+    return get_istota_file_task(conn, row["id"])
+
+
 def track_istota_file_task(
     conn: sqlite3.Connection,
     user_id: str,

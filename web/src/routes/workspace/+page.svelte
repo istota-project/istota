@@ -12,6 +12,7 @@
     Input,
     FileDropZone,
     HeaderNav,
+    type KebabItem,
   } from '$lib/components/ui';
   import {
     getWorkspacePins,
@@ -22,6 +23,7 @@
     getWorkspacePlaces,
     getWorkspaceListing,
     getWorkspaceDriveListing,
+    getWorkspaceDriveParent,
     type DriveListing,
     createWorkspaceFolder,
     deleteWorkspaceEntry,
@@ -281,6 +283,46 @@
   function driveFolder(path: string) {
     return path.split('/').filter(Boolean).at(-1)?.split(':')[0] || 'root';
   }
+  function revealAction(
+    ref: string | null | undefined,
+    provider: 'workspace' | 'drive' = 'workspace',
+    available = true,
+  ): KebabItem {
+    const unavailable = { label: 'Reveal', disabled: true };
+    if (!ref || !available) return unavailable;
+    if (provider === 'drive') {
+      const drive = places.find((place) => place.kind === 'drive' && place.browsable);
+      if (!drive) return unavailable;
+      return { label: 'Reveal', onSelect: () => void revealDrive(ref, drive.id) };
+    }
+    const place = places
+      .filter(
+        (place) =>
+          place.browsable &&
+          place.view_root &&
+          (ref === place.view_root || ref.startsWith(place.view_root + '/')),
+      )
+      .sort((a, b) => b.view_root!.length - a.view_root!.length)[0];
+    if (!place) return unavailable;
+    const relative = ref.slice(place.view_root!.length).replace(/^\//, '');
+    const path = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
+    return {
+      label: 'Reveal',
+      href: href(place.id, path),
+      onClick: (event) => navigate(event, place.id, path),
+    };
+  }
+  async function revealDrive(ref: string, place: string) {
+    pinError = '';
+    try {
+      const result = await getWorkspaceDriveParent(ref);
+      if (!active) return;
+      sidebarOpen = false;
+      selection.push({ place, path: result.folder });
+    } catch (error) {
+      if (active) pinError = error instanceof Error ? error.message : 'Could not reveal this file.';
+    }
+  }
   function breadcrumbLabel(part: string) {
     if (place?.kind !== 'drive') return part;
     if (part === 'shared') return 'Shared with me';
@@ -396,6 +438,9 @@
           {places}
           busy={pinsBusy}
           onRemove={removePin}
+          {configFiles}
+          onEdit={editConfigFile}
+          {revealAction}
           {href}
           onNavigate={navigate}
         />
@@ -410,6 +455,7 @@
           error={configError}
           onEdit={editConfigFile}
           onRetry={loadConfigFiles}
+          {revealAction}
         />
         <PlaceList
           places={places.filter((place) => place.kind !== 'home')}

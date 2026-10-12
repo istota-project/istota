@@ -5456,6 +5456,16 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
 };
 let workspacePins: WorkspacePin[] = [
   {
+    id: 3,
+    provider: 'workspace',
+    ref: '/Users/carol/istota/config/USER.md',
+    name: 'USER.md',
+    mime_type: 'text/markdown',
+    web_url: null,
+    available: true,
+    is_dir: false,
+  },
+  {
     id: 1,
     provider: 'workspace',
     ref: '/Users/carol/note.md',
@@ -5476,7 +5486,7 @@ let workspacePins: WorkspacePin[] = [
     is_dir: false,
   },
 ];
-let nextWorkspacePinId = 3;
+let nextWorkspacePinId = 4;
 
 // The user's config files. Every save status is reachable from the editor:
 // a stale revision is 409, text containing LOCKED is 423, INVALID is 422 with
@@ -5506,6 +5516,7 @@ function mockConfigFiles(path: string, method: string, body: any) {
         return {
           name,
           kind: name.startsWith('skills/') ? 'skill' : 'config',
+          view_path: `/Users/carol/istota/config/${name}${name.startsWith('skills/') ? '.md' : ''}`,
           exists: text !== undefined,
           size: text === undefined ? null : Buffer.byteLength(text, 'utf8'),
           editable: true,
@@ -5581,6 +5592,9 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
       (pin) => pin.id !== Number(driveUrl.pathname.split('/').at(-1)),
     );
     return { status: 'ok' };
+  }
+  if (driveUrl.pathname === '/istota/api/workspace/drive/parent' && method === 'GET') {
+    return { folder: 'drive_folder_1' };
   }
   if (driveUrl.pathname === '/istota/api/workspace/drive/list' && method === 'GET') {
     const folder = driveUrl.searchParams.get('folder') || 'root';
@@ -5682,8 +5696,27 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const selected = workspacePlaces.find((item) => item.id === place);
   if (!selected?.browsable) return { __status: 404, error: 'Place not found.' };
   if (folder === 'Unavailable folder') return { __status: 404, error: 'Folder not found.' };
+  const configEntries =
+    folder === 'istota/config'
+      ? [
+          ...[...mockConfigText.keys()]
+            .filter((name) => !name.startsWith('skills/'))
+            .map((name) => workspaceEntry(name)),
+          workspaceEntry('skills', 'dir'),
+        ]
+      : folder === 'istota/config/skills'
+        ? [...mockConfigText.keys()]
+            .filter((name) => name.startsWith('skills/'))
+            .map((name) => workspaceEntry(`${name.slice('skills/'.length)}.md`))
+        : folder === 'istota'
+          ? [workspaceEntry('config', 'dir')]
+          : undefined;
   const entries =
-    place === 'home' ? workspaceTree[folder] : folder ? undefined : [workspaceEntry('note.md')];
+    place === 'home'
+      ? (configEntries ?? workspaceTree[folder])
+      : folder
+        ? undefined
+        : [workspaceEntry('note.md')];
   if (!entries) return { __status: 404, error: 'Folder not found.' };
   return {
     place,

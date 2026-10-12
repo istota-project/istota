@@ -48,7 +48,10 @@ const configFiles = [
   { name: 'TASKS.md', kind: 'config', exists: false, size: null, editable: false },
   { name: 'HEARTBEAT.md', kind: 'config', exists: false, size: null, editable: true },
   { name: 'skills/notes', kind: 'skill', exists: false, size: null, editable: true },
-];
+].map((file) => ({
+  ...file,
+  view_path: `/Users/alice/Helper/config/${file.name}${file.kind === 'skill' ? '.md' : ''}`,
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -516,7 +519,9 @@ it('pins a file from its row and removes it from the Pinned section', async () =
   await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   await fireEvent.click(within(pinned).getByRole('button', { name: 'plan #1.md' }));
   expect(openFile).toHaveBeenCalledWith('/Users/alice/notes/plan #1.md');
-  await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin plan #1.md' }));
+  await openPinActions('plan #1.md');
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove pin' }));
   expect(api.deleteWorkspacePin).toHaveBeenCalledWith(1);
   await openActions('plan #1.md');
   await screen.findByRole('menuitem', { name: 'Pin' });
@@ -540,10 +545,14 @@ it('keeps unavailable pins removable and reports failed mutations', async () => 
   const pinned = await screen.findByRole('region', { name: 'Pinned files' });
   await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   expect(within(pinned).queryByRole('button', { name: 'Gone' })).toBeNull();
-  await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin Gone' }));
+  await openPinActions('Gone');
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove pin' }));
   await screen.findByText('Try again.');
   expect(within(pinned).getByText('Gone')).toBeTruthy();
-  await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin Gone' }));
+  await openPinActions('Gone');
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove pin' }));
   await waitFor(() => expect(screen.queryByText('Gone')).toBeNull());
 });
 
@@ -668,10 +677,29 @@ it('lists the configuration files with their sizes and keeps a refused one read-
   await within(section).findByText('USER.md');
   expect(within(section).getByText('2 KB')).toBeTruthy();
   expect(within(section).getAllByText('Not created yet').length).toBe(2);
-  expect(within(section).getByRole('button', { name: 'Edit TASKS.md' })).toBeDisabled();
+  expect(within(section).queryByRole('button', { name: /^Edit / })).toBeNull();
+  await openActions('TASKS.md');
+  const refusedEdit = await screen.findByRole('menuitem', { name: 'Edit' });
+  expect(refusedEdit).toHaveAttribute('data-disabled');
+  await fireEvent.click(refusedEdit);
+  expect(api.getWorkspaceConfigFile).not.toHaveBeenCalled();
+  await fireEvent.keyDown(refusedEdit, { key: 'Escape' });
   expect(within(section).queryByText('notes')).toBeNull();
   await fireEvent.click(within(section).getByRole('button', { name: /Skill instructions/ }));
-  expect(within(section).getByRole('button', { name: 'Edit skills/notes' })).toBeEnabled();
+  await openActions('skills/notes');
+  expect(await screen.findByRole('menuitem', { name: 'Edit' })).not.toHaveAttribute(
+    'data-disabled',
+  );
+});
+
+it('opens skill instructions from the file menu', async () => {
+  api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'rev-0', exists: false });
+  render(Workspace);
+  await openSection('Skill instructions');
+  await openActions('skills/notes');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+  await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('skills/notes'));
+  await waitFor(() => editorBox());
 });
 
 it('edits CRON.md with the loaded revision and says when the jobs change', async () => {
@@ -679,7 +707,8 @@ it('edits CRON.md with the loaded revision and says when the jobs change', async
   api.saveWorkspaceConfigFile.mockResolvedValue({ revision: 'rev-1', applies: 'next_sync' });
   render(Workspace);
   await openSection('Configuration');
-  await fireEvent.click(await screen.findByRole('button', { name: 'Edit CRON.md' }));
+  await openActions('CRON.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
   await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md'));
   await waitFor(() => editorBox());
   await fireEvent.input(editorBox(), { target: { value: '# Jobs\n' } });
@@ -704,7 +733,8 @@ it('keeps the text on a conflict and on validator errors, and lists the errors',
   );
   render(Workspace);
   await openSection('Configuration');
-  await fireEvent.click(await screen.findByRole('button', { name: 'Edit HEARTBEAT.md' }));
+  await openActions('HEARTBEAT.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
   await waitFor(() => expect(editorBox().value).toBe('old\n'));
   await fireEvent.input(editorBox(), { target: { value: 'broken' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -951,4 +981,170 @@ it('puts My files immediately after Pinned and opens only My files by default', 
   }
   await fireEvent.click(within(sidebar).getByRole('button', { name: /My files/ }));
   expect(within(sidebar).queryByRole('link', { name: 'My files' })).toBeNull();
+});
+
+async function openPinActions(name: string) {
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  await fireEvent.keyDown(within(pinned).getByRole('button', { name: `Actions for ${name}` }), {
+    key: 'Enter',
+  });
+}
+
+it.each(['USER.md', 'skills/notes'])(
+  'edits pinned %s through its exact config reference',
+  async (name) => {
+    const file = configFiles.find((file) => file.name === name)!;
+    api.getWorkspacePins.mockResolvedValue({
+      pins: [
+        {
+          id: 10,
+          provider: 'workspace',
+          ref: file.view_path,
+          name: 'My instructions',
+          available: true,
+          is_dir: false,
+          mime_type: null,
+          web_url: null,
+        },
+      ],
+    });
+    api.getWorkspaceConfigFile.mockResolvedValue({
+      content: 'Original',
+      revision: 'r1',
+      exists: true,
+    });
+    api.saveWorkspaceConfigFile.mockResolvedValue({ revision: 'r2' });
+    render(Workspace);
+    await openSection('Pinned');
+    await openPinActions('My instructions');
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+    await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith(name));
+    await waitFor(() => expect(editorBox().value).toBe('Original'));
+    await fireEvent.input(editorBox(), { target: { value: 'Updated' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(api.saveWorkspaceConfigFile).toHaveBeenCalledWith(name, 'Updated', 'r1'),
+    );
+  },
+);
+
+it.each([
+  { ref: '/Users/alice/notes/USER.md', available: true, is_dir: false },
+  { ref: '/Users/bob/Helper/config/USER.md', available: true, is_dir: false },
+  { ref: '/Users/alice/Helper/config/USER.md', available: false, is_dir: false },
+  { ref: '/Users/alice/Helper/config/USER.md', available: true, is_dir: true },
+  { ref: '/Users/alice/Helper/config/TASKS.md', available: true, is_dir: false },
+])('does not offer editing for an ineligible pin: %j', async (pin) => {
+  api.getWorkspacePins.mockResolvedValue({
+    pins: [
+      {
+        id: 10,
+        provider: 'workspace',
+        name: 'USER.md',
+        mime_type: null,
+        web_url: null,
+        ...pin,
+      },
+    ],
+  });
+  render(Workspace);
+  await openSection('Pinned');
+  await openPinActions('USER.md');
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  expect(screen.getByRole('menuitem', { name: 'Remove pin' })).toBeTruthy();
+});
+
+it.each(['USER.md', 'skills/notes'])('reveals %s in its containing folder', async (name) => {
+  api.getWorkspaceConfigFiles.mockResolvedValue({
+    files: configFiles.map((file) => ({ ...file, exists: true })),
+  });
+  render(Workspace);
+  await openSection(name.startsWith('skills/') ? 'Skill instructions' : 'Configuration');
+  await openActions(name);
+  const reveal = await screen.findByRole('menuitem', { name: 'Reveal' });
+  const path = name.startsWith('skills/') ? 'Helper/config/skills' : 'Helper/config';
+  expect(reveal).toHaveAttribute('href', `/workspace?place=home&path=${encodeURIComponent(path)}`);
+  await fireEvent.click(reveal);
+  await waitFor(() => expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('home', path));
+});
+
+it('reveals a pinned file in the closest accessible place', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [home, { ...room, view_root: '/Channels/sample' }],
+    notes: [],
+  });
+  api.getWorkspacePins.mockResolvedValue({
+    pins: [
+      {
+        id: 10,
+        provider: 'workspace',
+        ref: '/Channels/sample/plans & notes/plan.md',
+        name: 'Plan',
+        available: true,
+        is_dir: false,
+      },
+    ],
+  });
+  render(Workspace);
+  await openSection('Pinned');
+  await openPinActions('Plan');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Reveal' }));
+  await waitFor(() =>
+    expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('room:sample', 'plans & notes'),
+  );
+});
+
+it('remembers expanded and collapsed sidebar groups after returning to Workspace', async () => {
+  const first = render(Workspace);
+  await openSection('My files');
+  await openSection('Configuration');
+  await openSection('Skill instructions');
+  await openSection('Pinned');
+  await openSection('Rooms');
+  first.unmount();
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await within(sidebar).findByText('USER.md');
+  expect(within(sidebar).getByText('notes')).toBeTruthy();
+  expect(within(sidebar).getByText('Pin a file or folder to keep it here.')).toBeTruthy();
+  expect(within(sidebar).getByRole('link', { name: 'Project room' })).toBeTruthy();
+  expect(within(sidebar).queryByRole('link', { name: 'My files' })).toBeNull();
+});
+
+it('reveals a Drive pin using its current parent and keeps lookup errors visible', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [home, { ...home, id: 'drive', kind: 'drive', label: 'Google Drive', view_root: null }],
+    notes: [],
+  });
+  api.getWorkspacePins.mockResolvedValue({
+    pins: [
+      {
+        id: 11,
+        provider: 'drive',
+        ref: 'file_123456',
+        name: 'Report',
+        available: true,
+        is_dir: false,
+      },
+    ],
+  });
+  api.getWorkspaceDriveParent.mockRejectedValueOnce(new Error('Containing folder is unavailable.'));
+  api.getWorkspaceDriveParent.mockResolvedValue({ folder: 'folder_12345' });
+  api.getWorkspaceDriveListing.mockResolvedValue({ items: [], next_page_token: null });
+  render(Workspace);
+  await openSection('Pinned');
+  await openPinActions('Report');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Reveal' }));
+  await screen.findByText('Containing folder is unavailable.');
+  await openPinActions('Report');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Reveal' }));
+  await waitFor(() => expect(api.getWorkspaceDriveListing).toHaveBeenCalledWith('folder_12345'));
+  expect(api.getWorkspaceDriveParent).toHaveBeenCalledWith('file_123456');
+});
+
+it('uses default section state for an invalid saved preference', async () => {
+  localStorage.setItem('workspace:section:home', JSON.stringify('closed'));
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await within(sidebar).findByRole('link', { name: 'My files' });
 });
