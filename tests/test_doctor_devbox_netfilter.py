@@ -3,9 +3,9 @@
 ISSUE-295 in one sentence: four correct DROP rules appended to a chain whose
 first entry is `-j RETURN` are never evaluated, and `iptables -S` renders them
 identically to four rules that work. Every other witness the repo has over this
-boundary reads *templates* — `test_ansible_devbox_iptables.py` proves the role
-asks for the right rules in the right position, which is necessary and says
-nothing about the chain on a running host. An operator, a host-firewall
+boundary reads *files* — they prove a script asks for the right rules in the
+right position, which is necessary and says nothing about the chain on a
+running host. An operator, a host-firewall
 integration (`ufw-docker` inserts at the front), or a Docker Desktop daemon can
 put a terminal rule ahead of ours at any time, and nothing would report it.
 
@@ -33,7 +33,7 @@ from istota.doctor import CHECKS, CHECK_SCOPES, DEPLOYMENT, FAIL, OK, SKIP, WARN
 
 CHECK_NAME = "security.devbox_netfilter"
 
-# The role's default devbox subnet (deploy/ansible/defaults/main.yml).
+# The default devbox subnet (`[devbox] network_subnet`).
 DEVBOX_SUBNET = "172.30.0.0/24"
 
 # A rule as dockerd and the role really render it, comment included — the
@@ -551,34 +551,7 @@ class TestItSkipsRatherThanGuessing:
 # Registry wiring
 
 
-class TestTheOracleIsTheRealScript:
-    """The completeness comparison parses the boot script, so the parser has to
-    read the script the role really renders — not the fake above.
-
-    This is the one seam a fabricated fixture cannot cover: `boot_script` writes
-    what *this file* thinks the format is, and would keep passing after the
-    template changed shape. Rendering the real template and feeding it to the
-    real parser is what makes the fixture honest.
-    """
-
-    @pytest.fixture(scope="class")
-    def rendered(self):
-        from tests.test_ansible_devbox_iptables import SCRIPT_TEMPLATE, _render
-
-        return _render(SCRIPT_TEMPLATE)
-
-    def test_the_parser_finds_every_destination_the_template_blocks(self, rendered):
-        from tests.test_ansible_devbox_iptables import dropped_destinations
-
-        assert doctor.parse_devbox_boot_script(rendered) == dropped_destinations(
-            rendered
-        )
-
-    def test_it_finds_something_at_all(self, rendered):
-        """Guards the vacuous pass: two empty sets compare equal, so the
-        assertion above holds just as well against a parser that never matches."""
-        assert len(doctor.parse_devbox_boot_script(rendered)) >= 4
-
+class TestTheBootScriptParser:
     def test_a_script_it_cannot_read_yields_nothing_rather_than_raising(self):
         """Doctor runs on the start-up path; a parser that raised on an
         unexpected file would take the daemon down over a diagnostic."""

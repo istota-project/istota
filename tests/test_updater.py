@@ -372,6 +372,18 @@ class TestCheckoutFlow:
         # The updater refuses while the daemon holds its lock (ISSUE-690).
         assert "--scheduler-stopped" in init_cmds[0]
 
+    def test_the_default_migrate_does_not_migrate_in_process(self):
+        """The reinstall leaves the pre-update schema module loaded, so the
+        migration has to be a subprocess. A refactor back to an in-process
+        `db.init_db` beside the subprocess call would leave the test above
+        green and run the stale migrations first."""
+        from tests.support.drift import source_of
+
+        source = source_of(updater._run_fresh_migrations)
+        body = source.replace(updater._run_fresh_migrations.__doc__ or "", "")
+        assert '"init"' in body, "the migration no longer shells out to `istota init`"
+        assert "init_db(" not in body
+
     def test_daemon_running_refuses_before_changing_checkout(self, tmp_path):
         cfg = _standalone_config(tmp_path)
         src = _make_source(tmp_path)

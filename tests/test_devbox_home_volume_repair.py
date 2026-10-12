@@ -17,13 +17,11 @@ printed *the wrong diagnosis*: `could not put the top directory back; the next
 start will read it as repaired and not retry`, when in truth the `chown -R`
 never ran, the top directory was never touched, and the next start retries.
 
-Two halves are held here, because the fix has two:
-
-  * the host now repairs the volume from the Ansible role, which is the only
-    side with a route to root;
-  * the in-container path asks whether root is reachable *before* attempting
-    anything, so the two failures — a `chown -R` that died half-way and one
-    that could never start — keep the different words they need.
+The fix had two halves. The host side repaired the volume from the Ansible
+role, the only side with a route to root, and went with that role. The half
+held here is the in-container path: it asks whether root is reachable *before*
+attempting anything, so the two failures — a `chown -R` that died half-way and
+one that could never start — keep the different words they need.
 
 The shell half is executed rather than pattern-matched. `id`, `stat` and `sudo`
 are stubbed so the control flow is deterministic and the test runs the same on
@@ -37,117 +35,9 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
-import yaml
-
 REPO = Path(__file__).resolve().parent.parent
-TASKS_FILE = REPO / "deploy" / "ansible" / "tasks" / "main.yml"
 SUPERVISOR = REPO / "docker" / "devbox" / "scripts" / "istota-exec-run"
 
-READ_TASK = "Read each devbox home volume's current ownership"
-REPAIR_TASK = "Repair a devbox home volume whose ownership predates the daemon's uid"
-REPORT_TASK = "Report a devbox home volume whose ownership could not be read"
-
-
-# ---------------------------------------------------------------------------
-# The Ansible half
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def tasks() -> list[dict]:
-    return yaml.safe_load(TASKS_FILE.read_text())
-
-
-def _named(tasks: list[dict], name: str) -> dict:
-    for task in tasks:
-        if task.get("name") == name:
-            return task
-    raise AssertionError(f"no task named {name!r} in {TASKS_FILE}")
-
-
-class TestTheHostRepairsTheVolume:
-    def test_the_role_reads_each_volumes_ownership(self, tasks):
-        assert _named(tasks, READ_TASK)
-
-    def test_it_asks_before_mounting_so_a_fresh_install_gets_no_empty_volume(self, tasks):
-        """`docker run -v` creates a missing volume.
-
-        Creating one here would hand the first real container an empty volume
-        that Docker has already stopped treating as new — losing the seed that
-        gives a fresh install the right ownership for free.
-        """
-        shell = _named(tasks, READ_TASK)["ansible.builtin.shell"]
-        assert "docker volume inspect" in shell
-        assert "echo absent" in shell
-
-    def test_the_probe_cannot_write(self, tasks):
-        """A check that can modify what it checks is not a check."""
-        shell = _named(tasks, READ_TASK)["ansible.builtin.shell"]
-        assert ":/mnt:ro" in shell
-
-    def test_the_repair_targets_the_daemons_own_uid(self, tasks):
-        """Not a literal. The whole defect is a volume pinned to a stale uid,
-        and a hardcoded 1000 here would reintroduce it from the other side."""
-        argv = _named(tasks, REPAIR_TASK)["ansible.builtin.command"]["argv"]
-        assert "chown" in argv
-        assert "-R" in argv
-        assert "{{ istota_devbox_uid }}:{{ istota_devbox_gid }}" in argv
-
-    def test_the_repair_only_runs_on_a_volume_that_disagrees(self, tasks):
-        """An unconditional recursive chown on every deploy would walk a
-        multi-gigabyte volume for nothing, every time."""
-        conditions = " ".join(str(c) for c in _named(tasks, REPAIR_TASK)["when"])
-        assert "istota_devbox_uid ~ ':' ~ istota_devbox_gid" in conditions
-        assert "absent" in conditions
-
-    def test_the_repair_runs_as_root(self, tasks):
-        """The container's own `dev` is precisely the identity that cannot do
-        this; a repair inheriting the image's default user repeats the bug."""
-        argv = _named(tasks, REPAIR_TASK)["ansible.builtin.command"]["argv"]
-        assert "--user" in argv
-        assert argv[argv.index("--user") + 1] == "0:0"
-
-    def test_it_names_the_volume_the_compose_template_declares(self, tasks):
-        """Two files, one name, and nothing held them together.
-
-        The repair looks the volume up by name. If the template's `name:` ever
-        changes, `docker volume inspect` fails, the read echoes `absent`, the
-        repair is skipped and the play reports `ok` — reinstating the exact
-        silently-does-nothing property this block was written to remove.
-        """
-        template = (
-            REPO / "deploy" / "ansible" / "templates"
-            / "docker-compose.devbox.yml.j2"
-        ).read_text()
-        declared = "name: {{ istota_namespace }}-devbox-home-{{ devbox_user }}"
-        assert declared in template, "the compose template's volume name moved"
-
-        read = _named(tasks, READ_TASK)["ansible.builtin.shell"]
-        argv = _named(tasks, REPAIR_TASK)["ansible.builtin.command"]["argv"]
-        # Same name, with the role's loop variable in place of the template's.
-        assert "{{ istota_namespace }}-devbox-home-{{ item }}" in read
-        assert any(
-            "{{ istota_namespace }}-devbox-home-{{ item.item }}:/mnt" in str(a)
-            for a in argv
-        )
-
-    def test_an_unreadable_probe_is_reported_rather_than_skipped_quietly(self, tasks):
-        """Every failure mode of the probe used to land as empty stdout and
-        skip. Failing closed is right; reporting `ok` while doing nothing is
-        the thing this block exists to stop doing."""
-        read = _named(tasks, READ_TASK)["ansible.builtin.shell"]
-        assert "unreadable" in read
-
-        conditions = " ".join(str(c) for c in _named(tasks, REPAIR_TASK)["when"])
-        assert "unreadable" in conditions
-
-        report = _named(tasks, REPORT_TASK)
-        assert "unreadable" in " ".join(str(c) for c in report["when"])
-
-
-# ---------------------------------------------------------------------------
-# The in-container half, executed
-# ---------------------------------------------------------------------------
 
 def _run_repair(tmp_path: Path, *, sudo_ok: bool) -> str:
     """Call `repair_home_ownership` against a stubbed environment, return stderr.

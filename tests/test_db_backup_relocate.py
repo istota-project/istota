@@ -6,7 +6,6 @@ import fcntl
 from pathlib import Path
 
 import pytest
-import yaml
 
 from istota.maintenance import db_backup_relocate
 from istota.config import Config, NextcloudConfig, SchedulerConfig
@@ -232,40 +231,3 @@ class TestCommand:
 
         assert db_backup_relocate.main([]) == db_backup_relocate.EXIT_OK
         assert (_destination(config) / "2026-09-01").is_dir()
-
-
-class TestAnsibleIntegration:
-    def test_role_stops_scheduler_around_the_migrator(self):
-        repo = Path(__file__).resolve().parent.parent
-        tasks = yaml.safe_load(
-            (repo / "deploy" / "ansible" / "tasks" / "main.yml").read_text()
-        )
-        relocation = next(
-            task
-            for task in tasks
-            if task.get("name") == "Relocate legacy database snapshots"
-        )
-        rendered = str(relocation)
-        block = str(relocation["block"])
-        assert "db_backup_relocate" in block
-        assert "state': 'stopped" in block
-        assert "_legacy_db_snapshot_dirs" in rendered
-        # The restart is in `always`, so a failed migrator still brings the
-        # scheduler back, and it takes the update flock every role path that
-        # reopens a room writer shares (rooms Stage 17).
-        restarts = [
-            " ".join(str(task.get("command", "")).split())
-            for task in relocation["always"]
-        ]
-        assert any(
-            "flock" in cmd and "-update.lock" in cmd
-            and cmd.endswith("systemctl start {{ istota_namespace }}-scheduler")
-            for cmd in restarts
-        ), restarts
-
-        detection = next(
-            task
-            for task in tasks
-            if task.get("name") == "Detect legacy database snapshot directories"
-        )
-        assert detection.get("failed_when") is None

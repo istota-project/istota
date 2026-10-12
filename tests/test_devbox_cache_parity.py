@@ -2,11 +2,12 @@
 
 The host writes uv's and npm's caches under `{repos_dir}/{user_id}/.package-caches`
 (`executor.SANDBOX_CACHE_UV` / `SANDBOX_CACHE_NPM` name the subdirectories), the
-sweeper reclaims by walking those same two names, and the devbox compose template
-points the *container's* tools at them. Nothing connected the three, and two of
+sweeper reclaims by walking those same two names, and the devbox compose render
+(`istota devbox compose-file`) points the *container's* tools at them. Nothing connected the three, and two of
 them were wrong.
 
-Measured on a live deployment: the template set `UV_CACHE_DIR` to the cache root
+Measured on a live deployment: the Ansible role's devbox template, which the
+render replaced, set `UV_CACHE_DIR` to the cache root
 rather than to `{root}/uv`, so the container wrote `archive-v0/` as a sibling of
 the host's `uv/` — 401 MB against 404 MB of the same wheels. A `uv sync` in the
 container re-downloaded what was already on disk one directory over, and the
@@ -19,60 +20,36 @@ inside the container's home volume and nothing on the host could reach it.
 
 Neither is the kind of defect a test of one side finds: each file was
 self-consistent. What was missing is the assertion that they agree, which is what
-this file is. It reads the rendered template rather than the Jinja source, so a
-change to how the path is built is still caught as long as the result differs.
+this file is. It reads the rendered file rather than the renderer's source, so
+a change to how the path is built is still caught as long as the result differs.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import yaml
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from istota.config import Config, ContainerConfig, DeveloperConfig, DevboxConfig
+from istota.devbox import compose_file
 from istota.executor import SANDBOX_CACHE_NPM, SANDBOX_CACHE_UV
 from istota.maintenance.sandbox_cache_sweeper import CACHE_NPM, CACHE_UV, CACHE_ROOT_NAME
 
-REPO = Path(__file__).resolve().parent.parent
-TEMPLATES = REPO / "deploy" / "ansible" / "templates"
-
-REPOS_DIR = "/srv/repos"
+REPOS_DIR = "/data/repos"
 USER = "alice"
 
 
 @pytest.fixture(scope="module")
 def container_env() -> dict:
-    """The `environment:` block the template renders for a devbox user."""
-    env = Environment(
-        loader=FileSystemLoader(str(TEMPLATES)),
-        undefined=StrictUndefined,
-        keep_trailing_newline=True,
+    """The `environment:` block the compose render writes for a devbox user."""
+    config = Config()
+    config.developer = DeveloperConfig(
+        enabled=True,
+        repos_dir=REPOS_DIR,
+        devbox_proxy_socket_dir="/data/devbox/cred",
+        container=ContainerConfig(exec_socket_dir="/data/devbox/exec"),
     )
-    rendered = env.get_template("docker-compose.devbox.yml.j2").render(
-        istota_namespace="istota",
-        istota_devbox_users=[USER],
-        istota_devbox_image="istota-devbox:latest",
-        istota_devbox_container_prefix="devbox-",
-        istota_devbox_uid="999",
-        istota_devbox_gid="989",
-        istota_devbox_proxy_enabled=True,
-        istota_devbox_proxy_group_gid="989",
-        istota_devbox_proxy_socket_dir="/var/run/istota",
-        istota_devbox_mem_limit="4g",
-        istota_devbox_cpus=2,
-        istota_devbox_pids_limit=512,
-        istota_devbox_log_max_size="10m",
-        istota_devbox_log_max_file=3,
-        istota_devbox_network_name="istota-devbox-net",
-        istota_devbox_network_subnet="172.30.0.0/24",
-        istota_repo_dir="/srv/app/istota/istota",
-        istota_home="/srv/app/istota",
-        istota_developer_enabled=True,
-        istota_developer_repos_dir=REPOS_DIR,
-        istota_developer_container_exec_socket_dir="/run/istota-exec",
-        istota_developer_container_idle_timeout_seconds=3600,
-    )
+    config.devbox = DevboxConfig(enabled=True, users=[USER])
+    rendered = compose_file.render_devbox_compose(config)
     service = yaml.safe_load(rendered)["services"][f"devbox-{USER}"]
     return service["environment"]
 

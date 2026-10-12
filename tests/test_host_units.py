@@ -30,7 +30,6 @@ EGRESS_UNIT = HOST / "istota-devbox-egress.service"
 WATCHDOG_SH = HOST / "istota-browser-watchdog.sh"
 WATCHDOG_UNIT = HOST / "istota-browser-watchdog.service"
 WATCHDOG_TIMER = HOST / "istota-browser-watchdog.timer"
-ROLE_EGRESS = REPO / "deploy" / "ansible" / "templates" / "istota-devbox-iptables.sh.j2"
 
 WANTED = {
     "169.254.0.0/16", "168.63.129.16/32", "10.0.0.0/8", "172.16.0.0/12",
@@ -96,10 +95,6 @@ class TestTheEgressRules:
             assert "-A" not in call, call
             if "-I" in call:
                 assert call[call.index("-I") + 1:call.index("-I") + 3] == ["DOCKER-USER", "1"]
-
-    def test_it_asks_for_what_the_role_asks_for(self):
-        role = set(re.findall(r'ensure_drop "([^"]+)"', ROLE_EGRESS.read_text()))
-        assert role == WANTED
 
     def test_the_subnet_default_is_the_renderers(self):
         from istota.config import Config, ContainerConfig, DeveloperConfig
@@ -273,15 +268,8 @@ class TestProvision:
 
     TEXT = PROVISION.read_text() if PROVISION.exists() else ""
 
-    def test_it_ports_the_roles_host_values(self):
-        defaults = (REPO / "deploy" / "ansible" / "defaults" / "main.yml").read_text()
-        for key, value in {
-            "istota_journald_max_use": "500M", "istota_journald_max_file_size": "50M",
-            "istota_auditd_num_logs": "5", "istota_auditd_max_log_file": "6",
-            "istota_zram_size": "ram / 2", "istota_zram_algorithm": "zstd",
-            "istota_zram_priority": "100",
-        }.items():
-            assert re.search(rf"^{key}: \"?{re.escape(value)}\"?", defaults, re.M), key
+    def test_it_carries_the_host_bounds(self):
+        """The values the bare-metal role set, ported when the role went."""
         for line in ("SystemMaxUse=500M", "SystemMaxFileSize=50M", "num_logs = 5",
                      "max_log_file = 6", "max_log_file_action = ROTATE",
                      "zram-size = ram / 2", "compression-algorithm = zstd",

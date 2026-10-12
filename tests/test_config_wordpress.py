@@ -13,16 +13,10 @@ from __future__ import annotations
 import logging
 import re
 import textwrap
-from pathlib import Path
 
-import jinja2
 import pytest
-import yaml
 
 from istota.config import WORDPRESS_PRIVATE_HOST_PATTERN, load_config
-
-REPO = Path(__file__).resolve().parent.parent
-TASKS_FILE = REPO / "deploy" / "ansible" / "tasks" / "main.yml"
 
 
 def _load(tmp_path, body: str):
@@ -70,49 +64,7 @@ class TestTheLoader:
         assert entry in config.wordpress.private_hosts
 
 
-class TestTheRoleRefusesTheSameEntries:
-    """The role asserts with the loader's own pattern, so a deploy fails before
-    it writes a config the daemon would only warn about."""
-
-    @staticmethod
-    def _assert_task() -> dict:
-        tasks = yaml.safe_load(TASKS_FILE.read_text())
-        named = [
-            t for t in tasks
-            if isinstance(t, dict) and "wordpress" in str(t.get("name", "")).lower()
-        ]
-        assert len(named) == 1, named
-        return named[0]
-
-    def test_the_assert_carries_the_loader_pattern(self):
-        task = self._assert_task()
-        assert task["vars"]["wordpress_private_host_pattern"] == WORDPRESS_PRIVATE_HOST_PATTERN
-        assert "wordpress_private_host_pattern" in " ".join(task["assert"]["that"])
-
-    def _assert_passes(self, hosts) -> bool:
-        """Evaluate the task's `that` list the way Ansible would."""
-        task = self._assert_task()
-        env = jinja2.Environment()
-        env.tests["match"] = lambda value, pattern: bool(re.match(pattern, value))
-        variables = {
-            **task["vars"],
-            "istota_wordpress_private_hosts": hosts,
-            "istota_wordpress_max_upload_mb": 25,
-        }
-        return all(env.compile_expression(expr)(**variables) for expr in task["assert"]["that"])
-
-    def test_the_assert_passes_the_default_and_good_entries(self):
-        assert self._assert_passes([])
-        assert self._assert_passes(GOOD + [" padded.example.com "])
-
-    @pytest.mark.parametrize("entry", BAD)
-    def test_the_assert_refuses_a_bad_entry(self, entry):
-        assert not self._assert_passes(["ok.example.com", entry])
-
-    @pytest.mark.parametrize("value", ["localhost", None])
-    def test_the_assert_refuses_a_value_that_is_not_a_list(self, value):
-        assert not self._assert_passes(value)
-
+class TestThePattern:
     @pytest.mark.parametrize("entry", GOOD)
     def test_the_pattern_accepts(self, entry):
         assert re.match(WORDPRESS_PRIVATE_HOST_PATTERN, entry)
