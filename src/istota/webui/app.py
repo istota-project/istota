@@ -1091,10 +1091,14 @@ async def login(request: Request):
             return Response("Auth not configured", status_code=500, headers=_AUTH_PAGE_HEADERS)
         return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
+    # First-run setup ends here with `?email=`, so the new admin types only the
+    # password. Escaped on the way into the field like every other value.
+    email = request.query_params.get("email", "")
     return HTMLResponse(_render_login_page(
         _config.bot_name, mark, methods=_config.web.auth,
         login_csrf=_csrf_token(request, "login"),
         code_csrf=_csrf_token(request, "sign-in-code-request"),
+        email_prefill=email if len(email) <= 320 else "",
     ), headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1911,6 +1915,17 @@ def _resolve_tz(client_tz: str, fallback: str) -> str:
         return client_tz
     except (ZoneInfoNotFoundError, ValueError):
         return fallback
+
+
+@api_router.get("/setup/state")
+async def setup_state():
+    """The first-run setup page's question, answered by an app that is set up.
+
+    The page is in this bundle too; asked here, it says so and offers Sign in.
+    No session is needed, and no other setup route exists in this app: the
+    setup server (`webui/setup_app.py`) is a separate process.
+    """
+    return {"phase": "configured"}
 
 
 @api_router.get("/me")
