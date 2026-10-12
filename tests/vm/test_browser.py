@@ -1,7 +1,7 @@
 """The browser profile on an arm64 VM, and parity row 17's published-port half.
 
-The browser image installs Google Chrome's amd64 package, so on an arm64 VM it
-runs under Rosetta (`host/lima/istota.yaml` turns it on for the `vz` backend).
+The browser image installs Google Chrome's package for the build architecture,
+so on an arm64 VM it is an arm64 image and runs without Rosetta.
 This builds it there, starts it from the shipped compose file and asks the
 daemon to reach it.
 
@@ -78,17 +78,13 @@ def stack(local_stack):
     yield vm
 
 
-class TestTheBrowserRunsUnderRosetta:
-    def test_the_vm_is_arm64_with_rosetta_registered(self, stack):
+class TestTheBrowserRunsNatively:
+    def test_the_browser_is_an_arm64_image_running_as_aarch64(self, stack):
         assert stack.out("uname -m") == "aarch64"
-        handler = stack.read("/proc/sys/fs/binfmt_misc/rosetta")
-        assert handler.startswith("enabled"), handler
-
-    def test_the_browser_is_an_amd64_image_running_as_x86_64(self, stack):
         cid = lima.container(stack, "browser")
         image = stack.out(f"docker inspect -f '{{{{.Image}}}}' {cid}")
-        assert stack.out(f"docker image inspect -f '{{{{.Architecture}}}}' {image}") == "amd64"
-        assert stack.out(f"docker exec {cid} uname -m") == "x86_64"
+        assert stack.out(f"docker image inspect -f '{{{{.Architecture}}}}' {image}") == "arm64"
+        assert stack.out(f"docker exec {cid} uname -m") == "aarch64"
 
     def test_the_daemon_drives_the_browser(self, stack):
         istota = lima.container(stack, "daemon")

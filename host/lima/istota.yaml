@@ -11,7 +11,8 @@
 # from it as root on first boot; /srv/app/istota/src is a clone of it, and
 # `istota-stack update` fetches release tags from that origin. Ingress is
 # `local`: nginx publishes on the VM's loopback and Lima forwards that port to
-# the Mac's loopback. The browser profile's amd64 image runs under Rosetta.
+# the Mac's loopback. The browser image builds natively for arm64; Rosetta is
+# there for an amd64 image forced with BROWSER_PLATFORM=linux/amd64.
 
 minimumLimaVersion: 2.0.0
 

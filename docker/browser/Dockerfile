@@ -22,7 +22,19 @@ ENV TZ=America/New_York
 # because trixie's fonts-liberation moved to Liberation 2.x, which dropped the
 # Narrow faces bookworm's 1.x shipped. Both are here to keep the font list level
 # with the bookworm image; check `fc-list : family` against it before trimming.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# Google ships Chrome's Linux .deb for amd64 and arm64, so the image builds
+# natively on either and an arm64 host needs no emulation. The arch comes from
+# dpkg rather than TARGETARCH, which the legacy builder leaves empty. An arm64
+# Chrome still says `Linux x86_64` in navigator.platform and the UA string; only
+# the high-entropy architecture hint reads `arm`. See BOT_DETECTION.md.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64|arm64) ;; \
+        *) echo "Google Chrome has no Linux package for ${arch}" >&2; exit 1 ;; \
+    esac; \
+    apt-get update && apt-get install -y --no-install-recommends \
     tini \
     util-linux \
     x11vnc \
@@ -49,9 +61,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1 \
     libfreetype6 \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
-    && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get install -y ./google-chrome-stable_current_amd64.deb \
-    && rm google-chrome-stable_current_amd64.deb \
+    && wget -q "https://dl.google.com/linux/direct/google-chrome-stable_current_${arch}.deb" \
+    && apt-get install -y "./google-chrome-stable_current_${arch}.deb" \
+    && rm "google-chrome-stable_current_${arch}.deb" \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user so Chrome doesn't show --no-sandbox infobar

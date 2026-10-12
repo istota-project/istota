@@ -298,7 +298,8 @@ services:
       dockerfile: Dockerfile
     image: istota-browser:${ISTOTA_TAG:-local}
     container_name: istota-browser
-    platform: ${BROWSER_PLATFORM:-linux/amd64}
+    # Unset builds for the host's architecture; Chrome ships amd64 and arm64.
+    platform: ${BROWSER_PLATFORM:-}
     # PID 1 in this image is `su` (entrypoint.sh ends with `exec su … python`),
     # which installs no SIGCHLD handler and reaps no orphan. Chrome's renderer,
     # GPU, zygote and crashpad processes are children of the browser process, so

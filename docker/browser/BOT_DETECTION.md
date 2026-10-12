@@ -81,7 +81,7 @@ Pixelscan inspects property descriptors via `Object.getOwnPropertyDescriptor` to
 - **webdriver** — Patchright (avoids `Runtime.enable`) + `--disable-blink-features=AutomationControlled`
 - **plugins/mimeTypes** — Real Google Chrome in headed mode has 5 PDF plugins built-in
 - **languages** — `--lang=en-US,en` flag + container `LANG=en_US.UTF-8` (not Patchright `locale` which uses CDP emulation)
-- **platform** — Native `Linux x86_64` on Linux host
+- **platform** — Native `Linux x86_64`, which Chrome reports on arm64 too. The image builds for the host's architecture, and on arm64 the only difference is the high-entropy `architecture` client hint, which reads `arm`
 - **hardwareConcurrency** — Native host CPU count
 - **deviceMemory** — Native host RAM bucket (>=8GB hosts report 8)
 
