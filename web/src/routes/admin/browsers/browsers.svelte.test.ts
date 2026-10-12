@@ -43,6 +43,18 @@ it.each([
   expect(await screen.findByText(message)).toBeTruthy();
 });
 
+it('says when the scheduler read the pool', async () => {
+  const asOf = '2026-10-11T12:00:00Z';
+  api.getAdminBrowsers.mockResolvedValue({
+    status: 'ok',
+    console_configured: true,
+    instances: [],
+    as_of: asOf,
+  });
+  render(Page);
+  expect(await screen.findByText(`As of ${new Date(asOf).toLocaleTimeString()}`)).toBeTruthy();
+});
+
 it('explains missing console configuration without a viewer link', async () => {
   api.getAdminBrowsers.mockResolvedValue({
     status: 'ok',

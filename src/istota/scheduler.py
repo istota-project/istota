@@ -95,7 +95,7 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from istota import confirmations, db
-from istota.webui import avatars
+from istota.webui import admin_browsers, avatars
 from istota.rooms import speech_gate
 from .brain import (
     make_brain,
@@ -6169,6 +6169,16 @@ def _check_doctor_locked(
     return results
 
 
+def check_browser_instances(config: Config) -> None:
+    """Record the browser pool for the admin Browsers page (ISSUE-699).
+
+    The daemon is the only container on the browser's network, so it takes the
+    snapshot the web process cannot. On a background thread, hence its own loop.
+    """
+    result = asyncio.run(admin_browsers.snapshot(config.browser))
+    admin_browsers.record_snapshot(config, result)
+
+
 def check_doctor_request(config: Config, state: dict) -> None:
     """Answer a run the Health pane asked for, on the tick after it asked.
 
@@ -9590,6 +9600,9 @@ def build_interval_gates(
         # is almost always empty is not worth it. It hands off when there is one.
         poll_doctor_request(config, doctor_seen, keeper)
 
+    def _browser_instances(now: float) -> None:
+        check_browser_instances(config)
+
     def _worktree_reap(now: float) -> None:
         check_worktree_reap(config)
 
@@ -9835,6 +9848,16 @@ def build_interval_gates(
             run=_doctor_request,
             fixed_interval=1,
             on_error="Error polling doctor requests: %s",
+        ),
+        # The admin Browsers page's data. One read-only GET to the browser API,
+        # which never acquires a browser or extends its idle time.
+        IntervalGate(
+            name="browser-instances",
+            run=_browser_instances,
+            fixed_interval=admin_browsers.RECORD_INTERVAL_SECONDS,
+            enabled=lambda c: c.browser.enabled,
+            background=True,
+            overlap_expected=True,
         ),
         # ISSUE-288. Seeded to 0 for the reason the sweeps below share: the
         # accumulation it clears is the state a restart usually arrives into,
