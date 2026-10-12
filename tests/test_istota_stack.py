@@ -1363,6 +1363,8 @@ class TestSetupWebMints:
         result = web.run("setup", "--web", **_finished(STUB_IP4="", STUB_IP6="2001:db8::5"))
         assert result.returncode == 0, result.stdout + result.stderr
         assert "https://[2001:db8::5]/istota/setup#code=" in result.stdout
+        # An IPv4 publish would not answer the address it printed.
+        assert " -p [::]:443:8443 " in _setup_call(web)
 
     def test_it_publishes_443_to_the_server_with_the_config_open(self, web):
         assert web.run("setup", "--web", **_finished()).returncode == 0
@@ -1417,7 +1419,7 @@ class TestSetupWebUnfinished:
         assert not (web.stack / ".setup").exists()
         assert list(web.stack.glob(".setup.*")) == []
         assert not any(call.startswith("systemctl") for call in web.docker_calls())
-        assert "setup did not finish; nothing was changed on the host" in result.stdout
+        assert "setup did not finish; nothing was installed on the host" in result.stdout
         assert f"{web.stack}/config/config.toml" in result.stdout
         assert "ISTOTA_SETUP_PUBLISH" in result.stdout
 
@@ -1432,6 +1434,20 @@ class TestSetupWebUnfinished:
         assert result.returncode == 3
         assert "timed out" in result.stdout
         assert not (web.stack / ".setup").exists()
+
+    def test_a_lockout_says_to_run_again_and_keeps_its_code(self, web):
+        result = web.run("setup", "--web", STUB_SETUP_RC="4")
+        assert result.returncode == 4
+        assert "too many wrong setup codes" in result.stdout
+        assert "istota-stack setup --web" in result.stdout
+        assert not (web.stack / ".setup").exists()
+
+    def test_a_secret_written_before_the_failure_is_named(self, web):
+        secret = web.stack / "secrets" / "istota_brain_native_api_key"
+        result = web.run("setup", "--web", STUB_SETUP_RC="1",
+                         STUB_DURING=f'sleep 1; echo key > "{secret}"')
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert f"{secret} before it stopped" in result.stdout
 
 
 @needs_openssl

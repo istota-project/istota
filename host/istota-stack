@@ -803,6 +803,9 @@ print("-".join(chars[i:i + 5] for i in range(0, 20, 5)))
             echo
             echo "  ${fingerprint}"
             echo
+            echo "The address above is this machine's own. If your provider gives it a"
+            echo "different public address, open that one instead; the code still works."
+            echo
         fi
         echo "Setup code (if you open the page some other way): ${code}"
     } > "${SETUP_DIR}/instructions"
@@ -814,14 +817,17 @@ print("-".join(chars[i:i + 5] for i in range(0, 20, 5)))
 setup_did_not_finish() {
     local rc="$1" path
     if [ "$rc" -eq 3 ]; then
-        log "setup timed out after an hour without a request; nothing was changed on the host. Run \`istota-stack setup --web\` again."
+        log "setup timed out after an hour without a request; nothing was installed on the host. Run \`istota-stack setup --web\` again."
+    elif [ "$rc" -eq 4 ]; then
+        log "setup stopped after too many wrong setup codes; nothing was installed on the host. Run \`istota-stack setup --web\` again for a new code."
     else
-        log "setup did not finish; nothing was changed on the host."
+        log "setup did not finish; nothing was installed on the host."
         log "If the error above says the port is already in use, run it again with ISTOTA_SETUP_PUBLISH set to a free one (0.0.0.0:8443, for example)."
     fi
+    # A Finish that failed partway may have written config and credentials.
     while IFS= read -r path; do
         log "the setup server wrote ${path} before it stopped: remove it before setting up again."
-    done < <(find -P "$CONFIG_DIR" -maxdepth 1 ! -type d -newer "${SETUP_DIR}/code" 2>/dev/null)
+    done < <(find -P "$CONFIG_DIR" "$SECRETS_DIR" -maxdepth 1 ! -type d -newer "${SETUP_DIR}/code" 2>/dev/null)
     if [ "$rc" -eq 0 ]; then rc=1; fi
     exit "$rc"
 }
@@ -867,7 +873,12 @@ cmd_setup_web() {
         inner=8080
         local_arg=(--local)
     else
-        publish="${ISTOTA_SETUP_PUBLISH:-0.0.0.0:443}"
+        # An IPv4 publish does not listen on IPv6, and the printed address is
+        # IPv6 on a machine with no IPv4 route.
+        case "$(primary_address)" in
+            *:*) publish="${ISTOTA_SETUP_PUBLISH:-[::]:443}" ;;
+            *) publish="${ISTOTA_SETUP_PUBLISH:-0.0.0.0:443}" ;;
+        esac
         inner=8443
     fi
     [[ "$publish" =~ ^(\[[0-9A-Fa-f:]+\]|[0-9.]+):[0-9]+$ ]] \

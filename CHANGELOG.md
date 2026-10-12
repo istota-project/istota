@@ -117,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Setup now writes the Nextcloud mount's configuration.** Choosing Nextcloud in either setup writes the rclone config and the remote's name for the file mount, so the stack starts without a hand-written file. The browser container is now offered as on by default; a scripted `--yes` setup still leaves it off unless you ask for it.
+- **Setup now writes the Nextcloud mount's configuration.** Choosing Nextcloud in either setup writes the rclone config and the remote's name for the file mount, so the stack starts without a hand-written file; a `setup --force` re-run replaces an `rclone.conf` written by hand with one for the remote named `nextcloud`. The browser container is now offered as on by default; a scripted `--yes` setup still leaves it off unless you ask for it.
 
 - **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
 
