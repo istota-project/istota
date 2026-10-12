@@ -691,6 +691,8 @@ it('reports a failed configuration list without hiding the places', async () => 
   render(Workspace);
   await screen.findByText('Could not load your configuration files.');
   expect(screen.getByRole('link', { name: 'Project room' })).toBeTruthy();
+});
+
 it('sorts folders first, toggles date order and remembers it', async () => {
   api.getWorkspaceListing.mockResolvedValue({
     place: 'home',
