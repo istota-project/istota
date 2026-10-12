@@ -3,8 +3,12 @@
 Walks the `Config` dataclass tree and emits ordered sections of typed fields.
 The shape is deliberately field-level rather than a TOML dump — each field
 carries its dotted `key`, a `type`, and a `secret` flag — so the same payload
-can back an editable form later without the frontend changing shape. Nothing
-here writes; `editable` is a constant `False` and the endpoint is a GET.
+backs the config editor's form. Each field also carries what the form needs
+(its `path`, default, docs, vocabulary, credential routing, env override,
+editor kind and read-only reason; `config_editor.schema` decides most of
+them), and the top level carries the file's digest, the applier, who manages
+each resource and the problems a check of the current file reports. Nothing
+here writes, and `editable` stays `False` until the applier exists.
 
 **Redaction is the whole safety story of this module.** Config holds live
 credentials (Nextcloud app password, IMAP/SMTP passwords, GitLab/GitHub tokens,
@@ -264,43 +268,279 @@ def _field_entry(prefix: str, name: str, value: Any) -> dict:
     }
 
 
-def _walk(obj: Any, prefix: str, sections: list[dict], *, label: str) -> None:
+_MISSING = object()
+
+_NO_APPLIER = {
+    "kind": "none",
+    "available": False,
+    "reason": (
+        "This install has no config applier; changes are made with "
+        "`istota-stack apply` on the host."
+    ),
+}
+
+#: Display names for the credential files no config key reads.
+_SECRET_LABELS = {
+    "anthropic_api_key": "Anthropic API key",
+    "claude_code_oauth_token": "Claude Code OAuth token",
+}
+
+
+def _lookup(document: Any, path: tuple[str, ...]) -> tuple[bool, Any]:
+    node = document
+    for segment in path:
+        if not isinstance(node, dict) or segment not in node:
+            return False, None
+        node = node[segment]
+    return True, node
+
+
+def _type_hints(owner: type) -> dict:
+    import typing
+
+    try:
+        return typing.get_type_hints(owner)
+    except Exception:  # noqa: BLE001 - a hint that does not resolve falls back to the value
+        return {}
+
+
+def _managed_state(managed: dict | None) -> dict[str, dict]:
+    """Each resource's owner. An entry that is not a table fails closed."""
+    from istota.apply import MANAGED_RESOURCES
+
+    state: dict[str, dict] = {}
+    for resource in MANAGED_RESOURCES:
+        entry = (managed or {}).get(resource)
+        if entry is None:
+            state[resource] = {"managed": False, "source": None, "at": None}
+        elif isinstance(entry, dict):
+            source, at = entry.get("source"), entry.get("at")
+            state[resource] = {
+                "managed": entry.get("managed") is not False,
+                "source": source if isinstance(source, str) else None,
+                "at": at if isinstance(at, str) else None,
+            }
+        else:
+            state[resource] = {"managed": True, "source": "unreadable", "at": None}
+    return state
+
+
+def _managed_reason(entry: dict) -> str | None:
+    if not entry["managed"]:
+        return None
+    if entry["source"] == "unreadable":
+        return (
+            "config/managed.json cannot be read, so every resource reads as managed. "
+            "Re-run `istota-stack apply` on the host with the intended [meta] to repair it."
+        )
+    return (
+        f"Managed by {entry['source'] or 'a plan'}, whose next run would revert a change "
+        "made here. Change it there, or hand it to the web by removing it from that source."
+    )
+
+
+def _snippet(document: dict | None, path: tuple[str, ...]) -> str:
+    """The value at `path` as TOML whose one top-level key is the field's name."""
+    from istota.lib import toml_write
+
+    found, value = _lookup(document, path)
+    if not found:
+        return ""
+    try:
+        return toml_write.dumps({path[-1]: value})
+    except toml_write.TomlWriteError:
+        return ""
+
+
+def _editor_keys(
+    ctx: dict, prefix: str, name: str, declared: Any, value: Any, default: Any,
+) -> dict:
+    """What the editor's form needs for one field, beside the read-only entry."""
+    schema = ctx["schema"]
+    key = f"{prefix}.{name}" if prefix else name
+    path = tuple(key.split("."))
+    credential = schema.credential_for(path)
+    env_override = schema.env_override_for(path)
+    choices = schema.choices_for(path)
+    multi_choices = schema.multi_choices_for(path)
+
+    reason = schema.READ_ONLY.get(path)
+    if reason is None and env_override:
+        reason = (
+            f"Set by the environment variable {env_override}, which wins over "
+            "config.toml, so an edit here would do nothing. Change it on the host."
+        )
+    if reason is None:
+        resource = "secrets" if credential and credential["kind"] == "file" else "config"
+        reason = ctx["managed_reasons"][resource]
+
+    entry: dict[str, Any] = {"path": list(path)}
+    if default is not _MISSING and not is_secret_field(key, name):
+        entry["default"] = _field_entry(prefix, name, default)["value"]
+    entry.update({
+        "in_file": _lookup(ctx["document"], path)[0] if ctx["document"] is not None else False,
+        "choices": list(choices) if choices is not None else None,
+        "multi_choices": list(multi_choices) if multi_choices is not None else None,
+        "doc": ctx["docs"].get(path),
+        "credential": credential,
+        "env_override": env_override,
+        "editor": "readonly" if reason else schema.editor_kind(path, declared, value),
+        "read_only_reason": reason,
+        "risky": path in schema.RISKY_KEYS,
+    })
+    if path in schema.TABLE_PATHS and path not in schema.READ_ONLY:
+        entry["toml"] = _snippet(ctx["redacted"], path)
+    return entry
+
+
+def _walk(
+    obj: Any, prefix: str, sections: list[dict], *, label: str, ctx: dict, default: Any,
+) -> None:
     """Emit one section for ``obj``, recursing into nested dataclass fields.
 
     A nested dataclass becomes its own dotted section (``brain.native``) rather
     than a nested object, so the frontend renders one flat list of sections and
-    a future editor addresses every field by one dotted key.
+    the editor addresses every field by one path. ``default`` is the same
+    section of a default ``Config``, or ``None``.
     """
     fields: list[dict] = []
-    nested: list[tuple[str, Any]] = []
+    nested: list[tuple[str, Any, Any]] = []
+    hints = _type_hints(type(obj))
 
     for f in dataclasses.fields(obj):
         if prefix == "" and f.name in _EXCLUDED_TOP_LEVEL:
             continue
         value = getattr(obj, f.name, None)
+        default_value = getattr(default, f.name, _MISSING) if default is not None else _MISSING
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            nested.append((f.name, value))
+            nested.append((f.name, value, None if default_value is _MISSING else default_value))
             continue
-        fields.append(_field_entry(prefix, f.name, value))
+        entry = _field_entry(prefix, f.name, value)
+        entry.update(_editor_keys(ctx, prefix, f.name, hints.get(f.name), value, default_value))
+        fields.append(entry)
 
     sections.append({"key": prefix or "general", "label": label, "fields": fields})
 
-    for name, value in nested:
+    for name, value, default_value in nested:
         child_prefix = f"{prefix}.{name}" if prefix else name
-        _walk(value, child_prefix, sections, label=f"[{child_prefix}]")
+        _walk(value, child_prefix, sections, label=f"[{child_prefix}]", ctx=ctx, default=default_value)
 
 
-def build_config_view(config: "Config") -> dict:
-    """Render the loaded config as ordered, redacted sections."""
+def _problems(check: Any) -> list[dict]:
+    from istota.config_editor.check import BLOCKING_KINDS
+
+    if check is None:
+        return []
+    found = [
+        {**problem, "blocking": problem.get("kind") in BLOCKING_KINDS}
+        for problem in check.problems
+    ]
+    if check.error is not None:
+        found.append({"kind": "error", "path": [], "message": check.error, "blocking": True})
+    return found
+
+
+def _value_at(config: Any, path: tuple[str, ...]) -> Any:
+    node = config
+    for segment in path:
+        node = getattr(node, segment, None)
+    return node
+
+
+def _secret_files(config: "Config", ctx: dict) -> list[dict]:
+    """One entry per stack secrets file: whether it is set, never its value."""
+    import os
+
+    from istota.config_editor.reference import credential_files
+    from istota.setup_wizard import SECRET_NAMES
+
+    schema = ctx["schema"]
+    config_keys = {name: dotted for dotted, name in credential_files().items() if name}
+    entries = []
+    for name in SECRET_NAMES:
+        dotted = config_keys.get(name)
+        if dotted:
+            path = tuple(dotted.split("."))
+            is_set = _is_set(_value_at(config, path))
+            reason = schema.READ_ONLY.get(path)
+        else:
+            # No config key reads it; `istota-secrets` exports each file as
+            # the uppercase variable, in the web process too.
+            path = None
+            is_set = bool(os.environ.get(name.upper(), "").strip())
+            reason = None
+        entries.append({
+            "name": name,
+            "label": dotted or _SECRET_LABELS.get(name, name),
+            "config_key": dotted,
+            "set": is_set,
+            "read_only_reason": reason or ctx["managed_reasons"]["secrets"],
+            "risky": path in schema.RISKY_KEYS if path else False,
+        })
+    return entries
+
+
+def build_config_view(
+    config: "Config",
+    *,
+    document: str | None = None,
+    document_digest: str | None = None,
+    check: Any = None,
+    applier: dict | None = None,
+    managed: dict | None = None,
+    started_at: str | None = None,
+) -> dict:
+    """Render the loaded config as ordered, redacted sections.
+
+    ``document`` is the text of ``config.toml`` and ``document_digest`` its
+    sha256; ``check`` the ``apply.CheckResult`` of a check of it; ``managed``
+    what ``apply.read_managed(..., fail_closed=True)`` returned; ``applier``
+    the applier's ``{kind, available, reason}``. Each is optional, and the
+    view is the read-only one without it.
+    """
+    import tomllib
+
+    from istota.config_editor import edits, schema, secrets
+    from istota.config_editor.reference import field_docs
+
+    parsed = None
+    if document is not None:
+        try:
+            parsed = tomllib.loads(document)
+        except tomllib.TOMLDecodeError:
+            parsed = None
+    managed_state = _managed_state(managed)
+    try:
+        docs = field_docs(Path(config.skills_dir).parent)
+    except (OSError, TypeError):
+        docs = {}
+    ctx = {
+        "schema": schema,
+        "document": parsed,
+        "redacted": secrets.redact_document(parsed) if parsed is not None else None,
+        "docs": docs,
+        "managed_reasons": {
+            resource: _managed_reason(entry) for resource, entry in managed_state.items()
+        },
+    }
+    try:
+        default_config = type(config)()
+    except Exception:  # noqa: BLE001 - a subclass needing arguments has no defaults to show
+        default_config = None
+
     sections: list[dict] = []
-    _walk(config, "", sections, label="General")
+    _walk(config, "", sections, label="General", ctx=ctx, default=default_config)
 
     # `users` is excluded from the walk but reported as a count so an admin can
     # see the instance has users without seeing their config.
     general = sections[0]
-    general["fields"].append(
-        _field_entry("", "users", getattr(config, "users", {}) or {})
-    )
+    users = getattr(config, "users", {}) or {}
+    users_entry = _field_entry("", "users", users)
+    users_entry.update(_editor_keys(
+        ctx, "", "users", _type_hints(type(config)).get("users"), users,
+        getattr(default_config, "users", _MISSING) if default_config is not None else _MISSING,
+    ))
+    general["fields"].append(users_entry)
     # General only: it is a grab-bag of ~25 unrelated top-level keys where
     # declaration order says nothing, so alphabetical is easier to scan. A
     # `[section]` keeps its declaration order, which groups related knobs.
@@ -310,4 +550,15 @@ def build_config_view(config: "Config") -> dict:
         "config_path": str(config.config_path) if config.config_path else None,
         "editable": False,
         "sections": sections,
+        "applier": dict(applier) if applier is not None else dict(_NO_APPLIER),
+        "managed": managed_state,
+        "document_digest": document_digest,
+        "started_at": started_at,
+        "problems": _problems(check),
+        "has_comments": edits.has_comments(document) if document is not None else False,
+        "secrets": _secret_files(config, ctx),
+        "admins": {
+            "users": sorted(str(user) for user in (getattr(config, "admin_users", None) or ())),
+            "read_only_reason": ctx["managed_reasons"]["admins"],
+        },
     }

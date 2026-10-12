@@ -441,3 +441,19 @@ class TestBackups:
         assert exc.value.code == 2
         assert "argument --backup" in capsys.readouterr().err
         assert not os.listdir(config_path.parent)
+
+
+class TestReadingTheMarker:
+    def test_a_missing_file_is_nothing_managed(self, tmp_path):
+        assert apply.read_managed(tmp_path) == {}
+        assert apply.read_managed(tmp_path, fail_closed=True) == {}
+
+    @pytest.mark.parametrize("raw", [b"{not json", b"[1, 2]", b"\xff"])
+    def test_a_damaged_file_fails_closed_when_asked(self, tmp_path, raw):
+        """The writer repairs a damaged marker by reading it as empty; the
+        editor's view must not read it as nothing managed."""
+        (tmp_path / apply.MANAGED_FILE).write_bytes(raw)
+        assert apply.read_managed(tmp_path) == {}
+        damaged = apply.read_managed(tmp_path, fail_closed=True)
+        assert set(damaged) == set(apply.MANAGED_RESOURCES)
+        assert all(entry == {"managed": True, "source": "unreadable"} for entry in damaged.values())

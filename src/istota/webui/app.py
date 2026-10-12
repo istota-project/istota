@@ -5010,12 +5010,34 @@ async def admin_config(_: dict = Depends(_require_admin)):
     """The loaded config, sectioned and credential-redacted. Read-only.
 
     Shaped field-by-field (dotted key + type + secret flag) rather than as a
-    TOML dump so the same payload can back an editable form later without the
-    frontend changing shape.
+    TOML dump so the same payload backs the config editor's form. The file
+    itself is read for its digest, which keys are in it and the problems a
+    check of it reports (in a child process, once per digest), and
+    `managed.json` for who owns each resource, read fail-closed.
     """
+    from istota import apply as apply_module
+    from istota.config_editor import check as config_check
+
     from . import admin_config_view
 
-    return await asyncio.to_thread(admin_config_view.build_config_view, _config)
+    text = digest = check = managed = None
+    if _config.config_path is not None:
+        config_path = Path(_config.config_path)
+        try:
+            data = await asyncio.to_thread(config_path.read_bytes)
+        except OSError:
+            data = None
+        if data is not None:
+            digest = hashlib.sha256(data).hexdigest()
+            text = data.decode("utf-8", errors="replace")
+            check = await config_check.check_current(text, digest)
+        managed = await asyncio.to_thread(
+            apply_module.read_managed, config_path.parent, fail_closed=True,
+        )
+    return await asyncio.to_thread(
+        admin_config_view.build_config_view, _config,
+        document=text, document_digest=digest, check=check, managed=managed,
+    )
 
 
 # A daemon record older than this many sweep intervals reads as a daemon that

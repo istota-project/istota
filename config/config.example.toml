@@ -1654,7 +1654,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # service per user (the stack's compose.devbox.yml), and by the daemon, which
 # runs one credential-proxy listener per user. The bare-metal role renders its
 # own containers and leaves `users` empty.
-# users = []                           # e.g. ["alice"]; one devbox each
+# users = []                           # e.g. ["sam"]; one devbox each
 # mem_limit = "4g"
 # cpus = 2.0
 # pids_limit = 512

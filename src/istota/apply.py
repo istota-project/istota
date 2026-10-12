@@ -310,13 +310,26 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def read_managed(config_dir: Path) -> dict:
-    """The ownership record in `config_dir`; a missing or unreadable one is empty."""
+def read_managed(config_dir: Path, *, fail_closed: bool = False) -> dict:
+    """The ownership record in `config_dir`; a missing one is empty.
+
+    A file that exists but cannot be read or parsed is empty too, which lets
+    the writers repair it, unless `fail_closed`: then every resource reads as
+    managed, source `"unreadable"`. The config editor's view asks for that, so
+    a damaged marker never hands a managed resource to the web.
+    """
+    path = config_dir / MANAGED_FILE
     try:
-        document = json.loads((config_dir / MANAGED_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return {}
-    return document if isinstance(document, dict) else {}
+    except (OSError, ValueError):
+        document = None
+    if isinstance(document, dict):
+        return document
+    if not fail_closed:
+        return {}
+    return {resource: {"managed": True, "source": "unreadable"} for resource in MANAGED_RESOURCES}
 
 
 def _entry_is(entry: object, managed: bool, source: str) -> bool:
