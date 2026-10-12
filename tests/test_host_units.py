@@ -310,6 +310,42 @@ class TestProvision:
         assert "--cache-dir /var/cache/istota-rclone" in mount["Service"]["ExecStart"]
 
 
+class TestChangedFile:
+    """A file written under a hardened umask before `umask 022` landed keeps its
+    content, so it is never rewritten; the mode has to be set anyway (#714)."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, path: Path, content: str) -> subprocess.CompletedProcess:
+        function = re.search(r"^changed_file\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines changed_file"
+        script = (
+            "set -euo pipefail\numask 027\n"
+            f"{function.group(0)}\n"
+            'if changed_file "$1" "$2"; then echo changed; else echo same; fi\n'
+        )
+        return subprocess.run(["bash", "-c", script, "_", str(path), content],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_an_unchanged_root_only_file_is_made_readable(self, tmp_path):
+        path = tmp_path / "mount.conf"
+        path.write_text("[Unit]\nRequires=mount-nextcloud.service\n")
+        path.chmod(0o640)
+        result = self._run(path, "[Unit]\nRequires=mount-nextcloud.service")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "same"
+        assert path.stat().st_mode & 0o777 == 0o644
+
+    def test_the_files_written_outside_it_get_the_same_mode(self):
+        for path in ("/etc/apt/sources.list.d/docker.sources", "/etc/docker/daemon.json"):
+            assert re.search(rf"^chmod 0644 {re.escape(path)}$", self.TEXT, re.M), path
+
+    def test_a_new_file_is_readable_under_a_hardened_umask(self, tmp_path):
+        path = tmp_path / "d" / "istota.conf"
+        result = self._run(path, "x = 1")
+        assert result.stdout.strip() == "changed"
+        assert path.read_text() == "x = 1\n"
+        assert path.stat().st_mode & 0o777 == 0o644
 
 class TestUpstreamRclone:
     """The mount runs rclone.org's own build, pinned, never Debian's package (#694).

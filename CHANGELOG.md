@@ -189,6 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`provision.sh` now makes the host config files it writes world-readable even when their content is unchanged.** A file written before the script set its own umask stayed root-only, because an unchanged file was never touched again. The Nextcloud mount's drop-in for `istota-stack.service` was one, and systemd warned about it on every reload. The Docker apt source and `daemon.json` had the same problem. The next provisioning run corrects all of them.
+
 - **The admin dashboard's backup count and last-backup time are real again.** They read a backup layout that only the removed bare-metal deployment wrote, so every current install showed 0 backups and no last backup while backups were being taken. They now report the daily database snapshots: how many dated snapshots are kept, and when the last successful one ran.
 
 - **`istota-stack rollback` puts the host's scripts and units back too.** It returned the stack to the previous release but left `istota-stack` itself, the systemd units and the host scripts at the newer one. Like an update, a rollback now runs the restored checkout's `host/provision.sh` when the host's provisioning inputs differ from the last run.
