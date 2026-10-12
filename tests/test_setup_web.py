@@ -1140,7 +1140,10 @@ class TestValidateWithAPayloadErrorElsewhere:
 
     def test_a_wrong_type_does_not_hide_the_rest(self, unlocked):
         _app, client = unlocked
-        _draft(client, listen_port="eighty", ingress="proxied", user_id="ada", user_email="ada@example.com")
+        _draft(
+            client, listen_port="eighty", ingress="proxied", hostname="istota.example.com",
+            user_id="ada", user_email="ada@example.com",
+        )
         fields = {e["field"] for e in _validate(client, "address").json()["fields"]}
         assert fields == {"listen_port", "upstream_proxy", "listen_addr"}
 
@@ -1378,3 +1381,141 @@ class TestARetryWithAnotherUsername:
         _draft(client, user_id="ada")
         assert _finish(client).status_code == 200
         assert list(user_profiles.list_profiles(_db_path(dirs))) == ["ada"]
+
+
+# --- stage 8: the Nextcloud username, the web address, plain wording ----------
+
+NEXTCLOUD = {"storage": "nextcloud", "nextcloud_url": "https://cloud.example.com"}
+
+
+def _fields(resp):
+    return [(e["field"], e["message"]) for e in resp.json()["fields"]]
+
+
+class TestTheNextcloudUsername:
+    # Ids a Nextcloud hands out that the native login's pattern refuses.
+    @pytest.mark.parametrize(
+        "user_id", ["Ada", "first.last", "ada lovelace", "ada@example.com", "o'brien", "CORP\\ada"],
+    )
+    def test_an_id_istota_can_hold_passes(self, unlocked, user_id):
+        _app, client = unlocked
+        _draft(client, user_id=user_id, user_email="ada@example.com", **NEXTCLOUD)
+        assert _fields(_validate(client, "nextcloud")) == []
+
+    # `is_scopable_user_id`, the rule every path and task under a user id
+    # applies, and the admins file reading a leading `#` as a comment. Space
+    # around an id is not among them: the payload mapping strips it.
+    @pytest.mark.parametrize("user_id", [".", "..", "ada/files", "#ada"])
+    def test_an_id_istota_cannot_hold_is_a_nextcloud_error(self, unlocked, user_id):
+        _app, client = unlocked
+        _draft(client, user_id=user_id, user_email="ada@example.com", **NEXTCLOUD)
+        fields = _fields(_validate(client, "nextcloud"))
+        assert [f for f, _m in fields] == ["user_id"]
+        assert "Istota can't use" in fields[0][1]
+
+    def test_an_empty_id_asks_for_the_nextcloud_username(self, unlocked):
+        _app, client = unlocked
+        _draft(client, user_id="", user_email="ada@example.com", **NEXTCLOUD)
+        assert _fields(_validate(client, "nextcloud")) == [("user_id", "Enter your own Nextcloud username.")]
+
+    def test_the_welcome_screen_does_not_report_it(self, unlocked):
+        _app, client = unlocked
+        _draft(client, user_id="ada/files", user_email="ada@example.com", **NEXTCLOUD)
+        assert _validate(client, "welcome").json() == {"ok": True, "fields": []}
+
+    def test_finish_refuses_it_on_the_nextcloud_screen(self, unlocked, dirs):
+        _app, client = unlocked
+        _draft(client, **{**READY, "user_id": "..", **NEXTCLOUD})
+        resp = _finish(client)
+        assert resp.status_code == 400
+        assert [(e["field"], e["step"]) for e in resp.json()["fields"]] == [("user_id", "nextcloud")]
+        assert not (dirs.data_dir / "config" / "config.toml").exists()
+
+
+class TestTheWebAddress:
+    @pytest.mark.parametrize("ingress", ["direct", "proxied"])
+    @pytest.mark.parametrize("hostname", ["", "localhost", "localhost:8080", "127.0.0.1"])
+    def test_a_public_choice_needs_a_name(self, unlocked, ingress, hostname):
+        _app, client = unlocked
+        proxy = {"upstream_proxy": "10.0.0.2", "listen_addr": "10.0.0.5"} if ingress == "proxied" else {}
+        _draft(client, ingress=ingress, hostname=hostname, **proxy)
+        assert [f for f, _m in _fields(_validate(client, "address"))] == ["hostname"]
+
+    def test_a_name_passes(self, unlocked):
+        _app, client = unlocked
+        _draft(client, ingress="direct", hostname="istota.example.com")
+        assert _validate(client, "address").json() == {"ok": True, "fields": []}
+
+    def test_only_on_this_computer_needs_none(self, unlocked):
+        _app, client = unlocked
+        _draft(client, ingress="local", hostname="localhost:8080")
+        assert _validate(client, "address").json() == {"ok": True, "fields": []}
+
+
+#: The words a web user never sees (the spec's first goal), an option the
+#: terminal takes, and the shape of an environment variable's name.
+_OPERATOR_WORDS = re.compile(r"\b(ingress|brain|tls|oauth|dav|compose)\b", re.IGNORECASE)
+_OPERATOR_SHAPES = re.compile(r"--[a-z]|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b")
+
+_PROXIED = {"ingress": "proxied", "hostname": "istota.example.com"}
+
+#: One draft per refusal the shared validator and the payload mapping make,
+#: with the field it is refused on.
+_REFUSALS = [
+    ({"user_id": ""}, "user_id"),
+    ({"user_id": "", **NEXTCLOUD}, "user_id"),
+    ({"timezone": "Mars/Olympus"}, "timezone"),
+    ({"ingress": "sideways"}, "ingress"),
+    ({**_PROXIED, "listen_addr": "10.0.0.5"}, "upstream_proxy"),
+    ({**_PROXIED, "upstream_proxy": "10.0.0.2", "listen_addr": "0.0.0.0"}, "listen_addr"),
+    ({**_PROXIED, "upstream_proxy": "10.0.0.2", "listen_addr": "10.0.0.5", "tls_cert_source": "acme"}, "tls_cert_source"),
+    ({"ingress": "direct", "hostname": "istota.example.com", "tls_cert_source": "self-signed"}, "tls_cert_source"),
+    ({"listen_port": "eighty"}, "listen_port"),
+    ({"storage": "attic"}, "storage"),
+    ({"storage": "nextcloud"}, "nextcloud_url"),
+    ({"talk_enabled": "yes"}, "talk_enabled"),
+    ({"brain_kind": "oracle"}, "brain_kind"),
+    ({"brain_kind": "native"}, "native_model"),
+    ({"brain_kind": "native"}, "native_api_key"),
+    ({"caldav_url": "https://cal.example.com/cal/"}, "caldav_password"),
+    ({"profiles": ["devbox-x"]}, "profiles"),
+    ({"profiles": ["signaling"]}, "profiles"),
+    ({"profiles": "browser"}, "profiles"),
+]
+
+
+def _assert_plain(fields):
+    for name, message in fields:
+        assert not _OPERATOR_WORDS.search(message), (name, message)
+        assert not _OPERATOR_SHAPES.search(message), (name, message)
+
+
+class TestPlainWordsOnTheWeb:
+    @pytest.mark.parametrize("draft,field", _REFUSALS)
+    def test_a_refusal_reads_plainly(self, unlocked, draft, field):
+        _app, client = unlocked
+        _draft(client, **{"user_id": "ada", "user_email": "ada@example.com", **draft})
+        fields = _fields(_validate(client, "review"))
+        assert field in [f for f, _m in fields]
+        _assert_plain(fields)
+
+    def test_finish_reads_plainly_too(self, unlocked):
+        _app, client = unlocked
+        _draft(client, **{**READY, "native_api_key": "", "native_model": ""})
+        fields = _fields(_finish(client))
+        assert {f for f, _m in fields} == {"native_model", "native_api_key"}
+        _assert_plain(fields)
+
+    def test_a_check_refused_on_the_answers_reads_plainly(self, unlocked):
+        _app, client = unlocked
+        _draft(client, brain_kind="native", native_model="m", native_api_key=SENTINEL, listen_port="eighty")
+        resp = _check(client, "model")
+        assert resp.status_code == 400
+        assert [f for f, _m in _fields(resp)] == ["listen_port"]
+        _assert_plain(_fields(resp))
+
+    def test_the_terminal_keeps_its_own_wording(self):
+        a = setup_wizard.answers_from_payload({"user_id": "ada", "brain_kind": "native"})
+        messages = {e.field: e.message for e in setup_wizard.validate_container_answers(a)}
+        assert "--native-model" in messages["native_model"]
+        assert "ISTOTA_BRAIN_NATIVE_API_KEY" in messages["native_api_key"]

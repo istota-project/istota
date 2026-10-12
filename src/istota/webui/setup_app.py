@@ -265,13 +265,26 @@ def _username_errors(a: setup_wizard.ContainerAnswers) -> list[FieldError]:
     The terminal wizard keeps accepting the ids it always has; this rule is
     the web setup's, because the web setup also creates the first login.
     With local storage the username is the native login's, so it takes
-    ``valid_new_user_id``. With Nextcloud it is the user's Nextcloud id,
-    which the Nextcloud screen checks by that rule instead.
+    ``valid_new_user_id``. With Nextcloud it is the user's Nextcloud id, and
+    ``istota user ensure`` checks none: what holds an id is
+    ``is_scopable_user_id``, which every path and task made from it applies
+    (``db.create_task`` refuses the rest), plus the admins file, which reads
+    a line starting with ``#`` as a comment.
     """
+    from istota.sandbox.user_scope import is_scopable_user_id  # noqa: PLC0415
+
     from . import auth  # noqa: PLC0415
 
-    if not a.user_id or a.uses_nextcloud:
+    if not a.user_id:
         return []
+    if a.uses_nextcloud:
+        if is_scopable_user_id(a.user_id) and not a.user_id.startswith("#"):
+            return []
+        return [FieldError(
+            "user_id",
+            "Istota can't use this username, even where Nextcloud accepts it: it can't start "
+            "or end with a space, start with #, contain a slash, or be “.” or “..”.",
+        )]
     if auth.valid_new_user_id(a.user_id):
         return []
     return [FieldError(
@@ -304,6 +317,59 @@ def _kept_username_errors(a: setup_wizard.ContainerAnswers, data_dir: Path) -> l
     )]
 
 
+_LOOPBACK_NAMES = ("", "localhost", "127.0.0.1")
+
+
+def _address_errors(a: setup_wizard.ContainerAnswers) -> list[FieldError]:
+    # `answers_from_payload` reads a missing address as `localhost`, which a
+    # certificate cannot be issued for and nobody else can reach.
+    if a.ingress not in ("direct", "proxied"):
+        return []
+    if a.hostname.split(":")[0].strip().lower() not in _LOOPBACK_NAMES:
+        return []
+    return [FieldError("hostname", "Enter the web address people will use, like istota.example.com.")]
+
+
+#: The web setup's wording for the shared validator's refusals, which keep the
+#: terminal's operator wording (option names, environment variables) because
+#: the terminal is where those mean something.
+_WEB_MESSAGES: dict[str, str] = {
+    "user_id": "Choose a username.",
+    "timezone": "That isn't a time zone Istota knows. Choose one from the list.",
+    "ingress": "Choose how people will reach Istota.",
+    "hostname": "Enter the web address people will use, like istota.example.com.",
+    "upstream_proxy": "Enter your proxy's address. Istota accepts connections from it and nothing else.",
+    "listen_addr": "Enter one private address for Istota to listen on, not 0.0.0.0.",
+    "listen_port": "Enter a port number.",
+    "tls_cert_source": "Behind a proxy, choose a self-signed certificate, your own certificate files, or none.",
+    "storage": "Choose where Istota keeps its files.",
+    "nextcloud_url": "Enter your Nextcloud's address.",
+    "nextcloud_public_url": "Enter the address you open Nextcloud at.",
+    "talk_enabled": "Choose whether to chat with Istota in Nextcloud Talk.",
+    "brain_kind": "Choose an AI service.",
+    "native_model": "Enter a model name.",
+    "native_api_key": "Enter your API key.",
+    "caldav_password": "Enter the calendar's password.",
+    "profiles": "Choose from the features listed.",
+}
+_WEB_MESSAGE_FALLBACK = "This answer can't be used. Check it and try again."
+
+
+def _web_message(error: FieldError, a: setup_wizard.ContainerAnswers | None) -> str:
+    if not error.field:
+        return error.message
+    if a is not None and error.field == "user_id" and a.uses_nextcloud:
+        return "Enter your own Nextcloud username."
+    if a is not None and error.field == "tls_cert_source" and a.ingress == "direct":
+        return "A self-signed certificate works only behind a proxy you run."
+    return _WEB_MESSAGES.get(error.field, _WEB_MESSAGE_FALLBACK)
+
+
+def _plain(errors: list[FieldError], a: setup_wizard.ContainerAnswers | None) -> list[FieldError]:
+    """The shared validator's refusals in the web setup's words."""
+    return [FieldError(e.field, _web_message(e, a)) for e in errors]
+
+
 def _subscription_errors(a: setup_wizard.ContainerAnswers) -> list[FieldError]:
     # The terminal keeps an existing token file when the answer is empty; a
     # first web setup has no file to keep.
@@ -330,14 +396,15 @@ def draft_errors(
     try:
         a = setup_wizard.answers_from_payload(answers)
     except PayloadError as exc:
-        errors.extend(exc.errors)
         a = exc.answers
+        errors.extend(_plain(exc.errors, a))
     if a is not None:
         refused = {e.field for e in errors}
-        web_rules = [*_username_errors(a), *_subscription_errors(a)]
+        web_rules = [*_username_errors(a), *_address_errors(a), *_subscription_errors(a)]
         if data_dir is not None:
             web_rules.extend(_kept_username_errors(a, data_dir))
-        for error in (*setup_wizard.validate_container_answers(a), *web_rules):
+        shared = _plain(setup_wizard.validate_container_answers(a), a)
+        for error in (*shared, *web_rules):
             if error.field not in refused:
                 errors.append(error)
     errors.extend(_email_errors(draft))
@@ -348,7 +415,9 @@ def draft_errors(
 def step_errors(draft: dict, step: str, *, data_dir: Path | None = None) -> list[FieldError]:
     """The draft's errors on ``step``'s fields, plus any form-level error."""
     _answers, errors = draft_errors(draft, data_dir=data_dir)
-    wanted = set(SETUP_STEPS[step])
+    # A field two screens ask (the username) is reported on the one that owns
+    # it for this draft, so it is not refused under a label that doesn't ask it.
+    wanted = {f for f in SETUP_STEPS[step] if step == "review" or step_of(f, draft) == step}
     return [e for e in errors if e.field == "" or e.field in wanted]
 
 
@@ -657,7 +726,10 @@ def create_setup_app(
         try:
             a = setup_wizard.answers_from_payload(answers)
         except PayloadError as exc:
-            return _error(400, "invalid", "Some answers need fixing before this can be tested.", exc.errors)
+            return _error(
+                400, "invalid", "Some answers need fixing before this can be tested.",
+                _plain(exc.errors, exc.answers),
+            )
         refusal = _check_refusal(kind, a)
         if refusal is not None:
             return refusal
