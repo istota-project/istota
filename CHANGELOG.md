@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Browse your connected Nextcloud files under Workspace → Connections. Open folders in Workspace and files in Nextcloud; if the connection expires, Workspace links you back to Connections to sign in again.
+
 - `istota-stack localize-workspace` moves an install whose workspace is the Nextcloud mount onto the VM's own disk, with Talk and the `nextcloud` skill still connected. It stops the stack, copies the files, points the config at the local copy, turns the mount off and starts the stack again; the Nextcloud copy is left as it was, apart from a `MOVED.md` in each user's bot folder, so going back is a config change. Run it with `--dry-run` first to see what it would skip.
 
   **Upgrade note:** nothing changes until you run it. A VM managed by the Ansible role moves by its plan instead: `--copy-only`, then `istota_storage: local` and no `nextcloud_mount_path`. A hand-written config with a Nextcloud URL and `workspace_path = "/mnt/shared"` but no `nextcloud_mount_path` is now refused at boot, since it would run as a local workspace with the mount checks off; add `nextcloud_mount_path = "/mnt/shared"` to keep the mount.

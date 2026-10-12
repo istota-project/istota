@@ -84,5 +84,5 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
         if scopes is not None and levels_from_scopes(scopes).get("drive") in {"readonly", "full"}:
             places.append(Place("drive", "drive", "Google Drive", None, True, None))
     if config.nextcloud_enabled:
-        places.append(Place("nextcloud", "nextcloud", "Nextcloud", None, False, None))
+        places.append(Place("nextcloud", "nextcloud", "Nextcloud", None, True, None))
     return places

@@ -549,7 +549,7 @@
         <div class="center-msg">Loading folder…</div>
       {:else if listingError}
         <div class="center-msg error">
-          {#if place.kind === 'drive' && needsConnection(listingError)}
+          {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}
             <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
             <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
           {:else}
