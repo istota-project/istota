@@ -246,10 +246,25 @@ To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `
 
 | Volume | Purpose |
 |---|---|
-| `istota_data` | Istota's `/data` — config, databases, and in local storage mode the workspace (`/data/workspace`). **This is the one to back up.** |
+| `istota_data` | Istota's `/data`: the databases (`/data/db`), and in local storage mode the workspace (`/data/workspace`). `/data/config` is a bind of the VM's config directory, not part of the volume. **This is the one to back up.** |
 | `browser_profile` | Persistent Chrome profiles per user, including their logins; also the console TLS certificate and parked legacy profile |
 
 In full Nextcloud integration the workspace is not a volume: it is the VM's rclone mount, bound at `/mnt/shared`.
+
+### Backing up a local install
+
+Istota backs up nothing but its databases. On a timer it snapshots them to `[scheduler] db_backup_dir`, by default `Backups/db/snapshots` under the workspace. In full Nextcloud integration that is on the mount, so the snapshots leave the VM. In local storage mode it is `/data/workspace/Backups/db/snapshots`, on the same `istota_data` volume as the databases themselves: a snapshot there gets you back from a corrupted database file, not from losing the volume. `istota doctor` reports this as a warning under `backups.off_volume`, and `runtime.workspace_disk` warns when the volume runs low on space.
+
+The workspace and the volume as a whole are yours to back up. Either back up the volume with whatever backs up the VM's disk, or stop the stack and archive it:
+
+```bash
+istota-stack down
+docker run --rm -v istota_istota_data:/data:ro -v "$PWD":/backup alpine \
+  tar -czf /backup/istota-data.tar.gz -C /data .
+istota-stack up
+```
+
+Compose prefixes the volume with the project name, so on the VM it is `istota_istota_data`. Unless a secrets file supplies it, the archive holds `/data/.secret_key` beside the databases it decrypts, so keep it somewhere at least as private as the VM (see `docs/deployment/security.md`). To keep the database snapshots off the volume without archiving it, set `db_backup_dir` to a directory on another disk mounted into the stack.
 
 ## Container logs
 

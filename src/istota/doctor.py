@@ -1024,6 +1024,113 @@ def check_workspace_mode(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def _device_of(path: Path) -> int | None:
+    """``st_dev`` of `path`, or of its nearest existing ancestor.
+
+    The backup destination is created on the first run, so before then the
+    question is answered by the directory it will be made in.
+    """
+    current = Path(os.path.abspath(path))
+    while True:
+        try:
+            return os.stat(current).st_dev
+        except FileNotFoundError:
+            if current.parent == current:
+                return None
+            current = current.parent
+        except OSError:
+            return None
+
+
+def check_backups_off_volume(config: "Config", probe: bool) -> CheckResult:
+    """The database snapshots are not on the volume they are meant to survive.
+
+    `db_backup._destination_is_durable` deliberately does not refuse a
+    same-volume destination: on the Docker stack `/data/db` and
+    `/data/workspace` share `istota_data`, so refusing would stop every
+    backup on every local install. A snapshot there still protects against a
+    corrupted database file; it does not protect against losing the volume,
+    and this check is where that is said. Under the Nextcloud mount the
+    workspace is the off-host target, so sharing a device with it is the point
+    and only the database's device is compared.
+    """
+    from istota.maintenance.db_backup import backup_destination
+
+    name = "backups.off_volume"
+    if not config.scheduler.db_backup_enabled:
+        return CheckResult(name, SKIP, "database backups are disabled")
+    dest = backup_destination(config)
+    if dest is None:
+        return CheckResult(name, SKIP, "no backup destination (no workspace and no db_backup_dir)")
+    dest_dev = _device_of(dest)
+    if dest_dev is None:
+        return CheckResult(name, WARN, f"cannot stat the backup destination {dest}",
+                           remedy="Check that the backup directory's parent exists and is readable.")
+    shared = []
+    if _device_of(config.db_path.parent) == dest_dev:
+        shared.append(f"the database ({config.db_path.parent})")
+    if (
+        config.workspace_path is not None
+        and not config.storage_is_nextcloud
+        and _device_of(config.workspace_path) == dest_dev
+    ):
+        shared.append(f"the workspace ({config.workspace_path})")
+    if not shared:
+        return CheckResult(name, OK, f"backups go to {dest}, on a volume of their own")
+    return CheckResult(
+        name, WARN,
+        f"backups go to {dest}, on the same volume as " + " and ".join(shared)
+        + ": they survive a corrupted database file but not the loss of the volume",
+        remedy=(
+            "Back up that volume itself (istota_data on the Docker stack), or set "
+            "[scheduler] db_backup_dir to a directory on another disk."
+        ),
+    )
+
+
+# `runtime.workspace_disk` thresholds: WARN below either free-space floor,
+# FAIL below the last one.
+_DISK_WARN_FRACTION = 0.10
+_DISK_WARN_BYTES = 2 * 1024**3
+_DISK_FAIL_FRACTION = 0.02
+
+
+def check_workspace_disk(config: "Config", probe: bool) -> CheckResult:
+    """The local workspace's volume has room left.
+
+    SKIPs under the Nextcloud mount: `statvfs` there reports the cache disk
+    rclone writes to, not the Nextcloud quota the files count against.
+    """
+    name = "runtime.workspace_disk"
+    if config.workspace_path is None:
+        return CheckResult(name, SKIP, "no workspace configured")
+    if config.storage_is_nextcloud:
+        return CheckResult(name, SKIP, "the workspace is the Nextcloud mount; its quota is Nextcloud's")
+    try:
+        st = os.statvfs(config.workspace_path)
+    except OSError as e:
+        return CheckResult(name, WARN, f"cannot stat {config.workspace_path}: {e.strerror}",
+                           remedy="Check that the workspace directory exists and is readable.")
+    total = st.f_blocks * st.f_frsize
+    free = st.f_bavail * st.f_frsize
+    if total <= 0:
+        return CheckResult(name, SKIP, f"{config.workspace_path} reports no size")
+    fraction = free / total
+    detail = (
+        f"{free / 1024**3:.1f} GiB free of {total / 1024**3:.1f} GiB "
+        f"({fraction:.0%}) on the volume holding {config.workspace_path}"
+    )
+    remedy = (
+        "Free space on that volume or grow it. On the Docker stack it also holds "
+        "the databases and their snapshots (istota_data)."
+    )
+    if fraction < _DISK_FAIL_FRACTION:
+        return CheckResult(name, FAIL, detail, remedy=remedy)
+    if fraction < _DISK_WARN_FRACTION or free < _DISK_WARN_BYTES:
+        return CheckResult(name, WARN, detail, remedy=remedy)
+    return CheckResult(name, OK, detail)
+
+
 def _session_log_tree(root: Path) -> tuple[int, int]:
     """``(jsonl file count, bytes)`` in the log tree, du-style.
 
@@ -9328,6 +9435,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.mount_liveness", check_mount_liveness),
     ("runtime.workspace_xattr", check_workspace_xattr),
     ("runtime.workspace_mode", check_workspace_mode),
+    ("runtime.workspace_disk", check_workspace_disk),
+    ("backups.off_volume", check_backups_off_volume),
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.task_control_dir", check_task_control_dir),
     ("runtime.bare_metal_import", check_bare_metal_import),
@@ -9427,6 +9536,8 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.mount_liveness": DEPLOYMENT,
     "runtime.workspace_xattr": DEPLOYMENT,
     "runtime.workspace_mode": DEPLOYMENT,
+    "runtime.workspace_disk": DEPLOYMENT,
+    "backups.off_volume": DEPLOYMENT,
     # Deployment, not image: it walks a directory on the install's own disk and
     # reads the last sweep's row out of the framework database, neither of which
     # a bare `docker run` has.
