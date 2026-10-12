@@ -25,6 +25,7 @@ import functools
 import hmac
 import json
 import logging
+import os
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ from typing import Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.background import BackgroundTask
 
 from istota import setup_wizard
 from istota.setup_wizard import FieldError, PayloadError, SetupError
@@ -139,6 +141,9 @@ class SetupState:
     #: Called once with the exit code when the server should stop; `serve`
     #: points it at uvicorn's `should_exit`.
     on_exit: Callable[[int], None] | None = None
+    #: Set once Finish has written everything; the server is on its way out.
+    finished: bool = False
+    finish_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def request_exit(state: SetupState, code: int) -> None:
@@ -239,20 +244,56 @@ def _password_errors(draft: dict) -> list[FieldError]:
     return [FieldError(PASSWORD_FIELD, message)] if message else []
 
 
-def step_errors(draft: dict, step: str) -> list[FieldError]:
-    """The draft's errors on ``step``'s fields, plus any form-level error."""
+def _email_errors(draft: dict) -> list[FieldError]:
+    # The login identity: `upsert_identity` refuses an empty one, after the
+    # settings were already written, so it is asked for here.
+    email = str(draft.get("user_email") or "").strip()
+    local, at, domain = email.partition("@")
+    if not email:
+        return [FieldError("user_email", "Enter your email address. It is how you will sign in.")]
+    if not (at and local and domain) or any(c.isspace() for c in email):
+        return [FieldError("user_email", "That doesn't look like an email address.")]
+    return []
+
+
+def draft_errors(draft: dict) -> tuple[setup_wizard.ContainerAnswers | None, list[FieldError]]:
+    """Every error in the draft, and its answers when there are none.
+
+    A payload refusal on one field does not hide the validator's errors on
+    the others: the validator runs over what the rest of the payload made,
+    and only its errors on a field the payload already refused are dropped.
+    """
     answers = {key: value for key, value in draft.items() if key != PASSWORD_FIELD}
     errors: list[FieldError] = []
     try:
         a = setup_wizard.answers_from_payload(answers)
     except PayloadError as exc:
         errors.extend(exc.errors)
-    else:
-        errors.extend(setup_wizard.validate_container_answers(a))
-    if PASSWORD_FIELD in SETUP_STEPS[step]:
-        errors.extend(_password_errors(draft))
+        a = exc.answers
+    if a is not None:
+        refused = {e.field for e in errors}
+        errors.extend(e for e in setup_wizard.validate_container_answers(a) if e.field not in refused)
+    errors.extend(_email_errors(draft))
+    errors.extend(_password_errors(draft))
+    return (None if errors else a), errors
+
+
+def step_errors(draft: dict, step: str) -> list[FieldError]:
+    """The draft's errors on ``step``'s fields, plus any form-level error."""
+    _answers, errors = draft_errors(draft)
     wanted = set(SETUP_STEPS[step])
     return [e for e in errors if e.field == "" or e.field in wanted]
+
+
+def step_of(field_name: str, draft: dict) -> str:
+    """The screen that asks ``field_name``, for the page to go back to."""
+    if field_name == "user_id" and draft.get("storage") == "nextcloud":
+        # With Nextcloud the username is the Nextcloud screen's.
+        return "nextcloud"
+    for step, fields in SETUP_STEPS.items():
+        if step != "review" and field_name in fields:
+            return step
+    return "review"
 
 
 #: What each check needs before it has anything to test: the field, and what
@@ -406,8 +447,12 @@ def create_setup_app(
         open_here = _has_session(state, request)
         if open_here:
             state.last_activity = state.clock()
+        if state.finished:
+            phase = "finishing"
+        else:
+            phase = "open" if open_here else "locked"
         return {
-            "phase": "open" if open_here else "locked",
+            "phase": phase,
             "local": state.local,
             "host": request.headers.get("host", ""),
             "modules_available": [
@@ -519,6 +564,35 @@ def create_setup_app(
         logger.info("setup: check %s ok=%s", kind, result.ok)
         return result.to_json()
 
+    @app.post("/istota/api/setup/finish")
+    async def finish_route(request: Request):
+        _require_session(state, request)
+        _require_origin(request)
+        # One Finish at a time: a double click must not run the writers twice
+        # side by side.
+        async with state.finish_lock:
+            if state.finished:
+                return _error(409, "finished", "Setup has already finished.")
+            a, errors = draft_errors(state.draft)
+            if errors:
+                return _invalid_at_finish(errors, state.draft)
+            try:
+                await asyncio.to_thread(
+                    finish, a, state.draft[PASSWORD_FIELD], data_dir=state.data_dir, vm_dir=state.vm_dir,
+                )
+            except FinishError as exc:
+                return JSONResponse(
+                    {"error": "write_failed", "message": exc.message, "step": exc.step},
+                    status_code=500,
+                )
+            state.finished = True
+            # The draft holds every credential and the password; nothing
+            # needs them now.
+            state.draft.clear()
+        result = {"login_url": login_url(a), "email": auth_email(a.user_email)}
+        # Asked for after the response is sent, so the page gets it first.
+        return JSONResponse(result, background=BackgroundTask(request_exit, state, 0))
+
     @app.api_route(
         "/istota/api/{rest:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
@@ -531,6 +605,124 @@ def create_setup_app(
     if static_dir.is_dir():
         app.mount("/istota", cache_header_statics(static_dir), name="web-static")
     return app
+
+
+def _invalid_at_finish(errors: list[FieldError], draft: dict) -> JSONResponse:
+    """Every error with the screen that asks it, and the first such screen."""
+    steps = [step_of(e.field, draft) for e in errors]
+    order = list(SETUP_STEPS)
+    body = {
+        "error": "invalid",
+        "message": "Some answers need fixing before setup can finish.",
+        "step": min(steps, key=order.index),
+        "fields": [
+            {"field": e.field, "message": e.message, "step": step}
+            for e, step in zip(errors, steps)
+        ],
+    }
+    return JSONResponse(body, status_code=400)
+
+
+class FinishError(Exception):
+    """A Finish step that failed, with what to tell the user."""
+
+    def __init__(self, step: str, message: str) -> None:
+        super().__init__(message)
+        self.step = step
+        self.message = message
+
+
+#: What each Finish step says when it fails, before the reason.
+_FINISH_FAILURES = {
+    "settings": "Couldn't save the settings",
+    "account": "Couldn't create your account",
+    "marker": "Couldn't record that setup finished",
+}
+#: The marker `istota-stack` reads to tell a finished run from an aborted one.
+SETUP_DONE = "setup-done"
+
+
+def _reason(exc: BaseException) -> str:
+    """A failure's reason without its errno or path: ``strerror`` for an OSError."""
+    if isinstance(exc, OSError) and exc.strerror:
+        return exc.strerror
+    return str(exc) or type(exc).__name__
+
+
+def _failed(step: str, exc: BaseException) -> FinishError:
+    logger.warning("setup: finish: %s failed: %s: %s", step, type(exc).__name__, _reason(exc))
+    return FinishError(step, f"{_FINISH_FAILURES[step]}: {_reason(exc)}")
+
+
+def db_path_under(data_dir: Path) -> Path:
+    """The stack's database path, under ``data_dir`` rather than ``/data``."""
+    relative = Path(setup_wizard.CONTAINER_DB_PATH).relative_to(setup_wizard.CONTAINER_DATA_DIR)
+    return Path(data_dir) / relative
+
+
+def login_url(a: setup_wizard.ContainerAnswers) -> str:
+    return f"{a.public_scheme}://{a.hostname}/istota/login"
+
+
+def auth_email(raw: str) -> str:
+    from . import auth  # noqa: PLC0415
+
+    return auth.normalize_email(raw)
+
+
+def finish(a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path, vm_dir: Path) -> None:
+    """Write everything ``a`` decides, the first admin's login, and the marker.
+
+    Stops at the first failure with a ``FinishError`` naming the step. Every
+    step is safe to run again: the writers rewrite the config and env files
+    and keep an existing master key and admins file, the profile and the
+    identity are ensured, and a second ``set_password`` only bumps an epoch
+    nobody has signed in under yet.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    from istota import db, user_profiles  # noqa: PLC0415
+    from istota.config import config_from_document  # noqa: PLC0415
+
+    from . import auth  # noqa: PLC0415
+
+    try:
+        setup_wizard.write_container_setup(
+            a, data_dir=data_dir, vm_dir=vm_dir, out=lambda line: logger.info("setup: %s", line.strip()),
+        )
+    except (OSError, SetupError) as exc:
+        raise _failed("settings", exc) from None
+    logger.info("setup: finish: settings written")
+
+    db_path = db_path_under(data_dir)
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db.init_db(db_path)
+        # The row the entrypoint makes for an empty table, seeded from the
+        # `[users.<id>]` block just written, as the entrypoint seeds it.
+        seed = config_from_document(
+            setup_wizard.container_config_document(a, inline_credentials=False)
+        ).users.get(a.user_id)
+        user_profiles.ensure_profile(
+            db_path, a.user_id, display_name=a.display_name, timezone=a.timezone, seed_from=seed,
+        )
+        auth.upsert_identity(db_path, a.user_id, a.user_email, create_profile=False)
+        auth.set_password(db_path, a.user_id, password)
+    except (OSError, sqlite3.Error, ValueError, db.SchemaTooNew) as exc:
+        raise _failed("account", exc) from None
+    logger.info("setup: finish: account ready for %s", a.user_id)
+
+    marker = Path(vm_dir) / SETUP_DONE
+    try:
+        marker.unlink(missing_ok=True)
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        try:
+            os.fchmod(fd, 0o400)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise _failed("marker", exc) from None
+    logger.info("setup: finish: done")
 
 
 def _run_server(app: FastAPI, settings: dict) -> int:

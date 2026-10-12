@@ -4240,8 +4240,16 @@ def config_from_document(data: dict) -> Config:
     config = Config()
     # The mapping rewrites legacy sections in place; the caller's document is
     # still the one it means to write.
-    _map_document(copy.deepcopy(data), config)
+    data = copy.deepcopy(data)
+    _map_document(data, config)
+    _map_users(data, config)
     return config
+
+
+def _map_users(data: dict, config: Config) -> None:
+    """The `[users.<id>]` blocks, which the walk leaves to `_parse_user_data`."""
+    for user_id, user_data in (data.get("users") or {}).items():
+        config.users[user_id] = _parse_user_data(user_data, user_id)
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -4287,9 +4295,7 @@ def load_config(config_path: Path | None = None) -> Config:
     unknown = _map_document(data, config)
     report_unknown(unknown, config_path)
 
-    if "users" in data:
-        for nc_username, user_data in data["users"].items():
-            config.users[nc_username] = _parse_user_data(user_data, nc_username)
+    _map_users(data, config)
 
     if "email" in data:
         # The one genuinely cross-field parse in the file, and the reason it

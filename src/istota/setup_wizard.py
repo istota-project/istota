@@ -1774,11 +1774,17 @@ class FieldError:
 
 class PayloadError(SetupError):
     """A web payload that cannot become answers: an unknown key, a wrong type,
-    a choice with no value it can mean."""
+    a choice with no value it can mean.
 
-    def __init__(self, errors: list[FieldError]):
+    ``answers`` is what the rest of the payload made, with each refused key
+    taken as unasked, so a caller can still validate the fields that were
+    fine. None when the payload was not an object at all.
+    """
+
+    def __init__(self, errors: list[FieldError], answers: "ContainerAnswers | None" = None):
         super().__init__(errors[0].message)
         self.errors = errors
+        self.answers = answers
 
 
 _BRAIN_KINDS = ("claude_code", "native")
@@ -1920,16 +1926,17 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
     if not isinstance(payload, dict):
         raise PayloadError([FieldError("", "The setup answers must be a JSON object.")])
     errors: list[FieldError] = []
-    for key in payload:
-        if key not in WEB_SETUP_FIELDS:
-            errors.append(FieldError("", f"Unknown setup field {key!r}."))
+    values = {}
     for key, value in payload.items():
         expected = WEB_SETUP_FIELDS.get(key)
-        if expected is not None and value is not None and not _payload_type_ok(value, expected):
+        if expected is None:
+            errors.append(FieldError("", f"Unknown setup field {key!r}."))
+        elif value is None:
+            continue
+        elif not _payload_type_ok(value, expected):
             errors.append(FieldError(key, f"{key} must be a {expected.__name__}."))
-    if errors:
-        raise PayloadError(errors)
-    values = {key: value for key, value in payload.items() if value is not None}
+        else:
+            values[key] = value
 
     def text(key: str) -> str:
         return str(values.get(key, "")).strip()
@@ -2002,7 +2009,7 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
     a.profiles = tuple(profiles)
 
     if errors:
-        raise PayloadError(errors)
+        raise PayloadError(errors, a)
     return a
 
 

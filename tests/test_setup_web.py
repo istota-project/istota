@@ -163,6 +163,7 @@ SESSION_ROUTES = [
     ("PUT", "/istota/api/setup/draft", {"bot_name": "Ada"}),
     ("POST", "/istota/api/setup/validate", {"step": "welcome"}),
     ("POST", "/istota/api/setup/check/model", None),
+    ("POST", "/istota/api/setup/finish", None),
 ]
 STATE_CHANGING = [route for route in SESSION_ROUTES if route[0] != "GET"]
 
@@ -346,7 +347,10 @@ class TestValidate:
         _app, client = unlocked
         client.put(
             "/istota/api/setup/draft",
-            json={"timezone": "Mars/Olympus", "brain_kind": "native", "user_id": "ada"},
+            json={
+                "timezone": "Mars/Olympus", "brain_kind": "native", "user_id": "ada",
+                "user_email": "ada@example.com",
+            },
             headers=ORIGIN,
         )
         welcome = _validate(client, "welcome")
@@ -368,7 +372,7 @@ class TestValidate:
 
     def test_a_payload_refusal_is_merged_into_its_step(self, unlocked):
         _app, client = unlocked
-        client.put("/istota/api/setup/draft", json={"storage": "nextcloud"}, headers=ORIGIN)
+        client.put("/istota/api/setup/draft", json={"storage": "nextcloud", "user_id": "ada"}, headers=ORIGIN)
         fields = {e["field"] for e in _validate(client, "nextcloud").json()["fields"]}
         assert fields == {"nextcloud_url"}
 
@@ -929,3 +933,264 @@ class TestConfigFromDocument:
         before = json.dumps(doc, sort_keys=True)
         config_from_document(doc)
         assert json.dumps(doc, sort_keys=True) == before
+
+
+# --- finish -------------------------------------------------------------------
+
+from istota import user_profiles  # noqa: E402
+from istota.config import Config  # noqa: E402
+from istota.lib import rclone_conf  # noqa: E402
+from istota.webui import auth  # noqa: E402
+
+PASSWORD = "a long enough passphrase"
+#: A draft that finishes: local storage, the native brain, no connections.
+READY = {
+    "bot_name": "Ada's assistant", "display_name": "Ada Lovelace", "user_id": "ada",
+    "user_email": "Ada@Example.com", "timezone": "Europe/Berlin",
+    "brain_kind": "native", "native_model": "model-from-the-draft", "native_api_key": SENTINEL,
+    "ingress": "local", "hostname": "localhost:8080", "profiles": ["browser"],
+    "password": PASSWORD,
+}
+
+
+def _finish(client, headers=ORIGIN):
+    return client.post("/istota/api/setup/finish", headers=headers)
+
+
+def _db_path(dirs):
+    return dirs.data_dir / "db" / "istota.db"
+
+
+def _written(root):
+    """Every file under ``root`` with its bytes, the setup's own state left out."""
+    skip = {"setup-code", "setup-done"}
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.name not in skip and "db" not in path.relative_to(root).parts
+    }
+
+
+@pytest.fixture
+def pinned(monkeypatch):
+    """The two random choices the writer makes, fixed so two runs compare."""
+    monkeypatch.setattr(setup_wizard.secrets, "token_hex", lambda n: "k" * (2 * n))
+    monkeypatch.setattr(rclone_conf, "_new_iv", lambda: b"i" * 16)
+
+
+class TestFinish:
+    def test_it_writes_what_the_terminal_writer_writes(self, unlocked, dirs, tmp_path, pinned):
+        _app, client = unlocked
+        draft = {
+            **READY, "storage": "nextcloud", "nextcloud_url": "https://cloud.example.com",
+            "nextcloud_username": "istota", "nextcloud_app_password": "nc-app-password",
+            "user_id": "alice", "talk_enabled": True, "ingress": "direct",
+            "hostname": "istota.example.com",
+        }
+        _draft(client, **draft)
+        resp = _finish(client)
+        assert resp.status_code == 200, resp.text
+
+        terminal = tmp_path / "terminal"
+        (terminal / "data" / "config").mkdir(parents=True)
+        (terminal / "vm").mkdir()
+        answers = setup_wizard.answers_from_payload({k: v for k, v in draft.items() if k != "password"})
+        setup_wizard.write_container_setup(
+            answers, data_dir=terminal / "data", vm_dir=terminal / "vm", out=lambda _line: None,
+        )
+        assert _written(dirs.data_dir) == _written(terminal / "data")
+        assert _written(dirs.vm_dir) == _written(terminal / "vm")
+        assert (dirs.vm_dir / "rclone.conf").exists()
+
+    def test_the_first_admin_can_sign_in(self, unlocked, dirs):
+        _app, client = unlocked
+        _draft(client, **READY)
+        resp = _finish(client)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"login_url": "http://localhost:8080/istota/login", "email": "ada@example.com"}
+
+        db_path = _db_path(dirs)
+        profile = user_profiles.get_profile(db_path, "ada")
+        assert profile.display_name == "Ada Lovelace"
+        assert profile.timezone == "Europe/Berlin"
+        assert profile.email_addresses == ["Ada@Example.com"]
+        policy = auth.policy_from_config(Config())
+        status, identity = auth.authenticate(db_path, policy, "ada@example.com", PASSWORD, ip=None)
+        assert status == "ok" and identity.user_id == "ada"
+        assert auth.authenticate(db_path, policy, "ada@example.com", "not the password", ip=None)[0] == "bad"
+        # The password is a hash in the identity row and nowhere else.
+        for path in [*dirs.data_dir.rglob("*"), *dirs.vm_dir.rglob("*")]:
+            if path.is_file() and "db" not in path.relative_to(dirs.data_dir.parent).parts:
+                assert PASSWORD.encode() not in path.read_bytes(), path
+
+    def test_an_internet_address_is_signed_in_over_https(self, unlocked):
+        _app, client = unlocked
+        _draft(client, **{**READY, "ingress": "direct", "hostname": "istota.example.com"})
+        assert _finish(client).json()["login_url"] == "https://istota.example.com/istota/login"
+
+    def test_the_marker_is_written_and_the_server_stops(self, unlocked, dirs):
+        app, client = unlocked
+        stopped = []
+        app.state.setup.on_exit = stopped.append
+        _draft(client, **READY)
+        assert _finish(client).status_code == 200
+        marker = dirs.vm_dir / "setup-done"
+        assert marker.read_bytes() == b""
+        assert marker.stat().st_mode & 0o777 == 0o400
+        assert stopped == [0] and app.state.setup.exit_code == 0
+
+    def test_after_finishing_the_draft_is_gone_and_finish_is_refused(self, unlocked):
+        _app, client = unlocked
+        _draft(client, **READY)
+        assert _finish(client).status_code == 200
+        assert client.get("/istota/api/setup/state").json()["phase"] == "finishing"
+        assert client.get("/istota/api/setup/draft").json() == {"draft": {}}
+        assert _finish(client).status_code == 409
+
+    def test_every_error_comes_back_with_its_step_and_nothing_is_written(self, unlocked, dirs):
+        app, client = unlocked
+        _draft(client, **{**READY, "timezone": "Mars/Olympus", "password": "short"}, storage="nextcloud")
+        resp = _finish(client)
+        assert resp.status_code == 400
+        body = resp.json()
+        steps = {(e["field"], e["step"]) for e in body["fields"]}
+        assert steps == {("timezone", "welcome"), ("password", "account"), ("nextcloud_url", "nextcloud")}
+        assert body["step"] == "welcome"
+        assert "short" not in resp.text and SENTINEL not in resp.text
+        assert not (dirs.data_dir / "config" / "config.toml").exists()
+        assert not _db_path(dirs).exists()
+        assert not (dirs.vm_dir / "setup-done").exists()
+        assert app.state.setup.exit_code is None
+
+    def test_with_nextcloud_the_username_is_the_nextcloud_screens(self, unlocked):
+        _app, client = unlocked
+        _draft(client, **{**READY, "user_id": ""}, storage="nextcloud", nextcloud_url="https://cloud.example.com")
+        fields = _finish(client).json()["fields"]
+        assert [(e["field"], e["step"]) for e in fields] == [("user_id", "nextcloud")]
+
+    @pytest.mark.parametrize("field,step", [("user_email", "welcome"), ("password", "account")])
+    def test_the_login_needs_an_email_and_a_password(self, unlocked, field, step):
+        _app, client = unlocked
+        _draft(client, **{k: v for k, v in READY.items() if k != field})
+        resp = _finish(client)
+        assert resp.status_code == 400
+        assert [(e["field"], e["step"]) for e in resp.json()["fields"]] == [(field, step)]
+
+    def test_a_failed_write_is_reported_and_a_retry_finishes(self, unlocked, dirs):
+        app, client = unlocked
+        _draft(client, **READY)
+        # A file where the database directory goes: fails for root too.
+        (dirs.data_dir / "db").write_text("in the way")
+        resp = _finish(client)
+        assert resp.status_code == 500
+        assert resp.json()["error"] == "write_failed"
+        assert resp.json()["step"] == "account"
+        assert resp.json()["message"].startswith("Couldn't create your account:")
+        assert "Errno" not in resp.text
+        assert app.state.setup.exit_code is None
+        assert not (dirs.vm_dir / "setup-done").exists()
+        key = (dirs.data_dir / ".secret_key").read_bytes()
+        admins = (dirs.data_dir / "config" / "admins").read_bytes()
+
+        (dirs.data_dir / "db").unlink()
+        assert _finish(client).status_code == 200
+        assert (dirs.data_dir / ".secret_key").read_bytes() == key
+        assert (dirs.data_dir / "config" / "admins").read_bytes() == admins
+        status, _identity = auth.authenticate(
+            _db_path(dirs), auth.policy_from_config(Config()), "ada@example.com", PASSWORD, ip=None,
+        )
+        assert status == "ok"
+
+    def test_a_retry_over_a_finished_account_is_harmless(self, unlocked, dirs):
+        _app, client = unlocked
+        _draft(client, **READY)
+        # The account step runs and the marker does not: the retry runs both again.
+        (dirs.vm_dir / "setup-done").mkdir()
+        resp = _finish(client)
+        assert resp.status_code == 500 and resp.json()["step"] == "marker"
+        (dirs.vm_dir / "setup-done").rmdir()
+        assert _finish(client).status_code == 200
+        assert list(user_profiles.list_profiles(_db_path(dirs))) == ["ada"]
+        status, _identity = auth.authenticate(
+            _db_path(dirs), auth.policy_from_config(Config()), "ada@example.com", PASSWORD, ip=None,
+        )
+        assert status == "ok"
+
+    def test_a_settings_write_failure_names_the_step(self, unlocked, dirs):
+        _app, client = unlocked
+        _draft(client, **READY)
+        (dirs.data_dir / "config" / "config.toml").mkdir()
+        resp = _finish(client)
+        assert resp.status_code == 500
+        assert resp.json()["step"] == "settings"
+        assert resp.json()["message"].startswith("Couldn't save the settings:")
+        assert "Errno" not in resp.text
+
+
+class TestValidateWithAPayloadErrorElsewhere:
+    def test_an_earlier_step_still_reports_its_own_errors(self, unlocked):
+        # storage=nextcloud with no address cannot become answers; welcome's
+        # own errors are still found.
+        _app, client = unlocked
+        _draft(client, timezone="Mars/Olympus", user_id="ada", user_email="ada@example.com", storage="nextcloud")
+        assert {e["field"] for e in _validate(client, "welcome").json()["fields"]} == {"timezone"}
+        assert {e["field"] for e in _validate(client, "nextcloud").json()["fields"]} == {"nextcloud_url"}
+
+    def test_a_wrong_type_does_not_hide_the_rest(self, unlocked):
+        _app, client = unlocked
+        _draft(client, listen_port="eighty", ingress="proxied", user_id="ada", user_email="ada@example.com")
+        fields = {e["field"] for e in _validate(client, "address").json()["fields"]}
+        assert fields == {"listen_port", "upstream_proxy", "listen_addr"}
+
+    def test_welcome_needs_an_email(self, unlocked):
+        _app, client = unlocked
+        _draft(client, user_id="ada")
+        assert [e["field"] for e in _validate(client, "welcome").json()["fields"]] == ["user_email"]
+
+
+#: One distinct value per credential field, so a leak names its field.
+CREDENTIAL_SENTINELS = {name: f"sentinel-{name}-0b7e" for name in sorted(setup_app.CREDENTIAL_FIELDS)}
+
+
+class TestNothingSecretIsLogged:
+    def test_no_credential_reaches_a_log_line_over_the_whole_flow(self, server, dirs, caplog):
+        _app, client = server
+        s = CREDENTIAL_SENTINELS
+        with caplog.at_level(logging.DEBUG):
+            assert _unlock(client).status_code == 200
+            # A provider that quotes the key back is the worst case.
+            with RefusingModel(status=401, body=f"Incorrect API key: {s['native_api_key']}").serve() as model, \
+                    FakeNextcloud(username=NC_USER, password=s["nextcloud_app_password"]).serve() as nc, \
+                    CalendarServer(username="ada", password="other", error_body=s["caldav_password"]).serve() as cal:
+                _draft(
+                    client, **{**READY, "password": s["password"], "native_api_key": s["native_api_key"]},
+                    native_base_url=model.base_url,
+                    storage="nextcloud", nextcloud_url=nc.url, nextcloud_username=NC_USER,
+                    nextcloud_app_password=s["nextcloud_app_password"],
+                    email_enabled=True, imap_host="mail.invalid", imap_user="ada",
+                    imap_password=s["imap_password"],
+                    caldav_url=f"{cal.url}/dav/", caldav_username="ada", caldav_password=s["caldav_password"],
+                    claude_code_oauth_token=s["claude_code_oauth_token"],
+                )
+                for step in setup_app.SETUP_STEPS:
+                    _validate(client, step)
+                assert _check(client, "model").json()["ok"] is False
+                assert _check(client, "nextcloud").status_code == 200
+                assert _check(client, "email").json()["ok"] is False
+                _draft(client, storage="local")
+                assert _check(client, "caldav").json()["ok"] is False
+                # Finish with the subscription and Nextcloud, so every
+                # credential the draft holds goes through a writer.
+                _draft(client, storage="nextcloud", brain_kind="claude_code")
+                shown = client.get("/istota/api/setup/draft").text
+                resp = _finish(client)
+                assert resp.status_code == 200, resp.text
+
+        written = b"".join(p.read_bytes() for p in (dirs.vm_dir / "secrets").iterdir())
+        assert s["claude_code_oauth_token"].encode() in written
+        assert s["nextcloud_app_password"].encode() in written
+        for name, value in s.items():
+            assert value not in caplog.text, f"{name} reached the log"
+            assert value not in shown and value not in resp.text
+        assert "7KQ2M" not in caplog.text
+        assert "setup: finish" in caplog.text
