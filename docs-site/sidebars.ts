@@ -51,6 +51,7 @@ const sidebars: SidebarsConfig = {
         'features/google-workspace',
         'features/wordpress',
         'features/web-interface',
+        'features/workspace',
         'features/search',
         'features/notifications',
         'features/relay',

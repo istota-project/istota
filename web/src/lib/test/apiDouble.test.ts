@@ -74,6 +74,7 @@ describe('the $lib/api double', () => {
       'ChatRoomBusyError',
       'ConfigChangeError',
       'CredentialWriteError',
+      'SetupApiError',
       'UploadUnreachableError',
     ]);
     for (const name of passedThrough) expect(double[name]).toBe(actual[name]);

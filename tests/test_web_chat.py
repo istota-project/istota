@@ -2225,6 +2225,20 @@ class TestChatTaskRetry:
 
 @_needs_web_deps
 class TestChatAttachments:
+    async def test_workspace_writes_reject_cross_origin_requests(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        for headers in [{}, {"origin": "https://other.example.com"}]:
+            response = await chat_client.post(
+                "/istota/api/workspace/upload", files={"file": ("note.txt", b"x")},
+                cookies=cookies, headers=headers,
+            )
+            assert response.status_code == 403
+            response = await chat_client.post(
+                "/istota/api/workspace/folders", json={"place": "home", "path": "", "name": "Notes"},
+                cookies=cookies, headers=headers,
+            )
+            assert response.status_code == 403
+
     @pytest.mark.parametrize("component", ["inbox", "web-chat", "day", "temp"])
     @pytest.mark.parametrize("operation", ["upload", "send"])
     async def test_symlinked_upload_directories_are_refused(
@@ -3765,3 +3779,81 @@ class TestTheBrainRidesEveryRoomPayload:
             )
         payload = mod._promoted_room_dict(handle.id, "web-alice-1", "tk123")
         assert payload["brain"] == "native"
+
+
+@_needs_web_deps
+class TestWorkspaceFileRoots:
+    async def test_room_membership_is_live_for_download_preview_and_links(self, chat_client):
+        import istota.webui.app as mod
+        from istota.webui.chat_files import check_chat_file_links
+
+        config = mod._config
+        with db.get_db(config.db_path) as conn:
+            room = db.create_web_chat_room(conn, "bob", "Shared")
+            db.add_room_member(conn, room.token, "alice")
+        path = f"/Channels/{room.token}/note.txt"
+        target = config.workspace_path / path.lstrip("/")
+        target.parent.mkdir(parents=True)
+        target.write_text("room note")
+        link = f"[note](/istota/api/chat/files?path={path})"
+        cookies = await _login(chat_client, "alice")
+        for member in (True, False):
+            if not member:
+                with db.get_db(config.db_path) as conn:
+                    conn.execute("DELETE FROM room_members WHERE room_token = ? AND user_id = ?", (room.token, "alice"))
+            for endpoint in ("files", "files/preview"):
+                response = await chat_client.get(
+                    f"/istota/api/chat/{endpoint}", params={"path": path}, cookies=cookies,
+                )
+                assert response.status_code == (200 if member else 403)
+            checked = check_chat_file_links(config, "alice", link)
+            assert (checked == link) is member
+            if not member:
+                assert "file unavailable: outside your workspace" in checked
+
+    @pytest.mark.parametrize("case,status", [
+        ("home", 200), ("group", 200), ("other_group", 403),
+        ("linked", 200), ("shared_file", 200), ("talk", 403),
+        ("prefix", 403), ("escape", 403), ("missing", 404),
+        ("directory", 400),
+    ])
+    async def test_route_and_scheduler_verdicts_agree(self, chat_client, case, status):
+        import istota.webui.app as mod
+        from istota.webui.chat_files import check_chat_file_links
+
+        config = mod._config
+        with db.get_db(config.db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "Shared")
+            db.create_group(conn, "team", kind="group", display_name="Team", created_by="alice")
+            db.add_group_member(conn, "team", "alice", added_by="alice")
+            db.create_group(conn, "other", kind="group", display_name="Other", created_by="bob")
+            db.add_group_member(conn, "other", "bob", added_by="bob")
+            db.add_user_resource(conn, "alice", "folder", "linked/notes", permissions="read")
+            db.add_user_resource(conn, "alice", "shared_file", "linked/report.txt", permissions="read")
+        paths = {
+            "home": "/Users/alice/note.txt", "group": "/Groups/team/note.txt",
+            "other_group": "/Groups/other/note.txt", "linked": "/linked/notes/note.txt",
+            "shared_file": "/linked/report.txt", "talk": "/Talk/note.txt",
+            "prefix": f"/Channels/{room.token}x/note.txt",
+            "escape": "/linked/notes/escape.txt", "missing": "/linked/notes/missing.txt",
+            "directory": "/linked/notes",
+        }
+        for name, path in paths.items():
+            if name in {"escape", "missing", "directory"}:
+                continue
+            target = config.workspace_path / path.lstrip("/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("sample")
+        (config.workspace_path / "Channels" / room.token).mkdir()
+        (config.workspace_path / "linked/notes/escape.txt").symlink_to(
+            config.workspace_path / "Groups/other/note.txt",
+        )
+        cookies = await _login(chat_client, "alice")
+        path = paths[case]
+        for endpoint in ("files", "files/preview"):
+            response = await chat_client.get(
+                f"/istota/api/chat/{endpoint}", params={"path": path}, cookies=cookies,
+            )
+            assert response.status_code == status
+        link = f"[note](/istota/api/chat/files?path={path})"
+        assert (check_chat_file_links(config, "alice", link) == link) is (status == 200)

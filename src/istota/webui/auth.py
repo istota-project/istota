@@ -221,10 +221,8 @@ def _upsert_identity(
     conn: sqlite3.Connection, user_id: str, email: str, *, create_profile: bool,
     display_name: str, reject_case_collision: bool, reject_address_holders: bool,
 ) -> Identity:
-    if reject_case_collision:
-        for row in conn.execute("SELECT user_id FROM user_profiles UNION SELECT user_id FROM web_auth_identities"):
-            if row["user_id"] != user_id and row["user_id"].casefold() == user_id.casefold():
-                raise ValueError(f"User ID differs only in case from {row['user_id']}")
+    from istota.user_profiles import reject_user_id_case_collision
+    reject_user_id_case_collision(conn, user_id)
     conflict = conn.execute("SELECT user_id FROM web_auth_identities WHERE email = ? AND user_id != ?",
                             (email, user_id)).fetchone()
     if conflict and reject_case_collision:
@@ -326,11 +324,12 @@ def bump_epoch(db_path: Path, user_id: str) -> int:
 
 
 def _protect_last_admin(conn: sqlite3.Connection, identity: Identity, admins: set[str] | None) -> None:
-    if not admins or identity.disabled or identity.user_id not in admins:
+    folded_admins = {admin.casefold() for admin in admins or ()}
+    if identity.disabled or identity.user_id.casefold() not in folded_admins:
         return
     enabled = conn.execute("""SELECT i.user_id FROM web_auth_identities i
         JOIN user_profiles p ON p.user_id = i.user_id WHERE i.disabled = 0""")
-    if not any(row["user_id"] in admins and row["user_id"] != identity.user_id for row in enabled):
+    if not any(row["user_id"].casefold() in folded_admins and row["user_id"] != identity.user_id for row in enabled):
         raise ValueError("Cannot remove or disable the last enabled admin identity")
 
 

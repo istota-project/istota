@@ -283,6 +283,10 @@
 	   widen the column at exactly the setting a user picked to make lines
 	   easier to follow. */
   --content-max: 1280px;
+  /* The first-run setup page's column: one short form at a time. In `rem`,
+     unlike the two caps around it, because it bounds a form's line length
+     rather than a screen, and a form should widen with its text. */
+  --setup-max: 36rem;
 
   /* Chat row metrics: the message row's horizontal padding, the avatar column
 	   it opens with, the avatar inside that column, and the gap from that column to

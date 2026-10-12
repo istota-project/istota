@@ -1,9 +1,10 @@
 """The shipped compose file's `istota` service, booted the way a VM boots it.
 
-Shared by the row 12 witness (credentials are files) and the row 5 wrapper
-witness (every exec path drops to uid 10001). The stack directory is laid out
-as `/srv/app/istota` is: `config/` bound read-only at `/data/config`, `secrets/`
-holding one file per credential. `istota setup --vm-dir` runs as uid 10001 in a
+Shared by the row 12 witness (credentials are files), the row 5 wrapper
+witness (every exec path drops to uid 10001) and the web setup's witness,
+which runs the setup server through `shipped_compose` alone. The stack
+directory is laid out as `/srv/app/istota` is: `config/` bound read-only at
+`/data/config`, `secrets/` holding one file per credential. `istota setup --vm-dir` runs as uid 10001 in a
 one-shot container with the config directory opened (ISTOTA_CONFIG_READ_ONLY),
 as `istota-stack setup` runs it; then `docker compose up` starts the service
 from what it wrote.
@@ -18,7 +19,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from istota.setup_wizard import SECRET_NAMES
 
@@ -44,16 +45,32 @@ class ShippedStack:
         return subprocess.run([*cmd, self.container, *argv], capture_output=True, text=True, timeout=timeout)
 
 
+@dataclass
+class ShippedCompose:
+    """A stack directory laid out as `/srv/app/istota` is, and compose over it."""
+
+    vm: Path
+    secrets_dir: Path
+    config_dir: Path
+    compose: Callable[..., subprocess.CompletedProcess]
+    #: The argv `compose` runs, for a caller that needs the process itself
+    #: (a server left running while the test talks to it).
+    compose_argv: Callable[[list[str]], list[str]]
+
+
 @contextmanager
-def boot_shipped_stack(
+def shipped_compose(
     image_tag: str,
     work: Path,
     *,
-    setup_env: dict[str, str],
     env_values: dict[str, str] | None = None,
     overlays: list[Path] | None = None,
     project_prefix: str = "istota-shipped",
-) -> Iterator[ShippedStack]:
+) -> Iterator[ShippedCompose]:
+    """The shipped compose file over a fresh stack directory, torn down after.
+
+    Nothing is started: the caller runs setup and `up` through `compose`.
+    """
     require_docker()
     vm = work / "vm"
     secrets_dir = vm / "secrets"
@@ -84,17 +101,40 @@ def boot_shipped_stack(
     ))
     project = f"{project_prefix}-{uuid.uuid4().hex[:8]}"
 
-    def compose(args: list[str], *, timeout: int = 300, extra_env: dict[str, str] | None = None):
+    def compose_argv(args: list[str]) -> list[str]:
         argv = ["docker", "compose", "-f", str(COMPOSE)]
         for path in [overlay, *(overlays or [])]:
             argv += ["-f", str(path)]
-        argv += ["--project-name", project, "--env-file", str(env_file), *args]
+        return [*argv, "--project-name", project, "--env-file", str(env_file), *args]
+
+    def compose(args: list[str], *, timeout: int = 300, extra_env: dict[str, str] | None = None):
         return subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout,
+            compose_argv(args), capture_output=True, text=True, timeout=timeout,
             env={**os.environ, **(extra_env or {})},
         )
 
     try:
+        yield ShippedCompose(vm, secrets_dir, config_dir, compose, compose_argv)
+    finally:
+        compose(["down", "--volumes", "--remove-orphans", "--timeout", "5"])
+
+
+@contextmanager
+def boot_shipped_stack(
+    image_tag: str,
+    work: Path,
+    *,
+    setup_env: dict[str, str],
+    env_values: dict[str, str] | None = None,
+    overlays: list[Path] | None = None,
+    project_prefix: str = "istota-shipped",
+) -> Iterator[ShippedStack]:
+    with shipped_compose(
+        image_tag, work, env_values=env_values, overlays=overlays, project_prefix=project_prefix,
+    ) as shipped:
+        vm, secrets_dir, config_dir, compose = (
+            shipped.vm, shipped.secrets_dir, shipped.config_dir, shipped.compose,
+        )
         setup_args = ["run", "--rm", "--no-deps", "-T"]
         for key, value in setup_env.items():
             setup_args += ["-e", f"{key}={value}"]
@@ -124,5 +164,3 @@ def boot_shipped_stack(
         logs = compose(["logs", "daemon"]).stdout
         assert health == "healthy", f"the daemon is {health!r}\n{logs[-4000:]}"
         yield ShippedStack(container, vm, secrets_dir, config_dir, logs, compose)
-    finally:
-        compose(["down", "--volumes", "--remove-orphans", "--timeout", "5"])

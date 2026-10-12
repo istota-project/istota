@@ -30,9 +30,11 @@ sudo bash install.sh --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... re
 
 It clones the repository into `/srv/app/istota/src`, verifies the tag's signature before running anything from it, runs `host/provision.sh` (Docker Engine, the AppArmor and seccomp profiles, zram, the journald cap, the systemd units), builds the images with `istota-stack update <tag>`, runs the setup wizard with `istota-stack setup`, rebuilds the images when `istota-stack check-image` reports the new config needs Claude Code (the first build ran before the config existed), runs `provision.sh` again for the wizard's host settings, and starts `istota-stack.service`. Without a terminal it stops after the build and prints the rest.
 
-For a cloud VM, `host/cloud-init.yaml` does the same first half as user data: fill in the signing key, the repository and the tag, and run the printed steps once the machine is up.
+For a cloud VM, `host/cloud-init.yaml` does the same first half as user data: fill in the signing key, the repository and the tag. After the build it starts the setup in the browser and prints its address, setup code and certificate fingerprint to the console, which a VPS provider's web console shows; `sudo istota-stack setup-code` prints them again. See [First-run setup](../deployment/docker.md#first-run-setup).
 
 ## What the wizard asks
+
+On a machine that is already provisioned and built, `istota-stack setup --web` is the friendlier way to answer these: a few short screens in the browser, which also start the stack at the end. See [First-run setup](../deployment/docker.md#first-run-setup).
 
 `istota-stack setup` runs `istota setup` inside the image. It asks for the first admin's user id, the public hostname and how the stack is reached (`local`, `proxied` behind your own reverse proxy, or `direct` with its own TLS certificate), whether to connect to a Nextcloud (its URL, the bot's user and app password, an OAuth2 client for web login), the model backend and its credential, email, GPS location, the modules, the developer skill, and the optional containers.
 
@@ -63,6 +65,12 @@ The optional containers (`browser`, `whatsapp-baileys`, `signaling`) are Compose
 limactl create --name istota --param ISTOTA_REPO="$PWD" host/lima/istota.yaml
 limactl start istota
 limactl shell istota sudo istota-stack update --unsigned vX.Y.Z
+limactl shell istota sudo istota-stack setup --web --local
+```
+
+Open the printed `http://localhost:8080/istota/setup#code=…` address on the Mac and answer the screens; when they finish, the VM builds what the answers need and starts the stack on the same address. To set up in the terminal instead:
+
+```bash
 limactl shell istota sudo istota-stack setup --ingress local --hostname localhost:8080
 limactl shell istota sudo istota-stack check-image || limactl shell istota sudo istota-stack update --unsigned vX.Y.Z
 limactl shell istota sudo /srv/app/istota/src/host/provision.sh

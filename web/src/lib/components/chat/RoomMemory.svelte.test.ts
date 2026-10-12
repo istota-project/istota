@@ -75,6 +75,9 @@ describe('RoomMemory', () => {
     mount();
     await waitFor(() => expect(textarea().value).toContain('Answer briefly.'));
     expect(getRoomMemory).toHaveBeenCalledWith(1);
+    const dialog = document.querySelector('[role=dialog]') as HTMLElement;
+    expect(dialog.style.getPropertyValue('--modal-width')).toBe('960px');
+    expect(dialog.style.getPropertyValue('--modal-height')).toBe('100dvh');
   });
 
   it('offers the template only while the file is empty and untouched', async () => {

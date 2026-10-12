@@ -305,7 +305,7 @@ class TestProvision:
                      "istota-browser-watchdog.service", "istota-browser-watchdog.timer",
                      "istota-certbot.service", "istota-certbot.timer", "mount-nextcloud.service",
                      "istota-config-apply.service", "istota-config-apply.path",
-                     "istota-config-apply.timer"):
+                     "istota-config-apply.timer", "istota-setup.service"):
             assert (HOST / name).is_file(), name
             assert name in self.TEXT, name
         for script in ("istota-stack", "istota-devbox-egress.sh", "istota-browser-watchdog.sh",
@@ -784,6 +784,49 @@ class TestTheConfigApplier:
     def test_provision_makes_the_requests_directory_uid_10001s(self):
         assert ('install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/requests"'
                 in self.TEXT)
+
+
+class TestTheSetupUnit:
+    """`istota-setup.service` is how an unattended bootstrap starts the web
+    setup: installed by provision.sh, started once by cloud-init, never enabled."""
+
+    UNIT = HOST / "istota-setup.service"
+
+    def test_it_runs_the_web_setup_until_a_person_finishes_it(self):
+        unit = _unit(self.UNIT)
+        assert unit["Service"]["Type"] == "exec"
+        assert unit["Service"]["ExecStart"] == "/usr/local/sbin/istota-stack setup --web"
+        assert unit["Service"]["TimeoutStartSec"] == "infinity"
+        assert "docker.service" in unit["Unit"]["Requires"]
+
+    def test_it_never_starts_over_a_config(self):
+        unit = _unit(self.UNIT)
+        assert unit["Unit"]["ConditionPathExists"] == f"!{STACK_DIR}/config/config.toml"
+
+    def test_it_cannot_be_enabled(self):
+        assert "Install" not in _unit(self.UNIT)
+
+    def test_provision_installs_it_and_never_enables_or_starts_it(self):
+        text = PROVISION.read_text()
+        loop = re.search(r"^for unit in istota-stack\.service .*?; do$", text, re.M | re.S)
+        assert loop and "istota-setup.service" in loop.group(0)
+        assert not re.search(r"systemctl [^\n]*istota-setup", text)
+
+    def test_cloud_init_starts_it_after_the_first_build_and_prints_its_code(self):
+        doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
+        script = next(f["content"] for f in doc["write_files"] if f["path"] == "/root/istota-bootstrap.sh")
+        provision = script.index('"${SRC}/host/provision.sh"')
+        update = script.index('/usr/local/sbin/istota-stack update "$TAG"')
+        start = script.index("systemctl start istota-setup.service")
+        printed = script.index("/usr/local/sbin/istota-stack setup-code")
+        assert provision < update < start < printed
+
+    def test_the_lima_template_points_at_the_local_web_setup(self):
+        text = (HOST / "lima" / "istota.yaml").read_text()
+        assert "limactl shell istota sudo istota-stack setup --web --local" in text
+        # The setup page's default publish, 127.0.0.1:8080, is what Lima forwards.
+        forward = yaml.safe_load(text)["portForwards"][0]
+        assert (forward["guestIP"], forward["guestPort"], forward["hostPort"]) == ("127.0.0.1", 8080, 8080)
 
 
 class TestCertbot:

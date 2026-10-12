@@ -16,6 +16,8 @@ export { default as Select } from './Select.svelte';
 export { default as Input } from './Input.svelte';
 export { default as TextArea } from './TextArea.svelte';
 export { default as Field } from './Field.svelte';
+export { default as OptionCards } from './OptionCards.svelte';
+export type { OptionCard } from './OptionCards.svelte';
 export { default as AutocompleteInput } from './AutocompleteInput.svelte';
 export { default as DateRangeFilter } from './DateRangeFilter.svelte';
 export { default as FileDropZone } from './FileDropZone.svelte';

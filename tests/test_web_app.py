@@ -920,6 +920,37 @@ class TestApiMe:
         data = resp.json()
         assert data["features"]["feeds"] is False
 
+    @pytest.mark.parametrize("mode,expected", [("local", True), ("none", False), ("nextcloud", True), ("drive", True), ("gmail", False)])
+    async def test_workspace_feature(self, client, config, mode, expected):
+        from istota import db
+        import istota.webui.app as mod
+
+        if mode != "local":
+            config.workspace_path = None
+        if mode == "nextcloud":
+            config.nextcloud.url = "https://cloud.example.com"
+        if mode in {"drive", "gmail"}:
+            config.google_workspace.enabled = True
+            scope = f"https://www.googleapis.com/auth/{mode}.readonly"
+            with db.get_db(config.db_path) as conn:
+                conn.execute("INSERT INTO google_oauth_tokens (user_id, access_token, refresh_token, token_expiry, scopes) VALUES (?, ?, ?, ?, ?)",
+                             ("alice", "test-access", "test-refresh", "2099-01-01", json.dumps([scope])))
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
+        login = await client.get("/istota/callback", follow_redirects=False)
+        response = await client.get("/istota/api/me", cookies=login.cookies)
+        assert response.status_code == 200
+        assert response.json()["features"]["workspace"] is expected
+
+    async def test_workspace_router_mounted(self, client):
+        import istota.webui.app as mod
+
+        assert (await client.get("/istota/api/workspace/places")).status_code == 401
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
+        login = await client.get("/istota/callback", follow_redirects=False)
+        response = await client.get("/istota/api/workspace/places", cookies=login.cookies)
+        assert response.status_code == 200
+        assert any(p["id"] == "home" for p in response.json()["places"])
+
 
 @_needs_web_deps
 class TestSanitizeHtml:

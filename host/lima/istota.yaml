@@ -3,6 +3,13 @@
 #   limactl create --name istota --param ISTOTA_REPO=/path/to/istota host/lima/istota.yaml
 #   limactl start istota
 #   limactl shell istota sudo istota-stack update --unsigned <tag>
+#   limactl shell istota sudo istota-stack setup --web --local
+#
+# `setup --web --local` prints an http://localhost:8080 address and a setup
+# code; open it on the Mac, through the port forward below. It installs the
+# config, builds what it needs, provisions again and starts the stack, which
+# then answers on the same address. To set up in the terminal instead:
+#
 #   limactl shell istota sudo istota-stack setup --hostname localhost:8080 ...
 #   limactl shell istota sudo istota-stack check-image ||
 #     limactl shell istota sudo istota-stack update --unsigned <tag>
@@ -71,8 +78,9 @@ probes:
 
 portForwards:
   - guestIP: 127.0.0.1
-    # `istota setup --hostname localhost:8080` publishes nginx here; another
-    # port needs this pair changed too.
+    # `istota-stack setup --web --local` publishes the setup page here, and
+    # `istota setup --hostname localhost:8080` publishes nginx here after it;
+    # another port needs this pair changed too.
     guestPort: 8080
     hostIP: 127.0.0.1
     hostPort: 8080

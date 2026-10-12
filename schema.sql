@@ -2372,3 +2372,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_config_change_requests_open
     ON config_change_requests((1)) WHERE status IN ('pending','taken','building');
 CREATE INDEX IF NOT EXISTS idx_config_change_requests_created
     ON config_change_requests(created_at);
+
+CREATE TABLE IF NOT EXISTS workspace_pins (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK (provider IN ('workspace', 'drive')),
+    ref TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mime_type TEXT,
+    web_url TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, provider, ref)
+);

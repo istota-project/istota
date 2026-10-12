@@ -36,6 +36,8 @@ This covers fields whose behaviour is not obvious from name and default: default
 
 ## Adding a field
 
+User IDs retain their stored spelling. `Config.resolve_user_id` is the inbound lookup; it builds a case-folded index from the current users so replacement and in-place additions cannot leave a stale cache. TOML and profile overlays refuse case-colliding IDs before applying the overlay. Profile and web identity writers share `user_profiles.reject_user_id_case_collision`, under the write transaction. Admin membership uses `is_named_admin` for the explicit allowlist; `is_admin` keeps its empty-list fallback.
+
 - Existing section: add it with a default; no loader change. Extra validation is a `_CONFIG_HOOKS` entry. An annotation the resolver cannot coerce fails `tests/test_config_mapper.py::test_every_declared_field_resolves_to_a_coercion` (once shipped silently for `dict`). The old hand loader silently ignored eleven settings, including `security.sandbox_ro_paths` and `scheduler.max_subtasks_per_task`.
 - New section: dataclass + `Config` field; the walk recurses. Only lists of dataclasses, verbatim maps or cross-field rules need a hook or `_PARSED_BY_HAND`.
 - Per-user: `UserConfig` field, `_parse_user_data` if non-trivial; if profile-shaped, plumb through `user_profiles` (row, web, `istota user ensure`). TOML profile keys are seed-only.

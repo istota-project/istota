@@ -137,3 +137,19 @@ def test_nothing_path_shaped_comes_back(raw):
         out = safe_filename(raw, ascii_only=ascii_only)
         assert "/" not in out and "\\" not in out
         assert out not in ("", ".", "..")
+
+
+@pytest.mark.parametrize("stem,ext,n,expected", [
+    ("note", ".txt", 1, "note.txt"), ("note", ".txt", 2, "note (2).txt"),
+    ("Notes", "", 3, "Notes (3)"), ("résumé", ".pdf", 2, "résumé (2).pdf"),
+])
+def test_numbered_name(stem, ext, n, expected):
+    from istota.lib.filenames import numbered_name
+    assert numbered_name(stem, ext, n) == expected
+
+
+def test_numbered_name_preserves_marker_with_long_unicode_stem():
+    from istota.lib.filenames import numbered_name, MAX_NAME_BYTES
+    name = numbered_name("界" * 120, ".txt", 100)
+    assert name.endswith(" (100).txt")
+    assert len(name.encode("utf-8")) <= MAX_NAME_BYTES - 16

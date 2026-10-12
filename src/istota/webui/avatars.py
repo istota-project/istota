@@ -41,6 +41,8 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 
+from .request_guards import BodyError
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,13 +113,12 @@ class BotAvatar:
     updated_at: str
 
 
-class AvatarError(Exception):
-    """Refusal to store an image, carrying the status the caller should see."""
+class AvatarError(BodyError):
+    """Refusal to store an image, carrying the status the caller should see.
 
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
+    A ``BodyError`` because the upload routes read their body through
+    ``request_guards.read_bounded_body`` and answer both refusals one way.
+    """
 
 
 # --- normalization ----------------------------------------------------------

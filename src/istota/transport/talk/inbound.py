@@ -388,12 +388,13 @@ def _istota_members_for_conversation(
     so the other party comes from `conv['name']`. Returned sorted for a
     deterministic room owner. Empty when no istota human participates (a
     bot-only or all-guest room) — the caller then skips registration."""
-    bot = config.talk.bot_username
+    bot = config.talk.bot_username.casefold()
     members: set[str] = set()
     if conv.get("type") == 1:
         other = conv.get("name", "")
-        if other and other != bot and other in config.users:
-            members.add(other)
+        user_id = config.resolve_user_id(other)
+        if user_id and other.casefold() != bot:
+            members.add(user_id)
     else:
         for p in participants:
             # Mirror the message-processing gate: only real users (not guests /
@@ -401,8 +402,9 @@ def _istota_members_for_conversation(
             if p.get("actorType", "users") != "users":
                 continue
             actor_id = p.get("actorId", "")
-            if actor_id and actor_id != bot and actor_id in config.users:
-                members.add(actor_id)
+            user_id = config.resolve_user_id(actor_id)
+            if user_id and actor_id.casefold() != bot:
+                members.add(user_id)
     return sorted(members)
 
 
@@ -479,7 +481,8 @@ def _reconcile_webmirror_stamp(
         # known user before it is worth comparing (`stamp_webmirror_echo`
         # makes the comparison itself). A guest or a foreign actor carrying a
         # forged reference stops here.
-        if msg.get("actorType") != "users" or actor_id not in config.users:
+        actor_id = config.resolve_user_id(actor_id)
+        if msg.get("actorType") != "users" or actor_id is None:
             return
         canonical_token = (
             db.resolve_room_token(conn, "talk", conversation_token)
@@ -574,8 +577,8 @@ def _plan_room_pass(
 
         # Cache 1:1 DM tokens by user ID (for notification fallback)
         if conv_type == 1:
-            other_user = conv.get("name", "")
-            if other_user and other_user in config.users:
+            other_user = config.resolve_user_id(conv.get("name", ""))
+            if other_user:
                 _dm_token_cache[other_user] = conversation_token
 
         last_message_id = db.get_talk_poll_state(conn, conversation_token)
@@ -1469,7 +1472,7 @@ def _is_own_post(msg: dict, config: Config) -> bool:
     answer a second time as a user turn.
     """
     actor_id = msg.get("actorId", "")
-    return not actor_id or actor_id == config.talk.bot_username
+    return not actor_id or actor_id.casefold() == config.talk.bot_username.casefold()
 
 
 def _veto_verb(msg: dict, config: Config) -> str | None:
@@ -1503,7 +1506,7 @@ def _talk_author(
     resolves to an istota user; a guest, a federated or bridged sender, a
     Nextcloud user istota does not serve, and a bot all carry no user id."""
     actor_type = actor_type or "users"
-    user_id = actor_id if actor_type == "users" and actor_id in config.users else None
+    user_id = config.resolve_user_id(actor_id) if actor_type == "users" else None
     return ParticipantRef(
         surface="talk", surface_ref=_talk_ref(actor_type, actor_id),
         user_id=user_id, display_name=display_name or None,
@@ -1551,7 +1554,7 @@ def _sync_talk_roster(
     present: list[str] = []
     for entry in roster:
         actor_id = entry.get("actorId") or ""
-        if not actor_id or actor_id == config.talk.bot_username:
+        if not actor_id or actor_id.casefold() == config.talk.bot_username.casefold():
             continue
         ref = _talk_author(
             entry.get("actorType") or "users", actor_id, entry.get("displayName"),
@@ -1808,6 +1811,8 @@ async def _process_poll_results(
                 # is stored, and acts on nothing.
                 author = _message_author(msg, config)
                 is_user = author.user_id is not None
+                if is_user:
+                    actor_id = author.user_id
 
                 conv_type = conv_types.get(conversation_token, 1)
                 participants = await _await_in_txn(
@@ -2043,7 +2048,7 @@ async def _process_poll_results(
                 # docstring's atomicity note.
                 result = ingest(conn, config, IncomingMessage(
                     user_id=actor_id if is_user else "",
-                    author=None if is_user else author,
+                    author=author,
                     # A user's command was dispatched above; a guest's is
                     # ignored, which the ingest needs to know (multiplayer D2).
                     is_command=not is_user and content.strip().startswith("!"),

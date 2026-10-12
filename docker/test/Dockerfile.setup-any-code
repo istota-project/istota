@@ -1,0 +1,20 @@
+# Negative control for tests/image/test_web_setup.py: the shipped image with
+# a setup server that takes any code.
+#
+# The comparison against the minted code is replaced by `if False:`, so a wrong
+# code unlocks and spends the code like the right one. Everything else in the
+# server is untouched, so the flow still reaches Finish on the session the
+# wrong code was handed.
+#
+#   docker build -f docker/test/Dockerfile.setup-any-code --build-arg BASE=<image tag> \
+#       -t istota-test/setup-any-code:<suffix> docker/test
+#
+# Expected: tests/image/test_web_setup.py::TestTheSetupCode::
+# test_a_wrong_code_is_refused fails, and TestFinish::
+# test_finish_answers_and_the_server_exits_0 still passes.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i 's|^        if not hmac.compare_digest(normalize_code(submitted).encode(), state.code.encode()):$|        if False:|' \
+        /app/src/istota/webui/setup_app.py \
+    && ! grep -q 'compare_digest(normalize_code' /app/src/istota/webui/setup_app.py
