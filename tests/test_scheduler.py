@@ -1580,6 +1580,77 @@ class TestDownloadTalkAttachments:
         assert dest.read_bytes() == b"from the other attempt"
         assert sorted(p.name for p in dest.parent.iterdir()) == ["photo.jpg"]
 
+    def test_an_attempt_still_writing_is_never_handed_to_another(self, tmp_path):
+        # ISSUE-724: the other attempt's half-written file used to be reused.
+        from istota.workspace.writes import write_new_file
+        config = _local_config(tmp_path)
+        media = self._media(config)
+        media.mkdir(parents=True)
+        mid_write = threading.Event()
+        release = threading.Event()
+        outcome = {}
+
+        def slow_body():
+            yield b"half of "
+            mid_write.set()
+            release.wait(10)
+            yield b"the other attempt's copy"
+
+        def other_attempt():
+            try:
+                write_new_file(
+                    media.parent.parent, ["media", "4242"], "photo.jpg", slow_body(),
+                    max_bytes=1024, numbered=False,
+                )
+                outcome["other"] = "published"
+            except FileExistsError:
+                outcome["other"] = "lost the race"
+
+        writer = threading.Thread(target=other_attempt)
+        writer.start()
+        try:
+            assert mid_write.wait(10)
+            with patch("istota.nextcloud._http.httpx.request",
+                       _FakeNextcloud({"photo.jpg": b"the whole photo"})):
+                [path] = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+        finally:
+            release.set()
+            writer.join(10)
+
+        assert path == str(media / "photo.jpg")
+        assert Path(path).read_bytes() == b"the whole photo"
+        assert outcome["other"] == "lost the race"
+        assert sorted(p.name for p in media.iterdir()) == ["photo.jpg"]
+
+    def test_a_write_killed_midway_is_not_reused_by_the_retry(self, tmp_path):
+        # ISSUE-724: a SIGKILL runs no cleanup, so the old write left a part
+        # at the final name and every retry reused it.
+        from istota.workspace import writes
+        config = _local_config(tmp_path)
+        media = self._media(config)
+        media.mkdir(parents=True)
+
+        class Killed(BaseException):
+            pass
+
+        def body():
+            yield b"half"
+            raise Killed
+
+        with patch.object(writes.os, "unlink", lambda *a, **k: None), pytest.raises(Killed):
+            writes.write_new_file(
+                media.parent.parent, ["media", "4242"], "photo.jpg", body(),
+                max_bytes=1024, numbered=False,
+            )
+
+        fake = _FakeNextcloud({"photo.jpg": b"the whole photo"})
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            [path] = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+
+        assert path == str(media / "photo.jpg")
+        assert Path(path).read_bytes() == b"the whole photo"
+        assert [method for method, _ in fake.calls] == ["PROPFIND", "GET"]
+
     def test_a_symlink_at_the_message_directory_is_refused(self, tmp_path):
         config = _local_config(tmp_path)
         elsewhere = tmp_path / "elsewhere"
