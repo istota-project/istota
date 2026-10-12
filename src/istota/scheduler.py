@@ -6060,7 +6060,7 @@ def run_startup_checks(config: Config) -> list:
     from . import doctor
 
     try:
-        results = doctor.run_checks(config)
+        results = doctor.run_checks(config, skip=STARTUP_SKIPPED_CHECKS)
         # Redact before anything is logged or sent. `detail` carries observed
         # paths and raw exception text, and the log file and the Talk room are
         # boundaries in exactly the way the admin dashboard is.
@@ -6080,6 +6080,10 @@ def run_startup_checks(config: Config) -> list:
         "STARTUP doctor: %d ok, %d warn, %d fail, %d skip",
         counts[doctor.OK], counts[doctor.WARN], counts[doctor.FAIL], counts[doctor.SKIP],
     )
+    doctor.record_report(config, results)
+    from .executor import effective_sandboxing
+
+    doctor.record_sandbox_verdict(config, effective_sandboxing(config))
     _alert_doctor_failures(config, doctor.failing(results), context="start-up")
     return results
 
@@ -6088,8 +6092,19 @@ def run_startup_checks(config: Config) -> list:
 # at boot and on demand.
 SWEEP_SKIPPED_CHECKS = ("runtime.framework_db",)
 
+# The devbox services start once the daemon reports healthy, so at the boot run
+# their exec sockets do not exist yet: these failed, and alerted, on every
+# restart. The first sweep, DOCTOR_FIRST_SWEEP_DELAY after boot, answers them.
+STARTUP_SKIPPED_CHECKS = ("developer.container", "security.devbox_netfilter")
+DOCTOR_FIRST_SWEEP_DELAY = 300
 
-def check_doctor(config: Config, state: dict) -> list:
+
+# The hourly sweep and an on-demand request run on separate background threads;
+# one at a time, so the transition state they share is not raced.
+_DOCTOR_RUN_LOCK = threading.Lock()
+
+
+def check_doctor(config: Config, state: dict, *, request_id: str | None = None) -> list:
     """Re-run the doctor registry on the scheduler's interval.
 
     This matters more than the boot run. The drift we actually saw happens
@@ -6103,7 +6118,15 @@ def check_doctor(config: Config, state: dict) -> list:
     previously-failing set held in ``state`` — the caller's dict, so there is no
     process-global. A check that is still failing produces no second alert; one
     that is newly failing does.
+
+    Every run is recorded for the Health pane, with ``request_id`` naming the
+    pane's request it answers, if any.
     """
+    with _DOCTOR_RUN_LOCK:
+        return _check_doctor_locked(config, state, request_id)
+
+
+def _check_doctor_locked(config: Config, state: dict, request_id: str | None) -> list:
     from . import doctor
 
     try:
@@ -6128,7 +6151,35 @@ def check_doctor(config: Config, state: dict) -> list:
             context="periodic check",
         )
     state["failing"] = failing_names
+    doctor.record_report(config, results, request_id=request_id)
     return results
+
+
+def check_doctor_request(config: Config, state: dict) -> None:
+    """Answer a run the Health pane asked for, on the tick after it asked.
+
+    A deep request also runs the checks that spawn a sandbox namespace. They run
+    here because the daemon's container is the one that has the sandbox; the
+    web process cannot answer for it.
+    """
+    from . import doctor
+
+    request = doctor.take_request(config)
+    if request is None:
+        return
+    check_doctor(config, state, request_id=request["id"])
+    if not request.get("deep"):
+        return
+    try:
+        results = doctor.run_checks(config, only=tuple(sorted(doctor.DEEP_CHECKS)), deep=True)
+        results = doctor.redact(results, config)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not kill the loop
+        logger.error("doctor_deep_run_failed err=%s", exc, exc_info=True)
+        results = [doctor.CheckResult(
+            "doctor.deep_run", doctor.FAIL, f"the deep run raised {type(exc).__name__}",
+            remedy="See the daemon log for doctor_deep_run_failed.",
+        )]
+    doctor.record_report(config, results, deep=True, request_id=request["id"])
 
 
 #: `executor.SANDBOX_CACHE_ROOT_NAME`, restated. Held equal by
@@ -9498,6 +9549,9 @@ def build_interval_gates(
     def _doctor(now: float) -> None:
         check_doctor(config, doctor_seen)
 
+    def _doctor_request(now: float) -> None:
+        check_doctor_request(config, doctor_seen)
+
     def _worktree_reap(now: float) -> None:
         check_worktree_reap(config)
 
@@ -9722,15 +9776,26 @@ def build_interval_gates(
         ),
         # The drift this catches happens *after* boot — the auto-update cron
         # changes what is installed under a config the daemon already loaded —
-        # so a boot-only check is blind to it. Seeded to now, not 0: the boot
-        # run already swept, and a 0 here would re-run the whole registry
-        # seconds later.
+        # so a boot-only check is blind to it. Seeded so the first sweep lands
+        # DOCTOR_FIRST_SWEEP_DELAY after boot: not at once, since the boot run
+        # just swept, and not an interval later, since that run leaves out the
+        # devbox checks.
         IntervalGate(
             name="doctor",
             run=_doctor,
             field="doctor_check_interval",
             enabled=lambda c: bool(c.scheduler.doctor_check_interval),
-            seed=lambda c: time.time(),
+            seed=lambda c: time.time() - max(
+                0, c.scheduler.doctor_check_interval - DOCTOR_FIRST_SWEEP_DELAY
+            ),
+            background=True,
+        ),
+        # A run the Health pane asked for. One shared_kv read a tick, and on
+        # even with the sweep off, since an operator asked.
+        IntervalGate(
+            name="doctor-request",
+            run=_doctor_request,
+            fixed_interval=1,
             background=True,
         ),
         # ISSUE-288. Seeded to 0 for the reason the sweeps below share: the

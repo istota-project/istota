@@ -145,7 +145,7 @@ Below `min_available_memory_mb` of `MemAvailable` or above `host_pressure_psi_th
 
 ## Poller Integrations
 
-Each poller runs on its same-named interval key: `_talk_poll_loop()`, `poll_emails()`, `poll_all_tasks_files()`, `check_heartbeats()`, `check_db_health()`, `discover_and_organize_shared_files()`, `check_skill_overlay_reindex()`, `check_doctor()` (3600s); briefings, jobs and sleep cycles on `briefing_check_interval`; `check_travel_timezone()` (900s, `location.enabled`).
+Each poller runs on its same-named interval key: `_talk_poll_loop()`, `poll_emails()`, `poll_all_tasks_files()`, `check_heartbeats()`, `check_db_health()`, `discover_and_organize_shared_files()`, `check_skill_overlay_reindex()`, `check_doctor()` (3600s; every run recorded for the Health pane), `check_doctor_request()` (`doctor-request`, every tick: a run the Health pane asked for, deep included); briefings, jobs and sleep cycles on `briefing_check_interval`; `check_travel_timezone()` (900s, `location.enabled`).
 - `check_worktree_reap()`: gated on `developer.enabled`, `repos_dir`, `worktree_reap_enabled`.
 - `check_sandbox_cache_sweep()`: gated on `sandbox_cache_sweep_enabled` and `sandbox_cache_sweep_targets(config)`, which may name both layouts at once; skips users with a live task.
 - `check_avatar_import()`: gated on `storage_is_nextcloud` and `web.avatar_import_from_nextcloud`. Users from `config.users`, never `user_avatars`; no transaction across a fetch; a generated avatar writes a NULL-image probe row with the ETag; stamps `shared_kv` `_avatar_import`/`last_tick` for doctor.

@@ -5034,114 +5034,54 @@ async def admin_config(_: dict = Depends(_require_admin)):
     return await asyncio.to_thread(admin_config_view.build_config_view, _config)
 
 
-# The deep doctor run spawns a bubblewrap namespace. One at a time, bounded, and
-# on a thread pool of its own. Three separate problems, and the obvious
-# one-liner for each is wrong in a way worth writing down.
-#
-# **The slot is released by the worker thread, not by the awaiting request.**
-# `asyncio.wait_for` cancels the *await*; it cannot cancel the OS thread that
-# `to_thread` submitted. Releasing an `asyncio.Lock` in an `except TimeoutError`
-# therefore reports "nothing is running" while `subprocess.run(bwrap, ...)` is
-# still going, and the next request sails through the gate into a second
-# concurrent namespace spawn — the exact thing the gate exists to prevent. So
-# the gate is a semaphore the *thread* releases in its own `finally`.
-#
-# **A non-blocking acquire, not a `.locked()` pre-check.** That pre-check is
-# safe today only because CPython's uncontended `Lock.acquire` fast path has no
-# suspension point: incidental, unstated, and gone the moment anyone replaces
-# the pre-check with a bounded acquire. `acquire(blocking=False)` is one atomic
-# operation and needs no such reasoning.
-#
-# **A dedicated executor.** An abandoned deep thread pins a worker for as long
-# as its subprocess runs. On the default executor that worker is shared with
-# every other `to_thread` caller in this module, and production runs a single
-# uvicorn process — so repeated timeouts would degrade unrelated admin
-# endpoints. With one worker of its own the deep probe can only starve itself.
-_doctor_deep_slot = threading.Semaphore(1)
-_doctor_deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doctor-deep")
-
-# What the deep phase may take. Derived from doctor's own bound rather than
-# restated, so the two cannot drift, and it covers only the deep checks because
-# that is all the deep phase runs. The earlier shape put the whole registry
-# under one 30s bound while `doctor.DEEP_TIMEOUT` was itself 30s, so a healthy
-# host with several probing checks ahead of the deep one (10s each, worst case)
-# could blow the outer timer with nothing wrong.
-_DOCTOR_DEEP_HEADROOM = 10.0
+# A daemon record older than this many sweep intervals reads as a daemon that
+# stopped recording, plus slack for a slow sweep.
+_DOCTOR_STALE_INTERVALS = 2
+_DOCTOR_STALE_SLACK_SECONDS = 600
 
 
-def _doctor_deep_timeout() -> float:
+def _doctor_report_age(at: str) -> float | None:
+    try:
+        stamp = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
+def _doctor_view(config) -> dict:
     from istota import doctor
 
-    return doctor.DEEP_TIMEOUT + _DOCTOR_DEEP_HEADROOM
-
-
-@api_router.get("/admin/doctor")
-async def admin_doctor(deep: int = 0, _: dict = Depends(_require_admin)):
-    """The runtime self-check, as the dashboard's Health pane reads it.
-
-    Same payload shape as `istota doctor --json` — both go through
-    `doctor.check_payload`, so a key added for the image test tier cannot reach
-    one surface and miss the other — plus a summary and one overall status the
-    pane can colour a header with.
-
-    Redacted before it leaves the process, like `admin_config_view`: doctor's
-    `detail` carries observed paths and raw exception text, and check authors
-    being told not to put a credential there is not the same as it never
-    happening.
-
-    A deep request runs in two phases rather than one: the ordinary registry,
-    then the namespace-spawning checks on their own. So a deep probe that
-    overruns costs the operator the deep result and nothing else, rather than
-    discarding twenty findings they may have opened the page to read.
-    """
-    from istota import doctor
-
-    # Snapshot the module global once. `_reload_config` rebinds it wholesale on
-    # SIGHUP, and a run that built its details against one config and then
-    # redacted them against another would be scanning for a credential list that
-    # no longer holds the value sitting in the text.
-    config = _config
-
-    def _run(**kwargs):
-        return doctor.redact(doctor.run_checks(config, **kwargs), config)
-
-    # Every probing check bounds its own probe — `doctor.PROBE_TIMEOUT` for the
-    # ones that spawn a subprocess, and its own configured fetch timeout for
-    # `runtime.subscription_usage`, the one that makes a network request — so the
-    # shallow phase needs no outer timer, only to be off the event loop, which it
-    # would otherwise stall for a dozen `--version` spawns.
-    results = await asyncio.to_thread(_run, deep=False)
-
-    if deep:
-        if not _doctor_deep_slot.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="a deep run is in flight")
-
-        def _run_deep():
-            try:
-                return _run(only=tuple(doctor.DEEP_CHECKS), deep=True)
-            finally:
-                # Released here, not by the caller: see the note by the semaphore.
-                _doctor_deep_slot.release()
-
-        loop = asyncio.get_running_loop()
-        try:
-            deep_results = await asyncio.wait_for(
-                loop.run_in_executor(_doctor_deep_executor, _run_deep),
-                timeout=_doctor_deep_timeout(),
-            )
-        except TimeoutError:
-            # Named outside the registry deliberately. `sandbox.masks` is a real
-            # check, and reporting the run's failure under its name asserts a
-            # verdict on something that may never have been reached.
-            deep_results = [
-                doctor.CheckResult(
-                    "doctor.deep_run",
-                    doctor.FAIL,
-                    f"the deep checks did not finish within {_doctor_deep_timeout():.0f}s",
-                    remedy="Run `istota doctor --deep` on the host to see where it sticks.",
-                )
-            ]
-        results = results + deep_results
+    reports = doctor.read_reports(config)
+    report, deep_report = reports["report"], reports["deep_report"]
+    rows = list(report["checks"]) if report else []
+    if deep_report:
+        rows += deep_report["checks"]
+    results = [
+        doctor.CheckResult(r["name"], r["status"], r["detail"], remedy=r.get("remedy", ""),
+                           scope=r.get("scope", doctor.DEPLOYMENT))
+        for r in rows
+    ]
+    interval = config.scheduler.doctor_check_interval
+    if report is None:
+        results.insert(0, doctor.CheckResult(
+            "doctor.daemon_report", doctor.WARN,
+            "the daemon has not recorded a doctor run yet",
+            remedy="Check that the daemon is running; it records a run at start-up "
+                   "and on every sweep.",
+        ))
+    elif interval:
+        age = _doctor_report_age(report.get("at"))
+        if age is not None and age > interval * _DOCTOR_STALE_INTERVALS + _DOCTOR_STALE_SLACK_SECONDS:
+            results.insert(0, doctor.CheckResult(
+                "doctor.daemon_report", doctor.WARN,
+                f"the daemon's last run was {int(age // 60)} minutes ago, "
+                f"against a sweep every {interval // 60} minutes",
+                remedy="Check that the daemon is running and its doctor sweep is not failing "
+                       "(doctor_sweep_failed in its log).",
+            ))
+    # Redacted again with this process's config: the daemon redacted with its
+    # own, and this is the process putting the text on the wire.
+    results = doctor.redact(results, config)
 
     summary = doctor.summarize(results)
     if summary[doctor.FAIL]:
@@ -5150,13 +5090,52 @@ async def admin_doctor(deep: int = 0, _: dict = Depends(_require_admin)):
         overall = doctor.WARN
     else:
         overall = doctor.OK
-
+    request = reports["request"]
     return {
         "status": overall,
         "summary": summary,
-        "deep": bool(deep),
+        "deep": deep_report is not None,
         "checks": doctor.check_payload(results),
+        "checked_at": report["at"] if report else None,
+        "request_id": report.get("request_id") if report else None,
+        "deep_checked_at": deep_report["at"] if deep_report else None,
+        "deep_request_id": deep_report.get("request_id") if deep_report else None,
+        "pending": {"id": request["id"], "deep": bool(request.get("deep"))} if request else None,
     }
+
+
+@api_router.get("/admin/doctor")
+async def admin_doctor(_: dict = Depends(_require_admin)):
+    """The daemon's last doctor runs, as the dashboard's Health pane reads it.
+
+    Never runs a check here. On the Docker stack this process is a separate
+    container without the daemon's sandbox profile, cgroup or devbox sockets,
+    so its own answers to those checks were wrong. The daemon records a run at
+    start-up, on every sweep and for every request ``POST /admin/doctor/run``
+    leaves; the last deep run is shown beside the last shallow one with its own
+    time. Same check shape as ``istota doctor --json`` (``doctor.check_payload``).
+    """
+    config = _config
+    return await asyncio.to_thread(_doctor_view, config)
+
+
+@api_router.post("/admin/doctor/run", status_code=202)
+async def admin_doctor_run(request: Request, _: dict = Depends(_require_admin),
+                           _csrf: None = Depends(_verify_origin)):
+    """Ask the daemon for a run on its next tick; ``{"deep": true}`` adds the
+    checks that spawn a sandbox namespace. Joins a request still pending, so the
+    answer names the request id the pane should wait for."""
+    from istota import doctor
+
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = {}
+    deep = payload.get("deep", False) if isinstance(payload, dict) else None
+    if not isinstance(deep, bool):
+        raise HTTPException(status_code=400, detail="deep must be true or false.")
+    made = await asyncio.to_thread(doctor.request_run, _config, deep=deep)
+    return {"id": made["id"], "deep": made["deep"]}
 
 
 # ---- Connections: deployment-level external links ----
@@ -13211,7 +13190,6 @@ def _credential_settings(username: str, action="list", name="", payload=None):
     from istota.credentials import local as local_credentials
     from istota.credentials import names as secrets_vault
     from istota.credentials.broker import bindings, grants
-    from istota.executor import effective_sandboxing
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
@@ -13262,7 +13240,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
         existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
     refusal = secrets_vault.vault_isolation_refusal(_config, username) or ""
     return {"credentials": credentials, "rooms": rooms,
-            "grant_existing_available": existing_available, "sandboxed": effective_sandboxing(_config),
+            "grant_existing_available": existing_available, "sandboxed": secrets_vault.tasks_sandboxed(_config),
             "can_add": not refusal, "add_blocked_reason": refusal,
             "broker_enabled": bool(_config.security.credential_broker.enabled)}
 

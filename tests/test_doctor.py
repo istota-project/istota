@@ -1570,8 +1570,8 @@ class TestLiveChecks:
         assert doctor._MODEL_PROBE_MARKER == _MODEL_MARKER
 
     def test_deep_checks_is_exactly_the_mask_probe(self):
-        """A budget guard for `web_app._doctor_deep_timeout`, which is
-        `DEEP_TIMEOUT` plus headroom for exactly one deep check."""
+        """The daemon's deep run (`scheduler.check_doctor_request`) is sized
+        for exactly one namespace spawn."""
         assert DEEP_CHECKS == frozenset({"sandbox.masks"})
 
     @pytest.mark.parametrize(
