@@ -435,9 +435,13 @@
     display: none;
   }
   .selection-column {
-    width: 2.5rem;
+    width: 2rem;
     text-align: center;
     padding-inline: var(--space-2);
+  }
+  .selection-column + th,
+  .selection-column + td {
+    padding-inline-start: 0;
   }
   input[type='checkbox'] {
     margin: 0;
