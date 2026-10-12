@@ -117,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **What Istota says about the workspace is accurate on a local one.** The prompt shows every user, admins included, their own `Users/<id>` folder, and says the bot can reach the rest of the machine only on an install with no sandbox. `examples/README.md`, the email attachment line, `!export`, `!memory`, the Talk and web chat guidelines and the `files` and `nextcloud` skills stop saying a file is in Nextcloud when it is not. `istota doctor` adds `backups.off_volume`, which warns when the database snapshots are on the same volume as the database or a local workspace (back up `istota_data` itself, or point `[scheduler] db_backup_dir` at another disk), and `runtime.workspace_disk`, which warns under 10% or 2 GiB free and fails under 2%. Backups keep running in both cases.
+
 - **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
 
 - **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.

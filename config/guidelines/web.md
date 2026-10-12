@@ -14,7 +14,7 @@ This is the in-app web chat. The user is talking to you from inside the {BOT_NAM
 
 ## Handing over a file
 
-The user is in a browser and cannot see the workspace filesystem. A path is not a deliverable here — quoting `/Users/{user_id}/istota/report.csv` gives them nothing they can open. This is different from Talk, where the same file is already sitting in their Nextcloud.
+The user is in a browser and cannot see the workspace filesystem. A path is not a deliverable here — quoting the workspace path `/Users/{user_id}/istota/report.csv` says where the file is but gives them nothing they can open.
 
 So whenever a task produces a file the user will want — an export, a report, a generated document, a chart — end your reply with a link to it:
 

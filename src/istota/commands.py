@@ -2374,7 +2374,7 @@ async def cmd_memory(ctx: CommandContext):
             return refusal
 
     if target in ("user", "channel") and not config.has_workspace:
-        return "Nextcloud mount not configured -- cannot read memory files."
+        return "No workspace is configured -- cannot read memory files."
 
     if target == "user":
         from .storage import read_user_memory_v2
@@ -2811,7 +2811,7 @@ async def cmd_export(ctx: CommandContext):
     user_id, conversation_token, args = ctx.user_id, _room_token(ctx), ctx.args
     mount = config.workspace_path
     if mount is None:
-        return "Nextcloud mount not configured — cannot write export file."
+        return "No workspace is configured — cannot write export file."
 
     # Parse format
     fmt_arg = args.strip().lower()

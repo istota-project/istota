@@ -1201,7 +1201,7 @@ class TestCmdMemory:
     async def test_no_mount_configured(self, make_config):
         config = make_config()
         config.workspace_path = None
-        assert "mount not configured" in await _memory(config, "user")
+        assert "No workspace is configured" in await _memory(config, "user")
 
     async def test_facts_with_few(self, make_config):
         """Small fact sets show all facts inline."""
@@ -1879,7 +1879,7 @@ class TestCmdExport:
         config.workspace_path = None
         with db.get_db(config.db_path) as conn:
             result = await cmd_export(_ctx(config, conn))
-        assert "mount not configured" in result
+        assert "No workspace is configured" in result
 
     async def test_full_export_markdown(self, make_config):
         config = make_config()

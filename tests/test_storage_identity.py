@@ -133,11 +133,20 @@ class TestPromptStorageFramingLocal:
         assert str(tmp_path / "workspace") in prompt
         assert "workspace" in prompt
 
-    def test_has_wider_fs_note(self, tmp_path):
+    def test_has_wider_fs_note_without_a_sandbox(self, tmp_path, monkeypatch):
         # Fixes the transcript's second failure: the bot must know the
         # workspace is its managed area, not the limit of what it can read.
+        # True only of the standalone shape, where no sandbox is in effect.
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
         prompt = self._prompt(tmp_path).lower()
         assert "managed area" in prompt
+
+    def test_no_wider_fs_note_on_a_sandboxed_local_workspace(self, tmp_path, monkeypatch):
+        # The stack's default shape: local storage, and the sandbox binds
+        # `Users/<uid>` alone, so "the rest of the machine" would be false.
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: True)
+        prompt = self._prompt(tmp_path).lower()
+        assert "managed area" not in prompt
 
 
 class TestPromptStorageFramingNextcloud:
@@ -156,7 +165,8 @@ class TestPromptStorageFramingNextcloud:
         assert "Nextcloud" in prompt
         assert str(tmp_path / "mnt") in prompt
 
-    def test_no_wider_fs_note_when_sandboxed_server(self, tmp_path):
+    def test_no_wider_fs_note_when_sandboxed_server(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: True)
         prompt = self._prompt(tmp_path).lower()
         assert "managed area" not in prompt
 

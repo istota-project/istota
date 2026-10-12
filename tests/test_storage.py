@@ -46,7 +46,7 @@ from istota.storage import (
     _migrate_workspace_files,
     _migrate_workspace_to_bot_dir,
     WORKSPACE_README,
-    WORKSPACE_README_EXAMPLE,
+    workspace_readme_example,
     TASKS_FILE_TEMPLATE,
     TASKS_FILE_EXAMPLE,
     HEARTBEAT_EXAMPLE,
@@ -276,7 +276,7 @@ class TestMountOperations:
     def test_examples_contain_documentation(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
         examples_dir = mount_config.workspace_path / "Users" / "alice" / "istota" / "examples"
-        assert (examples_dir / "README.md").read_text() == WORKSPACE_README_EXAMPLE
+        assert (examples_dir / "README.md").read_text() == workspace_readme_example(mount_config)
         assert (examples_dir / "TASKS.md").read_text() == TASKS_FILE_EXAMPLE
         assert (examples_dir / "HEARTBEAT.md").read_text() == HEARTBEAT_EXAMPLE
         assert (examples_dir / "WORKFLOW.md").read_text() == WORKFLOW_EXAMPLE
@@ -287,7 +287,24 @@ class TestMountOperations:
         (examples_dir / "README.md").write_text("old content")
 
         ensure_user_directories_v2(mount_config, "alice")
-        assert (examples_dir / "README.md").read_text() == WORKSPACE_README_EXAMPLE
+        assert (examples_dir / "README.md").read_text() == workspace_readme_example(mount_config)
+
+    def test_the_example_readme_follows_the_storage_mode(self, mount_config, tmp_path):
+        local = workspace_readme_example(mount_config)
+        assert "Files you upload in the web UI land in `inbox/`." in local
+        assert "Nextcloud" not in local
+        mounted = Config(
+            workspace_path=tmp_path / "mount",
+            nextcloud_mount_path=tmp_path / "mount",
+            nextcloud=NextcloudConfig(url="https://cloud.example.test"),
+        )
+        assert "share any of your own Nextcloud folders" in workspace_readme_example(mounted)
+        # A URL alone is a local workspace with Talk: still nothing to share.
+        talk_only = Config(
+            workspace_path=tmp_path / "mount",
+            nextcloud=NextcloudConfig(url="https://cloud.example.test"),
+        )
+        assert workspace_readme_example(talk_only) == local
 
     def test_istota_readme_mentions_examples(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")

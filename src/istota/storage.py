@@ -79,10 +79,23 @@ Configure tasks that run on a cron schedule with results delivered to Talk or em
 Istota saves drafts, summaries, research, and anything else you ask it to \
 produce in this folder. You can also drop files here for Istota to read \
 in future conversations.
-
-Additionally, you can share any of your own Nextcloud folders with Istota \
-for direct access to your files.
 """
+
+# The closing sentence of `examples/README.md`, by storage mode. Under the
+# mount the user can share their own Nextcloud folders with the bot; on a local
+# workspace there is nothing to share into, and uploads arrive through the web.
+_README_EXAMPLE_NEXTCLOUD = (
+    "\nYou can also share any of your own Nextcloud folders with Istota "
+    "for direct access to your files.\n"
+)
+_README_EXAMPLE_LOCAL = "\nFiles you upload in the web UI land in `inbox/`.\n"
+
+
+def workspace_readme_example(config: "Config") -> str:
+    """`examples/README.md` for this install's storage mode."""
+    if config.storage_is_nextcloud:
+        return WORKSPACE_README_EXAMPLE + _README_EXAMPLE_NEXTCLOUD
+    return WORKSPACE_README_EXAMPLE + _README_EXAMPLE_LOCAL
 
 # Examples we have stopped shipping, swept out of `examples/` on the next
 # refresh. `BRIEFINGS.md` was a tombstone: the retirement left it in place to
@@ -1411,8 +1424,8 @@ def write_regular_file(path: Path, text: str) -> bool:
         os.close(fd)
 
     try:
-        # 0o644 because this becomes a file the user reads over Nextcloud;
-        # `atomic_write` applies it to the descriptor rather than the name,
+        # 0o644, the mode every workspace file has (and the one the user reads
+        # it with over Nextcloud, under the mount); `atomic_write` applies it to the descriptor rather than the name,
         # which is what this directory being model-writable requires.
         write_text_atomic(path, text, mode=0o644)
         return True
@@ -2004,7 +2017,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         else:
             examples_dir.mkdir(exist_ok=True)
             examples = {
-                "README.md": WORKSPACE_README_EXAMPLE,
+                "README.md": workspace_readme_example(config),
                 "TASKS.md": TASKS_FILE_EXAMPLE,
                 "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
                 "CRON.md": CRON_EXAMPLE,
@@ -2524,8 +2537,8 @@ def write_channel_memory(
             return False
         memory_path = channel_dir / "CHANNEL.md"
         try:
-            # 0o644: the file is about to become CHANNEL.md, which the user
-            # reads over Nextcloud like any other file in their channel dir.
+            # 0o644: the file is about to become CHANNEL.md, which has the
+            # mode of every other file in the channel dir.
             # `atomic_write` unlinks its staging file on any failure, so no
             # stray dot-file is left sitting in the user's channel directory.
             write_text_atomic(memory_path, content, mode=0o644)

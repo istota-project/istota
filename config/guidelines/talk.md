@@ -22,7 +22,8 @@ To put a file into the conversation itself, rather than telling the user where i
 istota-skill nextcloud talk share-file <token> --path /Users/{user_id}/{BOT_DIR}/radar.png
 ```
 
-- `<token>` is the `Conversation token` from the top of this prompt. `--path` is the Nextcloud path of the file, the same one you wrote it to.
+- `<token>` is the `Conversation token` from the top of this prompt. `--path` is the workspace path of the file, the same one you wrote it to.
+- When the workspace is not the bot's Nextcloud files, the command uploads a copy into Nextcloud and posts that, so a later edit to the file does not reach the posted copy.
 - Talk previews an image in the conversation, so this is how a screenshot, a chart or a rendered diagram gets seen rather than described. Any other file arrives as an attachment.
 - The file is posted as its own message with no text around it. Say what you sent in your reply.
-- A 404 back from this command is about the token, not the file: a room started in the web chat and later connected to Talk has a different token there, and this prompt only carries the first one. Nothing is posted, and retrying with the same token fails the same way. Give the user the file's path instead — it is already in their Nextcloud.
+- A 404 back from this command is about the token, not the file: a room started in the web chat and later connected to Talk has a different token there, and this prompt only carries the first one. Nothing is posted, and retrying with the same token fails the same way. Give the user the file's workspace path instead, and say the post did not go through.

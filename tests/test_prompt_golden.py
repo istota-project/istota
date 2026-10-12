@@ -1458,8 +1458,8 @@ class TestTheStorageBackendDimension:
     def test_the_file_tool_vocabulary_follows_the_backend(self, tmp_path, monkeypatch):
         nextcloud, local = self._pair(tmp_path, monkeypatch)
 
-        assert "Nextcloud files are mounted at" in nextcloud
-        assert "Nextcloud files are mounted at" not in local
+        assert "Your files live in Nextcloud at" in nextcloud
+        assert "Your files live in Nextcloud at" not in local
         assert "Your files live in your workspace at" in local
 
         # `{storage}` in an eager skill body, via `Config.storage_label`.
