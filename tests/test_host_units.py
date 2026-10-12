@@ -723,6 +723,16 @@ class TestTheStackUnit:
         assert unit["Service"]["Type"] == "oneshot"
         assert "docker.service" in unit["Unit"]["Requires"]
 
+    def test_down_outwaits_the_stack_lock(self):
+        """`down` waits up to STACK_LOCK_WAIT for the lock (a config apply may be
+        building an image); systemd's default 90 s stop timeout would kill it
+        first, rather than letting it fail naming the holder."""
+        unit = _unit(HOST / "istota-stack.service")
+        wait = int(re.search(r'^STACK_LOCK_WAIT="\$\{ISTOTA_STACK_LOCK_WAIT:-(\d+)\}"$',
+                             (HOST / "istota-stack").read_text(), re.M).group(1))
+        minutes = re.fullmatch(r"(\d+)min", unit["Service"]["TimeoutStopSec"])
+        assert int(minutes.group(1)) * 60 > wait
+
 
 class TestTheConfigApplier:
     """The web config editor's host half: the web writes a request id to

@@ -14,6 +14,8 @@ Type=oneshot
 RemainAfterExit=yes
 # A first `up` may wait for the daemon service's healthcheck before web starts.
 TimeoutStartSec=15min
+# `down` waits up to 600 s for the stack lock; past that it fails naming the holder.
+TimeoutStopSec=11min
 ExecStart=/usr/local/sbin/istota-stack up
 ExecStop=/usr/local/sbin/istota-stack down
 
