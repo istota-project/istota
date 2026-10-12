@@ -17,6 +17,9 @@
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
+#   istota-stack restore [--date YYYY-MM-DD] [--force]
+#                               the master key (on stdin), the config and the databases
+#                               from the workspace's backups, onto a stack never set up
 #   istota-stack retire-bare-metal --namespace NS [--dry-run]
 #                               remove what the old Ansible role installed, once the stack runs
 #   istota-stack put-files [--dry-run]
@@ -1028,6 +1031,26 @@ cmd_import_bare_metal() {
         "$(main_service)" istota migrate import-bare-metal --source /import "$@"
 }
 
+# `istota migrate restore-workspace` in a one-shot container: the master key
+# from stdin into /data/.secret_key, config.toml and admins from the
+# workspace's Backups/config/, the databases from its snapshots. The local
+# VM's recovery (the Mac's `istota-stack restore`, after `create --no-setup`).
+# The module refuses whatever it would replace that differs; the stack has to
+# be down, as for import-bare-metal, since the daemon's lock is in a /tmp the
+# one-shot does not share.
+cmd_restore() {
+    local running owner=()
+    [ -n "$(env_get "$ENV_FILE" ISTOTA_TAG)" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was restored."
+    if [ -n "$running" ]; then
+        die "the stack is running. Stop it first (\`systemctl stop istota-stack\`); a restore replaces its database."
+    fi
+    # Compose would make a missing bind source root's.
+    if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
+    install -d -m 0750 ${owner[@]+"${owner[@]}"} "$CONFIG_DIR"
+    ISTOTA_CONFIG_READ_ONLY=false oneshot "$(main_service)" istota migrate restore-workspace "$@"
+}
+
 # After a config change: re-render the devbox services, since [devbox] users may
 # have changed, and bring a running stack onto both. `up -d` creates an added
 # user's devbox and recreates the daemon with its socket volumes; `restart` is what
@@ -1353,6 +1376,7 @@ main() {
         setup-code) cmd_setup_code "$@" ;;
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
+        restore) cmd_restore "$@" ;;
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
         put-files) cmd_put_files "$@" ;;
         check-image) cmd_check_image "$@" ;;

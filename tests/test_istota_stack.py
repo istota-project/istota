@@ -69,6 +69,9 @@ case "$args" in
       : > "$vm/setup-done"
     fi
     exit "${STUB_SETUP_RC:-0}" ;;
+  *" migrate restore-workspace"*)
+    cat > "$STUB_CALLS.stdin"
+    exit "${STUB_RESTORE_RC:-0}" ;;
   *" config --services "*)
     if [ -n "${STUB_SERVICES:-}" ]; then printf '%b' "$STUB_SERVICES"; else printf 'daemon\nweb\nnginx\n'; fi
     case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
@@ -833,6 +836,48 @@ class TestImportBareMetal:
         result = fx.run("import-bare-metal", str(tmp_path / "nowhere"), STUB_STACK_DOWN="1")
         assert result.returncode == 1
         assert fx.docker_calls() == []
+
+
+class TestRestore:
+    """The local VM's recovery, VM half: the master key on stdin, the config and
+    the databases from the workspace's backups, in a one-shot container with the
+    stack down (`istota migrate restore-workspace`)."""
+
+    KEY = "5e" * 32
+
+    def _restore(self, fx: Fixture, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(SCRIPT), "restore", *args], capture_output=True, text=True,
+            input=self.KEY + "\n", env={**fx.env, **extra_env}, timeout=60,
+        )
+
+    def test_it_refuses_while_the_stack_is_up(self, fx):
+        result = self._restore(fx)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "running" in result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_the_key_reaches_the_one_shot_on_stdin_alone(self, fx):
+        result = self._restore(fx, "--date", "2026-10-10", STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert calls[-1].endswith(
+            "run --rm --no-deps -T --entrypoint istota-drop "
+            "daemon istota migrate restore-workspace --date 2026-10-10"
+        ), calls
+        assert Path(f"{fx.calls}.stdin").read_text() == self.KEY + "\n"
+        assert not any(self.KEY in call for call in calls)
+        assert (fx.stack / "config").is_dir()
+
+    def test_its_exit_status_comes_back(self, fx):
+        result = self._restore(fx, STUB_STACK_DOWN="1", STUB_RESTORE_RC="2")
+        assert result.returncode == 2, result.stdout + result.stderr
+
+    def test_without_an_image_nothing_runs(self, fx):
+        (fx.stack / ".env").write_text("COMPOSE_PROFILES=\n")
+        result = self._restore(fx, STUB_STACK_DOWN="1")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls())
 
 
 class TestExec:

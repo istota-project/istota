@@ -4714,6 +4714,10 @@ def main():
         from istota.maintenance import workspace_paths
 
         sys.exit(workspace_paths.main(argv[2:]))
+    if argv[:2] == ["migrate", "restore-workspace"]:
+        from istota.maintenance import workspace_restore
+
+        sys.exit(workspace_restore.main(argv[2:]))
     if argv[:2] == ["migrate", "role-vars"]:
         from istota.maintenance import role_vars
 
@@ -4775,6 +4779,10 @@ def main():
     migrate_subparsers.add_parser(
         "workspace-paths",
         help="Rewrite a migrated install's old host paths in users' bot directories; see --help",
+    )
+    migrate_subparsers.add_parser(
+        "restore-workspace",
+        help="Restore the key (stdin), config and databases from the workspace's backups onto a new stack; see --help",
     )
     migrate_subparsers.add_parser(
         "role-vars",

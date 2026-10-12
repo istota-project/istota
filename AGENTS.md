@@ -166,6 +166,7 @@ src/istota/
 │   ├── db_relocate.py    # One-time migrator: per-user module DBs from the mount → local disk, DELETE→WAL
 │   ├── db_backup.py      # Timed online-backup snapshot of local DBs to dated dirs on the mount; retention, row-count collapse guard, 0700/0600 → maintenance.md
 │   ├── db_restore.py     # Restore a cold snapshot back to local disk (newest good, or `--date`); refuses an empty snapshot without `--force` → maintenance.md
+│   ├── workspace_restore.py  # `istota migrate restore-workspace`: master key (stdin), config copy and databases from the workspace's backups onto a new stack → maintenance.md
 │   ├── repos_relocate.py # One-shot migrator: `developer.repos_dir` → per-user subtrees
 │   ├── workspace_paths.py # A migrated install's old host paths in users' bot directories, rewritten with backups → maintenance.md
 │   ├── room_relocate.py, room_mount_reconcile.py  # The room-identity migration and its mount sweep
