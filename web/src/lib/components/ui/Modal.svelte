@@ -32,7 +32,8 @@
     footer?: Snippet;
     width?: string;
     /**
-     * Panel height. `auto` (the default) sizes to the content, capped by the
+     * Panel height. Viewers fill the safe viewport; other dialogs default to
+     * `auto`, which sizes to the content, capped by the
      * viewport. A dialog whose content is a list rather than a form wants the
      * height it can have — pass `100dvh` and the panel's own max-height caps
      * it to the safe box.
@@ -55,7 +56,7 @@
     actions,
     navigation,
     bodyKey,
-    height = 'auto',
+    height,
   }: Props = $props();
 
   let bodyEl: HTMLDivElement | undefined = $state();
@@ -159,7 +160,8 @@
         : variant === 'palette'
           ? 'ui-modal-content ui-palette-content'
           : 'ui-modal-content'}
-      style="--modal-width: {width ?? (viewer ? '720px' : '420px')}; --modal-height: {height}"
+      style="--modal-width: {width ?? (viewer ? '960px' : '420px')}; --modal-height: {height ??
+        (viewer ? '100dvh' : 'auto')}"
       onkeydown={handleKeydown}
       {onOpenAutoFocus}
       escapeKeydownBehavior={dismissible ? 'close' : 'ignore'}
@@ -344,6 +346,7 @@
     gap: var(--space-2);
   }
   .ui-viewer-panel {
+    flex: 1;
     min-height: 0;
     min-width: 0;
     max-height: calc(100dvh - 2rem - var(--safe-top) - var(--safe-bottom));
@@ -388,6 +391,7 @@
     max-width: 100%;
   }
   .ui-viewer-panel :global(.ui-modal-body) {
+    flex: 1;
     padding: var(--space-2) var(--space-3);
     margin: 0;
   }

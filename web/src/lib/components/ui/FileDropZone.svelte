@@ -4,7 +4,10 @@
 
   interface Props {
     /** The picked file, bindable. `null` shows the prompt. */
-    file: File | null;
+    file?: File | null;
+    overlay?: boolean;
+    disabled?: boolean;
+    onFiles?: (files: File[]) => void;
     /** `accept` for the underlying picker. */
     accept?: string;
     /** Runs after the file is cleared — for whatever the page derived from it. */
@@ -17,6 +20,9 @@
     file = $bindable(null),
     accept = 'image/*,application/pdf',
     onClear,
+    overlay = false,
+    disabled = false,
+    onFiles,
     children,
   }: Props = $props();
 
@@ -26,16 +32,29 @@
     file = (e.target as HTMLInputElement).files?.[0] ?? null;
   }
 
+  let dragDepth = $state(0);
   function handleDrop(e: DragEvent) {
     e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (f) file = f;
+    dragDepth = 0;
+    if (disabled) return;
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (onFiles) onFiles(files);
+    else if (files[0]) file = files[0];
+  }
+  function dragEnter(e: DragEvent) {
+    if (!disabled && e.dataTransfer?.types.includes('Files')) dragDepth++;
   }
 
   // Image paste only. A page that also takes pasted *text* (the immunization
   // list) handles that on its own textarea, so this must not swallow the event
   // when the clipboard carries no file.
   function handlePaste(e: ClipboardEvent) {
+    if (disabled) return;
+    if (onFiles && e.clipboardData?.files.length) {
+      e.preventDefault();
+      onFiles(Array.from(e.clipboardData.files));
+      return;
+    }
     const f = e.clipboardData?.files?.[0];
     if (f) {
       e.preventDefault();
@@ -63,12 +82,18 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="dropzone"
+  class:overlay
+  ondragenter={dragEnter}
+  ondragleave={() => (dragDepth = Math.max(0, dragDepth - 1))}
   ondragover={(e) => e.preventDefault()}
   ondrop={handleDrop}
   onpaste={handlePaste}
   role="presentation"
 >
-  {#if file}
+  {#if overlay}
+    {@render children()}
+    {#if dragDepth > 0 && !disabled}<div class="drop-overlay">Drop files to upload</div>{/if}
+  {:else if file}
     <div class="picked">
       {file.name}
       <span class="caption">({Math.round(file.size / 1024)} KB)</span>
@@ -91,10 +116,32 @@
        sides on a phone, putting the button outside the dashed border. `hidden`
        rather than a class, so the input leaves the a11y tree with it: the
        button is the affordance, and .click() reaches it either way. -->
-  <input bind:this={fileInput} type="file" {accept} onchange={pickFile} hidden />
+  {#if !overlay}<input bind:this={fileInput} type="file" {accept} onchange={pickFile} hidden />{/if}
 </div>
 
 <style>
+  .dropzone.overlay {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    text-align: initial;
+    gap: 0;
+  }
+  .drop-overlay {
+    position: absolute;
+    inset: var(--space-2);
+    display: grid;
+    place-items: center;
+    border: 2px dashed var(--accent);
+    border-radius: var(--radius-card);
+    background: var(--surface-overlay);
+    color: var(--text-primary);
+    pointer-events: none;
+  }
+
   .dropzone {
     border: 2px dashed var(--border-default);
     border-radius: var(--radius-card);

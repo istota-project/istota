@@ -14357,3 +14357,37 @@ def clear_whatsapp_pairing(conn: sqlite3.Connection) -> bool:
         (sql_datetime_now(),),
     )
     return cur.rowcount > 0
+
+
+def list_pins(conn: sqlite3.Connection, user_id: str) -> list[dict]:
+    return [dict(row) for row in conn.execute(
+        "SELECT * FROM workspace_pins WHERE user_id = ? ORDER BY id", (user_id,),
+    )]
+
+
+def add_pin(
+    conn: sqlite3.Connection, user_id: str, provider: str, ref: str, name: str,
+    mime_type: str | None = None, web_url: str | None = None,
+) -> dict | None:
+    """Upsert a pin, or return None at the user's limit.
+
+    The count and write share one SQLite statement, so concurrent writers
+    cannot both claim the last slot. An existing pin can still be updated.
+    """
+    row = conn.execute(
+        """INSERT INTO workspace_pins (user_id, provider, ref, name, mime_type, web_url)
+        SELECT ?, ?, ?, ?, ?, ?
+        WHERE (SELECT COUNT(*) FROM workspace_pins WHERE user_id = ?) < 50
+           OR EXISTS (SELECT 1 FROM workspace_pins WHERE user_id = ? AND provider = ? AND ref = ?)
+        ON CONFLICT(user_id, provider, ref) DO UPDATE SET
+            name = excluded.name, mime_type = excluded.mime_type, web_url = excluded.web_url
+        RETURNING *""",
+        (user_id, provider, ref, name, mime_type, web_url, user_id, user_id, provider, ref),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_pin(conn: sqlite3.Connection, user_id: str, pin_id: int) -> bool:
+    return conn.execute(
+        "DELETE FROM workspace_pins WHERE user_id = ? AND id = ?", (user_id, pin_id),
+    ).rowcount > 0

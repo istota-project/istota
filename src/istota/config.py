@@ -1237,6 +1237,11 @@ def normalize_auth_methods(raw: object) -> list[str]:
 
 
 @dataclass
+class WorkspaceWebConfig:
+    max_upload_mb: int = 100
+
+
+@dataclass
 class WebConfig:
     """Authenticated web interface configuration.
 
@@ -1248,6 +1253,7 @@ class WebConfig:
     # Enabled login methods. "none" is exclusive and requires the direct
     # local launcher on loopback. Overridable by ISTOTA_WEB_AUTH.
     auth: list[str] = field(default_factory=lambda: ["nextcloud"])
+    workspace: WorkspaceWebConfig = field(default_factory=WorkspaceWebConfig)
     auth_enrol_ttl_hours: int = 168
     auth_reset_ttl_hours: int = 1
     auth_sign_in_code_ttl_minutes: int = 10

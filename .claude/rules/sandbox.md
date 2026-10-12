@@ -173,3 +173,7 @@ Covers `get`, both `run` forms, raw socket clients, and the public manifest `cre
 
 
 Browser secret capture uses `read_secret` (with `read_recovery` as a compatibility alias), the element's own HTTPS frame origin and the private credential channel. `vault_secret_capture` and the stdin setters share `_store_captured_secret`: write budget, isolation, snapshot/grant reach, shape validation, then an audited generated-credential write. Captured values enter browser redactions before a store refusal can return. Recovery formats and spent indices live in `recovery_code_state`; export prefixes spent lines with `(used) `. The dependency-free `lib/secret_shapes.py` receives the existing TOTP parser from its caller, because `lib/` leaves cannot import each other.
+
+## Workspace reach projection
+
+`sandbox.plan.user_data_mounts` is the shared derivation of home, Talk, channel, group and linked-resource binds. `build_mount_plan` inserts those mounts in their original positions; `workspace.reach.place_reach` uses the same pure function to describe private, shared-member and restricted reach without constructing a whole plan. Web browsing re-derives current places and never treats Talk as a browsable root. Workspace pins do not grant access: creation validates the current viewer roots and prompt inclusion follows ambient memory, absent on shared-room member and guest turns, with the existing email-thread exception.

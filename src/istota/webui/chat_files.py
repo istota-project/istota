@@ -13,7 +13,9 @@ import bisect
 import html
 import logging
 import os
+import posixpath
 import re
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
@@ -34,13 +36,7 @@ class ChatFileError(Exception):
 
 
 def chat_file_workspace(config: "Config | None", username: str) -> Path:
-    """On-disk root the caller's downloads are confined to.
-
-    Deliberately the user's own workspace with no admin bypass. The endpoint
-    exists to hand someone their own files; an admin who needs to read
-    elsewhere has the sandbox and the CLI, and widening this would make the
-    single most directly-reachable read path on the web app the widest one.
-    """
+    """Home root for relative paths, with no admin bypass."""
     root = config.workspace_root(username) if config else None
     if root is None:
         raise ChatFileError(
@@ -51,20 +47,30 @@ def chat_file_workspace(config: "Config | None", username: str) -> Path:
     return root
 
 
-def resolve_chat_file(config: "Config | None", username: str, path: str) -> Path:
-    """Map a caller-supplied workspace path to a real file, or refuse.
+def servable_roots(
+    config: "Config", conn: sqlite3.Connection, username: str,
+) -> list[tuple[str, Path]]:
+    """Viewer paths and resolved roots from the user's current places."""
+    from istota.workspace.places import list_places
 
-    Two independent checks, because they catch different escapes: the lexical
-    scope check (shared with the skill CLI, so the browser and the model are
-    held to one rule) rejects ``..`` and absolute paths outside the workspace,
-    and the realpath check afterwards rejects a symlink *inside* the workspace
-    that points out of it — which no amount of string normalization can see.
+    return [
+        (place.view_root, place.root.resolve())
+        for place in list_places(config, conn, username)
+        if place.browsable and place.view_root is not None and place.root is not None
+    ]
+
+
+def resolve_chat_file(
+    config: "Config | None", username: str, path: str,
+    *, roots: list[tuple[str, Path]] | None = None,
+) -> Path:
+    """Match a workspace path to its most specific root, then confine realpath.
+
+    Relative paths retain their home-directory meaning. Absolute viewer paths
+    can name any currently readable place; no administrator bypass applies.
+    Callers checking several links may share roots for that one check.
     """
-    from istota.nextcloud._http import (
-        PathScopeError,
-        resolve_scoped_path,
-        workspace_root as nc_workspace_root,
-    )
+    from istota import db
 
     raw = (path or "").strip()
     if not raw:
@@ -72,17 +78,21 @@ def resolve_chat_file(config: "Config | None", username: str, path: str) -> Path
     if "\x00" in raw:
         raise ChatFileError(400, "path is not a valid filename")
 
-    try:
-        # is_admin=False always — see chat_file_workspace.
-        scoped = resolve_scoped_path(raw, username, is_admin=False)
-    except PathScopeError as e:
-        raise ChatFileError(403, str(e)) from e
-
-    root = chat_file_workspace(config, username)
-    # Same helper the scope check anchors on, so the Nextcloud-path prefix and
-    # the on-disk root can't drift apart.
-    relative = scoped[len(nc_workspace_root(username)):].lstrip("/")
-    if not relative:
+    chat_file_workspace(config, username)
+    if roots is None:
+        with db.get_db(config.db_path) as conn:
+            roots = servable_roots(config, conn, username)
+    candidate = raw if raw.startswith("/") else f"/Users/{username}/{raw}"
+    scoped = posixpath.normpath(candidate)
+    matching = [
+        (view_root, root) for view_root, root in roots
+        if scoped == view_root or scoped.startswith(view_root.rstrip("/") + "/")
+    ]
+    if not matching:
+        raise ChatFileError(403, "path is outside your workspace")
+    view_root, root = max(matching, key=lambda item: len(item[0]))
+    relative = scoped[len(view_root):].lstrip("/")
+    if not relative and root.is_dir():
         raise ChatFileError(400, "path names the workspace itself, not a file")
 
     real_root = os.path.realpath(root)
@@ -274,7 +284,7 @@ def check_chat_file_links(
         if path is None:
             return match.group(0)
         try:
-            resolve_chat_file(config, user_id, path)
+            resolve_chat_file(config, user_id, path, roots=roots)
             return match.group(0)
         except ChatFileError as e:
             reason = _REASONS.get(e.status)
@@ -297,7 +307,14 @@ def check_chat_file_links(
         return f"{label} {note}" if label else note
 
     try:
+        from istota import db
+
+        chat_file_workspace(config, user_id)
+        with db.get_db(config.db_path) as conn:
+            roots = servable_roots(config, conn, user_id)
         return _CHAT_FILE_LINK_RE.sub(_replace, text)
+    except ChatFileError:
+        return text
     except Exception:
         logger.exception("chat file link check failed for task %s", task_id)
         return text

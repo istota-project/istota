@@ -1050,7 +1050,9 @@ def contained_group_dir(groups_root: Path, group_id: str) -> Path | None:
     return resolved if resolved == expected else None
 
 
-def open_overlay_dir(user_root: Path, *parts: str) -> int | None:
+def open_overlay_dir(
+    user_root: Path, *parts: str, raise_mount_errors: bool = False,
+) -> int | None:
     """An fd on ``{user_root}/{parts...}``, or None if any component below the
     root is not a plain directory reached directly from the one above it.
 
@@ -1103,9 +1105,10 @@ def open_overlay_dir(user_root: Path, *parts: str) -> int | None:
     path together or returns neither — a caller cannot take one and forget the
     other, which is exactly how four of five callers came to be wrong.
 
-    The caller closes the fd. Raises nothing an ordinary filesystem produces:
-    every ``OSError`` is a None. A platform without ``dir_fd`` support would
-    raise ``NotImplementedError``, which Linux and macOS both rule out.
+    The caller closes the fd. By default every ``OSError`` is a None.
+    ``raise_mount_errors`` preserves ENOTCONN/EIO for callers reporting a
+    disconnected mount. A platform without ``dir_fd`` support would raise
+    ``NotImplementedError``, which Linux and macOS both rule out.
     """
     # Each part must be one ordinary component. A `/` would have its own
     # interior walked by a single `os.open`, where `O_NOFOLLOW` covers only the
@@ -1118,7 +1121,9 @@ def open_overlay_dir(user_root: Path, *parts: str) -> int | None:
             return None
     try:
         fd = os.open(user_root, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError:
+    except OSError as exc:
+        if raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}:
+            raise
         return None
     try:
         for part in parts:
@@ -1127,8 +1132,10 @@ def open_overlay_dir(user_root: Path, *parts: str) -> int | None:
             )
             os.close(fd)
             fd = nxt
-    except OSError:
+    except OSError as exc:
         os.close(fd)
+        if raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}:
+            raise
         return None
     return fd
 
