@@ -17,7 +17,10 @@ from ..brain import primary_brain_unavailable, report_brain_result
 from ..config import Config
 from istota.usage.telemetry import SYSTEM_USER_ID
 from ..storage import (
+    _contained_under_user_root,
     _get_mount_path,
+    create_file_if_absent,
+    ensure_channel_directories,
     open_user_skill_overlays,
     resolve_user_config_dir,
     get_user_memories_path,
@@ -420,23 +423,37 @@ def _window_date_str(
     return midpoint.astimezone(tz).strftime("%Y-%m-%d")
 
 
-def _append_dated_memory(path: Path, new_text: str) -> str:
+def _append_dated_memory(path: Path, new_text: str) -> str | None:
     """Add ``new_text`` to a dated memory file, keeping what is already there.
 
     Returns the file's full text after the write, which is what callers index —
     ``index_file`` replaces every chunk for a path, so indexing only the new
     part would drop the earlier run's bullets from recall while leaving them on
-    disk.
+    disk. None when the file could not be read or written: a link, a FIFO or a
+    file that is not UTF-8 is refused rather than replaced. Containment of the
+    directory is the caller's.
     """
-    existing = ""
-    if path.exists():
-        try:
-            existing = path.read_text()
-        except OSError as e:
-            logger.warning("Could not read %s before appending: %s", path, e)
-    file_text = join_dated_memory(existing, new_text)
-    path.write_text(file_text)
+    existing, reason = read_regular_file(path)
+    if reason is not None:
+        logger.warning("dated_memory_read_refused path=%s reason=%s", path.name, reason)
+        return None
+    file_text = join_dated_memory(existing or "", new_text)
+    if not write_regular_file(path, file_text):
+        return None
     return file_text
+
+
+def _user_dir_for_write(config: Config, user_id: str, path: Path) -> Path | None:
+    """``path`` created and returned, or None when it leads out of the user's tree."""
+    if _contained_under_user_root(config, user_id, path) is None:
+        logger.warning("sleep_cycle_dir_refused user=%s dir=%s", user_id, path.name)
+        return None
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("sleep_cycle_dir_refused user=%s dir=%s errno=%s", user_id, path.name, e.errno)
+        return None
+    return path
 
 
 def join_dated_memory(existing: str, new_text: str) -> str:
@@ -1092,8 +1109,11 @@ def process_user_sleep_cycle(
         _update_state(config, conn, user_id, last_task_id)
         return False
 
-    context_dir = _get_mount_path(config, get_user_memories_path(user_id))
-    context_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = _user_dir_for_write(
+        config, user_id, _get_mount_path(config, get_user_memories_path(user_id)),
+    )
+    if context_dir is None:
+        return False
 
     memory_file = context_dir / f"{date_str}.md"
     # Append when the day's file already exists rather than replacing it. Two
@@ -1104,6 +1124,8 @@ def process_user_sleep_cycle(
     # therefore loses a day of memories outright, and `index_file` replaces the
     # chunks for the path, so it would go from recall too (ISSUE-470).
     file_text = _append_dated_memory(memory_file, memories_text)
+    if file_text is None:
+        return False
     logger.info("Wrote dated memory file for %s: %s (%d chars)", user_id, memory_file.name, len(file_text))
 
     # Insert extracted facts into knowledge graph (non-critical). While we're
@@ -2022,8 +2044,12 @@ def _process_extracted_playbooks(
         logger.warning("Playbooks require mount mode, skipping writes for %s", user_id)
         return
 
-    pb_dir = _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name))
-    pb_dir.mkdir(parents=True, exist_ok=True)
+    pb_dir = _user_dir_for_write(
+        config, user_id,
+        _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name)),
+    )
+    if pb_dir is None:
+        return
 
     index_enabled = (
         config.memory_search.enabled and config.memory_search.auto_index_memory_files
@@ -2049,7 +2075,8 @@ def _process_extracted_playbooks(
                 except Exception as e:
                     logger.debug("Pinned playbook reindex failed for %s: %s", pb_path.name, e)
             continue
-        pb_path.write_text(file_text)
+        if not write_regular_file(pb_path, file_text):
+            continue
         logger.info(
             "playbook_written slug=%s ref=%s updated=%s user=%s",
             slug, pb.get("ref") or pb.get("ref_task_id") or "", existed, user_id,
@@ -2099,6 +2126,11 @@ def cleanup_old_playbooks(
     pb_dir = _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name))
     if not pb_dir.exists():
         return 0
+    # This path touches and deletes files, so a `playbooks/` linked out of the
+    # user's tree is refused rather than pruned.
+    if _contained_under_user_root(config, user_id, pb_dir) is None:
+        logger.warning("playbook_retention_refused user=%s reason=outside_user_tree", user_id)
+        return 0
 
     now_ts = datetime.now(tz=ZoneInfo("UTC")).timestamp()
 
@@ -2134,12 +2166,12 @@ def cleanup_old_playbooks(
                 unrefreshed,
             )
             return 0
-        try:
-            sentinel.write_text(datetime.now(tz=ZoneInfo("UTC")).date().isoformat())
-        except OSError as e:
-            # Same reasoning in the other direction: without the sentinel the
-            # next cycle re-grandfathers, which is the safe way to fail.
-            logger.warning("playbook retention sentinel write failed: %s", e)
+        # Same reasoning in the other direction: without the sentinel the next
+        # cycle re-grandfathers, which is the safe way to fail. The helper
+        # logs its own refusal and never writes through a link.
+        create_file_if_absent(
+            sentinel, datetime.now(tz=ZoneInfo("UTC")).date().isoformat(),
+        )
         logger.info("playbook_retention_grandfathered user=%s", user_id)
         return 0
 
@@ -2448,12 +2480,17 @@ def process_channel_sleep_cycle(
         _update_channel_state(config, conn, conversation_token, last_task_id)
         return False
 
+    # Any task in the room can plant a link in `Channels/<token>`, so the
+    # directories are made by the helper that refuses one at every level.
+    if not ensure_channel_directories(config, conversation_token):
+        return False
     memories_dir = _get_mount_path(config, get_channel_memories_path(conversation_token))
-    memories_dir.mkdir(parents=True, exist_ok=True)
 
     memory_file = memories_dir / f"{date_str}.md"
     # Append rather than replace, for the reason the user cycle documents.
     file_text = _append_dated_memory(memory_file, output)
+    if file_text is None:
+        return False
     logger.info(
         "Wrote channel memory file for %s: %s (%d chars)",
         conversation_token,

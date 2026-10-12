@@ -1967,3 +1967,37 @@ class TestNoWriteLockAcrossTheBrainCall:
             sleep_cycle_module.curate_user_memory(mount_config, "alice", conn=conn)
         monkeypatch.setattr(db, "get_db", real_get_db)
         assert read_lint_seen(mount_config, "alice") != {}
+
+
+class TestDatedMemoryWritesRefuseLinks:
+    """Local-workspace spec, stage 3: the dated-memory writer refuses a link at
+    the file and the user's `memories/` must stay in the user's tree."""
+
+    def test_a_symlink_at_the_dated_file_is_not_written_through(self, tmp_path):
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        path = tmp_path / "2026-09-06.md"
+        path.symlink_to(victim)
+
+        assert _append_dated_memory(path, "- One\n") is None
+        assert victim.read_text() == "keep"
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_memories_dir_linked_outside_the_user_tree_gets_no_write(
+        self, mock_run, mount_config, db_path, tmp_path,
+    ):
+        mock_run.return_value = (True, "- Discussed project Alpha (2026-01-28)\n")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        user = mount_config.workspace_path / "Users" / "alice"
+        user.mkdir(parents=True)
+        (user / "memories").symlink_to(outside, target_is_directory=True)
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Tell me about project Alpha", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Going well.")
+            result = process_user_sleep_cycle(mount_config, conn, "alice")
+
+        assert result is False
+        assert list(outside.iterdir()) == []

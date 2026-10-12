@@ -186,7 +186,7 @@ from .transport.registry import (
 from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
 from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
-from .storage import BOT_USER_BASE, ensure_user_directories_v2
+from .storage import BOT_USER_BASE, ensure_user_directories_v2, ensure_workspace_roots
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
 # names so existing tests and call-sites that import them from this module
@@ -10008,12 +10008,16 @@ def build_interval_gates(
             one_shot_on_error=None,
         ),
         # Before the TASKS.md poll below, so the files are in place when it
-        # walks them.
+        # walks them. Mount only: on a local workspace nothing a user shares
+        # in Nextcloud appears in the tree, so a pass is one wasted PROPFIND
+        # per root entry.
         IntervalGate(
             name="shared-files",
             run=_shared_files,
             field="shared_file_check_interval",
-            enabled=lambda c: bool(c.scheduler.shared_file_check_interval),
+            enabled=lambda c: (
+                bool(c.scheduler.shared_file_check_interval) and c.storage_is_nextcloud
+            ),
             on_error="Error organizing shared files: %s",
             one_shot=True,
             one_shot_on_error="Error organizing shared files: %s",
@@ -10900,6 +10904,10 @@ def run_daemon(
         logger.warning("User config hydration failed: %s", e)
 
     # Ensure user directories exist for all configured users (runs migration + README seeding)
+    try:
+        ensure_workspace_roots(config)
+    except Exception as e:
+        logger.warning("Failed to ensure workspace roots: %s", e)
     for user_id in config.users:
         try:
             ensure_user_directories_v2(config, user_id)

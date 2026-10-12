@@ -1364,3 +1364,212 @@ class TestChannelAndDatedMemoryReads:
         today = datetime.now().strftime("%Y-%m-%d")
         (memories / f"{today}.md").write_text("- had coffee")
         assert "- had coffee" in read_dated_memories(mount_config, "alice")
+
+
+class TestWorkspaceTreeWriters:
+    """Local-workspace spec, stage 3: the tree at boot, and the writers into
+    `Channels/<token>` and `inbox/` that used to follow a planted link."""
+
+    @pytest.fixture
+    def mount_config(self, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        return Config(workspace_path=mount)
+
+    def test_the_roots_are_created_at_boot(self, mount_config):
+        from istota.storage import ensure_workspace_roots
+
+        assert ensure_workspace_roots(mount_config) is True
+        assert ensure_workspace_roots(mount_config) is True
+        for name in ("Users", "Channels", "Groups"):
+            assert (mount_config.workspace_path / name).is_dir()
+
+    def test_no_workspace_creates_no_roots(self):
+        from istota.storage import ensure_workspace_roots
+
+        assert ensure_workspace_roots(Config()) is False
+
+    def test_a_symlinked_root_is_refused_and_not_followed(self, mount_config, tmp_path):
+        from istota.storage import ensure_workspace_roots
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (mount_config.workspace_path / "Groups").symlink_to(outside, target_is_directory=True)
+
+        assert ensure_workspace_roots(mount_config) is False
+        assert (mount_config.workspace_path / "Channels").is_dir()
+        assert list(outside.iterdir()) == []
+
+    def test_a_symlinked_token_dir_is_refused(self, mount_config, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        channels = mount_config.workspace_path / "Channels"
+        channels.mkdir()
+        (channels / "room1").symlink_to(outside, target_is_directory=True)
+
+        assert ensure_channel_directories(mount_config, "room1") is False
+        assert list(outside.iterdir()) == []
+
+    def test_a_symlinked_memories_dir_is_refused(self, mount_config, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        room = mount_config.workspace_path / "Channels" / "room1"
+        room.mkdir(parents=True)
+        (room / "memories").symlink_to(outside, target_is_directory=True)
+
+        assert ensure_channel_directories(mount_config, "room1") is False
+        assert list(outside.iterdir()) == []
+
+    def test_the_legacy_migration_does_not_follow_a_link_at_the_old_file(
+        self, mount_config, tmp_path,
+    ):
+        secret = tmp_path / "secret"
+        secret.write_text("TOP SECRET TOKEN")
+        context = mount_config.workspace_path / "Channels" / "room1" / "context"
+        context.mkdir(parents=True)
+        (context / "memory.md").symlink_to(secret)
+
+        ensure_channel_directories(mount_config, "room1")
+
+        assert not (context.parent / "CHANNEL.md").exists()
+
+    def test_the_legacy_migration_does_not_follow_a_linked_context_dir(
+        self, mount_config, tmp_path,
+    ):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "memory.md").write_text("TOP SECRET TOKEN")
+        room = mount_config.workspace_path / "Channels" / "room1"
+        room.mkdir(parents=True)
+        (room / "context").symlink_to(outside, target_is_directory=True)
+
+        ensure_channel_directories(mount_config, "room1")
+
+        assert not (room / "CHANNEL.md").exists()
+
+    def test_the_legacy_migration_does_not_write_through_a_dangling_link(
+        self, mount_config, tmp_path,
+    ):
+        victim = tmp_path / "victim"
+        room = mount_config.workspace_path / "Channels" / "room1"
+        (room / "context").mkdir(parents=True)
+        (room / "context" / "memory.md").write_text("- old notes")
+        (room / "CHANNEL.md").symlink_to(victim)
+
+        ensure_channel_directories(mount_config, "room1")
+
+        assert not victim.exists()
+
+    def test_the_channel_template_does_not_write_through_a_dangling_link(
+        self, mount_config, tmp_path,
+    ):
+        victim = tmp_path / "victim"
+        room = mount_config.workspace_path / "Channels" / "room1"
+        room.mkdir(parents=True)
+        (room / "CHANNEL.md").symlink_to(victim)
+
+        assert init_channel_memory(mount_config, "room1") is False
+        assert not victim.exists()
+
+    def test_the_channel_template_refuses_a_symlinked_token_dir(
+        self, mount_config, tmp_path,
+    ):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        channels = mount_config.workspace_path / "Channels"
+        channels.mkdir()
+        (channels / "room1").symlink_to(outside, target_is_directory=True)
+
+        assert init_channel_memory(mount_config, "room1") is False
+        assert list(outside.iterdir()) == []
+
+    def test_the_channel_template_keeps_an_existing_file(self, mount_config):
+        room = mount_config.workspace_path / "Channels" / "room1"
+        room.mkdir(parents=True)
+        (room / "CHANNEL.md").write_text("- our notes")
+
+        init_channel_memory(mount_config, "room1")
+
+        assert (room / "CHANNEL.md").read_text() == "- our notes"
+
+    def test_a_second_inbox_upload_of_one_name_is_numbered(self, mount_config, tmp_path):
+        ensure_user_directories_v2(mount_config, "alice")
+        first = tmp_path / "first.txt"
+        first.write_text("first")
+        second = tmp_path / "second.txt"
+        second.write_text("second")
+
+        a = upload_file_to_inbox_v2(mount_config, "alice", first, "doc.txt")
+        b = upload_file_to_inbox_v2(mount_config, "alice", second, "doc.txt")
+
+        inbox = mount_config.workspace_path / "Users" / "alice" / "inbox"
+        assert a == "/Users/alice/inbox/doc.txt"
+        assert b == "/Users/alice/inbox/doc (2).txt"
+        assert (inbox / "doc.txt").read_text() == "first"
+        assert (inbox / "doc (2).txt").read_text() == "second"
+
+    def test_the_inbox_is_created_when_missing(self, mount_config, tmp_path):
+        src = tmp_path / "doc.txt"
+        src.write_text("contents")
+
+        assert upload_file_to_inbox_v2(mount_config, "alice", src) == "/Users/alice/inbox/doc.txt"
+
+    def test_a_symlinked_inbox_is_refused(self, mount_config, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        user = mount_config.workspace_path / "Users" / "alice"
+        user.mkdir(parents=True)
+        (user / "inbox").symlink_to(outside, target_is_directory=True)
+        src = tmp_path / "doc.txt"
+        src.write_text("contents")
+
+        assert upload_file_to_inbox_v2(mount_config, "alice", src) is None
+        assert list(outside.iterdir()) == []
+
+    def test_a_dangling_link_at_the_inbox_name_is_not_written_through(
+        self, mount_config, tmp_path,
+    ):
+        victim = tmp_path / "victim"
+        inbox = mount_config.workspace_path / "Users" / "alice" / "inbox"
+        inbox.mkdir(parents=True)
+        (inbox / "doc.txt").symlink_to(victim)
+        src = tmp_path / "doc.txt"
+        src.write_text("contents")
+
+        result = upload_file_to_inbox_v2(mount_config, "alice", src)
+
+        assert result == "/Users/alice/inbox/doc (2).txt"
+        assert not victim.exists()
+
+    def test_an_unscopable_user_gets_no_upload(self, mount_config, tmp_path):
+        src = tmp_path / "doc.txt"
+        src.write_text("contents")
+
+        assert upload_file_to_inbox_v2(mount_config, "..", src) is None
+        assert not (mount_config.workspace_path / "inbox").exists()
+
+
+class TestChannelMemoryWriteContainment:
+    """Local-workspace spec, stage 3 (writer survey): the web save's writer
+    must not follow a link planted at `Channels/<token>`."""
+
+    @pytest.fixture
+    def mount_config(self, tmp_path):
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        return Config(workspace_path=mount)
+
+    def test_a_symlinked_token_dir_gets_no_write(self, mount_config, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        channels = mount_config.workspace_path / "Channels"
+        channels.mkdir()
+        (channels / "room1").symlink_to(outside, target_is_directory=True)
+
+        assert write_channel_memory(mount_config, "room1", "notes") is False
+        assert list(outside.iterdir()) == []
+
+    def test_an_ordinary_room_is_written(self, mount_config):
+        assert write_channel_memory(mount_config, "room1", "notes") is True
+        path = mount_config.workspace_path / "Channels" / "room1" / "CHANNEL.md"
+        assert path.read_text() == "notes"

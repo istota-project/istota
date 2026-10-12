@@ -131,8 +131,9 @@ def bootstrap_checks(config: Config) -> None:
         ) from exc
 
     # Seed workspace directories for every configured user (idempotent).
-    from .storage import ensure_user_directories_v2
+    from .storage import ensure_user_directories_v2, ensure_workspace_roots
 
+    ensure_workspace_roots(config)
     for user_id in config.users:
         try:
             ensure_user_directories_v2(config, user_id)

@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import logging
+import os
 import re
 import signal
 import sqlite3
@@ -10,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 
 
 from typing import TYPE_CHECKING
@@ -2799,6 +2801,10 @@ def _format_history_text(
     return "\n".join(lines).rstrip()
 
 
+def _export_display_path(user_id: str, parts: list[str], export_path: Path) -> str:
+    return "/" + "/".join(["Users", user_id, *parts, export_path.name])
+
+
 @command("export", "Export conversation history to a file: `!export [markdown|text]`")
 async def cmd_export(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
@@ -2816,12 +2822,25 @@ async def cmd_export(ctx: CommandContext):
         fmt = "markdown"
         ext = ".md"
 
-    # Build export path
-    export_dir = mount / "Users" / user_id / config.bot_dir_name / "exports" / "conversations"
-    export_dir.mkdir(parents=True, exist_ok=True)
-    from .storage import validate_conversation_token
+    # Build export path. The user's tree is bound read-write into their tasks,
+    # so the directories are opened without following a link and the file is
+    # read and replaced through the leaf-guarded helpers.
+    from .storage import (
+        read_regular_file, validate_conversation_token, write_regular_file,
+    )
+    from .workspace.writes import open_or_create_dirs
+
     validate_conversation_token(conversation_token)
-    export_path = export_dir / f"{conversation_token}{ext}"
+    user_root = config.workspace_root(user_id) if user_id else None
+    export_parts = [config.bot_dir_name, "exports", "conversations"]
+    try:
+        if user_root is None:
+            raise OSError("no user root")
+        os.close(open_or_create_dirs(user_root, export_parts))
+    except (OSError, ValueError) as e:
+        logger.warning("export_dir_refused user=%s error=%s", user_id, e)
+        return "Could not write the export file: its folder is not a plain folder."
+    export_path = user_root.joinpath(*export_parts, f"{conversation_token}{ext}")
 
     # Resolve user timezone — live DB value so it tracks travel (ISSUE-099).
     from zoneinfo import ZoneInfo
@@ -2842,13 +2861,13 @@ async def cmd_export(ctx: CommandContext):
     render = _format_history_markdown if format_md else _format_history_text
 
     # Check for existing export
+    existing_content, refusal = read_regular_file(export_path)
+    if refusal is not None:
+        logger.warning("export_read_refused user=%s reason=%s", user_id, refusal)
+        return "Could not read the existing export file; it was left unchanged."
     existing_meta = None
-    if export_path.exists():
-        try:
-            first_line = export_path.read_text().split("\n", 1)[0]
-            existing_meta = _parse_export_metadata(first_line)
-        except Exception:
-            pass
+    if existing_content:
+        existing_meta = _parse_export_metadata(existing_content.split("\n", 1)[0])
 
     if existing_meta and existing_meta["token"] == conversation_token:
         # Incremental export — only turns newer than the stored cursor.
@@ -2863,15 +2882,17 @@ async def cmd_export(ctx: CommandContext):
         last_msg_id = _max_message_id(new_messages)
         new_content = render(new_messages, bot_name, tz=tz)
 
-        existing_content = export_path.read_text()
         # Replace first line (metadata) with the updated one, then append.
         rest = existing_content.split("\n", 1)[1] if "\n" in existing_content else ""
         new_meta = _build_export_metadata(
             conversation_token, last_id, fmt, last_msg_id,
         )
-        export_path.write_text(new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n")
+        if not write_regular_file(
+            export_path, new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n",
+        ):
+            return "Could not write the export file."
 
-        rel_path = f"/{export_path.relative_to(mount)}"
+        rel_path = _export_display_path(user_id, export_parts, export_path)
         return f"Appended {len(new_messages)} new messages to `{rel_path}`"
 
     # Full export
@@ -2898,9 +2919,10 @@ async def cmd_export(ctx: CommandContext):
 
     body = render(messages, bot_name, tz=tz)
     content = "\n".join(header_parts) + "\n" + body + "\n"
-    export_path.write_text(content)
+    if not write_regular_file(export_path, content):
+        return "Could not write the export file."
 
-    rel_path = f"/{export_path.relative_to(mount)}"
+    rel_path = _export_display_path(user_id, export_parts, export_path)
     return f"Exported {len(messages)} messages to `{rel_path}`"
 
 
