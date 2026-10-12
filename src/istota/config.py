@@ -1238,6 +1238,11 @@ def normalize_auth_methods(raw: object) -> list[str]:
 
 
 @dataclass
+class WorkspaceWebConfig:
+    max_upload_mb: int = 100
+
+
+@dataclass
 class WebConfig:
     """Authenticated web interface configuration.
 
@@ -1249,6 +1254,7 @@ class WebConfig:
     # Enabled login methods. "none" is exclusive and requires the direct
     # local launcher on loopback. Overridable by ISTOTA_WEB_AUTH.
     auth: list[str] = field(default_factory=lambda: ["nextcloud"])
+    workspace: WorkspaceWebConfig = field(default_factory=WorkspaceWebConfig)
     auth_enrol_ttl_hours: int = 168
     auth_reset_ttl_hours: int = 1
     auth_sign_in_code_ttl_minutes: int = 10
@@ -2322,9 +2328,16 @@ class Config:
         """
         return self.module_db_root() / user_id / f"{module}.db"
 
+    def resolve_user_id(self, user_id: str) -> str | None:
+        """Resolve to stored spelling, including users added since config load."""
+        from .lib.user_ids import user_id_index
+
+        # Callers may replace or mutate users; a cached index would go stale.
+        return user_id_index(self.users).get(user_id.casefold())
+
     def get_user(self, nc_username: str) -> UserConfig | None:
         """Get user config by Nextcloud username. Returns None if user not configured."""
-        return self.users.get(nc_username)
+        return self.users.get(self.resolve_user_id(nc_username))
 
     def find_user_by_email(self, email_address: str) -> str | None:
         """Find user_id by email address. Returns None if not found."""
@@ -2734,7 +2747,11 @@ class Config:
         """
         if not self.admin_users:
             return True
-        return user_id in self.admin_users
+        return self.is_named_admin(user_id)
+
+    def is_named_admin(self, user_id: str) -> bool:
+        """Explicit admin membership; an empty list grants nothing."""
+        return user_id.casefold() in {admin.casefold() for admin in self.admin_users}
 
     def is_shared_kv_writer(self, user_id: str) -> bool:
         """Authoritative gate for shared_kv writes. Fail-closed.
@@ -2783,10 +2800,10 @@ class Config:
             not self.admin_users
             and len(self.users) <= 1
             and self.is_standalone
-            and user_id == self.local_user_id
+            and user_id.casefold() == self.local_user_id.casefold()
         ):
             return True
-        return bool(self.admin_users) and user_id in self.admin_users
+        return self.is_named_admin(user_id)
 
 
 def load_admin_users(path: str | None = None) -> set[str]:
@@ -4248,7 +4265,11 @@ def config_from_document(data: dict) -> Config:
 
 def _map_users(data: dict, config: Config) -> None:
     """The `[users.<id>]` blocks, which the walk leaves to `_parse_user_data`."""
-    for user_id, user_data in (data.get("users") or {}).items():
+    from .lib.user_ids import user_id_index
+
+    users = data.get("users") or {}
+    user_id_index(users)
+    for user_id, user_data in users.items():
         config.users[user_id] = _parse_user_data(user_data, user_id)
 
 
@@ -4688,6 +4709,8 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_forge_clis(config)
     _validate_forge_urls(config)
 
+    from .lib.user_ids import user_id_index
+    user_id_index(config.users)
     return config
 
 
@@ -5788,6 +5811,9 @@ def _merge_profile_rows(config: "Config", rows: dict) -> None:
     from . import user_profiles as _up  # avoid import cycles at module load
 
     current = config.users
+    from .lib.user_ids import user_id_index
+    # Validate the whole snapshot before changing any existing profile.
+    user_id_index([*current, *rows])
     added: dict[str, UserConfig] = {}
     for user_id, profile in rows.items():
         existing = current.get(user_id)

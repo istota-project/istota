@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
+
+- Browse My Drive and Shared with me in Workspace, open files in Google Drive, and load more files as needed. Connection errors link to Settings so you can restore access.
+
+- My files in Workspace now shows Nextcloud shares and opens files in your Nextcloud when they are shared with you. A disconnected Nextcloud folder reports that it is unreachable when browsing or uploading.
+
+- Upload files and create folders under My files in Workspace. Uploads show progress, preserve existing files by numbering repeated names, and keep errors beside the affected file.
+
+- Files in your room folders, group folders and linked folders, including individual linked files, now open in Workspace and chat. Access follows your current memberships, including when a membership is removed.
+
+- Workspace shows your file locations and how tasks can reach them. Browse folders, open files in the shared viewer, and use each row’s menu to pin, download or open a file in its provider. File previews and room-note editors keep a consistent size, with full-height text areas and PDF pagination at the bottom.
+
+- The workspace API lists your file locations, their task access, and folder contents. Room membership is checked on every request, and symbolic links are shown without being followed.
+
 - **The Ansible management role can update the version on its own.** Running the play with `--tags istota_update` performs only the version update and waits for the stack to be healthy, leaving the config, secrets and users alone. `-e istota_update_force=true` runs the update even when the VM is already current, as running `istota-stack update` on the VM does.
 
 - **`istota migrate role-vars` moves an estate from the old Ansible role to the management role.** It reads the old role's decrypted variables and the migrated VM's own files, writes the new role's variables to a private file and prints only names. A credential the new stack has no secrets file for stops it before anything is written.
@@ -194,6 +208,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- User IDs now match regardless of case in Talk, Nextcloud sign-in, email plus-addresses and task submission, while keeping their original spelling. Creating an ID that differs only by case from an existing user is refused, so the two cannot share files on a case-insensitive filesystem.
 
 - **The browser's watchdog and health-check thresholds can be set on the stack again.** `BROWSE_WATCHDOG_DEADLINE_S`, `BROWSE_WATCHDOG_POLL_S`, `BROWSER_CDP_FAILURE_THRESHOLD`, `BROWSER_CDP_FAILURE_WINDOW_S`, `BROWSER_WEDGE_RECOVERY_THRESHOLD` and `BROWSER_WEDGE_RECOVERY_WINDOW_S` were read by the browser image but set only by the retired bare-metal role, so the stack had no way to change them. The compose file now passes them through from the stack's `.env` with the same defaults, and the Docker deployment guide lists them.
 

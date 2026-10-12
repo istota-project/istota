@@ -951,8 +951,19 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         insert_profile(conn, profile, replace=replace)
 
 
+def reject_user_id_case_collision(conn: sqlite3.Connection, user_id: str) -> None:
+    from .lib.user_ids import user_id_index
+
+    # Hold the write lock across the check and insert, including first login.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    rows = conn.execute("SELECT user_id FROM user_profiles UNION SELECT user_id FROM web_auth_identities")
+    user_id_index([*(row["user_id"] for row in rows), user_id])
+
+
 def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: bool = False) -> None:
     """Write a profile inside the caller's transaction, preserving existing rows."""
+    reject_user_id_case_collision(conn, profile.user_id)
     profile.sms_phone_number = normalize_sms_phone_number(
         profile.sms_phone_number, allow_empty=True,
     )

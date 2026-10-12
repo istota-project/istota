@@ -139,55 +139,59 @@
   );
 </script>
 
-<Modal bind:open {title} {description} onOpenChange={handleOpenChange} width="620px">
-  {#if loading}
-    <p class="caption">Loading…</p>
-  {:else if loaded === null}
-    <p class="msg-error">{error || loadFailed}</p>
-  {:else}
-    {#if mine}
-      <p class="caption shared">
-        Only you can see these. The bot reads them when it answers you in this room, and when it
-        drafts a reply to a guest for you to approve, if you host.
-      </p>
-    {:else if loaded.shared}
-      <p class="caption shared">Everyone in this room can read and edit these.</p>
-    {/if}
-
-    <TextArea
-      bind:value={text}
-      rows={18}
-      monospace
-      spellcheck="false"
-      aria-label={mine ? 'My notes (markdown)' : 'Room memory (markdown)'}
-      placeholder={empty ? (mine ? 'No notes yet.' : 'No memory yet for this room.') : ''}
-    />
-
-    <div class="row">
-      <p class="caption">
-        {#if mine}
-          Markdown. Saved in your workspace, never shown to the room.
-        {:else}
-          Markdown. Saved to <code>CHANNEL.md</code> and read into every task in this room.
-        {/if}
-      </p>
-      {#if empty && loaded.template}
-        <button class="link-btn" type="button" onclick={useTemplate}> Start from template </button>
+<Modal bind:open variant="viewer" {title} {description} onOpenChange={handleOpenChange}>
+  <div class="memory-editor">
+    {#if loading}
+      <p class="caption">Loading…</p>
+    {:else if loaded === null}
+      <p class="msg-error">{error || loadFailed}</p>
+    {:else}
+      {#if mine}
+        <p class="caption shared">
+          Only you can see these. The bot reads them when it answers you in this room, and when it
+          drafts a reply to a guest for you to approve, if you host.
+        </p>
+      {:else if loaded.shared}
+        <p class="caption shared">Everyone in this room can read and edit these.</p>
       {/if}
-    </div>
 
-    {#if conflicted}
-      <p class="msg-warn">
-        Someone — probably the assistant — changed this file while you were editing. Your text is
-        still here.
-        <button class="link-btn" type="button" onclick={load}>Discard mine and reload</button>
-      </p>
-    {:else if error}
-      <p class="msg-error">{error}</p>
-    {:else if saved && !dirty}
-      <p class="caption saved">Saved.</p>
+      <TextArea
+        bind:value={text}
+        rows={18}
+        monospace
+        spellcheck="false"
+        aria-label={mine ? 'My notes (markdown)' : 'Room memory (markdown)'}
+        placeholder={empty ? (mine ? 'No notes yet.' : 'No memory yet for this room.') : ''}
+      />
+
+      <div class="row">
+        <p class="caption">
+          {#if mine}
+            Markdown. Saved in your workspace, never shown to the room.
+          {:else}
+            Markdown. Saved to <code>CHANNEL.md</code> and read into every task in this room.
+          {/if}
+        </p>
+        {#if empty && loaded.template}
+          <button class="link-btn" type="button" onclick={useTemplate}>
+            Start from template
+          </button>
+        {/if}
+      </div>
+
+      {#if conflicted}
+        <p class="msg-warn">
+          Someone — probably the assistant — changed this file while you were editing. Your text is
+          still here.
+          <button class="link-btn" type="button" onclick={load}>Discard mine and reload</button>
+        </p>
+      {:else if error}
+        <p class="msg-error">{error}</p>
+      {:else if saved && !dirty}
+        <p class="caption saved">Saved.</p>
+      {/if}
     {/if}
-  {/if}
+  </div>
 
   {#snippet footer()}
     <Button variant="ghost" onclick={onClose}>Close</Button>
@@ -198,6 +202,22 @@
 </Modal>
 
 <style>
+  .memory-editor {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-height: 0;
+  }
+  .memory-editor :global(textarea) {
+    flex: 1;
+    min-height: 0;
+    resize: none;
+  }
+  .memory-editor > :not(:global(textarea)) {
+    flex-shrink: 0;
+  }
+
   p.caption {
     margin: var(--space-1) 0 0;
   }

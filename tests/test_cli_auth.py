@@ -63,6 +63,14 @@ def test_create_user_rejects_invalid_id(config, invoke, user_id):
     assert user_profiles.get_profile(config.db_path, user_id) is None
 
 
+def test_create_refuses_case_collision_with_toml_only_user(config, invoke):
+    from istota.config import UserConfig
+    config.users["Alice"] = UserConfig()
+    code, _, _ = invoke("add", "alice", "--email", "alice@example.com", "--create-user")
+    assert code == 1
+    assert user_profiles.get_profile(config.db_path, "alice") is None
+
+
 def test_existing_id_preserved_and_case_collision_refused(config, invoke):
     original = user_profiles.ensure_profile(config.db_path, "Alice", display_name="Original")
     assert invoke("add", "Alice", "--email", "alice@example.com")[0] == 0

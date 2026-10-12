@@ -28,6 +28,8 @@ describe('viewer modal', () => {
   it('renders the compact header with metadata, actions and Close', async () => {
     const { dialog } = await open();
     expect(within(dialog).getByText('12 KB')).toBeInTheDocument();
+    expect(dialog.style.getPropertyValue('--modal-width')).toBe('960px');
+    expect(dialog.style.getPropertyValue('--modal-height')).toBe('100dvh');
     expect(within(dialog).getByRole('link', { name: 'Download' })).toHaveAttribute(
       'download',
       'example.txt',

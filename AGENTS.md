@@ -135,6 +135,7 @@ src/istota/
 │   ├── proxy_protocol.py # Wire protocol for the devbox proxy (single-line JSON, 16 MiB cap) → devbox.md
 │   ├── exec_protocol.py  # The exec transport's wire format → devbox.md
 │   └── exec_client.py    # The other end, copied into each task's shim directory → devbox.md
+├── workspace/            # Places, task reach, safe listing/writes and personal pins → web-ui.md
 ├── search/               # Federated web search: core, provider registry, framework sources and links → search.md
 ├── notifications/        # Delivery, the inbox behind the bell, and its sources → notifications.md
 │   ├── delivery.py       # Talk / Email / ntfy dispatcher, distinct from the inbox below

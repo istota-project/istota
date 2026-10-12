@@ -453,7 +453,7 @@ def _user_is_web_admin(username: str) -> bool:
         return True
     if not _config or not _config.admin_users:
         return False
-    return username in _config.admin_users
+    return _config.is_named_admin(username)
 
 
 def _require_admin(user: dict = Depends(_require_api_auth)) -> dict:
@@ -1582,6 +1582,7 @@ async def callback(request: Request):
         # Unthrottled: a user added since load must not be refused here just
         # because another request checked within the last second.
         await asyncio.to_thread(refresh_user_profiles_if_changed, _config)
+        username = _config.resolve_user_id(username) or username
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)
 
@@ -1621,6 +1622,9 @@ async def callback(request: Request):
                 and display_name != username
             ):
                 _up.update_profile(_config.db_path, username, display_name=display_name)
+        except ValueError:
+            logger.warning("user_profile auto-seed refused user=%s", username)
+            return await _login_error(403, "Sign-in failed", "Sign-in could not be completed.")
         except Exception as e:  # noqa: BLE001
             logger.warning("user_profile auto-seed failed user=%s: %s", username, e)
 
@@ -1943,6 +1947,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "briefings": False,
         "google_workspace": False,
         "google_workspace_enabled": False,
+        "workspace": False,
         "admin": is_admin,
     }
     if _config:
@@ -1952,6 +1957,16 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         features["health"] = _user_has_health(username)
         features["briefings"] = _user_has_briefings(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
+        features["workspace"] = _config.has_workspace or _config.storage_is_nextcloud
+        if not features["workspace"] and _config.google_workspace.enabled:
+            from istota import db
+            from istota.workspace.places import list_places
+
+            def _has_workspace_connection():
+                with db.get_db(_config.db_path) as conn:
+                    return any(p.kind == "drive" for p in list_places(_config, conn, username))
+
+            features["workspace"] = await asyncio.to_thread(_has_workspace_connection)
         if _config.google_workspace.enabled:
             features["google_workspace"] = _has_google_token(username)
     # Nextcloud user-token status: null when the feature is off (ephemeral /
@@ -2059,7 +2074,7 @@ async def admin_users(_: dict = Depends(_require_admin)):
         profile = profiles.get(user_id)
         identity = identities.get(user_id)
         row = {"user_id": user_id, "display_name": profile.display_name if profile else user_id,
-               "identity": _admin_identity_view(identity), "is_admin": user_id in config.admin_users,
+               "identity": _admin_identity_view(identity), "is_admin": config.is_named_admin(user_id),
                "state": "nextcloud_only" if identity is None else "password_set" if identity.password_hash else "passwordless"}
         (users if profile else orphans).append(row)
     return {"users": users, "orphans": orphans, "email_enabled": config.web.has_method("email")}
@@ -2125,6 +2140,9 @@ async def admin_create_user(request: Request, _: dict = Depends(_require_admin),
         raise HTTPException(status_code=400, detail="Enter a valid email address.")
     if not config.web.has_method("email"):
         raise HTTPException(status_code=400, detail="Email sign-in is not enabled.")
+    canonical = config.resolve_user_id(payload["user_id"])
+    if canonical is not None and canonical != payload["user_id"]:
+        raise HTTPException(status_code=400, detail=f"User ID differs only in case from {canonical!r}")
     identity = await _admin_auth_write(
         web_auth.upsert_identity, config.db_path, payload["user_id"], email,
         create_profile=True, display_name=payload.get("display_name", ""), reject_case_collision=True,
@@ -2254,7 +2272,7 @@ def _admin_user_detail(conn, config, user_id: str) -> dict | None:
         identity_view["state"] = "password_set" if identity.password_hash else "passwordless"
     return {
         "user_id": user_id,
-        "is_admin": user_id in config.admin_users,
+        "is_admin": config.is_named_admin(user_id),
         "identity": identity_view,
         "profile": {field: getattr(profile, field) for field in user_profiles.ADMIN_EDITABLE_FIELDS},
         "channels": {"log_channel": profile.log_channel, "alerts_channel": profile.alerts_channel},
@@ -9923,11 +9941,7 @@ async def chat_room_memory(
     room_id: int,
     user: dict = Depends(_require_api_auth),
 ):
-    """The room's `CHANNEL.md` — the standing instructions every task in the
-    room is given. Read-only from `/chat/files`' point of view: that endpoint
-    is confined to `/Users/{user_id}` on purpose (`_resolve_chat_file`), and
-    `/Channels/{token}` sits outside it by design, so this carries its own
-    room-scoped confinement rather than widening that root."""
+    """The room's standing instructions, with room-scoped editor access."""
     result = await asyncio.to_thread(_chat_room_memory, user["username"], room_id)
     if result is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
@@ -11899,11 +11913,13 @@ def _save_chat_attachment(username: str, filename: str, data: bytes) -> str:
     stem = _attachment_stem(filename)
     suffix = uuid.uuid4().hex[:8] if stem else uuid.uuid4().hex
     dest = dest_dir / f"{stem}-{suffix}{ext}" if stem else dest_dir / f"{suffix}{ext}"
-    from istota.workspace.writes import write_new_file
+    from istota.workspace.writes import open_or_create_dirs, write_new_file
 
     anchor = _config.workspace_path or _config.temp_dir
-    write_new_file(anchor, dest.relative_to(anchor).parts, data)
-    return str(dest)
+    parts = list(dest_dir.relative_to(anchor).parts)
+    os.close(open_or_create_dirs(anchor, parts))
+    name = write_new_file(anchor, parts, dest.name, [data], max_bytes=len(data))
+    return str(dest_dir / name)
 
 
 @api_router.post("/chat/attachments")
@@ -11929,10 +11945,12 @@ async def chat_upload_attachment(
         return JSONResponse(
             {"error": f"file exceeds {chat.max_attachment_mb} MB"}, status_code=413,
         )
+    from istota.workspace.listing import ListingError
+
     username = user["username"]
     try:
         path = await asyncio.to_thread(_save_chat_attachment, username, name, data)
-    except OSError:
+    except (OSError, ListingError):
         return JSONResponse({"error": "attachment could not be saved"}, status_code=400)
     # `workspace_path` is what `/chat/files` takes, so the composer can link the
     # chip it renders optimistically instead of waiting for the turn to come
@@ -16128,6 +16146,13 @@ from istota.webui.garmin_routes import verify_origin as _garmin_verify_origin
 app.include_router(_garmin_router, prefix="/istota/api/garmin", tags=["garmin"])
 app.dependency_overrides[_garmin_require_auth] = _require_api_auth
 app.dependency_overrides[_garmin_verify_origin] = _verify_origin
+
+# Workspace is a core page, independent of per-user module switches.
+from istota.webui.workspace_routes import require_auth as _workspace_require_auth
+from istota.webui.workspace_routes import router as _workspace_router
+
+app.include_router(_workspace_router, prefix="/istota/api/workspace", tags=["workspace"])
+app.dependency_overrides[_workspace_require_auth] = _require_api_auth
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

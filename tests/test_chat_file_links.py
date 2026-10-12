@@ -190,3 +190,32 @@ class TestTheStoredAnswerIsChecked:
         assert task.result == expected
         result_events = [e for e in events if e["kind"] == "result"]
         assert result_events and result_events[-1]["payload"]["text"] == expected
+
+
+def test_multiple_links_read_membership_once(config, monkeypatch, workspace_png):
+    calls = []
+    original = db.list_member_rooms
+
+    def list_member_rooms(*args, **kwargs):
+        calls.append(args[1])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(db, "list_member_rooms", list_member_rooms)
+    link = f"[file]({_url('/Users/testuser/istota/exports/ok.png')})"
+    answer = f"{link} and {link}"
+    assert check_chat_file_links(config, "testuser", answer) == answer
+    assert calls == ["testuser"]
+
+
+def test_longest_root_confines_a_nested_linked_folder(config):
+    root = config.workspace_path / "linked"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (root / "outside.txt").write_text("outside the nested place")
+    (nested / "escape.txt").symlink_to(root / "outside.txt")
+    with db.get_db(config.db_path) as conn:
+        db.add_user_resource(conn, "testuser", "folder", "linked")
+        db.add_user_resource(conn, "testuser", "folder", "linked/nested")
+    with pytest.raises(ChatFileError) as caught:
+        resolve_chat_file(config, "testuser", "/linked/nested/escape.txt")
+    assert caught.value.status == 403

@@ -25,7 +25,7 @@ from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
 from istota.lib.filenames import (
-    DEFAULT_MAX_STEM, MAX_NAME_BYTES, filename_parts, safe_filename,
+    filename_parts, numbered_name, safe_filename,
 )
 from istota.sandbox.host_paths import (
     path_under_roots,
@@ -743,14 +743,7 @@ def _unclaimed_name(path: Path, claimed: list[Path]) -> Path:
     stem, suffix = filename_parts(path.name)
     n = 2
     while True:
-        marker = f" ({n}){suffix}"
-        # Shortened first, so the length cap cannot cut the number back off.
-        base = stem
-        while len(f"{base}{marker}") > DEFAULT_MAX_STEM or len(
-            f"{base}{marker}".encode("utf-8")
-        ) > MAX_NAME_BYTES - 16:
-            base = base[:-1]
-        candidate = path.with_name(f"{base.rstrip(' .')}{marker}")
+        candidate = path.with_name(numbered_name(stem, suffix, n))
         if candidate not in claimed:
             return candidate
         n += 1

@@ -1,5 +1,13 @@
 import type { Plugin } from 'vite';
-import type { AdminStats, AdminUserDetail, AdminUserProfile, AdminUsers } from './src/lib/api';
+import type {
+  WorkspacePin,
+  WorkspacePlace,
+  WorkspaceEntry,
+  AdminStats,
+  AdminUserDetail,
+  AdminUserProfile,
+  AdminUsers,
+} from './src/lib/api';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
@@ -405,6 +413,7 @@ const user = {
   features: {
     chat: true,
     briefings: true,
+    workspace: true,
     feeds: true,
     location: true,
     money: true,
@@ -4168,6 +4177,7 @@ const VIEWER_MEDIA: Record<string, { kind: 'image' | 'audio' | 'video' | 'pdf'; 
   'cjk-cmap.pdf': { kind: 'pdf', mime: 'application/pdf' },
 };
 const VIEWER_TEXT: Record<string, string> = {
+  '.preferences': 'An example hidden workspace file.\n',
   'note.md': '---\ntitle: Example note\n---\n# Workspace note\n\nA **Markdown** document.\n',
   'note.txt': 'A plain text file.\nSecond line.\n',
   'source.html': '<script>alert("example")</script><h1>Source only</h1>',
@@ -4850,8 +4860,275 @@ const setupHandler: MockHandler = ({ url, method, body }) => {
   return { __status: 404, error: 'not_found', message: 'Not found.' };
 };
 
+// Workspace: home, read-only linked files, shared roots and connection reach.
+const workspaceReach = {
+  private: 'rw',
+  shared_member: 'rw',
+  restricted: 'none',
+  note: null,
+} as const;
+const workspacePlaces: WorkspacePlace[] = [
+  {
+    id: 'home',
+    kind: 'home',
+    label: 'My files',
+    browsable: true,
+    view_root: '/Users/carol',
+    reach: {
+      ...workspaceReach,
+      note: 'Personal memory is not loaded into the prompt in shared rooms.',
+    },
+  },
+  {
+    id: 'linked:1',
+    kind: 'linked',
+    label: 'Reference library',
+    browsable: true,
+    view_root: '/Reference',
+    reach: { ...workspaceReach, private: 'ro', shared_member: 'ro' },
+  },
+  {
+    id: 'room:project',
+    kind: 'room',
+    label: 'Project room',
+    browsable: true,
+    view_root: '/Channels/project',
+    reach: {
+      ...workspaceReach,
+      restricted: 'rw',
+      note: "A room folder is reachable only from that room's own tasks.",
+    },
+  },
+  {
+    id: 'room:markup',
+    kind: 'room',
+    label: 'Planning & notes',
+    browsable: true,
+    view_root: '/Channels/markup',
+    reach: {
+      ...workspaceReach,
+      restricted: 'rw',
+      note: "A room folder is reachable only from that room's own tasks.",
+    },
+  },
+  {
+    id: 'group:team',
+    kind: 'group',
+    label: 'Team',
+    browsable: true,
+    view_root: '/Groups/team',
+    reach: {
+      ...workspaceReach,
+      shared_member: 'conditional',
+      note: 'Group files are available in a shared room only when every reader belongs to this group, with no guests or other bots. A room linked to a group can use only that group.',
+    },
+  },
+  {
+    id: 'drive',
+    kind: 'drive',
+    label: 'Google Drive',
+    browsable: true,
+    view_root: null,
+    reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
+  },
+  {
+    id: 'nextcloud',
+    kind: 'nextcloud',
+    label: 'Nextcloud',
+    browsable: false,
+    view_root: null,
+    reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
+  },
+  {
+    id: 'talk',
+    kind: 'talk',
+    label: 'Talk attachments',
+    browsable: false,
+    view_root: null,
+    reach: workspaceReach,
+  },
+];
+function workspaceEntry(name: string, kind: WorkspaceEntry['kind'] = 'file'): WorkspaceEntry {
+  return {
+    name,
+    kind,
+    size: kind === 'file' ? 2048 : null,
+    modified: 1767268800,
+    hidden: name.startsWith('.'),
+  };
+}
+const workspaceTree: Record<string, WorkspaceEntry[]> = {
+  '': [
+    workspaceEntry('Archive', 'dir'),
+    workspaceEntry('Empty folder', 'dir'),
+    workspaceEntry('Notes & plans', 'dir'),
+    workspaceEntry('Unavailable folder', 'dir'),
+    workspaceEntry('.preferences'),
+    {
+      ...workspaceEntry('document.pdf'),
+      share: { kind: 'user', count: 2 },
+      nextcloud_url: 'https://cloud.example.com/apps/files/files?dir=%2FShared',
+    },
+    workspaceEntry('image.png'),
+    workspaceEntry('note.md'),
+    workspaceEntry('outside-link', 'link'),
+    workspaceEntry('task-socket', 'other'),
+  ],
+  'Notes & plans': [
+    workspaceEntry('note.md'),
+    workspaceEntry('note.txt'),
+    workspaceEntry('source.html'),
+  ],
+  'Empty folder': [],
+  Archive: [workspaceEntry('note.txt')],
+};
+let workspacePins: WorkspacePin[] = [
+  {
+    id: 1,
+    provider: 'workspace',
+    ref: '/Users/carol/note.md',
+    name: 'note.md',
+    mime_type: null,
+    web_url: null,
+    available: true,
+    is_dir: false,
+  },
+  {
+    id: 2,
+    provider: 'workspace',
+    ref: '/Users/carol/old-plan.md',
+    name: 'Old plan.md',
+    mime_type: null,
+    web_url: null,
+    available: false,
+    is_dir: false,
+  },
+];
+let nextWorkspacePinId = 3;
+const workspaceHandler: MockHandler = ({ url, method, body }) => {
+  const driveUrl = new URL(url, 'http://localhost');
+  if (driveUrl.pathname === '/istota/api/workspace/pins') {
+    if (method === 'GET') return { pins: workspacePins };
+    if (method === 'PUT') {
+      const existing = workspacePins.find(
+        (pin) => pin.provider === body.provider && pin.ref === body.ref,
+      );
+      if (!existing && workspacePins.length >= 50) return { __status: 409, error: 'pin_limit' };
+      const pin = {
+        ...body,
+        id: existing?.id ?? nextWorkspacePinId++,
+        available: true,
+        is_dir:
+          body.mime_type === 'application/vnd.google-apps.folder' ||
+          (body.provider === 'workspace' &&
+            !!workspaceTree[body.ref.split('/').slice(3).join('/')]),
+      };
+      workspacePins = [...workspacePins.filter((item) => item.id !== pin.id), pin];
+      return { pin };
+    }
+  }
+  if (driveUrl.pathname.startsWith('/istota/api/workspace/pins/') && method === 'DELETE') {
+    workspacePins = workspacePins.filter(
+      (pin) => pin.id !== Number(driveUrl.pathname.split('/').at(-1)),
+    );
+    return { status: 'ok' };
+  }
+  if (driveUrl.pathname === '/istota/api/workspace/drive/list' && method === 'GET') {
+    const folder = driveUrl.searchParams.get('folder') || 'root';
+    const item = (id: string, name: string, is_folder = false) => ({
+      id,
+      name,
+      is_folder,
+      mime_type: is_folder ? 'application/vnd.google-apps.folder' : 'application/pdf',
+      size: is_folder ? null : 24576,
+      modified: '2026-01-02T12:00:00Z',
+      web_url: `https://drive.google.com/${is_folder ? 'drive/folders' : 'file/d'}/${id}`,
+    });
+    const more = driveUrl.searchParams.has('page_token');
+    return {
+      items:
+        folder === 'root'
+          ? more
+            ? [item('drive_notes_1', 'Meeting notes.pdf')]
+            : [
+                item('drive_folder_1', 'Project documents', true),
+                item('drive_report_1', 'Quarterly report.pdf'),
+              ]
+          : folder === 'shared'
+            ? [
+                item('drive_shared_1', 'Shared budget.pdf'),
+                item('drive_shared_folder', 'Shared plans', true),
+              ]
+            : [item('drive_plan_1', 'Project plan.pdf')],
+      next_page_token: folder === 'root' && !more ? 'page-2' : null,
+    };
+  }
+
+  const [path, query] = url.split('?');
+  if (
+    method === 'POST' &&
+    (path === '/istota/api/workspace/folders' || path === '/istota/api/workspace/upload')
+  ) {
+    const upload = path.endsWith('/upload');
+    const raw = typeof body === 'string' ? body : '';
+    const field = (name: string) =>
+      raw.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r]*)`))?.[1] || '';
+    const place = upload ? field('place') : body.place;
+    const folder = upload ? field('path') : body.path;
+    const entries = workspaceTree[folder];
+    if (place !== 'home' || !entries) return { __status: 404, error: 'Folder not found.' };
+    let name = upload ? raw.match(/filename="([^"]*)"/)?.[1] || 'upload' : body.name.trim();
+    const original = name;
+    let n = 2;
+    while (entries.some((entry) => entry.name === name)) {
+      if (!upload) return { __status: 409, error: 'A file or folder already exists.' };
+      const dot = original.lastIndexOf('.');
+      name =
+        dot > 0
+          ? `${original.slice(0, dot)} (${n++})${original.slice(dot)}`
+          : `${original} (${n++})`;
+    }
+    const resultPath = [folder, name].filter(Boolean).join('/');
+    const entry = workspaceEntry(name, upload ? 'file' : 'dir');
+    entries.push(entry);
+    entries.sort(
+      (a, b) => Number(b.kind === 'dir') - Number(a.kind === 'dir') || a.name.localeCompare(b.name),
+    );
+    if (!upload) workspaceTree[resultPath] = [];
+    return upload ? { name, path: resultPath, size: entry.size } : { path: resultPath };
+  }
+  if (method !== 'GET') return undefined;
+  if (path === '/istota/api/workspace/places')
+    return {
+      places: workspacePlaces,
+      notes: [
+        'Tasks run in a sandbox.',
+        'Files are stored in your Nextcloud at cloud.example.com.',
+      ],
+    };
+  if (path !== '/istota/api/workspace/list') return undefined;
+  const params = new URLSearchParams(query);
+  const place = params.get('place') || '';
+  const folder = params.get('path') || '';
+  const selected = workspacePlaces.find((item) => item.id === place);
+  if (!selected?.browsable) return { __status: 404, error: 'Place not found.' };
+  if (folder === 'Unavailable folder') return { __status: 404, error: 'Folder not found.' };
+  const entries =
+    place === 'home' ? workspaceTree[folder] : folder ? undefined : [workspaceEntry('note.md')];
+  if (!entries) return { __status: 404, error: 'Folder not found.' };
+  return {
+    place,
+    path: folder,
+    entries,
+    truncated: folder === 'Archive',
+    skipped_names: folder === 'Archive' ? 2 : 0,
+    notes: folder === 'Archive' ? ['Nextcloud share state is unavailable.'] : [],
+  };
+};
+
 const handlers: MockHandler[] = [
   setupHandler,
+  workspaceHandler,
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),

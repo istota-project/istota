@@ -416,6 +416,9 @@
     </a>
     <div class="nav-links">
       <a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
+      {#if user.features.workspace}
+        <a href="{base}/workspace" class:active={isActive('/workspace')}>Workspace</a>
+      {/if}
       {#if user.features.briefings}
         <a href="{base}/briefings" class:active={isActive('/briefings')}>Briefings</a>
       {/if}
@@ -488,6 +491,18 @@
                 >
               {/snippet}
             </DropdownMenu.Item>
+            {#if user.features.workspace}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/workspace"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/workspace')}
+                    {...props}>Workspace</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
             {#if user.features.briefings}
               <DropdownMenu.Item>
                 {#snippet child({ props })}
@@ -579,6 +594,7 @@
     class="app-content"
     class:app-content-fill={isActive('/') ||
       isActive('/chat') ||
+      isActive('/workspace') ||
       isActive('/location') ||
       isActive('/feeds') ||
       isActive('/money') ||
