@@ -82,11 +82,15 @@ class TestReceiverReloadsOnSignal:
 
         assert calls == []
 
-    def test_unloaded_config_is_a_no_op(self, monkeypatch):
+    def test_unloaded_config_loads_once(self, monkeypatch):
+        """ISSUE-704: a receiver nobody loaded at startup loads on first use,
+        rather than 403ing every request for the life of the process."""
         from istota.webui import webhook_receiver as wr
 
-        wr._config = None
+        monkeypatch.setattr(wr, "_config", None)
+        monkeypatch.setattr(wr, "_never_loaded_claimed", False)
         calls = []
         monkeypatch.setattr(wr, "reload_config", lambda: calls.append(1))
         wr._maybe_reload_for_signal()
-        assert calls == []
+        wr._maybe_reload_for_signal()
+        assert calls == [1]

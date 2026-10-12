@@ -430,3 +430,206 @@ class TestServeWebhookMount:
         with TestClient(parent) as client:
             assert client.post("/webhooks/location", json={"locations": []}).status_code == 401
 
+
+@_needs_fastapi
+class TestReceiverLoadsUnderAParentLifespan:
+    """ISSUE-704: Starlette drops `add_event_handler("startup", ...)` without a
+    word when the app was built with `lifespan=`, and the web app is. The
+    receiver's token map then stayed empty and every Overland ping was a 403.
+    """
+
+    @pytest.fixture
+    def stored_token(self, tmp_path, monkeypatch):
+        from istota import db
+        from istota.config import Config, LocationReceiverConfig, UserConfig
+        from istota.credentials import store as secrets_store
+        from istota.webui import webhook_receiver as wr
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        secrets_store.set_secret(db_path, "alice", "overland", "ingest_token", "alice-tok")
+        config = Config(
+            db_path=db_path,
+            users={"alice": UserConfig(display_name="Alice")},
+            location=LocationReceiverConfig(enabled=True),
+            workspace_path=tmp_path,
+        )
+        monkeypatch.setattr(wr, "load_config", lambda: config)
+        for name, value in (
+            ("_config", None), ("_sms_providers", None), ("_token_map", {}),
+            ("_user_contexts", {}), ("_places_cache", {}), ("_sentinel_stamp", 0.0),
+            ("_never_loaded_claimed", False),
+        ):
+            monkeypatch.setattr(wr, name, value, raising=False)
+        return config
+
+    @staticmethod
+    def _batch():
+        return {"locations": [{
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [-122.4, 37.7]},
+            "properties": {"timestamp": "2026-10-11T02:10:35Z"},
+        }]}
+
+    def test_a_stored_token_is_accepted_under_the_web_apps_lifespan(
+        self, stored_token, monkeypatch,
+    ):
+        """The real web lifespan, not a bare `FastAPI()` that has none."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota import serve
+        from istota.webui import app as web_app
+        from istota.webui import webhook_receiver as wr
+
+        monkeypatch.setattr(web_app, "load_config", lambda: stored_token)
+        monkeypatch.setattr(web_app, "_config", web_app._config)
+        monkeypatch.setattr(web_app, "_oauth", web_app._oauth)
+        monkeypatch.setattr(web_app.signal, "signal", lambda *args: None)
+        monkeypatch.setattr(web_app.web_shutdown, "install_signal_hook", lambda: None)
+        # The first-use backstop off, so only the lifespan can load the map.
+        monkeypatch.setattr(wr, "_never_loaded_claimed", True)
+        parent = FastAPI(lifespan=web_app.lifespan)
+        serve._maybe_mount_webhooks(parent, stored_token)
+
+        with TestClient(parent) as client:
+            resp = client.post(
+                "/webhooks/location", params={"token": "alice-tok"}, json=self._batch(),
+            )
+
+        assert resp.status_code == 200, resp.text
+
+    def test_one_users_broken_location_db_does_not_stop_the_web_app(
+        self, stored_token, monkeypatch,
+    ):
+        """In the web process a raise from the load fails the whole app's
+        startup, so a bad per-user DB skips that user instead."""
+        import sqlite3
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
+
+        def broken_init_db(path):
+            raise sqlite3.OperationalError("unable to open database file")
+
+        monkeypatch.setattr(wr.location, "init_db", broken_init_db)
+        parent = FastAPI()
+        serve._maybe_mount_webhooks(parent, stored_token)
+
+        with TestClient(parent) as client:
+            resp = client.post(
+                "/webhooks/location", params={"token": "alice-tok"}, json=self._batch(),
+            )
+
+        assert resp.status_code == 403
+        assert wr._config is stored_token
+
+    async def test_sighup_reloads_both_the_parent_and_the_receiver(
+        self, stored_token, monkeypatch,
+    ):
+        """The parent's SIGHUP handler is chained, not replaced."""
+        import signal
+        import threading
+        from contextlib import asynccontextmanager
+
+        from fastapi import FastAPI
+
+        from istota import serve
+        from istota.webui import webhook_receiver as wr
+
+        parent_reloads = []
+
+        @asynccontextmanager
+        async def parent_lifespan(app):
+            signal.signal(signal.SIGHUP, lambda *_: parent_reloads.append(1))
+            yield
+
+        parent = FastAPI(lifespan=parent_lifespan)
+        serve._maybe_mount_webhooks(parent, stored_token)
+        saved = signal.getsignal(signal.SIGHUP)
+        try:
+            async with parent.router.lifespan_context(parent):
+                assert wr._token_map == {"alice-tok": "alice"}
+                monkeypatch.setattr(wr, "_token_map", {})
+                signal.getsignal(signal.SIGHUP)(signal.SIGHUP, None)
+                for thread in threading.enumerate():
+                    if thread.name == "webhook-sighup-reload":
+                        thread.join(timeout=10)
+        finally:
+            signal.signal(signal.SIGHUP, saved)
+
+        assert parent_reloads == [1]
+        assert wr._token_map == {"alice-tok": "alice"}
+
+    def test_a_receiver_that_was_never_loaded_loads_on_first_use(self, stored_token):
+        """A missed startup costs one slow request, not a permanent 403."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota.webui import webhook_receiver as wr
+
+        bare = FastAPI()
+        bare.include_router(wr.location_router)
+        resp = TestClient(bare).post(
+            "/webhooks/location", params={"token": "alice-tok"}, json=self._batch(),
+        )
+
+        assert resp.status_code == 200, resp.text
+
+    def test_the_first_use_load_runs_once(self, stored_token, monkeypatch):
+        """Claimed under the lock: a config that will not load is not retried
+        on every request."""
+        from istota.webui import webhook_receiver as wr
+
+        calls = []
+
+        def failing_reload():
+            calls.append(1)
+            raise RuntimeError("config does not load")
+
+        monkeypatch.setattr(wr, "reload_config", failing_reload)
+        wr._load_if_never_loaded()
+        wr._load_if_never_loaded()
+
+        assert calls == [1]
+
+    def test_a_never_loaded_sms_route_loads_rather_than_404s(self, stored_token, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota.webui import webhook_receiver as wr
+
+        calls = []
+        monkeypatch.setattr(wr, "reload_config", lambda: calls.append(1))
+        bare = FastAPI()
+        bare.include_router(wr.sms_router)
+        TestClient(bare).post("/webhooks/sms/twilio", content=b"")
+
+        assert calls == [1]
+
+    def test_nothing_in_the_tree_registers_a_startup_event(self):
+        """The web app has a lifespan, and Starlette drops a startup handler
+        on such an app without saying so.
+
+        Reads `src/` off disk, so `scripts/qt` does not select it on a source
+        change; name this file in the close.
+        """
+        import re
+        from pathlib import Path
+
+        import istota
+
+        pattern = re.compile(
+            r"""(on_event|add_event_handler)\(\s*['"]startup|\bon_startup\b"""
+        )
+        root = Path(istota.__file__).parent
+        offenders = []
+        for path in root.rglob("*.py"):
+            if pattern.search(path.read_text(encoding="utf-8")):
+                offenders.append(str(path.relative_to(root)))
+        assert offenders == []
+
