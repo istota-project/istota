@@ -60,7 +60,7 @@ A test declares its profile as a string, `@pytest.mark.profile("forge")`, so a s
 
 `@pytest.mark.script([...])` is what the model answers, turn by turn. Omitting it installs `DEFAULT_SCRIPT`, one plain answer. A script depending on something invented at run time is installed with `stack.script(...)` inside the test, since the marker is read before the body runs.
 
-`Probe.wait_for_task` is filtered on `task_id`, `conversation_token` or `id_above`, never on `user_id` alone: the scheduler queues its own work for the same user at startup (a `source_type='scheduled'` row nobody wrote).
+`Probe.wait_for_task` is filtered on `task_id`, `conversation_token` or `id_above`, never on `user_id` alone: the scheduler queues its own work for the same user at startup (a `source_type='scheduled'` row nobody wrote). A Talk room is known to a scenario by its Talk token, but its task, `rooms` row and `messages` rows carry the minted room id (`rm_…`), so filter with `talk_token=`, which resolves the token on every poll, and read the room's rows under `Probe.talk_room(token)` (ISSUE-706).
 
 There is no `backend` field and no `LOCAL` profile. See "The storage backend".
 

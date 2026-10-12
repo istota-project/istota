@@ -18,6 +18,11 @@ from istota.health.routes import (
     router,
 )
 from istota.health.workspace import synthesize_health_context
+from tests.support.health_extract import (
+    extract_via_daemon,
+    handoff_app,
+    handoff_config,
+)
 
 
 @pytest.fixture
@@ -244,16 +249,20 @@ class TestRefsAndCoverageRoutes:
 
 
 class TestExtractRoute:
-    def test_extract_returns_fallback_when_brain_unavailable(self, client):
-        # No app.state.istota_config → brain unavailable → fallback empty rows
-        # with a warning, but still a 200.
-        files = {"file": ("vaccines.png", b"\x89PNG\r\n\x1a\nfake", "image/png")}
-        resp = client.post(
-            "/istota/api/health/immunizations/extract",
-            files=files,
+    def test_extract_returns_fallback_when_brain_unavailable(
+        self, make_config, monkeypatch,
+    ):
+        # The daemon side, with the brain call failing: fallback empty rows
+        # with a warning rather than an error.
+        import istota.health.immunization_ocr as ocr_mod
+
+        monkeypatch.setattr(ocr_mod, "_call_brain", lambda *a, **kw: None)
+        config = handoff_config(make_config)
+        client, _ctx = handoff_app(config)
+        body = extract_via_daemon(
+            client, config, "/immunizations/extract",
+            files={"file": ("vaccines.png", b"\x89PNG\r\n\x1a\nfake", "image/png")},
         )
-        assert resp.status_code == 200
-        body = resp.json()
         assert "rows" in body
         assert "warnings" in body
         assert any("unavailable" in w.lower() for w in body["warnings"])
@@ -480,50 +489,6 @@ class TestParseAndBulkRoutes:
         )
         assert resp.status_code == 400
 
-    def test_extract_uses_temp_dir_not_uploads_dir(
-        self, client, ctx, tmp_path, monkeypatch,
-    ):
-        """The /extract route must not leak transient uploads into the
-        persistent uploads_dir on a crashed worker — verified by stubbing
-        ``extract_from_file`` to capture the path the route hands it and
-        asserting it's outside ``ctx.uploads_dir``.
-        """
-        captured: dict[str, Path] = {}
-
-        def _fake_extract(path, mime, refs, *, config=None, user_id=""):
-            captured["path"] = Path(path)
-            return {"rows": [], "mode": "vision", "warnings": []}
-
-        import istota.health.immunization_ocr as ocr_mod
-        monkeypatch.setattr(ocr_mod, "extract_from_file", _fake_extract)
-
-        # Configure a writable temp_dir on the test app state so the route
-        # picks it up instead of falling back to gettempdir().
-        configured_tmp = tmp_path / "scheduler-tmp"
-        configured_tmp.mkdir()
-
-        class _Cfg:
-            temp_dir = str(configured_tmp)
-            brain = None
-
-        client.app.state.istota_config = _Cfg()
-
-        files = {"file": ("vax.png", b"\x89PNG\r\n\x1a\nbytes", "image/png")}
-        resp = client.post(
-            "/istota/api/health/immunizations/extract", files=files,
-        )
-        assert resp.status_code == 200
-        assert "path" in captured, "extract_from_file was not invoked"
-        # Path must NOT be under uploads_dir, and SHOULD be under temp_dir.
-        uploads_parent = Path(ctx.uploads_dir).resolve()
-        assert uploads_parent not in captured["path"].resolve().parents
-        # ISSUE-397: one level below temp_dir, not the shared root. That is the
-        # directory the OCR sandbox binds read-write; the root is bound at no
-        # path, so a copy written there is one the model cannot open.
-        assert captured["path"].resolve().parent == (
-            configured_tmp / ctx.user_id
-        ).resolve()
-
 
 class TestDashboardAndSummary:
     def test_dashboard_has_immunizations(self, client):
@@ -613,7 +578,23 @@ class TestStaticExplainerData:
 class TestImmunizationImportDocumentAttachment:
     """Proof of immunization is a document, so the upload is kept."""
 
-    def _extract(self, client, monkeypatch, *, rows=None):
+    @pytest.fixture
+    def config(self, make_config):
+        return handoff_config(make_config)
+
+    @pytest.fixture
+    def app(self, config):
+        return handoff_app(config)
+
+    @pytest.fixture
+    def client(self, app):
+        return app[0]
+
+    @pytest.fixture
+    def ctx(self, app):
+        return app[1]
+
+    def _extract(self, client, config, monkeypatch, *, rows=None) -> dict:
         def _fake(path, mime, refs, *, config=None, user_id=""):
             return {
                 "rows": rows if rows is not None else [],
@@ -623,17 +604,15 @@ class TestImmunizationImportDocumentAttachment:
 
         import istota.health.immunization_ocr as ocr_mod
         monkeypatch.setattr(ocr_mod, "extract_from_file", _fake)
-        return client.post(
-            "/istota/api/health/immunizations/extract",
+        return extract_via_daemon(
+            client, config, "/immunizations/extract",
             files={"file": ("card.png", b"\x89PNG\r\n\x1a\ncard", "image/png")},
         )
 
     def test_extract_keeps_the_file_and_returns_its_id(
-        self, client, ctx, monkeypatch,
+        self, client, config, ctx, monkeypatch,
     ):
-        resp = self._extract(client, monkeypatch)
-        assert resp.status_code == 200, resp.text
-        document_id = resp.json()["document_id"]
+        document_id = self._extract(client, config, monkeypatch)["document_id"]
         assert isinstance(document_id, int)
         with health_db.connect(ctx.db_path) as conn:
             doc = health_db.get_document(conn, document_id)
@@ -642,7 +621,7 @@ class TestImmunizationImportDocumentAttachment:
         assert (ctx.uploads_dir / doc.stored_path).is_file()
 
     def test_storage_failure_still_returns_the_rows(
-        self, client, ctx, monkeypatch,
+        self, client, config, ctx, monkeypatch,
     ):
         from istota.health import documents as health_documents
 
@@ -650,19 +629,18 @@ class TestImmunizationImportDocumentAttachment:
             raise health_documents.DocumentError("disk on fire")
 
         monkeypatch.setattr(health_documents, "store_document", _boom)
-        resp = self._extract(
-            client, monkeypatch,
+        body = self._extract(
+            client, config, monkeypatch,
             rows=[{"name": "Influenza", "date_given": "2026-01-05"}],
         )
-        body = resp.json()
         assert body["document_id"] is None
         assert len(body["rows"]) == 1
         assert any("could not be kept" in w for w in body["warnings"])
 
     def test_bulk_links_the_document_to_every_row(
-        self, client, ctx, monkeypatch,
+        self, client, config, ctx, monkeypatch,
     ):
-        document_id = self._extract(client, monkeypatch).json()["document_id"]
+        document_id = self._extract(client, config, monkeypatch)["document_id"]
         resp = client.post(
             "/istota/api/health/immunizations/bulk",
             json={

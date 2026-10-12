@@ -5779,6 +5779,29 @@ def poll_shared_block_requests(config: Config, inflight: dict) -> None:
         )
 
 
+def poll_health_extract_requests(config: Config, inflight: dict) -> None:
+    """The `health-extract-request` gate (ISSUE-697): one read on the dispatch
+    loop, and the extractions on a thread only when the Health pages asked for
+    one. Here rather than in the web process because the daemon is the process
+    that can build the extractor's namespace. Never raises."""
+    from istota.health import extract_requests
+
+    try:
+        pending = extract_requests.requests_pending(config)
+    except sqlite3.OperationalError as exc:
+        logger.debug("health_extract_request_poll_skipped reason=%s", exc)
+        return
+    except Exception:  # noqa: BLE001 - a raise here takes the dispatch loop
+        logger.warning("health_extract_request_poll_failed", exc_info=True)
+        return
+    if pending:
+        _spawn_background_check(
+            "health-extract-request",
+            lambda: extract_requests.answer_pending(config),
+            inflight, overlap_expected=True,
+        )
+
+
 def _parse_shared_kv_target(target: str) -> tuple[str, str]:
     """Parse a ``publish_shared_kv`` target into ``(namespace, key)``.
 
@@ -9687,6 +9710,9 @@ def build_interval_gates(
     def _shared_block_request(now: float) -> None:
         poll_shared_block_requests(config, keeper)
 
+    def _health_extract_request(now: float) -> None:
+        poll_health_extract_requests(config, keeper)
+
     def _notification_handoff(now: float) -> None:
         poll_notification_handoffs(config, keeper)
 
@@ -9816,6 +9842,14 @@ def build_interval_gates(
             run=_shared_block_request,
             fixed_interval=1,
             on_error="Error polling shared-block run requests: %s",
+        ),
+        # Health document extraction (ISSUE-697), the same shape: the web
+        # process cannot confine the extractor's `Read` grant.
+        IntervalGate(
+            name="health-extract-request",
+            run=_health_extract_request,
+            fixed_interval=1,
+            on_error="Error polling health extraction requests: %s",
         ),
         # Notification pushes the web process left for the daemon to send.
         IntervalGate(

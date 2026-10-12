@@ -2015,6 +2015,37 @@ async function healthFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.json();
 }
 
+/** How often, and for how long, the page waits on a daemon extraction. */
+const EXTRACT_POLL_MS = 1500;
+const EXTRACT_DEADLINE_MS = 10 * 60 * 1000;
+
+type ExtractState<T> =
+  | { state: 'pending' }
+  | { state: 'unknown' }
+  | { state: 'answered'; result: T & { error?: string } };
+
+/**
+ * Start a document extraction and wait for the daemon's answer. The extract
+ * routes only hand off (ISSUE-697): the daemon runs the model, and the answer
+ * is read back from `/extract-requests/{id}`.
+ */
+async function runHealthExtraction<T>(path: string, init: RequestInit): Promise<T> {
+  const { id } = await healthFetch<{ id: string }>(path, init);
+  const deadline = Date.now() + EXTRACT_DEADLINE_MS;
+  while (Date.now() < deadline) {
+    const answer = await healthFetch<ExtractState<T>>(
+      `/extract-requests/${encodeURIComponent(id)}`,
+    );
+    if (answer.state === 'answered') {
+      if (answer.result.error) throw new Error(answer.result.error);
+      return answer.result;
+    }
+    if (answer.state === 'unknown') throw new Error('The extraction request was lost.');
+    await new Promise((resolve) => setTimeout(resolve, EXTRACT_POLL_MS));
+  }
+  throw new Error('The extraction is taking too long. Try again later.');
+}
+
 export async function listHealthStats(
   params: { metric?: string; since?: string; until?: string; limit?: number } = {},
 ): Promise<{ stats: HealthStat[] }> {
@@ -2159,7 +2190,7 @@ export async function extractHealthPanel(panelId: number): Promise<{
   warnings: string[];
   raw_text: string;
 }> {
-  return healthFetch(`/panels/${panelId}/extract`, { method: 'POST' });
+  return runHealthExtraction(`/panels/${panelId}/extract`, { method: 'POST' });
 }
 
 export function healthPanelSourceUrl(panelId: number): string {
@@ -2349,7 +2380,7 @@ export async function extractEncounters(file: File): Promise<{
 }> {
   const form = new FormData();
   form.append('file', file);
-  return healthFetch('/encounters/extract', { method: 'POST', body: form });
+  return runHealthExtraction('/encounters/extract', { method: 'POST', body: form });
 }
 
 export async function bulkInsertEncounters(
@@ -2584,7 +2615,7 @@ export async function extractImmunizations(file: File): Promise<{
 }> {
   const form = new FormData();
   form.append('file', file);
-  return healthFetch('/immunizations/extract', { method: 'POST', body: form });
+  return runHealthExtraction('/immunizations/extract', { method: 'POST', body: form });
 }
 
 export async function bulkInsertImmunizations(

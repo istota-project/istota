@@ -1074,23 +1074,10 @@ def _process_deferred_kg_ops(
 
 
 def _health_max_document_bytes(config: Config) -> int:
-    """The operator's document cap, for the agent paths.
+    """The operator's document cap, for the agent paths."""
+    from istota.health.documents import max_document_bytes
 
-    Only the web routes read this before; the deferred replayer fell through
-    to the library default, so ``max_document_bytes = 0`` ("unlimited, for a
-    scanner that produces genuinely large files") silently didn't apply to a
-    document the agent filed — and a lowered cap wasn't enforced there either.
-    """
-    from istota.health.documents import DEFAULT_MAX_DOCUMENT_BYTES
-
-    health_cfg = getattr(config, "health", None)
-    raw = getattr(health_cfg, "max_document_bytes", None)
-    if raw is None:
-        return DEFAULT_MAX_DOCUMENT_BYTES
-    try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_DOCUMENT_BYTES
+    return max_document_bytes(config)
 
 
 def _resolved_source_path(

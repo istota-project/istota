@@ -45,6 +45,23 @@ _ALLOWED_DOCUMENT_MIMES = frozenset({
 
 DEFAULT_MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 
+
+def max_document_bytes(config) -> int:
+    """The operator's ``[health] max_document_bytes``, ``0`` meaning unlimited.
+
+    The one reader for the web routes, the daemon's import extraction and the
+    agent's deferred ops: the replayer once fell through to the default, so a
+    cap of ``0`` silently did not apply to a document the agent filed.
+    """
+    raw = getattr(getattr(config, "health", None), "max_document_bytes", None)
+    if raw is None:
+        return DEFAULT_MAX_DOCUMENT_BYTES
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DOCUMENT_BYTES
+
+
 _DOCUMENTS_SUBDIR = "documents"
 
 _MAX_STEM_CHARS = 100
