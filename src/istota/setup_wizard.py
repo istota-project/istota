@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from istota.lib import toml_write
-from istota.lib.rclone_conf import obscure as rclone_obscure
-from istota.lib.rclone_conf import render_webdav_remote
+from istota.lib.rclone_conf import webdav_remote_for
 
 logger = logging.getLogger("istota.setup")
 
@@ -1297,6 +1296,10 @@ CONTAINER_LOCAL_WORKSPACE = "/data/workspace"
 #: The workspace in full Nextcloud integration: the VM's rclone mount of the
 #: bot's files, bound here. The entrypoint refuses to start unless it is one.
 CONTAINER_NEXTCLOUD_WORKSPACE = "/mnt/shared"
+#: Where the workspace lives when Nextcloud is configured: the rclone mount of
+#: the bot's files, or a directory on the state volume. Talk and the nextcloud
+#: skill work in both.
+WORKSPACE_CHOICES = ("mount", "local")
 #: Where the image installs the real forge binaries, off PATH.
 CONTAINER_FORGE_DIR = "/usr/local/lib/istota_forge"
 #: The `browser` service's container name and API port.
@@ -1367,6 +1370,8 @@ class ContainerAnswers:
     nextcloud_app_password: str = ""
     nextcloud_dav_prefix: str = ""
     nextcloud_auto_share_bot_dir: bool = True
+    #: "mount" or "local"; read only when a Nextcloud URL is given.
+    workspace: str = "mount"
     talk_enabled: bool = True
     oauth_client_id: str = ""
     oauth_client_secret: str = ""
@@ -1415,6 +1420,10 @@ class ContainerAnswers:
     @property
     def uses_nextcloud(self) -> bool:
         return bool(self.nextcloud_url)
+
+    @property
+    def workspace_is_mount(self) -> bool:
+        return self.uses_nextcloud and self.workspace == "mount"
 
     @property
     def public_scheme(self) -> str:
@@ -1489,12 +1498,12 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
         "bot_name": a.bot_name,
         "db_path": CONTAINER_DB_PATH,
         "workspace_path": (
-            CONTAINER_NEXTCLOUD_WORKSPACE if a.uses_nextcloud else CONTAINER_LOCAL_WORKSPACE
+            CONTAINER_NEXTCLOUD_WORKSPACE if a.workspace_is_mount else CONTAINER_LOCAL_WORKSPACE
         ),
         "temp_dir": CONTAINER_TEMP_DIR,
         "security": {"sandbox_enabled": True, "skill_proxy_enabled": True},
     }
-    if a.uses_nextcloud:
+    if a.workspace_is_mount:
         # A real mount, so `runtime.mount_liveness` and the backup's mount
         # guard have something to check.
         doc["nextcloud_mount_path"] = CONTAINER_NEXTCLOUD_WORKSPACE
@@ -1685,14 +1694,14 @@ def host_env_values(a: ContainerAnswers) -> dict[str, str]:
     """The ``host.env`` keys: what the VM's provisioning reads, and what the nginx
     and daemon containers read for the ingress mode."""
     return {
-        "STORAGE": "nextcloud" if a.uses_nextcloud else "local",
+        "STORAGE": "nextcloud" if a.workspace_is_mount else "local",
         "INGRESS": a.ingress,
         "DOMAIN": a.hostname,
         "TLS_CERT_SOURCE": tls_cert_source(a),
         "UPSTREAM_PROXY": a.upstream_proxy,
         "LISTEN_ADDR": a.listen_addr,
         "LISTEN_PORT": str(a.listen_port or ""),
-        "RCLONE_REMOTE": RCLONE_REMOTE if a.uses_nextcloud else "",
+        "RCLONE_REMOTE": RCLONE_REMOTE if a.workspace_is_mount else "",
     }
 
 
@@ -2101,7 +2110,7 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
         ) if flag("tls_cert_source") is None and interactive else (flag("tls_cert_source") or "acme")
         _refuse_on(a, "tls_cert_source")
 
-    # Nextcloud: full integration, or none.
+    # Nextcloud, or none; with it, the workspace on the mount or local.
     nc_url = flag("nextcloud_url")
     if nc_url is None and interactive:
         use_nc = _ask_yes_no(
@@ -2115,19 +2124,34 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
         ).rstrip("/")
         a.nextcloud_username = text("nextcloud_user", "The bot's Nextcloud user", "istota")
         a.nextcloud_app_password = secret("istota_nextcloud_app_password", "Its app password")
-        a.nextcloud_dav_prefix = text(
-            "nextcloud_dav_prefix",
-            "Folder in the bot's files that holds the workspace (blank for the root)", "",
-        )
-        if flag("no_nextcloud_auto_share", False):
+        workspace = flag("workspace")
+        if workspace is None and interactive:
+            out("  Where should the workspace live? mount uses the bot account's files in")
+            out("  Nextcloud through an rclone mount on the VM. local keeps files on this VM")
+            out("  and shows them in the web UI.")
+            workspace = _ask_choice(input_fn, "Workspace", WORKSPACE_CHOICES, "mount", out=out)
+        a.workspace = workspace or "mount"
+        if a.workspace not in WORKSPACE_CHOICES:
+            raise SetupError(f"Unknown workspace {a.workspace!r}; use mount or local.")
+        if a.workspace == "local":
+            # Nothing of the workspace is in Nextcloud, so there is no folder
+            # to name and nothing to share back.
+            a.nextcloud_dav_prefix = ""
             a.nextcloud_auto_share_bot_dir = False
-        elif interactive:
-            a.nextcloud_auto_share_bot_dir = _ask_yes_no(
-                input_fn, "Share each user's bot folder back to them over OCS?",
-                not a.nextcloud_dav_prefix, out=out,
-            )
         else:
-            a.nextcloud_auto_share_bot_dir = not a.nextcloud_dav_prefix
+            a.nextcloud_dav_prefix = text(
+                "nextcloud_dav_prefix",
+                "Folder in the bot's files that holds the workspace (blank for the root)", "",
+            )
+            if flag("no_nextcloud_auto_share", False):
+                a.nextcloud_auto_share_bot_dir = False
+            elif interactive:
+                a.nextcloud_auto_share_bot_dir = _ask_yes_no(
+                    input_fn, "Share each user's bot folder back to them over OCS?",
+                    not a.nextcloud_dav_prefix, out=out,
+                )
+            else:
+                a.nextcloud_auto_share_bot_dir = not a.nextcloud_dav_prefix
         if flag("no_talk", False):
             a.talk_enabled = False
         elif interactive:
@@ -2140,6 +2164,8 @@ def collect_container_answers(args, *, input_fn, out, getpass_fn) -> ContainerAn
             if not a.oauth_client_secret:
                 out("  No client secret; Nextcloud login stays off.")
                 a.oauth_client_id = ""
+    elif flag("workspace") not in (None, "local"):
+        raise SetupError("A mount workspace needs Nextcloud (--nextcloud-url).")
     if flag("no_email_login", False):
         a.email_login = False
 
@@ -2309,16 +2335,25 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
 def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out) -> None:
     """``rclone.conf`` for the VM's Nextcloud mount, staged for ``istota-stack``
     to install. The password is this run's answer, else the one a previous run
-    left in the secrets file, which the loop above kept."""
+    left in the secrets file, which the loop above kept.
+
+    ``istota-stack`` copies the installed file into the staging directory, and
+    one that already says the same thing is kept byte for byte: the obscured
+    password is salted, and ``provision.sh --digest`` hashes the file (#720)."""
     password = a.nextcloud_app_password or _read_secret_file(secrets_dir / "istota_nextcloud_app_password")
     if not password:
         out("  No Nextcloud app password, so no rclone.conf was written; the mount needs one.")
         return
+    path = vm_dir / "rclone.conf"
     try:
-        text = render_webdav_remote(RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, rclone_obscure(password))
+        existing = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        existing = None
+    try:
+        text = webdav_remote_for(existing, RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, password)
     except ValueError as exc:
         raise SetupError(f"The Nextcloud answers cannot go into rclone.conf: {exc}.") from None
-    _write_private(vm_dir / "rclone.conf", text)
+    _write_private(path, text)
 
 
 def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out) -> None:
@@ -2326,7 +2361,7 @@ def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path |
 
     ``config.toml``, ``admins``, ``managed.json`` and the master key under ``data_dir``; with a
     ``vm_dir``, the credential files and the staged ``.env`` and ``host.env``,
-    plus ``rclone.conf`` when the answers use Nextcloud.
+    plus ``rclone.conf`` when the workspace is the Nextcloud mount.
     Validation is the caller's: this writes what it is given.
     """
     config_path = data_dir / "config" / "config.toml"
@@ -2359,7 +2394,7 @@ def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path |
             path = vm_dir / name
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
             path.write_text(render(a, existing), encoding="utf-8")
-        if a.uses_nextcloud:
+        if a.workspace_is_mount:
             _stage_rclone_conf(a, vm_dir, secrets_dir, out)
     elif a.brain_kind != "native" and (a.claude_code_oauth_token or a.anthropic_api_key):
         out(

@@ -25,6 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 import type { User } from '$lib/api';
+import { base } from '$app/paths';
 
 const SHELL_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) IstotaApp/0.10.0';
 
@@ -179,5 +180,37 @@ describe('the dashboard with a connection', () => {
 
     expect(await screen.findByText('RSS feed reader')).toBeTruthy();
     expect(getMe).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the workspace dashboard card', () => {
+  it('links to Workspace when enabled', async () => {
+    getMe.mockResolvedValue(person({ workspace: true }));
+    render(DashboardInLayout);
+
+    const card = await screen.findByRole('link', {
+      name: 'Workspace Browse your files and pinned items',
+    });
+    expect(card.getAttribute('href')).toBe(`${base}/workspace`);
+  });
+
+  it.each([false, undefined])('hides the card when workspace is %s', async (workspace) => {
+    getMe.mockResolvedValue(person({ workspace }));
+    render(DashboardInLayout);
+    await screen.findByText('Talk to Istota in the app');
+
+    expect(screen.queryByText('Browse your files and pinned items')).toBeNull();
+  });
+
+  it('shows the card from a cached offline identity', async () => {
+    online.set(false);
+    getMe.mockRejectedValue(new TypeError('Failed to fetch'));
+    getProfile.mockRejectedValue(new TypeError('Failed to fetch'));
+    readUser.mockResolvedValue(person({ workspace: true }));
+    render(DashboardInLayout);
+
+    expect(
+      await screen.findByRole('link', { name: 'Workspace Browse your files and pinned items' }),
+    ).toBeTruthy();
   });
 });

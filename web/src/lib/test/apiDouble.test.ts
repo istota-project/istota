@@ -75,6 +75,9 @@ describe('the $lib/api double', () => {
       'ConfigChangeError',
       'CredentialWriteError',
       'SetupApiError',
+      'TextFileConflictError',
+      'TextFileInvalidError',
+      'TextFileLockedError',
       'UploadUnreachableError',
     ]);
     for (const name of passedThrough) expect(double[name]).toBe(actual[name]);

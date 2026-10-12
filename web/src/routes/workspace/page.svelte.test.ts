@@ -4,6 +4,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { __history } from '../../../vitest-stubs/app-navigation';
 import type { WorkspacePlace } from '$lib/api';
 import Workspace from './+page.svelte';
+import workspaceSource from './+page.svelte?raw';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 const openFile = vi.hoisted(() => vi.fn());
@@ -41,11 +42,20 @@ const entry = (name: string, kind = 'file', hidden = false) => ({
   modified: 1767268800,
 });
 
+const configFiles = [
+  { name: 'USER.md', kind: 'config', exists: true, size: 2048, editable: true },
+  { name: 'CRON.md', kind: 'config', exists: false, size: null, editable: true },
+  { name: 'TASKS.md', kind: 'config', exists: false, size: null, editable: false },
+  { name: 'HEARTBEAT.md', kind: 'config', exists: false, size: null, editable: true },
+  { name: 'skills/notes', kind: 'skill', exists: false, size: null, editable: true },
+];
+
 beforeEach(() => {
   vi.clearAllMocks();
   api.getWorkspacePins = vi.fn().mockResolvedValue({ pins: [] });
   api.putWorkspacePin = vi.fn();
   api.deleteWorkspacePin = vi.fn().mockResolvedValue({ status: 'ok' });
+  api.getWorkspaceConfigFiles.mockResolvedValue({ files: configFiles });
   localStorage.clear();
   __history.reset('/istota/workspace');
   api.getWorkspacePlaces.mockResolvedValue({
@@ -69,13 +79,41 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+async function openSection(label: string) {
+  const sidebar = await screen.findByRole('complementary');
+  await fireEvent.click(await within(sidebar).findByRole('button', { name: new RegExp(label) }));
+}
+
 async function openActions(name: string) {
   const trigger = await screen.findByRole('button', { name: `Actions for ${name}` });
   await fireEvent.keyDown(trigger, { key: 'Enter' });
 }
 
+it('reserves the folder button height while the listing loads', async () => {
+  let resolve!: (value: unknown) => void;
+  api.getWorkspaceListing.mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  const { container } = render(Workspace);
+  await screen.findByRole('checkbox', { name: 'Show hidden' });
+  const actions = container.querySelector('.folder-actions');
+  expect(actions).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
+  // jsdom has no layout; pin the reserved height to the buttons' shared size.
+  expect(workspaceSource).toMatch(
+    /\.folder-actions\s*\{[^}]*min-height:\s*var\(--control-height-sm\)/,
+  );
+  resolve({ place: 'home', path: '', entries: [], truncated: false, skipped_names: 0 });
+  await screen.findByRole('button', { name: 'New folder' });
+  expect(screen.getByRole('button', { name: 'Upload' })).toBeEnabled();
+  expect(container.querySelector('.folder-actions')).toBe(actions);
+});
+
 it('keeps the standard sidebar uncluttered and shows access beside the folder path', async () => {
   const { container } = render(Workspace);
+  await openSection('Rooms');
   await screen.findByRole('link', { name: 'Project room' });
   const sidebar = screen.getByRole('complementary');
   expect(sidebar.style.getPropertyValue('--sidebar-width')).toBe('220px');
@@ -95,6 +133,7 @@ it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () 
   });
   const { container } = render(Workspace);
   const sidebar = await screen.findByRole('complementary');
+  await openSection('Rooms');
   await within(sidebar).findByRole('link', { name: '<b>Project room</b>' });
   expect(container.querySelector('b')).toBeNull();
   const breadcrumbs = screen.getByRole('navigation', { name: 'Folder path' });
@@ -173,6 +212,7 @@ it('keeps a failed folder retryable and ignores a late result after navigation',
     }),
   );
   render(Workspace);
+  await openSection('Rooms');
   await fireEvent.click(await screen.findByRole('link', { name: 'Project room' }));
   await screen.findByRole('link', { name: 'notes & drafts' });
   resolve({
@@ -286,6 +326,7 @@ it('shows folder conflicts in the dialog and hides writes for other places', asy
   await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
   await screen.findByText('A file or folder already exists.');
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  await openSection('Rooms');
   await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
   expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
@@ -471,7 +512,8 @@ it('pins a file from its row and removes it from the Pinned section', async () =
   await openActions('plan #1.md');
   const unpin = await screen.findByRole('menuitem', { name: 'Unpin' });
   await fireEvent.keyDown(unpin, { key: 'Escape' });
-  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   await fireEvent.click(within(pinned).getByRole('button', { name: 'plan #1.md' }));
   expect(openFile).toHaveBeenCalledWith('/Users/alice/notes/plan #1.md');
   await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin plan #1.md' }));
@@ -495,8 +537,8 @@ it('keeps unavailable pins removable and reports failed mutations', async () => 
   });
   api.deleteWorkspacePin.mockRejectedValueOnce(new Error('Try again.'));
   render(Workspace);
-  await screen.findByText('Unavailable');
-  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   expect(within(pinned).queryByRole('button', { name: 'Gone' })).toBeNull();
   await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin Gone' }));
   await screen.findByText('Try again.');
@@ -537,7 +579,8 @@ it('pins a Drive item with its provider metadata', async () => {
     mime_type: item.mime_type,
     web_url: item.web_url,
   });
-  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   const link = within(pinned).getByRole('link', { name: '<b>Budget</b>' });
   expect(link.querySelector('b')).toBeNull();
   expect(link).toHaveAttribute('rel', 'noopener noreferrer');
@@ -610,4 +653,302 @@ it('offers file downloads and keeps non-regular entries without actions', async 
   expect(download.getAttribute('href')).toContain(
     encodeURIComponent('/Users/alice/notes & drafts/plan #1.md'),
   );
+});
+
+function editorBox(): HTMLTextAreaElement {
+  const box = document.querySelector('[role=dialog] textarea');
+  if (!box) throw new Error('no editor open');
+  return box as HTMLTextAreaElement;
+}
+
+it('lists the configuration files with their sizes and keeps a refused one read-only', async () => {
+  render(Workspace);
+  const section = await screen.findByRole('region', { name: 'Configuration' });
+  await fireEvent.click(within(section).getByRole('button', { name: /Configuration/ }));
+  await within(section).findByText('USER.md');
+  expect(within(section).getByText('2 KB')).toBeTruthy();
+  expect(within(section).getAllByText('Not created yet').length).toBe(2);
+  expect(within(section).getByRole('button', { name: 'Edit TASKS.md' })).toBeDisabled();
+  expect(within(section).queryByText('notes')).toBeNull();
+  await fireEvent.click(within(section).getByRole('button', { name: /Skill instructions/ }));
+  expect(within(section).getByRole('button', { name: 'Edit skills/notes' })).toBeEnabled();
+});
+
+it('edits CRON.md with the loaded revision and says when the jobs change', async () => {
+  api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'rev-0', exists: false });
+  api.saveWorkspaceConfigFile.mockResolvedValue({ revision: 'rev-1', applies: 'next_sync' });
+  render(Workspace);
+  await openSection('Configuration');
+  await fireEvent.click(await screen.findByRole('button', { name: 'Edit CRON.md' }));
+  await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md'));
+  await waitFor(() => editorBox());
+  await fireEvent.input(editorBox(), { target: { value: '# Jobs\n' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() =>
+    expect(api.saveWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md', '# Jobs\n', 'rev-0'),
+  );
+  await screen.findByText('Saved. The jobs update at the next CRON.md sync.');
+  await fireEvent.click(screen.getAllByRole('button', { name: 'Close' }).at(-1)!);
+  // The list is refetched so a size or "not created yet" is current.
+  await waitFor(() => expect(api.getWorkspaceConfigFiles).toHaveBeenCalledTimes(2));
+});
+
+it('keeps the text on a conflict and on validator errors, and lists the errors', async () => {
+  api.getWorkspaceConfigFile.mockResolvedValue({
+    content: 'old\n',
+    revision: 'rev-0',
+    exists: true,
+  });
+  api.saveWorkspaceConfigFile.mockRejectedValueOnce(
+    new actualApi.TextFileInvalidError(['TOML error: expected a value']),
+  );
+  render(Workspace);
+  await openSection('Configuration');
+  await fireEvent.click(await screen.findByRole('button', { name: 'Edit HEARTBEAT.md' }));
+  await waitFor(() => expect(editorBox().value).toBe('old\n'));
+  await fireEvent.input(editorBox(), { target: { value: 'broken' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('TOML error: expected a value');
+  expect(editorBox().value).toBe('broken');
+
+  api.saveWorkspaceConfigFile.mockRejectedValueOnce(new actualApi.TextFileConflictError());
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await screen.findByText(/changed this file while you were editing/);
+  expect(editorBox().value).toBe('broken');
+
+  api.saveWorkspaceConfigFile.mockRejectedValueOnce(new actualApi.TextFileLockedError());
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await screen.findByText(/being written right now/);
+  expect(editorBox().value).toBe('broken');
+});
+
+it('reports a failed configuration list without hiding the places', async () => {
+  api.getWorkspaceConfigFiles.mockRejectedValue(new Error('network'));
+  render(Workspace);
+  await openSection('Configuration');
+  await screen.findByText('Could not load your configuration files.');
+  await openSection('Rooms');
+  expect(screen.getByRole('link', { name: 'Project room' })).toBeTruthy();
+});
+
+it('sorts folders first, toggles date order and remembers it', async () => {
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'home',
+    path: '',
+    entries: [
+      { ...entry('z.txt'), modified: 100 },
+      { ...entry('a.txt'), modified: 200 },
+      entry('Folder', 'dir'),
+    ],
+    truncated: false,
+    skipped_names: 0,
+  });
+  const { unmount } = render(Workspace);
+  const table = await screen.findByRole('table', { name: 'Files' });
+  const names = () =>
+    within(table)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => row.textContent);
+  expect(names()[0]).toContain('Folder');
+  expect(names()[1]).toContain('a.txt');
+  await fireEvent.click(screen.getByRole('button', { name: 'Sort by modified' }));
+  expect(names()[1]).toContain('a.txt');
+  await fireEvent.click(screen.getByRole('button', { name: 'Sort by modified' }));
+  expect(names()[1]).toContain('z.txt');
+  unmount();
+  render(Workspace);
+  const restored = await screen.findByRole('table', { name: 'Files' });
+  expect(within(restored).getAllByRole('row')[2]).toHaveTextContent('z.txt');
+  expect(screen.getByRole('button', { name: 'Sort by modified' }).closest('th')).toHaveAttribute(
+    'aria-sort',
+    'ascending',
+  );
+});
+
+it('selects only visible files and confirms deletion, retaining failed items', async () => {
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'home',
+    path: '',
+    entries: [entry('a.txt'), entry('b.txt'), entry('.hidden', 'file', true)],
+    truncated: false,
+    skipped_names: 0,
+  });
+  api.deleteWorkspaceEntry = vi
+    .fn()
+    .mockResolvedValueOnce({ status: 'ok' })
+    .mockRejectedValueOnce(new Error('Permission denied.'));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Select all visible items' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+  expect(api.deleteWorkspaceEntry).not.toHaveBeenCalled();
+  await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
+  await waitFor(() => expect(api.deleteWorkspaceEntry).toHaveBeenCalledTimes(2));
+  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(1, '', 'a.txt');
+  expect(api.deleteWorkspaceEntry).toHaveBeenNthCalledWith(2, '', 'b.txt');
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'a.txt' })).toBeNull());
+  expect(screen.getByRole('checkbox', { name: 'Select b.txt' })).toBeChecked();
+  expect(screen.getByRole('alert')).toHaveTextContent('b.txt: Permission denied.');
+});
+
+it('clears selection when filtering and never exposes deletion in shared places', async () => {
+  api.getWorkspaceListing.mockImplementation(async (place) => ({
+    place,
+    path: '',
+    entries: [entry('a.txt'), entry('b.txt')],
+    truncated: false,
+    skipped_names: 0,
+  }));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Select a.txt' }));
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Filter files' }), {
+    target: { value: 'b.txt' },
+  });
+  expect(screen.queryByRole('button', { name: 'a.txt' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
+  await openSection('Rooms');
+  await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
+  await screen.findByRole('button', { name: 'a.txt' });
+  expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull();
+});
+
+it('cancels deletion without a request and clears selection on navigation', async () => {
+  api.deleteWorkspaceEntry = vi.fn();
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Select notes & drafts' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+  await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+  expect(api.deleteWorkspaceEntry).not.toHaveBeenCalled();
+  await fireEvent.click(screen.getByRole('link', { name: 'notes & drafts' }));
+  await screen.findByRole('button', { name: 'plan #1.md' });
+  expect(screen.getByRole('checkbox', { name: 'Select plan #1.md' })).not.toBeChecked();
+  expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
+});
+
+it('browses Nextcloud folders and opens files in the connected account', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null }],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockImplementation(async (place, path) => ({
+    place,
+    path,
+    truncated: false,
+    skipped_names: 0,
+    entries: path
+      ? [{ ...entry('report.pdf'), nextcloud_url: 'https://cloud.example.com/index.php/f/11' }]
+      : [entry('Notes & plans', 'dir')],
+  }));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'Notes & plans' }));
+  expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('nextcloud', 'Notes & plans');
+  const file = await screen.findByRole('link', { name: 'report.pdf' });
+  expect(file).toHaveAttribute('href', 'https://cloud.example.com/index.php/f/11');
+  expect(file).toHaveAttribute('target', '_blank');
+  expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
+  await openActions('report.pdf');
+  expect(await screen.findByRole('menuitem', { name: 'Open in Nextcloud' })).toBeTruthy();
+});
+
+it('links to Connections when Nextcloud needs reconnecting', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null }],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockRejectedValue(new Error('Reconnect in Settings.'));
+  render(Workspace);
+  expect(await screen.findByRole('link', { name: 'Connections' })).toHaveAttribute(
+    'href',
+    '/settings/connections',
+  );
+});
+
+it('explains personal Nextcloud browsing without claiming tasks have no file access', async () => {
+  const note =
+    'This browser uses your personal Nextcloud connection. The Nextcloud skill uses the bot’s separate account. Files available to a task depend on that account’s access and the task’s workspace permissions.';
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      {
+        ...home,
+        id: 'nextcloud',
+        kind: 'nextcloud',
+        label: 'Nextcloud',
+        view_root: null,
+        reach: { private: 'none', shared_member: 'none', restricted: 'none', note },
+      },
+    ],
+    notes: ['Files are stored in your Nextcloud at cloud.example.com.'],
+  });
+  render(Workspace);
+  await screen.findByText(note);
+  expect(screen.queryByText('No access')).toBeNull();
+  expect(screen.queryByText('Private room')).toBeNull();
+  expect(screen.queryByText('Files are stored in your Nextcloud at cloud.example.com.')).toBeNull();
+  expect(screen.getByText('How Istota reaches your files')).toBeTruthy();
+});
+
+it('puts My files immediately after Pinned and opens only My files by default', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      home,
+      room,
+      { ...home, id: 'linked:1', kind: 'linked', label: 'Shared folder' },
+      { ...home, id: 'group:team', kind: 'group', label: 'Team folder' },
+      { ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null },
+    ],
+    notes: [],
+  });
+  api.getWorkspacePins.mockResolvedValue({
+    pins: [
+      {
+        id: 1,
+        provider: 'workspace',
+        ref: '/Users/alice/plan.md',
+        name: 'Pinned plan',
+        available: true,
+        is_dir: false,
+      },
+    ],
+  });
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await within(sidebar).findByRole('link', { name: 'My files' });
+  const headings = Array.from(sidebar.querySelectorAll('.cat-label-text')).map(
+    (el) => el.textContent,
+  );
+  expect(headings).toEqual([
+    'Pinned',
+    'My files',
+    'Configuration',
+    'Skill instructions',
+    'Linked folders',
+    'Rooms',
+    'Groups',
+    'Connections',
+  ]);
+  for (const hidden of [
+    'Pinned plan',
+    'USER.md',
+    'Shared folder',
+    'Project room',
+    'Team folder',
+    'Nextcloud',
+  ]) {
+    expect(within(sidebar).queryByText(hidden)).toBeNull();
+  }
+  for (const [group, item] of [
+    ['Pinned', 'Pinned plan'],
+    ['Configuration', 'USER.md'],
+    ['Skill instructions', 'notes'],
+    ['Linked folders', 'Shared folder'],
+    ['Rooms', 'Project room'],
+    ['Groups', 'Team folder'],
+    ['Connections', 'Nextcloud'],
+  ]) {
+    await fireEvent.click(within(sidebar).getByRole('button', { name: new RegExp(group) }));
+    expect(within(sidebar).getByText(item)).toBeTruthy();
+  }
+  await fireEvent.click(within(sidebar).getByRole('button', { name: /My files/ }));
+  expect(within(sidebar).queryByRole('link', { name: 'My files' })).toBeNull();
 });

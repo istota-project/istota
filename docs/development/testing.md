@@ -186,6 +186,8 @@ Six assertions in that file have no control, deliberately, and each fails closed
 
 **Each control names the exact parametrized node ids it must turn red**, and the script requires those to appear in pytest's own `FAILED` summary. Checking only the exit status is not enough, and that is not hypothetical: the first cut did that, and one control passed on a `UnicodeDecodeError` raised inside `subprocess` before its assertion ever ran — red for the right image, for the wrong reason, which is indistinguishable from a working assertion and is exactly what a control exists to tell apart. The underlying harness bug is fixed too (`errors="replace"` in `tests/image/conftest.py`).
 
+The first-run setup server has its own control, `scripts/test-image-negative-control.sh web-setup`. It builds `docker/test/Dockerfile.setup-any-code` on top of the built istota image: the same image with the setup code comparison in `webui/setup_app.py` replaced by `if False:`, so the server takes any code. Against it, `tests/image/test_web_setup.py::TestTheSetupCode::test_a_wrong_code_is_refused` and `tests/image/test_web_setup.py::TestTheSetupCode::test_the_right_code_unlocks_with_a_strict_secure_cookie` go red (the wrong code unlocks and spends the code, so the right one is then refused), and the other 13 tests in the file stay green. The script requires the first of the two in pytest's `FAILED` summary and requires `TestFinish::test_finish_answers_and_the_server_exits_0` not to fail, which shows the red came from the code check rather than from a server that never started. It needs the istota image built by `uv run pytest -m image -n0 tests/image/test_web_setup.py` first.
+
 The upgrade tier's control is the forge-less istota image passed through `ISTOTA_IMAGE_TAG`:
 
 ```bash
@@ -193,6 +195,16 @@ ISTOTA_IMAGE_TAG=istota-test/no-forge:control uv run pytest -m image -n0 tests/i
 ```
 
 A clean run there is the failure.
+
+`host/istota-stack` has its controls in `scripts/test-stack-negative-control.sh`. Each breaks one property in a copy of the script and hands the copy to the default suite's `tests/test_istota_stack.py` through `ISTOTA_STACK_SCRIPT`, so most of them need neither Docker nor a VM. With no argument it runs the two release-integrity controls, `skip-verify` and `user-keyring`. `setup-web` runs three controls for `istota-stack setup --web`, and each must turn exactly its named node ids red, with every other test in the setup classes green:
+
+| Control | Breaks | Turns red |
+|---|---|---|
+| `setup-unmarked` | installs staging without checking the `setup-done` marker | the five `TestSetupWebUnfinished` tests and `TestSetupWebFinished::test_a_linked_marker_is_not_a_finished_setup` |
+| `setup-mint-in-staging` | mints the code, certificate and key into staging instead of root's own `.setup/`, then copies them back, so only the staged files' mode is wrong | `TestSetupWebMints::test_the_code_and_certificate_are_root_s_and_the_copies_read_only` |
+| `setup-no-lock` | skips the setup lock, so a second run is not refused | `TestSetupWebRefuses::test_a_second_run_is_refused_while_the_first_serves`, `TestSetupCode::test_during_a_setup_it_prints_the_instructions` |
+
+`no-drop` and `rollback` run against the image tier and need Docker.
 
 ### Which shape a subsystem belongs on
 
@@ -242,7 +254,7 @@ The generated passwords, the module switches derived from the profile's service 
 
 ### The storage backend
 
-`Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped storage modes of the one deployment: `local` is what the stack runs with no Nextcloud, not a test convenience. So a change that decouples istota from Nextcloud and breaks the Nextcloud-free install has to go red somewhere.
+`Config.storage_is_nextcloud` is a Nextcloud URL together with `nextcloud_mount_path` (a URL alone is a Nextcloud install with a local workspace), and both values are shipped storage modes of the one deployment: `local` is what the stack runs with no Nextcloud, not a test convenience. So a change that decouples istota from Nextcloud and breaks the Nextcloud-free install has to go red somewhere.
 
 Both modes are booted. The testbed writes the config `istota setup` writes for each: every lean profile runs local storage, with `workspace_path` at `/data/workspace` on the state volume, and the full profile runs full Nextcloud integration, with `workspace_path` and `nextcloud_mount_path` at `/mnt/shared`. `storage.py` branches on `has_workspace` rather than on the backend, so briefings, memory and the tasks file take the identical path under both.
 

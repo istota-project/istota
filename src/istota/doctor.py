@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
 from istota.lib import du
+from istota.lib import mountinfo
 from istota.lib import sqlite_util
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.user_scope import is_within, paths_overlap
@@ -951,6 +952,183 @@ def check_workspace_xattr(config: "Config", probe: bool) -> CheckResult:
             ),
         )
     return CheckResult(name, OK, "listxattr on a workspace file succeeds")
+
+
+# Where `check_workspace_mode` reads `self/mountinfo` from; tests point it at a
+# directory holding a fake one.
+_MOUNTINFO_PROC_ROOT = Path("/proc")
+
+
+def check_workspace_mode(config: "Config", probe: bool) -> CheckResult:
+    """The config's storage mode agrees with the mount the workspace is on.
+
+    ``nextcloud_mount_path`` set means the workspace is the bot's Nextcloud
+    files through the rclone mount; unset means it is local. A hand-written
+    config can say one while the disk says the other, and the two cases cost
+    different things: a workspace on the mount with the key unset runs with
+    the mount checks off and local vocabulary (FAIL, as the entrypoint
+    refuses it), while the key set on something other than ``fuse.rclone`` is
+    what the full and upgrade test tiers run on purpose (WARN, or OK under
+    the entrypoint's testbed concession). Reads ``mountinfo`` only, never the
+    mount itself, so no probe gate.
+    """
+    name = "runtime.workspace_mode"
+    if config.workspace_path is None:
+        return CheckResult(name, SKIP, "no workspace configured")
+    text = mountinfo.read_mountinfo(_MOUNTINFO_PROC_ROOT)
+    if text is None:
+        return CheckResult(name, SKIP, "no /proc/self/mountinfo on this platform")
+    workspace = os.path.normpath(str(config.workspace_path))
+    mount = mountinfo.covering_mount(workspace, text)
+    mountpoint, fstype = (mount.point, mount.fstype) if mount else ("/", "unknown")
+    mount_key = config.nextcloud_mount_path
+    if mount_key is None:
+        if fstype == "fuse.rclone":
+            return CheckResult(
+                name, FAIL,
+                f"the workspace {workspace} is on the rclone mount {mountpoint}, "
+                "but nextcloud_mount_path is not set, so it runs as a local "
+                "workspace with the mount checks off",
+                remedy=(
+                    f'Set nextcloud_mount_path = "{mountpoint}" in config.toml, '
+                    "or move the workspace off the mount."
+                ),
+            )
+        return CheckResult(name, OK, f"local workspace at {workspace} ({fstype})")
+    if not config.nextcloud_enabled:
+        return CheckResult(
+            name, WARN,
+            f"nextcloud_mount_path is set ({mount_key}) but [nextcloud] url is "
+            "not: the mount checks run, and the workspace is described as local",
+            remedy=(
+                "Remove nextcloud_mount_path if the workspace is local, or set "
+                "[nextcloud] url if it is the bot's Nextcloud files."
+            ),
+        )
+    if fstype == "fuse.rclone":
+        return CheckResult(name, OK, f"the workspace {workspace} is the rclone mount {mountpoint}")
+    concession = os.environ.get("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE") == "1"
+    if concession and mountpoint == workspace:
+        return CheckResult(
+            name, OK,
+            f"the workspace {workspace} is a {fstype} mount of its own (test tier concession)",
+        )
+    return CheckResult(
+        name, WARN,
+        f"nextcloud_mount_path is set but the workspace {workspace} is on "
+        f"{mountpoint} ({fstype}), not the rclone mount (fuse.rclone)",
+        remedy=(
+            "Start mount-nextcloud.service on the VM, or remove "
+            "nextcloud_mount_path if the workspace is meant to be local."
+        ),
+    )
+
+
+def _device_of(path: Path) -> int | None:
+    """``st_dev`` of `path`, or of its nearest existing ancestor.
+
+    The backup destination is created on the first run, so before then the
+    question is answered by the directory it will be made in.
+    """
+    current = Path(os.path.abspath(path))
+    while True:
+        try:
+            return os.stat(current).st_dev
+        except FileNotFoundError:
+            if current.parent == current:
+                return None
+            current = current.parent
+        except OSError:
+            return None
+
+
+def check_backups_off_volume(config: "Config", probe: bool) -> CheckResult:
+    """The database snapshots are not on the volume they are meant to survive.
+
+    `db_backup._destination_is_durable` deliberately does not refuse a
+    same-volume destination: on the Docker stack `/data/db` and
+    `/data/workspace` share `istota_data`, so refusing would stop every
+    backup on every local install. A snapshot there still protects against a
+    corrupted database file; it does not protect against losing the volume,
+    and this check is where that is said. Under the Nextcloud mount the
+    workspace is the off-host target, so sharing a device with it is the point
+    and only the database's device is compared.
+    """
+    from istota.maintenance.db_backup import backup_destination
+
+    name = "backups.off_volume"
+    if not config.scheduler.db_backup_enabled:
+        return CheckResult(name, SKIP, "database backups are disabled")
+    dest = backup_destination(config)
+    if dest is None:
+        return CheckResult(name, SKIP, "no backup destination (no workspace and no db_backup_dir)")
+    dest_dev = _device_of(dest)
+    if dest_dev is None:
+        return CheckResult(name, WARN, f"cannot stat the backup destination {dest}",
+                           remedy="Check that the backup directory's parent exists and is readable.")
+    shared = []
+    if _device_of(config.db_path.parent) == dest_dev:
+        shared.append(f"the database ({config.db_path.parent})")
+    if (
+        config.workspace_path is not None
+        and not config.storage_is_nextcloud
+        and _device_of(config.workspace_path) == dest_dev
+    ):
+        shared.append(f"the workspace ({config.workspace_path})")
+    if not shared:
+        return CheckResult(name, OK, f"backups go to {dest}, on a volume of their own")
+    return CheckResult(
+        name, WARN,
+        f"backups go to {dest}, on the same volume as " + " and ".join(shared)
+        + ": they survive a corrupted database file but not the loss of the volume",
+        remedy=(
+            "Back up that volume itself (istota_data on the Docker stack), or set "
+            "[scheduler] db_backup_dir to a directory on another disk."
+        ),
+    )
+
+
+# `runtime.workspace_disk` thresholds: WARN below either free-space floor,
+# FAIL below the last one.
+_DISK_WARN_FRACTION = 0.10
+_DISK_WARN_BYTES = 2 * 1024**3
+_DISK_FAIL_FRACTION = 0.02
+
+
+def check_workspace_disk(config: "Config", probe: bool) -> CheckResult:
+    """The local workspace's volume has room left.
+
+    SKIPs under the Nextcloud mount: `statvfs` there reports the cache disk
+    rclone writes to, not the Nextcloud quota the files count against.
+    """
+    name = "runtime.workspace_disk"
+    if config.workspace_path is None:
+        return CheckResult(name, SKIP, "no workspace configured")
+    if config.storage_is_nextcloud:
+        return CheckResult(name, SKIP, "the workspace is the Nextcloud mount; its quota is Nextcloud's")
+    try:
+        st = os.statvfs(config.workspace_path)
+    except OSError as e:
+        return CheckResult(name, WARN, f"cannot stat {config.workspace_path}: {e.strerror}",
+                           remedy="Check that the workspace directory exists and is readable.")
+    total = st.f_blocks * st.f_frsize
+    free = st.f_bavail * st.f_frsize
+    if total <= 0:
+        return CheckResult(name, SKIP, f"{config.workspace_path} reports no size")
+    fraction = free / total
+    detail = (
+        f"{free / 1024**3:.1f} GiB free of {total / 1024**3:.1f} GiB "
+        f"({fraction:.0%}) on the volume holding {config.workspace_path}"
+    )
+    remedy = (
+        "Free space on that volume or grow it. On the Docker stack it also holds "
+        "the databases and their snapshots (istota_data)."
+    )
+    if fraction < _DISK_FAIL_FRACTION:
+        return CheckResult(name, FAIL, detail, remedy=remedy)
+    if fraction < _DISK_WARN_FRACTION or free < _DISK_WARN_BYTES:
+        return CheckResult(name, WARN, detail, remedy=remedy)
+    return CheckResult(name, OK, detail)
 
 
 def _session_log_tree(root: Path) -> tuple[int, int]:
@@ -4646,10 +4824,10 @@ def check_avatar_import(config: "Config", probe: bool) -> CheckResult:
     web = getattr(config, "web", None)
     if not web or not web.enabled:
         return CheckResult(name, SKIP, "web interface disabled", scope=DEPLOYMENT)
-    if not config.storage_is_nextcloud:
+    if not config.nextcloud_enabled:
         return CheckResult(
             name, SKIP,
-            "storage backend is local; there is no Nextcloud to import from",
+            "no Nextcloud is configured; there is nothing to import from",
             scope=DEPLOYMENT,
         )
     if not getattr(web, "avatar_import_from_nextcloud", False):
@@ -9328,6 +9506,9 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.writable_dirs", check_writable_dirs),
     ("runtime.mount_liveness", check_mount_liveness),
     ("runtime.workspace_xattr", check_workspace_xattr),
+    ("runtime.workspace_mode", check_workspace_mode),
+    ("runtime.workspace_disk", check_workspace_disk),
+    ("backups.off_volume", check_backups_off_volume),
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.task_control_dir", check_task_control_dir),
     ("runtime.bare_metal_import", check_bare_metal_import),
@@ -9427,6 +9608,9 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.writable_dirs": DEPLOYMENT,
     "runtime.mount_liveness": DEPLOYMENT,
     "runtime.workspace_xattr": DEPLOYMENT,
+    "runtime.workspace_mode": DEPLOYMENT,
+    "runtime.workspace_disk": DEPLOYMENT,
+    "backups.off_volume": DEPLOYMENT,
     # Deployment, not image: it walks a directory on the install's own disk and
     # reads the last sweep's row out of the framework database, neither of which
     # a bare `docker run` has.

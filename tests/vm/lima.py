@@ -388,6 +388,13 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
         '    log "rolled back to ${previous} (previous: ${current})"\n    reprovision_if_changed\n',
         '    log "rolled back to ${previous} (previous: ${current})"\n',
     ),
+    # The workspace is copied and the mount turned off, and config.toml still
+    # names the mount (`tests/vm/test_localize.py`).
+    "localize-without-config": (
+        '    ISTOTA_CONFIG_READ_ONLY=false oneshot "$(main_service)" istota workspace localize-config '
+        '--workspace "$LOCAL_WORKSPACE" \\\n',
+        '    true \\\n',
+    ),
 }
 
 
@@ -578,6 +585,24 @@ def nextcloud_mode(model_url: str, nc_url: str, bot_password: str, rclone_conf: 
     )
 
 
+def nextcloud_wizard_mode(model_url: str, nc_url: str, bot_password: str) -> Mode:
+    """Full integration as `istota-stack setup` writes it, not the role.
+
+    `localize-workspace` refuses a config `istota apply` wrote, so the move
+    needs the wizard's. The rclone.conf goes in through `prepare`.
+    """
+    return Mode(
+        name="nextcloud-wizard",
+        setup_args=common_args(model_url) + [
+            "--ingress", "local", "--hostname", "localhost:8080",
+            "--nextcloud-url", nc_url, "--nextcloud-user", NC_BOT, "--workspace", "mount",
+            "--nextcloud-dav-prefix", "Shared Files", "--no-nextcloud-auto-share", "--no-talk",
+        ],
+        setup_env={"ISTOTA_NEXTCLOUD_APP_PASSWORD": bot_password},
+        host_env={"RCLONE_REMOTE": "nextcloud"},
+    )
+
+
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
     for key, value in over.items():
@@ -666,7 +691,7 @@ def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
     return {
         "istota_release": release.tag,
         "istota_release_signing_key": release.signing_key,
-        "istota_storage": "nextcloud" if answers.uses_nextcloud else "local",
+        "istota_storage": setup_wizard.host_env_values(answers)["STORAGE"],
         "istota_ingress": answers.ingress,
         "istota_domain": answers.hostname,
         "istota_tls_cert_source": answers.tls_cert_source,

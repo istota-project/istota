@@ -3940,6 +3940,93 @@ def cmd_devbox_compose_file(args) -> int:
     return 0
 
 
+def cmd_workspace_localize(args) -> int:
+    """Copy a mounted workspace to a local tree; see `maintenance/workspace_localize.py`."""
+    from istota.maintenance import workspace_localize as wl
+
+    config = load_config(Path(args.config) if args.config else None)
+    source = Path(args.source)
+    destination = Path(args.destination)
+
+    def refuse(reason: str) -> int:
+        print(f"istota workspace localize: REFUSE: {reason}; nothing was written.", file=sys.stderr)
+        return wl.EXIT_REFUSED
+
+    if not args.scheduler_stopped and not args.dry_run:
+        return refuse("pass --scheduler-stopped once daemon, web and whatsapp-baileys are stopped")
+    if not config.storage_is_nextcloud:
+        return refuse("this config is not mount mode (no [nextcloud] url and nextcloud_mount_path)")
+    if config.workspace_path is None or os.path.realpath(source) != os.path.realpath(config.workspace_path):
+        return refuse(f"--from {source} is not the configured workspace {config.workspace_path}")
+    try:
+        report = wl.copy_workspace(
+            source, destination, bot_dir_name=config.bot_dir_name,
+            dry_run=args.dry_run, resume=args.resume,
+        )
+    except wl.LocalizeRefused as exc:
+        return refuse(str(exc))
+    if not args.dry_run and not args.no_note and report.error is None:
+        wl.write_notes(source, report, bot_dir_name=config.bot_dir_name, text=wl.default_note(config))
+    report_path = Path(args.report) if args.report else destination.parent / "workspace-localize-report.json"
+    try:
+        wl.write_report(report, report_path)
+        print(f"report: {report_path}")
+    except OSError as exc:
+        print(f"istota workspace localize: could not write the report to {report_path}: {exc}", file=sys.stderr)
+    for line in report.summary_lines():
+        print(line)
+    if report.noted:
+        print(f"wrote {wl.NOTE_NAME} for {len(report.noted)} user(s) on {source}")
+    return report.exit_code()
+
+
+def cmd_workspace_localize_config(args) -> int:
+    """Rewrite config.toml for a local workspace, keeping config.toml.pre-localize."""
+    from istota.maintenance import workspace_localize as wl
+
+    target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
+    if not target:
+        print("istota workspace localize-config: name the config file with -c (or ISTOTA_CONFIG_PATH).",
+              file=sys.stderr)
+        return wl.EXIT_REFUSED
+    try:
+        if args.check:
+            text = wl.read_config_text(Path(target))
+            if wl.localized_config_text(text, args.workspace) is None:
+                print(f"{target}: already a local workspace")
+            else:
+                print(f"{target}: can be moved to {args.workspace}")
+            return 0
+        changed = wl.localize_config(Path(target), args.workspace)
+    except (wl.LocalizeRefused, OSError, UnicodeDecodeError) as exc:
+        print(f"istota workspace localize-config: REFUSE: {exc}; nothing was written.", file=sys.stderr)
+        return wl.EXIT_REFUSED
+    if changed:
+        print(f"{target}: workspace_path = {args.workspace!r}, nextcloud_mount_path removed, "
+              f"auto_share_bot_dir = false; the previous file is {target}{wl.PRE_LOCALIZE_SUFFIX}")
+    else:
+        print(f"{target}: already a local workspace; unchanged")
+    return 0
+
+
+def cmd_workspace_reindex(args) -> int:
+    """Reindex memory files on the current workspace and drop rows under the old root."""
+    from istota.maintenance import workspace_localize as wl
+
+    config = load_config(Path(args.config) if args.config else None)
+    try:
+        with db.get_db(config.db_path) as conn:
+            stats = wl.reindex_moved_workspace(conn, config, args.forget_root)
+    except (wl.LocalizeRefused, ValueError) as exc:
+        print(f"istota workspace reindex: REFUSE: {exc}", file=sys.stderr)
+        return wl.EXIT_REFUSED
+    print(
+        f"reindexed {stats['users']} user(s): {stats['chunks']} chunks, "
+        f"{stats['playbook_chunks']} playbook chunks; removed {stats['removed']} rows under {args.forget_root}"
+    )
+    return 0
+
+
 def cmd_nextcloud_provision_rooms(args):
     """Create the user's default Talk rooms and seed their channel tokens.
 
@@ -4989,7 +5076,11 @@ def main():
     setup_parser = subparsers.add_parser(
         "setup", help="First-run installer (the container, or a standalone install)",
     )
-    setup_parser.add_argument("--workspace", help="Workspace directory (default ~/.istota)")
+    setup_parser.add_argument(
+        "--workspace",
+        help="Standalone: workspace directory (default ~/.istota). Container, with "
+        "--nextcloud-url: mount (the rclone mount, the default) or local",
+    )
     setup_parser.add_argument(
         "--brain", choices=["claude_code", "native"], help="Model backend (skip detection)",
     )
@@ -5723,6 +5814,41 @@ def main():
         help="Print compose.devbox.yml: one devbox service per [devbox] users entry",
     )
 
+    # workspace (with subparsers)
+    ws_parser = subparsers.add_parser(
+        "workspace", help="Move a mounted workspace onto local storage (docs/deployment/moving-to-a-local-workspace.md)",
+    )
+    ws_subparsers = ws_parser.add_subparsers(dest="workspace_action", required=True)
+    ws_localize = ws_subparsers.add_parser(
+        "localize",
+        help="Copy the workspace from the mount to a local tree (exit 0 copied, 1 refused, "
+             "2 copied with skipped entries, 3 stopped on an I/O error)",
+    )
+    ws_localize.add_argument("--from", dest="source", required=True, help="The mounted workspace (the configured one)")
+    ws_localize.add_argument("--to", dest="destination", required=True, help="The local tree to copy into")
+    ws_localize.add_argument("--dry-run", action="store_true", help="Walk and report; write nothing but the report")
+    ws_localize.add_argument("--resume", action="store_true",
+                             help="Continue an earlier copy: a destination file of equal size and mtime is kept")
+    ws_localize.add_argument("--no-note", action="store_true",
+                             help="Write no MOVED.md into each user's bot folder on the mount")
+    ws_localize.add_argument("--report", help="Where the JSON report goes (default: beside the destination)")
+    ws_localize.add_argument(
+        "--scheduler-stopped", action="store_true",
+        help="No writer is running (daemon, web and whatsapp-baileys stopped). Required unless --dry-run",
+    )
+    ws_config = ws_subparsers.add_parser(
+        "localize-config",
+        help="Point config.toml at a local workspace, keeping config.toml.pre-localize (exit 0, or 1 refused)",
+    )
+    ws_config.add_argument("--workspace", default="/data/workspace", help="The local workspace path")
+    ws_config.add_argument("--check", action="store_true",
+                           help="Only say whether the config can be moved (exit 0) or is refused (1); write nothing")
+    ws_reindex = ws_subparsers.add_parser(
+        "reindex",
+        help="Reindex every user's memory files on the workspace, then drop index rows under the old root",
+    )
+    ws_reindex.add_argument("--forget-root", required=True, help="The workspace root the files were indexed under")
+
     # nextcloud (with subparsers)
     nc_parser = subparsers.add_parser("nextcloud", help="Nextcloud server operations")
     nc_subparsers = nc_parser.add_subparsers(dest="nextcloud_action", required=True)
@@ -5955,6 +6081,15 @@ def main():
             "compose-file": cmd_devbox_compose_file,
         }
         rc = devbox_commands[args.devbox_action](args)
+        if rc:
+            sys.exit(rc)
+    elif args.command == "workspace":
+        workspace_commands = {
+            "localize": cmd_workspace_localize,
+            "localize-config": cmd_workspace_localize_config,
+            "reindex": cmd_workspace_reindex,
+        }
+        rc = workspace_commands[args.workspace_action](args)
         if rc:
             sys.exit(rc)
     elif args.command == "nextcloud":

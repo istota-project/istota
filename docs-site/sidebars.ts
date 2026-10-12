@@ -109,6 +109,7 @@ const sidebars: SidebarsConfig = {
         'deployment/ansible',
         'deployment/migrating-from-bare-metal',
         'deployment/moving-the-bundled-nextcloud',
+        'deployment/moving-to-a-local-workspace',
         'getting-started/local-install',
       ],
     },

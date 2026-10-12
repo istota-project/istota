@@ -79,10 +79,23 @@ Configure tasks that run on a cron schedule with results delivered to Talk or em
 Istota saves drafts, summaries, research, and anything else you ask it to \
 produce in this folder. You can also drop files here for Istota to read \
 in future conversations.
-
-Additionally, you can share any of your own Nextcloud folders with Istota \
-for direct access to your files.
 """
+
+# The closing sentence of `examples/README.md`, by storage mode. Under the
+# mount the user can share their own Nextcloud folders with the bot; on a local
+# workspace there is nothing to share into, and uploads arrive through the web.
+_README_EXAMPLE_NEXTCLOUD = (
+    "\nYou can also share any of your own Nextcloud folders with Istota "
+    "for direct access to your files.\n"
+)
+_README_EXAMPLE_LOCAL = "\nFiles you upload in the web UI land in `inbox/`.\n"
+
+
+def workspace_readme_example(config: "Config") -> str:
+    """`examples/README.md` for this install's storage mode."""
+    if config.storage_is_nextcloud:
+        return WORKSPACE_README_EXAMPLE + _README_EXAMPLE_NEXTCLOUD
+    return WORKSPACE_README_EXAMPLE + _README_EXAMPLE_LOCAL
 
 # Examples we have stopped shipping, swept out of `examples/` on the next
 # refresh. `BRIEFINGS.md` was a tombstone: the retirement left it in place to
@@ -1411,8 +1424,8 @@ def write_regular_file(path: Path, text: str) -> bool:
         os.close(fd)
 
     try:
-        # 0o644 because this becomes a file the user reads over Nextcloud;
-        # `atomic_write` applies it to the descriptor rather than the name,
+        # 0o644, the mode every workspace file has (and the one the user reads
+        # it with over Nextcloud, under the mount); `atomic_write` applies it to the descriptor rather than the name,
         # which is what this directory being model-writable requires.
         write_text_atomic(path, text, mode=0o644)
         return True
@@ -2004,7 +2017,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         else:
             examples_dir.mkdir(exist_ok=True)
             examples = {
-                "README.md": WORKSPACE_README_EXAMPLE,
+                "README.md": workspace_readme_example(config),
                 "TASKS.md": TASKS_FILE_EXAMPLE,
                 "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
                 "CRON.md": CRON_EXAMPLE,
@@ -2036,9 +2049,9 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
                     )
             logger.debug("Updated %s examples for %s", bot_dir, user_id)
 
-        # Auto-share bot dir back to the user (OCS). Skipped entirely when
-        # Nextcloud is unconfigured (local install) — the OCS call is a no-op
-        # there and would only log a spurious "Cannot share folder" warning.
+        # Auto-share bot dir back to the user (OCS). Only when the workspace
+        # is the bot's Nextcloud files: on a local workspace the path does not
+        # exist in Nextcloud, with or without a URL.
         #
         # `auto_share_bot_dir` is the second guard, and it is a deployment
         # shape rather than a preference. On bare metal this share is how the
@@ -2046,12 +2059,35 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         # `provision-nc.sh` gives them a `files_external` mount over the very
         # same directory at first provisioning, so the share would put a second
         # copy of it in their file list under a different name.
-        if config.nextcloud.url and config.nextcloud.auto_share_bot_dir:
+        if config.storage_is_nextcloud and config.nextcloud.auto_share_bot_dir:
             bot_path = get_user_bot_path(user_id, bot_dir)
             share_folder_with_user(config, bot_path, user_id)
 
         return True
     return False
+
+
+def ensure_workspace_roots(config: "Config") -> bool:
+    """Create the workspace's top-level ``Users/``, ``Channels/`` and ``Groups/``.
+
+    Called at boot beside ``ensure_user_directories_v2`` so the tree is whole
+    before the first room or group task, rather than made lazily by it. A root
+    that is a link is refused and reported, never followed. True when all
+    three are plain directories.
+    """
+    from .workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cycle
+
+    if not config.has_workspace:
+        return False
+    ok = True
+    for base in (BOT_USER_BASE, CHANNEL_BASE, GROUP_BASE):
+        name = base.lstrip("/")
+        try:
+            os.close(open_or_create_dirs(config.workspace_path, [name]))
+        except OSError as e:
+            logger.warning("workspace_root_refused name=%s errno=%s", name, e.errno)
+            ok = False
+    return ok
 
 
 def user_directories_exist_v2(config: "Config", user_id: str) -> dict[str, bool]:
@@ -2138,33 +2174,42 @@ def upload_file_to_inbox_v2(
     local_path: Path,
     remote_filename: str | None = None,
 ) -> str | None:
-    """
-    Upload a local file to the user's inbox directory (mount-aware).
+    """Copy a local file into the user's ``inbox/``, never over another file.
 
-    Args:
-        config: Application config
-        user_id: User ID
-        local_path: Local file path to upload
-        remote_filename: Optional filename to use on remote (defaults to local filename)
+    A name already taken is numbered (``doc (2).txt``) rather than replaced,
+    and ``inbox/`` and the leaf are opened without following a link: the user
+    root is bound read-write into the user's tasks, so either could be one.
 
-    Returns:
-        The remote path on success, None on failure.
+    Returns the workspace path written, or None when there is no workspace, no
+    such source file, or the write was refused.
     """
+    from .workspace.listing import ListingError  # noqa: PLC0415 - import cycle
+    from .workspace.writes import open_or_create_dirs, write_new_file  # noqa: PLC0415
+
     if not local_path.exists():
+        return None
+    user_root = config.workspace_root(user_id) if user_id else None
+    if user_root is None or not config.has_workspace:
         return None
 
     # Every inbox writer goes through here, so the name rule sits here too: a
     # name Nextcloud refuses stays in the mount's VFS cache for good (ISSUE-593).
     filename = _inbox_name(remote_filename or local_path.name)
-    inbox_path = get_user_inbox_path(user_id)
-    remote_path = f"{inbox_path}/{filename}"
-
-    if config.has_workspace:
-        dst = _get_mount_path(config, remote_path)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(local_path), str(dst))
-        return remote_path
-    return None
+    try:
+        os.close(open_or_create_dirs(user_root, ["inbox"]))
+        with open(local_path, "rb") as src:
+            size = os.fstat(src.fileno()).st_size
+            written = write_new_file(
+                user_root, ["inbox"], filename, iter(lambda: src.read(1024 * 1024), b""),
+                max_bytes=size, max_stem=MAX_NAME_BYTES,
+            )
+    except (OSError, ValueError, ListingError) as e:
+        logger.warning(
+            "inbox_upload_refused user=%s error=%s", user_id,
+            getattr(e, "errno", None) or type(e).__name__,
+        )
+        return None
+    return f"{get_user_inbox_path(user_id)}/{written}"
 
 
 # Date pattern for dated memory files (YYYY-MM-DD.md)
@@ -2309,31 +2354,67 @@ def get_channel_memories_path(conversation_token: str) -> str:
 
 
 def ensure_channel_directories(config: "Config", conversation_token: str) -> bool:
+    """Create ``Channels/{token}/memories/``, refusing a link at any level.
+
+    ``Channels/{token}`` is bound read-write into every task in the room, so a
+    link there or at ``memories`` is something a task can plant. The token
+    directory must resolve to itself (``_contained_channel_dir``) and every
+    component is then created with ``O_NOFOLLOW``.
+
+    Also migrates the old ``context/memory.md`` to ``CHANNEL.md`` once, reading
+    the old file through a pinned directory and creating the new one only
+    where nothing is at the name. False on no workspace or a refusal.
     """
-    Create the bot-managed directory structure for a channel (mount-aware).
+    from .workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cycle
 
-    Creates /Channels/{token}/memories/
+    if not config.has_workspace:
+        return False
+    channel_dir = _contained_channel_dir(config, conversation_token)
+    if channel_dir is None:
+        logger.warning(
+            "channel_dir_refused token=%s reason=outside_channel_root", conversation_token,
+        )
+        return False
+    channels = _get_mount_path(config, CHANNEL_BASE)
+    try:
+        os.close(open_or_create_dirs(channels, [conversation_token, "memories"]))
+    except (OSError, ValueError) as e:
+        logger.warning(
+            "channel_dir_refused token=%s errno=%s", conversation_token,
+            getattr(e, "errno", None),
+        )
+        return False
 
-    Returns True if directory was created or already exists.
-    """
-    if config.has_workspace:
-        base = _get_mount_path(config, get_channel_base_path(conversation_token))
-        memories_dir = base / "memories"
-        memories_dir.mkdir(parents=True, exist_ok=True)
+    old_memory = _read_legacy_channel_memory(channel_dir)
+    if old_memory is not None and create_file_if_absent(channel_dir / "CHANNEL.md", old_memory):
+        logger.info("Migrated channel memory for %s to CHANNEL.md", conversation_token)
 
-        # Migrate old layout: context/memory.md → CHANNEL.md
-        old_memory = base / "context" / "memory.md"
-        new_memory = base / "CHANNEL.md"
-        if old_memory.exists() and not new_memory.exists():
-            # Not copy2: its xattr step raises EIO on some FUSE workspace
-            # mounts (#694).
-            shutil.copyfile(old_memory, new_memory)
-            shutil.copymode(old_memory, new_memory)
-            logger.info("Migrated channel memory %s → %s", old_memory, new_memory)
+    logger.debug("Ensured channel directories for %s", conversation_token)
+    return True
 
-        logger.debug("Ensured channel directories for %s via mount", conversation_token)
-        return True
-    return False
+
+def _read_legacy_channel_memory(channel_dir: Path) -> str | None:
+    """``context/memory.md`` under ``channel_dir``, or None. Follows no link."""
+    from .skills._loader import open_overlay_dir, read_overlay_bytes  # noqa: PLC0415
+
+    fd = open_overlay_dir(channel_dir, "context")
+    if fd is None:
+        return None
+    try:
+        data, reason, size = read_overlay_bytes(
+            Path("memory.md"), max_bytes=USER_CONFIG_READ_CAP_BYTES, dir_fd=fd,
+        )
+    finally:
+        os.close(fd)
+    if reason is not None:
+        logger.warning("channel_memory_migration_refused reason=%s", reason)
+        return None
+    if size is None or data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def channel_memory_tokens(config: "Config", conversation_token: str) -> list[str]:
@@ -2436,11 +2517,28 @@ def write_channel_memory(
     merely intended.
     """
     if config.has_workspace:
-        memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
+        from .workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cycle
+
+        # A task in the room can plant a link at `Channels/<token>`: the
+        # directory is made without following one, and the write goes under
+        # the resolved, contained path.
+        validate_conversation_token(conversation_token)
         try:
-            memory_path.parent.mkdir(parents=True, exist_ok=True)
-            # 0o644: the file is about to become CHANNEL.md, which the user
-            # reads over Nextcloud like any other file in their channel dir.
+            os.close(open_or_create_dirs(
+                _get_mount_path(config, CHANNEL_BASE), [conversation_token],
+            ))
+        except OSError as e:
+            logger.warning(
+                "channel memory write refused for %s: errno=%s", conversation_token, e.errno,
+            )
+            return False
+        channel_dir = _contained_channel_dir(config, conversation_token)
+        if channel_dir is None:
+            return False
+        memory_path = channel_dir / "CHANNEL.md"
+        try:
+            # 0o644: the file is about to become CHANNEL.md, which has the
+            # mode of every other file in the channel dir.
             # `atomic_write` unlinks its staging file on any failure, so no
             # stray dot-file is left sitting in the user's channel directory.
             write_text_atomic(memory_path, content, mode=0o644)
@@ -2452,17 +2550,17 @@ def write_channel_memory(
 
 
 def init_channel_memory(config: "Config", conversation_token: str) -> bool:
-    """
-    Initialize the channel's memory file with a template (mount-aware).
+    """Seed the channel's CHANNEL.md with the template, where none exists.
 
-    Returns True on success.
+    True only when this call created the file. An existing file, or anything
+    planted at the name, is left alone.
     """
-    if config.has_workspace:
-        memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
-        memory_path.write_text(CHANNEL_MEMORY_TEMPLATE)
-        return True
-    return False
+    if not ensure_channel_directories(config, conversation_token):
+        return False
+    channel_dir = _contained_channel_dir(config, conversation_token)
+    if channel_dir is None:
+        return False
+    return create_file_if_absent(channel_dir / "CHANNEL.md", CHANNEL_MEMORY_TEMPLATE)
 
 
 # =============================================================================

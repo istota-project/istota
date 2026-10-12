@@ -25,18 +25,26 @@
 #       --tag TAG          the signed release tag to install (or ISTOTA_RELEASE_TAG)
 #       --signing-key KEY  the release signing key, one line of an SSH public key
 #                          (or RELEASE_SIGNING_KEY; read from host.env once it has one)
+#       --terminal-setup   set up in the terminal (`istota-stack setup`) rather
+#                          than in a browser
 #     --standalone         Local single-user install (uv tool install + istota setup)
 #     --help               Show this help
 #   With no mode flag on a terminal you are asked to choose; with no mode flag
 #   and no terminal, --server is used.
 #
-# The server path does what host/cloud-init.yaml does, then the steps after it:
-# clones the repository into /srv/app/istota/src, verifies the release tag's
-# signature against the key before running anything from it, runs
-# host/provision.sh, then `istota-stack update <tag>` (builds the images),
-# `istota-stack setup` (the wizard), provision.sh again for host.env, and
-# `systemctl enable --now istota-stack`. Without a terminal it stops after the
-# build and prints the rest.
+# The server path does what host/cloud-init.yaml does: clones the repository
+# into /srv/app/istota/src, verifies the release tag's signature against the
+# key before running anything from it, runs host/provision.sh, then
+# `istota-stack update <tag>` (builds the images), and starts the setup in a
+# browser (`systemctl start istota-setup`). It prints the address to open, the
+# one-use setup code and the certificate fingerprint, and `istota-stack
+# setup-code` prints them again. The setup installs the config, builds what it
+# needs, provisions again and starts the stack.
+#
+# With --terminal-setup it runs `istota-stack setup` (the wizard) instead, then
+# rebuilds if the config needs it, runs provision.sh again for host.env, and
+# `systemctl enable --now istota-stack`. Without a terminal that path stops
+# after the build and prints the rest.
 #
 # Standalone forwards every other flag to `istota setup` (--yes, --force,
 # --workspace, --port, ...). With a non-Anthropic (native) brain:
@@ -80,6 +88,7 @@ show_help() {
 # `istota setup` on the standalone path.
 MODE="server"
 MODE_EXPLICIT=false
+SETUP_IN_TERMINAL=false
 FORWARD_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -91,6 +100,7 @@ while [ $# -gt 0 ]; do
         --signing-key)
             [ $# -ge 2 ] || die "--signing-key needs a value"
             SIGNING_KEY="$2"; shift 2 ;;
+        --terminal-setup) SETUP_IN_TERMINAL=true; shift ;;
         --bare|--docker)
             die "$1 is gone: a server is one Debian 13 machine running the stack.
   Use --server --tag <release> --signing-key '<key>' (see --help)." ;;
@@ -203,12 +213,98 @@ verify_release_tag() {
     echo "$object"
 }
 
+# --- server setup ---
+# The first run after the build: in a browser by default, as cloud-init does,
+# or the wizard in the terminal with --terminal-setup.
+
+server_setup() {
+    if [ "$SETUP_IN_TERMINAL" = true ]; then
+        server_setup_in_terminal
+    else
+        server_setup_in_browser
+    fi
+}
+
+# What host/cloud-init.yaml's bootstrap does after its build. The unit runs
+# `istota-stack setup --web`, which installs the config, builds what it needs,
+# provisions again and starts the stack once the page finishes.
+server_setup_in_browser() {
+    # The unit is skipped once a config exists, so a re-run only updates.
+    if [ -e "${STACK}/config/config.toml" ]; then
+        section "Done"
+        ok "istota is already set up; ${RELEASE_TAG} is installed"
+        echo
+        exit 0
+    fi
+    section "Setup"
+    systemctl start istota-setup.service
+    # The unit mints the code and the certificate first; print its
+    # instructions once they exist.
+    local _
+    for _ in $(seq 1 60); do
+        if istota-stack setup-code 2>/dev/null; then
+            echo
+            echo -e "  ${_DIM}\`istota-stack setup-code\` prints this again; \`journalctl -u istota-setup\` follows the setup.${_RESET}"
+            echo
+            exit 0
+        fi
+        # A setup that refused or failed has exited and will never print one.
+        systemctl is-active --quiet istota-setup.service || break
+        sleep 5
+    done
+    die "the setup page is not running. \`systemctl status istota-setup\` and \`journalctl -u istota-setup\` say why."
+}
+
+server_setup_in_terminal() {
+    reattach_tty_if_needed
+    if [ ! -t 0 ]; then
+        cat <<EOF
+
+No terminal for the setup wizard. On the machine, as root:
+
+  istota-stack setup
+  istota-stack check-image || istota-stack update ${RELEASE_TAG}
+  ${SRC}/host/provision.sh
+  systemctl enable --now istota-stack
+
+EOF
+        exit 0
+    fi
+
+    section "Setup"
+    istota-stack setup
+    # The build ran before config.toml existed, so it left Claude Code out.
+    local image_rc=0
+    istota-stack check-image || image_rc=$?
+    if [ "$image_rc" -eq 2 ]; then
+        section "Rebuilding ${RELEASE_TAG} for the new config"
+        istota-stack update "$RELEASE_TAG"
+    elif [ "$image_rc" -ne 0 ]; then
+        die "istota-stack check-image failed (exit ${image_rc})."
+    fi
+    "${SRC}/host/provision.sh"
+    systemctl enable --now istota-stack
+
+    section "Done"
+    ok "istota ${RELEASE_TAG} is running"
+    echo
+    echo -e "  ${_BOLD}Check it:${_RESET}  istota doctor"
+    echo -e "  ${_BOLD}Update:${_RESET}    istota-stack update <tag>"
+    echo
+    # stdin may now be the terminal; exit rather than read on from it.
+    exit 0
+}
+# --- end server setup ---
+
 host_env_key() {
     [ -f "$HOST_ENV" ] || return 0
     sed -n 's/^RELEASE_SIGNING_KEY=//p' "$HOST_ENV" | tail -n 1
 }
 
 run_server() {
+    if [ ${#FORWARD_ARGS[@]} -gt 0 ]; then
+        die "The server install does not take ${FORWARD_ARGS[*]} (see --help)."
+    fi
     [ "$(id -u)" -eq 0 ] || die "The server install needs root. Re-run under sudo."
     if [ ! -r /etc/debian_version ] || ! command -v apt-get >/dev/null 2>&1; then
         die "The server install is for Debian 13."
@@ -263,43 +359,7 @@ run_server() {
     section "Building ${RELEASE_TAG}"
     istota-stack update "$RELEASE_TAG"
 
-    reattach_tty_if_needed
-    if [ ! -t 0 ]; then
-        cat <<EOF
-
-No terminal for the setup wizard. On the machine, as root:
-
-  istota-stack setup
-  istota-stack check-image || istota-stack update ${RELEASE_TAG}
-  ${SRC}/host/provision.sh
-  systemctl enable --now istota-stack
-
-EOF
-        exit 0
-    fi
-
-    section "Setup"
-    istota-stack setup
-    # The build ran before config.toml existed, so it left Claude Code out.
-    local image_rc=0
-    istota-stack check-image || image_rc=$?
-    if [ "$image_rc" -eq 2 ]; then
-        section "Rebuilding ${RELEASE_TAG} for the new config"
-        istota-stack update "$RELEASE_TAG"
-    elif [ "$image_rc" -ne 0 ]; then
-        die "istota-stack check-image failed (exit ${image_rc})."
-    fi
-    "${SRC}/host/provision.sh"
-    systemctl enable --now istota-stack
-
-    section "Done"
-    ok "istota ${RELEASE_TAG} is running"
-    echo
-    echo -e "  ${_BOLD}Check it:${_RESET}  istota doctor"
-    echo -e "  ${_BOLD}Update:${_RESET}    istota-stack update <tag>"
-    echo
-    # stdin may now be the terminal; exit rather than read on from it.
-    exit 0
+    server_setup
 }
 
 # --- Standalone (local single-user) helpers --------------------------------
@@ -518,6 +578,10 @@ prompt_install_mode() {
 
 if [ "$MODE_EXPLICIT" = false ]; then
     prompt_install_mode
+fi
+
+if [ "$SETUP_IN_TERMINAL" = true ] && [ "$MODE" != server ]; then
+    die "--terminal-setup is for the server install."
 fi
 
 case "$MODE" in

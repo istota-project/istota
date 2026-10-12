@@ -395,7 +395,7 @@ def reconcile(config, *, dry_run: bool = False, problems: list[str] | None = Non
             raise ValueError("workspace unavailable")
         if config.nextcloud_mount_path is not None and not os.path.ismount(config.nextcloud_mount_path):
             raise ValueError("Nextcloud mount unavailable")
-        if config.nextcloud.url:
+        if config.storage_is_nextcloud:
             if _dav_stat(config, "/") is None:
                 raise ValueError("DAV workspace unavailable")
         elif _local_kind(root / "Channels") not in {None, "directory"}:
@@ -410,7 +410,7 @@ def reconcile(config, *, dry_run: bool = False, problems: list[str] | None = Non
         _problem(problems, f"failed: {old}: mapping source belongs to a live room")
     for old, new in mapping.items():
         try:
-            if config.nextcloud.url:
+            if config.storage_is_nextcloud:
                 _merge_dav(config, (old, new), f"/Channels/{old}", f"/Channels/{new}", dry_run=dry_run)
             else:
                 source, target = root / "Channels" / old, root / "Channels" / new

@@ -50,7 +50,7 @@ After the page finishes, `istota-stack` installs `.env` and `host.env`, builds w
 - On a cloud machine behind its provider's NAT, the printed address is the private one; open the public address instead, and the code still works.
 - It refuses when `config.toml` exists. Change a configured stack by editing `config.toml`, with `istota-stack apply`, or with `istota-stack setup --force`.
 
-`istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `journalctl -u istota-setup` has the same lines.
+`istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `install.sh --server` does the same and prints them in the terminal. `journalctl -u istota-setup` has the same lines.
 
 The page leaves out the operator features: WhatsApp, the Talk signaling server, the developer skill, devboxes, Nextcloud login, the DAV prefix and the auto-share setting. Set those up afterwards in `config.toml` or with the terminal setup.
 
@@ -242,16 +242,23 @@ What each devbox gets, and nothing else:
 
 ## Storage
 
-Two modes, chosen by `[nextcloud] url` in `config.toml`, which `istota setup` writes from your answer:
+Two questions decide the storage: whether istota uses a Nextcloud (`[nextcloud] url`), and, if it does, where the workspace lives (`nextcloud_mount_path`). `istota setup` writes both from your answers:
 
-| Mode | `config.toml` | Workspace |
-|---|---|---|
-| Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume |
-| Full Nextcloud integration | `url` names your Nextcloud | the VM's rclone mount of the bot's files, bound at `/mnt/shared` |
+| Mode | `config.toml` | Workspace | `host.env` |
+|---|---|---|---|
+| Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Nextcloud, local workspace | `url` names your Nextcloud, no `nextcloud_mount_path` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Full Nextcloud integration | `url` names your Nextcloud, `nextcloud_mount_path = "/mnt/shared"` | the VM's rclone mount of the bot's files, bound at `/mnt/shared` | `STORAGE=nextcloud` |
+
+When you connect a Nextcloud, setup asks where the workspace should live: `mount` (the default) or `local`. A scripted run takes `--workspace mount|local` and defaults to `mount` when it is given `--nextcloud-url`. With either answer the bot is a regular user on your Nextcloud: Talk, the `nextcloud` skill's user, group, Talk and share-listing verbs, and avatars all work.
+
+With a local workspace, `provision.sh` installs no rclone and no mount unit, and setup writes no `dav_prefix` and turns `auto_share_bot_dir` off, since nothing of the workspace is in Nextcloud. Users reach their files in the web UI, not in Nextcloud. A file posted in Talk is fetched into the room's folder, `Channels/<room>/media/`, and `nextcloud talk share-file` uploads a copy before posting it. The skill's `files` verbs, `share create` and `share link` refuse, because the file they name is not in Nextcloud. Back up the `istota_data` volume, which now holds the workspace too (see [Backing up a local install](#backing-up-a-local-install)).
 
 In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`, and the mount's `rclone.conf` (one WebDAV remote named `nextcloud`, the app password obscured as `rclone obscure` does it) with `RCLONE_REMOTE=nextcloud` in `host.env`, so the mount needs no hand-written config.
 
 The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
+
+To move an install in full integration to a local workspace, see [Moving to a local workspace](moving-to-a-local-workspace.md).
 
 Workspace files have no versions or trash in either mode.
 
@@ -295,10 +302,25 @@ To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `
 
 | Volume | Purpose |
 |---|---|
-| `istota_data` | Istota's `/data` — config, databases, and in local storage mode the workspace (`/data/workspace`). **This is the one to back up.** |
+| `istota_data` | Istota's `/data`: the databases (`/data/db`), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a bind of the VM's config directory, not part of the volume. **This is the one to back up.** |
 | `browser_profile` | Persistent Chrome profiles per user, including their logins; also the console TLS certificate and parked legacy profile |
 
 In full Nextcloud integration the workspace is not a volume: it is the VM's rclone mount, bound at `/mnt/shared`.
+
+### Backing up a local install
+
+Istota backs up nothing but its databases. On a timer it snapshots them to `[scheduler] db_backup_dir`, by default `Backups/db/snapshots` under the workspace. In full Nextcloud integration that is on the mount, so the snapshots leave the VM. In local storage mode it is `/data/workspace/Backups/db/snapshots`, on the same `istota_data` volume as the databases themselves: a snapshot there gets you back from a corrupted database file, not from losing the volume. `istota doctor` reports this as a warning under `backups.off_volume`, and `runtime.workspace_disk` warns when the volume runs low on space.
+
+The workspace and the volume as a whole are yours to back up. Either back up the volume with whatever backs up the VM's disk, or stop the stack and archive it:
+
+```bash
+istota-stack down
+docker run --rm -v istota_istota_data:/data:ro -v "$PWD":/backup alpine \
+  tar -czf /backup/istota-data.tar.gz -C /data .
+istota-stack up
+```
+
+Compose prefixes the volume with the project name, so on the VM it is `istota_istota_data`. Unless a secrets file supplies it, the archive holds `/data/.secret_key` beside the databases it decrypts, so keep it somewhere at least as private as the VM (see `docs/deployment/security.md`). To keep the database snapshots off the volume without archiving it, set `db_backup_dir` to a directory on another disk mounted into the stack.
 
 ## Container logs
 

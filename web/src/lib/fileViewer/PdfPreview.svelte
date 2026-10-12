@@ -164,7 +164,11 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
+    padding: var(--space-2) var(--space-3);
     padding-bottom: calc(var(--pdf-controls-height) + var(--space-4));
+  }
+  .pdf-preview > p {
+    padding: var(--space-2) var(--space-3);
   }
   .pdf-controls {
     position: absolute;

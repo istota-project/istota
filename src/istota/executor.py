@@ -7109,31 +7109,27 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
 """
 
-    # Build file access tools section based on the storage backend: a local
-    # folder or the Nextcloud mount. Non-admin users get a scoped path
-    # restricted to their own directory (server shape only).
-    if config.storage_backend == "local":
-        # `_one_line` here as well as on the bare user id above: these paths are
+    # File access tools. One branch for both storage modes: the display path is
+    # `Users/<uid>` for every user, admins included, because that is what
+    # `sandbox/plan.py` binds. Only the noun and the folder's nature differ.
+    ws_user_root = (
+        config.workspace_root(task.user_id) if config.has_workspace else None
+    )
+    if ws_user_root is not None:
+        # `_one_line` here as well as on the bare user id above: the path is
         # built from it, so a line break survives `Path` joining into the
         # system half.
-        ws_root = _one_line(
-            str(config.workspace_root(task.user_id) or config.workspace_path)
-        )
-        file_tools = f"""- Your files live in your workspace at '{ws_root}'. Use standard file tools (Read, Write, Edit, ls, cat).
-  - The workspace is the area you manage for the user (memory, notes, inbox, shared files). It is a normal local folder.
-  - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
-    elif config.has_workspace:
-        if is_admin:
-            mount_display = _one_line(str(config.workspace_path))
+        ws_display = _one_line(str(ws_user_root))
+        if config.storage_is_nextcloud:
+            folder_line = "It is the bot's Nextcloud files, mounted as a local folder."
         else:
-            mount_display = _one_line(
-                str(config.workspace_path / "Users" / task.user_id)
-            )
-        file_tools = f"""- Nextcloud files are mounted at '{mount_display}'
-  - List: ls {mount_display}/path/
-  - Read: cat {mount_display}/path/file.txt
-  - Write: Use standard file operations (Python, bash, etc.)
-  - All Nextcloud paths are accessible as local filesystem paths"""
+            folder_line = "It is a normal local folder."
+        file_tools = f"""- Your files live in {config.storage_label} at '{ws_display}'. Use standard file tools (Read, Write, Edit, ls, cat).
+  - The workspace is the area you manage for the user (memory, notes, inbox, shared files). {folder_line}"""
+        # The standalone install is the only shape this is true of.
+        if not effective_sandboxing(config):
+            file_tools += """
+  - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
     else:
         file_tools = "- No file workspace is configured for this install."
 

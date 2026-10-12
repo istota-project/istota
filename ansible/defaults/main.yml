@@ -39,7 +39,10 @@ istota_release: ""
 istota_release_signing_key: ""
 
 # --- host.env ----------------------------------------------------------------
-# local | nextcloud. nextcloud needs istota_rclone_remote and istota_rclone_conf.
+# local | nextcloud: where the workspace lives, not whether Nextcloud is used.
+# nextcloud is the rclone mount and needs istota_rclone_remote and
+# istota_rclone_conf. Talk and the nextcloud skill work in both; for local with
+# a Nextcloud URL, leave nextcloud_mount_path out of istota_config.
 istota_storage: local
 # local | proxied | direct
 istota_ingress: local
@@ -206,10 +209,10 @@ istota_config: {}
 #   db_path: "/data/db/istota.db"
 #
 #   nextcloud:
-#     # Nextcloud server URL. This also drives storage vocabulary: when set, the bot
-#     # describes files as Nextcloud; when blank (the local/standalone shape), it
-#     # describes "your workspace" as a plain local folder instead. A URL needs
-#     # workspace_path, the mount of the bot's Nextcloud files.
+#     # Nextcloud server URL: Talk, the nextcloud skill, OCS and DAV. A URL needs
+#     # workspace_path. Whether the workspace is the bot's Nextcloud files is
+#     # nextcloud_mount_path's question, not this one: with the mount path set the
+#     # bot describes files as Nextcloud, without it as a plain local workspace.
 #     # example: "https://nextcloud.example.com"
 #     url: ""
 #
@@ -247,6 +250,16 @@ istota_config: {}
 #
 #     # Bot's Nextcloud username (to filter its own messages)
 #     bot_username: "istota"
+#
+#     # When the workspace is not the Nextcloud mount, a file posted in Talk is
+#     # fetched over WebDAV into the room's folder, Channels/<room>/media/<message id>/,
+#     # once per message. Files larger than this many megabytes are skipped, and the
+#     # task runs without them.
+#     attachment_max_mb: 50
+#
+#     # Days a fetched attachment is kept before the cleanup pass removes it. 0 keeps
+#     # them. Not used when the workspace is the mount.
+#     attachment_retention_days: 30
 #
 #     signaling:
 #       # Receive Talk messages over Nextcloud's standalone signaling server (the
@@ -2322,14 +2335,15 @@ istota_config: {}
 #
 #   # File Access Configuration
 #   # Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
-#   # Required when [nextcloud] url is set: the files are reached through it.
+#   # Required when [nextcloud] url is set, whether or not it is the mount.
 #   # example: "/srv/mount/nextcloud/content"
 #   # unset by default; give it a value or leave it out
 #   # The container layout: `istota setup` writes "/data/workspace" here (code default ).
 #   workspace_path: "/data/workspace"
 #
 #   # The FUSE mountpoint of the bot's Nextcloud files (mount-nextcloud.service),
-#   # when the workspace is one.
+#   # when the workspace is one. Set, with a URL, means the workspace is the mount;
+#   # unset means it is local, and Talk and the nextcloud skill still work.
 #   # example: "/srv/mount/nextcloud/content"
 #   # unset by default; give it a value or leave it out
 #   nextcloud_mount_path:

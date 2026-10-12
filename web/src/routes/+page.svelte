@@ -2,7 +2,15 @@
   import { base } from '$app/paths';
   import { getProfile } from '$lib/api';
   import { onMount } from 'svelte';
-  import { HeartPulse, MapPin, MessageSquare, Newspaper, Rss, Wallet } from '@lucide/svelte';
+  import {
+    FolderOpen,
+    HeartPulse,
+    MapPin,
+    MessageSquare,
+    Newspaper,
+    Rss,
+    Wallet,
+  } from '@lucide/svelte';
   import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
   import { AppShell, ShellHeader } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
@@ -91,6 +99,12 @@
         <a href="{base}/chat" class="feature-card">
           <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
           <div class="feature-desc">Talk to Istota in the app</div>
+        </a>
+      {/if}
+      {#if user.features.workspace}
+        <a href="{base}/workspace" class="feature-card">
+          <div class="feature-title"><FolderOpen aria-hidden="true" />Workspace</div>
+          <div class="feature-desc">Browse your files and pinned items</div>
         </a>
       {/if}
       {#if user.features.briefings}

@@ -332,7 +332,6 @@ class TestTheEnablingConditions:
             ("heartbeats", "heartbeat_check_interval"),
             ("tasks-file-poll", "tasks_file_poll_interval"),
             ("briefing-triggers", "tasks_file_poll_interval"),
-            ("shared-files", "shared_file_check_interval"),
         ],
     )
     def test_a_zero_interval_disables_rather_than_firing_every_tick(self, name, field):
@@ -350,7 +349,6 @@ class TestTheEnablingConditions:
             "briefing-triggers",
             "scheduled-jobs",
             "sleep-cycles",
-            "shared-files",
             "tasks-file-poll",
             "cleanup",
             "status-write",
@@ -360,6 +358,21 @@ class TestTheEnablingConditions:
         by_name = {g.name: g for g in build_interval_gates(config)}
         for name in always:
             assert by_name[name].enabled(config) is True, name
+
+    def test_the_shared_file_organizer_needs_the_mount(self, tmp_path):
+        """Local-workspace spec, stage 3: without the mount the organizer has
+        nothing to organize and only spends a PROPFIND per root entry."""
+        gate = _by_name()["shared-files"]
+        nc = NextcloudConfig(url="https://cloud.example", username="bot")
+        local = Config(nextcloud=nc, workspace_path=tmp_path)
+        mounted = Config(
+            nextcloud=nc, workspace_path=tmp_path, nextcloud_mount_path=tmp_path,
+        )
+        assert gate.enabled(Config(workspace_path=tmp_path)) is False
+        assert gate.enabled(local) is False
+        assert gate.enabled(mounted) is True
+        mounted.scheduler = SchedulerConfig(shared_file_check_interval=0)
+        assert gate.enabled(mounted) is False
 
     def test_travel_follows_the_location_switch(self):
         gate = _by_name()["travel-timezone"]
@@ -773,6 +786,8 @@ class TestTheOneShotRunner:
         config.db_path = path
         config.users = {"alice": UserConfig(vault_path="vault.kdbx")}
         config.workspace_path = Path("/srv/files")
+        config.nextcloud = NextcloudConfig(url="https://cloud.example", username="bot")
+        config.nextcloud_mount_path = Path("/srv/files")
         _run_interval_gates_once(_recorded_table(config, order), config)
         assert order == EXPECTED_ONE_SHOT
 
@@ -785,7 +800,10 @@ class TestTheOneShotRunner:
         assert order == [
             n
             for n in EXPECTED_ONE_SHOT
-            if n not in {"travel-timezone", "email-poll", "vault-retire", "operator-persona"}
+            if n not in {
+                "travel-timezone", "email-poll", "vault-retire", "operator-persona",
+                "shared-files",
+            }
         ]
 
     def test_it_never_backgrounds(self, monkeypatch):

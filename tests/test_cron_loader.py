@@ -3953,3 +3953,95 @@ line two"""
 
         assert update_job_enabled_in_cron_md(config, "alice", "multi", False) is False
         assert list(elsewhere.rglob("*")) == []
+
+
+# ---------------------------------------------------------------------------
+# parse_cron_document reports its reasons (the web editor's validator)
+# ---------------------------------------------------------------------------
+
+
+def _in_fence(block: str) -> str:
+    return f"# Jobs\n\n```toml\n{block}```\n"
+
+
+class TestCronDocumentErrors:
+    """Each reason the sync holds a file or drops part of it, worded once."""
+
+    @pytest.fixture
+    def config(self, make_config_with_mount):
+        return make_config_with_mount(admin_users={"root"})
+
+    def _errors(self, content, config, user_id="alice"):
+        from istota.cron_loader import cron_document_errors
+        return cron_document_errors(content, config, user_id)
+
+    def test_a_file_the_scheduler_loads_whole_has_none(self, config):
+        content = _in_fence('[[jobs]]\nname = "a"\ncron = "0 9 * * *"\nprompt = "hi"\n')
+        assert self._errors(content, config) == []
+        from istota.cron_loader import parse_cron_document
+        assert parse_cron_document(content, config, "alice").errors == ()
+
+    def test_no_fence_at_all_is_not_an_error(self, config):
+        assert self._errors("# Just notes\n", config) == []
+
+    def test_a_toml_error(self, config):
+        errors = self._errors(_in_fence('[[jobs]]\nname = "a\n'), config)
+        assert len(errors) == 1 and errors[0].startswith("TOML error:")
+
+    def test_an_unclosed_fence(self, config):
+        errors = self._errors("```toml\n[[jobs]]\n", config)
+        assert errors == ["The ```toml fence is opened and never closed"]
+
+    def test_a_fence_it_cannot_resolve(self, config):
+        errors = self._errors("Write the jobs in a ```toml block.\n", config)
+        assert len(errors) == 1 and "no ```toml block" in errors[0]
+
+    def test_jobs_not_an_array(self, config):
+        assert self._errors(_in_fence('jobs = "x"\n'), config) == [
+            "'jobs' must be an array of [[jobs]] tables"]
+
+    def test_an_incomplete_job(self, config):
+        errors = self._errors(_in_fence('[[jobs]]\nname = "a"\nprompt = "hi"\n'), config)
+        assert errors == ["Job 'a': needs both a name and a cron schedule"]
+
+    def test_both_prompt_and_command(self, config):
+        errors = self._errors(_in_fence(
+            '[[jobs]]\nname = "a"\ncron = "* * * * *"\nprompt = "p"\ncommand = "ls"\n'
+        ), config, user_id="root")
+        assert errors == ["Job 'a': cannot have both prompt and command"]
+
+    def test_neither_prompt_nor_command(self, config):
+        errors = self._errors(_in_fence('[[jobs]]\nname = "a"\ncron = "* * * * *"\n'), config)
+        assert errors == ["Job 'a': needs a prompt, a prompt_file or a command"]
+
+    def test_a_field_of_the_wrong_type(self, config):
+        errors = self._errors(_in_fence(
+            '[[jobs]]\nname = "a"\ncron = "* * * * *"\nprompt = "p"\nenabled = "false"\n'
+        ), config)
+        assert errors == [
+            "Job 'a': enabled must be a TOML boolean (true or false), got str 'false'"]
+
+    def test_an_unreadable_prompt_file(self, config):
+        errors = self._errors(_in_fence(
+            '[[jobs]]\nname = "a"\ncron = "* * * * *"\nprompt_file = "nope.txt"\n'
+        ), config)
+        assert len(errors) == 1
+        assert errors[0].startswith("Job 'a': cannot read prompt_file nope.txt")
+
+    def test_a_non_admin_command_job(self, config):
+        content = _in_fence('[[jobs]]\nname = "a"\ncron = "* * * * *"\ncommand = "ls"\n')
+        assert self._errors(content, config) == [
+            "Job 'a': command jobs are admin-only; use a prompt, or a plain "
+            "`istota-skill <skill> ...` command"]
+        # It still parses: the sync drops it, as before.
+        from istota.cron_loader import parse_cron_document
+        assert [j.name for j in parse_cron_document(content, config, "alice").jobs] == ["a"]
+
+    def test_an_admin_command_job_and_a_pure_skill_command_are_fine(self, config):
+        assert self._errors(_in_fence(
+            '[[jobs]]\nname = "a"\ncron = "* * * * *"\ncommand = "ls"\n'
+        ), config, user_id="root") == []
+        assert self._errors(_in_fence(
+            '[[jobs]]\nname = "a"\ncron = "* * * * *"\n'
+            'command = "istota-skill money run"\n'
+        ), config) == []

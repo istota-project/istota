@@ -159,6 +159,7 @@ def test_workspace_upload_config_and_nginx_cap(tmp_path):
 async def test_nextcloud_dropped_mount(client, config, monkeypatch, caplog, error, operation):
     import os
     config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     root = config.workspace_root("alice")
     real_open = os.open
 
@@ -185,6 +186,7 @@ async def test_nextcloud_share_markers_and_recipient_urls(client, config):
     from tests.test_nextcloud_http import _ocs_response
 
     config.nextcloud.url = "https://cloud.example.com/"
+    config.nextcloud_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     config.nextcloud.dav_prefix = "Shared Files"
@@ -221,6 +223,7 @@ async def test_nextcloud_share_failure_is_a_note(client, config, caplog):
     from unittest.mock import patch
     from httpx import ReadTimeout
     config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     with patch("istota.nextcloud._http.httpx.get", side_effect=ReadTimeout("sensitive-name")) as get:
@@ -239,6 +242,17 @@ async def test_local_listing_does_not_fetch_share_state(client):
         response = await client.get("/workspace/list", params={"place": "home"})
     assert response.status_code == 200
     shares.assert_not_called()
+
+
+async def test_local_workspace_with_nextcloud_has_no_share_state(client, config):
+    from unittest.mock import patch
+    config.nextcloud.url = "https://cloud.example.com"
+    with patch("istota.nextcloud.shares.list_shares") as shares:
+        response = await client.get("/workspace/list", params={"place": "home", "path": "notes"})
+    assert response.status_code == 200
+    shares.assert_not_called()
+    assert "share" not in response.json()["entries"][0]
+    assert "nextcloud_url" not in response.json()["entries"][0]
 
 
 async def test_drive_not_granted(client, config):
@@ -314,3 +328,408 @@ async def test_linked_file_place_lists_only_its_authorized_file(client, config):
     for path in ("report.txt", "../private.txt", "child"):
         response = await client.get("/workspace/list", params={"place": place["id"], "path": path})
         assert response.status_code == 404
+
+
+# --- config files (local-workspace stage 7) ---------------------------------
+
+def _config_dir(config, user="alice"):
+    return config.workspace_path / "Users" / user / config.bot_dir_name / "config"
+
+
+def _rev(content=""):
+    from istota.workspace import text_files
+    return text_files.revision(content)
+
+
+async def test_config_files_list_offers_the_four_files_and_the_users_skills(client, config):
+    _config_dir(config).mkdir(parents=True)
+    (_config_dir(config) / "USER.md").write_text("I prefer short answers.\n")
+    response = await client.get("/workspace/config-files")
+    assert response.status_code == 200
+    rows = {row["name"]: row for row in response.json()["files"]}
+    assert list(rows)[:4] == ["USER.md", "CRON.md", "TASKS.md", "HEARTBEAT.md"]
+    assert rows["USER.md"] == {"name": "USER.md", "kind": "config", "exists": True, "size": 24, "editable": True}
+    assert rows["CRON.md"]["exists"] is False and rows["CRON.md"]["size"] is None
+    assert rows["skills/notes"]["kind"] == "skill"
+    assert rows["skills/notes"]["exists"] is False
+    assert "skills/sensitive_actions" not in rows
+    assert "skills/untrusted_input" not in rows
+
+
+async def test_config_files_list_hides_admin_skills_from_a_member(client, config):
+    config.admin_users = {"root"}
+    names = {row["name"] for row in (await client.get("/workspace/config-files")).json()["files"]}
+    assert "skills/notes" in names
+    assert "skills/tasks" not in names
+
+
+async def test_config_file_get_missing_and_present(client, config):
+    response = await client.get("/workspace/config-files/CRON.md")
+    assert response.status_code == 200
+    assert response.json() == {"content": "", "revision": _rev(), "exists": False}
+    _config_dir(config).mkdir(parents=True)
+    (_config_dir(config) / "TASKS.md").write_text("- [ ] call the dentist\n")
+    response = await client.get("/workspace/config-files/TASKS.md")
+    assert response.json()["content"] == "- [ ] call the dentist\n"
+    assert response.json()["revision"] == _rev("- [ ] call the dentist\n")
+
+
+async def test_config_file_save_and_conflict(client, config):
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "Be brief.\n", "revision": _rev()})
+    assert response.status_code == 200
+    assert response.json() == {"revision": _rev("Be brief.\n")}
+    assert (_config_dir(config) / "USER.md").read_text() == "Be brief.\n"
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "stale\n", "revision": _rev()})
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    assert (_config_dir(config) / "USER.md").read_text() == "Be brief.\n"
+
+
+async def test_cron_save_reports_next_sync_and_refuses_what_the_loader_refuses(client, config):
+    good = '```toml\n[[jobs]]\nname = "a"\ncron = "0 9 * * *"\nprompt = "hi"\n```\n'
+    response = await client.put("/workspace/config-files/CRON.md", json={"content": good, "revision": _rev()})
+    assert response.status_code == 200
+    assert response.json() == {"revision": _rev(good), "applies": "next_sync"}
+    bad = '```toml\n[[jobs]]\nname = "a\n```\n'
+    response = await client.put("/workspace/config-files/CRON.md", json={"content": bad, "revision": _rev(good)})
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid"
+    assert response.json()["errors"][0].startswith("TOML error:")
+    assert (_config_dir(config) / "CRON.md").read_text() == good
+
+
+async def test_cron_command_job_is_refused_for_a_member(client, config):
+    config.admin_users = {"root"}
+    content = '```toml\n[[jobs]]\nname = "sh"\ncron = "0 9 * * *"\ncommand = "echo hi"\n```\n'
+    response = await client.put("/workspace/config-files/CRON.md", json={"content": content, "revision": _rev()})
+    assert response.status_code == 422
+    assert any("admin" in error for error in response.json()["errors"])
+    assert not (_config_dir(config) / "CRON.md").exists()
+
+
+async def test_heartbeat_save_refuses_what_the_loader_cannot_read(client, config):
+    for content in ('```toml\n[[checks]]\nname = "x\n```\n', '```toml\nchecks = "x"\n```\n'):
+        response = await client.put("/workspace/config-files/HEARTBEAT.md", json={"content": content, "revision": _rev()})
+        assert response.status_code == 422
+        assert response.json()["errors"]
+    assert not (_config_dir(config) / "HEARTBEAT.md").exists()
+    good = '```toml\n[[checks]]\nname = "disk"\ntype = "shell-command"\ncommand = "true"\n```\n'
+    response = await client.put("/workspace/config-files/HEARTBEAT.md", json={"content": good, "revision": _rev()})
+    assert response.status_code == 200
+
+
+async def test_skill_overlay_save_cap_and_denylist(client, config):
+    from istota.skills._loader import OVERLAY_MAX_BYTES
+    response = await client.put("/workspace/config-files/skills/notes", json={"content": "Keep notes terse.\n", "revision": _rev()})
+    assert response.status_code == 200
+    assert (_config_dir(config) / "skills" / "notes.md").read_text() == "Keep notes terse.\n"
+    rows = {row["name"]: row for row in (await client.get("/workspace/config-files")).json()["files"]}
+    assert rows["skills/notes"]["exists"] is True
+    assert (await client.get("/workspace/config-files/skills/notes")).json()["content"] == "Keep notes terse.\n"
+    big = "x" * (OVERLAY_MAX_BYTES + 1)
+    response = await client.put("/workspace/config-files/skills/notes", json={"content": big, "revision": _rev("Keep notes terse.\n")})
+    assert response.status_code == 413
+    assert response.json()["max_bytes"] == OVERLAY_MAX_BYTES
+    for name in ("skills/sensitive_actions", "skills/untrusted_input", "skills/no_such_skill"):
+        assert (await client.get(f"/workspace/config-files/{name}")).status_code == 404
+        response = await client.put(f"/workspace/config-files/{name}", json={"content": "x", "revision": _rev()})
+        assert response.status_code == 404
+    assert not (_config_dir(config) / "skills" / "sensitive_actions.md").exists()
+
+
+async def test_skill_overlay_for_a_skill_the_member_cannot_use_is_404(client, config):
+    config.admin_users = {"root"}
+    assert (await client.get("/workspace/config-files/skills/tasks")).status_code == 404
+
+
+@pytest.mark.parametrize("name", [
+    # A literal `..` segment is normalized away by the client before it is
+    # sent, so the server-side cases are the encoded ones.
+    "user.md", "BRIEFINGS.md", "skills", "skills/", "skills/notes.md", "../USER.md",
+    "%2e%2e/USER.md", "skills/%2e%2e%2fUSER.md", "skills/%2e%2e/USER.md",
+    "Users/bob/istota/config/USER.md", "config/USER.md",
+])
+async def test_config_file_names_are_an_allowlist(client, config, name):
+    assert (await client.get(f"/workspace/config-files/{name}")).status_code == 404
+    response = await client.put(f"/workspace/config-files/{name}", json={"content": "x", "revision": _rev()})
+    assert response.status_code == 404
+    assert not (config.workspace_path / "Users/alice").joinpath(config.bot_dir_name).exists()
+
+
+async def test_another_users_config_files_are_unreachable(client, config):
+    _config_dir(config, "bob").mkdir(parents=True)
+    (_config_dir(config, "bob") / "USER.md").write_text("bob's private notes\n")
+    response = await client.get("/workspace/config-files/USER.md")
+    assert response.json()["content"] == ""
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "alice\n", "revision": _rev()})
+    assert response.status_code == 200
+    assert (_config_dir(config, "bob") / "USER.md").read_text() == "bob's private notes\n"
+    assert (_config_dir(config) / "USER.md").read_text() == "alice\n"
+
+
+async def test_config_file_locked_is_423(client, config, monkeypatch):
+    from istota.memory.curation.file_lock import MemoryMdLocked
+    from istota.workspace import text_files
+
+    def held(*args, **kwargs):
+        raise MemoryMdLocked("held")
+
+    monkeypatch.setattr(text_files._md_lock, "memory_md_lock", held)
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": _rev()})
+    assert response.status_code == 423
+    assert response.json()["code"] == "locked"
+    assert not (_config_dir(config) / "USER.md").exists()
+
+
+async def test_config_file_save_locks_the_path_the_daemon_locks(client, config, monkeypatch):
+    from contextlib import contextmanager
+    from istota import storage
+    from istota.workspace import text_files
+    seen = []
+    real = text_files._md_lock.memory_md_lock
+
+    @contextmanager
+    def spy(path, **kwargs):
+        seen.append((path, kwargs["lock_dir"]))
+        with real(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(text_files._md_lock, "memory_md_lock", spy)
+    _config_dir(config).mkdir(parents=True)
+    assert (await client.put("/workspace/config-files/CRON.md", json={"content": "", "revision": _rev()})).status_code == 200
+    assert seen == [(storage.resolve_user_config_dir(config, "alice") / "CRON.md", text_files.lock_dir(config, "alice"))]
+
+
+async def test_config_file_symlink_is_refused_and_not_followed(client, config, tmp_path):
+    target = tmp_path / "elsewhere.md"
+    target.write_text("outside\n")
+    _config_dir(config).mkdir(parents=True)
+    (_config_dir(config) / "USER.md").symlink_to(target)
+    rows = {row["name"]: row for row in (await client.get("/workspace/config-files")).json()["files"]}
+    assert rows["USER.md"]["editable"] is False
+    assert (await client.get("/workspace/config-files/USER.md")).status_code == 500
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": _rev()})
+    assert response.status_code == 500
+    assert response.json()["code"] == "failed"
+    assert target.read_text() == "outside\n"
+
+
+@pytest.mark.parametrize("body", [None, [], {"content": "x"}, {"revision": "r"}, {"content": 1, "revision": "r"}])
+async def test_config_file_save_rejects_a_malformed_body(client, body):
+    response = await client.put("/workspace/config-files/USER.md", json=body)
+    assert response.status_code == 400
+
+
+async def test_config_files_without_a_workspace(client, config):
+    config.workspace_path = None
+    assert (await client.get("/workspace/config-files")).status_code == 503
+    assert (await client.get("/workspace/config-files/USER.md")).status_code == 503
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": "r"})
+    assert response.status_code == 503
+
+
+async def test_config_file_save_requires_origin_and_auth(client, app):
+    from fastapi import HTTPException
+    from istota.webui.router_stubs import verify_origin
+
+    def refuse():
+        raise HTTPException(403, "cross-origin request")
+    app.dependency_overrides[verify_origin] = refuse
+    assert (await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": "r"})).status_code == 403
+    app.dependency_overrides.clear()
+    assert (await client.get("/workspace/config-files")).status_code == 401
+    assert (await client.get("/workspace/config-files/USER.md")).status_code == 401
+    assert (await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": "r"})).status_code == 401
+
+
+async def test_delete_through_workspace_route(client, config):
+    response = await client.delete("/workspace/files", params={"place": "home", "path": "notes", "name": "plan.md"})
+    assert response.status_code == 200
+    assert not (config.workspace_path / "Users/alice/notes/plan.md").exists()
+    listing = await client.get("/workspace/list", params={"place": "home", "path": "notes"})
+    assert listing.json()["entries"] == []
+
+
+@pytest.mark.parametrize("place,path,name,status", [
+    ("room:sample", "notes", "plan.md", 404),
+    ("home", "../alice/notes", "plan.md", 404),
+    ("home", "notes", "../notes/plan.md", 422),
+    ("home", "", "notes", 409),
+])
+async def test_delete_refusal_keeps_files(client, config, place, path, name, status):
+    response = await client.delete("/workspace/files", params={"place": place, "path": path, "name": name})
+    assert response.status_code == status
+    assert (config.workspace_path / "Users/alice/notes/plan.md").read_text() == "plan"
+
+
+async def test_delete_requires_auth_and_origin(client, app, config):
+    from fastapi import HTTPException
+    from istota.webui.router_stubs import verify_origin
+
+    def refuse():
+        raise HTTPException(403, "cross-origin request")
+
+    app.dependency_overrides[verify_origin] = refuse
+    params = {"place": "home", "path": "notes", "name": "plan.md"}
+    assert (await client.delete("/workspace/files", params=params)).status_code == 403
+    app.dependency_overrides.clear()
+    assert (await client.delete("/workspace/files", params=params)).status_code == 401
+    assert (config.workspace_path / "Users/alice/notes/plan.md").exists()
+
+
+@pytest.fixture
+def nextcloud_connection(config, monkeypatch):
+    from istota.webui import tokens
+    monkeypatch.setenv("ISTOTA_WEB_TOKEN_KEY", "x" * 64)
+    config.web.token_storage = "encrypted"
+    config.web.oauth2_provider = "https://cloud.example.com/nc"
+    config.nextcloud.url = "https://internal.example.com"
+    config.nextcloud.username = "istota"
+    config.nextcloud.app_password = "bot-password"
+    config.nextcloud.dav_prefix = "Shared Files"
+    tokens.store_tokens(config.db_path, "alice", "alice-access", "alice-refresh", 3600)
+    tokens.store_tokens(config.db_path, "bob", "bob-access", "bob-refresh", 3600)
+
+
+@pytest.fixture
+def nextcloud_wire(monkeypatch):
+    from contextlib import contextmanager
+    import httpx
+    calls, replies = [], []
+
+    def handle(request):
+        calls.append(request)
+        return replies.pop(0)
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+            with client.stream(method, url, **kwargs) as response:
+                yield response
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    return calls, replies
+
+
+def nextcloud_xml():
+    return """<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+      <d:response><d:href>/nc/remote.php/dav/files/alice/</d:href>
+        <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+      <d:response><d:href>/nc/remote.php/dav/files/alice/Notes%20%26%20plans/</d:href>
+        <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><oc:fileid>10</oc:fileid></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+      <d:response><d:href>/nc/remote.php/dav/files/alice/report%23.pdf</d:href>
+        <d:propstat><d:prop><d:getcontentlength>42</d:getcontentlength><d:getlastmodified>Sat, 25 Jul 2026 10:00:00 GMT</d:getlastmodified><oc:fileid>11</oc:fileid></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+    </d:multistatus>"""
+
+
+async def test_connected_nextcloud_browses_own_account(client, config, nextcloud_connection, nextcloud_wire):
+    import httpx
+    calls, replies = nextcloud_wire
+    places = (await client.get("/workspace/places")).json()["places"]
+    assert next(p for p in places if p["id"] == "nextcloud")["browsable"]
+    replies.append(httpx.Response(207, text=nextcloud_xml()))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 200
+    entries = response.json()["entries"]
+    assert [(e["name"], e["kind"]) for e in entries] == [("Notes & plans", "dir"), ("report#.pdf", "file")]
+    assert entries[1]["size"] == 42
+    assert entries[1]["nextcloud_url"] == "https://cloud.example.com/nc/index.php/f/11"
+    assert calls[0].url == "https://cloud.example.com/nc/remote.php/dav/files/alice/"
+    assert calls[0].headers["authorization"] == "Bearer alice-access"
+    assert calls[0].headers["depth"] == "1"
+    assert config.nextcloud.username == "istota"
+    assert "alice-access" not in response.text and "bot-password" not in response.text
+    replies.append(httpx.Response(207, text=nextcloud_xml().replace("/alice/", "/alice/Notes%20%26%20plans/")))
+    response = await client.get("/workspace/list", params={"place": "nextcloud", "path": "Notes & plans"})
+    assert response.status_code == 200
+    assert calls[1].url.path == "/nc/remote.php/dav/files/alice/Notes & plans/"
+    assert response.json()["path"] == "Notes & plans"
+
+
+async def test_nextcloud_disconnect_never_uses_another_account(client, config, nextcloud_connection, nextcloud_wire):
+    from istota.webui import tokens
+    tokens.delete_tokens(config.db_path, "alice")
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 409
+    assert "Reconnect in Settings." in response.json()["error"]
+    assert not nextcloud_wire[0]
+
+
+@pytest.mark.parametrize("path", ["../bob", "notes/../bob", "bad" + chr(0) + "name", "notes/./file", "bad" + chr(92) + "name"])
+async def test_nextcloud_rejects_unsafe_paths(client, nextcloud_connection, nextcloud_wire, path):
+    response = await client.get("/workspace/list", params={"place": "nextcloud", "path": path})
+    assert response.status_code == 404
+    assert not nextcloud_wire[0]
+
+
+@pytest.mark.parametrize("status,expected", [(403, 403), (404, 404), (500, 502), (302, 502)])
+async def test_nextcloud_upstream_errors_are_safe(client, nextcloud_connection, nextcloud_wire, status, expected):
+    import httpx
+    nextcloud_wire[1].append(httpx.Response(status, text="private upstream detail", headers={"Location": "https://other.example.com"}))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == expected
+    assert "private upstream detail" not in response.text
+    assert len(nextcloud_wire[0]) == 1
+
+
+async def test_nextcloud_401_refreshes_user_token(client, nextcloud_connection, nextcloud_wire, monkeypatch):
+    import httpx
+    nextcloud_wire[1].extend([httpx.Response(401), httpx.Response(207, text=nextcloud_xml())])
+    def refresh(url, **kwargs):
+        assert kwargs["data"]["refresh_token"] == "alice-refresh"
+        return httpx.Response(200, json={"access_token": "renewed", "refresh_token": "rotated", "expires_in": 3600})
+    monkeypatch.setattr(httpx, "post", refresh)
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 200
+    assert nextcloud_wire[0][1].headers["authorization"] == "Bearer renewed"
+
+
+@pytest.mark.parametrize("disabled", ["storage", "key", "nextcloud"])
+async def test_nextcloud_connection_gate(client, config, nextcloud_connection, nextcloud_wire, monkeypatch, disabled):
+    if disabled == "storage":
+        config.web.token_storage = "ephemeral"
+    elif disabled == "key":
+        monkeypatch.delenv("ISTOTA_WEB_TOKEN_KEY")
+    else:
+        config.nextcloud.url = ""
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 409
+    assert not nextcloud_wire[0]
+
+
+@pytest.mark.parametrize("failure", ["malformed", "oversized", "network", "revoked"])
+async def test_nextcloud_failure_is_bounded(client, nextcloud_connection, nextcloud_wire, monkeypatch, failure):
+    import httpx
+    from istota.webui import nextcloud_files
+    if failure == "network":
+        def fail(*args, **kwargs):
+            raise httpx.ReadTimeout("private upstream detail")
+        monkeypatch.setattr(httpx, "stream", fail)
+    elif failure == "revoked":
+        nextcloud_wire[1].append(httpx.Response(401))
+        monkeypatch.setattr(httpx, "post", lambda *a, **kw: httpx.Response(400))
+    else:
+        if failure == "oversized":
+            monkeypatch.setattr(nextcloud_files, "_MAX_RESPONSE_BYTES", 20)
+        nextcloud_wire[1].append(httpx.Response(207, text=nextcloud_xml() if failure == "oversized" else "<not xml"))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == (409 if failure == "revoked" else 502)
+    assert "private upstream detail" not in response.text
+
+
+async def test_nextcloud_listing_filters_and_caps_entries(client, nextcloud_connection, nextcloud_wire, monkeypatch):
+    import httpx
+    from istota.webui import nextcloud_files
+    xml = nextcloud_xml()
+    extra = xml[xml.index("<d:response><d:href>/nc/remote.php/dav/files/alice/report"):xml.rindex("</d:multistatus>")]
+    xml = xml.replace("</d:multistatus>", extra.replace("/alice/report", "/bob/report") + extra + "</d:multistatus>")
+    nextcloud_wire[1].append(httpx.Response(207, text=xml))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert response.status_code == 200
+    assert len(response.json()["entries"]) == 2
+    assert response.json()["skipped_names"] == 2
+    monkeypatch.setattr(nextcloud_files, "LIST_MAX_ENTRIES", 1)
+    nextcloud_wire[1].append(httpx.Response(207, text=nextcloud_xml()))
+    response = await client.get("/workspace/list", params={"place": "nextcloud"})
+    assert len(response.json()["entries"]) == 1
+    assert response.json()["truncated"]

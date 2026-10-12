@@ -4,6 +4,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 from istota.heartbeat import (
     HeartbeatSettings,
@@ -1841,3 +1843,52 @@ class TestCheckCalendarConflicts:
     def test_same_zone_same_wall_clock_is_a_conflict(self):
         result, _ = self._run({}, make_events=self._two_events("Asia/Tokyo", "Asia/Tokyo"))
         assert result.healthy is False
+
+
+# ---------------------------------------------------------------------------
+# parse_heartbeat_text: the loader's parse half, for the web editor
+# ---------------------------------------------------------------------------
+
+
+_HEARTBEAT_TEXTS = {
+    "empty": "",
+    "whitespace": "  \n",
+    "no fence": "# Just markdown, no TOML",
+    "commented": "```toml\n# [[checks]]\n# name = \"x\"\n```\n",
+    "empty fence": "```toml\n```\n",
+    "toml error": "```toml\n[[checks]\nname = \"x\"\n```\n",
+    "no checks": "```toml\n[settings]\nquiet_hours = [\"22:00-07:00\"]\n```\n",
+    "check without type": "```toml\n[[checks]]\nname = \"x\"\n```\n",
+    "two checks": (
+        "# Heartbeat\n\n```toml\n[settings]\nconversation_token = \"room1\"\n"
+        "default_cooldown_minutes = 30\n\n[[checks]]\nname = \"site\"\n"
+        "type = \"url-health\"\nurl = \"https://example.com\"\ncooldown_minutes = 5\n\n"
+        "[[checks]]\nname = \"disk\"\ntype = \"shell-command\"\ncommand = \"df\"\n"
+        "interval_minutes = 10\nchannel = \"room2\"\n```\n"
+    ),
+}
+
+
+class TestParseHeartbeatText:
+    @pytest.mark.parametrize("name", sorted(_HEARTBEAT_TEXTS))
+    def test_agrees_with_the_loader(self, tmp_path, name):
+        from istota.heartbeat import parse_heartbeat_text
+
+        content = _HEARTBEAT_TEXTS[name]
+        config_dir = tmp_path / "mount" / "Users" / "alice" / "istota" / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "HEARTBEAT.md").write_text(content)
+
+        loaded = load_heartbeat_config(Config(workspace_path=tmp_path / "mount"), "alice")
+        assert parse_heartbeat_text(content, "alice") == loaded
+
+    def test_a_valid_file_parses_to_its_checks(self):
+        from istota.heartbeat import parse_heartbeat_text
+
+        settings, checks = parse_heartbeat_text(_HEARTBEAT_TEXTS["two checks"])
+        assert settings.conversation_token == "room1"
+        assert settings.default_cooldown_minutes == 30
+        assert [(c.name, c.type) for c in checks] == [
+            ("site", "url-health"), ("disk", "shell-command")]
+        assert checks[0].config == {"url": "https://example.com"}
+        assert checks[1].channel == "room2" and checks[1].interval_minutes == 10

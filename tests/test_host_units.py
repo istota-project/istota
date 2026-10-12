@@ -862,6 +862,61 @@ class TestCertbot:
         assert timer["Timer"]["OnCalendar"] == "*-*-* 00,12:00:00"
 
 
+INSTALL_SH = REPO / "install.sh"
+
+
+def _install_function(name: str) -> str:
+    script = INSTALL_SH.read_text()
+    start = script.index(f"\n{name}() {{\n") + 1
+    return script[start:script.index("\n}\n", start) + 3]
+
+
+def _run_server_setup(tmp_path: Path, *, terminal: bool, setup_code_fails: int = 0,
+                      configured: bool = False, unit_active: bool = True,
+                      ) -> tuple[subprocess.CompletedProcess, str]:
+    """Run install.sh's setup step, the part after the build, against stub
+    `systemctl`, `istota-stack` and `sleep`. The rest of `run_server` needs
+    root and Debian; this is the part that decides which setup runs."""
+    script = INSTALL_SH.read_text()
+    helpers = script[script.index("_BOLD="):script.index("show_help() {")]
+    setup = script[script.index("# --- server setup ---"):script.index("# --- end server setup ---")]
+    stack = tmp_path / "stack"
+    (stack / "config").mkdir(parents=True)
+    if configured:
+        (stack / "config" / "config.toml").write_text("")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "calls"
+    log.write_text("")
+    count = tmp_path / "count"
+    _stub(bindir, "systemctl", f"""echo "systemctl $*" >> "{log}"
+[ "$1" = is-active ] && exit {0 if unit_active else 3}
+exit 0
+""")
+    _stub(bindir, "sleep", "exit 0\n")
+    _stub(bindir, "istota-stack", f"""echo "istota-stack $*" >> "{log}"
+[ "$1" = setup-code ] || exit 0
+n=$(cat "{count}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{count}"
+if [ "$n" -le {setup_code_fails} ]; then echo "no setup in progress" >&2; exit 1; fi
+printf 'Open this address in your browser to set up Istota:\\n\\n  https://192.0.2.1/istota/setup#code=TEST\\n\\nSHA-256 fingerprint: AA:BB\\n'
+""")
+    program = "\n".join([
+        "set -euo pipefail",
+        helpers,
+        _install_function("reattach_tty_if_needed"),
+        f'STACK="{stack}"; SRC="{stack}/src"; RELEASE_TAG=v1',
+        f"SETUP_IN_TERMINAL={'true' if terminal else 'false'}",
+        setup,
+        "server_setup",
+    ])
+    result = subprocess.run(
+        ["bash", "-c", program], capture_output=True, text=True, timeout=30,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+        env={"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path)},
+    )
+    return result, log.read_text()
+
+
 class TestBootstrapFiles:
     def test_cloud_init_verifies_the_tag_before_running_anything(self):
         doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
@@ -906,13 +961,92 @@ class TestBootstrapFiles:
         checkout = run_server.index('checkout --quiet --detach "${object}^{commit}"')
         assert verify < checkout < run_server.index("host/provision.sh")
         assert run_server.index("host/provision.sh") < run_server.index("istota-stack update")
-        # The first build ran before config.toml existed: a config that needs
-        # Claude Code gets its rebuild after the wizard, before the unit starts.
-        setup = run_server.index("    istota-stack setup\n")
-        check = run_server.index("istota-stack check-image || image_rc=$?")
-        assert setup < check < run_server.index("systemctl enable --now istota-stack\n", check)
-        assert run_server.index('istota-stack update "$RELEASE_TAG"', check) < run_server.index(
+        assert run_server.index("istota-stack update") < run_server.index("    server_setup\n")
+
+    def test_the_terminal_setup_rebuilds_before_the_unit_starts(self):
+        """The first build ran before config.toml existed: a config that needs
+        Claude Code gets its rebuild after the wizard, before the unit starts.
+        The browser setup does the same itself (`build_what_setup_needs`)."""
+        terminal = _install_function("server_setup_in_terminal")
+        setup = terminal.index("    istota-stack setup\n")
+        check = terminal.index("istota-stack check-image || image_rc=$?")
+        assert setup < check < terminal.index("systemctl enable --now istota-stack\n", check)
+        assert terminal.index('istota-stack update "$RELEASE_TAG"', check) < terminal.index(
             "systemctl enable --now istota-stack\n", check)
+
+    def test_the_root_installer_starts_the_setup_unit_cloud_init_starts(self):
+        doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
+        bootstrap = next(f["content"] for f in doc["write_files"] if f["path"] == "/root/istota-bootstrap.sh")
+        browser = _install_function("server_setup_in_browser")
+        for script in (bootstrap, browser):
+            start = script.index("systemctl start istota-setup.service\n")
+            assert start < script.index("istota-stack setup-code 2>/dev/null", start)
+
+    def test_install_server_starts_the_browser_setup_by_default(self, tmp_path):
+        """ISSUE-717: `install.sh --server` ran the terminal wizard, so a server
+        installed with it got a different first run from one cloud-init made."""
+        result, calls = _run_server_setup(tmp_path, terminal=False, setup_code_fails=2)
+        assert result.returncode == 0, result.stderr
+        assert "systemctl start istota-setup.service" in calls
+        assert calls.count("istota-stack setup-code") == 3
+        assert "istota-stack setup\n" not in calls + "\n"
+        assert "https://192.0.2.1/istota/setup#code=TEST" in result.stdout
+        assert "SHA-256 fingerprint" in result.stdout
+
+    def test_install_server_stops_waiting_once_the_unit_has_exited(self, tmp_path):
+        """A setup that refused (a config copied out of an old state volume,
+        port 443 taken) removes its files on exit, so setup-code can never
+        answer; the installer says so at once rather than after five minutes."""
+        result, calls = _run_server_setup(tmp_path, terminal=False, setup_code_fails=1000,
+                                          unit_active=False)
+        assert result.returncode == 1
+        assert calls.count("istota-stack setup-code") == 1
+        assert "journalctl -u istota-setup" in result.stderr
+
+    def test_install_server_names_the_unit_when_no_code_comes(self, tmp_path):
+        result, calls = _run_server_setup(tmp_path, terminal=False, setup_code_fails=1000)
+        assert result.returncode == 1
+        assert calls.count("istota-stack setup-code") == 60
+        assert "journalctl -u istota-setup" in result.stderr
+
+    def test_install_server_on_a_configured_stack_starts_no_setup(self, tmp_path):
+        result, calls = _run_server_setup(tmp_path, terminal=False, configured=True)
+        assert result.returncode == 0, result.stderr
+        assert "systemctl" not in calls
+        assert "already set up" in result.stdout
+
+    def test_install_server_terminal_setup_keeps_the_wizard(self, tmp_path):
+        """--terminal-setup keeps the old path. With no terminal it stops and
+        prints the wizard's steps, as it did before; it never starts the unit."""
+        result, calls = _run_server_setup(tmp_path, terminal=True)
+        assert result.returncode == 0, result.stderr
+        assert "systemctl" not in calls
+        assert "istota-stack setup\n" in result.stdout
+
+    def test_the_server_path_refuses_a_flag_it_does_not_know(self):
+        """A mistyped --terminal-setup used to be dropped silently on the server
+        path, which would now mean the other setup."""
+        result = subprocess.run(
+            ["bash", str(REPO / "install.sh"), "--server", "--terminal-stup"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert "--terminal-stup" in result.stderr
+
+    def test_terminal_setup_is_parsed_and_belongs_to_the_server_path(self):
+        server = subprocess.run(
+            ["bash", str(REPO / "install.sh"), "--server", "--terminal-setup"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        # Parsed: the run gets as far as its root check (or, as root, its
+        # Debian or tag check) rather than refusing the flag.
+        assert "--terminal-setup" not in server.stderr
+        standalone = subprocess.run(
+            ["bash", str(REPO / "install.sh"), "--standalone", "--terminal-setup"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        assert standalone.returncode == 1
+        assert "--terminal-setup" in standalone.stderr
 
     def test_the_root_installer_has_no_bare_metal_or_docker_arm(self):
         """The old --bare arm ran the deleted deploy/install.sh; --docker printed

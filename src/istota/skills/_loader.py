@@ -908,6 +908,11 @@ def _denylist_key(skill_name: str) -> str:
     return skill_name.replace("-", "_")
 
 
+def overlay_denylisted(skill_name: str) -> bool:
+    """Whether ``skill_name`` takes no user overlay (``OVERLAY_DENYLIST``)."""
+    return _denylist_key(skill_name) in OVERLAY_DENYLIST
+
+
 #: A YAML mapping key, which is what a real frontmatter block is made of.
 _FRONTMATTER_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\s*:")
 
@@ -1306,7 +1311,7 @@ def inspect_overlay(
             skill=skill, path=path, size=None, lines=None, first_line=None,
             reason=OVERLAY_UNKNOWN_SKILL, warnings=(),
         )
-    if _denylist_key(skill) in OVERLAY_DENYLIST:
+    if overlay_denylisted(skill):
         reason = OVERLAY_DENYLISTED
     elif skill in disabled_skills:
         reason = OVERLAY_SKILL_DISABLED
@@ -1387,7 +1392,7 @@ def _load_user_overlay(
     file from outside the mount into the prompt. The invariant now lives in the
     helper rather than in a rule two call sites have to remember.
     """
-    if user_overlay_dir is None or _denylist_key(skill_name) in OVERLAY_DENYLIST:
+    if user_overlay_dir is None or overlay_denylisted(skill_name):
         return None
 
     path = user_overlay_dir / f"{skill_name}.md"
