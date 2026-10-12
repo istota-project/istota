@@ -663,7 +663,10 @@ def authenticate(db_path: Path, policy: Policy, email: str, password: str, *, ip
         return "bad", None
 
 
-STEP_UP_ACTIONS = ("export", "recovery_reveal", "backup_recipient", "history_restore", "history_purge")
+STEP_UP_ACTIONS = (
+    "export", "recovery_reveal", "backup_recipient", "history_restore", "history_purge",
+    "admin_config_change",
+)
 
 
 def start_step_up(db_path, policy, user_id: str, action: str, session_key: str,

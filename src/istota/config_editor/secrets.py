@@ -20,8 +20,9 @@ from istota.lib import toml_write
 from istota.webui.admin_config_view import is_secret_path
 
 __all__ = [
-    "SENTINEL", "SentinelError", "extract_inline_secrets", "is_secret_path",
-    "label", "lookup", "parse_label", "redact_document", "restore_sentinels",
+    "SENTINEL", "SentinelError", "drop_missing_sentinels", "extract_inline_secrets",
+    "is_secret_path", "label", "lookup", "parse_label", "redact_document",
+    "restore_sentinels",
 ]
 
 #: What a secret leaf reads as in a document shown to an admin or stored in a
@@ -150,6 +151,40 @@ def restore_sentinels(new: dict, current: dict, values: dict[str, Any] | None = 
         return stored
 
     return _restore_everywhere(new, (), restore)
+
+
+def drop_missing_sentinels(document: dict, current: dict) -> tuple[dict, list[str]]:
+    """`document` without the sentinels `current` has no value for, and their labels.
+
+    For restoring a history entry: a credential cleared since the entry was
+    applied stays cleared, rather than refusing the whole restore the way
+    `restore_sentinels` refuses a sentinel with nothing to keep. An array
+    element is dropped with its slot.
+    """
+    dropped: list[str] = []
+
+    def keep(value: Any, path: tuple) -> bool:
+        if value != SENTINEL or lookup(current, path)[0]:
+            return True
+        dropped.append(label(path))
+        return False
+
+    def walk(value: Any, path: tuple) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: walk(item, path + (key,))
+                for key, item in value.items()
+                if keep(item, path + (key,))
+            }
+        if isinstance(value, list):
+            return [
+                walk(item, path + (str(index),))
+                for index, item in enumerate(value)
+                if keep(item, path + (str(index),))
+            ]
+        return value
+
+    return walk(document, ()), dropped
 
 
 def _restore_everywhere(value: Any, path: tuple, restore):

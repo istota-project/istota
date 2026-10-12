@@ -478,8 +478,13 @@ class TestTopLevel:
         assert payload["document_digest"] == "abc"
         assert payload["started_at"] == "2026-10-12T00:00:00Z"
 
-    def test_the_view_stays_read_only_until_the_applier_lands(self):
+    def test_editable_needs_the_host_applier_and_the_file(self):
+        host = {"kind": "host", "available": True, "reason": ""}
         assert view.build_config_view(Config(), document="")["editable"] is False
+        assert view.build_config_view(Config(), document="", applier=host)["editable"] is False
+        assert view.build_config_view(
+            Config(), document="", document_digest="abc", applier=host,
+        )["editable"] is True
 
     def test_has_comments(self):
         assert view.build_config_view(Config(), document=_EDITOR_DOCUMENT)["has_comments"] is True

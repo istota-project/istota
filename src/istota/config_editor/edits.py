@@ -358,6 +358,65 @@ def check_file_credentials(new: dict, current: dict) -> list[str]:
     return errors
 
 
+def check_dates(new: dict) -> list[str]:
+    """A TOML date or time anywhere in the new document, which the host's
+    plan cannot carry: `plan.json` is JSON. Refused here so such a change never
+    reaches the host, where `take` would refuse it anyway."""
+    import datetime
+
+    errors: list[str] = []
+
+    def walk(value: Any, path: tuple[str, ...]) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                walk(item, path + (key,))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, path + (str(index),))
+        elif isinstance(value, (datetime.date, datetime.time)):
+            errors.append(
+                f"{secrets.label(path)} holds a date or time value, which the host "
+                "applier cannot carry; change it on the host with `istota-stack apply`"
+            )
+
+    walk(new, ())
+    return errors
+
+
+def restore_change_set(document_toml: str, current_text: str, base_digest: str) -> tuple[dict, list[dict]]:
+    """A change set restoring a history entry's document, and what restoring it drops.
+
+    The stored document holds a sentinel at every secret leaf, so credentials
+    keep their current values. A sentinel whose credential has since been
+    cleared is dropped, and the credential stays cleared, each named in a
+    non-blocking warning. Credentials and the admin list are never restored.
+    """
+    try:
+        stored = tomllib.loads(document_toml)
+    except tomllib.TOMLDecodeError as exc:
+        raise ChangeError(f"the stored document does not parse: {exc}") from None
+    try:
+        current = tomllib.loads(current_text)
+    except tomllib.TOMLDecodeError:
+        current = {}
+    document, dropped = secrets.drop_missing_sentinels(stored, current)
+    try:
+        raw = toml_write.dumps(document)
+    except toml_write.TomlWriteError as exc:
+        raise ChangeError(f"the stored document cannot be written: {exc}") from None
+    warnings = [
+        {
+            "kind": "warning",
+            "path": list(secrets.parse_label(name) or ()),
+            "message": f"{name} was cleared after this change; it stays cleared",
+            "blocking": False,
+            "pre_existing": False,
+        }
+        for name in dropped
+    ]
+    return {"base_digest": base_digest, "ops": [], "raw": raw}, warnings
+
+
 def _read_secrets(raw: Any) -> tuple[dict[str, str], dict[str, str]]:
     """The change set's credentials, split into file and inline ones."""
     from istota.config_editor import schema
@@ -589,6 +648,7 @@ async def preview(
             errors.append(f"the credential {name} is not changed here. {schema.READ_ONLY[path]}")
     errors += check_choices(new, base)
     errors += check_sign_in(new, base)
+    errors += check_dates(new)
     current_admins = sorted(getattr(config, "admin_users", None) or ())
     admins_changed = admins is not None and sorted(admins) != current_admins
     if admins_changed:

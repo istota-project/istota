@@ -339,3 +339,45 @@ class TestLoggableNames:
 
     def test_an_inline_credential_is_its_section(self):
         assert edits.loggable_secret_name('brain.native.extra_headers."X-Secret.Name"') == "brain.native (inline)"
+
+
+class TestDates:
+    def test_a_date_anywhere_in_the_new_document_is_refused_by_its_label(self):
+        found, _ = _preview(CURRENT, {"raw": CURRENT + "\n[custom]\nwhen = 1979-05-27\n"})
+        assert found.blocked
+        assert any(error.startswith("custom.when holds a date or time value") for error in found.errors)
+
+    def test_a_time_inside_an_array_is_named_by_its_index(self):
+        import datetime
+
+        assert edits.check_dates({"a": {"times": ["x", datetime.time(7, 30)]}}) == [
+            "a.times.1 holds a date or time value, which the host applier cannot carry; "
+            "change it on the host with `istota-stack apply`"
+        ]
+
+    def test_no_date_no_error(self):
+        assert edits.check_dates({"email": {"imap_host": "h", "imap_port": 993}}) == []
+
+
+class TestRestoreChangeSet:
+    def test_a_credential_cleared_since_stays_cleared_and_is_named(self):
+        stored = (
+            '[email]\nimap_host = "older.example.org"\n\n'
+            f'[brain.native.extra_headers]\nX-Harmless = "{SENTINEL}"\nX-Gone = "{SENTINEL}"\n'
+        )
+        change_set, warnings = edits.restore_change_set(stored, CURRENT, "d1")
+        assert change_set["base_digest"] == "d1" and change_set["ops"] == []
+        assert "X-Gone" not in change_set["raw"]
+        assert [warning["message"] for warning in warnings] == [
+            "brain.native.extra_headers.X-Gone was cleared after this change; it stays cleared",
+        ]
+        assert warnings[0]["path"] == ["brain", "native", "extra_headers", "X-Gone"]
+        assert warnings[0]["blocking"] is False
+        found, seen = _preview(CURRENT, change_set)
+        assert not found.blocked
+        assert seen[0]["brain"]["native"]["extra_headers"] == {"X-Harmless": "header-value-1"}
+        assert seen[0]["email"]["imap_host"] == "older.example.org"
+
+    def test_an_unreadable_stored_document_is_a_change_error(self):
+        with pytest.raises(ChangeError):
+            edits.restore_change_set("not = [toml", CURRENT, "d1")

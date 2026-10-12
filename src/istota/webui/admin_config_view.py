@@ -8,7 +8,8 @@ backs the config editor's form. Each field also carries what the form needs
 editor kind and read-only reason; `config_editor.schema` decides most of
 them), and the top level carries the file's digest, the applier, who manages
 each resource and the problems a check of the current file reports. Nothing
-here writes, and `editable` stays `False` until the applier exists.
+here writes; `editable` is true when the host applier is there and the file
+was read.
 
 **Redaction is the whole safety story of this module.** Config holds live
 credentials (Nextcloud app password, IMAP/SMTP passwords, GitLab/GitHub tokens,
@@ -270,15 +271,6 @@ def _field_entry(prefix: str, name: str, value: Any) -> dict:
 
 _MISSING = object()
 
-_NO_APPLIER = {
-    "kind": "none",
-    "available": False,
-    "reason": (
-        "This install has no config applier; changes are made with "
-        "`istota-stack apply` on the host."
-    ),
-}
-
 #: Display names for the credential files no config key reads.
 _SECRET_LABELS = {
     "anthropic_api_key": "Anthropic API key",
@@ -304,7 +296,7 @@ def _type_hints(owner: type) -> dict:
         return {}
 
 
-def _managed_state(managed: dict | None) -> dict[str, dict]:
+def managed_state(managed: dict | None) -> dict[str, dict]:
     """Each resource's owner. An entry that is not a table fails closed."""
     from istota.apply import MANAGED_RESOURCES
 
@@ -493,6 +485,7 @@ def build_config_view(
     import tomllib
 
     from istota.config_editor import edits, schema, secrets
+    from istota.config_editor.applier import NO_APPLIER
     from istota.config_editor.reference import field_docs
 
     parsed = None
@@ -501,7 +494,8 @@ def build_config_view(
             parsed = tomllib.loads(document)
         except tomllib.TOMLDecodeError:
             parsed = None
-    managed_state = _managed_state(managed)
+    managed_by = managed_state(managed)
+    applier_state = dict(applier) if applier is not None else dict(NO_APPLIER)
     try:
         docs = field_docs(Path(config.skills_dir).parent)
     except (OSError, TypeError):
@@ -512,7 +506,7 @@ def build_config_view(
         "redacted": secrets.redact_document(parsed) if parsed is not None else None,
         "docs": docs,
         "managed_reasons": {
-            resource: _managed_reason(entry) for resource, entry in managed_state.items()
+            resource: _managed_reason(entry) for resource, entry in managed_by.items()
         },
     }
     try:
@@ -540,10 +534,10 @@ def build_config_view(
 
     return {
         "config_path": str(config.config_path) if config.config_path else None,
-        "editable": False,
+        "editable": bool(applier_state["available"]) and document_digest is not None,
         "sections": sections,
-        "applier": dict(applier) if applier is not None else dict(_NO_APPLIER),
-        "managed": managed_state,
+        "applier": applier_state,
+        "managed": managed_by,
         "document_digest": document_digest,
         "started_at": started_at,
         "problems": _problems(check),

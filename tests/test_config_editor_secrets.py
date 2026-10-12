@@ -163,3 +163,16 @@ class TestNewValuesAndLabels:
     @pytest.mark.parametrize("text", ["", "a = 1\nb", "a.", '"a', "a b", "[a]"])
     def test_text_label_would_not_write_is_no_path(self, text):
         assert secrets.parse_label(text) is None
+
+
+class TestDropMissingSentinels:
+    def test_only_sentinels_with_nothing_stored_are_dropped(self):
+        current = {"email": {"imap_password": "kept-value"}}
+        document = {
+            "email": {"imap_password": secrets.SENTINEL, "smtp_password": secrets.SENTINEL},
+            "list": [secrets.SENTINEL, "plain"],
+        }
+        kept, dropped = secrets.drop_missing_sentinels(document, current)
+        assert kept == {"email": {"imap_password": secrets.SENTINEL}, "list": ["plain"]}
+        assert dropped == ["email.smtp_password", "list.0"]
+        assert document["email"]["smtp_password"] == secrets.SENTINEL
