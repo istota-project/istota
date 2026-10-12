@@ -794,14 +794,15 @@ class Target:
         return self.data_dir / PROGRESS_NAME
 
 
-def _restore_config(target: Target, source: Source):
+def _restore_config(target: Target, snapshot: Path):
     """A ``Config`` whose framework and module paths are the target's, and whose
-    backup root is the export's snapshot tree, for ``db_restore``."""
+    backup root is the snapshot tree ``snapshot`` is a dated directory of, for
+    ``db_restore``."""
     from istota.config import load_config
 
     document = {
         "db_path": str(target.db_path),
-        "scheduler": {"db_backup_dir": str(source.snapshot.parent)},
+        "scheduler": {"db_backup_dir": str(snapshot.parent)},
     }
     with tempfile.TemporaryDirectory(prefix="istota-import-") as scratch:
         path = Path(scratch) / "config.toml"
@@ -945,18 +946,21 @@ def _write_secrets(plan: SecretsPlan, target: Target) -> None:
         apply_module.write_private(target.data_dir / name, value)
 
 
-def _restore_databases(source: Source, target: Target, out) -> None:
+def restore_snapshot(snapshot: Path, names: list[str], target: Target, out) -> None:
+    """Each database of a dated snapshot directory (``framework/istota.db``,
+    ``<user>/<module>.db``) into the target, then ``quick_check``. Shared with
+    the standalone import, whose staged databases take the same layout."""
     from istota.maintenance.db_restore import restore_database
 
-    config = _restore_config(target, source)
-    for name in source.snapshot_dbs:
+    config = _restore_config(target, snapshot)
+    for name in names:
         if name == "framework/istota.db":
-            result = restore_database(config, label="framework", date=source.snapshot.name)
+            result = restore_database(config, label="framework", date=snapshot.name)
         else:
             user, module_file = name.split("/", 1)
             result = restore_database(
                 config, user=user, module=Path(module_file).stem,
-                date=source.snapshot.name, force=True,
+                date=snapshot.name, force=True,
             )
         if result["status"] != "restored":
             raise RuntimeError(f"{name}: {result['status']} {result.get('error', '')}".strip())
@@ -1112,7 +1116,7 @@ def run(args, out, err) -> int:
         _print_secrets(secrets, out)
         _write_secrets(secrets, target)
         out("databases:")
-        _restore_databases(source, target, out)
+        restore_snapshot(source.snapshot, source.snapshot_dbs, target, out)
         out("files:")
         _import_repos(source, target, out)
         _import_side_trees(source, target, out, rehearsal=args.rehearsal)

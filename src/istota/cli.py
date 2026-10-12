@@ -4714,6 +4714,10 @@ def main():
         from istota.maintenance import workspace_paths
 
         sys.exit(workspace_paths.main(argv[2:]))
+    if argv[:2] == ["migrate", "import-standalone"]:
+        from istota.maintenance import standalone_import
+
+        sys.exit(standalone_import.main(argv[2:]))
     if argv[:2] == ["migrate", "restore-workspace"]:
         from istota.maintenance import workspace_restore
 
