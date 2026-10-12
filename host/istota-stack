@@ -329,7 +329,7 @@ build_images() {
     local tag="$1" services
     services="$(WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" build_services)"
     # shellcheck disable=SC2086
-    WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="$(needs_claude_code)" compose build $services
+    BUILDX_BUILDER=default WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" INSTALL_CLAUDE_CODE="$(needs_claude_code)" compose build $services
 }
 
 build_devbox_images() {
@@ -339,7 +339,7 @@ build_devbox_images() {
     devbox="$(ISTOTA_TAG="$tag" compose config --services | grep -vxF -f <(printf '%s\n' "$core") || true)"
     [ -n "$devbox" ] || return 0
     # shellcheck disable=SC2086
-    ISTOTA_TAG="$tag" compose build $devbox
+    BUILDX_BUILDER=default ISTOTA_TAG="$tag" compose build $devbox
 }
 
 # Why the tag's image cannot run what config.toml asks for, or nothing when it
@@ -382,6 +382,29 @@ prune_images() {
         if [ "$tag" = "$keep_current" ] || [ "$tag" = "$keep_previous" ]; then continue; fi
         docker image rm "$ref" >/dev/null 2>&1 || log "could not remove ${ref}; in use?"
     done
+}
+
+# Compose labels its built images even after a rebuild leaves them untagged.
+# No --all here: a tagged rollback image must survive without a container.
+prune_build_artifacts() {
+    log "pruning dangling Istota images"
+    docker image prune --force --filter "label=com.docker.compose.project=${PROJECT}" \
+        || log "WARNING: could not prune dangling Istota images"
+    # The VM's default builder is also used explicitly by build_images and
+    # build_devbox_images. Cache is shared; tagged images and volumes are not cache.
+    log "pruning unused build cache (keep 2GB)"
+    BUILDX_BUILDER=default docker builder prune --all --force --keep-storage 2GB \
+        || log "WARNING: could not prune build cache"
+}
+
+# Read the retained pair at cleanup time: before a failed build it is still
+# the old pair; after the switch it is the new one. Never remove volumes.
+cleanup_update() {
+    local current previous
+    current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    previous="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG)"
+    prune_images "$current" "$previous" || log "WARNING: could not prune older Istota images"
+    prune_build_artifacts
 }
 
 render_devbox_compose() {
@@ -450,6 +473,8 @@ cmd_update() {
         exit "$EXIT_REFUSED_TAG"
     fi
     before="$(verified_git rev-parse HEAD)"
+    prune_build_artifacts
+    trap cleanup_update EXIT
 
     # From here until .env is written, a failure puts the checkout back, so .env,
     # the checkout and the running stack all stay as they were.
@@ -483,7 +508,9 @@ cmd_update() {
     else
         log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
     fi
-    prune_images "$tag" "$previous"
+    cleanup_update
+    # A successful update may exec provision.sh, which does not run EXIT traps.
+    trap - EXIT
     log "now on ${tag} (previous: ${previous:-none})"
     reprovision_if_changed
 }
