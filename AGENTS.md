@@ -168,9 +168,11 @@ src/istota/
 │   ├── db_restore.py     # Restore a cold snapshot back to local disk (newest good, or `--date`); refuses an empty snapshot without `--force` → maintenance.md
 │   ├── repos_relocate.py # One-shot migrator: `developer.repos_dir` → per-user subtrees
 │   ├── workspace_paths.py # A migrated install's old host paths in users' bot directories, rewritten with backups → maintenance.md
+│   ├── workspace_localize.py # Moving a mounted workspace to local disk: the copy, the config edit, the index cleanup → maintenance.md
 │   ├── room_relocate.py, room_mount_reconcile.py  # The room-identity migration and its mount sweep
 │   ├── persona_retire.py # Deletes or retires the old per-user PERSONA.md copies, from `istota init` → maintenance.md
 │   ├── worktree_reaper.py   # Removes a developer worktree once its work has landed → maintenance.md
+│   ├── talk_media.py     # Retention for Talk attachments fetched into `Channels/<token>/media/` on a local workspace → maintenance.md
 │   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
 │   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
 ├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications

@@ -186,7 +186,7 @@ from .transport.registry import (
 from .lib.audio_sniff import VOICE_TRANSCRIPT_LABEL
 from .transport.ingest import describe_attachment_only_message
 from .transport.routing import private_phone_room
-from .storage import BOT_USER_BASE, ensure_user_directories_v2
+from .storage import BOT_USER_BASE, ensure_user_directories_v2, ensure_workspace_roots
 
 # Deferred-op handlers were extracted to a sibling module; re-export the
 # names so existing tests and call-sites that import them from this module
@@ -1099,47 +1099,147 @@ def _talk_result_mirror_body(
     return body
 
 
-def download_talk_attachments(config: Config, attachments: list[str]) -> list[str]:
-    """
-    Get local paths for Talk attachments.
+def download_talk_attachments(
+    config: Config, task: "db.Task", attachments: list[str],
+) -> list[str]:
+    """Local paths for a Talk task's attachments.
 
-    Talk attachments arrive as Nextcloud paths (e.g., "Talk/filename.jpg").
-
-    Returns the workspace paths, falling back to the original path where a
-    file is not found or there is no workspace.
+    A Talk attachment arrives as a name in the bot's Nextcloud ``Talk/``
+    folder (``Talk/<name>``). Under the mount that folder is on disk. On a
+    local workspace with Nextcloud configured the file is fetched over WebDAV
+    into the room's own folder (``_fetch_talk_attachment``). Anything that
+    cannot be resolved keeps its original string, so the prompt still names
+    the file the user sent and the task runs without it.
     """
     if not attachments:
         return []
 
     local_paths = []
     for att in attachments:
-        if att.startswith("Talk/") and config.has_workspace:
-            # Use mount path directly - no download needed
-            mount_path = config.workspace_path / att
-            if mount_path.exists():
-                local_paths.append(str(mount_path))
-                logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
-            else:
-                # File may be in a user's Talk folder (NC stores shared files
-                # in the sender's data dir). Check NC data dir if available.
-                nc_data = attachment_source.NC_DATA_ROOT
-                found = False
-                if nc_data.is_dir():
-                    filename = att.split("/", 1)[1] if "/" in att else att
-                    for user_dir in nc_data.iterdir():
-                        candidate = user_dir / "files" / "Talk" / filename
-                        if candidate.exists():
-                            local_paths.append(str(candidate))
-                            logger.debug(f"Talk attachment via nc-data: {att} -> {candidate}")
-                            found = True
-                            break
-                if not found:
-                    logger.warning(f"Talk attachment not found at mount path: {mount_path}")
-                    local_paths.append(att)  # Fall back to original path
+        if not (isinstance(att, str) and att.startswith("Talk/")):
+            local_paths.append(att)
+        elif config.storage_is_nextcloud:
+            local_paths.append(_talk_attachment_on_mount(config, att))
+        elif config.nextcloud_enabled and config.has_workspace:
+            local_paths.append(_fetch_talk_attachment(config, task, att))
         else:
             local_paths.append(att)
-
     return local_paths
+
+
+def _talk_attachment_on_mount(config: Config, att: str) -> str:
+    mount_path = config.workspace_path / att
+    if mount_path.exists():
+        logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
+        return str(mount_path)
+    # The file may be in a user's Talk folder (Nextcloud stores shared files in
+    # the sender's data dir). That data dir is Nextcloud's, so only beside the
+    # mount.
+    nc_data = attachment_source.NC_DATA_ROOT
+    if nc_data.is_dir():
+        filename = att.split("/", 1)[1] if "/" in att else att
+        for user_dir in nc_data.iterdir():
+            candidate = user_dir / "files" / "Talk" / filename
+            if candidate.exists():
+                logger.debug(f"Talk attachment via nc-data: {att} -> {candidate}")
+                return str(candidate)
+    logger.warning(f"Talk attachment not found at mount path: {mount_path}")
+    return att
+
+
+def _fetch_talk_attachment(config: Config, task: "db.Task", att: str) -> str:
+    """Fetch ``Talk/<name>`` into ``Channels/<token>/media/<message id>/``.
+
+    The room's folder because its readers are the conversation's
+    participants, who have all seen the file posted, and every task in the
+    room already has it bound, a guest's turn included. The message id makes
+    the destination deterministic: a retry, a confirmed re-run or a second
+    attempt finds the first copy and fetches nothing.
+    """
+    from istota import storage  # noqa: PLC0415 - import cycle
+    from istota.lib.filenames import safe_filename  # noqa: PLC0415
+    from istota.nextcloud import dav  # noqa: PLC0415
+    from istota.nextcloud._http import OcsError, dav_files_url, dav_request  # noqa: PLC0415
+    from istota.workspace.listing import ListingError  # noqa: PLC0415
+    from istota.workspace.writes import open_or_create_dirs, write_new_file  # noqa: PLC0415
+
+    remote_name = att.split("/", 1)[1]
+    task_id = getattr(task, "id", None)
+    token = getattr(task, "conversation_token", None)
+    message_id = getattr(task, "talk_message_id", None)
+    if not token or not message_id:
+        logger.warning(
+            "Talk attachment %r on task %s not fetched: the task has no "
+            "conversation token or Talk message id", remote_name, task_id,
+        )
+        return att
+    try:
+        channel_dir = storage._contained_channel_dir(config, token)
+    except ValueError:
+        channel_dir = None
+    if channel_dir is None:
+        logger.warning(
+            "Talk attachment %r on task %s not fetched: the room folder for "
+            "%r is not contained", remote_name, task_id, token,
+        )
+        return att
+
+    name = safe_filename(remote_name, fallback="attachment")
+    parts = ["media", str(int(message_id))]
+    destination = channel_dir.joinpath(*parts, name)
+
+    def existing() -> str | None:
+        """The destination, if a regular file stands there; raises on anything else."""
+        dir_fd = open_or_create_dirs(channel_dir, parts)
+        try:
+            try:
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+        finally:
+            os.close(dir_fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{destination} exists and is not a regular file")
+        return str(destination)
+
+    cap = max(0, int(config.talk.attachment_max_mb)) * 1024 * 1024
+    remote = f"Talk/{remote_name}"
+    try:
+        found = existing()
+        if found is not None:
+            return found
+        entry = dav.stat(config, remote, prefixed=False)
+        size = entry.get("size")
+        if size is not None and size > cap:
+            logger.warning(
+                "Talk attachment %r on task %s skipped: %d bytes is over "
+                "[talk] attachment_max_mb", remote_name, task_id, size,
+            )
+            return att
+        response = dav_request(config, "GET", dav_files_url(config, remote, prefixed=False))
+        data = response.content
+        if len(data) > cap:
+            logger.warning(
+                "Talk attachment %r on task %s skipped: the body is %d bytes, "
+                "over [talk] attachment_max_mb", remote_name, task_id, len(data),
+            )
+            return att
+        try:
+            write_new_file(channel_dir, parts, name, [data], max_bytes=cap, numbered=False)
+        except FileExistsError:
+            # A concurrent attempt wrote it first; its copy is the answer.
+            found = existing()
+            if found is None:
+                raise
+            return found
+    except (OcsError, ListingError, OSError, ValueError) as e:
+        logger.warning(
+            "Talk attachment %r on task %s not fetched: %s",
+            remote_name, task_id, getattr(e, "message", None) or str(e) or type(e).__name__,
+        )
+        return att
+    logger.debug(f"Talk attachment fetched: {att} -> {destination}")
+    return str(destination)
 
 
 def localize_workspace_attachments(
@@ -3320,7 +3420,7 @@ def process_one_task(
 
             # Download Talk attachments to local filesystem before execution
             if task.source_type == "talk" and task.attachments:
-                local_attachments = download_talk_attachments(config, task.attachments)
+                local_attachments = download_talk_attachments(config, task, task.attachments)
                 # Create modified task with local paths
                 task = replace(task, attachments=local_attachments)
             elif task.attachments:
@@ -6682,13 +6782,13 @@ def check_avatar_import(config: Config) -> list[AvatarImportOutcome]:
     """
     if not (
         config.web.enabled
-        and config.storage_is_nextcloud
+        and config.nextcloud_enabled
         and config.web.avatar_import_from_nextcloud
         and config.scheduler.avatar_import_interval
     ):
         return []
 
-    # `storage_is_nextcloud` is `bool(url)` and `nc_configured` is
+    # `nextcloud_enabled` is `bool(url)` and `nc_configured` is
     # `bool(url and username)`, so a config carrying a URL and no username
     # passes every gate above and then raises "Nextcloud is not configured" for
     # every user, once per tick, forever. Refusing here makes that one skip
@@ -8312,6 +8412,21 @@ def run_cleanup_checks(config: Config) -> None:
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
 
+    # 7a. Talk attachments fetched into room folders. Only a local workspace
+    # with Nextcloud writes them; under the mount the room's `media/` is not ours.
+    if (config.has_workspace and config.nextcloud_enabled
+            and not config.storage_is_nextcloud
+            and config.talk.attachment_retention_days > 0):
+        try:
+            from istota.maintenance.talk_media import sweep_talk_media
+            removed = sweep_talk_media(
+                config.workspace_path, config.talk.attachment_retention_days,
+            )
+            if removed > 0:
+                logger.info(f"Removed {removed} expired Talk attachment folder(s)")
+        except Exception as e:
+            logger.warning(f"Talk media sweep skipped: {e}")
+
     # 7b. Clean up old native-brain session logs
     #
     # The **only** caller of the sweep. The feature ships enabled and the writer
@@ -9894,12 +10009,16 @@ def build_interval_gates(
             one_shot_on_error=None,
         ),
         # Before the TASKS.md poll below, so the files are in place when it
-        # walks them.
+        # walks them. Mount only: on a local workspace nothing a user shares
+        # in Nextcloud appears in the tree, so a pass is one wasted PROPFIND
+        # per root entry.
         IntervalGate(
             name="shared-files",
             run=_shared_files,
             field="shared_file_check_interval",
-            enabled=lambda c: bool(c.scheduler.shared_file_check_interval),
+            enabled=lambda c: (
+                bool(c.scheduler.shared_file_check_interval) and c.storage_is_nextcloud
+            ),
             on_error="Error organizing shared files: %s",
             one_shot=True,
             one_shot_on_error="Error organizing shared files: %s",
@@ -10011,7 +10130,7 @@ def build_interval_gates(
             field="avatar_import_interval",
             enabled=lambda c: bool(
                 c.web.enabled
-                and c.storage_is_nextcloud
+                and c.nextcloud_enabled
                 and c.web.avatar_import_from_nextcloud
                 and c.scheduler.avatar_import_interval
             ),
@@ -10786,6 +10905,10 @@ def run_daemon(
         logger.warning("User config hydration failed: %s", e)
 
     # Ensure user directories exist for all configured users (runs migration + README seeding)
+    try:
+        ensure_workspace_roots(config)
+    except Exception as e:
+        logger.warning("Failed to ensure workspace roots: %s", e)
     for user_id in config.users:
         try:
             ensure_user_directories_v2(config, user_id)

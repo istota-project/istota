@@ -460,3 +460,113 @@ class TestTalkParser:
         ):
             args = parser.parse_args(argv)
             assert args.group == "talk"
+
+
+class _DavRecorder:
+    """The network at `httpx.request`: MKCOL and PUT, with names that exist."""
+
+    def __init__(self, existing=()):
+        self.existing = set(existing)
+        self.calls = []
+
+    def __call__(self, method, url, **kwargs):
+        import httpx
+        from urllib.parse import unquote, urlparse
+        path = unquote(urlparse(url).path)
+        self.calls.append((method, path, dict(kwargs.get("headers") or {})))
+        request = httpx.Request(method, url)
+        if method == "PUT" and path in self.existing:
+            return httpx.Response(412, text="exists", request=request)
+        if method == "PUT":
+            self.existing.add(path)
+        return httpx.Response(201, request=request)
+
+    def puts(self):
+        return [(path, headers) for method, path, headers in self.calls if method == "PUT"]
+
+
+class TestShareFileOnALocalWorkspace:
+    """`talk share-file` uploads a copy first when the workspace is not in Nextcloud."""
+
+    @pytest.fixture(autouse=True)
+    def _local(self, monkeypatch, tmp_path):
+        self.workspace = tmp_path / "ws"
+        self.home = self.workspace / "Users" / "alice"
+        self.home.mkdir(parents=True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_PATH", str(self.workspace))
+        monkeypatch.setenv("NC_STORAGE_IS_NEXTCLOUD", "False")
+        monkeypatch.setenv("NC_DAV_PREFIX", "Shared Files")
+
+    def _day(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def test_uploads_into_the_bots_talk_folder_then_shares_that_copy(self, talk_client, capsys):
+        (self.home / "chart.png").write_bytes(b"png")
+        talk_client.share_file.return_value = {"id": 9}
+        dav = _DavRecorder()
+
+        with patch("istota.nextcloud._http.httpx.request", dav):
+            out, code = _run(
+                capsys, ["talk", "share-file", "abc123", "--path", "/Users/alice/chart.png"],
+            )
+
+        remote = f"/Talk/abc123/{self._day()}/chart.png"
+        assert code == 0, out
+        assert out["uploaded_to"] == remote
+        assert out["path"] == "/Users/alice/chart.png"
+        assert out["share_id"] == 9
+        [(put_path, headers)] = dav.puts()
+        assert put_path == "/remote.php/dav/files/istota" + remote
+        assert headers.get("If-None-Match") == "*"
+        assert talk_client.share_file.call_args[0] == ("abc123", remote)
+
+    def test_a_second_post_of_the_same_name_is_numbered(self, talk_client, capsys):
+        (self.home / "chart.png").write_bytes(b"png")
+        first = f"/remote.php/dav/files/istota/Talk/abc123/{self._day()}/chart.png"
+        dav = _DavRecorder(existing={first})
+
+        with patch("istota.nextcloud._http.httpx.request", dav):
+            out, code = _run(
+                capsys, ["talk", "share-file", "abc123", "--path", "/Users/alice/chart.png"],
+            )
+
+        assert code == 0, out
+        assert out["uploaded_to"].endswith("/chart (2).png")
+        assert [path for path, _ in dav.puts()] == [
+            first, first.replace("chart.png", "chart (2).png"),
+        ]
+
+    @pytest.mark.parametrize("make", ["symlink", "directory", "missing"])
+    def test_only_a_regular_file_is_posted(self, talk_client, capsys, tmp_path, make):
+        target = self.home / "thing"
+        if make == "symlink":
+            outside = tmp_path / "outside.txt"
+            outside.write_bytes(b"secret")
+            target.symlink_to(outside)
+        elif make == "directory":
+            target.mkdir()
+        dav = _DavRecorder()
+
+        with patch("istota.nextcloud._http.httpx.request", dav):
+            out, code = _run(
+                capsys, ["talk", "share-file", "abc123", "--path", "/Users/alice/thing"],
+            )
+
+        assert code == 1
+        assert out["reason"] == "host_path_refused"
+        assert dav.calls == []
+        talk_client.share_file.assert_not_called()
+
+    def test_under_the_mount_nothing_is_uploaded(self, talk_client, capsys, monkeypatch):
+        monkeypatch.setenv("NC_STORAGE_IS_NEXTCLOUD", "True")
+        dav = _DavRecorder()
+        with patch("istota.nextcloud._http.httpx.request", dav):
+            out, code = _run(
+                capsys, ["talk", "share-file", "abc123", "--path", "/Users/alice/chart.png"],
+            )
+        assert code == 0, out
+        assert dav.calls == []
+        assert talk_client.share_file.call_args[0] == (
+            "abc123", "/Shared Files/Users/alice/chart.png",
+        )

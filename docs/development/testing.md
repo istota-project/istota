@@ -254,7 +254,7 @@ The generated passwords, the module switches derived from the profile's service 
 
 ### The storage backend
 
-`Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped storage modes of the one deployment: `local` is what the stack runs with no Nextcloud, not a test convenience. So a change that decouples istota from Nextcloud and breaks the Nextcloud-free install has to go red somewhere.
+`Config.storage_is_nextcloud` is a Nextcloud URL together with `nextcloud_mount_path` (a URL alone is a Nextcloud install with a local workspace), and both values are shipped storage modes of the one deployment: `local` is what the stack runs with no Nextcloud, not a test convenience. So a change that decouples istota from Nextcloud and breaks the Nextcloud-free install has to go red somewhere.
 
 Both modes are booted. The testbed writes the config `istota setup` writes for each: every lean profile runs local storage, with `workspace_path` at `/data/workspace` on the state volume, and the full profile runs full Nextcloud integration, with `workspace_path` and `nextcloud_mount_path` at `/mnt/shared`. `storage.py` branches on `has_workspace` rather than on the backend, so briefings, memory and the tasks file take the identical path under both.
 

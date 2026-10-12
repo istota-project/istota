@@ -88,7 +88,7 @@
             mime_type: null,
             modified: new Date(entry.modified * 1000).toISOString(),
             path: [listing?.path, entry.name].filter(Boolean).join('/'),
-            web_url: null,
+            web_url: place.kind === 'nextcloud' ? (entry.nextcloud_url ?? null) : null,
           })),
   );
   type SortKey = 'name' | 'size' | 'modified';

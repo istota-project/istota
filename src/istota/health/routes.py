@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import os
 import re
 import shutil
 import uuid
@@ -31,6 +32,8 @@ from fastapi import Form
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from istota.lib.filenames import filename_parts
+from istota.workspace.listing import ListingError
+from istota.workspace.writes import open_or_create_dirs, write_new_file
 from istota.health import db as health_db
 from istota.health import documents as health_documents
 from istota.health import extract_requests
@@ -874,11 +877,25 @@ async def api_panel_upload(
                 specimen=specimen_value,
             )
             conn.commit()
-        panel_dir = ctx.uploads_dir / str(pid)
-        panel_dir.mkdir(parents=True, exist_ok=True)
-        target = panel_dir / f"original{suffix}"
-        target.write_bytes(raw)
-        rel = str(target.relative_to(ctx.uploads_dir))
+        # The uploads tree is in the user's workspace, which their tasks can
+        # write, so the panel directory and the file follow no link and a name
+        # already there (a rolled-back panel's leftover) is numbered, not replaced.
+        try:
+            os.close(open_or_create_dirs(ctx.uploads_dir, [str(pid)]))
+            name = write_new_file(
+                ctx.uploads_dir, [str(pid)], f"original{suffix}", [raw],
+                max_bytes=len(raw),
+            )
+        except (OSError, ValueError, ListingError) as e:
+            logger.warning(
+                "health_panel_upload_refused panel=%s error=%s", pid,
+                getattr(e, "errno", None) or type(e).__name__,
+            )
+            with health_db.connect(ctx.db_path) as conn:
+                health_db.delete_panel(conn, pid)
+                conn.commit()
+            return None, None
+        rel = f"{pid}/{name}"
         with health_db.connect(ctx.db_path) as conn:
             health_db.update_panel(conn, pid, notes=None)  # placeholder for future
             conn.execute(
@@ -889,6 +906,8 @@ async def api_panel_upload(
         return pid, collision
 
     pid, collision = await asyncio.to_thread(_save_and_record)
+    if pid is None:
+        return JSONResponse({"error": "could not save the upload"}, status_code=500)
 
     # The panel is a draft, and a draft is excluded from the dashboard *and*
     # from the trends — so an upload whose review is never finished is data the

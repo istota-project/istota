@@ -1201,7 +1201,7 @@ class TestCmdMemory:
     async def test_no_mount_configured(self, make_config):
         config = make_config()
         config.workspace_path = None
-        assert "mount not configured" in await _memory(config, "user")
+        assert "No workspace is configured" in await _memory(config, "user")
 
     async def test_facts_with_few(self, make_config):
         """Small fact sets show all facts inline."""
@@ -1879,7 +1879,7 @@ class TestCmdExport:
         config.workspace_path = None
         with db.get_db(config.db_path) as conn:
             result = await cmd_export(_ctx(config, conn))
-        assert "mount not configured" in result
+        assert "No workspace is configured" in result
 
     async def test_full_export_markdown(self, make_config):
         config = make_config()
@@ -2068,6 +2068,47 @@ class TestCmdExport:
         assert "Exported 1 messages" in result
         assert (export_dir / "room1.txt").exists()
         assert (export_dir / "room1.md").exists()  # original still there
+
+    async def test_a_symlinked_exports_dir_is_refused(self, make_config, tmp_path):
+        config = make_config()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        exports = _export_dir(config).parent
+        exports.mkdir(parents=True)
+        (exports / "conversations").symlink_to(outside, target_is_directory=True)
+
+        with db.get_db(config.db_path) as conn:
+            _seed_conversation(conn, count=1)
+            result = await cmd_export(_ctx(config, conn))
+
+        assert "Could not write" in result
+        assert list(outside.iterdir()) == []
+
+    async def test_a_symlink_at_the_export_file_is_not_written_through(
+        self, make_config, tmp_path,
+    ):
+        config = make_config()
+        victim = tmp_path / "victim.md"
+        victim.write_text("<!-- export:token=room1,last_id=0,updated=2026-02-25T00:00:00Z -->\nkeep\n")
+        export_dir = _export_dir(config)
+        export_dir.mkdir(parents=True)
+        (export_dir / "room1.md").symlink_to(victim)
+
+        with db.get_db(config.db_path) as conn:
+            _seed_conversation(conn, count=1)
+            result = await cmd_export(_ctx(config, conn))
+
+        assert "Could not" in result
+        assert victim.read_text().endswith("keep\n")
+
+    async def test_an_unscopable_user_writes_nothing(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            _seed_conversation(conn, count=1)
+            result = await cmd_export(_ctx(config, conn, user_id=".."))
+
+        assert "Could not write" in result
+        assert not (config.workspace_path / "istota").exists()
 
 
 # ---------------------------------------------------------------------------

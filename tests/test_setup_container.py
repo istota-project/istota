@@ -248,6 +248,7 @@ def _args(tmp_path: Path, **kw):
         upstream_proxy=None, listen_addr=None, listen_port=None, tls_cert_source=None,
         nextcloud_url=None, nextcloud_public_url=None, nextcloud_user=None,
         nextcloud_dav_prefix=None, no_nextcloud_auto_share=False, no_talk=False,
+        workspace=None,
         oauth_client_id=None, no_email_login=False, brain="native",
         native_base_url=None, native_model="model-x", email=False,
         imap_host=None, imap_user=None, smtp_host=None, bot_email=None,
@@ -366,7 +367,7 @@ class TestTheRun:
         """The prompt path, driven end to end with a scripted terminal."""
         answers = iter([
             "", "carol", "Carol", "UTC", "", "localhost", "local",
-            "y", "http://nextcloud", "", "", "Shared Files", "n", "y", "",
+            "y", "http://nextcloud", "", "", "", "Shared Files", "n", "y", "",
             "claude_code", "n", "n", "y", "y", "y", "y", "n", "n", "y", "n",
         ])
         secrets = iter(["nc-pass", "oauth-token"])
@@ -433,6 +434,103 @@ class TestTheLocalWorkspace:
         assert config.storage_backend == "local"
         assert str(config.workspace_path) == "/data/workspace"
         assert config.nextcloud_mount_path is None
+
+
+class TestTheWorkspaceChoice:
+    """With Nextcloud, the workspace is the rclone mount by default, or local
+    on the state volume when the operator chooses it."""
+
+    @pytest.fixture(autouse=True)
+    def _credentials(self, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nc-pass")
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+
+    def _run(self, tmp_path, **kw) -> tuple[dict, dict[str, str]]:
+        assert setup_wizard.run_setup(_args(tmp_path, **kw), out=lambda *_: None) == 0
+        doc = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        host_env = _env((tmp_path / "vm" / "host.env").read_text())
+        return doc, host_env
+
+    def test_a_local_workspace_with_nextcloud_loads_as_local_with_talk(self, tmp_path, monkeypatch):
+        a = _full_answers(workspace="local", nextcloud_dav_prefix="", nextcloud_auto_share_bot_dir=False)
+        config = _load(tmp_path, render_container_config(a, inline_credentials=True), monkeypatch)
+
+        assert config.nextcloud_enabled is True
+        assert config.storage_is_nextcloud is False
+        assert config.storage_backend == "local"
+        assert str(config.workspace_path) == "/data/workspace"
+        assert config.nextcloud_mount_path is None
+        assert config.talk.enabled is True
+        assert render_host_env(a).count("STORAGE=local") == 1
+
+    def test_a_url_without_the_flag_is_the_mount(self, tmp_path):
+        doc, host_env = self._run(tmp_path, nextcloud_url="http://nextcloud")
+
+        assert doc["workspace_path"] == "/mnt/shared"
+        assert doc["nextcloud_mount_path"] == "/mnt/shared"
+        assert doc["nextcloud"]["auto_share_bot_dir"] is True
+        assert host_env["STORAGE"] == "nextcloud"
+
+    def test_the_local_flag_skips_the_prefix_and_the_share(self, tmp_path):
+        doc, host_env = self._run(
+            tmp_path, nextcloud_url="http://nextcloud", workspace="local",
+            nextcloud_dav_prefix="Shared Files",
+        )
+
+        assert doc["workspace_path"] == "/data/workspace"
+        assert "nextcloud_mount_path" not in doc
+        assert doc["nextcloud"]["url"] == "http://nextcloud"
+        assert doc["nextcloud"]["dav_prefix"] == ""
+        assert doc["nextcloud"]["auto_share_bot_dir"] is False
+        assert doc["talk"]["enabled"] is True
+        assert host_env["STORAGE"] == "local"
+        assert (tmp_path / "vm" / "secrets" / "istota_nextcloud_app_password").read_text() == "nc-pass"
+
+    def test_answering_local_asks_neither_the_prefix_nor_the_share(self, tmp_path, monkeypatch):
+        prompts: list[str] = []
+        answers = iter([
+            "", "carol", "Carol", "UTC", "", "localhost", "local",
+            "y", "http://nextcloud", "", "", "local", "y", "",
+            "claude_code", "n", "n", "y", "y", "y", "y", "n", "n", "y", "n",
+        ])
+
+        def ask(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY")
+        monkeypatch.setattr("istota.modules.module_available", lambda _name: True)
+        args = _args(tmp_path, yes=False, user=None, brain=None, native_model=None)
+
+        assert setup_wizard.run_setup(
+            args, input_fn=ask, getpass_fn=lambda _prompt: "", out=lambda *_: None,
+        ) == 0
+
+        doc = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        assert doc["workspace_path"] == "/data/workspace"
+        assert doc["nextcloud"]["auto_share_bot_dir"] is False
+        assert any(p.startswith("Workspace (mount/local)") for p in prompts)
+        assert not any("holds the workspace" in p or "over OCS" in p for p in prompts)
+        assert _env((tmp_path / "vm" / "host.env").read_text())["STORAGE"] == "local"
+
+    def test_an_unknown_choice_is_refused(self, tmp_path):
+        with pytest.raises(setup_wizard.SetupError, match="mount or local"):
+            setup_wizard.run_setup(
+                _args(tmp_path, nextcloud_url="http://nextcloud", workspace="/srv/files"),
+                out=lambda *_: None,
+            )
+        assert not (tmp_path / "data" / "config" / "config.toml").exists()
+
+    def test_a_mount_without_nextcloud_is_refused(self, tmp_path):
+        with pytest.raises(setup_wizard.SetupError, match="needs Nextcloud"):
+            setup_wizard.run_setup(_args(tmp_path, workspace="mount"), out=lambda *_: None)
+
+    def test_local_without_nextcloud_is_the_default_local_install(self, tmp_path):
+        doc, host_env = self._run(tmp_path, workspace="local")
+
+        assert doc["workspace_path"] == "/data/workspace"
+        assert host_env["STORAGE"] == "local"
 
 
 def _image_default_log_file() -> str:
@@ -901,6 +999,14 @@ class TestTheNextcloudMount:
 
         assert not (tmp_path / "vm" / "rclone.conf").exists()
         assert self._host_env(tmp_path / "vm")["RCLONE_REMOTE"] == ""
+
+    def test_nextcloud_with_a_local_workspace_stages_no_remote(self, tmp_path):
+        assert setup_wizard.run_setup(self._nextcloud(tmp_path, workspace="local"), out=lambda *_: None) == 0
+
+        assert not (tmp_path / "vm" / "rclone.conf").exists()
+        host_env = self._host_env(tmp_path / "vm")
+        assert host_env["STORAGE"] == "local"
+        assert host_env["RCLONE_REMOTE"] == ""
 
 
 def _written(root: Path) -> dict[str, bytes]:

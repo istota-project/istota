@@ -641,3 +641,52 @@ class TestTheGrandfatherDoesNotArmAPruneItCouldNotPrepare:
         assert cleanup_old_playbooks(pb_config, "alice", 30) == 0
         assert (pb_dir / _RETENTION_SENTINEL).exists()
         assert old.stat().st_mtime > time.time() - 86400
+
+
+class TestPlaybookWritesRefuseLinks:
+    """Local-workspace spec, stage 3: the playbook writer refuses a link."""
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_symlink_at_the_playbook_is_not_written_through(
+        self, mock_run, pb_config, tmp_path,
+    ):
+        mock_run.return_value = (True, _PB_OUTPUT)
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        pb_dir = pb_config.workspace_path / "Users" / "alice" / "istota" / "playbooks"
+        pb_dir.mkdir(parents=True)
+        slug = _playbook_slug("Open a GitHub PR via developer skill")
+        (pb_dir / f"{slug}.md").symlink_to(victim)
+
+        with db.get_db(pb_config.db_path) as conn:
+            t = db.create_task(conn, prompt="open a PR", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(
+                conn, t, "completed", result="PR opened",
+                execution_trace=_trace("⚙️ a", "⚙️ b", "📄 c", "📝 d"),
+            )
+            process_user_sleep_cycle(pb_config, conn, "alice")
+
+        assert victim.read_text() == "keep"
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_playbooks_dir_linked_outside_the_user_tree_gets_no_write(
+        self, mock_run, pb_config, tmp_path,
+    ):
+        mock_run.return_value = (True, _PB_OUTPUT)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        bot = pb_config.workspace_path / "Users" / "alice" / "istota"
+        bot.mkdir(parents=True)
+        (bot / "playbooks").symlink_to(outside, target_is_directory=True)
+
+        with db.get_db(pb_config.db_path) as conn:
+            t = db.create_task(conn, prompt="open a PR", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(
+                conn, t, "completed", result="PR opened",
+                execution_trace=_trace("⚙️ a", "⚙️ b", "📄 c", "📝 d"),
+            )
+            process_user_sleep_cycle(pb_config, conn, "alice")
+
+        assert list(outside.iterdir()) == []

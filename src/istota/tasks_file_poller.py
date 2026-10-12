@@ -1,5 +1,6 @@
 """TASKS.md file polling and task creation."""
 
+import contextlib
 import hashlib
 import logging
 import re
@@ -9,6 +10,8 @@ from datetime import datetime
 from . import db
 from .config import Config
 from .skills.files import list_files, read_text, write_text
+from .workspace import text_files
+from .workspace.text_files import MemoryMdLocked
 
 logger = logging.getLogger("istota.tasks_file_poller")
 
@@ -100,6 +103,24 @@ def _write_tasks_file(
         raise PermissionError(f"not this user's TASKS.md: {file_path}")
     if not write_regular_file(config_dir / name, content):
         raise PermissionError(f"refused to write {file_path}")
+
+
+def _tasks_file_lock(config: Config, file_path: str, *, user_id: str):
+    """The lock every writer of this TASKS.md takes, the web editor included.
+
+    Keyed on the resolved path `_write_tasks_file` writes to. No lock without a
+    workspace: nothing else can edit the file then. Raises like the read does
+    for a path that is not the user's TASKS.md.
+    """
+    if not config.has_workspace:
+        return contextlib.nullcontext()
+    from .storage import resolve_user_config_dir
+
+    name = _tasks_file_name(config, user_id, file_path)
+    config_dir = resolve_user_config_dir(config, user_id)
+    if name is None or config_dir is None:
+        raise PermissionError(f"not this user's TASKS.md: {file_path}")
+    return text_files.file_lock(config, user_id, config_dir / name)
 
 
 def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:
@@ -292,7 +313,25 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
 
     Returns:
         List of created task IDs
+
+    The read, the task creation and the write back all run under the file's
+    lock, so a web save cannot land between the read and the write and be
+    overwritten. A lock held past its timeout skips the file for this pass;
+    nothing has been created, so the next pass picks the same lines up.
     """
+    try:
+        lock = _tasks_file_lock(config, file_path, user_id=user_id)
+        with lock:
+            return _poll_user_tasks_file_locked(config, user_id, file_path)
+    except MemoryMdLocked:
+        logger.info("TASKS.md for %s is being written; skipping it this pass", user_id)
+        return []
+    except OSError as e:
+        logger.error("Error reading %s for %s: %s", file_path, user_id, e)
+        return []
+
+
+def _poll_user_tasks_file_locked(config: Config, user_id: str, file_path: str) -> list[int]:
     # Read the file (mount-aware)
     try:
         file_content = _read_tasks_file(config, file_path, user_id=user_id)
@@ -440,21 +479,22 @@ def handle_tasks_file_completion(
 
     # Update the file (using file_path from DB, mount-aware)
     try:
-        file_content = _read_tasks_file(
-            config, istota_task.file_path, user_id=task.user_id,
-        )
+        with _tasks_file_lock(config, istota_task.file_path, user_id=task.user_id):
+            file_content = _read_tasks_file(
+                config, istota_task.file_path, user_id=task.user_id,
+            )
 
-        updated_content = update_task_in_file(
-            file_content,
-            istota_task.content_hash,
-            'completed' if success else 'failed',
-            result_summary=result_summary if success else None,
-            error_message=result_summary if not success else None,
-        )
+            updated_content = update_task_in_file(
+                file_content,
+                istota_task.content_hash,
+                'completed' if success else 'failed',
+                result_summary=result_summary if success else None,
+                error_message=result_summary if not success else None,
+            )
 
-        _write_tasks_file(
-            config, istota_task.file_path, updated_content, user_id=task.user_id,
-        )
+            _write_tasks_file(
+                config, istota_task.file_path, updated_content, user_id=task.user_id,
+            )
         logger.debug("Updated %s with task completion", istota_task.file_path)
     except Exception as e:
         logger.error("Error updating %s after completion for %s: %s", istota_task.file_path, task.user_id, e)

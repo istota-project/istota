@@ -133,7 +133,7 @@ def href_to_path(config: Config, href: str) -> str:
     was the account name; the mount point is a value an operator types.
     """
     raw = unquote(urlparse(href).path)
-    prefix = _files_prefix(config)
+    prefix = unquote(urlparse(nc_base_url(config)).path).rstrip("/") + _files_prefix(config)
     if raw == prefix:
         raw = "/"
     elif raw.startswith(prefix + "/"):
@@ -225,11 +225,12 @@ def propfind(
     *,
     depth: int = 0,
     timeout: float = DAV_TIMEOUT,
+    prefixed: bool = True,
 ) -> list[dict[str, Any]]:
     resp = dav_request(
         config,
         "PROPFIND",
-        dav_files_url(config, path),
+        dav_files_url(config, path, prefixed=prefixed),
         content=PROPFIND_BODY,
         headers={"Content-Type": "application/xml", "Depth": str(depth)},
         timeout=timeout,
@@ -237,8 +238,13 @@ def propfind(
     return parse_multistatus(config, resp.text)
 
 
-def stat(config: Config, path: str, timeout: float = DAV_TIMEOUT) -> dict[str, Any]:
-    entries = propfind(config, path, depth=0, timeout=timeout)
+def stat(
+    config: Config, path: str, timeout: float = DAV_TIMEOUT, *, prefixed: bool = True,
+) -> dict[str, Any]:
+    """One entry's properties. ``prefixed=False`` addresses the bot account's
+    own root rather than the storage root, which is where Talk keeps the files
+    posted into a conversation (``Talk/<name>``)."""
+    entries = propfind(config, path, depth=0, timeout=timeout, prefixed=prefixed)
     if not entries:
         raise OcsError(f"No such path: {path}", 404, None, path)
     return entries[0]
@@ -392,8 +398,15 @@ def upload(
     chunked: bool | None = None,
     supports_chunking: bool = True,
     timeout: float = DAV_TIMEOUT,
+    prefixed: bool = True,
+    overwrite: bool = True,
 ) -> dict[str, Any]:
-    """Upload a local file, chunking large ones when the server supports it."""
+    """Upload a local file, chunking large ones when the server supports it.
+
+    ``overwrite=False`` refuses to replace an existing remote file: the server
+    answers 412, raised as an ``OcsError`` with that status, so the caller can
+    pick another name.
+    """
     local = Path(local_path)
     if not local.is_file():
         raise OcsError(f"No such local file: {local}", None, None, str(local))
@@ -403,15 +416,21 @@ def upload(
     use_chunks = want_chunks and supports_chunking
 
     if use_chunks:
-        _upload_chunked(config, local, remote_path, timeout=timeout)
+        _upload_chunked(
+            config, local, remote_path, timeout=timeout,
+            prefixed=prefixed, overwrite=overwrite,
+        )
         method = "chunked"
     else:
+        headers = {"Content-Type": "application/octet-stream"}
+        if not overwrite:
+            headers["If-None-Match"] = "*"
         dav_request(
             config,
             "PUT",
-            dav_files_url(config, remote_path),
+            dav_files_url(config, remote_path, prefixed=prefixed),
             content=local.read_bytes(),
-            headers={"Content-Type": "application/octet-stream"},
+            headers=headers,
             timeout=timeout,
         )
         method = "plain"
@@ -427,11 +446,12 @@ def upload(
 
 
 def _upload_chunked(
-    config: Config, local: Path, remote_path: str, *, timeout: float
+    config: Config, local: Path, remote_path: str, *, timeout: float,
+    prefixed: bool = True, overwrite: bool = True,
 ) -> None:
     """Chunked upload v2: a temp collection, per-chunk PUTs, a final MOVE."""
     upload_id = uuid.uuid4().hex
-    destination = dav_files_url(config, remote_path)
+    destination = dav_files_url(config, remote_path, prefixed=prefixed)
 
     dav_request(
         config,
@@ -461,7 +481,7 @@ def _upload_chunked(
             config,
             "MOVE",
             uploads_url(config, upload_id, ".file"),
-            headers={"Destination": destination, "Overwrite": "T"},
+            headers={"Destination": destination, "Overwrite": "T" if overwrite else "F"},
             timeout=timeout,
         )
     except Exception:
@@ -484,9 +504,12 @@ def download(
     remote_path: str,
     local_path: Path,
     timeout: float = DAV_TIMEOUT,
+    *,
+    prefixed: bool = True,
 ) -> dict[str, Any]:
     resp = dav_request(
-        config, "GET", dav_files_url(config, remote_path), timeout=timeout
+        config, "GET", dav_files_url(config, remote_path, prefixed=prefixed),
+        timeout=timeout,
     )
     local = Path(local_path)
     content = resp.content if isinstance(resp.content, bytes) else str(resp.text).encode()
@@ -498,6 +521,22 @@ def download(
     # would follow a link planted in between (ISSUE-447).
     write_resolved(local, content)
     return {"status": "ok", "path": remote_path, "local": str(local), "bytes": len(content)}
+
+
+def ensure_dirs(
+    config: Config, path: str, *, prefixed: bool = True, timeout: float = DAV_TIMEOUT,
+) -> None:
+    """MKCOL each component of ``path`` in turn; one that exists is a no-op."""
+    built = ""
+    for part in [p for p in (path or "").split("/") if p]:
+        built = f"{built}/{part}"
+        dav_request(
+            config,
+            "MKCOL",
+            dav_files_url(config, built, prefixed=prefixed),
+            timeout=timeout,
+            ok_statuses=(201, 405),
+        )
 
 
 # --- versions ---

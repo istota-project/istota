@@ -28,7 +28,13 @@
     uploadWorkspaceFile,
     type WorkspacePlace,
     type WorkspaceListing,
+    getWorkspaceConfigFiles,
+    getWorkspaceConfigFile,
+    saveWorkspaceConfigFile,
+    type WorkspaceConfigFile,
   } from '$lib/api';
+  import TextFileEditor from '$lib/components/TextFileEditor.svelte';
+  import ConfigFileList from '$lib/components/workspace/ConfigFileList.svelte';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
@@ -84,6 +90,51 @@
     } finally {
       pinsBusy = false;
     }
+  }
+
+  let configFiles = $state<WorkspaceConfigFile[]>([]);
+  let configError = $state('');
+  let editing = $state<WorkspaceConfigFile | null>(null);
+  let editorOpen = $state(false);
+  async function loadConfigFiles() {
+    configError = '';
+    try {
+      const result = await getWorkspaceConfigFiles();
+      if (active) configFiles = result.files;
+    } catch {
+      if (active) configError = 'Could not load your configuration files.';
+    }
+  }
+  function editConfigFile(file: WorkspaceConfigFile) {
+    sidebarOpen = false;
+    editing = file;
+    editorOpen = true;
+  }
+  function closeEditor() {
+    editorOpen = false;
+    // Sizes and "not created yet" change with a save.
+    void loadConfigFiles();
+  }
+  async function saveConfigFile(name: string | number, content: string, revision: string) {
+    const result = await saveWorkspaceConfigFile(String(name), content, revision);
+    return {
+      revision: result.revision,
+      note:
+        result.applies === 'next_sync'
+          ? 'Saved. The jobs update at the next CRON.md sync.'
+          : undefined,
+    };
+  }
+  const configDescriptions: Record<string, string> = {
+    'USER.md': 'What the assistant remembers about you, read at the start of every task.',
+    'CRON.md': 'Your scheduled jobs.',
+    'TASKS.md': 'Tasks the assistant picks up from a checklist.',
+    'HEARTBEAT.md': 'Checks the assistant runs on a schedule and alerts you about.',
+  };
+  function editorDescription(file: WorkspaceConfigFile) {
+    if (file.kind === 'skill')
+      return `Your instructions for the ${file.name.slice('skills/'.length)} skill, added to its own whenever it loads.`;
+    return configDescriptions[file.name] ?? '';
   }
 
   type Selection = { place: string; path: string };
@@ -315,6 +366,7 @@
   onMount(() => {
     void load();
     void loadPins();
+    void loadConfigFiles();
     return () => {
       active = false;
       generation++;
@@ -337,7 +389,7 @@
     </ShellHeader>
   {/snippet}
   {#snippet sidebar()}
-    {#if places.length || pins.length}
+    {#if places.length || pins.length || configFiles.length || configError}
       <Sidebar title="Files" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
         <PinnedList
           {pins}
@@ -346,6 +398,12 @@
           onRemove={removePin}
           {href}
           onNavigate={navigate}
+        />
+        <ConfigFileList
+          files={configFiles}
+          error={configError}
+          onEdit={editConfigFile}
+          onRetry={loadConfigFiles}
         />
         <PlaceList {places} selected={selected?.place || ''} {href} onNavigate={navigate} />
       </Sidebar>
@@ -491,7 +549,7 @@
         <div class="center-msg">Loading folder…</div>
       {:else if listingError}
         <div class="center-msg error">
-          {#if place.kind === 'drive' && needsConnection(listingError)}
+          {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}
             <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
             <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
           {:else}
@@ -548,6 +606,25 @@
   {/if}
 </AppShell>
 
+{#if editing}
+  <TextFileEditor
+    bind:open={editorOpen}
+    fileKey={editing.name}
+    title={editing.name}
+    description={editorDescription(editing)}
+    ariaLabel={`${editing.name} (markdown)`}
+    placeholder="This file is empty."
+    loadFailed="Couldn't load this file."
+    load={(name) => getWorkspaceConfigFile(String(name))}
+    save={saveConfigFile}
+    onClose={closeEditor}
+  >
+    {#snippet caption()}
+      Markdown. Saved in your workspace config folder.
+    {/snippet}
+  </TextFileEditor>
+{/if}
+
 <Modal
   bind:open={folderOpen}
   title="New folder"
@@ -590,6 +667,9 @@
   .drive-pagination {
     padding: var(--space-3);
     text-align: center;
+  }
+  .folder-actions {
+    min-height: var(--control-height-sm);
   }
   .folder-actions,
   .upload-heading {

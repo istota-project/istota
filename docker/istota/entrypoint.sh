@@ -48,9 +48,12 @@ fi
 # Before anything is written. Three refusals, each naming the fix:
 #   - it names the compose Nextcloud (`http://nextcloud`), which the shipped
 #     compose file no longer runs, and no such host resolves;
-#   - full Nextcloud integration, and the workspace is not the VM's rclone
-#     mount: a daemon writing into an unmounted /mnt/shared writes into the
-#     container, and those files never reach Nextcloud (parity row 9);
+#   - full Nextcloud integration (`nextcloud_mount_path` set), and the
+#     workspace is not the VM's rclone mount: a daemon writing into an
+#     unmounted /mnt/shared writes into the container, and those files never
+#     reach Nextcloud (parity row 9). Turned around: a URL and a workspace on
+#     the rclone mount without `nextcloud_mount_path`, which would run as a
+#     local workspace with the mount checks off;
 #   - behind TLS, `[site] hostname` is not the stack's DOMAIN, which is a login
 #     that fails its origin check.
 # ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE is the full test tier's concession: its
@@ -74,17 +77,23 @@ if url and urlsplit(url).hostname == "nextcloud":
             f"config.toml names the bundled Nextcloud ({url}), which this compose file no longer runs. "
             "Move it, unchanged, into a compose project of its own and point [nextcloud] url at it, or "
             "switch to local storage; see docs/deployment/moving-the-bundled-nextcloud.md.")
-if config.storage_is_nextcloud and config.workspace_path is not None:
+if config.nextcloud_enabled and config.workspace_path is not None:
     workspace = os.path.normpath(str(config.workspace_path))
     with open(os.environ.get("ISTOTA_MOUNTINFO", "/proc/self/mountinfo")) as mounts:
         mount = covering_mount(workspace, mounts.read())
     mountpoint, fstype = (mount.point, mount.fstype) if mount else ("/", "unknown")
     concession = os.environ.get("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE") == "1"
-    if not (fstype == "fuse.rclone" or (concession and mountpoint == workspace)):
+    if config.storage_is_nextcloud:
+        if not (fstype == "fuse.rclone" or (concession and mountpoint == workspace)):
+            refusals.append(
+                f"the workspace {workspace} is on {mountpoint} ({fstype}), not the VM's rclone mount "
+                "(fuse.rclone). Start mount-nextcloud.service on the VM before the stack; nothing is "
+                "written into an unmounted store.")
+    elif fstype == "fuse.rclone":
         refusals.append(
-            f"the workspace {workspace} is on {mountpoint} ({fstype}), not the VM's rclone mount "
-            "(fuse.rclone). Start mount-nextcloud.service on the VM before the stack; nothing is "
-            "written into an unmounted store.")
+            f"the workspace {workspace} is on the rclone mount {mountpoint}, but nextcloud_mount_path "
+            "is not set, so it would run as a local workspace with the mount checks off. Set "
+            f"nextcloud_mount_path = \"{mountpoint}\" in config.toml, or move the workspace off the mount.")
 ingress, domain = os.environ.get("INGRESS", ""), os.environ.get("DOMAIN", "")
 if ingress in ("direct", "proxied") and config.site.hostname != domain:
     refusals.append(

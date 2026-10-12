@@ -2491,7 +2491,7 @@ def poll_emails(config: Config) -> list[int]:
                     # its own lines into that block (ISSUE-274).
                     attachments_text = ""
                     if attachment_paths:
-                        attachments_text = "\nAttachments (in Nextcloud):\n" + "\n".join(
+                        attachments_text = "\nAttachments (saved to your inbox):\n" + "\n".join(
                             f"  - {flatten_prompt_header(p)}" for p in attachment_paths
                         )
                     if skipped_attachments:
