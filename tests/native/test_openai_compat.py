@@ -553,6 +553,20 @@ class TestErrorEncoding:
         assert events[0].message.stop_reason == "error"
         assert "429" in events[0].message.error_message
 
+    async def test_an_error_body_quoting_the_key_does_not_carry_it(self):
+        # The error message is logged and shown; a provider that echoes the
+        # key it was sent must not put it there.
+        key = "provider-key-under-test-3c9d"
+        p = OpenAICompatibleProvider(api_key=key, base_url="https://x/v1")
+        p._client = FakeClient(response=FakeStreamResponse(401, body=f"Incorrect API key: {key}".encode()))
+        events = [e async for e in p.stream("", [], [])]
+        assert "401" in events[0].message.error_message
+        assert key not in events[0].message.error_message
+
+        frame = f'data: {{"error":{{"message":"bad key {key}","code":401}}}}'
+        events = [e async for e in p._parse_sse_lines(_aiter([frame]), "m")]
+        assert key not in events[-1].message.error_message
+
     async def test_connection_error_encoded_not_raised(self):
         p = OpenAICompatibleProvider(api_key="k", base_url="https://x/v1")
         p._client = FakeClient(raise_exc=httpx.ConnectError("down"))

@@ -125,7 +125,7 @@ class RecordingProvider:
                     yield StreamError(
                         message=AssistantMessage(
                             stop_reason="error",
-                            error_message=f"HTTP {resp.status_code}: {text[:500]}",
+                            error_message=self._inner.scrub(f"HTTP {resp.status_code}: {text[:500]}"),
                             model=model,
                         )
                     )

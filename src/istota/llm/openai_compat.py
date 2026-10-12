@@ -148,6 +148,7 @@ class OpenAICompatibleProvider:
         }
         if extra_headers:
             headers.update(extra_headers)
+        self._api_key = api_key or ""
         self._base_url = base_url or ""
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout, headers=headers)
         # Opt-in: add Anthropic/OpenRouter cache_control breakpoints. Off by
@@ -166,6 +167,17 @@ class OpenAICompatibleProvider:
         configured.
         """
         return self._prompt_caching
+
+    def scrub(self, text: str) -> str:
+        """``text`` without this provider's key in it.
+
+        An error body can quote the key a request carried, and the error
+        message it becomes is logged and shown. A key under eight characters
+        is a placeholder, and replacing it would mangle the message.
+        """
+        if len(self._api_key) < 8:
+            return text
+        return text.replace(self._api_key, "[redacted]")
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client (frees pooled sockets/fds). NB-17."""
@@ -199,7 +211,7 @@ class OpenAICompatibleProvider:
                     yield StreamError(
                         message=AssistantMessage(
                             stop_reason="error",
-                            error_message=f"HTTP {resp.status_code}: {text[:500]}",
+                            error_message=self.scrub(f"HTTP {resp.status_code}: {text[:500]}"),
                             model=model,
                         )
                     )
@@ -210,7 +222,7 @@ class OpenAICompatibleProvider:
             yield StreamError(
                 message=AssistantMessage(
                     stop_reason="error",
-                    error_message=f"Connection error: {e}",
+                    error_message=self.scrub(f"Connection error: {e}"),
                     model=model,
                 )
             )
@@ -511,7 +523,7 @@ class OpenAICompatibleProvider:
                     message=AssistantMessage(
                         content=[TextContent(text="".join(text_parts))] if text_parts else [],
                         stop_reason="error",
-                        error_message=f"Provider error frame: {detail}",
+                        error_message=self.scrub(f"Provider error frame: {detail}"),
                         model=model,
                     )
                 )
