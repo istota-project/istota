@@ -20,6 +20,9 @@
 #   istota-stack restore [--date YYYY-MM-DD] [--force]
 #                               the master key (on stdin), the config and the databases
 #                               from the workspace's backups, onto a stack never set up
+#   istota-stack import-standalone <dir> --hostname HOST [--dry-run]
+#                               a standalone install the Mac staged in <dir>, its istota.env
+#                               on stdin, onto a stack never set up
 #   istota-stack retire-bare-metal --namespace NS [--dry-run]
 #                               remove what the old Ansible role installed, once the stack runs
 #   istota-stack put-files [--dry-run]
@@ -678,7 +681,10 @@ install_setup_staging() {
 # What either setup needs before the wizard runs: the directories, every secret
 # file compose declares, and an upgraded Docker install's config copied out.
 prepare_setup() {
-    install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$CONFIG_DIR"
+    local owner=()
+    # Root on the VM; the tests run as themselves.
+    if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
+    install -d -m 0750 ${owner[@]+"${owner[@]}"} "$CONFIG_DIR"
     install -d -m 0755 "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
     # A host folder is the user's own on the Mac, and a mode set here reaches it.
     local host_folder=""
@@ -1093,6 +1099,53 @@ cmd_restore() {
     exit "$rc"
 }
 
+# `istota migrate import-standalone` in a one-shot container: a standalone
+# install the Mac's istota-stack staged in <dir> (read-only at /import), its
+# istota.env on stdin, onto a stack made with `create --no-setup`. The module
+# writes config.toml, admins, the master key and the secrets files, restores
+# the databases, and stages .env and host.env as setup's wizard does; they go
+# in place here, then what the config needs is built and the host provisioned,
+# as after setup. The caller starts the stack. Down, as for restore: the
+# import replaces the database and the master key.
+cmd_import_standalone() {
+    [ "$#" -ge 1 ] || { usage >&2; exit 64; }
+    local source="$1" tag running rc=0 dry=""
+    shift
+    case " $* " in *" --dry-run "*) dry=1 ;; esac
+    [ -d "$source" ] || die "no staged standalone install at ${source}"
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was imported."
+    if [ -n "$running" ]; then
+        die "the stack is running. Stop it first (\`systemctl stop istota-stack\`); the import replaces its database and master key."
+    fi
+    prepare_setup
+    trap 'rm -rf "${staging:-}"' EXIT
+    new_staging
+    if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot \
+        -v "${source}:/import:ro" -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
+        "$(main_service)" istota migrate import-standalone --source /import --vm-dir /vm "$@" || rc=$?
+    # 1 is a refusal with nothing written; 2 a partial, which a re-run resumes.
+    [ "$rc" -eq 0 ] || exit "$rc"
+    [ -z "$dry" ] || exit 0
+    # Nothing running as 10001 may change staging while root reads it.
+    if [ "$(id -u)" -eq 0 ]; then chown root:root "$staging"; fi
+    chmod 0700 "$staging"
+    install_setup_staging "$staging"
+    env_set "ISTOTA_TAG=${tag}"
+    render_devbox_compose "$tag"
+    build_what_setup_needs "$tag"
+    copy_stack_env_out
+    if provision_outdated; then
+        log "host.env changed what this host provisions; running ${SRC}/host/provision.sh"
+        "${SRC}/host/provision.sh" \
+            || die "provision.sh failed. The import is in place: fix it, run ${SRC}/host/provision.sh, then \`systemctl enable --now istota-stack\`."
+    fi
+    # Exit rather than return: provision.sh may have replaced this script's file.
+    exit 0
+}
+
 # The stack's .env and host.env into the workspace's Backups/config/<UTC
 # date>/, beside the config.toml and admins db_backup copies there, so a lost
 # VM's restore can put them back. Neither holds a credential, which
@@ -1477,6 +1530,7 @@ main() {
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
         restore) cmd_restore "$@" ;;
+        import-standalone) cmd_import_standalone "$@" ;;
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
         put-files) cmd_put_files "$@" ;;
         check-image) cmd_check_image "$@" ;;

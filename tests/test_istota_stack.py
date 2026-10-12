@@ -80,6 +80,16 @@ case "$args" in
     if [ -n "$vm" ] && [ -n "${STUB_RESTORED_STACK_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_STACK_ENV" > "$vm/stack.env"; fi
     if [ -n "$vm" ] && [ -n "${STUB_RESTORED_HOST_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_HOST_ENV" > "$vm/host.env"; fi
     exit "${STUB_RESTORE_RC:-0}" ;;
+  *" migrate import-standalone"*)
+    cat > "$STUB_CALLS.stdin"
+    vm=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ] && [ "${a%:/vm}" != "$a" ]; then vm="${a%:/vm}"; fi
+      prev="$a"
+    done
+    if [ -n "$vm" ] && [ -n "${STUB_IMPORTED_ENV:-}" ]; then printf '%s' "$STUB_IMPORTED_ENV" > "$vm/.env"; fi
+    if [ -n "$vm" ] && [ -n "${STUB_IMPORTED_HOST_ENV:-}" ]; then printf '%s' "$STUB_IMPORTED_HOST_ENV" > "$vm/host.env"; fi
+    exit "${STUB_IMPORT_RC:-0}" ;;
   *" config --services "*)
     if [ -n "${STUB_SERVICES:-}" ]; then printf '%b' "$STUB_SERVICES"; else printf 'daemon\nweb\nnginx\n'; fi
     case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
@@ -926,6 +936,76 @@ class TestRestore:
         assert result.returncode == 0, result.stdout + result.stderr
         builds = [call for call in fx.docker_calls() if " build " in f"{call} "]
         assert builds and builds[-1].endswith(" build browser"), builds
+
+
+class TestImportStandalone:
+    """A standalone install the Mac staged, its istota.env on stdin, in a
+    one-shot container with the stack down (`istota migrate import-standalone`);
+    the .env and host.env it stages go in place as setup's do."""
+
+    ENV = "ISTOTA_SECRET_KEY=" + "6a" * 32 + "\n"
+
+    def _import(self, fx: Fixture, source: Path, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(SCRIPT), "import-standalone", str(source), "--hostname", "localhost:8080", *args],
+            capture_output=True, text=True, input=self.ENV, env={**fx.env, **extra_env}, timeout=60,
+        )
+
+    @pytest.fixture
+    def source(self, tmp_path) -> Path:
+        staged = tmp_path / "standalone"
+        staged.mkdir()
+        return staged
+
+    def test_it_refuses_while_the_stack_is_up(self, fx, source):
+        result = self._import(fx, source)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "running" in result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_the_env_file_reaches_the_one_shot_on_stdin_alone(self, fx, source):
+        result = self._import(fx, source, STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        run = next(call for call in calls if "import-standalone" in call)
+        assert re.search(
+            rf"run --rm --no-deps -T --entrypoint istota-drop -v {source}:/import:ro "
+            rf"-v \S+/\.setup\.\w+:/vm -v {fx.stack}/secrets:/vm/secrets "
+            r"daemon istota migrate import-standalone --source /import --vm-dir /vm "
+            r"--hostname localhost:8080$", run), run
+        assert Path(f"{fx.calls}.stdin").read_text() == self.ENV
+        assert not any("6a" * 32 in call for call in calls)
+
+    def test_the_staged_stack_files_go_in_place_with_this_vms_tag(self, fx, source):
+        result = self._import(
+            fx, source, STUB_STACK_DOWN="1",
+            STUB_IMPORTED_ENV="COMPOSE_PROFILES=\nNGINX_PUBLISH=127.0.0.1:8080:80\nISTOTA_TAG=v0\n",
+            STUB_IMPORTED_HOST_ENV="STORAGE=host-folder\nINGRESS=local\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        env = fx.env_text()
+        assert "NGINX_PUBLISH=127.0.0.1:8080:80\n" in env and "ISTOTA_TAG=v0\n" in env
+        assert (fx.stack / "host.env").read_text() == "STORAGE=host-folder\nINGRESS=local\n"
+        assert not list(fx.stack.glob(".setup.*")), "the staging directory was left behind"
+
+    def test_a_refused_import_puts_nothing_in_place(self, fx, source):
+        env_before = fx.env_text()
+        result = self._import(
+            fx, source, STUB_STACK_DOWN="1", STUB_IMPORT_RC="1",
+            STUB_IMPORTED_ENV="COMPOSE_PROFILES=browser\n")
+        assert result.returncode == 1
+        assert fx.env_text() == env_before
+
+    def test_a_dry_run_puts_nothing_in_place(self, fx, source):
+        env_before = fx.env_text()
+        result = self._import(
+            fx, source, "--dry-run", STUB_STACK_DOWN="1", STUB_IMPORTED_ENV="COMPOSE_PROFILES=browser\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.env_text() == env_before
+
+    def test_a_missing_staging_directory_is_refused(self, fx, tmp_path):
+        result = self._import(fx, tmp_path / "nowhere", STUB_STACK_DOWN="1")
+        assert result.returncode == 1
+        assert fx.docker_calls() == []
 
 
 def _utc_today() -> str:

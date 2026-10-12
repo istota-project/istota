@@ -23,6 +23,9 @@
 #                               a new VM from the folder's backups and the Keychain's
 #                               key, the old VM deleted first; --force restores an
 #                               empty database snapshot
+#   istota-stack import-standalone [--from DIR] [--config FILE] [--dry-run] [create's options]
+#                               move a standalone install (~/.istota) into a new VM: its
+#                               databases, files, settings and keys; ~/.istota is left as it is
 #
 # Every other verb is the VM's own `istota-stack`, run as root in the VM with
 # its arguments unchanged and its exit status passed back (setup, apply,
@@ -838,31 +841,224 @@ cmd_restore() {
     log "open http://localhost:$(port_or_default)/istota"
 }
 
-# `apply <plan>` and `import-bare-metal <dir>`: the Mac path copied into a
-# directory of the VM user's, moved by the VM's `istota-stack stage` into a
-# fresh root-only one under /srv/app/istota/staging, run, and removed.
+# A Mac path copied into a directory of the VM user's and moved by the VM's
+# `istota-stack stage` into a fresh root-only one under
+# /srv/app/istota/staging; prints the path in the VM. --daemon stages it for
+# uid 10001, which is what a one-shot container reads it as.
+stage_in_vm() {
+    local path="$1" copy=() stage=(stage) tmp staged
+    [ "${2:-}" != --daemon ] || stage+=(--daemon)
+    [ ! -d "$path" ] || copy=(-r)
+    tmp="$(limactl shell --workdir / "$INSTANCE" mktemp -d </dev/null)" || fail 1 "could not make a directory in the VM."
+    limactl copy ${copy[@]+"${copy[@]}"} "$path" "${INSTANCE}:${tmp}/" >&2 || fail 1 "could not copy ${path} into the VM."
+    staged="$(vm_stack "${stage[@]}" "${tmp}/$(basename "$path")" </dev/null)" || fail 1 "could not stage ${path} in the VM."
+    limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null >&2 || true
+    printf '%s\n' "$staged"
+}
+
+# `apply <plan>` and `import-bare-metal <dir>`: the Mac path staged in the VM,
+# run, and removed.
 cmd_with_path() {
     local verb="$1"
     shift
     [ "$#" -ge 1 ] || usage_error "${verb} takes a path on this Mac"
-    local path="$1" copy=() stage=(stage) tmp staged rc=0
+    local path="$1" daemon="" staged rc=0
     shift
     case "$verb" in
         apply) [ -f "$path" ] || usage_error "no plan file at ${path}" ;;
         import-bare-metal)
             [ -d "$path" ] || usage_error "no unpacked export at ${path}"
-            copy=(-r)
-            # The one-shot container reads the export as uid 10001.
-            stage+=(--daemon) ;;
+            daemon=--daemon ;;
     esac
     require_running
-    tmp="$(limactl shell --workdir / "$INSTANCE" mktemp -d </dev/null)" || fail 1 "could not make a directory in the VM."
-    limactl copy ${copy[@]+"${copy[@]}"} "$path" "${INSTANCE}:${tmp}/" || fail 1 "could not copy ${path} into the VM."
-    staged="$(vm_stack "${stage[@]}" "${tmp}/$(basename "$path")" </dev/null)" || fail 1 "could not stage ${path} in the VM."
-    limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null || true
+    staged="$(stage_in_vm "$path" ${daemon:+"$daemon"})" || exit $?
     vm_stack "$verb" "$staged" "$@" || rc=$?
     vm_stack unstage "$staged" </dev/null || log "WARNING: ${staged} was left in the VM"
     exit "$rc"
+}
+
+# --- the standalone install ----------------------------------------------------
+
+# The standalone install's scheduler lock (scheduler.DAEMON_LOCK_PATH), held
+# open by `istota serve` while it runs.
+STANDALONE_LOCK=/tmp/istota-scheduler-daemon.lock
+
+# The master key istota.env gives `istota serve`: the first line for the name,
+# which is the one serve puts in its environment.
+standalone_key() {
+    sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}ISTOTA_SECRET_KEY=//p' "$1" \
+        | head -n 1 | sed "s/^[\"']//; s/[\"'][[:space:]]*\$//; s/[[:space:]]*\$//"
+}
+
+standalone_running() {
+    command -v lsof >/dev/null 2>&1 \
+        || fail "$EX_UNAVAILABLE" "no lsof to tell whether the standalone install is running."
+    [ -n "$(lsof -t -- "$STANDALONE_LOCK" 2>/dev/null || true)" ]
+}
+
+# What the VM's import reads, in a directory of its own: the config and admins
+# files, an online backup of each database (consistent under WAL) in
+# db_backup's snapshot layout, the transcripts, the names under Users/, and a
+# MANIFEST naming the root. istota.env is not among them: it goes on stdin.
+stage_standalone() {
+    local from="$1" config="$2" dir="$3" day path user rel
+    day="$(date -u +%F)"
+    mkdir -p "${dir}/db/${day}/framework"
+    {
+        echo "format=standalone-1"
+        echo "source_root=${from}"
+        echo "mac_home=$(cd "$HOME" && pwd -P)"
+        echo "exported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${dir}/MANIFEST"
+    cp "$config" "${dir}/config.toml"
+    if [ -f "$(dirname "$config")/admins" ]; then cp "$(dirname "$config")/admins" "${dir}/admins"; fi
+    sqlite3 "${from}/istota.db" ".backup '${dir}/db/${day}/framework/istota.db'" \
+        || fail 1 "could not back up ${from}/istota.db; nothing was changed."
+    for path in "${from}"/modules/*/*.db; do
+        [ -f "$path" ] || continue
+        rel="${path#"${from}/modules/"}"
+        user="${rel%%/*}"
+        mkdir -p "${dir}/db/${day}/${user}"
+        sqlite3 "$path" ".backup '${dir}/db/${day}/${rel}'" \
+            || fail 1 "could not back up ${path}; nothing was changed."
+    done
+    if [ -d "${from}/logs" ]; then cp -Rp "${from}/logs" "${dir}/logs"; fi
+    : > "${dir}/workspace-users"
+    if [ -d "${from}/Users" ]; then
+        find "${from}/Users" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; > "${dir}/workspace-users"
+    fi
+}
+
+# The standalone root's files into the workspace folder, copied and never
+# moved. What is state rather than workspace stays behind: the databases go
+# through the VM's import, the transcripts too, scratch is scratch. A file
+# already there is never replaced: one with the same bytes is passed over, any
+# other is named, and on a case-insensitive Mac that includes a name that
+# differs from one copied before it only in case.
+copy_workspace() {
+    local from="$1" to="$2" path rel target collided=0
+    while IFS= read -r -d '' path; do
+        rel="${path#"${from}/"}"
+        case "$rel" in
+            istota.db|istota.db-*|modules|modules/*|tmp|tmp/*|logs|logs/*|Backups/db|Backups/db/*) continue ;;
+            config.toml|istota.env|.istota-workspace|.DS_Store|*/.DS_Store) continue ;;
+            subscription_usage.json|openrouter_models.json) continue ;;
+        esac
+        target="${to}/${rel}"
+        if [ -d "$path" ] && [ ! -L "$path" ]; then
+            if [ -e "$target" ] && [ ! -d "$target" ]; then
+                log "  not copied: ${rel} (a file of that name is in ${to})"
+                collided=$((collided + 1))
+            else
+                mkdir -p "$target"
+            fi
+            continue
+        fi
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            if [ -f "$path" ] && [ -f "$target" ] && cmp -s "$path" "$target"; then continue; fi
+            log "  not copied: ${rel} (${target} is there already)"
+            collided=$((collided + 1))
+            continue
+        fi
+        [ -d "$(dirname "$target")" ] || continue
+        cp -pP "$path" "$target"
+    done < <(find "$from" -mindepth 1 -print0)
+    if [ "$collided" -gt 0 ]; then
+        log "${collided} item(s) were left in ${from} because something was already in their place; compare and copy them by hand."
+    fi
+}
+
+# A standalone install (~/.istota) into the local VM: refused while it runs;
+# its databases, config and transcripts staged into the VM and imported there
+# with its istota.env on stdin; its files copied into the folder; the stack
+# started, the key escrowed, and doctor asked. ~/.istota is never changed.
+cmd_import_standalone() {
+    local from="" config="" dry="" folder="" create_args=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --from|--config)
+                [ "$#" -ge 2 ] || usage_error "$1 needs a value"
+                if [ "$1" = --from ]; then from="$2"; else config="$2"; fi
+                shift 2 ;;
+            --dry-run) dry=1; shift ;;
+            --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
+                [ "$#" -ge 2 ] || usage_error "$1 needs a value"
+                [ "$1" != --workspace ] || folder="$2"
+                create_args+=("$1" "$2"); shift 2 ;;
+            --adopt) create_args+=("$1"); shift ;;
+            *) usage_error "import-standalone takes no '$1'" ;;
+        esac
+    done
+
+    require_mac
+    from="$(resolve_dir "${from:-${HOME}/.istota}")"
+    config="${config:-${HOME}/.config/istota/config.toml}"
+    local env_file
+    env_file="$(dirname "$config")/istota.env"
+    [ -f "${from}/istota.db" ] \
+        || fail "$EX_CONFIG" "no standalone install at ${from} (no istota.db); give its folder with --from. Nothing was changed."
+    [ -f "$config" ] || fail "$EX_CONFIG" "no standalone config at ${config}; give it with --config. Nothing was changed."
+    [ -f "$env_file" ] || fail "$EX_CONFIG" "no ${env_file} beside the config. Nothing was changed."
+    local key
+    key="$(standalone_key "$env_file")"
+    valid_key "$key" \
+        || fail "$EX_CONFIG" "${env_file} has no usable ISTOTA_SECRET_KEY: without it the stored credentials cannot be read. Nothing was changed."
+    if standalone_running; then
+        fail "$EX_CONFIG" "the standalone install is running (it holds ${STANDALONE_LOCK}). Stop \`istota serve\` first. Nothing was changed."
+    fi
+    [ -n "$folder" ] || folder="$(workspace_or_default)"
+    folder="$(resolve_dir "$folder")"
+    refuse_location "$folder"
+    if keychain_has_item && [ "$(keychain_value || true)" != "$key" ]; then
+        fail "$EX_CONFIG" "the login Keychain holds a different master key under ${KEYCHAIN_SERVICE} / ${KEYCHAIN_ACCOUNT}, from an earlier VM; it decrypts that VM's snapshots. Rename that item in Keychain Access first. Nothing was changed."
+    fi
+    command -v sqlite3 >/dev/null 2>&1 || fail "$EX_UNAVAILABLE" "no sqlite3 to back up the databases with."
+    require_limactl
+    [ -z "$dry" ] || require_running
+
+    local scratch staging staged port rc=0
+    scratch="$(mktemp -d "${TMPDIR:-/tmp}/istota-standalone.XXXXXX")"
+    trap 'rm -rf "${scratch:-}"' EXIT
+    staging="${scratch}/standalone"
+    mkdir -m 0700 "$staging"
+    stage_standalone "$from" "$config" "$staging"
+
+    if [ -z "$dry" ]; then
+        if [ -z "$(instance_status)" ]; then
+            cmd_create ${create_args[@]+"${create_args[@]}"} --workspace "$folder" --no-setup
+        else
+            require_running
+        fi
+    fi
+    port="$(port_or_default)"
+    staged="$(stage_in_vm "$staging" --daemon)" || exit $?
+    local import=(import-standalone "$staged" --hostname "localhost:${port}")
+    [ -z "$dry" ] || import+=(--dry-run)
+    # istota.env on stdin: the master key and the credentials, on no command line.
+    vm_stack "${import[@]}" < "$env_file" || rc=$?
+    vm_stack unstage "$staged" </dev/null || log "WARNING: ${staged} was left in the VM"
+    [ "$rc" -eq 0 ] || fail "$rc" "step 'import' failed: \`istota-stack ${import[*]}\` (exit ${rc}). Nothing in ${from} was changed."
+    if [ -n "$dry" ]; then
+        log "--dry-run: nothing was changed, here or in the VM."
+        return 0
+    fi
+
+    log "copying the files of ${from} into ${folder}"
+    copy_workspace "$from" "$folder"
+    run_step "start the stack" "systemctl enable --now istota-stack" \
+        vm systemctl enable --now istota-stack </dev/null
+    escrow_key
+    local probe
+    probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
+    enrolment "$(probe_value "$probe" admin)" "$port"
+
+    local doctor_rc=0
+    vm_stack exec istota doctor </dev/null || doctor_rc=$?
+    if [ "$doctor_rc" -ne 0 ]; then
+        log "doctor reported a failure (above), so ${from} stays where it is. Fix it, then run \`istota doctor\`; this import can be run again and does nothing twice."
+        exit "$doctor_rc"
+    fi
+    log "imported. Once you have checked the web UI, move the old install to the Trash: open ${from%/*} in Finder and drag $(basename "$from") there, or \`mv ${from} ~/.Trash/\`. Its config is in $(dirname "$config")."
 }
 
 main() {
@@ -882,7 +1078,7 @@ main() {
         destroy) cmd_destroy "$@" ;;
         apply|import-bare-metal) cmd_with_path "$command" "$@" ;;
         restore) cmd_restore "$@" ;;
-        import-standalone) fail "$EX_USAGE" "${command} is not in this release." ;;
+        import-standalone) cmd_import_standalone "$@" ;;
         ""|-h|--help|help) usage ;;
         *) forward "$command" "$@" ;;
     esac

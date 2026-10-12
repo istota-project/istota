@@ -20,6 +20,7 @@ default suite holds the argv the shim and the forward produce.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -66,6 +67,11 @@ if name == "uname":
     sys.exit(0)
 
 if name == "lsof":
+    if any(a.endswith("istota-scheduler-daemon.lock") for a in argv):
+        if state.get("lock_holder"):
+            out(f"{state['lock_holder']}\n")
+            sys.exit(0)
+        sys.exit(1)
     holder = state.get("port_holder")
     if holder:
         out(f"COMMAND   PID USER   FD   TYPE\n{holder} 4242 me 5u IPv4 TCP 127.0.0.1:8080 (LISTEN)\n")
@@ -139,6 +145,9 @@ if verb == "copy":
     else:
         state.setdefault("copied", []).append(source)
         save()
+        if state.get("vm_root") and os.path.isdir(source):
+            import shutil
+            shutil.copytree(source, os.path.join(state["vm_root"], os.path.basename(source.rstrip("/"))))
     sys.exit(0)
 if verb == "shell":
     rest = argv[1:]
@@ -164,6 +173,9 @@ if verb == "shell":
     if stack == ["exec", "cat", "/data/.secret_key"]:
         out(state.get("key", ""))
         sys.exit(0)
+    if stack[:3] == ["exec", "istota", "doctor"]:
+        out("doctor ran\n")
+        sys.exit(state.get("doctor_rc", 0))
     if stack[:4] == ["exec", "istota", "auth", "list"]:
         out(state.get("auth_list", "") + "state=unchanged\n")
         sys.exit(0)
@@ -203,6 +215,14 @@ if verb == "shell":
         rc = state.get("restore_rc", 0)
         if rc == 0:
             vm["config"] = True
+        save()
+        sys.exit(rc)
+    if stack[:1] == ["import-standalone"]:
+        state["import_stdin"] = sys.stdin.read()
+        rc = state.get("import_rc", 0)
+        if rc == 0 and "--dry-run" not in stack:
+            vm["config"] = True
+            vm["admin"] = state.get("admin", "alice")
         save()
         sys.exit(rc)
     if stack[:1] == ["stage"]:
@@ -341,12 +361,6 @@ class TestForwarding:
         )
         assert result.returncode == 4, result.stderr
         assert mac.stack_calls()[-1] == ["exec", "istota", "user", "list"]
-
-    def test_the_verbs_of_later_stages_are_not_forwarded(self, mac):
-        mac.set(instance={"name": "istota", "status": "Running"})
-        result = mac.run("import-standalone")
-        assert result.returncode == 64, result.stderr
-        assert mac.stack_calls() == []
 
 
 class TestFileArguments:
@@ -885,6 +899,232 @@ class TestRestore:
         result = made.run("restore", stdin="istota\n")
         assert result.returncode == 0
         assert "secrets/" in result.stdout
+
+
+STAGED = "/srv/app/istota/staging/AbCd1234/standalone"
+
+
+def _import(mac: Mac, *args: str) -> subprocess.CompletedProcess:
+    return mac.run("import-standalone", "--tag", "v1.2.0", "--signing-key", SIGNING_KEY, *args)
+
+
+@dataclass
+class Standalone:
+    root: Path
+    config: Path
+    env_text: str
+    conn: object
+
+    def tree(self) -> dict[str, bytes]:
+        """Every path under the root, with the bytes of each file that is not a
+        database (an open WAL connection may touch those)."""
+        out = {}
+        for path in sorted(self.root.rglob("*")):
+            rel = str(path.relative_to(self.root))
+            out[rel] = b"" if path.is_dir() or ".db" in path.name else path.read_bytes()
+        return out
+
+
+@pytest.fixture
+def standalone(mac):
+    """A standalone install as `istota setup` leaves one: ~/.istota with the
+    framework database in WAL mode holding a row only its -wal file has, a
+    module database, scratch, transcripts and snapshots, and the config,
+    istota.env and admins in ~/.config/istota."""
+    import shutil
+    import sqlite3
+
+    from istota import db
+
+    if shutil.which("sqlite3", path="/usr/bin:/bin") is None:
+        pytest.skip("needs the sqlite3 command")
+    root = (mac.home / ".istota")
+    (root / "Users" / "alice" / "inbox").mkdir(parents=True)
+    root = root.resolve()
+    (root / "Users" / "alice" / "inbox" / "a.txt").write_text("from the standalone install")
+    (root / "PERSONA.md").write_text("persona")
+    (root / "tmp").mkdir()
+    (root / "tmp" / "scratch").write_text("scratch")
+    (root / "logs" / "alice").mkdir(parents=True)
+    (root / "logs" / "alice" / "20261001_task-1-1.jsonl").write_text('{"type": "session"}\n')
+    (root / "Backups" / "db" / "snapshots" / "2026-10-01" / "framework").mkdir(parents=True)
+    (root / "modules" / "alice").mkdir(parents=True)
+    module = sqlite3.connect(root / "modules" / "alice" / "feeds.db")
+    module.execute("CREATE TABLE feeds (url TEXT)")
+    module.execute("INSERT INTO feeds VALUES ('https://example.test/feed.xml')")
+    module.commit()
+    module.close()
+    db.init_db(root / "istota.db")
+    conn = sqlite3.connect(root / "istota.db")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("INSERT INTO user_profiles (user_id, display_name) VALUES ('alice', 'Alice')")
+    conn.execute(
+        "INSERT INTO tasks (id, status, source_type, user_id, prompt, attachments) VALUES "
+        "(1, 'completed', 'web', 'alice', 'only in the wal', ?)",
+        (json.dumps([f"{root}/Users/alice/inbox/a.txt"]),),
+    )
+    conn.commit()
+    config_dir = mac.home / ".config" / "istota"
+    config_dir.mkdir(parents=True)
+    config = config_dir / "config.toml"
+    config.write_text(
+        f'db_path = "{root}/istota.db"\nworkspace_path = "{root}"\ntemp_dir = "{root}/tmp"\n\n'
+        '[web]\nauth = "none"\n\n[brain]\nkind = "claude_code"\n\n'
+        '[users.alice]\ndisplay_name = "Alice"\ntimezone = "UTC"\n'
+    )
+    env_text = f"ISTOTA_SECRET_KEY={KEY}\nISTOTA_WEB_INSECURE_COOKIES=1\nANTHROPIC_API_KEY=sk-test-only\n"
+    (config_dir / "istota.env").write_text(env_text)
+    (config_dir / "admins").write_text("alice\n")
+    made = Standalone(root, config, env_text, conn)
+    yield made
+    conn.close()
+
+
+class TestImportStandalone:
+    """A standalone install into a new VM: everything that can refuse is asked
+    before the VM is made, istota.env goes on stdin alone, the files are copied
+    into the folder, and ~/.istota is never changed."""
+
+    def test_it_moves_into_a_new_vm(self, mac, standalone):
+        before = standalone.tree()
+        result = _import(mac)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c[:1] == ["create"] for c in mac.calls("limactl"))
+        calls = mac.stack_calls()
+        verbs = [c[0] for c in calls]
+        assert "setup" not in verbs
+        assert ["import-standalone", STAGED, "--hostname", "localhost:8080"] in calls
+        assert ["unstage", STAGED] in calls
+        assert ["stage", "--daemon", "/tmp/tmp.stub/standalone"] in calls
+        assert mac.state()["import_stdin"] == standalone.env_text
+        vm = mac.vm_calls()
+        assert vm.index(["istota-stack", "import-standalone", STAGED, "--hostname", "localhost:8080"]) \
+            < vm.index(["systemctl", "enable", "--now", "istota-stack"]) \
+            < vm.index(["istota-stack", "exec", "istota", "doctor"])
+        assert mac.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert "Trash" in result.stdout
+        assert standalone.tree() == before
+
+    def test_the_files_are_copied_and_the_state_stays_behind(self, mac, standalone):
+        assert _import(mac).returncode == 0
+        folder = mac.home / "Istota"
+        assert (folder / "Users" / "alice" / "inbox" / "a.txt").read_text() == "from the standalone install"
+        assert (folder / "PERSONA.md").read_text() == "persona"
+        assert (folder / ".istota-workspace").is_file()
+        for left in ("istota.db", "tmp", "logs", "modules", "Backups/db"):
+            assert not (folder / left).exists(), left
+        assert (standalone.root / "Users" / "alice" / "inbox" / "a.txt").exists()
+
+    def test_no_secret_is_on_an_argv(self, mac, standalone):
+        assert _import(mac).returncode == 0
+        for call in mac.all_calls():
+            for secret in (KEY, "sk-test-only"):
+                assert not any(secret in arg for arg in call["argv"]), call
+
+    def test_what_it_stages_is_what_the_vms_import_reads(self, mac, standalone, tmp_path):
+        """The seam: the Mac's staging read by `istota migrate import-standalone`,
+        with a row only the source's WAL file held."""
+        from istota.maintenance import standalone_import as si
+        from istota.setup_wizard import SECRET_NAMES
+
+        vm_root = tmp_path / "vm-root"
+        vm_root.mkdir()
+        mac.set(vm_root=str(vm_root))
+        result = _import(mac)
+        assert result.returncode == 0, result.stdout + result.stderr
+        staged = vm_root / "standalone"
+        manifest = (staged / "MANIFEST").read_text()
+        assert f"source_root={standalone.root}\n" in manifest
+        assert (staged / "workspace-users").read_text() == "alice\n"
+        assert (staged / "admins").read_text() == "alice\n"
+        assert not (staged / "istota.env").exists()
+        assert KEY not in "".join(p.read_text(errors="replace") for p in staged.rglob("*") if p.is_file())
+        (snapshot,) = (staged / "db").iterdir()
+        assert (snapshot / "alice" / "feeds.db").is_file()
+
+        data, vm = tmp_path / "data", tmp_path / "vm"
+        (data / "config").mkdir(parents=True)
+        (vm / "secrets").mkdir(parents=True)
+        for name in SECRET_NAMES:
+            (vm / "secrets" / name).write_text("")
+        out, err = io.StringIO(), io.StringIO()
+        code = si.main(
+            ["--source", str(staged), "--hostname", "localhost:8080", "--config",
+             str(data / "config" / "config.toml"), "--vm-dir", str(vm), "--data-dir", str(data)],
+            stdin=io.StringIO(mac.state()["import_stdin"]), out=out, err=err,
+        )
+        assert code == 0, out.getvalue() + err.getvalue()
+        import sqlite3
+
+        conn = sqlite3.connect(data / "db" / "istota.db")
+        try:
+            rows = conn.execute("SELECT prompt, attachments FROM tasks").fetchall()
+        finally:
+            conn.close()
+        assert rows == [("only in the wal", json.dumps(["/mnt/shared/Users/alice/inbox/a.txt"]))]
+        assert (data / ".secret_key").read_text() == KEY
+        assert (vm / "secrets" / "anthropic_api_key").read_text() == "sk-test-only"
+
+    def test_a_running_standalone_install_is_refused_first(self, mac, standalone):
+        mac.set(lock_holder="4242")
+        result = _import(mac)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "istota serve" in result.stderr
+        assert mac.calls("limactl") == []
+        assert not (mac.home / "Istota").exists()
+
+    def test_no_standalone_install_is_refused_first(self, mac, standalone):
+        result = _import(mac, "--from", str(mac.home / "elsewhere"))
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert mac.calls("limactl") == []
+
+    def test_an_env_file_without_a_key_is_refused_first(self, mac, standalone):
+        (standalone.config.parent / "istota.env").write_text("ANTHROPIC_API_KEY=sk-test-only\n")
+        result = _import(mac)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "ISTOTA_SECRET_KEY" in result.stderr
+        assert mac.calls("limactl") == []
+
+    def test_a_different_key_in_the_keychain_is_refused_first(self, mac, standalone):
+        mac.set(keychain={"istota.local/secret-key-istota": "ab" * 32})
+        result = _import(mac)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert mac.calls("limactl") == []
+
+    def test_a_refused_import_copies_nothing_and_starts_nothing(self, mac, standalone):
+        mac.set(import_rc=1)
+        result = _import(mac)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert ["unstage", STAGED] in mac.stack_calls()
+        assert not (mac.home / "Istota" / "Users").exists()
+        assert ["systemctl", "enable", "--now", "istota-stack"] not in mac.vm_calls()
+
+    def test_a_file_already_in_the_folder_is_named_and_kept(self, mac, standalone):
+        folder = mac.home / "Istota"
+        (folder / "Users" / "alice" / "inbox").mkdir(parents=True)
+        (folder / ".istota-workspace").write_text("")
+        (folder / "Users" / "alice" / "inbox" / "a.txt").write_text("already here")
+        result = _import(mac)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (folder / "Users" / "alice" / "inbox" / "a.txt").read_text() == "already here"
+        assert "Users/alice/inbox/a.txt" in result.stdout
+
+    def test_a_failing_doctor_leaves_the_old_install_named(self, mac, standalone):
+        mac.set(doctor_rc=1)
+        result = _import(mac)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Trash" not in result.stdout + result.stderr
+        assert "run again" in result.stdout + result.stderr
+
+    def test_a_dry_run_changes_nothing(self, mac, standalone):
+        assert _create(mac, "--no-setup").returncode == 0
+        mac.calls_path.unlink()
+        result = _import(mac, "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["import-standalone", STAGED, "--hostname", "localhost:8080", "--dry-run"] in mac.stack_calls()
+        assert not (mac.home / "Istota" / "Users").exists()
+        assert ["systemctl", "enable", "--now", "istota-stack"] not in mac.vm_calls()
+        assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
 
 
 class TestInstallLocal:
