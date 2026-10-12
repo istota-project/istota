@@ -41,6 +41,16 @@ const config: Config = {
     mermaid: true,
   },
   themes: ['@docusaurus/theme-mermaid'],
+  plugins: [
+    [
+      '@docusaurus/plugin-client-redirects',
+      {
+        redirects: [
+          {from: '/getting-started/quickstart-docker', to: '/getting-started/quickstart-server'},
+        ],
+      },
+    ],
+  ],
 
   i18n: {
     defaultLocale: 'en',
