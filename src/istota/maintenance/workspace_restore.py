@@ -17,7 +17,11 @@ on a new stack, in a one-shot container with the stack stopped
 3. the framework database through `db_restore` (`--date`, or the newest good
    snapshot; an empty one refused without `--force`), then each user's module
    databases, for the users the restored database holds as well as the ones
-   `config.toml` names.
+   `config.toml` names;
+4. with `--vm-dir`, the stack's `.env` and `host.env` as `istota-stack`
+   copied them in (`stack.env`, `host.env`, the set in effect on `<date>`),
+   handed back for `istota-stack restore` to install on the VM, which this
+   container cannot reach.
 
 Everything is checked before anything is written: the key's form, the config
 copy (a plain file that parses), a restorable framework snapshot, and that
@@ -100,6 +104,41 @@ def config_copy_dir(workspace: Path, date: str | None) -> Path:
     raise Refusal(f"no config copy {when}in {root} (Backups/config/<date>/config.toml)")
 
 
+_ENV_LINE = re.compile(r"[A-Z_][A-Z0-9_]*=[^\x00-\x08\x0b-\x1f\x7f]*")
+
+
+def stack_files(workspace: Path, config_date: str) -> tuple[str | None, dict[str, str]]:
+    """The stack's `.env` and `host.env` copies to hand back, and their date.
+
+    `istota-stack` copies them in only on update, setup and apply, so the set
+    in effect on `config_date` is the newest at or before it; with none that
+    old, the newest there is (db_backup keeps that one past its retention).
+    """
+    from istota.maintenance.db_backup import (
+        _CONFIG_COPY_DIR, HOST_ENV_COPY, STACK_ENV_COPY, _dated_dirs,
+    )
+
+    dated = [d for d in _dated_dirs(workspace / _CONFIG_COPY_DIR)
+             if os.path.lexists(d / STACK_ENV_COPY) or os.path.lexists(d / HOST_ENV_COPY)]
+    if not dated:
+        return None, {}
+    chosen = next((d for d in dated if d.name <= config_date), dated[0])
+    files: dict[str, str] = {}
+    for name in (STACK_ENV_COPY, HOST_ENV_COPY):
+        data = _read_plain(chosen / name)
+        if data is None:
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise Refusal(f"{chosen / name} is not text") from exc
+        for line in text.splitlines():
+            if line.strip() and not line.startswith("#") and not _ENV_LINE.fullmatch(line):
+                raise Refusal(f"{chosen / name} is not an env file: a line is not KEY=VALUE")
+        files[name] = text
+    return chosen.name, files
+
+
 def _task_count(db_path: Path) -> int:
     from istota.maintenance.bare_metal_import import _task_count as count
 
@@ -107,7 +146,7 @@ def _task_count(db_path: Path) -> int:
 
 
 def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
-            date: str | None, force: bool, load, out) -> int:
+            date: str | None, force: bool, load, out, vm_dir: Path | None = None) -> int:
     from istota.apply import write_private
     from istota.maintenance import db_restore
     from istota.maintenance.bare_metal_import import _quick_check
@@ -131,6 +170,7 @@ def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
         tomllib.loads(copies["config.toml"].decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise Refusal(f"{source / 'config.toml'} is not a config: {exc}") from exc
+    env_date, env_files = stack_files(workspace, source.name) if vm_dir is not None else (None, {})
 
     key_path = data_dir / KEY_NAME
     current_key = _read_plain(key_path)
@@ -164,6 +204,12 @@ def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
         if not target.exists():
             write_private(target, data.decode("utf-8"))
             out(f"restored {target} from {source}")
+    if vm_dir is not None:
+        if not env_files:
+            out("no stack.env or host.env copy in the backups: the stack's .env and host.env stay as they are")
+        for name, text in env_files.items():
+            write_private(vm_dir / name, text)
+            out(f"handed back {name} of {env_date}")
 
     failed = 0
     installed = config_dir / "config.toml"
@@ -222,6 +268,8 @@ def main(argv: list[str], *, stdin=None, out=None, err=None) -> int:
     parser.add_argument("--workspace", default=DEFAULT_WORKSPACE)
     parser.add_argument("--config-dir", default=f"{DEFAULT_DATA_DIR}/config")
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
+    parser.add_argument("--vm-dir", help="where to hand back the stack's .env and host.env "
+                                         "copies (stack.env, host.env) for istota-stack to install")
     args = parser.parse_args(argv)
 
     from istota.config import load_config
@@ -231,6 +279,7 @@ def main(argv: list[str], *, stdin=None, out=None, err=None) -> int:
         return restore(
             Path(args.workspace), Path(args.config_dir), Path(args.data_dir), key,
             date=args.date, force=args.force, load=load_config, out=say,
+            vm_dir=Path(args.vm_dir) if args.vm_dir else None,
         )
     except Refusal as exc:
         print(f"REFUSE: {exc}", file=err_stream)

@@ -526,6 +526,7 @@ cmd_update() {
         log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
     fi
     prune_images "$tag" "$previous"
+    copy_stack_env_out
     log "now on ${tag} (previous: ${previous:-none})"
     reprovision_if_changed
 }
@@ -733,6 +734,7 @@ cmd_setup() {
         log "${lacking}: run \`istota-stack update ${tag}\`."
     fi
     render_devbox_compose "$tag"
+    copy_stack_env_out
     log "written. Re-run provision.sh to pick up host.env, then \`systemctl enable --now istota-stack\`."
 }
 
@@ -963,6 +965,7 @@ cmd_setup_web() {
     env_set "ISTOTA_TAG=${tag}"
     render_devbox_compose "$tag"
     build_what_setup_needs "$tag"
+    copy_stack_env_out
     # A first setup choosing direct ingress or Nextcloud changes what is
     # provisioned. Run as a child, not exec'd as an update does it, because the
     # start comes after it.
@@ -1003,6 +1006,7 @@ cmd_apply() {
     if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
     ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/plan:ro" \
         "$(main_service)" istota apply -f "/plan/${name}" "$@" || rc=$?
+    copy_stack_env_out
     if [ "$rc" -eq 2 ]; then
         case " $* " in
             *" --dry-run "*) ;;
@@ -1038,9 +1042,16 @@ cmd_import_bare_metal() {
 # The module refuses whatever it would replace that differs; the stack has to
 # be down, as for import-bare-metal, since the daemon's lock is in a /tmp the
 # one-shot does not share.
+#
+# The module hands back the stack's .env and host.env copies (stack.env,
+# host.env, copied in by copy_stack_env_out) in a staging directory, as setup's
+# wizard does; they go in place here, except .env's tag lines, which name the
+# old VM's images and stay this VM's. Then what the restored config and
+# profiles need is built and the host provisioned; the caller starts the stack.
 cmd_restore() {
-    local running owner=()
-    [ -n "$(env_get "$ENV_FILE" ISTOTA_TAG)" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    local running owner=() tag rc=0 key saved=()
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
     running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was restored."
     if [ -n "$running" ]; then
         die "the stack is running. Stop it first (\`systemctl stop istota-stack\`); a restore replaces its database."
@@ -1048,7 +1059,96 @@ cmd_restore() {
     # Compose would make a missing bind source root's.
     if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
     install -d -m 0750 ${owner[@]+"${owner[@]}"} "$CONFIG_DIR"
-    ISTOTA_CONFIG_READ_ONLY=false oneshot "$(main_service)" istota migrate restore-workspace "$@"
+    trap 'rm -rf "${staging:-}"' EXIT
+    staging="$(mktemp -d "${STACK}/.restore.XXXXXX")"
+    if [ "$(id -u)" -eq 0 ]; then chown "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/vm" \
+        "$(main_service)" istota migrate restore-workspace --vm-dir /vm "$@" || rc=$?
+    # 1 is a refusal with nothing written; 2 is partial, with the config in place.
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || exit "$rc"
+    # Nothing running as 10001 may change staging while root reads it.
+    if [ "$(id -u)" -eq 0 ]; then chown root:root "$staging"; fi
+    chmod 0700 "$staging"
+
+    if [ -e "${staging}/stack.env" ] || [ -L "${staging}/stack.env" ]; then
+        for key in ISTOTA_TAG ISTOTA_TAG_UNSIGNED ISTOTA_PREVIOUS_TAG ISTOTA_PREVIOUS_TAG_UNSIGNED; do
+            saved+=("${key}=$(env_get "$ENV_FILE" "$key")")
+        done
+        install_staged "${staging}/stack.env" "$ENV_FILE"
+        env_set "${saved[@]}"
+        log "restored .env from the workspace, keeping this VM's tag (${tag})"
+    fi
+    if [ -e "${staging}/host.env" ] || [ -L "${staging}/host.env" ]; then
+        install_staged "${staging}/host.env" "$HOST_ENV"
+        log "restored host.env from the workspace"
+    fi
+    render_devbox_compose "$tag"
+    build_what_setup_needs "$tag"
+    if provision_outdated; then
+        log "host.env changed what this host provisions; running ${SRC}/host/provision.sh"
+        "${SRC}/host/provision.sh" \
+            || die "provision.sh failed. The restore is in place: fix it, run ${SRC}/host/provision.sh, then \`systemctl enable --now istota-stack\`."
+    fi
+    # Exit rather than return: provision.sh may have replaced this script's file.
+    exit "$rc"
+}
+
+# The stack's .env and host.env into the workspace's Backups/config/<UTC
+# date>/, beside the config.toml and admins db_backup copies there, so a lost
+# VM's restore can put them back. Neither holds a credential, which
+# tests/test_workspace_restore.py holds against what setup writes. Only where
+# the workspace is a mount, db_backup's rule: the rclone mount, or a host folder
+# with its marker. Run as uid 10001, whose the workspace is, through directory
+# fds that follow no link. Best-effort: a failure is a warning, never the
+# calling verb's. Called by update, setup and apply.
+COPY_STACK_ENV_PY='
+import os, sys
+root, date, pairs = sys.argv[1], sys.argv[2], sys.argv[3:]
+dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+fd = os.open(root, dir_flags)
+try:
+    for part in ("Backups", "config", date):
+        try:
+            os.mkdir(part, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        inner = os.open(part, dir_flags, dir_fd=fd)
+        os.close(fd)
+        fd = inner
+    for pair in pairs:
+        name, source = pair.split("=", 1)
+        try:
+            src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            continue
+        with os.fdopen(src, "rb") as fh:
+            data = fh.read(1 << 20)
+        tmp = f".{name}.{os.getpid()}"
+        out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        with os.fdopen(out, "wb") as fh:
+            fh.write(data)
+            os.fchmod(fh.fileno(), 0o600)
+        os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+finally:
+    os.close(fd)
+'
+
+copy_stack_env_out() {
+    local storage day drop=()
+    storage="$(env_get "$HOST_ENV" STORAGE)"
+    case "$storage" in host-folder|nextcloud) ;; *) return 0 ;; esac
+    mountpoint -q "$MOUNT_DIR" 2>/dev/null || return 0
+    if [ "$storage" = host-folder ] \
+            && { [ -L "${MOUNT_DIR}/.istota-workspace" ] || [ ! -f "${MOUNT_DIR}/.istota-workspace" ]; }; then
+        return 0
+    fi
+    day="$(date -u +%F)"
+    if [ "$(id -u)" -eq 0 ]; then
+        drop=(setpriv "--reuid=${ISTOTA_UID}" "--regid=${ISTOTA_UID}" --clear-groups --no-new-privs)
+    fi
+    ${drop[@]+"${drop[@]}"} python3 -I -c "$COPY_STACK_ENV_PY" "$MOUNT_DIR" "$day" \
+            "stack.env=${ENV_FILE}" "host.env=${HOST_ENV}" 2>&1 \
+        || log "WARNING: could not copy .env and host.env into ${MOUNT_DIR}/Backups/config/${day}; a restore from this workspace would not have them."
 }
 
 # After a config change: re-render the devbox services, since [devbox] users may

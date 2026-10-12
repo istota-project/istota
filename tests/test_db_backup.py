@@ -469,6 +469,26 @@ class TestTheConfigCopy:
         kept = sorted(p.name for p in (tmp_path / "mount" / "Backups" / "config").iterdir())
         assert kept == [(start + timedelta(days=offset)).isoformat() for offset in (2, 3)]
 
+    def test_the_newest_stack_env_copy_outlives_the_retention(self, tmp_path, config_files, monkeypatch):
+        """`istota-stack` copies .env and host.env in only on update, setup and
+        apply, so the newest set may be older than every day kept; a restore
+        needs it all the same."""
+        cfg = self._cfg(tmp_path, config_files, db_backup_retention=2)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        start = _date.fromisoformat(FIXED_DAY)
+        root = tmp_path / "mount" / "Backups" / "config"
+        for offset, env in ((0, "old"), (1, "new")):
+            day = root / (start + timedelta(days=offset)).isoformat()
+            day.mkdir(parents=True)
+            (day / "stack.env").write_text(f"COMPOSE_PROFILES={env}\n")
+            (day / "host.env").write_text("STORAGE=host-folder\n")
+
+        for offset in range(2, 6):
+            db_backup.backup_databases(cfg, today=(start + timedelta(days=offset)).isoformat())
+
+        kept = sorted(p.name for p in root.iterdir())
+        assert kept == [(start + timedelta(days=offset)).isoformat() for offset in (1, 4, 5)]
+
 
 class TestMountLiveness:
     """A destination under the Nextcloud mount must not be written when the mount

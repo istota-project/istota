@@ -233,6 +233,10 @@ def _mount_problem(config, resolved_mount: Path) -> str | None:
 
 #: Where the config copies go, beside ``Backups/db/snapshots``.
 _CONFIG_COPY_DIR = Path("Backups") / "config"
+#: The names ``istota-stack`` gives the stack's ``.env`` and ``host.env`` in a
+#: dated config copy (``copy_stack_env_out``); a restore puts them back.
+STACK_ENV_COPY = "stack.env"
+HOST_ENV_COPY = "host.env"
 
 
 def _config_sources(config) -> list[Path]:
@@ -289,7 +293,14 @@ def copy_config_files(config, date_str: str) -> Path | None:
         return None
     keep = getattr(config.scheduler, "db_backup_retention", 7)
     if keep > 0:
-        for old in _dated_dirs(root)[keep:]:
+        dated_dirs = _dated_dirs(root)
+        # istota-stack copies the stack's .env and host.env in only when it
+        # changes them, so the newest set can be older than every day kept.
+        newest_stack_files = next(
+            (d for d in dated_dirs if (d / STACK_ENV_COPY).is_file()), None)
+        for old in dated_dirs[keep:]:
+            if old == newest_stack_files:
+                continue
             try:
                 shutil.rmtree(old)
             except OSError as exc:

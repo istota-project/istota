@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,13 @@ case "$args" in
     exit "${STUB_SETUP_RC:-0}" ;;
   *" migrate restore-workspace"*)
     cat > "$STUB_CALLS.stdin"
+    vm=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ] && [ "${a%:/vm}" != "$a" ]; then vm="${a%:/vm}"; fi
+      prev="$a"
+    done
+    if [ -n "$vm" ] && [ -n "${STUB_RESTORED_STACK_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_STACK_ENV" > "$vm/stack.env"; fi
+    if [ -n "$vm" ] && [ -n "${STUB_RESTORED_HOST_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_HOST_ENV" > "$vm/host.env"; fi
     exit "${STUB_RESTORE_RC:-0}" ;;
   *" config --services "*)
     if [ -n "${STUB_SERVICES:-}" ]; then printf '%b' "$STUB_SERVICES"; else printf 'daemon\nweb\nnginx\n'; fi
@@ -861,23 +869,159 @@ class TestRestore:
         result = self._restore(fx, "--date", "2026-10-10", STUB_STACK_DOWN="1")
         assert result.returncode == 0, result.stdout + result.stderr
         calls = fx.docker_calls()
-        assert calls[-1].endswith(
-            "run --rm --no-deps -T --entrypoint istota-drop "
-            "daemon istota migrate restore-workspace --date 2026-10-10"
-        ), calls
+        run = next(call for call in calls if "restore-workspace" in call)
+        assert re.search(
+            r"run --rm --no-deps -T --entrypoint istota-drop -v \S+/\.restore\.\w+:/vm "
+            r"daemon istota migrate restore-workspace --vm-dir /vm --date 2026-10-10$", run), run
         assert Path(f"{fx.calls}.stdin").read_text() == self.KEY + "\n"
         assert not any(self.KEY in call for call in calls)
         assert (fx.stack / "config").is_dir()
 
     def test_its_exit_status_comes_back(self, fx):
-        result = self._restore(fx, STUB_STACK_DOWN="1", STUB_RESTORE_RC="2")
-        assert result.returncode == 2, result.stdout + result.stderr
+        result = self._restore(fx, STUB_STACK_DOWN="1", STUB_RESTORE_RC="1")
+        assert result.returncode == 1, result.stdout + result.stderr
 
     def test_without_an_image_nothing_runs(self, fx):
         (fx.stack / ".env").write_text("COMPOSE_PROFILES=\n")
         result = self._restore(fx, STUB_STACK_DOWN="1")
         assert result.returncode == 1, result.stdout + result.stderr
         assert not any(" run " in f"{call} " for call in fx.docker_calls())
+
+    def test_the_stack_files_go_back_with_this_vms_tag(self, fx):
+        """The backed-up .env names the old VM's tag, whose images this VM never
+        built; every other line is the old install's."""
+        result = self._restore(
+            fx, STUB_STACK_DOWN="1",
+            STUB_RESTORED_STACK_ENV="COMPOSE_PROFILES=browser\nNGINX_PUBLISH=127.0.0.1:8181:80\n"
+                                    "ISTOTA_TAG=v-old\nISTOTA_PREVIOUS_TAG=v-older\n",
+            STUB_RESTORED_HOST_ENV="STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_ALLOW=11434\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        env = fx.env_text()
+        assert "COMPOSE_PROFILES=browser\n" in env
+        assert "NGINX_PUBLISH=127.0.0.1:8181:80\n" in env
+        assert "ISTOTA_TAG=v0\n" in env and "v-old" not in env and "v-older" not in env
+        host = (fx.stack / "host.env").read_text()
+        assert host == "STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_ALLOW=11434\n"
+        assert not list(fx.stack.glob(".restore.*")), "the staging directory was left behind"
+
+    def test_without_stack_files_the_vms_own_stay(self, fx):
+        env_before = fx.env_text()
+        host_before = (fx.stack / "host.env").read_text()
+        result = self._restore(fx, STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.env_text() == env_before
+        assert (fx.stack / "host.env").read_text() == host_before
+
+    def test_a_refused_restore_puts_nothing_in_place(self, fx):
+        result = self._restore(
+            fx, STUB_STACK_DOWN="1", STUB_RESTORE_RC="1",
+            STUB_RESTORED_STACK_ENV="COMPOSE_PROFILES=browser\n")
+        assert result.returncode == 1
+        assert "COMPOSE_PROFILES=browser" not in fx.env_text()
+
+    def test_a_profile_the_restored_env_turns_on_is_built(self, fx):
+        result = self._restore(
+            fx, STUB_STACK_DOWN="1", STUB_RESTORED_STACK_ENV="COMPOSE_PROFILES=browser\n",
+            STUB_SERVICES="daemon\\nweb\\nnginx\\nbrowser\\n", STUB_MISSING_IMAGES="istota-browser:v0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        builds = [call for call in fx.docker_calls() if " build " in f"{call} "]
+        assert builds and builds[-1].endswith(" build browser"), builds
+
+
+def _utc_today() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+@pytest.fixture
+def mounted(fx) -> Fixture:
+    """A host-folder VM whose folder is mounted and marked."""
+    bindir = Path(fx.env["PATH"].split(":")[0])
+    (bindir / "mountpoint").write_text('#!/bin/bash\n[ -z "${STUB_NOT_MOUNTED:-}" ]\n')
+    (bindir / "mountpoint").chmod(0o755)
+    (fx.stack / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\n")
+    mount = Path(fx.env["ISTOTA_MOUNT_DIR"])
+    mount.mkdir()
+    (mount / ".istota-workspace").write_text("")
+    return fx
+
+
+class TestTheStackFilesAreCopiedOut:
+    """`.env` and `host.env` are the VM's, outside anything db_backup reads, so
+    istota-stack copies them into the workspace's `Backups/config/<date>/` on
+    every verb that changes them: update, setup, apply. Only where the
+    workspace is a mount, as db_backup's own copy."""
+
+    def _copied(self, fx: Fixture) -> Path:
+        return Path(fx.env["ISTOTA_MOUNT_DIR"]) / "Backups" / "config" / _utc_today()
+
+    def test_apply_copies_both_private(self, mounted, tmp_path):
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = mounted.run("apply", str(plan))
+        assert result.returncode == 0, result.stdout + result.stderr
+        day = self._copied(mounted)
+        assert (day / "stack.env").read_text() == mounted.env_text()
+        assert (day / "host.env").read_text() == (mounted.stack / "host.env").read_text()
+        assert stat.S_IMODE(day.stat().st_mode) == 0o700
+        for name in ("stack.env", "host.env"):
+            assert stat.S_IMODE((day / name).stat().st_mode) == 0o600, name
+
+    def test_update_copies_them_with_the_new_tag(self, mounted):
+        mounted.commit("v1")
+        mounted.tag("v1", key=mounted.release_key)
+        result = mounted.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in (self._copied(mounted) / "stack.env").read_text()
+
+    def test_a_dry_run_apply_copies_them_too(self, mounted, tmp_path):
+        """Nothing in either file changes under apply; the copy is what keeps
+        the newest set within the snapshots' retention."""
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        assert mounted.run("apply", str(plan), "--dry-run").returncode == 0
+        assert (self._copied(mounted) / "stack.env").is_file()
+
+    @pytest.mark.parametrize("change", ["not-mounted", "local", "no-marker"])
+    def test_nothing_is_copied_off_a_mount(self, mounted, tmp_path, change):
+        env = {}
+        if change == "not-mounted":
+            env["STUB_NOT_MOUNTED"] = "1"
+        elif change == "local":
+            (mounted.stack / "host.env").write_text("STORAGE=local\n")
+        else:
+            (Path(mounted.env["ISTOTA_MOUNT_DIR"]) / ".istota-workspace").unlink()
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = mounted.run("apply", str(plan), **env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (Path(mounted.env["ISTOTA_MOUNT_DIR"]) / "Backups").exists()
+
+    def test_a_link_in_the_path_is_not_followed_and_fails_nothing(self, mounted, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (Path(mounted.env["ISTOTA_MOUNT_DIR"]) / "Backups").symlink_to(elsewhere)
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = mounted.run("apply", str(plan))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert list(elsewhere.iterdir()) == []
+        assert "WARNING" in result.stdout + result.stderr
+
+    def test_setup_web_copies_them(self, web, tmp_path):
+        bindir = Path(web.env["PATH"].split(":")[0])
+        (bindir / "mountpoint").write_text("#!/bin/bash\nexit 0\n")
+        (bindir / "mountpoint").chmod(0o755)
+        mount = Path(web.env["ISTOTA_MOUNT_DIR"])
+        mount.mkdir()
+        (mount / ".istota-workspace").write_text("")
+        result = web.run("setup", "--web", **_finished(
+            STUB_STAGED_HOST_ENV="STORAGE=host-folder\nINGRESS=local\n"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        day = mount / "Backups" / "config" / _utc_today()
+        assert (day / "host.env").read_text() == "STORAGE=host-folder\nINGRESS=local\n"
+        assert (day / "stack.env").read_text() == web.env_text()
 
 
 class TestExec:

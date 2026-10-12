@@ -473,12 +473,23 @@ class TestARestoreFromTheFolder:
     and `istota-stack restore` puts them back from the folder's own backups,
     with the master key on stdin as the Mac CLI passes it from the Keychain
     (the Mac half, `destroy` and `create --no-setup` around it, is the default
-    suite's `tests/test_mac_istota_stack.py::TestRestore`). Last in the module:
-    it takes the stack down and brings it back."""
+    suite's `tests/test_mac_istota_stack.py::TestRestore`). `.env` is cut down
+    to its tag lines, as a new VM's is before setup, and has to come back from
+    the copy an `apply` made in the folder, a line only this run wrote
+    included. Last in the module: it takes the stack down and brings it back."""
 
     def test_the_key_the_config_and_the_database_come_back(self, stack, folder):
         key = lima.stack_exec(stack, "cat /data/.secret_key").stdout.strip()
         config_before = stack.out(f"cat {lima.STACK}/config/config.toml")
+        # A line only this run wrote, so a restored .env is told apart from the
+        # VM's own; then an apply, which copies .env and host.env out.
+        mark = f"VMTIER_RESTORE_MARK={uuid.uuid4().hex}"
+        stack.run(f"echo {mark} >> {lima.STACK}/.env\n"
+                  f"printf '[config]\\n' > {lima.SCRATCH}/empty-plan.toml\n"
+                  f"istota-stack apply {lima.SCRATCH}/empty-plan.toml --dry-run || true\n", timeout=600)
+        env_keys = ("COMPOSE_PROFILES", "NGINX_PUBLISH", "NGINX_PUBLISH_TLS")
+        env_before = {k: stack.out(f"sed -n 's/^{k}=//p' {lima.STACK}/.env | tail -1") for k in env_keys}
+        host_env_before = stack.out(f"cat {lima.STACK}/host.env")
         lima.stack_exec(stack, "python3 -m istota.maintenance.db_backup")
         snapshot = lima.stack_exec(
             stack, "ls -1d /mnt/shared/Backups/db/snapshots/*/ | tail -1").stdout.strip()
@@ -490,6 +501,9 @@ class TestARestoreFromTheFolder:
             f"install -d -m 0700 {saved}\n"
             f"cp -p {lima.STACK}/config/config.toml {lima.STACK}/config/admins {saved}/\n"
             f"rm -f {lima.STACK}/config/config.toml {lima.STACK}/config/admins\n"
+            f"cp -p {lima.STACK}/.env {lima.STACK}/host.env {saved}/\n"
+            # What a new VM's .env holds before setup: the tag lines alone.
+            f"grep -E '^ISTOTA_(PREVIOUS_)?TAG(_UNSIGNED)?=' {saved}/.env > {lima.STACK}/.env\n"
             "docker volume rm istota_istota_data\n",
             timeout=600)
         try:
@@ -500,6 +514,11 @@ class TestARestoreFromTheFolder:
             lima.wait_healthy(stack)
             assert lima.stack_exec(stack, "cat /data/.secret_key").stdout.strip() == key
             assert stack.out(f"cat {lima.STACK}/config/config.toml") == config_before
+            env_after = stack.out(f"cat {lima.STACK}/.env")
+            assert mark in env_after, "the restore did not put the copied .env back"
+            for k, value in env_before.items():
+                assert stack.out(f"sed -n 's/^{k}=//p' {lima.STACK}/.env | tail -1") == value, k
+            assert stack.out(f"cat {lima.STACK}/host.env") == host_env_before
             task_id = int(newest.split("|", 1)[0])
             assert _newest_task(stack, "/data/db/istota.db", task_id=task_id) == newest, (
                 "the snapshot's newest task is not in the restored database")
@@ -508,5 +527,7 @@ class TestARestoreFromTheFolder:
             stack.run(
                 f"[ -e {lima.STACK}/config/config.toml ] || "
                 f"cp -p {saved}/config.toml {saved}/admins {lima.STACK}/config/\n"
+                f"grep -q '^COMPOSE_PROFILES=' {lima.STACK}/.env || cp -p {saved}/.env {lima.STACK}/.env\n"
+                f"sed -i '/^VMTIER_RESTORE_MARK=/d' {lima.STACK}/.env\n"
                 "systemctl start istota-stack.service\n",
                 timeout=1800, check=False)
