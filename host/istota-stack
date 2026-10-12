@@ -656,6 +656,9 @@ install_setup_staging() {
     install_staged "${staging}/host.env" "$HOST_ENV"
     if [ -e "${staging}/rclone.conf" ] || [ -L "${staging}/rclone.conf" ]; then
         install_staged "${staging}/rclone.conf" "${STACK}/rclone.conf" 0600
+        # install_staged leaves root's inode, and provision.sh, which hands it
+        # to the mount, does not run when the bytes did not change (#720).
+        chown "$ISTOTA_UID:$ISTOTA_UID" "${STACK}/rclone.conf"
     fi
 }
 
@@ -672,10 +675,11 @@ prepare_setup() {
 # --vm-dir, so it gets a staging directory, handed to 10001 by the caller once
 # root has put in everything it copies; the files are moved into place as root
 # afterwards. The current .env and host.env go in, so the wizard keeps the
-# lines it does not own.
+# lines it does not own, and rclone.conf, so a re-run with the same answers
+# keeps it byte for byte rather than re-salting the password (#720).
 new_staging() {
     staging="$(mktemp -d "${STACK}/.setup.XXXXXX")"
-    for f in .env host.env; do
+    for f in .env host.env rclone.conf; do
         if [ -f "${STACK}/${f}" ]; then cp "${STACK}/${f}" "${staging}/${f}"; fi
     done
 }

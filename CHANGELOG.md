@@ -213,6 +213,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Running `istota-stack setup --force` again with the same Nextcloud answers no longer reprovisions the VM. Setup re-encoded the app password into `rclone.conf` on every run, so the file changed each time even though nothing about the mount had. It now keeps the existing file when it already holds the same address, user and password.
+
 - Repeated stack updates no longer leave unused build cache and untagged build images to fill the VM disk. Updates reclaim these artifacts before building and after successful or failed attempts, while keeping the current and previous deployment images for rollback.
 
 - User IDs now match regardless of case in Talk, Nextcloud sign-in, email plus-addresses and task submission, while keeping their original spelling. Creating an ID that differs only by case from an existing user is refused, so the two cannot share files on a case-insensitive filesystem.
