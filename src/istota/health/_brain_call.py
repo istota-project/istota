@@ -104,7 +104,7 @@ def call_health_brain(
     "an OCR call runs in a namespace" is a property of the call rather than of
     which branch it took. ``build_daemon_sandbox`` names the document in
     ``extra_ro_binds``: the ``{mount}/Users/{user_id}`` bind covers a panel's
-    upload, but the encounter and immunization routes hand over a temp copy and
+    upload, but an encounter or immunization import is a staged copy and
     ``python -m istota.health.ocr`` an arbitrary local file, and a wrap that
     hides the document is an outage rather than a boundary.
     """

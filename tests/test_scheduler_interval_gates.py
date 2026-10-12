@@ -59,6 +59,8 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("shared-blocks", "briefing_check_interval"),
     # Added after the baseline extraction: shared-block Run now (ISSUE-700).
     ("shared-block-request", None),
+    # Health document extraction, handed off by the web process (ISSUE-697).
+    ("health-extract-request", None),
     # Added after the baseline extraction: web-raised pushes (ISSUE-702).
     ("notification-handoff", None),
     ("briefing-triggers", "tasks_file_poll_interval"),
@@ -1179,6 +1181,7 @@ class TestTheOneShotPathTouchesNoDaemonState:
             "doctor",
             "doctor-request",
             "shared-block-request",
+            "health-extract-request",
             "notification-handoff",
             "host-pressure-sample",
             "backup-stale-alert",

@@ -6805,6 +6805,16 @@ const handlers: MockHandler[] = [
     ];
     let nextDocumentId = 3;
 
+    // The extract routes hand off to the daemon and return an id; the client
+    // polls /extract-requests/{id}. The mock answers at once.
+    const extractAnswers = new Map<string, unknown>();
+    let nextExtractId = 1;
+    const answerExtract = (result: unknown): { id: string } => {
+      const id = `mock-extract-${nextExtractId++}`;
+      extractAnswers.set(id, result);
+      return { id };
+    };
+
     // The extract routes keep their upload; the review screen passes the id
     // back to /bulk, which links it to every row the import creates.
     const storeImportDocument = (body: unknown): number => {
@@ -7842,7 +7852,7 @@ const handlers: MockHandler[] = [
       }
       const extractMatch = url.match(/^\/istota\/api\/health\/panels\/(\d+)\/extract$/);
       if (extractMatch && method === 'POST') {
-        return {
+        return answerExtract({
           biomarkers: [
             {
               name: 'WBC',
@@ -7882,7 +7892,12 @@ const handlers: MockHandler[] = [
           panel_type: 'CBC + Lipid Panel',
           warnings: [],
           raw_text: 'Mock OCR text — replace with real extraction output.',
-        };
+        });
+      }
+      const extractRequestMatch = url.match(/^\/istota\/api\/health\/extract-requests\/([^/]+)$/);
+      if (extractRequestMatch && method === 'GET') {
+        const result = extractAnswers.get(extractRequestMatch[1]);
+        return result === undefined ? { state: 'unknown' } : { state: 'answered', result };
       }
 
       if (url === '/istota/api/health/csv/import' && method === 'POST') {
@@ -8349,7 +8364,7 @@ const handlers: MockHandler[] = [
       if (url === '/istota/api/health/encounters/extract' && method === 'POST') {
         // Dev fixture: pretend the LLM extracted a single visit from the
         // uploaded paperwork. Real backend route runs OCR + brain call.
-        return {
+        return answerExtract({
           document_id: storeImportDocument(body),
           mode: 'vision',
           rows: [
@@ -8374,7 +8389,7 @@ const handlers: MockHandler[] = [
             },
           ],
           warnings: ['Mock extraction (dev mode) — the real LLM runs against the uploaded file.'],
-        };
+        });
       }
       if (url === '/istota/api/health/encounters/bulk' && method === 'POST') {
         if (!body || !Array.isArray(body.rows)) return { error: 'rows must be a list' };
@@ -8941,7 +8956,7 @@ const handlers: MockHandler[] = [
         // Dev fixture: mock the LLM extraction so the review UI is
         // reachable in offline development. The real backend route
         // runs OCR / vision against the uploaded file.
-        return {
+        return answerExtract({
           document_id: storeImportDocument(body),
           mode: 'vision',
           rows: [
@@ -8971,7 +8986,7 @@ const handlers: MockHandler[] = [
             },
           ],
           warnings: ['Mock extraction (dev mode) — the real LLM runs against the uploaded file.'],
-        };
+        });
       }
       if (url === '/istota/api/health/immunizations/bulk' && method === 'POST') {
         if (!body || !Array.isArray(body.rows)) return { error: 'rows must be a list' };
