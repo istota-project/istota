@@ -502,9 +502,24 @@ export function adminLogStreamUrl(
   return `${base}/api/admin/logs/${encodeURIComponent(sourceId)}/stream?${params.toString()}`;
 }
 
+/** The control a config field is edited with. `readonly` when it is not
+ *  edited here at all; `read_only_reason` says why. */
+export type ConfigEditorKind =
+  | 'bool'
+  | 'int'
+  | 'float'
+  | 'str'
+  | 'path'
+  | 'list'
+  | 'choice'
+  | 'multi_choice'
+  | 'secret'
+  | 'table'
+  | 'readonly';
+
 export interface AdminConfigField {
-  /** Dotted path — `web.oauth2_client_secret`. The address a future editor
-   *  would PUT to, which is why the payload is field-level not a TOML dump. */
+  /** Dotted display label — `web.oauth2_client_secret`. Never an address: a
+   *  segment can hold a dot, so the editor addresses a field by `path`. */
   key: string;
   name: string;
   value: unknown;
@@ -512,6 +527,24 @@ export interface AdminConfigField {
   /** A credential: `value` is always null. `set` says whether it is configured. */
   secret: boolean;
   set: boolean;
+  path: string[];
+  /** The dataclass default. Absent for a credential. */
+  default?: unknown;
+  /** Whether config.toml sets the key; when it does not, the default applies. */
+  in_file: boolean;
+  choices: string[] | null;
+  multi_choices: string[] | null;
+  doc: string | null;
+  /** How a credential is changed: a secrets file by its name, or an inline
+   *  value by its dotted label. Null for a plain field. */
+  credential: { kind: 'file' | 'inline'; name: string } | null;
+  /** The environment variable that sets the key over the file right now. */
+  env_override: string | null;
+  editor: ConfigEditorKind;
+  read_only_reason: string | null;
+  risky: boolean;
+  /** A `table` field's current file value as TOML, secrets as sentinels. */
+  toml?: string;
 }
 
 export interface AdminConfigSection {
@@ -520,10 +553,189 @@ export interface AdminConfigSection {
   fields: AdminConfigField[];
 }
 
+export interface ConfigProblem {
+  kind: 'discarded' | 'unknown' | 'retired' | 'warning' | 'error';
+  path: string[];
+  message: string;
+  blocking: boolean;
+  /** In the file before this change; the change can fix it, and must. */
+  pre_existing?: boolean;
+}
+
+export interface ConfigManagedEntry {
+  managed: boolean;
+  source: string | null;
+  at: string | null;
+}
+
+export type ConfigResource = 'config' | 'secrets' | 'admins';
+
+export interface ConfigSecretFile {
+  name: string;
+  label: string;
+  config_key: string | null;
+  set: boolean;
+  read_only_reason: string | null;
+  risky: boolean;
+}
+
 export interface AdminConfigView {
   config_path: string | null;
   editable: boolean;
   sections: AdminConfigSection[];
+  applier: { kind: 'host' | 'none'; available: boolean; reason: string };
+  managed: Record<ConfigResource, ConfigManagedEntry>;
+  /** sha256 of the config.toml bytes this view was built from. */
+  document_digest: string | null;
+  /** When the web process started. Moves when an applied change restarts it. */
+  started_at: string | null;
+  problems: ConfigProblem[];
+  has_comments: boolean;
+  /** One entry per deployment secrets file, never a value. */
+  secrets: ConfigSecretFile[];
+  admins: { users: string[]; read_only_reason: string | null };
+}
+
+export type ConfigOp =
+  | { op: 'set'; path: string[]; value: unknown }
+  | { op: 'unset'; path: string[] }
+  | { op: 'set_toml'; path: string[]; toml: string };
+
+/** What preview and submit take. `secrets` maps a credential name to its new
+ *  value, `""` clearing it; `admins` is the whole new list, or absent. */
+export interface ConfigChangeSet {
+  base_digest: string;
+  ops: ConfigOp[];
+  raw: string | null;
+  secrets: Record<string, string>;
+  admins?: string[];
+  confirm?: string[];
+  step_up?: StepUpProof;
+}
+
+export interface ConfigPreview {
+  diff: string[];
+  problems: { blocking: ConfigProblem[]; warnings: ConfigProblem[] };
+  errors: string[];
+  changed: boolean;
+  changed_sections: string[];
+  changed_keys: number;
+  /** Labels of the risky keys the change touches, `admins` for the list. */
+  risky_keys: string[];
+  secret_names: string[];
+  admins_changed: boolean;
+  /** Tasks running now, which the restart after applying interrupts. */
+  running_tasks: number;
+  base_digest: string;
+}
+
+export type ConfigRequestStatus =
+  'pending' | 'taken' | 'building' | 'applied' | 'unchanged' | 'refused' | 'failed' | 'cancelled';
+
+export interface ConfigRequest {
+  id: number;
+  status: ConfigRequestStatus;
+  admin_id: string;
+  base_digest: string;
+  document_toml: string;
+  admins: string[] | null;
+  admins_changed: boolean;
+  changed_sections: string[];
+  secret_names: string[];
+  diff_text: string;
+  output_text: string | null;
+  created_at: string;
+  taken_at: string | null;
+  finished_at: string | null;
+}
+
+/**
+ * A refused config editor request.
+ *
+ * `error` is the route's code (`config_changed`, `request_open`,
+ * `confirm_required`, …) and `extra` carries what comes with it: `digest`,
+ * `id`, `keys`, `resources`, `problems`, `errors`. A refused step-up code has
+ * no `error`; it has `field: 'code'` and a `reason`, which is what
+ * `StepUpDialog` reads. `status` 0 is a request that never reached the server.
+ */
+export class ConfigChangeError extends Error {
+  readonly status: number;
+  readonly error: string | null;
+  readonly field: string | null;
+  readonly reason: string | null;
+  readonly extra: Record<string, unknown>;
+  constructor(
+    message: string,
+    status: number,
+    error: string | null,
+    extra: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'ConfigChangeError';
+    this.status = status;
+    this.error = error;
+    this.extra = extra;
+    this.field = typeof extra.field === 'string' ? extra.field : null;
+    this.reason = typeof extra.reason === 'string' ? extra.reason : null;
+  }
+}
+
+/** Outside `apiFetch` because a refusal's code and its extras have to reach
+ *  the review dialog, and `apiFetch` keeps only the message. */
+async function configChangeWrite<T>(path: string, body: unknown): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/admin/config${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    noteTransport(false, 'unreachable');
+    throw new ConfigChangeError('Istota could not be reached. Nothing was sent.', 0, null);
+  }
+  noteTransport(true);
+  if (resp.status === 401) throw new AuthError();
+  let payload: unknown = null;
+  try {
+    payload = await resp.json();
+  } catch {
+    payload = null;
+  }
+  if (!resp.ok) {
+    const { error, detail, ...extra } = (payload ?? {}) as Record<string, unknown>;
+    const message =
+      typeof detail === 'string' && detail.trim() ? detail : `API error: ${resp.status}`;
+    throw new ConfigChangeError(
+      message,
+      resp.status,
+      typeof error === 'string' ? error : null,
+      extra,
+    );
+  }
+  return payload as T;
+}
+
+/** The redacted diff, problems and risky keys a change set would produce.
+ *  Stores nothing and needs no step-up. */
+export function previewConfigChange(changeSet: ConfigChangeSet): Promise<ConfigPreview> {
+  return configChangeWrite<ConfigPreview>('/preview', changeSet);
+}
+
+/** Store the change for the host applier. Needs `step_up`, and `confirm` for
+ *  every risky key the preview named. */
+export function submitConfigChange(changeSet: ConfigChangeSet): Promise<{ id: number }> {
+  return configChangeWrite<{ id: number }>('/requests', changeSet);
+}
+
+export function getConfigRequest(id: number): Promise<ConfigRequest> {
+  return apiFetch<ConfigRequest>(`/admin/config/requests/${id}`);
+}
+
+/** Withdraw a request the host has not taken yet. */
+export function cancelConfigRequest(id: number): Promise<{ id: number; status: 'cancelled' }> {
+  return configChangeWrite(`/requests/${id}/cancel`, {});
 }
 
 export interface AdminUser {
@@ -4914,7 +5126,12 @@ export function grantExistingCredentials(): Promise<{ ok: boolean; count: number
   return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });
 }
 export type StepUpAction =
-  'export' | 'recovery_reveal' | 'backup_recipient' | 'history_restore' | 'history_purge';
+  | 'export'
+  | 'recovery_reveal'
+  | 'backup_recipient'
+  | 'history_restore'
+  | 'history_purge'
+  | 'admin_config_change';
 export interface StepUpProof {
   request_id: string;
   code: string;

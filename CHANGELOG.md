@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Admins can change the configuration from Admin → Configuration.** Settings, deployment credentials and the admin list are edited in place, reviewed as a diff with any problems shown against their keys, confirmed with an emailed code (and a typed phrase for settings that affect sign-in or confinement), then applied by the host. The page follows the change through the restart and reloads into the new values; settings the host owns, or that a plan manages, stay read-only with the reason shown.
+
 - **The dedicated VM can apply configuration changes requested from the web.** `istota-stack config-apply`, run by the new `istota-config-apply.path` and a five-minute timer, takes each change the web config editor stored, checks it with dry runs before writing anything, builds the image when the new config needs Claude Code, then writes the credentials, admins and `config.toml` (keeping ten backups) and restarts the stack. `provision.sh` installs the units and the `requests/` directory, and the stack picks the applier up at the restart after that.
 
 - **`istota-stack` verbs that write now take one lock**, `/srv/app/istota/.stack.lock`, so an update, setup, apply, put-files, import or config change never runs alongside another. A second command waits up to ten minutes and then fails naming the command that holds the lock.

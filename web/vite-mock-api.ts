@@ -3760,7 +3760,9 @@ function mockAdminDoctor() {
   };
 }
 
-function mockAdminConfig() {
+/** The read-only payload the pane started with: sections of typed fields. The
+ *  editor's keys are added by `mockAdminConfig` below. */
+function mockAdminConfigBase() {
   const f = (
     key: string,
     value: unknown,
@@ -3830,9 +3832,9 @@ function mockAdminConfig() {
         key: 'nextcloud',
         label: '[nextcloud]',
         fields: [
-          f('url', 'https://cloud.example.com', 'str'),
-          f('username', 'istota', 'str'),
-          f('app_password', null, 'secret', { secret: true, set: true }),
+          f('nextcloud.url', 'https://cloud.example.com', 'str'),
+          f('nextcloud.username', 'istota', 'str'),
+          f('nextcloud.app_password', null, 'secret', { secret: true, set: true }),
         ],
       },
       {
@@ -3880,6 +3882,342 @@ function mockAdminConfig() {
       },
     ],
   };
+}
+
+/**
+ * The config editor's dev-server state.
+ *
+ * A submitted change walks `pending → taken → applied` across status polls, the
+ * way the host applier moves a real one, and the view's `started_at` moves a
+ * moment after `applied` so the page's wait for the restart has something to
+ * wait for. An applied change is written into `values`, so the page reloads
+ * into what it asked for.
+ */
+const mockConfigEditor = {
+  digest: 'mock-digest-1',
+  startedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+  restartAt: 0,
+  restartedAt: '',
+  admins: ['carol', 'alice'],
+  values: new Map<string, unknown>(),
+  inFile: new Set<string>(['["logging","level"]', '["web","port"]', '["brain","kind"]']),
+  secretsSet: new Map<string, boolean>(),
+  nextId: 1,
+  requests: new Map<number, { row: Record<string, any>; polls: number; ops: any[]; body: any }>(),
+};
+
+const MOCK_READ_ONLY: Record<string, string> = {
+  'web.port':
+    'Serves the web UI itself; a wrong value has no recovery from here. Change it on the host.',
+  'nextcloud.url':
+    'The Nextcloud mount depends on it. Change it with `istota-stack setup --force` on the host.',
+  'nextcloud.username':
+    'Written into rclone.conf as well. Change it with `istota-stack setup --force` on the host.',
+  db_path: 'The container layout `istota setup` writes. It is not changed from here.',
+  users: 'Per-user configuration lives on the Users pane.',
+  'web.session_secret_key': 'Rotating it ends every session mid-apply. It stays a host action.',
+};
+const MOCK_CHOICES: Record<string, string[]> = {
+  'logging.output': ['console', 'file', 'both'],
+  'logging.level': ['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+  'web.token_storage': ['encrypted', 'plaintext'],
+  'brain.kind': ['claude_code', 'native', 'tmux'],
+  'brain.fallback': ['', 'claude_code', 'native', 'tmux'],
+};
+const MOCK_MULTI: Record<string, string[]> = { 'web.auth': ['email', 'nextcloud'] };
+const MOCK_RISKY = new Set(['web.auth', 'brain.kind', 'brain.fallback']);
+const MOCK_FILE_CREDENTIALS: Record<string, string> = {
+  'sms.twilio.auth_token': 'istota_twilio_auth_token',
+  'sms.twilio.api_key_sid': 'istota_twilio_api_key_sid',
+  'sms.twilio.api_key_secret': 'istota_twilio_api_key_secret',
+  'sms.telnyx.api_key': 'istota_telnyx_api_key',
+  'nextcloud.app_password': 'istota_nextcloud_app_password',
+  'web.oauth2_client_secret': 'istota_web_oauth2_client_secret',
+  'web.session_secret_key': 'istota_web_session_secret_key',
+  'brain.native.api_key': 'istota_brain_native_api_key',
+};
+const MOCK_DOCS: Record<string, string> = {
+  'logging.level': 'Minimum level written to the log.',
+  'brain.native.base_url': 'An OpenAI-compatible endpoint the native brain talks to.',
+};
+
+function mockIso(ms = Date.now()): string {
+  return new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+function mockAdminConfig() {
+  const state = mockConfigEditor;
+  if (state.restartAt && Date.now() >= state.restartAt) {
+    state.startedAt = state.restartedAt;
+    state.restartAt = 0;
+  }
+  const base = mockAdminConfigBase();
+  const sections = base.sections.map((section) => ({
+    ...section,
+    fields: section.fields.map((field) => {
+      const path =
+        section.key === 'general' ? [field.name] : [...section.key.split('.'), field.name];
+      const key = path.join('.');
+      const pkey = JSON.stringify(path);
+      const credentialName = MOCK_FILE_CREDENTIALS[key];
+      const readOnly = MOCK_READ_ONLY[key] ?? null;
+      let value: unknown = state.values.has(pkey) ? state.values.get(pkey) : field.value;
+      if (key === 'web.auth' && !state.values.has(pkey)) value = ['email', 'nextcloud'];
+      const set = credentialName ? (state.secretsSet.get(credentialName) ?? field.set) : field.set;
+      let editor: string = field.type === 'count' ? 'readonly' : field.type;
+      if (credentialName || field.secret) editor = 'secret';
+      if (MOCK_CHOICES[key]) editor = 'choice';
+      if (MOCK_MULTI[key]) editor = 'multi_choice';
+      if (field.type === 'null') editor = 'str';
+      if (readOnly) editor = 'readonly';
+      return {
+        ...field,
+        key,
+        value: field.secret ? null : value,
+        type: key === 'web.auth' ? 'list' : field.type,
+        set,
+        path,
+        ...(field.secret ? {} : { default: field.value }),
+        in_file: state.inFile.has(pkey),
+        choices: MOCK_CHOICES[key] ?? null,
+        multi_choices: MOCK_MULTI[key] ?? null,
+        doc: MOCK_DOCS[key] ?? null,
+        credential: credentialName ? { kind: 'file', name: credentialName } : null,
+        env_override: null,
+        editor,
+        read_only_reason: readOnly,
+        risky: MOCK_RISKY.has(key),
+      };
+    }),
+  }));
+  return {
+    config_path: '/data/config/config.toml',
+    editable: true,
+    sections,
+    applier: { kind: 'host', available: true, reason: '' },
+    managed: {
+      config: { managed: false, source: 'setup', at: null },
+      secrets: { managed: false, source: 'setup', at: null },
+      admins: { managed: false, source: 'setup', at: null },
+    },
+    document_digest: state.digest,
+    started_at: state.startedAt,
+    problems: [],
+    has_comments: false,
+    secrets: [
+      {
+        name: 'anthropic_api_key',
+        label: 'Anthropic API key',
+        config_key: null,
+        set: state.secretsSet.get('anthropic_api_key') ?? false,
+        read_only_reason: null,
+        risky: false,
+      },
+      {
+        name: 'claude_code_oauth_token',
+        label: 'Claude Code OAuth token',
+        config_key: null,
+        set: state.secretsSet.get('claude_code_oauth_token') ?? true,
+        read_only_reason: null,
+        risky: false,
+      },
+    ],
+    admins: { users: [...state.admins], read_only_reason: null },
+  };
+}
+
+function mockConfigPreview(body: any) {
+  const state = mockConfigEditor;
+  if (!body || body.base_digest !== state.digest) {
+    return {
+      __status: 409,
+      error: 'config_changed',
+      detail: 'config.toml changed since the page loaded. Reload to see the current values.',
+      digest: state.digest,
+    };
+  }
+  const ops: any[] = Array.isArray(body.ops) ? body.ops : [];
+  const secrets: Record<string, string> = body.secrets ?? {};
+  const adminsChanged =
+    Array.isArray(body.admins) &&
+    [...body.admins].sort().join(',') !== [...state.admins].sort().join(',');
+  const diff: string[] = [];
+  const sections = new Set<string>();
+  const risky = new Set<string>();
+  for (const op of ops) {
+    const label = op.path.join('.');
+    sections.add(op.path.length > 1 ? op.path[0] : 'general');
+    if (MOCK_RISKY.has(label)) risky.add(label);
+    diff.push(
+      op.op === 'unset'
+        ? `-${label} (reset to the default)`
+        : `+${label} = ${JSON.stringify(op.value)}`,
+    );
+  }
+  if (adminsChanged) risky.add('admins');
+  const errors: string[] = [];
+  if (adminsChanged && !body.admins.includes('carol')) {
+    errors.push('the admin list must contain you');
+  }
+  return {
+    diff: diff.length ? ['--- config.toml', '+++ config.toml', ...diff] : [],
+    problems: { blocking: [], warnings: [] },
+    errors,
+    changed: ops.length > 0 || Object.keys(secrets).length > 0 || adminsChanged,
+    changed_sections: [...sections].sort(),
+    changed_keys: ops.length,
+    risky_keys: [...risky].sort(),
+    secret_names: Object.keys(secrets).sort(),
+    admins_changed: adminsChanged,
+    running_tasks: 1,
+    base_digest: state.digest,
+  };
+}
+
+function mockConfigSubmit(body: any) {
+  const state = mockConfigEditor;
+  const preview = mockConfigPreview(body) as any;
+  if (preview.__status) return preview;
+  if (preview.errors.length) {
+    return {
+      __status: 400,
+      error: 'invalid_change',
+      detail: 'The change has problems to fix first.',
+      errors: preview.errors,
+      problems: [],
+    };
+  }
+  for (const entry of state.requests.values()) {
+    if (['pending', 'taken', 'building'].includes(entry.row.status)) {
+      return {
+        __status: 409,
+        error: 'request_open',
+        detail: 'A change is already waiting for the host.',
+        id: entry.row.id,
+      };
+    }
+  }
+  const confirmed: string[] = Array.isArray(body.confirm) ? body.confirm : [];
+  const unconfirmed = preview.risky_keys.filter((k: string) => !confirmed.includes(k));
+  if (unconfirmed.length) {
+    return {
+      __status: 409,
+      error: 'confirm_required',
+      detail: 'Confirm the risky changes first.',
+      keys: unconfirmed,
+    };
+  }
+  // Any six digits is the code the mock "sent".
+  if (!/^[0-9]{6}$/.test(String(body.step_up?.code ?? ''))) {
+    return {
+      __status: 403,
+      detail: 'That code was not accepted. Try again.',
+      field: 'code',
+      reason: 'bad',
+    };
+  }
+  const id = state.nextId++;
+  state.requests.set(id, {
+    polls: 0,
+    ops: body.ops ?? [],
+    body,
+    row: {
+      id,
+      status: 'pending',
+      admin_id: 'carol',
+      base_digest: state.digest,
+      document_toml: '',
+      admins: preview.admins_changed ? body.admins : null,
+      admins_changed: preview.admins_changed,
+      changed_sections: preview.changed_sections,
+      secret_names: preview.secret_names,
+      diff_text: preview.diff.join('\n'),
+      output_text: null,
+      created_at: mockIso(),
+      taken_at: null,
+      finished_at: null,
+    },
+  });
+  return { __status: 202, id };
+}
+
+function mockConfigApply(entry: { ops: any[]; body: any }) {
+  const state = mockConfigEditor;
+  for (const op of entry.ops) {
+    const key = JSON.stringify(op.path);
+    if (op.op === 'unset') {
+      state.values.delete(key);
+      state.inFile.delete(key);
+    } else {
+      state.values.set(key, op.value);
+      state.inFile.add(key);
+    }
+  }
+  for (const [name, value] of Object.entries(entry.body.secrets ?? {})) {
+    state.secretsSet.set(name, value !== '');
+  }
+  if (Array.isArray(entry.body.admins)) state.admins = [...entry.body.admins];
+  state.digest = `mock-digest-${state.nextId}`;
+}
+
+function mockConfigRequest(id: number) {
+  const entry = mockConfigEditor.requests.get(id);
+  if (!entry) return { __status: 404, error: 'not_found', detail: 'No such request.' };
+  const row = entry.row;
+  if (['pending', 'taken'].includes(row.status)) {
+    entry.polls += 1;
+    if (row.status === 'pending' && entry.polls >= 2) {
+      row.status = 'taken';
+      row.taken_at = mockIso();
+    } else if (row.status === 'taken' && entry.polls >= 4) {
+      row.status = 'applied';
+      row.finished_at = mockIso();
+      row.output_text = 'Updated: config.toml';
+      mockConfigApply(entry);
+      // The restarted process answers a few seconds later, and its start
+      // time is after the change finished.
+      mockConfigEditor.restartAt = Date.now() + 3_000;
+      mockConfigEditor.restartedAt = mockIso(Date.now() + 3_000);
+    }
+  }
+  return { ...row };
+}
+
+function mockConfigCancel(id: number) {
+  const entry = mockConfigEditor.requests.get(id);
+  if (!entry) return { __status: 404, error: 'not_found', detail: 'No such request.' };
+  if (entry.row.status !== 'pending') {
+    return {
+      __status: 409,
+      error: 'not_pending',
+      detail: 'Only a request the host has not taken can be cancelled.',
+    };
+  }
+  entry.row.status = 'cancelled';
+  entry.row.finished_at = mockIso();
+  return { id, status: 'cancelled' };
+}
+
+function configEditorHandler({ url, method, body }: MockReq): unknown | undefined {
+  if (url === '/istota/api/settings/step-up' && method === 'POST') {
+    return {
+      request_id: 'mock-step-up',
+      email_hint: 's•••@example.com',
+      expires_at: mockIso(Date.now() + 600_000),
+    };
+  }
+  if (url === '/istota/api/admin/config' && method === 'GET') return mockAdminConfig();
+  if (url === '/istota/api/admin/config/preview' && method === 'POST') {
+    return mockConfigPreview(body);
+  }
+  if (url === '/istota/api/admin/config/requests' && method === 'POST') {
+    return mockConfigSubmit(body);
+  }
+  const status = url.match(/^\/istota\/api\/admin\/config\/requests\/(\d+)$/);
+  if (status && method === 'GET') return mockConfigRequest(Number(status[1]));
+  const cancel = url.match(/^\/istota\/api\/admin\/config\/requests\/(\d+)\/cancel$/);
+  if (cancel && method === 'POST') return mockConfigCancel(Number(cancel[1]));
+  return undefined;
 }
 
 /**
@@ -4670,7 +5008,7 @@ const handlers: MockHandler[] = [
 
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
-  ({ url }) => (url === '/istota/api/admin/config' ? mockAdminConfig() : undefined),
+  configEditorHandler,
   ({ url, method, body }) =>
     url === '/istota/api/admin/doctor/run' && method === 'POST'
       ? mockAdminDoctorRun(body)
