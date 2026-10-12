@@ -1382,42 +1382,249 @@ class TestDeferredGarminImport:
 # ---------------------------------------------------------------------------
 
 
+def _talk_task(**overrides):
+    from types import SimpleNamespace
+    fields = dict(
+        id=7, user_id="alice", conversation_token="room1", talk_message_id=4242,
+        source_type="talk",
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def _mount_config(tmp_path):
+    from istota.config import NextcloudConfig
+    mount = tmp_path / "mount"
+    mount.mkdir(exist_ok=True)
+    return Config(
+        workspace_path=mount, nextcloud_mount_path=mount,
+        nextcloud=NextcloudConfig(url="https://cloud.test", username="istota", app_password="pw"),
+    )
+
+
+def _local_config(tmp_path, **talk):
+    from istota.config import NextcloudConfig, TalkConfig
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return Config(
+        workspace_path=workspace,
+        temp_dir=tmp_path / "temp",
+        nextcloud=NextcloudConfig(
+            url="https://cloud.test", username="istota", app_password="pw",
+            dav_prefix="Shared Files",
+        ),
+        talk=TalkConfig(**talk),
+    )
+
+
+_MULTISTATUS = (
+    '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+    "<d:response><d:href>/remote.php/dav/files/istota/Talk/{name}</d:href>"
+    "<d:propstat><d:prop><d:getcontentlength>{size}</d:getcontentlength><d:resourcetype/>"
+    "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"
+)
+
+
+class _FakeNextcloud:
+    """Stands in for the network at `httpx.request`, the one call `dav_request` makes."""
+
+    def __init__(self, files, *, size_override=None, on_get=None):
+        self.files = files
+        self.size_override = size_override
+        self.on_get = on_get
+        self.calls = []
+
+    def __call__(self, method, url, **kwargs):
+        import httpx
+        from urllib.parse import unquote, urlparse
+        path = unquote(urlparse(url).path)
+        self.calls.append((method, path))
+        name = path.rsplit("/", 1)[-1]
+        request = httpx.Request(method, url)
+        if name not in self.files:
+            return httpx.Response(404, text="not found", request=request)
+        body = self.files[name]
+        if method == "PROPFIND":
+            size = self.size_override if self.size_override is not None else len(body)
+            return httpx.Response(
+                207, text=_MULTISTATUS.format(name=name, size=size), request=request,
+            )
+        if self.on_get is not None:
+            self.on_get()
+        return httpx.Response(200, content=body, request=request)
+
+
 class TestDownloadTalkAttachments:
     def test_mount_path_exists(self, tmp_path):
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        talk_dir = mount / "Talk"
-        talk_dir.mkdir()
-        (talk_dir / "photo.jpg").write_bytes(b"fake image")
+        config = _mount_config(tmp_path)
+        (config.workspace_path / "Talk").mkdir()
+        (config.workspace_path / "Talk" / "photo.jpg").write_bytes(b"fake image")
 
-        config = Config(workspace_path=mount)
-        result = download_talk_attachments(config, ["Talk/photo.jpg"])
-        assert len(result) == 1
-        assert result[0] == str(mount / "Talk" / "photo.jpg")
+        result = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+
+        assert result == [str(config.workspace_path / "Talk" / "photo.jpg")]
 
     def test_mount_path_not_exists(self, tmp_path):
-        mount = tmp_path / "mount"
-        mount.mkdir()
-        # No Talk/file.jpg on disk
-        config = Config(workspace_path=mount)
-        result = download_talk_attachments(config, ["Talk/missing.jpg"])
-        assert len(result) == 1
-        # Falls back to original path
-        assert result[0] == "Talk/missing.jpg"
+        config = _mount_config(tmp_path)
+        result = download_talk_attachments(config, _talk_task(), ["Talk/missing.jpg"])
+        assert result == ["Talk/missing.jpg"]
 
     def test_no_workspace_leaves_the_path_as_given(self, tmp_path):
         config = Config(workspace_path=None, temp_dir=tmp_path / "temp")
-        assert download_talk_attachments(config, ["Talk/doc.pdf"]) == ["Talk/doc.pdf"]
+        assert download_talk_attachments(config, _talk_task(), ["Talk/doc.pdf"]) == ["Talk/doc.pdf"]
 
     def test_non_talk_path_unchanged(self, tmp_path):
-        config = Config(workspace_path=tmp_path)
-        result = download_talk_attachments(config, ["/some/other/path.txt"])
+        config = _local_config(tmp_path)
+        result = download_talk_attachments(config, _talk_task(), ["/some/other/path.txt"])
         assert result == ["/some/other/path.txt"]
 
     def test_empty_list(self, tmp_path):
         config = Config(workspace_path=tmp_path)
-        result = download_talk_attachments(config, [])
-        assert result == []
+        assert download_talk_attachments(config, _talk_task(), []) == []
+
+    # -- a local workspace with Nextcloud configured --------------------------
+
+    def _media(self, config, token="room1", message_id=4242):
+        root = Path(os.path.realpath(config.workspace_path))
+        return root / "Channels" / token / "media" / str(message_id)
+
+    def test_a_local_workspace_fetches_into_the_rooms_media_folder(self, tmp_path):
+        config = _local_config(tmp_path)
+        fake = _FakeNextcloud({"photo.jpg": b"jpeg bytes"})
+
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            result = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+
+        dest = self._media(config) / "photo.jpg"
+        assert result == [str(dest)]
+        assert dest.read_bytes() == b"jpeg bytes"
+        # The bot's own Talk folder, outside `dav_prefix`.
+        assert fake.calls == [
+            ("PROPFIND", "/remote.php/dav/files/istota/Talk/photo.jpg"),
+            ("GET", "/remote.php/dav/files/istota/Talk/photo.jpg"),
+        ]
+
+    def test_the_fetched_file_is_openable_through_the_tasks_image_roots(self, tmp_path):
+        from istota.executor import image_bind_roots
+        from istota.sandbox import attachment_source
+        config = _local_config(tmp_path)
+        task = _talk_task()
+        with patch("istota.nextcloud._http.httpx.request",
+                   _FakeNextcloud({"photo.jpg": b"jpeg bytes"})):
+            [path] = download_talk_attachments(config, task, ["Talk/photo.jpg"])
+
+        roots = image_bind_roots(config, task, tmp_path / "temp" / "alice")
+        opened = attachment_source.open_attachment(path, roots=roots)
+        assert opened is not None
+        fd, _source = opened
+        try:
+            assert os.read(fd, 100) == b"jpeg bytes"
+        finally:
+            os.close(fd)
+
+    def test_a_file_over_the_cap_is_refused_on_its_stat(self, tmp_path):
+        config = _local_config(tmp_path, attachment_max_mb=1)
+        fake = _FakeNextcloud({"big.bin": b"x"}, size_override=2 * 1024 * 1024)
+
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            result = download_talk_attachments(config, _talk_task(), ["Talk/big.bin"])
+
+        assert result == ["Talk/big.bin"]
+        assert [method for method, _ in fake.calls] == ["PROPFIND"]
+        assert not (self._media(config) / "big.bin").exists()
+
+    def test_a_body_longer_than_the_cap_is_refused(self, tmp_path):
+        config = _local_config(tmp_path, attachment_max_mb=1)
+        fake = _FakeNextcloud({"big.bin": b"x" * (1024 * 1024 + 1)}, size_override=10)
+
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            result = download_talk_attachments(config, _talk_task(), ["Talk/big.bin"])
+
+        assert result == ["Talk/big.bin"]
+        assert [method for method, _ in fake.calls] == ["PROPFIND", "GET"]
+        assert not (self._media(config) / "big.bin").exists()
+
+    def test_a_404_is_a_skip(self, tmp_path):
+        config = _local_config(tmp_path)
+        with patch("istota.nextcloud._http.httpx.request", _FakeNextcloud({})):
+            result = download_talk_attachments(config, _talk_task(), ["Talk/gone.jpg"])
+        assert result == ["Talk/gone.jpg"]
+
+    def test_a_second_call_reuses_the_first_copy_without_asking_nextcloud(self, tmp_path):
+        config = _local_config(tmp_path)
+        with patch("istota.nextcloud._http.httpx.request",
+                   _FakeNextcloud({"photo.jpg": b"first"})):
+            first = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+
+        second_fake = _FakeNextcloud({"photo.jpg": b"second"})
+        with patch("istota.nextcloud._http.httpx.request", second_fake):
+            second = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+
+        assert second == first
+        assert second_fake.calls == []
+        assert sorted(p.name for p in self._media(config).iterdir()) == ["photo.jpg"]
+        assert Path(first[0]).read_bytes() == b"first"
+
+    def test_a_concurrent_attempt_that_wrote_first_wins(self, tmp_path):
+        config = _local_config(tmp_path)
+        dest = self._media(config) / "photo.jpg"
+
+        def other_attempt_lands():
+            dest.write_bytes(b"from the other attempt")
+
+        fake = _FakeNextcloud({"photo.jpg": b"ours"}, on_get=other_attempt_lands)
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            result = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+
+        assert result == [str(dest)]
+        assert dest.read_bytes() == b"from the other attempt"
+        assert sorted(p.name for p in dest.parent.iterdir()) == ["photo.jpg"]
+
+    def test_a_symlink_at_the_message_directory_is_refused(self, tmp_path):
+        config = _local_config(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        media = self._media(config).parent
+        media.mkdir(parents=True)
+        (media / "4242").symlink_to(elsewhere)
+
+        fake = _FakeNextcloud({"photo.jpg": b"jpeg"})
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            result = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+
+        assert result == ["Talk/photo.jpg"]
+        assert list(elsewhere.iterdir()) == []
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("missing", ["conversation_token", "talk_message_id"])
+    def test_no_token_or_message_id_means_no_download(self, tmp_path, missing):
+        config = _local_config(tmp_path)
+        fake = _FakeNextcloud({"photo.jpg": b"jpeg"})
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            result = download_talk_attachments(
+                config, _talk_task(**{missing: None}), ["Talk/photo.jpg"],
+            )
+        assert result == ["Talk/photo.jpg"]
+        assert fake.calls == []
+
+    def test_a_guests_file_lands_in_the_room_and_not_the_hosts_tree(self, tmp_path):
+        config = _local_config(tmp_path)
+        # A guest's turn runs as the room's host.
+        task = _talk_task(user_id="host", conversation_token="shared1", talk_message_id=9)
+        with patch("istota.nextcloud._http.httpx.request",
+                   _FakeNextcloud({"menu.pdf": b"%PDF"})):
+            [path] = download_talk_attachments(config, task, ["Talk/menu.pdf"])
+
+        assert Path(path) == self._media(config, "shared1", 9) / "menu.pdf"
+        assert not (config.workspace_path / "Users").exists()
+
+    def test_the_mount_is_read_from_disk_and_never_fetched(self, tmp_path):
+        config = _mount_config(tmp_path)
+        fake = _FakeNextcloud({"photo.jpg": b"jpeg"})
+        with patch("istota.nextcloud._http.httpx.request", fake):
+            result = download_talk_attachments(config, _talk_task(), ["Talk/photo.jpg"])
+        assert result == ["Talk/photo.jpg"]
+        assert fake.calls == []
 
 
 # ---------------------------------------------------------------------------

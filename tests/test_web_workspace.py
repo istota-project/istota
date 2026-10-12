@@ -159,6 +159,7 @@ def test_workspace_upload_config_and_nginx_cap(tmp_path):
 async def test_nextcloud_dropped_mount(client, config, monkeypatch, caplog, error, operation):
     import os
     config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     root = config.workspace_root("alice")
     real_open = os.open
 
@@ -185,6 +186,7 @@ async def test_nextcloud_share_markers_and_recipient_urls(client, config):
     from tests.test_nextcloud_http import _ocs_response
 
     config.nextcloud.url = "https://cloud.example.com/"
+    config.nextcloud_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     config.nextcloud.dav_prefix = "Shared Files"
@@ -221,6 +223,7 @@ async def test_nextcloud_share_failure_is_a_note(client, config, caplog):
     from unittest.mock import patch
     from httpx import ReadTimeout
     config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     with patch("istota.nextcloud._http.httpx.get", side_effect=ReadTimeout("sensitive-name")) as get:
@@ -239,6 +242,17 @@ async def test_local_listing_does_not_fetch_share_state(client):
         response = await client.get("/workspace/list", params={"place": "home"})
     assert response.status_code == 200
     shares.assert_not_called()
+
+
+async def test_local_workspace_with_nextcloud_has_no_share_state(client, config):
+    from unittest.mock import patch
+    config.nextcloud.url = "https://cloud.example.com"
+    with patch("istota.nextcloud.shares.list_shares") as shares:
+        response = await client.get("/workspace/list", params={"place": "home", "path": "notes"})
+    assert response.status_code == 200
+    shares.assert_not_called()
+    assert "share" not in response.json()["entries"][0]
+    assert "nextcloud_url" not in response.json()["entries"][0]
 
 
 async def test_drive_not_granted(client, config):
@@ -314,6 +328,218 @@ async def test_linked_file_place_lists_only_its_authorized_file(client, config):
     for path in ("report.txt", "../private.txt", "child"):
         response = await client.get("/workspace/list", params={"place": place["id"], "path": path})
         assert response.status_code == 404
+
+
+# --- config files (local-workspace stage 7) ---------------------------------
+
+def _config_dir(config, user="alice"):
+    return config.workspace_path / "Users" / user / config.bot_dir_name / "config"
+
+
+def _rev(content=""):
+    from istota.workspace import text_files
+    return text_files.revision(content)
+
+
+async def test_config_files_list_offers_the_four_files_and_the_users_skills(client, config):
+    _config_dir(config).mkdir(parents=True)
+    (_config_dir(config) / "USER.md").write_text("I prefer short answers.\n")
+    response = await client.get("/workspace/config-files")
+    assert response.status_code == 200
+    rows = {row["name"]: row for row in response.json()["files"]}
+    assert list(rows)[:4] == ["USER.md", "CRON.md", "TASKS.md", "HEARTBEAT.md"]
+    assert rows["USER.md"] == {"name": "USER.md", "kind": "config", "exists": True, "size": 24, "editable": True}
+    assert rows["CRON.md"]["exists"] is False and rows["CRON.md"]["size"] is None
+    assert rows["skills/notes"]["kind"] == "skill"
+    assert rows["skills/notes"]["exists"] is False
+    assert "skills/sensitive_actions" not in rows
+    assert "skills/untrusted_input" not in rows
+
+
+async def test_config_files_list_hides_admin_skills_from_a_member(client, config):
+    config.admin_users = {"root"}
+    names = {row["name"] for row in (await client.get("/workspace/config-files")).json()["files"]}
+    assert "skills/notes" in names
+    assert "skills/tasks" not in names
+
+
+async def test_config_file_get_missing_and_present(client, config):
+    response = await client.get("/workspace/config-files/CRON.md")
+    assert response.status_code == 200
+    assert response.json() == {"content": "", "revision": _rev(), "exists": False}
+    _config_dir(config).mkdir(parents=True)
+    (_config_dir(config) / "TASKS.md").write_text("- [ ] call the dentist\n")
+    response = await client.get("/workspace/config-files/TASKS.md")
+    assert response.json()["content"] == "- [ ] call the dentist\n"
+    assert response.json()["revision"] == _rev("- [ ] call the dentist\n")
+
+
+async def test_config_file_save_and_conflict(client, config):
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "Be brief.\n", "revision": _rev()})
+    assert response.status_code == 200
+    assert response.json() == {"revision": _rev("Be brief.\n")}
+    assert (_config_dir(config) / "USER.md").read_text() == "Be brief.\n"
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "stale\n", "revision": _rev()})
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    assert (_config_dir(config) / "USER.md").read_text() == "Be brief.\n"
+
+
+async def test_cron_save_reports_next_sync_and_refuses_what_the_loader_refuses(client, config):
+    good = '```toml\n[[jobs]]\nname = "a"\ncron = "0 9 * * *"\nprompt = "hi"\n```\n'
+    response = await client.put("/workspace/config-files/CRON.md", json={"content": good, "revision": _rev()})
+    assert response.status_code == 200
+    assert response.json() == {"revision": _rev(good), "applies": "next_sync"}
+    bad = '```toml\n[[jobs]]\nname = "a\n```\n'
+    response = await client.put("/workspace/config-files/CRON.md", json={"content": bad, "revision": _rev(good)})
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid"
+    assert response.json()["errors"][0].startswith("TOML error:")
+    assert (_config_dir(config) / "CRON.md").read_text() == good
+
+
+async def test_cron_command_job_is_refused_for_a_member(client, config):
+    config.admin_users = {"root"}
+    content = '```toml\n[[jobs]]\nname = "sh"\ncron = "0 9 * * *"\ncommand = "echo hi"\n```\n'
+    response = await client.put("/workspace/config-files/CRON.md", json={"content": content, "revision": _rev()})
+    assert response.status_code == 422
+    assert any("admin" in error for error in response.json()["errors"])
+    assert not (_config_dir(config) / "CRON.md").exists()
+
+
+async def test_heartbeat_save_refuses_what_the_loader_cannot_read(client, config):
+    for content in ('```toml\n[[checks]]\nname = "x\n```\n', '```toml\nchecks = "x"\n```\n'):
+        response = await client.put("/workspace/config-files/HEARTBEAT.md", json={"content": content, "revision": _rev()})
+        assert response.status_code == 422
+        assert response.json()["errors"]
+    assert not (_config_dir(config) / "HEARTBEAT.md").exists()
+    good = '```toml\n[[checks]]\nname = "disk"\ntype = "shell-command"\ncommand = "true"\n```\n'
+    response = await client.put("/workspace/config-files/HEARTBEAT.md", json={"content": good, "revision": _rev()})
+    assert response.status_code == 200
+
+
+async def test_skill_overlay_save_cap_and_denylist(client, config):
+    from istota.skills._loader import OVERLAY_MAX_BYTES
+    response = await client.put("/workspace/config-files/skills/notes", json={"content": "Keep notes terse.\n", "revision": _rev()})
+    assert response.status_code == 200
+    assert (_config_dir(config) / "skills" / "notes.md").read_text() == "Keep notes terse.\n"
+    rows = {row["name"]: row for row in (await client.get("/workspace/config-files")).json()["files"]}
+    assert rows["skills/notes"]["exists"] is True
+    assert (await client.get("/workspace/config-files/skills/notes")).json()["content"] == "Keep notes terse.\n"
+    big = "x" * (OVERLAY_MAX_BYTES + 1)
+    response = await client.put("/workspace/config-files/skills/notes", json={"content": big, "revision": _rev("Keep notes terse.\n")})
+    assert response.status_code == 413
+    assert response.json()["max_bytes"] == OVERLAY_MAX_BYTES
+    for name in ("skills/sensitive_actions", "skills/untrusted_input", "skills/no_such_skill"):
+        assert (await client.get(f"/workspace/config-files/{name}")).status_code == 404
+        response = await client.put(f"/workspace/config-files/{name}", json={"content": "x", "revision": _rev()})
+        assert response.status_code == 404
+    assert not (_config_dir(config) / "skills" / "sensitive_actions.md").exists()
+
+
+async def test_skill_overlay_for_a_skill_the_member_cannot_use_is_404(client, config):
+    config.admin_users = {"root"}
+    assert (await client.get("/workspace/config-files/skills/tasks")).status_code == 404
+
+
+@pytest.mark.parametrize("name", [
+    # A literal `..` segment is normalized away by the client before it is
+    # sent, so the server-side cases are the encoded ones.
+    "user.md", "BRIEFINGS.md", "skills", "skills/", "skills/notes.md", "../USER.md",
+    "%2e%2e/USER.md", "skills/%2e%2e%2fUSER.md", "skills/%2e%2e/USER.md",
+    "Users/bob/istota/config/USER.md", "config/USER.md",
+])
+async def test_config_file_names_are_an_allowlist(client, config, name):
+    assert (await client.get(f"/workspace/config-files/{name}")).status_code == 404
+    response = await client.put(f"/workspace/config-files/{name}", json={"content": "x", "revision": _rev()})
+    assert response.status_code == 404
+    assert not (config.workspace_path / "Users/alice").joinpath(config.bot_dir_name).exists()
+
+
+async def test_another_users_config_files_are_unreachable(client, config):
+    _config_dir(config, "bob").mkdir(parents=True)
+    (_config_dir(config, "bob") / "USER.md").write_text("bob's private notes\n")
+    response = await client.get("/workspace/config-files/USER.md")
+    assert response.json()["content"] == ""
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "alice\n", "revision": _rev()})
+    assert response.status_code == 200
+    assert (_config_dir(config, "bob") / "USER.md").read_text() == "bob's private notes\n"
+    assert (_config_dir(config) / "USER.md").read_text() == "alice\n"
+
+
+async def test_config_file_locked_is_423(client, config, monkeypatch):
+    from istota.memory.curation.file_lock import MemoryMdLocked
+    from istota.workspace import text_files
+
+    def held(*args, **kwargs):
+        raise MemoryMdLocked("held")
+
+    monkeypatch.setattr(text_files._md_lock, "memory_md_lock", held)
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": _rev()})
+    assert response.status_code == 423
+    assert response.json()["code"] == "locked"
+    assert not (_config_dir(config) / "USER.md").exists()
+
+
+async def test_config_file_save_locks_the_path_the_daemon_locks(client, config, monkeypatch):
+    from contextlib import contextmanager
+    from istota import storage
+    from istota.workspace import text_files
+    seen = []
+    real = text_files._md_lock.memory_md_lock
+
+    @contextmanager
+    def spy(path, **kwargs):
+        seen.append((path, kwargs["lock_dir"]))
+        with real(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(text_files._md_lock, "memory_md_lock", spy)
+    _config_dir(config).mkdir(parents=True)
+    assert (await client.put("/workspace/config-files/CRON.md", json={"content": "", "revision": _rev()})).status_code == 200
+    assert seen == [(storage.resolve_user_config_dir(config, "alice") / "CRON.md", text_files.lock_dir(config, "alice"))]
+
+
+async def test_config_file_symlink_is_refused_and_not_followed(client, config, tmp_path):
+    target = tmp_path / "elsewhere.md"
+    target.write_text("outside\n")
+    _config_dir(config).mkdir(parents=True)
+    (_config_dir(config) / "USER.md").symlink_to(target)
+    rows = {row["name"]: row for row in (await client.get("/workspace/config-files")).json()["files"]}
+    assert rows["USER.md"]["editable"] is False
+    assert (await client.get("/workspace/config-files/USER.md")).status_code == 500
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": _rev()})
+    assert response.status_code == 500
+    assert response.json()["code"] == "failed"
+    assert target.read_text() == "outside\n"
+
+
+@pytest.mark.parametrize("body", [None, [], {"content": "x"}, {"revision": "r"}, {"content": 1, "revision": "r"}])
+async def test_config_file_save_rejects_a_malformed_body(client, body):
+    response = await client.put("/workspace/config-files/USER.md", json=body)
+    assert response.status_code == 400
+
+
+async def test_config_files_without_a_workspace(client, config):
+    config.workspace_path = None
+    assert (await client.get("/workspace/config-files")).status_code == 503
+    assert (await client.get("/workspace/config-files/USER.md")).status_code == 503
+    response = await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": "r"})
+    assert response.status_code == 503
+
+
+async def test_config_file_save_requires_origin_and_auth(client, app):
+    from fastapi import HTTPException
+    from istota.webui.router_stubs import verify_origin
+
+    def refuse():
+        raise HTTPException(403, "cross-origin request")
+    app.dependency_overrides[verify_origin] = refuse
+    assert (await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": "r"})).status_code == 403
+    app.dependency_overrides.clear()
+    assert (await client.get("/workspace/config-files")).status_code == 401
+    assert (await client.get("/workspace/config-files/USER.md")).status_code == 401
+    assert (await client.put("/workspace/config-files/USER.md", json={"content": "x", "revision": "r"})).status_code == 401
 
 
 async def test_delete_through_workspace_route(client, config):

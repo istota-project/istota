@@ -578,6 +578,123 @@ class TestFilesCli:
         assert mock_upload.call_args.kwargs["supports_chunking"] is False
 
 
+class TestTheFilesAndPathShareVerbsOnALocalWorkspace:
+    """On a local workspace the same path in the bot's Nextcloud is not the
+    workspace file, so every verb naming one refuses before any request."""
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["files", "stat", "/Users/alice/x.pdf"],
+            ["files", "list", "/Users/alice"],
+            ["files", "search", "--scope", "/Users/alice"],
+            ["files", "versions", "/Users/alice/x"],
+            ["files", "restore-version", "/Users/alice/x", "1"],
+            ["files", "favorite", "/Users/alice/x"],
+            ["files", "upload", "/tmp/x", "/Users/alice/x"],
+            ["files", "download", "/Users/alice/x", "/tmp/x"],
+            ["share", "create", "--path", "/Users/alice/x", "--type", "link"],
+            ["share", "link", "/Users/alice/x"],
+        ],
+    )
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_refused_with_the_way_to_hand_a_file_over(
+        self, mock_req, argv, capsys, monkeypatch, workspace,
+    ):
+        monkeypatch.setenv("NC_STORAGE_IS_NEXTCLOUD", "False")
+        out, code = _run(capsys, argv)
+        assert code == 1, out
+        assert out["reason"] in ("not_in_nextcloud", "host_path_refused")
+        if out["reason"] == "not_in_nextcloud":
+            assert "talk share-file" in out["error"]
+        mock_req.assert_not_called()
+
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_the_same_verb_under_the_mount_reaches_nextcloud(self, mock_req, capsys, monkeypatch):
+        monkeypatch.setenv("NC_STORAGE_IS_NEXTCLOUD", "True")
+        mock_req.return_value = _dav_response(PROPFIND_FILE)
+        out, code = _run(capsys, ["files", "stat", "/Users/alice/report.pdf"])
+        assert code == 0, out
+        assert mock_req.called
+
+
+class TestThePrefixedFlag:
+    """`prefixed=False` addresses the bot account's root, where Talk keeps files."""
+
+    @pytest.fixture
+    def prefixed_config(self):
+        return Config(
+            nextcloud=NextcloudConfig(
+                url="https://cloud.example.com", username="istota", app_password="pw",
+                dav_prefix="Shared Files",
+            )
+        )
+
+    @staticmethod
+    def _path(mock_req):
+        from urllib.parse import unquote, urlparse
+        return unquote(urlparse(mock_req.call_args[0][1]).path)
+
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_stat(self, mock_req, prefixed_config):
+        mock_req.return_value = _dav_response(PROPFIND_FILE)
+        dav.stat(prefixed_config, "/Users/alice/report.pdf")
+        assert self._path(mock_req) == "/remote.php/dav/files/istota/Shared Files/Users/alice/report.pdf"
+        dav.stat(prefixed_config, "Talk/photo.jpg", prefixed=False)
+        assert self._path(mock_req) == "/remote.php/dav/files/istota/Talk/photo.jpg"
+
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_download(self, mock_req, prefixed_config, tmp_path):
+        mock_req.return_value = _dav_response(status=200, content=b"x")
+        dav.download(prefixed_config, "Talk/photo.jpg", tmp_path / "out.jpg", prefixed=False)
+        assert self._path(mock_req) == "/remote.php/dav/files/istota/Talk/photo.jpg"
+
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_upload_without_overwrite_asks_for_a_new_name(self, mock_req, prefixed_config, tmp_path):
+        local = tmp_path / "a.txt"
+        local.write_bytes(b"x")
+        mock_req.return_value = _dav_response(status=201)
+        dav.upload(prefixed_config, local, "/Talk/t/a.txt", prefixed=False, overwrite=False)
+        assert self._path(mock_req) == "/remote.php/dav/files/istota/Talk/t/a.txt"
+        assert mock_req.call_args.kwargs["headers"]["If-None-Match"] == "*"
+
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_an_upload_onto_an_existing_name_raises_412(self, mock_req, prefixed_config, tmp_path):
+        local = tmp_path / "a.txt"
+        local.write_bytes(b"x")
+        mock_req.return_value = _dav_response(status=412)
+        with pytest.raises(OcsError) as exc:
+            dav.upload(prefixed_config, local, "/Talk/t/a.txt", prefixed=False, overwrite=False)
+        assert exc.value.http_status == 412
+
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_a_chunked_upload_without_overwrite_moves_with_overwrite_f(
+        self, mock_req, prefixed_config, tmp_path,
+    ):
+        local = tmp_path / "a.bin"
+        local.write_bytes(b"x")
+        mock_req.return_value = _dav_response(status=201)
+        dav.upload(
+            prefixed_config, local, "/Talk/t/a.bin", chunked=True, prefixed=False, overwrite=False,
+        )
+        move = [c for c in mock_req.call_args_list if c[0][0] == "MOVE"][0]
+        assert move.kwargs["headers"]["Overwrite"] == "F"
+        assert move.kwargs["headers"]["Destination"].endswith("/files/istota/Talk/t/a.bin")
+
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_ensure_dirs_makes_each_level_and_tolerates_existing(self, mock_req, prefixed_config):
+        mock_req.return_value = _dav_response(status=405)
+        dav.ensure_dirs(prefixed_config, "Talk/t/2026-10-12", prefixed=False)
+        from urllib.parse import unquote, urlparse
+        assert [
+            (c[0][0], unquote(urlparse(c[0][1]).path)) for c in mock_req.call_args_list
+        ] == [
+            ("MKCOL", "/remote.php/dav/files/istota/Talk"),
+            ("MKCOL", "/remote.php/dav/files/istota/Talk/t"),
+            ("MKCOL", "/remote.php/dav/files/istota/Talk/t/2026-10-12"),
+        ]
+
+
 class TestFilesPathScoping:
     @pytest.fixture(autouse=True)
     def _non_admin(self):

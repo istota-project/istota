@@ -1748,6 +1748,198 @@ class TestWorkspaceXattr:
         assert calls == []
 
 
+class TestWorkspaceMode:
+    """`runtime.workspace_mode`: the config's storage mode against the mount
+    the workspace is actually on, read from a fake `mountinfo`."""
+
+    URL = "https://cloud.example.test"
+
+    @staticmethod
+    def _mounts(monkeypatch, tmp_path, workspace, fstype):
+        proc = tmp_path / "proc"
+        (proc / "self").mkdir(parents=True)
+        lines = ["21 1 0:20 / / rw,relatime - overlay overlay rw"]
+        if fstype is not None:
+            lines.append(f"33 21 0:31 / {workspace} rw,nosuid - {fstype} remote: rw")
+        (proc / "self" / "mountinfo").write_text("\n".join(lines) + "\n")
+        monkeypatch.setattr(doctor, "_MOUNTINFO_PROC_ROOT", proc)
+
+    def _run(self, make_config, monkeypatch, tmp_path, *, url, mount_key, fstype):
+        from istota.config import NextcloudConfig
+
+        workspace = tmp_path / "mount"
+        config = make_config(
+            nextcloud=NextcloudConfig(url=url),
+            nextcloud_mount_path=workspace if mount_key else None,
+        )
+        self._mounts(monkeypatch, tmp_path, workspace, fstype)
+        monkeypatch.delenv("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE", raising=False)
+        return config
+
+    def test_the_rclone_mount_without_the_key_fails(self, make_config, monkeypatch, tmp_path):
+        config = self._run(make_config, monkeypatch, tmp_path, url=self.URL, mount_key=False, fstype="fuse.rclone")
+        r = run_checks(config, only=("runtime.workspace_mode",))[0]
+        assert r.status == FAIL
+        assert "nextcloud_mount_path" in r.remedy
+
+    def test_the_mount_with_the_key_is_ok(self, make_config, monkeypatch, tmp_path):
+        config = self._run(make_config, monkeypatch, tmp_path, url=self.URL, mount_key=True, fstype="fuse.rclone")
+        assert run_checks(config, only=("runtime.workspace_mode",))[0].status == OK
+
+    @pytest.mark.parametrize("url", ["", URL], ids=["no-url", "url"])
+    def test_a_local_workspace_is_ok(self, make_config, monkeypatch, tmp_path, url):
+        config = self._run(make_config, monkeypatch, tmp_path, url=url, mount_key=False, fstype=None)
+        assert run_checks(config, only=("runtime.workspace_mode",))[0].status == OK
+
+    @pytest.mark.parametrize("fstype", ["tmpfs", None], ids=["tmpfs", "no-mount"])
+    def test_the_key_on_something_else_warns(self, make_config, monkeypatch, tmp_path, fstype):
+        config = self._run(make_config, monkeypatch, tmp_path, url=self.URL, mount_key=True, fstype=fstype)
+        r = run_checks(config, only=("runtime.workspace_mode",))[0]
+        assert r.status == WARN
+        assert r.remedy
+
+    def test_the_testbed_concession_is_ok_on_a_mount_of_its_own(self, make_config, monkeypatch, tmp_path):
+        config = self._run(make_config, monkeypatch, tmp_path, url=self.URL, mount_key=True, fstype="ext4")
+        monkeypatch.setenv("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE", "1")
+        assert run_checks(config, only=("runtime.workspace_mode",))[0].status == OK
+
+    def test_the_testbed_concession_still_needs_a_mount_point(self, make_config, monkeypatch, tmp_path):
+        config = self._run(make_config, monkeypatch, tmp_path, url=self.URL, mount_key=True, fstype=None)
+        monkeypatch.setenv("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE", "1")
+        assert run_checks(config, only=("runtime.workspace_mode",))[0].status == WARN
+
+    def test_the_key_without_a_url_warns(self, make_config, monkeypatch, tmp_path):
+        config = self._run(make_config, monkeypatch, tmp_path, url="", mount_key=True, fstype="fuse.rclone")
+        r = run_checks(config, only=("runtime.workspace_mode",))[0]
+        assert r.status == WARN
+        assert "url" in r.detail
+
+    def test_skips_without_mountinfo(self, make_config, monkeypatch, tmp_path):
+        config = make_config()
+        monkeypatch.setattr(doctor, "_MOUNTINFO_PROC_ROOT", tmp_path / "no-proc")
+        assert run_checks(config, only=("runtime.workspace_mode",))[0].status == SKIP
+
+    def test_skips_without_a_workspace(self, make_config):
+        config = make_config(workspace_path=None, nextcloud_mount_path=None)
+        assert run_checks(config, only=("runtime.workspace_mode",))[0].status == SKIP
+
+
+class TestBackupsOffVolume:
+    """`backups.off_volume`: a same-volume snapshot destination is said, never
+    refused (`db_backup._destination_is_durable` keeps running backups)."""
+
+    NAME = "backups.off_volume"
+
+    @staticmethod
+    def _devices(monkeypatch, table):
+        """`_device_of` answered from `{path prefix: device}`, longest first."""
+        def fake(path):
+            p = os.path.abspath(path)
+            for prefix in sorted(table, key=len, reverse=True):
+                if p == prefix or p.startswith(prefix + os.sep):
+                    return table[prefix]
+            return 1
+        monkeypatch.setattr(doctor, "_device_of", fake)
+
+    def _local(self, make_config, tmp_path, **overrides):
+        return make_config(nextcloud_mount_path=None, **overrides)
+
+    def test_a_local_workspace_on_one_volume_warns(self, make_config, tmp_path):
+        # Real devices: the database, the workspace and the default
+        # destination under it all sit in tmp_path, as on `istota_data`.
+        config = self._local(make_config, tmp_path)
+        r = run_checks(config, only=(self.NAME,))[0]
+        assert r.status == WARN
+        assert "the database" in r.detail and "the workspace" in r.detail
+        assert "istota_data" in r.remedy and "db_backup_dir" in r.remedy
+
+    def test_a_destination_on_another_disk_is_ok(self, make_config, monkeypatch, tmp_path):
+        config = self._local(make_config, tmp_path)
+        config.scheduler.db_backup_dir = "/mnt/backup-disk/snapshots"
+        self._devices(monkeypatch, {"/mnt/backup-disk": 7, str(tmp_path): 2})
+        assert run_checks(config, only=(self.NAME,))[0].status == OK
+
+    def test_sharing_only_the_database_volume_warns(self, make_config, monkeypatch, tmp_path):
+        config = self._local(make_config, tmp_path)
+        self._devices(monkeypatch, {str(tmp_path): 2, str(tmp_path / "mount"): 3})
+        config.scheduler.db_backup_dir = str(tmp_path / "snapshots")
+        r = run_checks(config, only=(self.NAME,))[0]
+        assert r.status == WARN
+        assert "the database" in r.detail and "the workspace" not in r.detail
+
+    def test_under_the_mount_the_workspace_volume_is_the_target(self, make_config, monkeypatch, tmp_path):
+        from istota.config import NextcloudConfig
+
+        config = make_config(nextcloud=NextcloudConfig(url="https://cloud.example.test"))
+        assert config.storage_is_nextcloud
+        self._devices(monkeypatch, {str(tmp_path): 2, str(tmp_path / "mount"): 9})
+        assert run_checks(config, only=(self.NAME,))[0].status == OK
+
+    def test_skips_when_backups_are_disabled(self, make_config, tmp_path):
+        config = self._local(make_config, tmp_path)
+        config.scheduler.db_backup_enabled = False
+        assert run_checks(config, only=(self.NAME,))[0].status == SKIP
+
+    def test_skips_without_a_destination(self, make_config):
+        config = make_config(workspace_path=None, nextcloud_mount_path=None)
+        assert run_checks(config, only=(self.NAME,))[0].status == SKIP
+
+    def test_the_destination_need_not_exist_yet(self, tmp_path):
+        assert doctor._device_of(tmp_path / "a" / "b") == os.stat(tmp_path).st_dev
+
+
+class TestWorkspaceDisk:
+    """`runtime.workspace_disk`: free space on the local workspace's volume."""
+
+    NAME = "runtime.workspace_disk"
+    GIB = 1024**3
+
+    def _statvfs(self, monkeypatch, *, total_gib, free_gib):
+        class _St:
+            f_frsize = 4096
+            f_blocks = int(total_gib * self.GIB / 4096)
+            f_bavail = int(free_gib * self.GIB / 4096)
+
+        monkeypatch.setattr(doctor.os, "statvfs", lambda path: _St())
+
+    def _run(self, make_config, monkeypatch, **space):
+        self._statvfs(monkeypatch, **space)
+        config = make_config(nextcloud_mount_path=None)
+        return run_checks(config, only=(self.NAME,))[0]
+
+    def test_plenty_of_room_is_ok(self, make_config, monkeypatch):
+        r = self._run(make_config, monkeypatch, total_gib=100, free_gib=50)
+        assert r.status == OK
+        assert "50.0 GiB free" in r.detail
+
+    def test_under_ten_percent_warns(self, make_config, monkeypatch):
+        r = self._run(make_config, monkeypatch, total_gib=100, free_gib=9)
+        assert r.status == WARN
+        assert r.remedy
+
+    def test_under_two_gib_warns_on_a_small_volume(self, make_config, monkeypatch):
+        assert self._run(make_config, monkeypatch, total_gib=10, free_gib=1.5).status == WARN
+
+    def test_under_two_percent_fails(self, make_config, monkeypatch):
+        assert self._run(make_config, monkeypatch, total_gib=1000, free_gib=15).status == FAIL
+
+    def test_skips_under_the_mount(self, make_config, monkeypatch):
+        from istota.config import NextcloudConfig
+
+        self._statvfs(monkeypatch, total_gib=100, free_gib=0.1)
+        config = make_config(nextcloud=NextcloudConfig(url="https://cloud.example.test"))
+        assert run_checks(config, only=(self.NAME,))[0].status == SKIP
+
+    def test_skips_without_a_workspace(self, make_config):
+        config = make_config(workspace_path=None, nextcloud_mount_path=None)
+        assert run_checks(config, only=(self.NAME,))[0].status == SKIP
+
+    def test_the_real_volume_is_measured(self, make_config):
+        r = run_checks(make_config(nextcloud_mount_path=None), only=(self.NAME,))[0]
+        assert r.status in (OK, WARN, FAIL)
+        assert "GiB free" in r.detail
+
+
 # The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
 # suite, so the doctor sweep on a developer's macOS laptop cannot read the real
 # keychain or issue a live request. This file drives the real function on

@@ -631,10 +631,11 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
 
     db.init_db(tmp_path / "framework.db")
 
-    # Empty means local: `Config.storage_is_nextcloud` is
-    # `bool(self.nextcloud.url)`, and `istota setup` writes no `url` for the
-    # Nextcloud-free install.
-    url = "https://cloud.example.test" if case.backend == "nextcloud" else ""
+    # `Config.storage_is_nextcloud` is a URL *and* `nextcloud_mount_path`, which
+    # is what `istota setup` writes for full integration; the Nextcloud-free
+    # install has neither.
+    nextcloud_backed = case.backend == "nextcloud"
+    url = "https://cloud.example.test" if nextcloud_backed else ""
 
     return Config(
         db_path=tmp_path / "framework.db",
@@ -642,6 +643,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         skills_dir=skills_dir,
         bundled_skills_dir=bundled,
         workspace_path=mount,
+        nextcloud_mount_path=mount if nextcloud_backed else None,
         nextcloud=NextcloudConfig(
             url=url,
             username="istota",
@@ -1456,8 +1458,8 @@ class TestTheStorageBackendDimension:
     def test_the_file_tool_vocabulary_follows_the_backend(self, tmp_path, monkeypatch):
         nextcloud, local = self._pair(tmp_path, monkeypatch)
 
-        assert "Nextcloud files are mounted at" in nextcloud
-        assert "Nextcloud files are mounted at" not in local
+        assert "Your files live in Nextcloud at" in nextcloud
+        assert "Your files live in Nextcloud at" not in local
         assert "Your files live in your workspace at" in local
 
         # `{storage}` in an eager skill body, via `Config.storage_label`.

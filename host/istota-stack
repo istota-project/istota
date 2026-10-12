@@ -19,6 +19,8 @@
 #                               import a bare-metal export, with the stack down
 #   istota-stack retire-bare-metal --namespace NS [--dry-run]
 #                               remove what the old Ansible role installed, once the stack runs
+#   istota-stack localize-workspace [--copy-only] [--resume] [--dry-run] [--no-note] [--accept-skipped]
+#                               move a mounted workspace onto the state volume, offline
 #   istota-stack put-files [--dry-run]
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
 #   istota-stack check-image    exit 2 when the image lacks what config.toml needs (Claude Code)
@@ -121,9 +123,15 @@ env_get() {
 # Set KEY=VALUE pairs in .env, keeping every other line, through a rename so a
 # reader never sees half a file.
 env_set() {
-    local tmp
-    tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
-    if [ -f "$ENV_FILE" ]; then cat "$ENV_FILE" > "$tmp"; fi
+    file_set "$ENV_FILE" "$@"
+}
+
+# The same for any env file of root's (.env, host.env).
+file_set() {
+    local file="$1" tmp
+    shift
+    tmp="$(mktemp "${file}.XXXXXX")"
+    if [ -f "$file" ]; then cat "$file" > "$tmp"; fi
     while [ "$#" -gt 0 ]; do
         local key="${1%%=*}" value="${1#*=}"
         case "$value" in *$'\n'*) rm -f "$tmp"; die "a value for ${key} holds a newline" ;; esac
@@ -135,7 +143,7 @@ env_set() {
         shift
     done
     chmod 0644 "$tmp"
-    mv "$tmp" "$ENV_FILE"
+    mv "$tmp" "$file"
 }
 
 # --- compose -----------------------------------------------------------------
@@ -1033,6 +1041,89 @@ restart_for_config() {
     compose restart
 }
 
+# --- moving the workspace off the mount ------------------------------------------
+
+# Where the workspace lives inside the containers, before and after the move.
+CONTAINER_MOUNT=/mnt/shared
+LOCAL_WORKSPACE=/data/workspace
+# What writes the workspace: the room-relocation set.
+LOCALIZE_WRITERS="daemon web whatsapp-baileys"
+
+# The offline move from the rclone mount to /data/workspace on the state volume
+# (docs/deployment/moving-to-a-local-workspace.md). The copy, the config edit
+# and the reindex are `istota workspace` verbs run as uid 10001, so root reads
+# and writes nothing under config/ or the mount. A config `istota apply` wrote
+# is refused before anything stops, since the plan would undo the edit: that
+# install moves by its plan, after a --copy-only run here.
+cmd_localize_workspace() {
+    local copy_only="" dry_run="" accept="" rc=0 pass=() service stop=() answer=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --copy-only) copy_only=1 ;;
+            --dry-run) dry_run=1; pass+=(--dry-run) ;;
+            --resume|--no-note) pass+=("$1") ;;
+            --accept-skipped) accept=1 ;;
+            *) usage >&2; exit 64 ;;
+        esac
+        shift
+    done
+    [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml: nothing to move."
+    [ "$(env_get "$HOST_ENV" STORAGE)" = "nextcloud" ] \
+        || die "host.env does not say STORAGE=nextcloud: the workspace is not the rclone mount, so there is nothing to move."
+    if [ -z "$copy_only" ] && [ -z "$dry_run" ]; then
+        oneshot "$(main_service)" istota workspace localize-config --check --workspace "$LOCAL_WORKSPACE" \
+            || die "config.toml cannot be moved here (above); nothing was stopped. A config written by \`istota apply\` moves by its plan: run \`istota-stack localize-workspace --copy-only\`, then set istota_storage: local, workspace_path = \"${LOCAL_WORKSPACE}\", no nextcloud_mount_path and auto_share_bot_dir = false in the plan, and apply it."
+    fi
+    if [ -z "$dry_run" ]; then
+        for service in $LOCALIZE_WRITERS; do
+            if compose config --services | grep -qxF "$service"; then stop+=("$service"); fi
+        done
+        if [ "${#stop[@]}" -gt 0 ]; then
+            log "stopping ${stop[*]}"
+            compose stop "${stop[@]}"
+        fi
+        pass+=(--scheduler-stopped)
+    fi
+    oneshot "$(main_service)" istota workspace localize \
+        --from "$CONTAINER_MOUNT" --to "$LOCAL_WORKSPACE" "${pass[@]}" || rc=$?
+    if [ -n "$dry_run" ]; then
+        return "$rc"
+    fi
+    case "$rc" in
+        0) ;;
+        2)
+            if [ -n "$accept" ]; then
+                log "the copy skipped entries (listed above); going on (--accept-skipped)"
+            elif [ -t 0 ]; then
+                printf '[istota-stack] The copy skipped the entries listed above. Move to the local workspace anyway? [y/N] '
+                read -r answer || true
+                case "$answer" in
+                    y|Y|yes) ;;
+                    *) die "stopped before the config change, with the stack down. \`istota-stack up\` returns to the mount." ;;
+                esac
+            else
+                die "the copy skipped entries (listed above); stopped before the config change, with the stack down. Re-run with --resume --accept-skipped to go on, or \`istota-stack up\` to return to the mount."
+            fi
+            ;;
+        *) die "the copy exited ${rc}; config.toml is unchanged and the stack is down. Re-run with --resume, or \`istota-stack up\` to return to the mount." ;;
+    esac
+    if [ -n "$copy_only" ]; then
+        log "copied, and the stack is down. Change the plan (istota_storage: local, workspace_path = \"${LOCAL_WORKSPACE}\", no nextcloud_mount_path, auto_share_bot_dir = false) and apply it, then run \`istota-stack exec istota workspace reindex --forget-root ${CONTAINER_MOUNT}\`."
+        return 0
+    fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot "$(main_service)" istota workspace localize-config --workspace "$LOCAL_WORKSPACE" \
+        || die "the config change failed; the copy is in ${LOCAL_WORKSPACE} and the stack is down. \`istota-stack up\` returns to the mount."
+    file_set "$HOST_ENV" STORAGE=local
+    log "host.env: STORAGE=local"
+    if [ -x "${SRC}/host/provision.sh" ]; then
+        "${SRC}/host/provision.sh" || die "provision.sh failed after the config change; run it again, then \`istota-stack up\`."
+    fi
+    cmd_up
+    stack_exec istota workspace reindex --forget-root "$CONTAINER_MOUNT" \
+        || log "WARNING: the memory reindex failed; run \`istota-stack exec istota workspace reindex --forget-root ${CONTAINER_MOUNT}\` again."
+    log "the workspace is now ${LOCAL_WORKSPACE}. To go back: restore config/config.toml.pre-localize, set STORAGE=nextcloud in host.env, run provision.sh, then \`istota-stack up\`."
+}
+
 # Read-only: origin is asked, not fetched, so the checkout and its refs stay as
 # they are. The management role compares this with ISTOTA_TAG, because an
 # update rebuilds even when main has not moved.
@@ -1287,6 +1378,7 @@ main() {
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
+        localize-workspace) cmd_localize_workspace "$@" ;;
         put-files) cmd_put_files "$@" ;;
         check-image) cmd_check_image "$@" ;;
         latest-tag) cmd_latest_tag "$@" ;;

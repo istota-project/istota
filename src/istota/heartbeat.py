@@ -92,7 +92,43 @@ def load_heartbeat_config(
     from .storage import read_user_config_file  # noqa: PLC0415 - import cycle
 
     content = read_user_config_file(config, user_id, "HEARTBEAT.md")
-    if content is None or not content.strip():
+    if content is None:
+        return None
+    return parse_heartbeat_text(content, user_id)
+
+
+def heartbeat_document_errors(content: str, user_id: str = "") -> list[str]:
+    """Why the daemon could not read this HEARTBEAT.md: the web editor's validator.
+
+    `parse_heartbeat_text` reads a TOML error as "no checks" and logs it, so the
+    TOML half is parsed here first to say what is wrong; anything the parse
+    itself raises on (a `checks` that is not a list of tables) is reported too.
+    An empty list means the daemon loads the file as written.
+    """
+    span = find_toml_block(content)
+    if span is not None:
+        import tomllib
+        try:
+            tomllib.loads(content[span[0]:span[1]])
+        except tomllib.TOMLDecodeError as e:
+            return [f"TOML error: {e}"]
+    try:
+        parse_heartbeat_text(content, user_id)
+    except (AttributeError, TypeError, ValueError) as e:
+        return [f"The checks could not be read: {e}"]
+    return []
+
+
+def parse_heartbeat_text(
+    content: str, user_id: str = "",
+) -> tuple[HeartbeatSettings, list[HeartbeatCheck]] | None:
+    """The parse half of `load_heartbeat_config`, on text already read.
+
+    No I/O, so the web editor can check a save against exactly what the
+    daemon will load. None for a file that configures no checks, as the
+    loader returns; a type error in the file raises, as it always has.
+    """
+    if not content.strip():
         return None
 
     # Extract TOML block from markdown

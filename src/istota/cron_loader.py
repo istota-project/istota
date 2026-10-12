@@ -12,6 +12,8 @@ from pathlib import Path
 import tomli
 
 from . import db
+from .workspace import text_files
+from .workspace.text_files import MemoryMdLocked
 from .workspace.writes import open_or_create_dirs as _open_or_create_dirs
 from istota.sandbox.host_paths import owner_path_parts
 from .storage import OWNER_FILE_MAX_BYTES, get_user_scripts_path, read_owner_text
@@ -287,7 +289,10 @@ def _validate_target(name: str, user_id: str, target: str) -> None:
             )
 
 
-def _coerce_bool(name: str, user_id: str, field: str, value, default: bool) -> bool:
+def _coerce_bool(
+    name: str, user_id: str, field: str, value, default: bool,
+    errors: list[str] | None = None,
+) -> bool:
     """A TOML bool, or the default with a warning. Never rejects the job.
 
     TOML has a real boolean type, so anything else here is a mistake in the
@@ -312,6 +317,11 @@ def _coerce_bool(name: str, user_id: str, field: str, value, default: bool) -> b
         "Job '%s' (user %s): %s must be a TOML boolean, got %s %s; using %s",
         name, user_id, field, type(value).__name__, shown, default,
     )
+    if errors is not None:
+        errors.append(
+            f"Job '{name}': {field} must be a TOML boolean (true or false), "
+            f"got {type(value).__name__} {shown}"
+        )
     return default
 
 
@@ -371,6 +381,10 @@ class CronDocument:
     # deletes their rows even when it otherwise holds, since a pre-fix row
     # can carry another user's text as its prompt.
     refused_names: frozenset[str] = frozenset()
+    # Why a job was dropped, a field ignored, or a command job will not run
+    # for this author, worded for the user. The sync does not read it; the
+    # web editor's validator does (`cron_document_errors`).
+    errors: tuple[str, ...] = ()
 
     @property
     def is_template(self) -> bool:
@@ -426,7 +440,9 @@ class CronDocument:
         return not self.jobs and not self.skipped_entries
 
 
-def _str_field(name: str, user_id: str, field: str, value) -> str:
+def _str_field(
+    name: str, user_id: str, field: str, value, errors: list[str] | None = None,
+) -> str:
     """A TOML string, stripped, or ``""`` with a warning. Never raises.
 
     Every field here used to be read as ``j.get(field, "").strip()``, which
@@ -445,6 +461,11 @@ def _str_field(name: str, user_id: str, field: str, value) -> str:
         "Job '%s' (user %s): %s must be a TOML string, got %s %s; ignoring it",
         name or "(unnamed)", user_id, field, type(value).__name__, shown,
     )
+    if errors is not None:
+        errors.append(
+            f"Job '{name or '(unnamed)'}': {field} must be a TOML string, "
+            f"got {type(value).__name__} {shown}"
+        )
     return ""
 
 
@@ -475,6 +496,26 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
 
 def parse_cron_document(content: str, config, user_id: str) -> "CronDocument | None":
     """Parse already-read bytes with the same hold guard as the scheduler."""
+    return _parse_cron_document(content, config, user_id)[0]
+
+
+def cron_document_errors(content: str, config, user_id: str) -> list[str]:
+    """Why the scheduler would hold this CRON.md or drop part of it.
+
+    The web editor's validator. The same parse the sync runs, so it accepts
+    exactly the language the daemon loads: an empty list means every job the
+    file states will be scheduled as written.
+    """
+    doc, errors = _parse_cron_document(content, config, user_id)
+    if doc is not None:
+        return list(doc.errors)
+    return errors
+
+
+def _parse_cron_document(
+    content: str, config, user_id: str,
+) -> "tuple[CronDocument | None, list[str]]":
+    """The document, or None with the reason the whole file is held."""
     opener = _TOML_FENCE_OPEN_RE.search(content)
     if opener is None:
         if _BACKTICK_RUN_RE.search(content):
@@ -492,10 +533,13 @@ def parse_cron_document(content: str, config, user_id: str) -> "CronDocument | N
                 "reader can resolve; the previous job definitions stay in "
                 "force and the file is left alone", user_id,
             )
-            return None
+            return None, [
+                "The file has backtick fences but no ```toml block on a line "
+                "of its own, so no jobs can be read from it"
+            ]
         # A document with no toml fence. Distinct from a fence holding no
         # jobs, and the whole reason this function exists.
-        return CronDocument(content=content, block=None, block_span=None, jobs=[])
+        return CronDocument(content=content, block=None, block_span=None, jobs=[]), []
 
     closer = _TOML_FENCE_CLOSE_RE.search(content, opener.end())
     if closer is None:
@@ -509,7 +553,7 @@ def parse_cron_document(content: str, config, user_id: str) -> "CronDocument | N
             "CRON.md for %s opens a toml fence and never closes it; the "
             "previous job definitions stay in force", user_id,
         )
-        return None
+        return None, ["The ```toml fence is opened and never closed"]
 
     # The block is everything between the two marker lines. Neither marker's
     # own indent is inside it, so a splice through `block_span` writes both
@@ -523,9 +567,10 @@ def parse_cron_document(content: str, config, user_id: str) -> "CronDocument | N
             "Failed to parse CRON.md for %s: %s; the previous job definitions "
             "stay in force", user_id, e,
         )
-        return None
+        return None, [f"TOML error: {e}"]
 
-    jobs, skipped, refused_names = _parse_jobs(data, config, user_id)
+    errors: list[str] = []
+    jobs, skipped, refused_names = _parse_jobs(data, config, user_id, errors)
     return CronDocument(
         content=content,
         block=toml_str,
@@ -533,7 +578,8 @@ def parse_cron_document(content: str, config, user_id: str) -> "CronDocument | N
         jobs=jobs,
         skipped_entries=skipped,
         refused_names=refused_names,
-    )
+        errors=tuple(errors),
+    ), errors
 
 
 def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
@@ -549,7 +595,7 @@ def load_cron_jobs(config, user_id: str) -> list[CronJob] | None:
 
 
 def _parse_jobs(
-    data: dict, config, user_id: str,
+    data: dict, config, user_id: str, errors: list[str] | None = None,
 ) -> tuple[list[CronJob], int, frozenset[str]]:
     """Build the ``CronJob`` list from a parsed toml block. Never raises.
 
@@ -569,7 +615,14 @@ def _parse_jobs(
     fault that may clear, so it must not hold the sync. Holding it kept the
     row a pre-ISSUE-596 read wrote, with another user's text as its prompt,
     running for as long as the file said what it says.
+
+    ``errors``, when given, collects each drop and each ignored field as a
+    sentence for the user, plus a non-admin ``command`` job: that one parses
+    and is dropped at sync, so without saying so here the author never
+    learns why it does not run.
     """
+    if errors is None:
+        errors = []
     jobs = []
     refused: set[str] = set()
     raw_jobs = data.get("jobs", [])
@@ -578,6 +631,7 @@ def _parse_jobs(
             "Ignoring 'jobs' in CRON.md for %s: expected an array of tables, "
             "got %s", user_id, type(raw_jobs).__name__,
         )
+        errors.append("'jobs' must be an array of [[jobs]] tables")
         # One refused entry rather than none: the file did state something
         # under `jobs`, so this must not read as "the user has no jobs" and
         # authorize the orphan sweep.
@@ -588,17 +642,21 @@ def _parse_jobs(
                 "Skipping entry in CRON.md for %s: expected a [[jobs]] table, "
                 "got %s", user_id, type(j).__name__,
             )
+            errors.append("An entry under 'jobs' is not a [[jobs]] table")
             continue
-        name = _str_field("", user_id, "name", j.get("name", ""))
-        cron = _str_field(name, user_id, "cron", j.get("cron", ""))
-        prompt = _str_field(name, user_id, "prompt", j.get("prompt", ""))
-        command = _str_field(name, user_id, "command", j.get("command", ""))
+        name = _str_field("", user_id, "name", j.get("name", ""), errors)
+        cron = _str_field(name, user_id, "cron", j.get("cron", ""), errors)
+        prompt = _str_field(name, user_id, "prompt", j.get("prompt", ""), errors)
+        command = _str_field(name, user_id, "command", j.get("command", ""), errors)
         prompt_file = _str_field(
-            name, user_id, "prompt_file", j.get("prompt_file", ""))
+            name, user_id, "prompt_file", j.get("prompt_file", ""), errors)
         if not name or not cron:
             logger.warning(
                 "Skipping incomplete job in CRON.md for %s: name=%r cron=%r",
                 user_id, name, cron,
+            )
+            errors.append(
+                f"Job '{name or '(unnamed)'}': needs both a name and a cron schedule"
             )
             continue
         # Resolve prompt_file to prompt contents
@@ -608,12 +666,19 @@ def _parse_jobs(
                     "Skipping job '%s' in CRON.md for %s: prompt_file cannot be combined with prompt or command",
                     name, user_id,
                 )
+                errors.append(
+                    f"Job '{name}': prompt_file cannot be combined with "
+                    "prompt or command"
+                )
                 continue
             text, reason, definitive = read_owner_text(config, user_id, prompt_file)
             if text is None:
                 logger.warning(
                     "Skipping job '%s' in CRON.md for %s: cannot read prompt_file %s: %s",
                     name, user_id, prompt_file, reason,
+                )
+                errors.append(
+                    f"Job '{name}': cannot read prompt_file {prompt_file}: {reason}"
                 )
                 if definitive:
                     refused.add(name)
@@ -624,15 +689,17 @@ def _parse_jobs(
                 "Skipping job '%s' in CRON.md for %s: cannot have both prompt and command",
                 name, user_id,
             )
+            errors.append(f"Job '{name}': cannot have both prompt and command")
             continue
         if not prompt and not command:
             logger.warning(
                 "Skipping job '%s' in CRON.md for %s: must have either prompt or command",
                 name, user_id,
             )
+            errors.append(f"Job '{name}': needs a prompt, a prompt_file or a command")
             continue
-        model = _str_field(name, user_id, "model", j.get("model", ""))
-        effort = _str_field(name, user_id, "effort", j.get("effort", ""))
+        model = _str_field(name, user_id, "model", j.get("model", ""), errors)
+        effort = _str_field(name, user_id, "effort", j.get("effort", ""), errors)
         if effort:
             _validate_effort(name, user_id, effort)
         # Through `_str_field` like `model` and `effort` beside it. Read as
@@ -642,7 +709,7 @@ def _parse_jobs(
         # file, which is the failure `_str_field` exists for. A scalar is
         # quieter and no better: it reaches a sqlite bind through
         # `_file_owned_values` and `brain = 5` is stored as the string "5".
-        brain = _str_field(name, user_id, "brain", j.get("brain", ""))
+        brain = _str_field(name, user_id, "brain", j.get("brain", ""), errors)
         if brain:
             _validate_brain(name, user_id, brain)
         if model:
@@ -650,31 +717,31 @@ def _parse_jobs(
                 name, user_id, model, config,
                 brain if config.is_admin(user_id) else "",
             )
-        target = _str_field(name, user_id, "target", j.get("target", ""))
+        target = _str_field(name, user_id, "target", j.get("target", ""), errors)
         if target:
             _validate_target(name, user_id, target)
             _validate_room_pairing(
                 name, user_id, target,
                 _str_field(name, user_id, "room", j.get("room", "")),
             )
-        jobs.append(CronJob(
+        job = CronJob(
             name=name,
             cron=cron,
             prompt=prompt,
             command=command,
             prompt_file=prompt_file,
             target=target,
-            room=_str_field(name, user_id, "room", j.get("room", "")),
+            room=_str_field(name, user_id, "room", j.get("room", ""), errors),
             enabled=_coerce_bool(
-                name, user_id, "enabled", j.get("enabled", True), True),
+                name, user_id, "enabled", j.get("enabled", True), True, errors),
             silent_unless_action=_coerce_bool(
                 name, user_id, "silent_unless_action",
-                j.get("silent_unless_action", False), False),
+                j.get("silent_unless_action", False), False, errors),
             skip_log_channel=_coerce_bool(
                 name, user_id, "skip_log_channel",
-                j.get("skip_log_channel", False), False),
+                j.get("skip_log_channel", False), False, errors),
             once=_coerce_bool(
-                name, user_id, "once", j.get("once", False), False),
+                name, user_id, "once", j.get("once", False), False, errors),
             model=model,
             effort=effort,
             brain=brain,
@@ -684,11 +751,17 @@ def _parse_jobs(
             # silent coercion has a consequence outside the job.
             publish_shared_kv=_str_field(
                 name, user_id, "publish_shared_kv",
-                j.get("publish_shared_kv", "")),
+                j.get("publish_shared_kv", ""), errors),
             publish_shared_kv_trusted=_coerce_bool(
                 name, user_id, "publish_shared_kv_trusted",
-                j.get("publish_shared_kv_trusted", False), False),
-        ))
+                j.get("publish_shared_kv_trusted", False), False, errors),
+        )
+        if config is not None and fj_is_disallowed_command(job, config.is_admin(user_id)):
+            errors.append(
+                f"Job '{name}': command jobs are admin-only; use a prompt, or "
+                "a plain `istota-skill <skill> ...` command"
+            )
+        jobs.append(job)
 
     return jobs, len(raw_jobs) - len(jobs) - len(refused), frozenset(refused)
 
@@ -1367,6 +1440,11 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
 
     Returns True if a file was written — which now includes the write
     itself having succeeded, not just having been attempted.
+
+    Under the file's lock, and the "absent or template" judgement is made again
+    inside it: the sync decided to restore from a read taken outside the lock,
+    and a web save of real jobs in between must not be overwritten by the
+    table.
     """
     if not config.has_workspace:
         return False
@@ -1376,8 +1454,29 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     config_dir = resolve_user_config_dir(config, user_id)
     if config_dir is None:
         return False
-    if (config_dir / "CRON.md").exists() and not overwrite:
+    try:
+        with text_files.file_lock(config, user_id, config_dir / "CRON.md"):
+            return _migrate_db_jobs_locked(conn, config, user_id, config_dir, overwrite)
+    except MemoryMdLocked:
+        logger.warning("cron_md_write_refused user=%s reason=locked", user_id)
         return False
+    except OSError as e:
+        # The anchor could not be made or opened. False, never an exception:
+        # the contract `remove_job_from_cron_md`'s caller depends on.
+        logger.warning(
+            "cron_md_write_refused user=%s reason=lock_unavailable errno=%s",
+            user_id, e.errno,
+        )
+        return False
+
+
+def _migrate_db_jobs_locked(conn, config, user_id: str, config_dir, overwrite: bool) -> bool:
+    if (config_dir / "CRON.md").exists():
+        if not overwrite:
+            return False
+        current = load_cron_document(config, user_id)
+        if current is None or not current.is_template:
+            return False
 
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     # Module-managed jobs are owned by their integrations and must not be
@@ -1428,6 +1527,34 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     return True
 
 
+def _with_cron_md_lock(config, user_id: str, fn) -> bool:
+    """Run a CRON.md read-modify-write under the file's lock. False if held.
+
+    The read has to be inside the lock, not only the write: a web save landing
+    between the two would otherwise be overwritten by a document built from
+    the text it replaced.
+    """
+    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+
+    config_dir = resolve_user_config_dir(config, user_id)
+    if config_dir is None:
+        return False
+    try:
+        with text_files.file_lock(config, user_id, config_dir / "CRON.md"):
+            return fn()
+    except MemoryMdLocked:
+        logger.warning("cron_md_write_refused user=%s reason=locked", user_id)
+        return False
+    except OSError as e:
+        # The anchor could not be made or opened. False, never an exception:
+        # the contract `remove_job_from_cron_md`'s caller depends on.
+        logger.warning(
+            "cron_md_write_refused user=%s reason=lock_unavailable errno=%s",
+            user_id, e.errno,
+        )
+        return False
+
+
 def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: bool) -> bool:
     """
     Update a job's enabled state in the user's CRON.md file.
@@ -1442,7 +1569,13 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     """
     if not config.has_workspace:
         return False
+    return _with_cron_md_lock(
+        config, user_id,
+        lambda: _update_job_enabled_locked(config, user_id, job_name, enabled),
+    )
 
+
+def _update_job_enabled_locked(config, user_id: str, job_name: str, enabled: bool) -> bool:
     doc = load_cron_document(config, user_id)
     if doc is None:
         return False
@@ -1488,7 +1621,12 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     """
     if not config.has_workspace:
         return False
+    return _with_cron_md_lock(
+        config, user_id, lambda: _remove_job_locked(config, user_id, job_name),
+    )
 
+
+def _remove_job_locked(config, user_id: str, job_name: str) -> bool:
     doc = load_cron_document(config, user_id)
     if doc is None:
         return False

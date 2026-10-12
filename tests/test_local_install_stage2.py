@@ -185,6 +185,8 @@ class TestBootstrapChecks:
         serve.bootstrap_checks(cfg)
         base = cfg.workspace_path / "Users" / "alice"
         assert base.is_dir()
+        assert (cfg.workspace_path / "Channels").is_dir()
+        assert (cfg.workspace_path / "Groups").is_dir()
 
 
 # ---------------------------------------------------------------------------

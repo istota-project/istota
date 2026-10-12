@@ -147,6 +147,8 @@ def test_notes_use_daemon_verdict_and_only_nextcloud_host(config, monkeypatch):
     doctor.record_sandbox_verdict(config, True)
     monkeypatch.setattr(executor, "_bwrap_checked", False)
     config.nextcloud.url = "https://alice:secret@cloud.example.com/private"
+    assert deployment_notes(config)[-1] == "Files are stored in a local folder."
+    config.nextcloud_mount_path = config.workspace_path
     assert deployment_notes(config) == ["Files are stored in your Nextcloud at cloud.example.com."]
 
 

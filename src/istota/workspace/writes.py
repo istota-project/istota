@@ -6,7 +6,9 @@ import stat
 from pathlib import Path
 from collections.abc import Iterable
 
-from istota.lib.filenames import filename_parts, numbered_name, safe_filename
+from istota.lib.filenames import (
+    DEFAULT_MAX_STEM, filename_parts, numbered_name, safe_filename,
+)
 from istota.skills._loader import open_overlay_dir
 from istota.workspace.listing import ListingError
 
@@ -46,15 +48,24 @@ def open_or_create_dirs(root: Path, parts: list[str] | tuple[str, ...]) -> int:
 
 def write_new_file(
     root: Path, parts: list[str], filename: str, chunks: Iterable[bytes],
-    *, max_bytes: int,
+    *, max_bytes: int, numbered: bool = True, max_stem: int = DEFAULT_MAX_STEM,
 ) -> str:
-    """Write chunks through a pinned parent, removing incomplete uploads."""
+    """Write chunks through a pinned parent, removing incomplete uploads.
+
+    ``numbered=False`` writes the name as given or not at all: an existing
+    entry raises ``FileExistsError``, for a caller that owns the destination
+    and treats a concurrent writer's copy as the answer. ``max_stem`` is for a
+    caller whose name is already sanitised with a wider stem (the inbox).
+    """
     dir_fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
     if dir_fd is None:
         raise ListingError(404, "Folder not found.")
     try:
-        stem, ext = filename_parts(safe_filename(filename, fallback="upload"))
-        for n in range(1, 101):
+        stem, ext = filename_parts(
+            safe_filename(filename, fallback="upload", max_stem=max_stem),
+            max_stem=max_stem,
+        )
+        for n in range(1, 101 if numbered else 2):
             name = numbered_name(stem, ext, n)
             try:
                 fd = os.open(
@@ -63,6 +74,8 @@ def write_new_file(
                 )
                 break
             except FileExistsError:
+                if not numbered:
+                    raise
                 continue
         else:
             raise ListingError(409, "Too many files with this name.")

@@ -325,6 +325,44 @@ class _HealthOpsReplay:
         return path
 
 
+class TestDeferredRegisterUploadTarget(_HealthOpsReplay):
+    """Local-workspace spec, stage 3: the uploads tree is in the user's
+    workspace, so the panel directory and the copy follow no link."""
+
+    def test_an_upload_is_copied_under_the_panel(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = deferred / "scan.pdf"
+        src.write_bytes(b"%PDF-1.4 scan")
+
+        count = self._replay(ctx, deferred, [
+            {"op": "register_upload", "source_path": str(src), "drawn_at": "2026-05-08"},
+        ])
+
+        assert count == 1
+        (pid,) = self._panel_ids(ctx)
+        assert (ctx.uploads_dir / str(pid) / "original.pdf").read_bytes() == b"%PDF-1.4 scan"
+
+    def test_a_symlinked_panel_dir_is_not_written_through(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = deferred / "scan.pdf"
+        src.write_bytes(b"%PDF-1.4 scan")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        ctx.uploads_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.uploads_dir / "1").symlink_to(outside, target_is_directory=True)
+
+        count = self._replay(ctx, deferred, [
+            {"op": "register_upload", "source_path": str(src), "drawn_at": "2026-05-08"},
+        ])
+
+        assert count == 0
+        assert list(outside.iterdir()) == []
+
+
 class TestDeferredImportCsvSourcePath(_HealthOpsReplay):
     """`import_csv` replays a path written from inside the sandbox.
 

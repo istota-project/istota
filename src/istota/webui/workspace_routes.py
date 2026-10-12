@@ -23,6 +23,7 @@ from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places
 from istota.workspace.reach import deployment_notes, place_reach
+from istota.workspace import config_files, text_files
 from istota.workspace.writes import delete_entry, make_folder, write_new_file
 
 logger = logging.getLogger(__name__)
@@ -237,6 +238,102 @@ async def api_workspace_folder(
         return _filesystem_error(config, exc, "home", write=True)
 
 
+def _no_workspace(config):
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    if not config.has_workspace:
+        return JSONResponse({"error": "No workspace is configured."}, status_code=503)
+    return None
+
+
+_CONFIG_FILE_NOT_FOUND = {"error": "File not found."}
+
+# One body per save outcome. `locked` is 423 rather than the room-memory
+# editor's 409, so a client can tell "try again" from "reload first".
+_SAVE_REFUSALS = {
+    "conflict": (409, "This file changed since it was loaded."),
+    "locked": (423, "This file is being written right now. Try again."),
+    "invalid": (422, "The daemon would not load this file as written."),
+    "too_large": (413, "This file is too large."),
+    "failed": (500, "Could not save this file."),
+}
+
+
+@router.get("/config-files")
+async def api_workspace_config_files(request: Request, user: dict = Depends(require_auth)):
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+    files = await asyncio.to_thread(config_files.list_files, config, user["username"])
+    return {"files": files}
+
+
+@router.get("/config-files/{name:path}")
+async def api_workspace_config_file(
+    request: Request, name: str, user: dict = Depends(require_auth),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+
+    def query():
+        file = config_files.lookup(config, user["username"], name)
+        if file is None:
+            return None, None
+        return file, config_files.read(config, user["username"], file)
+
+    file, text = await asyncio.to_thread(query)
+    if file is None:
+        return JSONResponse(_CONFIG_FILE_NOT_FOUND, status_code=404)
+    if text is None:
+        return JSONResponse({"error": "Could not read this file."}, status_code=500)
+    return {"content": text, "revision": text_files.revision(text), "exists": bool(text.strip())}
+
+
+@router.put("/config-files/{name:path}")
+async def api_workspace_config_file_save(
+    request: Request, name: str,
+    user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    # The revision is required: a client that may omit it can silently
+    # overwrite, which is the failure the revision exists to stop.
+    if (not isinstance(body, dict) or not isinstance(body.get("content"), str)
+            or not isinstance(body.get("revision"), str)):
+        return JSONResponse({"error": "content and revision are required"}, status_code=400)
+
+    def write():
+        file = config_files.lookup(config, user["username"], name)
+        if file is None:
+            return None, None
+        return file, config_files.save(config, user["username"], file, body["content"], body["revision"])
+
+    file, outcome = await asyncio.to_thread(write)
+    if file is None:
+        return JSONResponse(_CONFIG_FILE_NOT_FOUND, status_code=404)
+    if outcome.status == "ok":
+        payload = {"revision": outcome.revision}
+        if file.name == "CRON.md":
+            # The scheduler's sync reads the file; the web does not touch
+            # `scheduled_jobs`, so the jobs change at the next sync.
+            payload["applies"] = "next_sync"
+        return payload
+    status, message = _SAVE_REFUSALS[outcome.status]
+    payload = {"error": message, "code": outcome.status}
+    if outcome.status == "invalid":
+        payload["errors"] = list(outcome.errors)
+    if outcome.status == "too_large":
+        payload["max_bytes"] = file.max_bytes
+    return JSONResponse(payload, status_code=status)
 @router.delete("/files")
 async def api_workspace_delete(
     request: Request, place: str, path: str, name: str,
