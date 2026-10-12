@@ -86,7 +86,7 @@ def test_stale_state_stops_even_continue_on_error(store, tmp_path):
 
 def test_late_preflight_refusal_cannot_write_config(tmp_path):
     context = engine.Context(tmp_path / "config.toml")
-    plan = parse_plan({"config": {"bot_name": "After"}, "users": {"alice": {"resources": []}}})
+    plan = parse_plan({"config": {"bot_name": "After"}, "users": {"alice": {"briefings": []}}})
     with pytest.raises(engine.ExecutionError) as exc:
         engine.build_plan(plan, context, context.options)
     assert exc.value.code == "unsupported_section"

@@ -2488,15 +2488,19 @@ def get_pending_confirmation_by_response_id(
     return _row_to_task(row)
 
 
-def _decode_resource_extras(raw: object) -> dict[str, Any]:
-    """Parse the extras JSON column. Falls back to {} on missing or corrupt data."""
+def _decode_resource_extras(raw: object, *, strict: bool = False) -> dict[str, Any]:
+    """Parse extras, optionally refusing corruption for declarative reads."""
     if raw is None or raw == "":
         return {}
     try:
         decoded = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
+        if strict:
+            raise ValueError("invalid resource extras") from None
         logger.warning("user_resources.extras contained invalid JSON; defaulting to {}")
         return {}
+    if strict and not isinstance(decoded, dict):
+        raise ValueError("invalid resource extras")
     return decoded if isinstance(decoded, dict) else {}
 
 
@@ -2504,6 +2508,8 @@ def get_user_resources(
     conn: sqlite3.Connection,
     user_id: str,
     resource_type: str | None = None,
+    *,
+    strict_extras: bool = False,
 ) -> list[UserResource]:
     """Get resources accessible to a user."""
     if resource_type:
@@ -2533,7 +2539,7 @@ def get_user_resources(
             resource_path=row["resource_path"],
             display_name=row["display_name"],
             permissions=row["permissions"],
-            extras=_decode_resource_extras(row["extras"]),
+            extras=_decode_resource_extras(row["extras"], strict=strict_extras),
         )
         for row in cursor.fetchall()
     ]
