@@ -52,7 +52,9 @@ fi
 #     an unmounted /mnt/shared writes into the container, and those files never
 #     reach Nextcloud (parity row 9) or the Mac. ISTOTA_WORKSPACE_FSTYPE is the
 #     type `istota-stack` expects there (fuse.rclone, virtiofs), fuse.rclone in
-#     full Nextcloud integration when nothing says;
+#     full Nextcloud integration when nothing says, and any other
+#     workspace_mount_path with no type is refused: a bind of a plain host
+#     directory is a mount too;
 #   - the host shares in a folder (ISTOTA_WORKSPACE_MARKER_REQUIRED) and it
 #     lacks .istota-workspace, or the config does not use it: an empty
 #     directory of the same type stands in for a folder that went away (L1);
@@ -67,7 +69,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from istota.config import load_config
 from istota.lib.mountinfo import covering_mount
-from istota.lib.workspace_marker import MARKER_NAME, marker_present, marker_required
+from istota.lib.workspace_marker import (
+    FSTYPE_ENV, MARKER_NAME, expected_fstype, marker_present, marker_required, undeclared_mount)
 
 config = load_config(Path(sys.argv[1]))
 refusals = []
@@ -80,16 +83,22 @@ if url and urlsplit(url).hostname == "nextcloud":
             f"config.toml names the bundled Nextcloud ({url}), which this compose file no longer runs. "
             "Move it, unchanged, into a compose project of its own and point [nextcloud] url at it, or "
             "switch to local storage; see docs/deployment/moving-the-bundled-nextcloud.md.")
-expected = os.environ.get("ISTOTA_WORKSPACE_FSTYPE", "").strip()
+expected = expected_fstype(config.storage_is_nextcloud)
 workspace = config.workspace_path if config.storage_is_nextcloud else config.workspace_mount_path
 if marker_required() and config.workspace_mount_path is None:
     refusals.append(
         "this host shares a folder in as the workspace and config.toml has no "
         "workspace_mount_path, so the folder would go unused. Run `istota-stack setup "
         "--storage host-folder`.")
-elif workspace is not None and (expected or config.storage_is_nextcloud):
+elif undeclared_mount(config.workspace_mount_path, config.storage_is_nextcloud):
+    refusals.append(
+        f"config.toml names {config.workspace_mount_path} as the workspace mount "
+        f"(workspace_mount_path), and this stack does not say what is mounted there: "
+        f"{FSTYPE_ENV} is empty, as istota-stack leaves it under STORAGE=local. Make "
+        "host.env and config.toml agree with `istota-stack setup --storage host-folder` or "
+        "`--storage local`; nothing is written into a directory nothing vouches for.")
+elif workspace is not None and expected:
     workspace = os.path.normpath(str(workspace))
-    expected = expected or "fuse.rclone"
     with open(os.environ.get("ISTOTA_MOUNTINFO", "/proc/self/mountinfo")) as mounts:
         mount = covering_mount(workspace, mounts.read())
     mountpoint, fstype = (mount.point, mount.fstype) if mount else ("/", "unknown")

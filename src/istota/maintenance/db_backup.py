@@ -44,7 +44,9 @@ from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
-from istota.lib.workspace_marker import MARKER_NAME, marker_present, marker_required
+from istota.lib.workspace_marker import (
+    FSTYPE_ENV, MARKER_NAME, marker_present, marker_required, undeclared_mount,
+)
 from istota.modules import MODULE_NAMES
 from istota.sandbox.user_scope import is_within
 
@@ -200,7 +202,7 @@ def _destination_is_durable(config) -> bool:
     resolved_mount = _resolve_or_none(mount) or Path(mount)
     if not _destination_is_under_mount(dest, resolved_mount):
         return True
-    problem = _mount_problem(resolved_mount)
+    problem = _mount_problem(config, resolved_mount)
     if problem:
         logger.error(
             "db_backup skipped: backup destination %s is under the workspace mount, "
@@ -210,13 +212,18 @@ def _destination_is_durable(config) -> bool:
     return True
 
 
-def _mount_problem(resolved_mount: Path) -> str | None:
+def _mount_problem(config, resolved_mount: Path) -> str | None:
     """Why the workspace mount cannot take a backup now, or None.
 
-    Not mounted: the mountpoint reverts to local disk (ISSUE-480). A host
-    folder without its marker: an empty stand-in for a folder that went away,
-    which a snapshot would vanish with when the folder comes back (row L1).
+    Undeclared: nothing says what is mounted there, and a bind of a plain host
+    directory passes ``ismount`` (the entrypoint's rule). Not mounted: the
+    mountpoint reverts to local disk (ISSUE-480). A host folder without its
+    marker: an empty stand-in for a folder that went away, which a snapshot
+    would vanish with when the folder comes back (row L1).
     """
+    nextcloud = bool(getattr(config, "storage_is_nextcloud", False))
+    if undeclared_mount(resolved_mount, nextcloud):
+        return f"nothing says what is mounted at {resolved_mount} ({FSTYPE_ENV} is empty)"
     if not os.path.ismount(str(resolved_mount)):
         return f"{resolved_mount} is not mounted"
     if marker_required() and not marker_present(resolved_mount):
@@ -260,7 +267,7 @@ def copy_config_files(config, date_str: str) -> Path | None:
     root = Path(workspace) / _CONFIG_COPY_DIR
     if not _destination_is_under_mount(root, resolved_mount):
         return None
-    problem = _mount_problem(resolved_mount)
+    problem = _mount_problem(config, resolved_mount)
     if problem:
         logger.error("db_backup config copy skipped: %s", problem)
         return None

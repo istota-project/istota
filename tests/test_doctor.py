@@ -1654,14 +1654,16 @@ class TestMountLiveness:
         assert r.status == SKIP
 
     def test_configured_but_not_mounted_fails_without_nextcloud_url(
-        self, make_config, tmp_path,
+        self, make_config, tmp_path, monkeypatch,
     ):
         # `make_config` points workspace_mount_path at a plain tmp_path dir,
         # which is on the same filesystem as its parent and so is not a mount.
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
         config = make_config()
         assert config.storage_is_nextcloud is False
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == FAIL
+        assert "not a mount point" in r.detail
         assert r.remedy
 
     def test_a_real_mount_is_ok(self, make_config, tmp_path, monkeypatch):
@@ -1670,11 +1672,31 @@ class TestMountLiveness:
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == OK
 
+    def test_a_mount_nothing_vouches_for_fails(self, make_config, tmp_path, monkeypatch):
+        """config.toml names a workspace mount and the stack passes no type for
+        it (host.env STORAGE=local): a bind of a plain host directory is a mount
+        point too, so `ismount` alone reads it as the workspace."""
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_FSTYPE", raising=False)
+        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+        assert r.status == FAIL
+        assert str(tmp_path / "mount") in r.detail
+        assert "ISTOTA_WORKSPACE_FSTYPE" in r.detail
+        assert r.remedy
+
+    def test_a_mount_whose_type_is_declared_is_ok(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+        assert r.status == OK
+
     def test_a_host_folder_without_its_marker_fails(self, make_config, tmp_path, monkeypatch):
         """The folder shared into the local VM went away under a running stack:
         the mount point stays a mount of the same type, and only the marker
         says the folder is not the workspace any more (row L1)."""
         monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
         monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
         config = make_config()
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
@@ -1685,6 +1707,7 @@ class TestMountLiveness:
 
     def test_a_host_folder_with_its_marker_is_ok(self, make_config, tmp_path, monkeypatch):
         monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
         monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
         (tmp_path / "mount" / ".istota-workspace").parent.mkdir(exist_ok=True)
         (tmp_path / "mount" / ".istota-workspace").write_text("")

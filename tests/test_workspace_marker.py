@@ -49,3 +49,29 @@ class TestPresent:
 
     def test_an_unreadable_root_is_not(self, tmp_path):
         assert workspace_marker.marker_present(tmp_path / "missing" / "deeper") is False
+
+
+class TestExpectedType:
+    """What the workspace mount must be, and when nothing says: the stray
+    workspace the vm tier left on its VM, config.toml naming the folder's mount
+    while host.env said STORAGE=local, so istota-stack passed no type."""
+
+    def test_the_host_declares_it(self):
+        env = {workspace_marker.FSTYPE_ENV: " virtiofs "}
+        assert workspace_marker.expected_fstype(False, env) == "virtiofs"
+        assert workspace_marker.expected_fstype(True, env) == "virtiofs"
+
+    def test_full_integration_falls_back_to_rclone(self):
+        assert workspace_marker.expected_fstype(True, {}) == "fuse.rclone"
+
+    def test_otherwise_nothing_says(self):
+        assert workspace_marker.expected_fstype(False, {}) == ""
+
+    def test_a_mount_path_nobody_vouches_for_is_undeclared(self):
+        assert workspace_marker.undeclared_mount("/mnt/shared", False, {}) is True
+
+    def test_a_declared_an_rclone_or_no_mount_is_not(self):
+        env = {workspace_marker.FSTYPE_ENV: "virtiofs"}
+        assert workspace_marker.undeclared_mount("/mnt/shared", False, env) is False
+        assert workspace_marker.undeclared_mount("/mnt/shared", True, {}) is False
+        assert workspace_marker.undeclared_mount(None, False, {}) is False

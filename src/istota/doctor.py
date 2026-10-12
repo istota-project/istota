@@ -67,7 +67,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from istota.lib import du
 from istota.lib import sqlite_util
-from istota.lib.workspace_marker import MARKER_NAME, marker_present, marker_required
+from istota.lib.workspace_marker import (
+    FSTYPE_ENV, MARKER_NAME, marker_present, marker_required, undeclared_mount,
+)
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.user_scope import is_within, paths_overlap
 
@@ -860,6 +862,10 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     A host folder shared into the local VM that went away is still a mount of
     the same type (Lima recreates a missing one empty), so where the host says
     the folder carries ``.istota-workspace`` the marker is checked too (row L1).
+
+    A bind of a plain host directory is a mount point too, so a mount whose
+    type nothing declares fails before ``ismount`` is asked (the entrypoint's
+    rule, from ``lib/workspace_marker``).
     """
     mount = config.workspace_mount_path
     if mount is None:
@@ -867,6 +873,18 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
             "runtime.mount_liveness", SKIP, "no workspace_mount_path configured"
         )
     path = Path(mount)
+    if undeclared_mount(mount, config.storage_is_nextcloud):
+        return CheckResult(
+            "runtime.mount_liveness",
+            FAIL,
+            f"{path} is configured as the workspace mount and nothing says what is "
+            f"mounted there ({FSTYPE_ENV} is empty)",
+            remedy=(
+                "host.env and config.toml disagree: a config that names a workspace "
+                "mount under STORAGE=local. Run `istota-stack setup --storage host-folder` "
+                "or `--storage local` so the two agree, then restart the stack."
+            ),
+        )
     if os.path.ismount(path):
         if marker_required() and not marker_present(path):
             return CheckResult(

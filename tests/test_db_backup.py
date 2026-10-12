@@ -342,6 +342,10 @@ class TestTheHostFolderMarker:
     mount of the same type; only `.istota-workspace` says it is the workspace
     (row L1). A snapshot into the empty stand-in would be lost with it."""
 
+    @pytest.fixture(autouse=True)
+    def _host_folder(self, monkeypatch):
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+
     def test_a_mount_without_its_marker_is_not_written(self, tmp_path, monkeypatch):
         cfg = _config(tmp_path, db_backup_dir="")
         db.init_db(cfg.db_path)
@@ -363,6 +367,45 @@ class TestTheHostFolderMarker:
         assert any(r["status"] == "ok" for r in results)
 
 
+class TestAMountNothingVouchesFor:
+    """config.toml names a workspace mount and the stack passes no type for it
+    (host.env STORAGE=local while the config is still a host folder's). A bind
+    of a plain host directory is a mount point too, so `ismount` reads it as
+    the workspace; the snapshots would land in a directory nobody vouched for,
+    as the daemon's workspace did on the vm tier's VM."""
+
+    @pytest.fixture(autouse=True)
+    def _nothing_declared(self, monkeypatch):
+        monkeypatch.delenv("ISTOTA_WORKSPACE_FSTYPE", raising=False)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+
+    def test_no_snapshot_and_no_config_copy_is_written(self, tmp_path, monkeypatch):
+        (tmp_path / "admins").write_text("alice\n")
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+        (tmp_path / "mount" / ".istota-workspace").write_text("")
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+        assert not (tmp_path / "mount" / "Backups").exists()
+
+    def test_a_declared_type_is_written(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+    def test_full_integration_needs_no_declaration(self, tmp_path):
+        cfg = _config(tmp_path, db_backup_dir="", nextcloud_url="https://cloud.example.com")
+        db.init_db(cfg.db_path)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+
 class TestTheConfigCopy:
     """`config.toml` and `admins` beside the snapshots, for a restore that has
     lost the VM: the snapshots alone cannot rebuild a stack (the local VM's
@@ -375,6 +418,7 @@ class TestTheConfigCopy:
         (directory / "config.toml").write_text('bot_name = "Zed"\n')
         (directory / "admins").write_text("alice\n")
         monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(directory / "admins"))
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
         monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
         return directory
 

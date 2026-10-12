@@ -468,12 +468,31 @@ class TestTheHostFolderIsTheWorkspace:
         assert "workspace_mount_path" in result.stderr
         assert "--storage host-folder" in result.stderr
 
-    def test_without_the_hosts_word_no_marker_is_asked_for(self, tmp_path):
-        """A mount path with no host behind it (a developer's own) is checked
-        by doctor's liveness check at run time, as before."""
+    def test_a_mount_nothing_vouches_for_is_refused_by_name(self, tmp_path):
+        """The vm tier's stray workspace: config.toml still named the folder's
+        mount and host.env said STORAGE=local, so istota-stack passed no type.
+        /mnt/shared was then a plain directory on the VM, the daemon wrote a
+        workspace into it, and the rclone mount later refused that directory."""
         volume = self._volume(tmp_path, marker=False, fstype="ext4")
 
-        assert volume.run().returncode == 0
+        result = volume.run()
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert str(volume.workspace) in result.stderr
+        assert "ISTOTA_WORKSPACE_FSTYPE" in result.stderr
+        assert volume.calls() == []
+        assert not (volume.root / ".secret_key").exists()
+
+    def test_a_marker_does_not_vouch_for_an_undeclared_mount(self, tmp_path):
+        volume = self._volume(tmp_path, fstype="virtiofs")
+
+        assert volume.run().returncode == 78
+
+    def test_a_mount_whose_type_is_declared_needs_no_marker(self, tmp_path):
+        """A developer's own mount: declaring its type is what vouches for it."""
+        volume = self._volume(tmp_path, marker=False, fstype="ext4")
+
+        assert volume.run(ISTOTA_WORKSPACE_FSTYPE="ext4").returncode == 0
 
     def test_the_rclone_refusal_is_unchanged_with_the_type_passed(self, tmp_path):
         volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
