@@ -1,16 +1,18 @@
 """File definitions use the scheduler parser and the shared workspace lock."""
 
 from contextlib import closing, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import os
 import sqlite3
 import tomllib
 
 from croniter import croniter
 
-from istota import cron_loader, db, storage
+from istota import cron_loader, db, heartbeat, storage
 from istota.brain import KNOWN_BRAIN_KINDS
+from istota.config import load_admin_users
 from istota.lib import toml_write
+from istota.lib.toml_fence import find_toml_block
 from istota.lib.sqlite_util import connect_read_only
 from istota.settings_plan.engine import ExecutionError, Operation, Unit
 from istota.settings_plan.profiles import validate_destination
@@ -202,3 +204,162 @@ def plan_cron(plan, user, context, options):
             raise ExecutionError("state_changed", field_path) from None
 
     apply_file(context, user, "scheduled_jobs", "CRON.md", rendered, expected, operations, validate=validate)
+
+
+def _heartbeat_document(content, user):
+    field_path = ["users", user, "heartbeat"]
+    diagnostics = []
+    parsed = heartbeat.parse_heartbeat_text(content, user, diagnostics=diagnostics, include_empty=True)
+    if diagnostics:
+        raise ExecutionError("heartbeat_file_invalid", field_path)
+    span = find_toml_block(content)
+    data = tomllib.loads(content[span[0]:span[1]]) if span is not None else {}
+    raw = {name: data[name] for name in ("settings", "checks") if name in data}
+    try:
+        validate_user_plan(user, {"heartbeat": raw})
+        # reset is plan metadata, never a file-authored check field.
+        if any("reset" in item for item in raw.get("checks", [])):
+            raise ExecutionError("heartbeat_file_invalid", field_path)
+    except SchemaError:
+        raise ExecutionError("heartbeat_file_invalid", field_path) from None
+    settings, checks = parsed if parsed is not None else (heartbeat.HeartbeatSettings(), [])
+    definitions = []
+    for check in checks:
+        definition = {"name": check.name, "type": check.type, "channel": check.channel,
+                      **heartbeat.CHECK_CONFIG_DEFAULTS[check.type], **check.config}
+        for name in ("cooldown_minutes", "interval_minutes"):
+            value = getattr(check, name)
+            if value is not None:
+                definition[name] = value
+        definitions.append(definition)
+    result = {"settings": asdict(settings), "checks": definitions}
+    _validate_heartbeat_definition(result, field_path)
+    return span, data, result
+
+
+def _validate_heartbeat_definition(definition, field_path):
+    settings = definition["settings"]
+    if settings["default_cooldown_minutes"] < 0:
+        raise ExecutionError("validation_error", [*field_path, "settings", "default_cooldown_minutes"])
+    for value in settings["quiet_hours"]:
+        try:
+            start, end = value.split("-")
+            for time in (start, end):
+                hour, minute = map(int, time.strip().split(":"))
+                if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+                    raise ValueError
+        except ValueError:
+            raise ExecutionError("validation_error", [*field_path, "settings", "quiet_hours"]) from None
+    for index, check in enumerate(definition["checks"]):
+        path = [*field_path, "checks", index]
+        required = {"file-watch": "path", "shell-command": "command", "url-health": "url"}.get(check["type"])
+        if required and not check.get(required):
+            raise ExecutionError("validation_error", [*path, required])
+        for name in ("cooldown_minutes", "interval_minutes", "max_age_hours", "lookahead_hours", "warn_hours_before"):
+            if name in check and check[name] < 0:
+                raise ExecutionError("validation_error", [*path, name])
+        if "timeout" in check and check["timeout"] <= 0:
+            raise ExecutionError("validation_error", [*path, "timeout"])
+        if "expected_status" in check and not 100 <= check["expected_status"] <= 599:
+            raise ExecutionError("validation_error", [*path, "expected_status"])
+
+
+def snapshot_heartbeat(config, user):
+    """Complete file definitions and revision; absent overrides reset a target."""
+    field_path = ["users", user, "heartbeat"]
+    path = _file_path(config, user, "HEARTBEAT.md", field_path)
+    content = _read_file(path, field_path)
+    _, _, definition = _heartbeat_document(content, user)
+    definition["checks"].sort(key=lambda item: item["name"])
+    for check in definition["checks"]:
+        fields = ["cooldown_minutes", "interval_minutes"]
+        if check["type"] == "file-watch":
+            fields.append("max_age_hours")
+        reset = [name for name in fields if name not in check]
+        if reset:
+            check["reset"] = reset
+    return definition, text_files.revision(content)
+
+
+def _validate_heartbeat_reach(config, user, definition):
+    from istota.sandbox.host_paths import owner_path_parts
+
+    field_path = ["users", user, "heartbeat"]
+    try:
+        with closing(connect_read_only(config.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            token = definition["settings"]["conversation_token"]
+            if token:
+                validate_destination(conn, config, user, "talk:" + token)
+            for index, check in enumerate(definition["checks"]):
+                path = [*field_path, "checks", index]
+                if check["type"] in {"shell-command", "url-health"} and not config.is_admin(user):
+                    raise ExecutionError("validation_error", [*path, "type"])
+                if check["type"] == "file-watch" and owner_path_parts(check["path"], user) is None:
+                    raise ExecutionError("validation_error", [*path, "path"])
+                if check["channel"]:
+                    validate_destination(conn, config, user, check["channel"])
+    except ValueError:
+        raise ExecutionError("validation_error", field_path) from None
+    except (sqlite3.Error, OSError):
+        raise ExecutionError("heartbeat_store_unavailable", field_path) from None
+
+
+def plan_heartbeat(plan, user, context, options):
+    config = context.config
+    field_path = ["users", user, "heartbeat"]
+    path = _file_path(config, user, "HEARTBEAT.md", field_path)
+    content = _read_file(path, field_path)
+    expected = text_files.revision(content)
+    span, data, before = _heartbeat_document(content, user)
+    declaration = plan.users[user].sections["heartbeat"]
+    settings = {**before["settings"], **declaration.get("settings", {})}
+    existing = {item["name"]: item for item in before["checks"]}
+    desired = {} if options.prune and "checks" in declaration else dict(existing)
+    for index, check in enumerate(declaration.get("checks", [])):
+        identity = check["name"]
+        merged = {**existing.get(identity, {}), **check}
+        reset = merged.pop("reset", [])
+        if "max_age_hours" in reset and merged.get("type") != "file-watch":
+            raise ExecutionError("validation_error", [*field_path, "checks", index, "reset"])
+        for name in reset:
+            merged.pop(name, None)
+        desired[identity] = merged
+    candidate = "```toml\n" + toml_write.dumps({"settings": settings, "checks": list(desired.values())}) + "```\n"
+    _, _, after = _heartbeat_document(candidate, user)
+    _validate_heartbeat_reach(config, user, after)
+    operations = []
+    if before["settings"] != after["settings"]:
+        changes = [{"path": [name], "before": before["settings"][name], "after": value}
+                   for name, value in after["settings"].items() if before["settings"][name] != value]
+        operations.append(Operation("heartbeat", "settings", "update", user=user, changes=changes, expected_state=expected))
+    desired = {item["name"]: item for item in after["checks"]}
+    for identity, definition in desired.items():
+        previous = existing.get(identity)
+        if previous == definition:
+            continue
+        changes = [{"path": [name], "before": (previous or {}).get(name), "after": definition.get(name)}
+                   for name in sorted(set(previous or {}) | set(definition))
+                   if name != "name" and (previous is None or previous.get(name) != definition.get(name))]
+        operations.append(Operation("heartbeat", identity, "create" if previous is None else "update",
+                                    user=user, changes=changes, expected_state=expected))
+    for identity in sorted(existing.keys() - desired.keys()):
+        operations.append(Operation("heartbeat", identity, "delete", user=user, expected_state=expected))
+    if not operations:
+        return
+    other = {name: value for name, value in data.items() if name not in {"settings", "checks"}}
+    block = toml_write.dumps({**other, **after})
+    if span is not None:
+        rendered = content[:span[0]] + block + content[span[1]:]
+    else:
+        rendered = content + ("\n" if content and not content.endswith("\n") else "") + "```toml\n" + block + "```\n"
+
+    def validate():
+        try:
+            current_config = replace(config, admin_users=load_admin_users())
+            _validate_heartbeat_reach(current_config, user, after)
+        except (ExecutionError, OSError):
+            raise ExecutionError("state_changed", field_path) from None
+
+    apply_file(context, user, "heartbeat", "HEARTBEAT.md", rendered, expected, operations, validate=validate)

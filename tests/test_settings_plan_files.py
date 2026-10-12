@@ -289,3 +289,285 @@ def test_failed_atomic_writer_reports_no_applied_operation(install, monkeypatch)
     assert result.exit_code == 1 and not result.changed
     assert result.errors == [{"code": "file_write_failed", "path": ["users", "alice", "scheduled_jobs"]}]
     assert install[2].read_bytes() == before
+
+
+# Heartbeat definitions share the same file unit as scheduled jobs.
+def heartbeat_preview(install, declaration, **options):
+    context = engine.Context(install[0])
+    plan = parse_plan({"users": {"alice": {"heartbeat": declaration}}})
+    return context, engine.build_plan(plan, context, engine.Options(**options))
+
+
+def heartbeat_seed(install):
+    path = install[2].with_name("HEARTBEAT.md")
+    path.write_text('Before\n```toml\nlabel = "keep"\n'
+                    '[settings]\nquiet_hours = ["22:00-07:00"]\ndefault_cooldown_minutes = 90\n'
+                    '[[checks]]\nname = "inbox"\ntype = "file-watch"\npath = "/Users/alice/inbox"\n'
+                    'cooldown_minutes = 15\ninterval_minutes = 10\n'
+                    '[[checks]]\nname = "other"\ntype = "self-check"\n```\nAfter\n')
+    return path
+
+
+def test_heartbeat_merge_real_loader_and_runtime_preserved(install):
+    from istota import heartbeat
+    import tomllib
+
+    path = heartbeat_seed(install)
+    with db.get_db(install[1].db_path) as conn:
+        conn.execute("INSERT INTO heartbeat_state (user_id, check_name, consecutive_errors) VALUES (?, ?, ?)",
+                     ("alice", "inbox", 4))
+    before_db = install[1].db_path.read_bytes()
+    context, operations = heartbeat_preview(install, {
+        "settings": {"quiet_hours": []},
+        "checks": [{"name": "inbox", "channel": "email", "reset": ["cooldown_minutes"]}],
+    })
+    result = engine.execute_plan(operations, context)
+    assert result.exit_code == 2 and not result.restart_required
+    assert install[1].db_path.read_bytes() == before_db
+    content = path.read_text()
+    assert content.startswith('Before\n```toml\n') and content.endswith('```\nAfter\n')
+    assert 'reset' not in content
+    assert tomllib.loads(content.split('```toml\n')[1].split('```')[0])["label"] == "keep"
+    settings, checks = heartbeat.load_heartbeat_config(context.config, "alice")
+    assert settings.quiet_hours == [] and settings.default_cooldown_minutes == 90
+    assert [(c.name, c.channel, c.cooldown_minutes, c.interval_minutes) for c in checks] == [
+        ("inbox", "email", None, 10), ("other", "", None, None)]
+    context, operations = heartbeat_preview(install, {"checks": [{"name": "inbox", "channel": "email"}]})
+    assert engine.execute_plan(operations, context).exit_code == 0
+    assert path.read_text() == content
+
+
+@pytest.mark.parametrize("declaration,prune,names", [
+    ({"settings": {}}, True, ["inbox", "other"]),
+    ({"checks": []}, False, ["inbox", "other"]),
+    ({"checks": []}, True, []),
+])
+def test_heartbeat_presence_and_empty_collections(install, declaration, prune, names):
+    from istota.settings_plan.files import snapshot_heartbeat
+
+    path = heartbeat_seed(install)
+    context, operations = heartbeat_preview(install, declaration, prune=prune)
+    assert engine.execute_plan(operations, context).exit_code == (2 if not names else 0)
+    definitions, _ = snapshot_heartbeat(context.config, "alice")
+    assert [c["name"] for c in definitions["checks"]] == names
+    assert definitions["settings"]["default_cooldown_minutes"] == 90
+    if not names:
+        assert 'checks = []' in path.read_text()
+
+
+def test_heartbeat_snapshot_clears_inherited_overrides_and_is_idempotent(install):
+    from istota.settings_plan.files import snapshot_heartbeat
+    from istota import heartbeat
+    from istota.workspace import text_files
+
+    path = heartbeat_seed(install)
+    source = path.read_text().replace('cooldown_minutes = 15\ninterval_minutes = 10\n', '')
+    path.write_text(source)
+    definitions, revision = snapshot_heartbeat(install[1], "alice")
+    assert revision == text_files.revision(source)
+    assert definitions["checks"][0]["reset"] == ["cooldown_minutes", "interval_minutes", "max_age_hours"]
+    assert definitions["checks"][0]["channel"] == ""
+    context, operations = heartbeat_preview(install, definitions)
+    assert engine.execute_plan(operations, context).exit_code == 0
+    heartbeat_seed(install)
+    context, operations = heartbeat_preview(install, definitions)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    _, checks = heartbeat.load_heartbeat_config(context.config, "alice")
+    assert checks[0].cooldown_minutes is None and checks[0].interval_minutes is None
+
+
+@pytest.mark.parametrize("template", [None, "Notes\n", "Notes\n```toml\n# Example\n```\n"])
+def test_heartbeat_empty_template_and_settings_only(install, template):
+    from istota.settings_plan.files import snapshot_heartbeat
+
+    path = install[2].with_name("HEARTBEAT.md")
+    if template is not None:
+        path.write_text(template)
+    context, operations = heartbeat_preview(install, {"settings": {}, "checks": []}, prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 0
+    assert path.exists() is (template is not None)
+    context, operations = heartbeat_preview(install, {"settings": {"default_cooldown_minutes": 120}})
+    assert engine.execute_plan(operations, context).exit_code == 2
+    assert snapshot_heartbeat(context.config, "alice")[0]["settings"]["default_cooldown_minutes"] == 120
+    if template:
+        assert path.read_text().startswith("Notes\n")
+
+
+def test_heartbeat_stale_revision_and_runtime_change(install):
+    path = heartbeat_seed(install)
+    context, operations = heartbeat_preview(install, {"checks": [{"name": "inbox", "channel": "email"}]})
+    path.write_text(path.read_text() + "Concurrent notes\n")
+    before = path.read_bytes()
+    result = engine.execute_plan(operations, context)
+    assert result.errors == [{"code": "state_changed", "path": ["users", "alice", "heartbeat"]}]
+    assert path.read_bytes() == before
+    context, operations = heartbeat_preview(install, {"checks": []}, prune=True)
+    with db.get_db(install[1].db_path) as conn:
+        conn.execute("INSERT INTO heartbeat_state (user_id, check_name, consecutive_errors) VALUES (?, ?, ?)",
+                     ("alice", "inbox", 5))
+    assert engine.execute_plan(operations, context).exit_code == 2
+    with db.get_db(install[1].db_path) as conn:
+        assert conn.execute("SELECT consecutive_errors FROM heartbeat_state").fetchone()[0] == 5
+
+
+@pytest.mark.parametrize("block", [
+    '[[checks]]\nname = "bad"\n',
+    '[[checks]]\nname = "bad"\ntype = "unknown"\n',
+    '[[checks]]\nname = "bad"\ntype = "self-check"\nunknown = "private-placeholder"\n',
+    '[[checks]]\nname = "bad"\ntype = "self-check"\n' * 2,
+    'checks = [1]\n', 'broken = [\n',
+    '[settings]\nunknown = "private-placeholder"\n',
+])
+def test_heartbeat_invalid_current_file_is_not_erased(install, block, caplog):
+    path = install[2].with_name("HEARTBEAT.md")
+    path.write_text("```toml\n" + block + "```\n")
+    before = path.read_bytes()
+    with pytest.raises(engine.ExecutionError, match="heartbeat_file_invalid") as error:
+        heartbeat_preview(install, {"checks": []}, prune=True)
+    assert path.read_bytes() == before
+    assert "private-placeholder" not in str(error.value) + caplog.text
+
+
+def test_heartbeat_new_checks_validate_without_running(install, monkeypatch):
+    from istota import heartbeat
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("preview must not execute checks")
+    monkeypatch.setattr(heartbeat, "run_check", unexpected)
+    monkeypatch.setattr(heartbeat.httpx, "get", unexpected)
+    context, operations = heartbeat_preview(install, {"checks": [
+        {"name": "web", "type": "url-health", "url": "https://example.com"},
+        {"name": "shell", "type": "shell-command", "command": "echo ok"},
+    ]})
+    assert not install[2].with_name("HEARTBEAT.md").exists()
+    assert engine.execute_plan(operations, context).exit_code == 2
+
+
+@pytest.mark.parametrize("check", [
+    {"name": "bad"}, {"name": "bad", "type": "file-watch"},
+    {"name": "bad", "type": "self-check", "interval_minutes": -1},
+])
+def test_heartbeat_invalid_merged_definition_refuses_plan(install, check):
+    with pytest.raises(engine.ExecutionError):
+        heartbeat_preview(install, {"checks": [check]})
+    assert not install[2].with_name("HEARTBEAT.md").exists()
+
+
+@pytest.mark.parametrize("check", [
+    {"name": "inbox", "max_age_hours": 2, "reset": ["max_age_hours"]},
+    {"name": "other", "reset": ["max_age_hours"]},
+])
+def test_heartbeat_age_reset_rejects_conflict_and_wrong_merged_type(install, check):
+    from istota.settings_plan.schema import SchemaError
+
+    path = heartbeat_seed(install)
+    before = path.read_bytes()
+    with pytest.raises((engine.ExecutionError, SchemaError)):
+        heartbeat_preview(install, {"checks": [check]})
+    assert path.read_bytes() == before
+
+
+def test_heartbeat_age_reset_clears_destination_limit(install):
+    from istota import heartbeat
+    from istota.settings_plan.files import snapshot_heartbeat
+
+    path = heartbeat_seed(install)
+    snapshot, _ = snapshot_heartbeat(install[1], "alice")
+    path.write_text(path.read_text().replace('cooldown_minutes = 15', 'max_age_hours = 1\ncooldown_minutes = 15'))
+    context, operations = heartbeat_preview(install, snapshot)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    assert "max_age_hours" not in path.read_text()
+    assert "max_age_hours" not in heartbeat.load_heartbeat_config(context.config, "alice")[1][0].config
+    context, operations = heartbeat_preview(install, snapshot)
+    assert engine.execute_plan(operations, context).exit_code == 0
+
+
+@pytest.mark.parametrize("content", ['```toml\n[[checks]]\n', '```TOML\n[[checks]]\n```\n'])
+def test_heartbeat_malformed_fence_is_refused(install, content):
+    path = install[2].with_name("HEARTBEAT.md")
+    path.write_text(content)
+    with pytest.raises(engine.ExecutionError, match="heartbeat_file_invalid"):
+        heartbeat_preview(install, {"checks": []}, prune=True)
+    assert path.read_text() == content
+
+
+@pytest.mark.parametrize("check", [
+    {"name": "web", "type": "url-health", "url": "https://example.com"},
+    {"name": "shell", "type": "shell-command", "command": "echo ok"},
+    {"name": "watch", "type": "file-watch", "path": "/Users/bob/private"},
+])
+def test_heartbeat_rejects_other_users_paths_and_admin_checks(install, check, monkeypatch, tmp_path):
+    admins = tmp_path / "other-admins"
+    admins.write_text("bob\n")
+    monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(admins))
+    with pytest.raises(engine.ExecutionError, match="validation_error"):
+        heartbeat_preview(install, {"checks": [check]})
+    assert not install[2].with_name("HEARTBEAT.md").exists()
+
+
+def test_heartbeat_defaults_match_handler_configuration(install):
+    from istota.settings_plan.files import snapshot_heartbeat
+
+    context, operations = heartbeat_preview(install, {"checks": [
+        {"name": "self", "type": "self-check"},
+        {"name": "web", "type": "url-health", "url": "https://example.com"},
+        {"name": "shell", "type": "shell-command", "command": "echo ok"},
+    ]})
+    assert engine.execute_plan(operations, context).exit_code == 2
+    definitions, _ = snapshot_heartbeat(context.config, "alice")
+    checks = {check["name"]: check for check in definitions["checks"]}
+    assert checks["self"]["execution_test"] is True
+    assert checks["web"]["expected_status"] == 200 and checks["web"]["timeout"] == 10
+    assert checks["shell"]["timeout"] == 30 and checks["shell"]["condition"] == ""
+    assert checks["shell"]["message"] == "Check failed: {value}"
+
+
+def test_heartbeat_revoked_admin_is_rechecked_before_write(install, tmp_path, monkeypatch):
+    context, operations = heartbeat_preview(install, {"checks": [
+        {"name": "web", "type": "url-health", "url": "https://example.com"},
+    ]})
+    admins = tmp_path / "other-admins"
+    admins.write_text("bob\n")
+    monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(admins))
+    result = engine.execute_plan(operations, context)
+    assert result.errors == [{"code": "state_changed", "path": ["users", "alice", "heartbeat"]}]
+    assert not install[2].with_name("HEARTBEAT.md").exists()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_heartbeat_nonregular_file_refused(install, tmp_path, kind):
+    import os
+
+    path = install[2].with_name("HEARTBEAT.md")
+    if kind == "symlink":
+        target = tmp_path / "target.md"
+        target.write_text("Notes")
+        path.symlink_to(target)
+    else:
+        os.mkfifo(path)
+    with pytest.raises(engine.ExecutionError, match="file_unavailable"):
+        heartbeat_preview(install, {"checks": []}, prune=True)
+
+
+def test_heartbeat_cli_dry_run_write_and_repeat(install, tmp_path, monkeypatch, capsys):
+    from istota import cli
+    import json
+
+    path = heartbeat_seed(install)
+    before = path.read_bytes()
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"users": {"alice": {"heartbeat": {"checks": [
+        {"name": "inbox", "reset": ["cooldown_minutes", "interval_minutes", "max_age_hours"]},
+    ]}}}}))
+    for flags, expected in [(["--dry-run"], 2), ([], 2), ([], 0)]:
+        monkeypatch.setattr("sys.argv", ["istota", "-c", str(install[0]), "apply", "-f", str(plan), "--format", "json", *flags])
+        code = 0
+        try:
+            cli.main()
+        except SystemExit as result:
+            code = result.code
+        assert code == expected
+        report = json.loads(capsys.readouterr().out)
+        assert report["restart_required"] is False
+        if flags:
+            assert path.read_bytes() == before

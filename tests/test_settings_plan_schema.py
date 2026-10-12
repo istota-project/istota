@@ -250,3 +250,25 @@ def test_config_keeps_native_toml_date_values():
 
     document = {"custom": {"date": date(2026, 1, 1)}}
     assert parse_plan({"config": document}).config == document
+
+
+@pytest.mark.parametrize("check", [
+    {"name": "watch", "reset": ["max_age_hours"]},
+    {"name": "watch", "type": "file-watch", "reset": ["max_age_hours"]},
+])
+def test_file_watch_age_reset_schema(check):
+    from istota.settings_plan import schema
+
+    plan = schema.parse_plan({"users": {"alice": {"heartbeat": {"checks": [check]}}}})
+    assert plan.users["alice"].sections["heartbeat"]["checks"] == [check]
+
+
+@pytest.mark.parametrize("check", [
+    {"name": "watch", "max_age_hours": 2, "reset": ["max_age_hours"]},
+    {"name": "self", "type": "self-check", "reset": ["max_age_hours"]},
+])
+def test_age_reset_schema_rejects_conflict_and_explicit_wrong_type(check):
+    from istota.settings_plan import schema
+
+    with pytest.raises(schema.SchemaError):
+        schema.parse_plan({"users": {"alice": {"heartbeat": {"checks": [check]}}}})

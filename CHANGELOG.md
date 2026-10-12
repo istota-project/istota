@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota apply` can update heartbeat settings and checks, reset inherited overrides and remove file-watch age limits. Previews validate definitions without running checks; writes refuse concurrent file edits and preserve heartbeat history.
+
 - `istota apply` can reconcile shared briefing definitions and refuses pruning while retained user or configuration definitions still reference them. Shared deletions wait for successful user updates; generated content and run history are preserved.
 
 - `istota apply` can reconcile briefing schedules with partial updates and explicit pruning. Pruning removes schedule and content definitions while keeping archives, items and runtime history; conflicting configuration seeds are refused before any settings change.

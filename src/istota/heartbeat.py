@@ -15,12 +15,23 @@ import httpx
 
 from . import db
 from istota.sandbox.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
-from istota.lib.toml_fence import find_toml_block
+from istota.lib.toml_fence import BACKTICK_RUN_RE, find_toml_block
 
 if TYPE_CHECKING:
     from .config import Config
 
 logger = logging.getLogger("istota.heartbeat")
+
+# Defaults in the heartbeat handlers, made explicit in portable definitions.
+CHECK_CONFIG_DEFAULTS = {
+    "file-watch": {},
+    "shell-command": {"condition": "", "message": "Check failed: {value}", "timeout": 30},
+    "url-health": {"expected_status": 200, "timeout": 10},
+    "calendar-conflicts": {"lookahead_hours": 24},
+    "task-deadline": {"warn_hours_before": 24},
+    "self-check": {"execution_test": True},
+}
+
 
 # Where the fence starts and ends is `toml_fence`'s to say (ISSUE-386). This
 # module used to carry its own copy of an expression that anchored neither
@@ -120,13 +131,16 @@ def heartbeat_document_errors(content: str, user_id: str = "") -> list[str]:
 
 
 def parse_heartbeat_text(
-    content: str, user_id: str = "",
+    content: str, user_id: str = "", *, diagnostics: list[str] | None = None,
+    include_empty: bool = False,
 ) -> tuple[HeartbeatSettings, list[HeartbeatCheck]] | None:
     """The parse half of `load_heartbeat_config`, on text already read.
 
     No I/O, so the web editor can check a save against exactly what the
     daemon will load. None for a file that configures no checks, as the
     loader returns; a type error in the file raises, as it always has.
+    Callers rewriting definitions can collect safe diagnostics and retain
+    settings even when there are no checks, without changing daemon reads.
     """
     if not content.strip():
         return None
@@ -134,6 +148,8 @@ def parse_heartbeat_text(
     # Extract TOML block from markdown
     span = find_toml_block(content)
     if span is None:
+        if diagnostics is not None and BACKTICK_RUN_RE.search(content):
+            diagnostics.append("unreadable_fence")
         logger.debug("No TOML block found in HEARTBEAT.md for %s", user_id)
         return None
 
@@ -151,11 +167,20 @@ def parse_heartbeat_text(
         import tomllib
         data = tomllib.loads(toml_content)
     except Exception as e:
-        logger.warning("Failed to parse heartbeat config for %s: %s", user_id, e)
+        if diagnostics is not None:
+            diagnostics.append("invalid_toml")
+        else:
+            logger.warning("Failed to parse heartbeat config for %s: %s", user_id, e)
         return None
 
     # Parse settings
     settings_data = data.get("settings", {})
+    if diagnostics is not None and (
+        not isinstance(settings_data, dict) or not isinstance(data.get("checks", []), list)
+        or any(not isinstance(item, dict) for item in data.get("checks", []))
+    ):
+        diagnostics.append("invalid_shape")
+        return None
     settings = HeartbeatSettings(
         conversation_token=settings_data.get("conversation_token", ""),
         quiet_hours=settings_data.get("quiet_hours", []),
@@ -168,6 +193,8 @@ def parse_heartbeat_text(
         name = check_data.get("name", "")
         check_type = check_data.get("type", "")
         if not name or not check_type:
+            if diagnostics is not None:
+                diagnostics.append("skipped_check")
             continue
 
         # Extract type-specific config (all fields except top-level check fields)
@@ -186,7 +213,7 @@ def parse_heartbeat_text(
             interval_minutes=check_data.get("interval_minutes"),
         ))
 
-    if not checks:
+    if not checks and not include_empty:
         return None
 
     logger.debug("Loaded %d heartbeat check(s) for user %s", len(checks), user_id)
@@ -373,9 +400,9 @@ def _check_shell_command(check: HeartbeatCheck, config: "Config", user_id: str |
         timeout: Command timeout in seconds (default: 30)
     """
     command = check.config.get("command", "")
-    condition = check.config.get("condition", "")
-    message_template = check.config.get("message", "Check failed: {value}")
-    timeout = check.config.get("timeout", 30)
+    condition = check.config.get("condition", CHECK_CONFIG_DEFAULTS["shell-command"]["condition"])
+    message_template = check.config.get("message", CHECK_CONFIG_DEFAULTS["shell-command"]["message"])
+    timeout = check.config.get("timeout", CHECK_CONFIG_DEFAULTS["shell-command"]["timeout"])
 
     if not command:
         return CheckResult(healthy=False, message="No command configured")
@@ -526,8 +553,8 @@ def _check_url_health(check: HeartbeatCheck, config: "Config") -> CheckResult:
         timeout: Request timeout in seconds (default: 10)
     """
     url = check.config.get("url", "")
-    expected_status = check.config.get("expected_status", 200)
-    timeout = _clamped_timeout(check.config.get("timeout", 10))
+    expected_status = check.config.get("expected_status", CHECK_CONFIG_DEFAULTS["url-health"]["expected_status"])
+    timeout = _clamped_timeout(check.config.get("timeout", CHECK_CONFIG_DEFAULTS["url-health"]["timeout"]))
 
     if not url:
         return CheckResult(healthy=False, message="No URL configured")
@@ -570,7 +597,7 @@ def _check_calendar_conflicts(check: HeartbeatCheck, config: "Config", user_id: 
     Config fields:
         lookahead_hours: Hours to look ahead (default: 24)
     """
-    lookahead_hours = check.config.get("lookahead_hours", 24)
+    lookahead_hours = check.config.get("lookahead_hours", CHECK_CONFIG_DEFAULTS["calendar-conflicts"]["lookahead_hours"])
 
     if not config.caldav_url:
         return CheckResult(healthy=False, message="CalDAV not configured")
@@ -651,7 +678,7 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
         source: "file" (only supported option currently)
         warn_hours_before: Hours before deadline to warn (default: 24)
     """
-    warn_hours_before = check.config.get("warn_hours_before", 24)
+    warn_hours_before = check.config.get("warn_hours_before", CHECK_CONFIG_DEFAULTS["task-deadline"]["warn_hours_before"])
 
     if not config.has_workspace:
         return CheckResult(healthy=False, message="Task deadline check requires mount")
@@ -821,7 +848,7 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
         results = doctor.redact(
             doctor.run_checks(
                 config,
-                live=bool(check.config.get("execution_test", True)),
+                live=bool(check.config.get("execution_test", CHECK_CONFIG_DEFAULTS["self-check"]["execution_test"])),
                 skip=_SELF_CHECK_SKIPPED,
             ),
             config,

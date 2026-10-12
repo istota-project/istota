@@ -230,9 +230,11 @@ def _heartbeat(value, path):
         if "reset" in check:
             _strings(check["reset"], [*check_path, "reset"], unique=True)
             for index, name in enumerate(check["reset"]):
-                _choice(name, ("cooldown_minutes", "interval_minutes"), [*check_path, "reset", index])
+                _choice(name, ("cooldown_minutes", "interval_minutes", "max_age_hours"), [*check_path, "reset", index])
                 if name in check:
                     _fail([*check_path, "reset"], "cannot reset and supply the same override")
+                if name == "max_age_hours" and "type" in check and check["type"] != "file-watch":
+                    _fail([*check_path, "reset"], "age limits belong to file-watch checks")
 
 
 def validate_user_plan(user_id: str, document: dict) -> UserPlan:

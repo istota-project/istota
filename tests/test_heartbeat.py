@@ -1892,3 +1892,26 @@ class TestParseHeartbeatText:
             ("site", "url-health"), ("disk", "shell-command")]
         assert checks[0].config == {"url": "https://example.com"}
         assert checks[1].channel == "room2" and checks[1].interval_minutes == 10
+
+
+@pytest.mark.parametrize("text,reason", [
+    ('```toml\n[[checks]]\n', "unreadable_fence"),
+    ('```toml\ninvalid = [\n```\n', "invalid_toml"),
+    ('```toml\nchecks = [1]\n```\n', "invalid_shape"),
+    ('```toml\n[[checks]]\nname = "incomplete"\n```\n', "skipped_check"),
+])
+def test_parse_heartbeat_diagnostics_for_rewrite(text, reason, caplog):
+    from istota.heartbeat import parse_heartbeat_text
+
+    diagnostics = []
+    assert parse_heartbeat_text(text, diagnostics=diagnostics, include_empty=True) in (None, (HeartbeatSettings(), []))
+    assert diagnostics == [reason]
+    assert not caplog.text
+
+
+def test_parse_heartbeat_retains_settings_without_checks_when_requested():
+    from istota.heartbeat import parse_heartbeat_text
+
+    text = '```toml\n[settings]\ndefault_cooldown_minutes = 120\n```\n'
+    assert parse_heartbeat_text(text) is None
+    assert parse_heartbeat_text(text, include_empty=True) == (HeartbeatSettings(default_cooldown_minutes=120), [])
