@@ -5,8 +5,8 @@ with ordinary POSIX calls, and an HTTP variant would give the model two ways to
 do one thing with no rule for choosing. What lives here is what the filesystem
 has no way to show or do: server-side properties (file id, share types,
 favorite, owner), indexed server-side search, versions, the trash bin, quota —
-plus upload/download, which exist for large files, files originating outside
-the mount, and rclone mode, where there is no local path at all.
+plus upload/download, which exist for large files and files originating
+outside the mount.
 """
 
 from __future__ import annotations

@@ -81,16 +81,11 @@ module_data_dir = "data/modules"
 # File Access Configuration
 # =============================================================================
 # Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
-# workspace_path = "/srv/mount/nextcloud/content"
+# Required when [nextcloud] url is set: the files are reached through it.
+workspace_path = "/srv/mount/nextcloud/content"
 
-# Choose ONE of the following options:
-
-# Option 1: rclone CLI (default, works without systemd mount)
-# Uses subprocess calls to rclone for each file operation
-rclone_remote = "nextcloud"
-
-# Option 2: Local mount (faster, requires mount-nextcloud.service)
-# Uncomment to enable - all Nextcloud files accessible as local paths
+# The FUSE mountpoint of the bot's Nextcloud files (mount-nextcloud.service),
+# when the workspace is one.
 # nextcloud_mount_path = "/srv/mount/nextcloud/content"
 
 # Path to skills directory (individual skill files loaded selectively)
@@ -570,8 +565,9 @@ features = []
 
 [nextcloud]
 # Nextcloud server URL. This also drives storage vocabulary: when set, the bot
-# describes files as Nextcloud (mount/rclone); when blank (the local/standalone
-# shape), it describes "your workspace" as a plain local folder instead.
+# describes files as Nextcloud; when blank (the local/standalone shape), it
+# describes "your workspace" as a plain local folder instead. A URL needs
+# workspace_path, the mount of the bot's Nextcloud files.
 url = "https://nextcloud.example.com"
 # Bot's Nextcloud username
 username = "istota"

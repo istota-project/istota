@@ -178,7 +178,6 @@ src/istota/
 ├── lib/                  # Dependency-free leaves; nothing here imports from `istota` → leaf-modules.md
 │   ├── sqlite_util.py    # One SQLite open, each caller's pragma set as parameters; no journal_mode, deliberately → leaf-modules.md
 │   ├── du.py             # Du-style tree measurement and the first-level directory scan → leaf-modules.md
-│   ├── rclone_client.py  # The rclone API `storage` and the files skill each had a copy of → leaf-modules.md
 │   ├── image_sniff.py    # Which bytes `/chat/files` will serve `inline` on the app's own origin → leaf-modules.md
 │   ├── audio_sniff.py    # Which bytes are audio the transcription pipeline decodes, and `AUDIO_EXTENSIONS` → leaf-modules.md
 │   ├── video_sniff.py    # Which bytes are an MP4 the GIF frame extractor opens → leaf-modules.md

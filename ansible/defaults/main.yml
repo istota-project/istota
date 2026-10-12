@@ -207,8 +207,9 @@ istota_config: {}
 #
 #   nextcloud:
 #     # Nextcloud server URL. This also drives storage vocabulary: when set, the bot
-#     # describes files as Nextcloud (mount/rclone); when blank (the local/standalone
-#     # shape), it describes "your workspace" as a plain local folder instead.
+#     # describes files as Nextcloud; when blank (the local/standalone shape), it
+#     # describes "your workspace" as a plain local folder instead. A URL needs
+#     # workspace_path, the mount of the bot's Nextcloud files.
 #     # example: "https://nextcloud.example.com"
 #     url: ""
 #
@@ -2314,19 +2315,16 @@ istota_config: {}
 #   # Written [[briefing_shared_blocks]] in config.example.toml, which shows the fields.
 #   briefing_shared_blocks: []
 #
-#   # Option 1: rclone CLI (default, works without systemd mount)
-#   # Uses subprocess calls to rclone for each file operation
-#   rclone_remote: "nextcloud"
-#
 #   # File Access Configuration
 #   # Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
+#   # Required when [nextcloud] url is set: the files are reached through it.
 #   # example: "/srv/mount/nextcloud/content"
 #   # unset by default; give it a value or leave it out
 #   # The container layout: `istota setup` writes "/data/workspace" here (code default ).
 #   workspace_path: "/data/workspace"
 #
-#   # Option 2: Local mount (faster, requires mount-nextcloud.service)
-#   # Uncomment to enable - all Nextcloud files accessible as local paths
+#   # The FUSE mountpoint of the bot's Nextcloud files (mount-nextcloud.service),
+#   # when the workspace is one.
 #   # example: "/srv/mount/nextcloud/content"
 #   # unset by default; give it a value or leave it out
 #   nextcloud_mount_path:

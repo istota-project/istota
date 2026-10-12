@@ -245,16 +245,15 @@ def _audio_in_reach(
     """`audio_path`, or a copy of it the child will be allowed to open.
 
     The transcription child is a skill CLI and resolves its path argument
-    against the allowlist its own environment names (ISSUE-447). Two of the
-    shapes a Talk attachment arrives in are outside that allowlist, and both
-    are shipped: `download_talk_attachments` falls back to
+    against the allowlist its own environment names (ISSUE-447). One shape a
+    Talk attachment arrives in is outside that allowlist:
+    `download_talk_attachments` falls back to
     `/mnt/nc-data/<user>/files/Talk/<name>` when the bot's own `Talk/` view
     does not hold the file (Nextcloud keeps a shared file in the *sender's*
-    data dir), and the rclone branch copies to `config.temp_dir` rather than
-    to the per-user directory below it. Those two, the WhatsApp and email
-    copies kept in `temp_dir` when an inbox upload fails, and a restricted
-    task's own `{control_dir}/room-attachments` copy are copied into the task's
-    own temp dir, which is a root because the caller passes it as
+    data dir). That fallback, the WhatsApp and email copies kept in `temp_dir`
+    when an inbox upload fails, and a restricted task's own
+    `{control_dir}/room-attachments` copy are copied into the task's own temp
+    dir, which is a root because the caller passes it as
     `ISTOTA_DEFERRED_DIR`. `cleanup_old_temp_files` owns the copy afterwards.
 
     **Nothing else is copied, and no link is followed** (ISSUE-610). The
@@ -6754,12 +6753,7 @@ def _attachment_line(
     strictly more images than before makes that mixed list the common case
     rather than the odd one.
     """
-    if attachment.startswith("/"):
-        where = "local path"
-    elif config.storage_is_nextcloud:
-        where = "in Nextcloud, access via rclone"
-    else:
-        where = "workspace-relative"
+    where = "local path" if attachment.startswith("/") else "workspace-relative"
     note = (status or {}).get(attachment, "")
     return f"  - {attachment} [{where}]" + (f" — {note}" if note else "")
 
@@ -7102,9 +7096,9 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
 """
 
-    # Build file access tools section based on the storage backend. Three modes:
-    # local folder, Nextcloud via mount, Nextcloud via rclone. Non-admin users
-    # get a scoped path restricted to their own directory (server shape only).
+    # Build file access tools section based on the storage backend: a local
+    # folder or the Nextcloud mount. Non-admin users get a scoped path
+    # restricted to their own directory (server shape only).
     if config.storage_backend == "local":
         # `_one_line` here as well as on the bare user id above: these paths are
         # built from it, so a line break survives `Path` joining into the
@@ -7128,11 +7122,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
   - Write: Use standard file operations (Python, bash, etc.)
   - All Nextcloud paths are accessible as local filesystem paths"""
     else:
-        remote = _one_line(config.rclone_remote)
-        file_tools = f"""- rclone for Nextcloud files: remote name is '{remote}'
-  - List: rclone ls {remote}:/path/
-  - Copy from NC: rclone copy {remote}:/path/file.txt /tmp/
-  - Copy to NC: rclone copy /tmp/file.txt {remote}:/path/"""
+        file_tools = "- No file workspace is configured for this install."
 
     # Browser tool line (only when enabled)
     browser_tool = ""
@@ -7275,7 +7265,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     db_tool_line = ""  # DB writes handled via deferred JSON files
 
-    scoped_path = str(config.workspace_path / "Users" / task.user_id) if config.has_workspace else f"{config.rclone_remote}:/Users/{task.user_id}"
+    scoped_path = str(config.workspace_path / "Users" / task.user_id) if config.has_workspace else f"/Users/{task.user_id}"
     rules_section = build_rules_section(
         is_admin=is_admin,
         user_id=task.user_id,
@@ -8170,7 +8160,7 @@ def execute_task(
         if config.has_workspace:
             scripts_dir = str(config.workspace_path / scripts_nc_path.lstrip("/"))
         else:
-            scripts_dir = f"{config.rclone_remote}:{scripts_nc_path}"
+            scripts_dir = scripts_nc_path
         skills_doc = skills_doc.replace("{scripts_dir}", scripts_dir)
         skills_doc = skills_doc.replace("{user_id}", task.user_id)
         # Storage-neutral workspace root + product noun (backend-derived).
@@ -8182,7 +8172,7 @@ def execute_task(
         # workspace lives under that root, so reusing the variable made every
         # sandboxed task fail with "overlaps a protected path".
         ws_root = config.workspace_root(task.user_id)
-        workspace_display = str(ws_root) if ws_root is not None else f"{config.rclone_remote}:/Users/{task.user_id}"
+        workspace_display = str(ws_root) if ws_root is not None else f"/Users/{task.user_id}"
         skills_doc = skills_doc.replace("{workspace}", workspace_display)
         skills_doc = skills_doc.replace("{storage}", config.storage_label)
     if selected_skills:

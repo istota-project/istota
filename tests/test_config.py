@@ -27,10 +27,6 @@ class TestConfigDefaults:
         cfg = Config()
         assert cfg.db_path == Path("data/istota.db")
 
-    def test_default_rclone_remote(self):
-        cfg = Config()
-        assert cfg.rclone_remote == "nextcloud"
-
     def test_default_nextcloud_config(self):
         cfg = Config()
         assert cfg.nextcloud.url == ""
@@ -196,6 +192,7 @@ class TestConfigLoading:
     def test_load_nextcloud_section(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text(
+            'workspace_path = "/srv/mount/nextcloud/content"\n'
             '[nextcloud]\n'
             'url = "https://cloud.example.com"\n'
             'username = "bot"\n'
@@ -503,6 +500,12 @@ class TestConfigLoading:
             in record.getMessage()
             for record in caplog.records
         )
+
+    def test_nextcloud_url_without_a_workspace_is_refused(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('[nextcloud]\nurl = "https://cloud.example.com"\n')
+        with pytest.raises(ValueError, match="workspace_path"):
+            load_config(p)
 
     def test_new_workspace_field_suppresses_mount_migration(self, tmp_path, caplog):
         p = tmp_path / "config.toml"
@@ -1849,7 +1852,9 @@ repos_dir = "/srv/repos"
 class TestMoneyModuleConfig:
     def test_lookup_defaults_on(self, tmp_path):
         config_file = tmp_path / "config.toml"
-        config_file.write_text("[nextcloud]\nurl = 'https://nc.example.com'\n")
+        config_file.write_text(
+            "workspace_path = '/srv/workspace'\n[nextcloud]\nurl = 'https://nc.example.com'\n"
+        )
         assert load_config(config_file).money.autoclass_lookup is True
 
     def test_operator_can_switch_the_lookup_off(self, tmp_path):
@@ -2319,11 +2324,11 @@ class TestConfigToplevelKeyOrdering:
         with open(example, "rb") as f:
             data = tomli.load(f)
         # These must be at the root, not under [brain] or any other table.
-        for key in ("db_path", "temp_dir", "skills_dir", "rclone_remote"):
+        for key in ("db_path", "temp_dir", "skills_dir", "workspace_path"):
             assert key in data, f"{key} not at root in config.example.toml"
         # And they must NOT be inside the brain table.
         if "brain" in data:
-            for key in ("db_path", "temp_dir", "skills_dir", "rclone_remote"):
+            for key in ("db_path", "temp_dir", "skills_dir", "workspace_path"):
                 assert key not in data["brain"], (
                     f"{key} ended up under [brain] — table header is positioned wrong"
                 )

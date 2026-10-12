@@ -285,17 +285,11 @@ def test_live_source_identity_never_becomes_another_rooms_alias(migrated):
 
 
 
-@pytest.mark.parametrize("returncode,expected", [(1, None), (3, "old notes"), (4, "old notes")])
-def test_rclone_fallback_requires_a_missing_file(migrated, returncode, expected):
-    import subprocess
+def test_no_workspace_reads_no_channel_memory(migrated):
     config, old, new = migrated
+    put(config, f"Channels/{old}/CHANNEL.md", "old notes")
     config.workspace_path = None
-    with patch("istota.lib.rclone_client.subprocess.run", side_effect=[
-        subprocess.CompletedProcess([], returncode, stdout="", stderr="read failed"),
-        subprocess.CompletedProcess([], 0, stdout="old notes", stderr=""),
-    ]) as command:
-        assert storage.read_channel_memory(config, new) == expected
-    assert command.call_count == (1 if returncode == 1 else 2)
+    assert storage.read_channel_memory(config, new) is None
 
 
 def test_existing_vector_index_does_not_refuse_the_sweep(migrated, monkeypatch):
