@@ -139,6 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Location History now opens on yesterday. Dates and ranges selected through links still take precedence.
+
 - **`istota apply` refuses a plan with a value the loader would throw away.** It used to match the loader's wording and missed several cases, so a typo in a closed choice (`web.token_storage = "plain"`), `scheduler.talk_poll_timeout = 0` or an unknown `[web] auth` method was applied and then silently replaced by the default. Those plans now fail with nothing written. **Upgrade note:** check your plan with `istota apply --check -f plan.json` (or an Ansible `--check` run) before upgrading, since a play that passed before can now fail. Four config shapes that were ignored in silence now log a warning: a `[web] auth` that is not a list, a `[brain] fallback` that is not a string, a `[brain.source_type_overrides]` that is not a table, and a `[[briefings]]` entry that is not a table.
 
 - **`istota apply` gains `--check`, `--json`, `--backup N` and plans on stdin.** `--check` validates a plan without reading or writing any config, and with `--json` prints its problems as one JSON object; `-f -` reads the plan from stdin; `--backup N` keeps the replaced `config.toml` as a dated 0600 copy, and the newest N of those. A plan's `[meta]` can now say who manages the config (`managed`, `source`), recorded in `config/managed.json`; `istota setup` marks everything unmanaged, `istota-stack put-files` records who manages the secrets and the admins, and the Ansible role marks all three as its own. Changing only that record exits 0, so it does not restart the stack.
@@ -241,6 +243,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- Workspace no longer lists a Talk attachments location on a local workspace, where no `Talk/` folder exists. Files posted in Talk are under each room's own location there.
+
+- Admin Configuration showed two warnings for the retired vault sync interval. It now shows only the retirement warning. Review changes and Discard now sit in the app bar, in the same place as the other settings pages' Save button.
+
+- `istota-stack localize-workspace` writes `MOVED.md` into the users' Nextcloud bot folders only after the config has moved, so a copy that stops, or a `--copy-only` run, no longer leaves a note saying edits there are ignored on an install still running on the mount. A user's own `MOVED.md` is kept and copied instead of being overwritten and left out. A non-empty `/data/workspace` is refused before the stack stops, and the rollback steps now remove the notes (`istota workspace moved-note --remove`) and the memory index entries for the local copy.
 
 - A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.
 

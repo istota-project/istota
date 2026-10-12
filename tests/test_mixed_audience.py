@@ -271,6 +271,7 @@ class TestAGuestsTurnHasItsOwnDirectories:
         assert task_deferred_dir(config, task) == config.temp_dir / "alice"
 
     def test_the_talk_dir_is_not_bound_and_its_own_attachment_is_copied_in(self, config):
+        config.nextcloud_mount_path = config.workspace_path
         talk = config.workspace_path / "Talk"
         talk.mkdir()
         (talk / "other-room.pdf").write_bytes(b"not yours")
@@ -350,6 +351,7 @@ class TestAGuestsTurnHasItsOwnDirectories:
         assert ok is not None, err
 
     def test_control_a_private_task_binds_the_talk_dir(self, config):
+        config.nextcloud_mount_path = config.workspace_path
         (config.workspace_path / "Talk").mkdir()
         seen = _run(config, _room(config, shared=False))
         assert str((config.workspace_path / "Talk").resolve()) in _binds(seen["argv"])

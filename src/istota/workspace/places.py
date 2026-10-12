@@ -78,7 +78,10 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
                 label = group["display_name"] or group_id
                 places.append(Place(f"group:{group_id}", "group", label[:120],
                                     root, True, f"/Groups/{group_id}"))
-        places.append(Place("talk", "talk", "Talk attachments", workspace / "Talk", False, None))
+        # A local workspace keeps Talk attachments in each room's own
+        # `Channels/<token>/media/`; `Talk/` is the Nextcloud account's folder.
+        if config.storage_is_nextcloud:
+            places.append(Place("talk", "talk", "Talk attachments", workspace / "Talk", False, None))
     if config.google_workspace.enabled:
         scopes = db.get_google_scopes(conn, user_id)
         if scopes is not None and levels_from_scopes(scopes).get("drive") in {"readonly", "full"}:

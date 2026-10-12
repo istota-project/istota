@@ -3657,6 +3657,7 @@ _RETIRED = frozenset({
     "security.sandbox_admin_db_write",
     "rooms",
     "devbox.docker_cli",
+    "scheduler.vault_sync_interval",
     # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
     "scheduler.istota_file_poll_interval",
 })

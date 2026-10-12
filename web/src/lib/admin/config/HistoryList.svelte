@@ -2,6 +2,7 @@
   import type { ConfigRequest, ConfigRequestStatus } from '$lib/api';
   import { Badge, Button } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
+  import DiffBlock from './DiffBlock.svelte';
 
   type BadgeVariant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';
 
@@ -45,7 +46,7 @@
   change; credentials and the admin list stay as they are now.
 -->
 <section class="card">
-  <h2 class="section-title">History</h2>
+  <header class="section-header"><h2>History</h2></header>
   {#if error}
     <p class="form-error">{error}</p>
   {:else if requests === null}
@@ -54,22 +55,22 @@
     <p class="caption">No change has been made from this page yet.</p>
   {:else}
     {#if restoreBlockedReason}
-      <p class="caption history-note">{restoreBlockedReason}</p>
+      <p class="caption">{restoreBlockedReason}</p>
     {/if}
     <ul class="history">
       {#each requests as request (request.id)}
         <li class="history-row">
-          <div class="history-head">
-            <span class="history-id">#{request.id}</span>
-            <Badge size="sm" variant={STATUS_VARIANT[request.status] ?? 'neutral'}
-              >{request.status}</Badge
-            >
-            <span class="history-meta">
-              {request.admin_id} · {formatDateTime(request.finished_at ?? request.created_at)}
-            </span>
+          <div class="card-head history-head control-row">
+            <div class="history-title">
+              <span class="history-id">#{request.id}</span>
+              <Badge size="sm" variant={STATUS_VARIANT[request.status] ?? 'neutral'}
+                >{request.status}</Badge
+              >
+              <span class="history-summary">{summary(request)}</span>
+            </div>
             {#if request.status === 'applied'}
               <Button
-                variant="ghost"
+                variant="secondary"
                 size="sm"
                 disabled={!!restoreBlockedReason || restoring !== null}
                 loading={restoring === request.id}
@@ -78,12 +79,21 @@
               >
             {/if}
           </div>
-          <p class="caption history-summary">{summary(request)}</p>
+          <p class="caption">
+            {request.admin_id} · {formatDateTime(request.finished_at ?? request.created_at)}
+          </p>
           {#if request.diff_text || request.output_text}
-            <details>
+            <details class="history-details">
               <summary class="caption">Details</summary>
-              {#if request.diff_text}<pre class="history-text">{request.diff_text}</pre>{/if}
-              {#if request.output_text}<pre class="history-text">{request.output_text}</pre>{/if}
+              <div class="history-body">
+                {#if request.diff_text}<DiffBlock lines={request.diff_text.split('\n')} />{/if}
+                {#if request.output_text}
+                  <div>
+                    <span class="micro-label">Host</span>
+                    <pre class="history-output">{request.output_text}</pre>
+                  </div>
+                {/if}
+              </div>
             </details>
           {/if}
         </li>
@@ -100,48 +110,62 @@
   }
 
   .history-row {
-    padding: var(--space-2) 0;
-    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .history-row:first-child {
+    padding-top: 0;
+    border-top: none;
   }
 
   .history-row:last-child {
-    border-bottom: none;
+    padding-bottom: 0;
   }
 
   .history-head {
+    align-items: center;
+  }
+
+  .history-title {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
+    min-width: 0;
+    font-size: var(--text-sm);
   }
 
   .history-id {
     font-weight: 600;
   }
 
-  .history-meta {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
+  .history-summary {
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
   }
 
-  .history-summary,
-  .history-note {
-    margin: var(--space-1) 0 0;
-  }
-
-  details summary {
+  .history-details summary {
     cursor: pointer;
+    width: fit-content;
   }
 
-  .history-text {
+  .history-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+
+  .history-output {
     margin: var(--space-1) 0 0;
-    padding: var(--space-2);
-    max-height: 16rem;
-    overflow: auto;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    background: var(--surface-base);
-    border-radius: var(--radius-sm);
-    white-space: pre;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 </style>

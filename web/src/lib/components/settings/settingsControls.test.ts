@@ -160,13 +160,13 @@ describe('settings controls go through the primitives', () => {
 describe('SecretField composes rather than forks', () => {
   const source = read(join(SRC, 'lib/components/settings/SecretField.svelte'));
 
-  it('builds on Field, Input and IconButton', () => {
+  it('builds on Field, Input and Button', () => {
     // It used to restate Field's descendant rule declaration-for-declaration
     // minus the tier height and the leading pin, so on touch it computed
     // ~34.8px against a 32px tier — the exact defect those two lines were
     // added to fix, reproduced in the one component that renders on five
     // settings pages.
-    for (const primitive of ['Field', 'Input', 'IconButton']) {
+    for (const primitive of ['Field', 'Input', 'Button']) {
       expect(source, `SecretField should use ${primitive}`).toMatch(new RegExp(`<${primitive}\\b`));
     }
   });

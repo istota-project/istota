@@ -409,6 +409,21 @@ class TestTheImageAttachmentRoots:
         roots = image_bind_roots(config, task, _user_temp(config, task))
         assert (config.workspace_path / "Users" / "alice").resolve() in roots
 
+    def test_a_local_workspace_names_no_talk_root(self, config):
+        """ISSUE-725: `{workspace}/Talk` is Nextcloud's folder; a local
+        workspace keeps attachments under the room's own `Channels/` tree."""
+        config.nextcloud.url = "https://cloud.example.com"
+        task = _task("alice")
+        roots = image_bind_roots(config, task, _user_temp(config, task))
+        assert (config.workspace_path / "Talk").resolve() not in roots
+
+    def test_a_nextcloud_workspace_names_the_talk_root(self, config):
+        config.nextcloud.url = "https://cloud.example.com"
+        config.nextcloud_mount_path = config.workspace_path
+        task = _task("alice")
+        roots = image_bind_roots(config, task, _user_temp(config, task))
+        assert (config.workspace_path / "Talk").resolve() in roots
+
 
 class TestTheHostPathAllowlist:
     """`skill_host_paths` guards the conversation token against `.`, `..` and a

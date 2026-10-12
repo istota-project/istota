@@ -1960,7 +1960,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         features["health"] = _user_has_health(username)
         features["briefings"] = _user_has_briefings(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
-        features["workspace"] = _config.has_workspace or _config.storage_is_nextcloud
+        features["workspace"] = _config.has_workspace
         if not features["workspace"] and _config.google_workspace.enabled:
             from istota import db
             from istota.workspace.places import list_places

@@ -291,10 +291,11 @@ Prints the stack's second compose file: a `devbox-<user>` service per user and t
 ```bash
 istota workspace localize --from /mnt/shared --to /data/workspace --scheduler-stopped   # Copy the mounted workspace
 istota workspace localize-config [--check]                                              # Point config.toml at /data/workspace
+istota workspace moved-note --from /mnt/shared [--remove]                               # MOVED.md in each user's Nextcloud bot folder
 istota workspace reindex --forget-root /mnt/shared                                      # Rebuild the memory index on the new paths
 ```
 
-The three steps of `istota-stack localize-workspace`, which runs them in order with the stack stopped. `localize` exits 0 copied, 1 refused, 2 copied with entries skipped, 3 stopped on an I/O error. See [Moving to a local workspace](../deployment/moving-to-a-local-workspace.md).
+The four steps of `istota-stack localize-workspace`, which runs them in order with the stack stopped. `localize` exits 0 copied, 1 refused, 2 copied with entries skipped, 3 stopped on an I/O error; `--check` only answers whether it would start. `moved-note` refuses while the config still names `--from` as the workspace, and `--remove` takes the notes off again when going back; either exits 2 when a user's own `MOVED.md` was left in place. See [Moving to a local workspace](../deployment/moving-to-a-local-workspace.md).
 
 ### Nextcloud
 

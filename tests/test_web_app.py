@@ -925,11 +925,12 @@ class TestApiMe:
         from istota import db
         import istota.webui.app as mod
 
-        if mode != "local":
-            config.workspace_path = None
         if mode == "nextcloud":
+            # The mounted shape as load_config builds it: the mount is the workspace.
             config.nextcloud.url = "https://cloud.example.com"
-            config.nextcloud_mount_path = Path("/srv/mount/nextcloud/content")
+            config.nextcloud_mount_path = config.workspace_path
+        elif mode != "local":
+            config.workspace_path = None
         if mode in {"drive", "gmail"}:
             config.google_workspace.enabled = True
             scope = f"https://www.googleapis.com/auth/{mode}.readonly"

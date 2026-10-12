@@ -1,12 +1,14 @@
 <script lang="ts">
   import Field from '../ui/Field.svelte';
   import Input from '../ui/Input.svelte';
-  import IconButton from '../ui/IconButton.svelte';
+  import Button from '../ui/Button.svelte';
 
   interface Props {
     label: string;
     /** Optional guidance, rendered behind the "?" beside the label. */
     hint?: string;
+    /** Passed to `Field`: the label in a column beside the control. */
+    inline?: boolean;
     type?: 'text' | 'email' | 'password' | 'url';
     configured: boolean;
     value: string;
@@ -21,6 +23,7 @@
   let {
     label,
     hint,
+    inline = false,
     type = 'password',
     configured,
     value,
@@ -35,12 +38,11 @@
 </script>
 
 <!--
-  Field + Input + IconButton. This used to restate Field's descendant rule
-  declaration-for-declaration while dropping the two lines that are not
-  obvious — the tier `min-height` and the `line-height` that has to be pinned
-  beside `font: inherit` — so on touch it computed ~34.8px against a 32px tier
-  and stood proud of every control beside it. It renders on five settings
-  pages, which made it the widest copy of that bug in the tree.
+  Field + Input + a Clear button. The input is always the field's full 24rem,
+  stored value or not, and Clear sits after it rather than inside that width:
+  a button carved out of the input made every clearable field a step narrower
+  than the plain ones beside it. Clearing stays a button rather than "empty
+  the box", because an empty box already means "leave it as it is".
 
   `labelled` is false only while the clear button is present: a <button> is a
   labelable element, so inside a <label> it would become the label's implicit
@@ -48,7 +50,7 @@
   no button there is nothing to steal the association, and clicking the caption
   should focus the input as it does in every other field.
 -->
-<Field {label} {hint} {error} labelled={!showClear}>
+<Field {label} {hint} {inline} {error} labelled={!showClear}>
   <div class="secret-row">
     <Input
       {type}
@@ -57,50 +59,37 @@
       {required}
       invalid={!!error}
       autocomplete="new-password"
-      placeholder={configured ? '•••• stored — enter to replace' : 'Enter value'}
+      placeholder={configured ? '•••••••• stored, type to replace' : 'Enter value'}
       aria-label={showClear ? label : undefined}
       oninput={(e: Event) => onValueChange((e.currentTarget as HTMLInputElement).value)}
     />
     {#if showClear}
-      <IconButton
-        label="Clear stored {label}"
+      <Button
+        variant="secondary"
+        size="sm"
+        ariaLabel="Clear stored {label}"
         title="Clear stored value"
-        danger
         {disabled}
-        onclick={onRequestClear}>×</IconButton
+        onclick={onRequestClear}>Clear</Button
       >
-    {:else if onRequestClear}
-      <!--
-        The button's slot is held open when there is nothing stored to clear.
-        Both rows end at 24rem either way, so without this the *input* absorbed
-        the button's width and an unconfigured field rendered visibly wider
-        than a configured one in the same card — which is how the ntfy card
-        read, its unset access token stretching past every field above it.
-        A mirror of the glyph rather than a measured width, so it cannot drift
-        from what IconButton actually renders. A caller that can never clear
-        (the credential dialog) reserves nothing, so its input gets the row.
-      -->
-      <span class="clear-placeholder" aria-hidden="true">×</span>
     {/if}
   </div>
 </Field>
 
 <style>
-  /* Carries the input's own 24rem cap so the button rides inside it rather
-     than pushing past — a field with a clear button and one without have to
-     end at the same edge, or the card's right margin moves per row. */
   .secret-row {
     display: flex;
     gap: var(--space-2);
     align-items: center;
-    max-width: 24rem;
   }
 
-  /* IconButton's `md` padding, and the same glyph at the same inherited font,
-     so it occupies exactly the width the real button would. */
-  .clear-placeholder {
+  /* The input's own 24rem cap as its basis, so the button follows it rather
+     than taking width out of it. */
+  .secret-row > :global(input) {
+    flex: 0 1 24rem;
+  }
+
+  .secret-row > :global(.btn) {
     flex: none;
-    visibility: hidden;
-    padding: var(--space-1);
   }
 </style>

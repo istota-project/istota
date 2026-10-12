@@ -1412,11 +1412,24 @@ class TestNativeFsRoots:
         assert (mount / "Channels" / "room123").resolve() in write
 
     def test_talk_is_read_only(self, sandbox_config, make_sandbox_task):
+        sandbox_config.nextcloud.url = "https://cloud.example.com"
+        sandbox_config.nextcloud_mount_path = sandbox_config.workspace_path
         (sandbox_config.workspace_path / "Talk").mkdir()
         task = make_sandbox_task()
         read, write, _ = self._roots(sandbox_config, task, False)
         talk = (sandbox_config.workspace_path / "Talk").resolve()
         assert talk in read
+        assert talk not in write
+
+    def test_talk_not_bound_on_local_workspace(self, sandbox_config, make_sandbox_task):
+        """A local workspace binds no flat `Talk/`, even when one exists on disk,
+        and even with a Nextcloud URL configured."""
+        sandbox_config.nextcloud.url = "https://cloud.example.com"
+        (sandbox_config.workspace_path / "Talk").mkdir()
+        task = make_sandbox_task()
+        read, write, _ = self._roots(sandbox_config, task, False)
+        talk = (sandbox_config.workspace_path / "Talk").resolve()
+        assert talk not in read
         assert talk not in write
 
     @pytest.mark.parametrize("is_admin", [True, False])

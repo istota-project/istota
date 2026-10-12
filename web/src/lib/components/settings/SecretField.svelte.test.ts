@@ -10,22 +10,21 @@ function mount(over: Record<string, unknown> = {}) {
   });
 }
 
-describe('the clear button slot', () => {
-  it('is not reserved when the caller cannot clear a stored value', () => {
-    const { container } = mount({ configured: true });
-    expect(container.querySelector('.clear-placeholder')).toBeNull();
+describe('the clear button', () => {
+  it('is absent when the caller cannot clear a stored value', () => {
+    mount({ configured: true });
     expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('is held open while nothing is stored, for a caller that can clear', () => {
-    const { container } = mount({ onRequestClear: vi.fn() });
-    expect(container.querySelector('.clear-placeholder')).not.toBeNull();
+  it('is absent while nothing is stored', () => {
+    mount({ onRequestClear: vi.fn() });
+    expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('holds the button once a value is stored', () => {
-    const { container } = mount({ configured: true, onRequestClear: vi.fn() });
-    expect(container.querySelector('.clear-placeholder')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Clear stored Token' })).toBeTruthy();
+  it('is a labelled Clear button once a value is stored', () => {
+    mount({ configured: true, onRequestClear: vi.fn() });
+    const button = screen.getByRole('button', { name: 'Clear stored Token' });
+    expect(button.textContent?.trim()).toBe('Clear');
   });
 });
 

@@ -22,6 +22,44 @@ function mount(field: AdminConfigField, extra: { op?: ConfigOp; secretPending?: 
   return { ...view, onOp, onSecret };
 }
 
+describe('the field doc', () => {
+  it.each([
+    ['a string field', configField({ doc: 'Where mail is read from.' })],
+    ['a bool field', configField({ doc: 'Where mail is read from.', editor: 'bool', value: true })],
+    [
+      'a credential field',
+      configField({
+        doc: 'Where mail is read from.',
+        secret: true,
+        set: true,
+        value: null,
+        editor: 'secret',
+        credential: { kind: 'file', name: 'istota_email_imap_password' },
+      }),
+    ],
+  ])('is behind the label hint on %s, not a disclosure', async (_kind, field) => {
+    const { container } = mount(field);
+    expect(container.querySelector('details')).toBeNull();
+    expect(screen.queryByText('Where mail is read from.')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText(`About ${field.name}`));
+    expect(await screen.findByText('Where mail is read from.')).toBeInTheDocument();
+  });
+
+  it('puts Reset on the control row', () => {
+    const { container } = mount(configField({ in_file: true }));
+    const reset = screen.getByRole('button', { name: 'Reset' });
+    expect(reset.closest('.field-row.inline-meta')).toBe(container.querySelector('.field-row'));
+    expect(container.querySelector('.field-row .field.inline')).not.toBeNull();
+  });
+
+  it('puts the default note under the control row, not on it', () => {
+    const { container } = mount(configField({ in_file: false, default: 'd' }));
+    const note = screen.getByText('Not in config.toml; the default applies.');
+    expect(note.closest('.field-row')).toBeNull();
+    expect(note.parentElement).toBe(container.querySelector('.config-field'));
+  });
+});
+
 describe('a control per editor kind', () => {
   it('a string field emits a set at its path', async () => {
     const { onOp } = mount(configField({ path: ['email', 'imap_host'], value: 'old' }));
@@ -117,7 +155,7 @@ describe('a control per editor kind', () => {
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(
       '[aliases]\nfast = "haiku"\n',
     );
-    await fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
     expect(onOp).toHaveBeenLastCalledWith({ op: 'unset', path: ['models', 'aliases'] }, [
       'models',
       'aliases',
@@ -137,7 +175,7 @@ describe('a control per editor kind', () => {
 describe('defaults and reset', () => {
   it('reset to default emits unset', async () => {
     const { onOp } = mount(configField({ value: 'x', default: '', in_file: true }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
     expect(onOp).toHaveBeenLastCalledWith({ op: 'unset', path: ['email', 'imap_host'] }, [
       'email',
       'imap_host',
@@ -147,7 +185,7 @@ describe('defaults and reset', () => {
   it('a key not in the file says the default applies and offers no reset', () => {
     mount(configField({ value: 'd', default: 'd', in_file: false }));
     expect(screen.getByText('Not in config.toml; the default applies.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Reset to default' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
   });
 
   it('a pending reset shows the default and can be undone', async () => {
@@ -201,7 +239,7 @@ describe('read-only fields', () => {
     });
     expect(screen.getByText('imap.example.org')).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Reset to default' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
   });
 });
 

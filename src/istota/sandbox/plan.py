@@ -352,8 +352,10 @@ def user_data_mounts(
         # Talk attachments directory (flat, shared across conversations). Not
         # for a task its room restricts: it holds every conversation's files,
         # and `execute_task` copies the task's own into its temp dir instead.
+        # Only on the Nextcloud mount: a local workspace's attachments land
+        # under `Channels/<token>/`, so a `Talk/` there is nothing to bind.
         talk_dir = mount / "Talk"
-        if talk_dir.exists() and not withheld_scopes:
+        if config.storage_is_nextcloud and talk_dir.exists() and not withheld_scopes:
             _ro(talk_dir, "nextcloud_talk_dir", user_data=True)
         if conversation_token:
             channel_dir = mount / "Channels" / conversation_token

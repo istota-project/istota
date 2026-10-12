@@ -10,11 +10,21 @@
     pending: string | undefined;
     readOnlyReason?: string | null;
     hint?: string;
+    /** Passed to `Field`: the label in a column beside the control. */
+    inline?: boolean;
     /** The new value, `""` to clear, or null to leave the credential as it is. */
     onChange: (value: string | null) => void;
   }
 
-  let { label, configured, pending, readOnlyReason = null, hint, onChange }: Props = $props();
+  let {
+    label,
+    configured,
+    pending,
+    readOnlyReason = null,
+    hint,
+    inline = false,
+    onChange,
+  }: Props = $props();
 </script>
 
 <!--
@@ -24,22 +34,23 @@
   other, so it goes through the review dialog rather than happening on click.
 -->
 {#if readOnlyReason}
-  <Field {label} {hint} labelled={false}>
+  <Field {label} {hint} {inline} labelled={false}>
     <div class="secret-state">
       <Badge variant={configured ? 'success' : 'partial'}>{configured ? 'set' : 'not set'}</Badge>
     </div>
   </Field>
 {:else if pending === ''}
-  <Field {label} {hint} labelled={false}>
+  <Field {label} {hint} {inline} labelled={false}>
     <div class="secret-state">
       <span class="muted">Will be cleared.</span>
-      <Button variant="ghost" size="sm" onclick={() => onChange(null)}>Undo</Button>
+      <Button variant="secondary" size="sm" onclick={() => onChange(null)}>Undo</Button>
     </div>
   </Field>
 {:else}
   <SecretField
     {label}
     {hint}
+    {inline}
     {configured}
     value={pending ?? ''}
     onValueChange={(next) => onChange(next === '' ? null : next)}
@@ -52,5 +63,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    min-height: var(--control-height-lg);
   }
 </style>
