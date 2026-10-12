@@ -10,11 +10,11 @@ Per-user data lives in three DB tables and (optionally) the user's Nextcloud wor
 2. `[users.alice]` block in main `config/config.toml` (the docker entrypoint path) — DB rows still win at config-load time.
 3. User workspace files in Nextcloud (`CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md`).
 
-> The legacy `config/users/{user_id}.toml` file (and its `.user.json` overlay) was retired with the OIDC retirement / Phase 7 sweep. The `config/users/` directory is gone, Ansible no longer renders per-user TOML, and `Config.users_dir` / `load_user_configs()` no longer exist.
+> The legacy `config/users/{user_id}.toml` file (and its `.user.json` overlay) was retired with the OIDC retirement / Phase 7 sweep. The `config/users/` directory is gone, and `Config.users_dir` / `load_user_configs()` no longer exist.
 
 The DB rows are populated four ways:
 
-- **Ansible**: `istota user|resource|briefing|secret ensure …` — each idempotent and prints `STATE: created|updated|noop` for `changed_when` semantics.
+- **CLI** (what a config manager such as the [Ansible management role](../deployment/ansible.md) runs): `istota user|resource|briefing|secret ensure …` — each idempotent and prints `STATE: created|updated|noop` for `changed_when` semantics.
 - **Web UI**: `/istota/settings` (Account, Preferences, Delivery, Credentials and Connections sections) and the per-feature settings under `/istota/{feeds,money,location}/settings`.
 - **Auto-seed**: on first OAuth login the profile row is created from the Nextcloud display_name and any `[users.X]` block. Subsequent logins do not overwrite values the user has edited.
 - **TOML migration**: on scheduler startup, `import_from_user_configs` (one each for profiles / resources / briefings) seeds DB rows from any remaining `[users.X]` block whose natural key isn't already present.
@@ -90,7 +90,7 @@ After the Resources sunset, the only declarable resource type is `folder` —
 an out-of-workspace path mounted into the sandbox (a cross-user share, an
 absolute path elsewhere). In-workspace paths are already covered by the
 wholesale user-dir bind, so a `folder` row only does real work for paths
-outside `Users/<id>/`. Provision via Ansible (`istota resource ensure
+outside `Users/<id>/`. Provision with the CLI (`istota resource ensure
 --user alice --type folder --path /shared/Projects --name Projects`) or the
 `[[users.X.resources]]` TOML block. Calendars are CalDAV-discovered;
 todo/reminders/notes read an explicit path (a briefing-source `path`, or a
@@ -242,7 +242,7 @@ Overlay text is indexed for memory search under the `skill_overlay` source type,
 
 ## Admin vs non-admin
 
-Admin users are listed in `/etc/istota/admins`. Empty file = all users are admin.
+Admin users are listed in the admins file (`/srv/app/istota/config/admins` on a server; `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset). Empty file = all users are admin.
 
 Non-admin restrictions:
 

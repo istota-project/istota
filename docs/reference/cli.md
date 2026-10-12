@@ -164,7 +164,7 @@ istota secret vault-new    -u USER --slug SLUG [--username USER] [--url URL] [--
 
 Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are long-only (`-v` is the global verbose flag).
 
-`--value-stdin` reads the value from stdin instead (the whole input, less one trailing line ending), so it is not on the command line, where other processes on the host can read it. The Ansible management role passes every user secret this way.
+`--value-stdin` reads the value from stdin instead (the whole input, less one trailing line ending), so it is not on the command line, where other processes on the host can read it. The [Ansible management role](../deployment/ansible.md) passes every user secret this way.
 
 
 Export requires a terminal and prints a generated password once. Import prompts privately for the source passphrase, prints a preview, and imports new entries; `--include-changed` also replaces changed entries. Both use the same credential modules as Settings.
@@ -173,11 +173,11 @@ Export requires a terminal and prints a generated password once. Import prompts 
 
 ### Ensure-CLI state contract
 
-All four `* ensure` subcommands (`user`, `resource`, `briefing`, `secret`) share a uniform contract: each computes `created` / `updated` / `noop` honestly by comparing the requested fields against the existing row, writes only when state would change, and prints a final `STATE: created|updated|noop` line. Ansible roles use `changed_when: "'STATE: noop' not in stdout"` for accurate change reporting.
+All four `* ensure` subcommands (`user`, `resource`, `briefing`, `secret`) share a uniform contract: each computes `created` / `updated` / `noop` honestly by comparing the requested fields against the existing row, writes only when state would change, and prints a final `STATE: created|updated|noop` line. A config manager can use it for change reporting (Ansible: `changed_when: "'STATE: noop' not in stdout"`).
 
 Subsystem helpers that own the contract: `db.upsert_user_resource`, `credentials.store.upsert_secret`, `user_profiles.update_profile_with_status`, and `db.upsert_briefing_config` (via the existing briefing helper). Each returns `(thing, state)` (or just the state string) so the CLI is a thin printer.
 
-`user ensure` writes one table those helpers do not cover: the WhatsApp binding is its own row, so the command compares it before and after and escalates a `noop` to `updated` when it moved. A WhatsApp-only change has to report `updated`, or the role's `changed_when` suppresses the restarts and both processes carry on with a user set snapshotted before the enrollment.
+`user ensure` writes one table those helpers do not cover: the WhatsApp binding is its own row, so the command compares it before and after and escalates a `noop` to `updated` when it moved. A WhatsApp-only change has to report `updated`, or a play keyed on `STATE:` suppresses the restarts and both processes carry on with a user set snapshotted before the enrollment.
 
 ### Email
 
@@ -303,7 +303,7 @@ istota nextcloud provision-rooms --user alice --adopt general=abc123  # Record a
 
 The `--check` form is the deployment fit-check — usable in a shell or a heartbeat `shell-command`. See [Nextcloud](../features/nextcloud.md) for the feature names and for the full `istota-skill nextcloud` surface.
 
-`provision-rooms` is what the Ansible role calls to give a bare-metal install the same default Talk rooms a Docker install gets. It is idempotent and prints `STATE: created|updated|noop`. A channel room whose profile column is already set is left alone entirely, and a token is written only for a room the run actually made usable — so it can neither overwrite a pinned value nor re-enable an execution log you turned off. `--reseed` is the deliberate re-point, and overrides both rules.
+`provision-rooms` creates a user's default Talk rooms; the stack's entrypoint runs it for the first admin, and you run it for anyone else. It is idempotent and prints `STATE: created|updated|noop`. A channel room whose profile column is already set is left alone entirely, and a token is written only for a room the run actually made usable — so it can neither overwrite a pinned value nor re-enable an execution log you turned off. `--reseed` is the deliberate re-point, and overrides both rules.
 
 Each room's token is remembered per user, so renaming a room does not make the next run create a second one under the old name (ISSUE-342). A run prefers the remembered token and only matches on the room's name when there is nothing remembered for it — the first provision, or a room whose conversation has since been deleted in Nextcloud.
 
@@ -315,7 +315,7 @@ Records written before that outcome was stored carry no failure and are never re
 istota kv delete _provisioned_rooms general --user alice
 ```
 
-A retry that does fail still prints `invite FAILED`, which is what the Ansible role fails the play on.
+A retry that does fail still prints `invite FAILED`, and a warning on stderr names the rooms.
 
 `--adopt NAME=TOKEN` writes that record by hand and exits without contacting Talk. It exists for an install that already carries a duplicate from before the record existed: the room you kept no longer answers to its old name, so nothing else can point the record at it. Repeatable. A wrong token costs nothing beyond a fall back to name matching on the next run.
 
@@ -329,7 +329,7 @@ istota bot-icon show                         # mime, byte size, content hash, up
 
 The headless counterpart to the Bot icon card at the foot of `/admin`. The file is decoded, centre-cropped to a 192px square and re-encoded as WebP by the same code an upload takes, so a JPEG, PNG, WebP, GIF or HEIC all work and nothing of the original's metadata is stored.
 
-Idempotent by the content hash of what is stored, printing `STATE: created|updated|noop`, so an Ansible play can call it on every deploy without reporting a change. Setting the same file twice does not rewrite the row.
+Idempotent by the content hash of what is stored, printing `STATE: created|updated|noop`, so a config manager can call it on every run without reporting a change. Setting the same file twice does not rewrite the row.
 
 `[web] max_avatar_kb` bounds the file, except that `0` — which switches both web upload endpoints off, the admin one included — falls back to the shipped default here: that setting is about an unauthenticated network body, and this reads a local file as the operator. So `0` is the way to leave the icon settable by a deploy and by nobody else.
 
@@ -444,7 +444,7 @@ istota update [--force] [--channel stable|main]           # Self-update the stan
 
 `istota setup` writes a local workspace (default `~/.istota`) and configures a single user; `--yes` runs non-interactively from flags and defaults. `istota serve` is the combined local launcher — it runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`).
 
-`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on a server-shape deployment, which is updated through Ansible instead. See [Local install](../getting-started/local-install.md) for the full walkthrough.
+`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on a server, which is updated with `istota-stack update`. See [Local install](../getting-started/local-install.md) for the full walkthrough.
 
 ### Database
 
@@ -475,14 +475,12 @@ istota-skill markets quote AAPL
 
 Used by Claude Code inside the sandbox to invoke skill CLIs with credentials injected server-side.
 
-## `<namespace>-run` (production host wrapper)
+## `istota` on a server (host wrapper)
 
-Ansible deploys a host wrapper named `<namespace>-run` (e.g. `istota-run`) to `/usr/local/bin/`. It self-sudoes into the service user, loads the same secret bundle (`/etc/<namespace>/secrets.env`) and admins file (`ISTOTA_ADMINS_FILE`) the systemd units use, `cd`s to the install tree so the relative config search path resolves, then passes its arguments straight through to the `istota` CLI. The caller needs sudo rights (passwordless or interactive).
+`host/provision.sh` installs an `istota` command on the server. It runs the CLI inside the running daemon container as uid 10001, with every capability dropped (`istota-stack exec istota ...`), so a CLI call cannot leave a root-owned file under `/data` that locks the daemon out of its own database. Run it as root; arguments pass straight through.
 
 ```bash
-istota-run repl -u alice            # interactive REPL as the service user
-istota-run list                     # any istota subcommand works
-istota-run task "..." -u alice -x
+istota repl -u alice            # interactive REPL
+istota list                     # any istota subcommand works
+istota task "..." -u alice -x
 ```
-
-For `repl` it defaults `--workspace` to `standard` (the per-user temp dir), because the install tree is a protected path the sandbox refuses to bind read-write; pass `--workspace` explicitly to override.

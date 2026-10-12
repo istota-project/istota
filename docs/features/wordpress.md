@@ -18,14 +18,7 @@ The skill runs host-side, in the daemon's network namespace, so every site addre
 
 Each entry is a bare host name or IP address, compared exactly (case and a trailing dot aside) with the host in the site's URL: no scheme, port, path or wildcard. The config loader logs a warning for an entry that is not, since it would lift the refusal for no site. An internationalised domain is written in its ASCII (punycode) form, in the entry and in the site's URL alike.
 
-On a deployment built by the Ansible role, set these through the role rather than editing `config.toml`, which the next run rewrites:
-
-```yaml
-istota_wordpress_private_hosts: ["wp.internal.example.com"]
-istota_wordpress_max_upload_mb: 25
-```
-
-The role refuses to deploy an entry that is not a bare host name. On the Docker stack, set `ISTOTA_WORDPRESS_PRIVATE_HOSTS` (comma-separated) and `ISTOTA_WORDPRESS_MAX_UPLOAD_MB` in `docker/.env`.
+Both are ordinary `config.toml` keys. On an install managed by a config manager, set them in its plan rather than in the file, which the next `istota apply` rewrites.
 
 `istota_security_network_extra_hosts` is not the setting for this. It is the sandbox's egress allowlist, which the skill never passes through, so listing the WordPress host there reaches nothing the skill uses and opens a route from the model's own shell.
 

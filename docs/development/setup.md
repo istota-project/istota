@@ -148,7 +148,7 @@ Three extras compose others rather than naming packages: `local` (a lean single-
 
 ## Documentation
 
-The site is [Docusaurus](https://docusaurus.io/), in `docs-site/`. The markdown itself stays at the repository root in `docs/` — hundreds of references across the tree name those paths (`docs/features/whatsapp.md` in the Ansible defaults, in docker-compose comments, in `.claude/rules/`, in source docstrings), so the site points at `../docs` rather than the files moving.
+The site is [Docusaurus](https://docusaurus.io/), in `docs-site/`. The markdown itself stays at the repository root in `docs/` — hundreds of references across the tree name those paths (`docs/features/whatsapp.md` in docker-compose comments, in `.claude/rules/`, in source docstrings), so the site points at `../docs` rather than the files moving.
 
 ```bash
 npm --prefix docs-site ci

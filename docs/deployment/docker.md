@@ -12,7 +12,8 @@ This page covers the Docker stack in `docker/`, which is the only way Istota run
 | `web` | SvelteKit + FastAPI web UI |
 | `nginx` | Reverse proxy (single entry port) |
 | `browser` (profile) | Chrome + VNC container for web browsing |
-| `webhooks` (`location` or `sms` profile) | GPS and SMS webhook receiver |
+| `whatsapp-baileys` (profile) | The WhatsApp sidecar for a paired session |
+| `signaling` (profile) | Talk's signaling server |
 
 ## Configuration
 
@@ -46,7 +47,7 @@ Edit `/data/config/config.toml` and restart:
 
 ```bash
 docker compose exec daemon istota-drop vi /data/config/config.toml   # or copy it out and back
-docker compose restart daemon web webhooks
+docker compose restart daemon web
 ```
 
 A credential is a file under `docker/secrets/` (0400, owned by uid 10001); replace the file and restart. An existing install keeps the `config.toml` its old entrypoint rendered, unchanged, as its own file; `docker/istota/config-diff.py` in the image compares two configs by key if you want to see what an old render would have changed.
@@ -114,22 +115,19 @@ It refuses rather than guessing when it cannot tell whose clones are whose, and 
 
 ## Optional profiles
 
-There are six: `browser`, `location`, `sms`, `whatsapp`, `whatsapp-baileys` and `signaling`.
+There are three: `browser`, `whatsapp-baileys` and `signaling`.
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
-docker compose --profile location up -d             # GPS tracking
-docker compose --profile sms up -d                  # SMS webhooks
-docker compose --profile whatsapp up -d             # WhatsApp via Meta's Cloud API
 docker compose --profile whatsapp-baileys up -d     # WhatsApp via a paired session
-docker compose --profile browser --profile location up -d  # Combine as needed
+docker compose --profile browser --profile signaling up -d  # Combine as needed
 ```
 
 Rather than naming them per command, set `COMPOSE_PROFILES` in `.env` — a comma-separated list every `docker compose` in that directory then picks up. `istota setup --vm-dir` writes it from the answers you give it; a hand-copied `.env.example` leaves it empty, which means the core stack only.
 
-The web service serves the webhook receiver's routes too (location pings, SMS and Meta's WhatsApp callbacks), so no profile is needed for them; each route answers only when its feature is enabled in the config. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`. Nginx is the public endpoint for `/webhooks/`; the receiver port is exposed only inside the Compose network. Enabling several profiles still runs one receiver.
+The web service serves the webhook receiver's routes too (location pings, SMS and Meta's WhatsApp callbacks), so no profile is needed for them; each route answers only when its feature is enabled in the config. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`. Nginx is the public endpoint for `/webhooks/`.
 
-**The two WhatsApp profiles are alternatives, not a pair.** The surface has two adapters and they need opposite halves of the stack: Meta's Cloud API receives over a signed HTTP callback, so it wants `whatsapp` and the receiver; a paired WhatsApp Web session receives over a Unix socket, so it wants `whatsapp-baileys` and the Node sidecar, and no receiver at all. A profile cannot read the config, so pick the one matching `[whatsapp] provider`. Selecting both costs a receiver whose handlers answer 404, which is inert rather than harmful.
+**Only the Baileys adapter needs a profile.** Meta's Cloud API receives over a signed HTTP callback, which the web service already serves; a paired WhatsApp Web session receives over a Unix socket from the Node sidecar, which `whatsapp-baileys` starts. A profile cannot read the config, so turn it on only when `[whatsapp] provider = "baileys"`.
 
 Pairing a Baileys session is not reachable from inside this stack — `istota whatsapp pair` starts a sidecar of its own and the istota image ships neither the program nor its dependencies. Pair on a host with a checkout and node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as.
 
@@ -331,7 +329,7 @@ The stack has no settings of its own for Nextcloud: there is no bundled one to c
 
 ## Upload limits
 
-nginx is given a generous `NGINX_CLIENT_MAX_BODY_SIZE` (default `512M`), so the binding limit on a chat attachment is the application's own `[web.chat] max_attachment_mb` — 25 MB unless you raise it in `config.toml`. This is the opposite arrangement to the Ansible deployment, which derives the nginx ceiling from the application setting so the two cannot drift; there is no equivalent variable here.
+nginx is given a generous `NGINX_CLIENT_MAX_BODY_SIZE` (default `512M`), so the binding limit on a chat attachment is the application's own `[web.chat] max_attachment_mb` — 25 MB unless you raise it in `config.toml`. A proxy in front of the stack needs a ceiling at least as large.
 
 The web service also runs uvicorn without `--timeout-graceful-shutdown`, so a `docker compose restart` with a browser tab holding the chat room stream open waits out the stop timeout before the container is killed.
 

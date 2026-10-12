@@ -173,7 +173,7 @@ restart_interval_seconds = 0    # how long your supervisor takes to restart the 
 
 The last four are the re-pairing flow's. `pairing_relay_path` is where a code crosses from the process holding the sidecar to the process serving `/admin`; the default sits beside the framework database at 0600, and on the standalone install it resolves off the workspace root instead, since there the two are one directory and the workspace is readable from inside a task's sandbox. A window is refused outright where the resolved path would still land inside a sandbox-bound directory, and the card says which setting to change.
 
-`restart_interval_seconds` is a declaration rather than a control: it tells Istota roughly how long your supervisor waits before restarting the sidecar, and the only thing it changes is how long the card waits before saying the sidecar has not come back. The Ansible role renders it from the same variable that fills `RestartSec=` in the unit, so the two cannot disagree. Compose leaves it `0`, because Docker's backoff is not an interval; `0` means undeclared and a fixed 30-second allowance is used.
+`restart_interval_seconds` is a declaration rather than a control: it tells Istota roughly how long your supervisor waits before restarting the sidecar, and the only thing it changes is how long the card waits before saying the sidecar has not come back. Compose leaves it `0`, because Docker's backoff is not an interval; `0` means undeclared and a fixed 30-second allowance is used.
 
 The Cloud adapter's own settings sit in their own block, and are read only under `provider = "whatsapp_cloud"`:
 
@@ -210,7 +210,7 @@ language = "en_US"
 
 `business_phone_number` is required under Cloud, where the account is configured by hand, and optional under Baileys, where the paired session carries its own number. Set it anyway if you want to enroll a user who has not written in yet: it is what Istota addresses a first message to.
 
-`enabled = true` with a malformed provider, id, number, timezone, policy or limit fails the config load, and only the active adapter's settings are checked — a Baileys deployment is not asked for a WABA id. The three Cloud credentials never fail the load: they are reported by `istota doctor` and refused at send time, because the Ansible role renders them empty on purpose and delivers them through `secrets.env`.
+`enabled = true` with a malformed provider, id, number, timezone, policy or limit fails the config load, and only the active adapter's settings are checked — a Baileys deployment is not asked for a WABA id. The three Cloud credentials never fail the load: they are reported by `istota doctor` and refused at send time, because a config may leave them empty on purpose and supply them through the environment.
 
 The full setting table is in the [configuration reference](../configuration/reference.md#whatsapp).
 
@@ -316,7 +316,7 @@ On the Baileys adapter, a WhatsApp group the bot's number belongs to becomes a [
 - **Guests.** A guest's message is answered as the host's emissary, and by default (`held`) the reply goes to the host's [private chat](shared-rooms.md#private-replies) with the bot for approval before it is posted to the group. Change it with `!room guests direct` or `off`.
 - **Commands.** A member's `!command` in a group is answered in their own WhatsApp chat with the bot, and acts on the group's room. Anything the bot has for you alone about the group arrives in that chat too, headed "re: <group>", when you have messaged the bot's number before. Quote it to have the bot answer with the group's recent conversation in view, or to post into the group after you approve the text ([private replies](shared-rooms.md#private-replies)).
 - **Quoted answers.** The bot quotes the message it answers when the chat has moved on since it, in a group or in your own chat. On Baileys the quote needs the original message, which the bot's sidecar keeps in memory for its last 256 incoming messages; after a sidecar restart, an answer to an older message goes out unquoted.
-- **Photos and voice notes.** A member's photo or voice note reaches the bot when the bot would answer the message: one addressed to it (a caption that names or mentions the bot, or a reply to one of its messages), a captioned one the classifier decides is meant for it, or any message in a group where only one member is present. A file with no caption gives the classifier nothing to judge, so it needs addressing, except in a room set to the friendly disposition, where the classifier is asked about the file itself. A photo or GIF with no caption that the bot will answer waits 30 seconds first: if the same member sends a text in that time, the text is read as the file's caption and the two get one answer. The wait is `group_bare_file_hold_seconds` under `[whatsapp]` (Ansible `istota_whatsapp_group_bare_file_hold_seconds`); `0` answers the file at once. The file goes to that member's inbox, as in a private chat. A photo nobody addressed to the bot is not downloaded into anyone's workspace, and a guest's file never is, since a guest's message is answered as the host and the file would land in the host's workspace. Either way the message is recorded in the room with a line saying what was sent, and the caption with it. A member's unopened photo, GIF or voice note can still reach the bot later: quote it in a message addressed to the bot, or send your own photo and then address the bot within two minutes, before it has answered anything else in the group. The file goes to the inbox of the member asking, which can be someone other than the sender when they quote another member's photo, and the line in the room changes to say it was opened. A quote reaches back a day at most, and only to messages the sidecar still holds in memory (its last 256, emptied on a restart). A guest's file is never opened this way either. A message the bot cannot open (a video that is not a GIF, a sticker, a document) is recorded the same way, caption included, so it shows in the room and in later answers' context. The bot does not answer it, and the group gets no "not supported" reply.
+- **Photos and voice notes.** A member's photo or voice note reaches the bot when the bot would answer the message: one addressed to it (a caption that names or mentions the bot, or a reply to one of its messages), a captioned one the classifier decides is meant for it, or any message in a group where only one member is present. A file with no caption gives the classifier nothing to judge, so it needs addressing, except in a room set to the friendly disposition, where the classifier is asked about the file itself. A photo or GIF with no caption that the bot will answer waits 30 seconds first: if the same member sends a text in that time, the text is read as the file's caption and the two get one answer. The wait is `group_bare_file_hold_seconds` under `[whatsapp]` ; `0` answers the file at once. The file goes to that member's inbox, as in a private chat. A photo nobody addressed to the bot is not downloaded into anyone's workspace, and a guest's file never is, since a guest's message is answered as the host and the file would land in the host's workspace. Either way the message is recorded in the room with a line saying what was sent, and the caption with it. A member's unopened photo, GIF or voice note can still reach the bot later: quote it in a message addressed to the bot, or send your own photo and then address the bot within two minutes, before it has answered anything else in the group. The file goes to the inbox of the member asking, which can be someone other than the sender when they quote another member's photo, and the line in the room changes to say it was opened. A quote reaches back a day at most, and only to messages the sidecar still holds in memory (its last 256, emptied on a restart). A guest's file is never opened this way either. A message the bot cannot open (a video that is not a GIF, a sticker, a document) is recorded the same way, caption included, so it shows in the room and in later answers' context. The bot does not answer it, and the group gets no "not supported" reply.
 - **Leaving.** If the host leaves the group, the bot leaves too, and the room is archived. Removing the bot's number from the group [switches it off](room-veto.md) for that group, and it stays off after it is added again until a member sends `!<name> on`.
 - **Privacy.** The room's id is a hash of the group's id, not the id itself, since older group ids contain the creator's phone number.
 
@@ -344,77 +344,19 @@ The Cloud circuit breaker is persistent and deployment-wide. In `free_guard`, th
 
 Before relying on the surface, send one real message in each direction and confirm the delivery states reach what you expect. The automated tests drive a fake at each adapter's boundary; they cannot prove token validity, template approval, number quality, what Meta bills, or that a paired session survives a WhatsApp protocol change.
 
-## Docker
+## Deployment
 
-Copy `docker/.env.example`, fill in the `ISTOTA_WHATSAPP_*` values, and add the profile matching your adapter to `COMPOSE_PROFILES`. **The two WhatsApp profiles are alternatives, not a pair**: `whatsapp` starts the shared webhook receiver, which only the Cloud adapter needs, and `whatsapp-baileys` starts the Node sidecar, which only Baileys needs. A profile cannot read the rendered configuration, so pick the one matching `ISTOTA_WHATSAPP_PROVIDER`. Selecting both costs a receiver whose handlers answer 404, which is inert.
+Put the `[whatsapp]` block in `config.toml` and restart the stack. Under Baileys, add `whatsapp-baileys` to `COMPOSE_PROFILES` to start the Node sidecar; under the Cloud adapter no profile is needed, because the web service serves Meta's callback at `/webhooks/whatsapp` when WhatsApp is on. A profile cannot read the config, so turn the sidecar's on only when `provider = "baileys"`.
 
-```dotenv
-COMPOSE_PROFILES=whatsapp-baileys
-ISTOTA_WHATSAPP_ENABLED=true
-ISTOTA_WHATSAPP_PROVIDER=baileys
-ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER=+15551234567
-```
-
-```dotenv
-COMPOSE_PROFILES=whatsapp
-ISTOTA_WHATSAPP_ENABLED=true
-ISTOTA_WHATSAPP_PROVIDER=whatsapp_cloud
-ISTOTA_WHATSAPP_WABA_ID=100000000000001
-ISTOTA_WHATSAPP_PHONE_NUMBER_ID=100000000000002
-ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER=+15551234567
-ISTOTA_WHATSAPP_ACCESS_TOKEN=...
-ISTOTA_WHATSAPP_APP_SECRET=...
-ISTOTA_WHATSAPP_VERIFY_TOKEN=...
-```
-
-The `webhooks` service belongs to the `location`, `sms` and `whatsapp` profiles, so enabling several still starts one receiver. Nginx exposes `/webhooks/`; the receiver port stays inside the Compose network. Restart `istota`, `webhooks` and `nginx` after changing these. The main service renders `config.toml`; the webhook service waits for that render before it accepts a request.
+An inbound photograph is staged under the state volume, 0700, and deleted as soon as it has been copied into the sender's own folder, so the steady state is an empty directory; `istota doctor` reports anything left standing in it under `whatsapp.media_staging`. There is no setting for that location: both the sidecar and the daemon derive it from `db_path`.
 
 **A first-ever pairing is not reachable from inside this stack.** `istota whatsapp pair` starts a sidecar of its own when no bridge is running, and the istota image ships neither the sidecar program nor its dependencies. Pair on a host with a checkout and Node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as. **Re-pairing that session afterwards works from the stack**, through Admin, Connections: the flow asks the running sidecar to stop rather than starting one of its own, so it needs nothing the containers do not already have.
 
-## Ansible
-
-The role installs the operator CLI at `/usr/local/bin/<namespace>` — `istota` on a default install — so the commands on this page can be typed by name. It is a wrapper that execs the venv's console script with `-c` pointing at the deployed config, because the config search order starts at the working directory and a bare command run from a home directory would otherwise resolve none. An explicit `-c` of your own still wins.
-
-
-Set the matching `istota_whatsapp_*` role variables and vault the three Cloud credentials. They are written to the root-owned `secrets.env` and loaded by the scheduler, web app and webhook receiver; they never reach `config.toml`. The role provisions the webhook receiver when location is on, SMS is on, or WhatsApp is on with an adapter that has a callback.
-
-```yaml
-istota_whatsapp_enabled: true
-istota_whatsapp_provider: "baileys"
-istota_whatsapp_business_phone_number: "+15551234567"
-istota_whatsapp_baileys_sidecar_unit: true       # run the sidecar as its own unit
-istota_whatsapp_baileys_sidecar_command: ""      # leave empty when the unit runs it
-istota_whatsapp_baileys_log_level: "info"
-istota_whatsapp_baileys_memory_high: "512M"
-```
-
-```yaml
-istota_whatsapp_enabled: true
-istota_whatsapp_provider: "whatsapp_cloud"
-istota_whatsapp_waba_id: "100000000000001"
-istota_whatsapp_phone_number_id: "100000000000002"
-istota_whatsapp_business_phone_number: "+15551234567"
-istota_whatsapp_business_timezone: "America/Los_Angeles"
-istota_whatsapp_access_token: "{{ vault_whatsapp_access_token }}"
-istota_whatsapp_app_secret: "{{ vault_whatsapp_app_secret }}"
-istota_whatsapp_verify_token: "{{ vault_whatsapp_verify_token }}"
-```
-
-Under Baileys the role installs Node, installs the sidecar's dependencies from its lockfile, creates the session directory 0700 owned by the daemon's account, and runs the sidecar as its own systemd unit. An inbound photograph is staged at `<istota_home>/data/whatsapp-media`, 0700, and deleted as soon as it has been copied into the sender's own folder — so the steady state is an empty directory, and `istota doctor` reports anything left standing in it under `whatsapp.media_staging`. There is no setting for that location on either deployment shape: both the sidecar and the daemon derive it from `db_path`. Setting both `istota_whatsapp_baileys_sidecar_unit` and a non-empty `istota_whatsapp_baileys_sidecar_command` is refused: that pairing arranges two Baileys clients against one session directory, and neither process can detect the other. Enabling the sidecar on a host needs one full play first — the update-only mode does not install Node.
-
-Bind a user inside `istota_users`:
-
-```yaml
-istota_users:
-  alice:
-    whatsapp_number: "+15551234567"
-```
-
-Read the warning under "Identity and enrollment" before putting one there: inventory is version control, and this value carries authority. Omit the key to leave a CLI-set binding alone; `""` clears the binding.
+A user's WhatsApp number is bound with `istota user ensure --whatsapp-number`. Read the warning under "Identity and enrollment" before managing that from an inventory: version control would then carry a value with authority.
 
 ## Reverse proxy (Cloud only)
 
-Baileys receives over a local socket and needs nothing in front of it. The Cloud adapter's callback needs two things the application cannot enforce for itself. The shipped Docker and Ansible nginx configurations do both; a hand-rolled front end has to.
+Baileys receives over a local socket and needs nothing in front of it. The Cloud adapter's callback needs two things the application cannot enforce for itself. The stack's nginx does both; a hand-rolled front end has to.
 
 The verify token arrives as a **query value** on the GET handshake, and nginx's default log format writes the whole request line. Turn the access log off for `/webhooks/whatsapp`, or use a format that logs `$uri` rather than `$request`. Istota logs the handshake itself under a stable event name and without the token.
 
@@ -432,4 +374,4 @@ Going **away from Cloud**, Meta's callback stops being served the moment the new
 
 ## Switching off
 
-Set `enabled = false`. The routes refuse every request and the sidecar is not provisioned. Outstanding rows keep their last state. User bindings, opt-outs, ledger rows and conversation history all survive, so turning it back on resumes where it stopped. A paired Baileys session is left on disk: the Ansible teardown names the directory rather than deleting it, since a switch back re-uses it, and a credential deleted on your behalf during a routine converge is the wrong default. Remove it by hand if you are done with the number, and unlink the device from the phone. Two things sit beside it and are part of the same clean-up: every `whatsapp-baileys-session.<timestamp>` archive a re-pair left, each a full-account credential of its own, and `whatsapp-pairing.json` if a pairing window was open when the surface was switched off.
+Set `enabled = false`. The routes refuse every request and the sidecar is not provisioned. Outstanding rows keep their last state. User bindings, opt-outs, ledger rows and conversation history all survive, so turning it back on resumes where it stopped. A paired Baileys session is left on disk: nothing deletes it, since a switch back re-uses it, and a credential deleted on your behalf is the wrong default. Remove it by hand if you are done with the number, and unlink the device from the phone. Two things sit beside it and are part of the same clean-up: every `whatsapp-baileys-session.<timestamp>` archive a re-pair left, each a full-account credential of its own, and `whatsapp-pairing.json` if a pairing window was open when the surface was switched off.

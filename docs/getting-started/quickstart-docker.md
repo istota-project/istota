@@ -34,23 +34,21 @@ When it's up, open `http://localhost:8080`, log in, and start chatting.
 
 ## Optional services
 
-Four run as Docker Compose profiles: `browser` (Chrome with bot-detection countermeasures), `location` (the shared webhook receiver for GPS), `sms` (the same receiver for SMS), and `signaling` (Talk over a WebSocket instead of polling).
+Three run as Docker Compose profiles: `browser` (Chrome with bot-detection countermeasures), `whatsapp-baileys` (the sidecar for a paired WhatsApp session), and `signaling` (Talk over a WebSocket instead of polling).
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
-docker compose --profile location up -d             # GPS webhook receiver
-docker compose --profile sms up -d                  # SMS webhook receiver
-docker compose --profile browser --profile location up -d  # Combine as needed
+docker compose --profile browser --profile signaling up -d  # Combine as needed
 ```
 
-Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per command; `istota setup` writes it from your answers. The `location` and `sms` profiles share one receiver, so turn the matching feature on in `config.toml` as well (`[location] enabled`, `[sms] enabled`); the wizard does this for location. The browser container requires an x86-64 host, since Chrome has no ARM packages. `signaling` needs its registration in place before the first boot -- see above.
+Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per command; `istota setup` writes it from your answers. GPS, SMS and WhatsApp Cloud webhooks need no profile: the web service serves them when the feature is on in `config.toml` (`[location] enabled`, `[sms] enabled`, `[whatsapp] enabled`); the wizard does this for location. The browser container requires an x86-64 host, since Chrome has no ARM packages. `signaling` needs its registration in place before the first boot -- see above.
 
 ## Configuration after first start
 
 `/data/config/config.toml` is yours: nothing regenerates it. Edit it and restart:
 
 ```bash
-docker compose restart daemon web webhooks   # webhooks for location or SMS
+docker compose restart daemon web
 ```
 
 A credential is a file under `docker/secrets/`; replace it and restart. A release that adds or renames a config key changes nothing until you edit the file; the CHANGELOG says what to write. See [Docker deployment](../deployment/docker.md) for the settings that matter on this stack.

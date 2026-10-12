@@ -26,7 +26,7 @@ Source kinds (`kind = …`):
 
 Schedule + delivery are loaded from (higher precedence wins):
 
-1. `briefing_configs` DB table — provisioned via `istota briefings schedule ensure` (Ansible) or the web UI (briefings tab → settings); `enabled=0` mutes a row without scheduling.
+1. `briefing_configs` DB table — provisioned via `istota briefings schedule ensure` or the web UI (briefings tab → settings); `enabled=0` mutes a row without scheduling.
 2. `[[users.alice.briefings]]` in main `config/config.toml` (name/cron/title/output; DB rows win by name).
 
 Those two are the whole surface. A user's workspace `{bot_dir}/config/BRIEFINGS.md` was a third source, applied over both at read time; it is retired, and on first start after the upgrade whatever it held is imported into `briefing_configs`, once per user. An existing file is left on disk and is inert.
@@ -84,7 +84,7 @@ It has two layers over one storage substrate — the **shared KV store** (`share
 
 The briefings module ships **shared blocks**: one-block briefings it schedules and generates *once globally*, writing the rendered section into `shared_kv`. A fresh deploy ships a canonical set (`world-headlines` via browse presets, `markets-summary` via the markets source) and the default morning briefing references `world-headlines` — so the N-way frontpage fetch + N-way synthesis collapses to **one generation total**, with no operator scripting.
 
-A shared block is defined at the instance level (top-level `[[briefing_shared_blocks]]`, Ansible `istota_briefing_shared_blocks`):
+A shared block is defined at the instance level (top-level `[[briefing_shared_blocks]]`):
 
 ```toml
 [[briefing_shared_blocks]]
@@ -152,7 +152,7 @@ The **writer** chooses whether the fetch or the synthesis is shared, via the sto
 
 ### Authorization + trust
 
-- **Writes are admin-only** (the `/etc/istota/admins` allowlist), **fail-closed**: on a deployment with a *blank* admins file, no user can write shared content (only module-owned generation, a trusted daemon write, still works). Reads are open to any user.
+- **Writes are admin-only** (the admins file), **fail-closed**: on a deployment with a *blank* admins file, no user can write shared content (only module-owned generation, a trusted daemon write, still works). Reads are open to any user.
 - Shared content is **wrapped untrusted by default** (a trusted identity typically relayed web-sourced content), matching the `browse`/`email` posture. Trust is a property of the stored value — set `"trusted": true` in the published JSON to skip the wrap for content you control. A consuming user can never flip it.
 
 ## Reading briefings (web)

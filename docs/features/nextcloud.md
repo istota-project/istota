@@ -142,8 +142,6 @@ dav_prefix = ""                  # mount point of the storage root in the bot's 
 auto_share_bot_dir = true        # share the bot workspace back to the user at boot
 ```
 
-Ansible: `istota_nextcloud_share_default_expire_days`.
-
 `dav_prefix` exists because the bot's storage root and the root of its Nextcloud file tree are not always the same directory. On the rclone-mount deploy they are, so it stays empty. On the Docker stack `/mnt/shared` is a volume Nextcloud serves through a `files_external` mount, so `/Users/alice` on disk is `/Shared Files/Users/alice` over DAV and OCS; the value is set to that mount point and the request layer puts it in front of every path on the way out and strips it on the way back. Paths on disk, and the paths the skill takes and returns, are unaffected — they stay logical.
 
 `auto_share_bot_dir` controls the OCS share of the bot workspace back to the user that runs on every boot. Leave it true unless the deployment already puts that directory in the user's file tree some other way; the Docker stack mounts it there at provisioning and sets this false, so the user is not handed the same folder twice.
