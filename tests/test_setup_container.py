@@ -19,6 +19,7 @@ import yaml
 
 from istota import setup_wizard
 from istota.config import load_config
+from istota.lib import rclone_conf
 from istota.setup_wizard import (
     SECRET_NAMES,
     ContainerAnswers,
@@ -418,7 +419,7 @@ class TestTheStackFiles:
         assert values == {
             "STORAGE": "nextcloud", "INGRESS": "proxied", "DOMAIN": "bot.example.test",
             "TLS_CERT_SOURCE": "", "UPSTREAM_PROXY": "10.0.0.5",
-            "LISTEN_ADDR": "10.0.0.20", "LISTEN_PORT": "8080",
+            "LISTEN_ADDR": "10.0.0.20", "LISTEN_PORT": "8080", "RCLONE_REMOTE": "nextcloud",
         }
 
 
@@ -804,6 +805,64 @@ _SHAPES = [
 ]
 
 
+class TestTheNextcloudMount:
+    """A Nextcloud setup stages the VM's rclone.conf and names its remote in
+    host.env, so the mount provision.sh installs can start without a hand step."""
+
+    @pytest.fixture(autouse=True)
+    def _credentials(self, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nc-app-pass")
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+
+    @staticmethod
+    def _nextcloud(tmp_path: Path, **kw):
+        return _args(
+            tmp_path, nextcloud_url="https://cloud.example.test/", nextcloud_user="zed-bot", **kw,
+        )
+
+    @staticmethod
+    def _host_env(vm: Path) -> dict[str, str]:
+        text = (vm / "host.env").read_text()
+        return dict(line.split("=", 1) for line in text.splitlines() if "=" in line and not line.startswith("#"))
+
+    def test_a_nextcloud_setup_stages_the_remote_and_names_it(self, tmp_path):
+        assert setup_wizard.run_setup(self._nextcloud(tmp_path), out=lambda *_: None) == 0
+
+        vm = tmp_path / "vm"
+        conf = vm / "rclone.conf"
+        assert _mode(conf) == 0o600
+        lines = conf.read_text().splitlines()
+        assert lines[:5] == [
+            "[nextcloud]",
+            "type = webdav",
+            "url = https://cloud.example.test/remote.php/dav/files/zed-bot/",
+            "vendor = nextcloud",
+            "user = zed-bot",
+        ]
+        obscured = lines[5].removeprefix("pass = ")
+        assert obscured != "nc-app-pass"
+        assert rclone_conf.reveal(obscured) == "nc-app-pass"
+        host_env = self._host_env(vm)
+        assert host_env["STORAGE"] == "nextcloud"
+        assert host_env["RCLONE_REMOTE"] == "nextcloud"
+
+    def test_a_rerun_without_the_password_obscures_the_kept_one(self, tmp_path, monkeypatch):
+        setup_wizard.run_setup(self._nextcloud(tmp_path), out=lambda *_: None)
+        monkeypatch.delenv("ISTOTA_NEXTCLOUD_APP_PASSWORD")
+
+        setup_wizard.run_setup(self._nextcloud(tmp_path, force=True), out=lambda *_: None)
+
+        last = (tmp_path / "vm" / "rclone.conf").read_text().splitlines()[-1]
+        assert rclone_conf.reveal(last.removeprefix("pass = ")) == "nc-app-pass"
+
+    def test_local_storage_stages_no_remote(self, tmp_path):
+        assert setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None) == 0
+
+        assert not (tmp_path / "vm" / "rclone.conf").exists()
+        assert self._host_env(tmp_path / "vm")["RCLONE_REMOTE"] == ""
+
+
 def _written(root: Path) -> dict[str, bytes]:
     return {
         str(path.relative_to(root)): path.read_bytes()
@@ -818,8 +877,9 @@ class TestOneWriterForBothFrontEnds:
     def test_the_same_answers_write_the_same_bytes(
         self, tmp_path, monkeypatch, _no_credentials_in_env, flags, env, payload,
     ):
-        # The session key and the master key are the two generated values.
+        # The session key, the master key and rclone.conf's IV are the generated values.
         monkeypatch.setattr(setup_wizard.secrets, "token_hex", lambda n: "k" * (2 * n))
+        monkeypatch.setattr(rclone_conf, "_new_iv", lambda: b"i" * 16)
         for name, value in env.items():
             monkeypatch.setenv(name, value)
         terminal = setup_wizard.collect_container_answers(
@@ -839,7 +899,9 @@ class TestOneWriterForBothFrontEnds:
         assert {
             "data/config/config.toml", "data/config/admins", "data/.secret_key",
             "vm/.env", "vm/host.env",
-        } | {f"vm/secrets/{name}" for name in SECRET_NAMES} == set(terminal_files)
+        } | {f"vm/secrets/{name}" for name in SECRET_NAMES} | (
+            {"vm/rclone.conf"} if terminal.uses_nextcloud else set()
+        ) == set(terminal_files)
         assert _written(tmp_path / "web") == terminal_files
 
     def test_the_run_writes_through_the_shared_writer(self, tmp_path, monkeypatch):

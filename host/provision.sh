@@ -390,7 +390,7 @@ if [ "$(host_env STORAGE)" = "nextcloud" ]; then
         chown "$ISTOTA_UID:$ISTOTA_UID" "${STACK}/rclone.conf"
         chmod 0600 "${STACK}/rclone.conf"
     else
-        log "STORAGE=nextcloud: put the rclone remote's config at ${STACK}/rclone.conf (written by you, never on a command line), then re-run this."
+        log "STORAGE=nextcloud: no ${STACK}/rclone.conf yet. \`istota-stack setup\` writes it from the Nextcloud answers (the management role writes it from istota_rclone_conf); then re-run this."
     fi
     # Never write into an unmounted path: the stack requires the mount.
     changed_file "${dropin}/mount.conf" "$(cat <<'EOF'

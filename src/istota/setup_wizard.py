@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from istota.lib import toml_write
+from istota.lib.rclone_conf import obscure as rclone_obscure
+from istota.lib.rclone_conf import render_webdav_remote
 
 logger = logging.getLogger("istota.setup")
 
@@ -1665,6 +1667,11 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
     }
 
 
+#: The remote's name in the ``rclone.conf`` setup stages, and ``host.env``'s
+#: ``RCLONE_REMOTE``, which the VM's mount unit reads.
+RCLONE_REMOTE = "nextcloud"
+
+
 def host_env_values(a: ContainerAnswers) -> dict[str, str]:
     """The ``host.env`` keys: what the VM's provisioning reads, and what the nginx
     and daemon containers read for the ingress mode."""
@@ -1676,6 +1683,7 @@ def host_env_values(a: ContainerAnswers) -> dict[str, str]:
         "UPSTREAM_PROXY": a.upstream_proxy,
         "LISTEN_ADDR": a.listen_addr,
         "LISTEN_PORT": str(a.listen_port or ""),
+        "RCLONE_REMOTE": RCLONE_REMOTE if a.uses_nextcloud else "",
     }
 
 
@@ -2279,11 +2287,27 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
     return 0
 
 
+def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out) -> None:
+    """``rclone.conf`` for the VM's Nextcloud mount, staged for ``istota-stack``
+    to install. The password is this run's answer, else the one a previous run
+    left in the secrets file, which the loop above kept."""
+    password = a.nextcloud_app_password or _read_secret_file(secrets_dir / "istota_nextcloud_app_password")
+    if not password:
+        out("  No Nextcloud app password, so no rclone.conf was written; the mount needs one.")
+        return
+    try:
+        text = render_webdav_remote(RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, rclone_obscure(password))
+    except ValueError as exc:
+        raise SetupError(f"The Nextcloud answers cannot go into rclone.conf: {exc}.") from None
+    _write_private(vm_dir / "rclone.conf", text)
+
+
 def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out) -> None:
     """Write everything a set of answers decides, for either front end.
 
     ``config.toml``, ``admins`` and the master key under ``data_dir``; with a
-    ``vm_dir``, the credential files and the staged ``.env`` and ``host.env``.
+    ``vm_dir``, the credential files and the staged ``.env`` and ``host.env``,
+    plus ``rclone.conf`` when the answers use Nextcloud.
     Validation is the caller's: this writes what it is given.
     """
     config_path = data_dir / "config" / "config.toml"
@@ -2311,6 +2335,8 @@ def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path |
             path = vm_dir / name
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
             path.write_text(render(a, existing), encoding="utf-8")
+        if a.uses_nextcloud:
+            _stage_rclone_conf(a, vm_dir, secrets_dir, out)
     elif a.brain_kind != "native" and (a.claude_code_oauth_token or a.anthropic_api_key):
         out(
             "  The Claude credential has no config key; without --vm-dir it was not "

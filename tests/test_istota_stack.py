@@ -932,6 +932,52 @@ class TestRootNeverReadsWhatUid10001Can:
         assert dest.read_text() == "COMPOSE_PROFILES=\nISTOTA_TAG=v0\n"
         assert (dest.stat().st_mode & 0o777) == 0o644
 
+    @staticmethod
+    def _staging(tmp_path: Path) -> Path:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / ".env").write_text("COMPOSE_PROFILES=\nISTOTA_TAG=v0\n")
+        (staging / "host.env").write_text("STORAGE=nextcloud\nRCLONE_REMOTE=nextcloud\n")
+        return staging
+
+    def test_setup_installs_a_staged_rclone_conf_private(self, fx, tmp_path):
+        staging = self._staging(tmp_path)
+        conf = "[nextcloud]\ntype = webdav\npass = obscured\n"
+        (staging / "rclone.conf").write_text(conf)
+
+        result = _source(fx, f'install_setup_staging "{staging}"')
+
+        assert result.returncode == 0, result.stderr
+        installed = fx.stack / "rclone.conf"
+        assert installed.read_text() == conf
+        assert (installed.stat().st_mode & 0o777) == 0o600
+        assert "RCLONE_REMOTE=nextcloud" in (fx.stack / "host.env").read_text()
+
+    def test_setup_without_a_staged_rclone_conf_leaves_the_existing_one(self, fx, tmp_path):
+        staging = self._staging(tmp_path)
+        (fx.stack / "rclone.conf").write_text("[mine]\n")
+
+        result = _source(fx, f'install_setup_staging "{staging}"')
+
+        assert result.returncode == 0, result.stderr
+        assert (fx.stack / "rclone.conf").read_text() == "[mine]\n"
+
+    def test_a_staged_rclone_conf_that_is_a_link_is_not_followed(self, fx, tmp_path):
+        secret = tmp_path / "shadow"
+        secret.write_text("root:secret-hash:\n")
+        staging = self._staging(tmp_path)
+        (staging / "rclone.conf").symlink_to(secret)
+
+        result = _source(fx, f'install_setup_staging "{staging}"')
+
+        assert result.returncode != 0
+        assert not (fx.stack / "rclone.conf").exists()
+
+    def test_cmd_setup_installs_through_the_same_function(self):
+        text = SCRIPT.read_text()
+        setup = text.split("\ncmd_setup() {", 1)[1].split("\n}\n", 1)[0]
+        assert 'install_setup_staging "$staging"' in setup
+
 
 class TestAProfileThatFailsToLoadChangesNothing:
     """`.env` names a tag only once that tag's AppArmor profile is loaded.

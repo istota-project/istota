@@ -571,13 +571,14 @@ copy_out_config() {
     fi
 }
 
-# Copy a file the wizard wrote in staging into place as 0644, refusing a link
-# or anything but a plain file: staging is uid 10001's, and root following a
-# link planted there would copy whatever root can read into .env.
+# Copy a file the wizard wrote in staging into place, 0644 unless a third
+# argument names the mode, refusing a link or anything but a plain file:
+# staging is uid 10001's, and root following a link planted there would copy
+# whatever root can read into .env.
 install_staged() {
-    python3 - "$1" "$2" <<'PY'
+    python3 - "$1" "$2" "${3:-0644}" <<'PY'
 import os, stat, sys
-src, dst = sys.argv[1], sys.argv[2]
+src, dst, mode = sys.argv[1], sys.argv[2], int(sys.argv[3], 8)
 try:
     fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 except OSError as exc:
@@ -588,12 +589,24 @@ with os.fdopen(fd, "rb") as fh:
         sys.exit(f"[istota-stack] REFUSE: {src} is not a plain file")
     data = fh.read(1 << 20)
 tmp = f"{dst}.staged.{os.getpid()}"
-out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
 with os.fdopen(out, "wb") as fh:
     fh.write(data)
-os.chmod(tmp, 0o644)
+os.chmod(tmp, mode)
 os.replace(tmp, dst)
 PY
+}
+
+# What the wizard staged, into place. rclone.conf is there only when the
+# answers use Nextcloud; it carries the obscured app password, so it is 0600,
+# and provision.sh hands it to uid 10001 for the mount.
+install_setup_staging() {
+    local staging="$1"
+    install_staged "${staging}/.env" "$ENV_FILE"
+    install_staged "${staging}/host.env" "$HOST_ENV"
+    if [ -e "${staging}/rclone.conf" ] || [ -L "${staging}/rclone.conf" ]; then
+        install_staged "${staging}/rclone.conf" "${STACK}/rclone.conf" 0600
+    fi
 }
 
 cmd_setup() {
@@ -629,8 +642,7 @@ cmd_setup() {
     # Nothing running as 10001 may change staging while root reads it.
     chown root:root "$staging"
     chmod 0700 "$staging"
-    install_staged "${staging}/.env" "$ENV_FILE"
-    install_staged "${staging}/host.env" "$HOST_ENV"
+    install_setup_staging "$staging"
     # The wizard owns .env's keys but not this script's.
     env_set "ISTOTA_TAG=${tag}"
     local lacking
