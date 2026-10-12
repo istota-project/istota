@@ -885,9 +885,9 @@ def ensure_nextcloud(vm: Vm) -> dict[str, str]:
         f"up -d --wait --wait-timeout 1500 postgres redis nextcloud",
         timeout=2400,
     )
-    # Debian's rclone, installed first only so the remote's password can be
-    # obscured before provision.sh runs; that run replaces it with the pinned
-    # rclone.org build, so the tier exercises the replacement path.
+    # Debian's rclone, installed only so the remote's password can be obscured
+    # before provision.sh first runs, which replaces it with the pinned build.
+    # Only a fresh VM takes that path, and nothing here asserts on the result.
     vm.run("command -v rclone >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rclone fuse3 >/dev/null",
            timeout=900)
     # rclone obscure is salted, so the obscured form is made once per VM and
