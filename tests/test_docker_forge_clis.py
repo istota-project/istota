@@ -123,8 +123,11 @@ class TestTheImageShipsTheForgeBinaries:
     def test_the_downloads_are_checksum_verified(self):
         # An unverified curl into an image that ships to other people is the
         # supply-chain half of this change; the pin alone does not cover it.
-        body = DOCKERFILE.read_text()
-        assert body.count("sha256sum -c -") >= 2
+        # Each check named against its own download: a count would stay green
+        # while other layers' checks stand in for a deleted one.
+        run = _forge_run_block(DOCKERFILE.read_text())
+        assert '"${gh_sha}  /tmp/gh.deb" | sha256sum -c -' in run
+        assert '"${glab_sha}  /tmp/glab.deb" | sha256sum -c -' in run
 
     def test_the_binaries_are_verified_to_actually_exec(self):
         # `dpkg-deb | tar` has no pipefail under dash, so a truncated extract

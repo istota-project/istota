@@ -368,6 +368,19 @@ class TestMain:
         assert run.envelope.get("status") == "error", run.stdout
         assert run.envelope.get("reason") == "gws_missing", run.envelope
 
+    def test_any_other_exec_failure_is_an_error_envelope(self, mount, monkeypatch):
+        """execvp reports EACCES from an unrelated PATH entry when gws is absent."""
+        def _denied(file, args):
+            raise PermissionError(13, "Permission denied", file)
+
+        monkeypatch.setattr(os, "execvp", _denied)
+        monkeypatch.chdir(mount)
+
+        run = run_skill_main(main, ["drive", "files", "list"])
+
+        assert run.exit_code == 1, run.stdout
+        assert run.envelope.get("reason") == "gws_exec_failed", run.envelope
+
     def test_a_refused_path_never_reaches_the_exec(self, mount, execs):
         run = run_skill_main(main, ["drive", "+upload", "/etc/passwd"])
 

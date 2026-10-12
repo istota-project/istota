@@ -63,7 +63,8 @@ def test_checksums_are_literal_sha256(args, name):
 
 
 def test_both_downloads_are_verified(layer):
-    assert layer.count("sha256sum -c -") == 2
+    assert '"${gl_sha}  ${tmp}/gitleaks.tgz" | sha256sum -c -' in layer
+    assert '"${gws_sha}  ${tmp}/gws.tgz" | sha256sum -c -' in layer
 
 
 def test_an_unpinned_architecture_fails_the_build(layer):

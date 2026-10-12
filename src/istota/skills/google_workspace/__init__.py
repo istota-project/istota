@@ -303,10 +303,18 @@ def main() -> None:
         fail(refusal, reason="host_path_refused")
     try:
         os.execvp("gws", ["gws"] + argv)
-    except FileNotFoundError:
+    except OSError as e:
+        # execvp raises the first error other than ENOENT it met on PATH, so a
+        # missing binary can also arrive as EACCES from an unrelated entry.
+        if isinstance(e, FileNotFoundError):
+            fail(
+                "The gws binary is not installed on this deployment, so no Google "
+                "Workspace command can run. This is a deployment problem; report it "
+                "to the operator.",
+                reason="gws_missing",
+            )
         fail(
-            "The gws binary is not installed on this deployment, so no Google "
-            "Workspace command can run. This is a deployment problem; report it "
-            "to the operator.",
-            reason="gws_missing",
+            f"The gws binary could not be run ({e.strerror or e}). This is a "
+            "deployment problem; report it to the operator.",
+            reason="gws_exec_failed",
         )
