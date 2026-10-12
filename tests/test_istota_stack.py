@@ -73,6 +73,10 @@ case "$args" in
     if [ -n "${STUB_SERVICES:-}" ]; then printf '%b' "$STUB_SERVICES"; else printf 'daemon\nweb\nnginx\n'; fi
     case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
   *" build "*) exit "${STUB_BUILD_RC:-0}" ;;
+  *" up -d "*) exit "${STUB_UP_RC:-0}" ;;
+  *" builder prune "*|*" image prune "*)
+    echo 'Total reclaimed space: 1.5GB'
+    exit "${STUB_PRUNE_RC:-0}" ;;
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
     else echo '{"services": {}}'; fi ;;
@@ -81,7 +85,7 @@ case "$args" in
   *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
   *" istota apply "*) exit "${STUB_APPLY_RC:-0}" ;;
-  *" image ls "*) printf 'istota:v0\nistota:v1\nistota:old\nistota-istota:v0\nistota-istota:older\nistota-browser:old\nnginx:alpine\n' ;;
+  *" image ls "*) if [ -n "${STUB_IMAGES:-}" ]; then printf "%b" "$STUB_IMAGES"; exit 0; fi; printf 'istota:v0\nistota:v1\nistota:old\nistota-istota:v0\nistota-istota:older\nistota-browser:old\nnginx:alpine\n' ;;
   *" image tag "*) touch "${STUB_CALLS}.tagged" ;;
   *" image inspect istota:"*)
     if [ -n "${STUB_RENAMED_IMAGE_MISSING:-}" ] && [ ! -e "${STUB_CALLS}.tagged" ]; then exit 1; fi
@@ -249,6 +253,110 @@ class TestARefusedTagChangesNothing:
         v0 = _git(fx.origin, "rev-parse", "refs/tags/v0", env=fx.env)
         _git(fx.origin, "update-ref", "refs/tags/v9", v0, env=fx.env)
         _assert_unchanged(fx, fx.run("update", "v9"), *before)
+
+
+class TestUpdateBuildCleanup:
+    cache_prune = "builder prune --all --force --keep-storage 2GB"
+    image_prune = "image prune --force --filter label=com.docker.compose.project=istota"
+
+    def test_cleanup_runs_before_build_and_after_old_tags_are_removed(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stderr
+        calls = fx.docker_calls()
+        build = next(i for i, c in enumerate(calls) if " build " in f"{c} ")
+        up = next(i for i, c in enumerate(calls) if " up -d " in f"{c} ")
+        assert calls.count(self.cache_prune) == 2
+        assert calls.count(self.image_prune) == 2
+        assert calls.index(self.image_prune) < calls.index(self.cache_prune) < build
+        assert up < calls.index("image rm istota:old") < len(calls) - 2
+        assert calls[-2:] == [self.image_prune, self.cache_prune]
+        assert "Total reclaimed space: 1.5GB" in result.stdout
+
+    @pytest.mark.parametrize("failure", ["STUB_BUILD_RC", "STUB_UP_RC"])
+    @pytest.mark.parametrize("prune_rc", ["0", "1"])
+    def test_a_failed_attempt_still_cleans_and_keeps_its_exit_status(self, fx, failure, prune_rc):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        before = fx.env_text(), fx.head()
+        result = fx.run("update", "v1", STUB_PRUNE_RC=prune_rc, **{failure: "1"})
+        assert result.returncode == 1, result.stderr
+        calls = fx.docker_calls()
+        assert calls.count(self.cache_prune) == 2
+        assert calls[-2:] == [self.image_prune, self.cache_prune]
+        assert "image rm istota:v0" not in calls
+        if failure == "STUB_BUILD_RC":
+            assert (fx.env_text(), fx.head()) == before
+            assert "image rm istota:v1" in calls  # discard an incomplete candidate
+
+    def test_cleanup_errors_warn_without_failing_a_successful_update(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", STUB_PRUNE_RC="1")
+        assert result.returncode == 0, result.stderr
+        assert "WARNING: could not prune dangling Istota images" in result.stdout
+        assert "WARNING: could not prune build cache" in result.stdout
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+
+    def test_repeated_updates_and_same_tag_rebuild_preserve_rollback(self, fx):
+        for tag, previous in [("v1", "v0"), ("v2", "v1"), ("v3", "v2"), ("v3", "v2")]:
+            if tag != "v3" or "ISTOTA_TAG=v3\n" not in fx.env_text():
+                fx.commit(tag)
+                fx.tag(tag, key=fx.release_key)
+            fx.calls.unlink(missing_ok=True)
+            images = "".join(f"{repo}:{t}\n" for repo in ["istota", "istota-devbox", "istota-browser"]
+                             for t in ["v0", "v1", "v2", "v3"])
+            result = fx.run("update", tag, STUB_IMAGES=images + "unrelated:old\n")
+            assert result.returncode == 0, result.stderr
+            calls = fx.docker_calls()
+            for ref in images.splitlines():
+                assert (f"image rm {ref}" in calls) == (ref.split(":")[1] not in {tag, previous})
+            assert "image rm unrelated:old" not in calls
+            assert calls.count(self.cache_prune) == 2
+            assert f"ISTOTA_PREVIOUS_TAG={previous}\n" in fx.env_text()
+        fx.calls.unlink()
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stderr
+        assert "ISTOTA_TAG=v2\n" in fx.env_text()
+        assert not any(" build " in f"{c} " for c in fx.docker_calls())
+
+    def test_failed_build_preserves_both_existing_deployment_tags(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        assert fx.run("update", "v1").returncode == 0
+        fx.commit("v2")
+        fx.tag("v2", key=fx.release_key)
+        fx.calls.unlink()
+        before = fx.env_text(), fx.head()
+        result = fx.run("update", "v2", STUB_BUILD_RC="1",
+                        STUB_IMAGES="istota:v0\nistota:v1\nistota:v2\n")
+        assert result.returncode == 1
+        assert (fx.env_text(), fx.head()) == before
+        removed = [c for c in fx.docker_calls() if c.startswith("image rm ")]
+        assert removed == ["image rm istota:v2"]
+
+    def test_builds_use_the_same_default_builder_that_cleanup_prunes(self, fx, tmp_path):
+        recorder = tmp_path / "builders"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            '*" build "*) exit',
+            f'*" build "*) echo "$BUILDX_BUILDER" >> {recorder}; exit',
+        ).replace(
+            '*" builder prune "*|*" image prune "*)',
+            f'*" builder prune "*|*" image prune "*) echo "$BUILDX_BUILDER" >> {recorder};',
+        ))
+        (fx.stack / "compose.devbox.yml").write_text('{"services": {"devbox-alice": {}}}')
+        result = _source(fx, 'build_images v0; build_devbox_images v0; prune_build_artifacts', BUILDX_BUILDER="unrelated-builder")
+        assert result.returncode == 0, result.stderr
+        assert recorder.read_text().splitlines() == ["default", "default", "unrelated-builder", "default"]
+
+    def test_an_unverified_tag_does_not_prune_anything(self, fx):
+        fx.commit("v1")
+        fx.tag("v1")
+        result = fx.run("update", "v1")
+        assert result.returncode == 65
+        assert not fx.docker_calls()
 
 
 class TestASignedTagIsDeployed:
