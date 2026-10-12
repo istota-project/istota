@@ -10,22 +10,17 @@ this tier runs the image with `--entrypoint /bin/sh` and never re-renders the
 planted anchor config. Every other tier renders a fresh config, and a fresh
 config is current by definition — so none of them can see this.
 
-Two shapes, two anchors, because one anchor is not enough:
-
-  * **code** — the near anchor, the merge-base with the default branch. That is
-    about three days at the current release cadence, which on its own is close
-    to a no-op as a regression detector. It is the default because it is cheap
-    and it is the span the auto-update cron actually crosses.
-  * **volume** — the far anchor, `scripts/upgrade-floor`, roughly a month back.
-    This is the one worth running before a release, and it is the one that
-    carries the drift assertion.
+One shape, **volume**, from the far anchor in `scripts/upgrade-floor`, roughly
+a month back. A second, near shape (`code`, from the merge-base with the
+default branch) covered the span the bare-metal auto-update cron crossed, and
+went with that cron.
 
 **What is asserted, and what is deliberately not.** Not "reproduces ISSUE-263 as
 a doctor FAIL": `resolve_real_bin`'s `IMAGE_BIN` fallback is specifically what
 makes the upgrade clean, so that criterion is unreachable against current code,
 and that is the fix working rather than a gap in the test. What is asserted is:
 
-  * no `FAIL` on any check, in either shape — the regression assertion, and the
+  * no `FAIL` on any check — the regression assertion, and the
     one that would go red if a future migration or config rename broke the old
     file. A short exemption list, by name and with its own guard:
     `TestTheUpgradeStaysClean.NOT_ABOUT_THE_UPGRADE`. This is the only tier that
@@ -39,8 +34,8 @@ and that is the fix working rather than a gap in the test. What is asserted is:
 
 And because "no FAIL" is trivially satisfied by a run where every interesting
 check `SKIP`ped — the spec's own "a doctor assertion must name the environment
-that makes its checks run" — every shape asserts first that the developer
-checks actually ran.
+that makes its checks run" — the shape asserts first that the developer checks
+actually ran.
 """
 
 from __future__ import annotations
@@ -76,7 +71,7 @@ RUN_TIMEOUT = 600
 # environment so `scripts/test-upgrade.sh` can set them without this file
 # growing a second argument-parsing surface — the same way `ISTOTA_IMAGE_TAG`
 # already lets the driver hand the tier a pre-built image.
-SHAPES = ("code", "volume")
+SHAPES = ("volume",)
 
 # Scripts bind-mounted into the container. A directory rather than inline
 # `python -c`, because the relocation seed has to import istota and a one-liner
@@ -234,25 +229,19 @@ def _perform_upgrade(
         pytest.skip(f"shape {shape!r} not selected (ISTOTA_UPGRADE_SHAPES)")
     anchor = anchor_for(shape)
 
-    # The near anchor's own emptiness guard, the counterpart to the volume
-    # shape's `test_the_schema_moved_at_all`.
-    #
-    # On a checkout with no local commits, `merge-base(HEAD, origin/main)` *is*
-    # HEAD — which is the normal state of this repo, and `scripts/test-upgrade.sh`
-    # with no arguments is the documented default. The capture then runs HEAD's
-    # own entrypoint to produce the config HEAD's image is tested against, and
-    # every code-shape assertion is trivially true. Skipped rather than passed,
-    # because a green run that compared a tree with itself is worse than no run:
-    # it is the same silent non-execution `scripts/test-linux.sh` grew a
-    # post-condition for, and this driver has one too.
+    # The anchor's own emptiness guard, the counterpart to
+    # `test_the_schema_moved_at_all`. An anchor that is HEAD (`--from HEAD`)
+    # runs HEAD's own entrypoint to produce the config HEAD's image is tested
+    # against, and every assertion is trivially true. Skipped rather than
+    # passed, because a green run that compared a tree with itself is worse
+    # than no run: it is the same silent non-execution `scripts/test-linux.sh`
+    # grew a post-condition for, and this driver has one too.
     head = upgrade.resolve_anchor(REPO, ref="HEAD")
     if anchor.commit == head.commit:
         pytest.skip(
             f"the {shape} shape's anchor is HEAD itself ({anchor.short}), so "
             f"this run would upgrade a tree from itself and assert nothing. "
-            f"The near anchor is the merge-base with the default branch, which "
-            f"equals HEAD until this checkout has a commit of its own; commit "
-            f"first, or pass --from/--from-floor to name an older release."
+            f"Pass --from or --from-floor to name an older release."
         )
 
     env = upgrade.render_env(nextcloud_url="placeholder")
@@ -344,13 +333,6 @@ def _perform_upgrade(
 
 
 @pytest.fixture(scope="session")
-def code_upgrade(istota_image, platform, tmp_path_factory) -> UpgradeResult:
-    return _perform_upgrade(
-        "code", istota_image, tmp_path_factory.mktemp("upgrade-code"), platform
-    )
-
-
-@pytest.fixture(scope="session")
 def current_config_doctor(istota_image, tmp_path_factory) -> list[dict]:
     """`doctor --json` over a config rendered from the working tree.
 
@@ -394,12 +376,12 @@ class TestTheAssertionsHaveASubject:
     comment.
     """
 
-    @pytest.mark.parametrize("shape", ["code", "volume"])
+    @pytest.mark.parametrize("shape", SHAPES)
     def test_the_doctor_run_produced_results(self, shape, request):
         result = request.getfixturevalue(f"{shape}_upgrade")
         assert result.doctor, "`istota doctor --json` returned an empty list"
 
-    @pytest.mark.parametrize("shape", ["code", "volume"])
+    @pytest.mark.parametrize("shape", SHAPES)
     def test_the_forge_checks_were_not_skipped(self, shape, request):
         result = request.getfixturevalue(f"{shape}_upgrade")
         drift = result.named("developer.forge_config_drift")
@@ -465,7 +447,7 @@ class TestTheUpgradeStaysClean:
         "security.skill_model_credential.value",
     )
 
-    @pytest.mark.parametrize("shape", ["code", "volume"])
+    @pytest.mark.parametrize("shape", SHAPES)
     def test_no_check_fails(self, shape, request):
         result = request.getfixturevalue(f"{shape}_upgrade")
         failed = [
@@ -481,7 +463,7 @@ class TestTheUpgradeStaysClean:
             + result.report()
         )
 
-    @pytest.mark.parametrize("shape", ["code", "volume"])
+    @pytest.mark.parametrize("shape", SHAPES)
     def test_the_excluded_checks_still_ran(self, shape, request):
         """An exclusion nothing watches is an exclusion that quietly widens.
 
@@ -505,7 +487,7 @@ class TestTheUpgradeStaysClean:
             f"exclusion above is exempting nothing.\n" + result.report()
         )
 
-    @pytest.mark.parametrize("shape", ["code", "volume"])
+    @pytest.mark.parametrize("shape", SHAPES)
     def test_the_forge_binaries_resolve(self, shape, request):
         """The ISSUE-263 shape itself: the wrapper's exec target exists.
 
@@ -935,7 +917,7 @@ def entrypoint_boot(istota_image, platform, tmp_path_factory) -> EntrypointBoot:
     start the daemon. Every other case in this file runs the image with its
     entrypoint overridden; this one runs the root phase and `entrypoint.sh`.
     """
-    shape = "volume" if "volume" in selected_shapes() else "code"
+    shape = "volume"
     anchor = anchor_for(shape)
     if anchor.commit == upgrade.resolve_anchor(REPO, ref="HEAD").commit:
         pytest.skip(f"the {shape} anchor is HEAD itself; nothing was rendered by an older release")
