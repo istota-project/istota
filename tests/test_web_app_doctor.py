@@ -1,23 +1,19 @@
-"""Tests for the admin doctor endpoint, `GET /api/admin/doctor`.
+"""Tests for the admin doctor endpoints, `GET /api/admin/doctor` and `POST .../run`.
 
-Read-only, in the shape `admin_config_view` and `admin_logs` already
-establish — and those two modules are *defined* by the property this endpoint
-has to inherit. `admin_config_view` exists so credentials never leave the
-process; `admin_logs` so a caller names a source id, never a path. Doctor's
-`detail` carries observed paths and raw exception text, so redaction is
-asserted here rather than assumed from the renderer.
+The Health pane shows the daemon's own runs. On the Docker stack the web
+process is a separate container without the daemon's sandbox profile, cgroup
+or devbox sockets, so a run made here answered for the wrong container: the
+sandbox, cgroup and devbox checks failed in the pane on a stack whose tasks
+were confined. So the GET reads what the daemon recorded and never runs a
+check, and a re-run or a deep run is a request the daemon answers on its next
+tick (`tests/test_doctor_daemon_report.py` covers that half).
 
-The deep run is the other half. It spawns a bubblewrap subprocess, so it gets a
-single-flight lock and a bounded timeout: a second concurrent request is told
-so rather than queued behind a namespace spawn, and a probe that hangs is
-reported rather than holding the request open.
+Redaction still happens here as well as in the daemon: this process is the one
+crossing the HTTP boundary, and its config is the one it can vouch for.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import threading
 from unittest.mock import AsyncMock
 
 import pytest
@@ -38,13 +34,13 @@ _needs_web_deps = pytest.mark.skipif(
 if _has_web_deps:
     from httpx import ASGITransport, AsyncClient
 
-    # Imported here rather than lazily inside `_patch_app`, because
-    # `istota.webui.app` calls `load_config()` at module scope and that
-    # reaches `doctor.run_checks` via `_validate_forge_clis`. Deferred,
-    # the import lands inside whichever test patched `run_checks` first
-    # and its call is counted as the endpoint's.
+    # Imported here rather than lazily, because `istota.webui.app` calls
+    # `load_config()` at module scope and that reaches `doctor.run_checks` via
+    # `_validate_forge_clis`; deferred, that call would land inside a test that
+    # patched `run_checks` to fail on any call.
     import istota.webui.app  # noqa: F401
 
+from istota import doctor
 from istota.doctor import DEPLOYMENT, FAIL, IMAGE, OK, SKIP, WARN, CheckResult
 
 from .test_web_app import _make_config, _patch_app
@@ -55,18 +51,12 @@ def _results():
         CheckResult("runtime.platform", OK, "Linux x86_64", scope=IMAGE),
         CheckResult("runtime.bwrap", SKIP, "sandbox is disabled", scope=IMAGE),
         CheckResult(
-            "developer.forge_binaries.gh",
-            FAIL,
-            "/usr/local/bin/gh does not exist",
-            remedy="Install gh.",
-            scope=IMAGE,
+            "developer.forge_binaries.gh", FAIL, "/usr/local/bin/gh does not exist",
+            remedy="Install gh.", scope=IMAGE,
         ),
         CheckResult(
-            "developer.forge_config_drift.gh",
-            WARN,
-            "configured path is not the resolved one",
-            remedy="Rewrite config.toml.",
-            scope=DEPLOYMENT,
+            "developer.forge_config_drift.gh", WARN, "configured path is not the resolved one",
+            remedy="Rewrite config.toml.", scope=DEPLOYMENT,
         ),
     ]
 
@@ -91,341 +81,146 @@ class TestAdminDoctor:
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies
 
-    async def _get(self, tmp_path, monkeypatch, path="/istota/api/admin/doctor",
-                   user="alice", results=None, run_checks=None):
-        config = self._config_with_admin(tmp_path)
-        if run_checks is None:
-            def run_checks(cfg, **kw):
-                return _results() if results is None else results
-        monkeypatch.setattr("istota.doctor.run_checks", run_checks)
+    async def _call(self, tmp_path, monkeypatch, *, method="GET", path="/istota/api/admin/doctor",
+                    user="alice", record=None, deep_record=None, json=None, config=None,
+                    headers=None):
+        config = config or self._config_with_admin(tmp_path)
+        if record is not None:
+            doctor.record_report(config, record)
+        if deep_record is not None:
+            doctor.record_report(config, deep_record, deep=True, request_id="deep1")
+
+        def no_local_run(cfg, **kw):
+            raise AssertionError("the web process ran doctor itself")
+
+        monkeypatch.setattr("istota.doctor.run_checks", no_local_run)
         app = _patch_app(config)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="https://example.com") as client:
             cookies = await self._login(client, user) if user else None
-            return await client.get(path, cookies=cookies)
+            if method == "GET":
+                resp = await client.get(path, cookies=cookies)
+            else:
+                resp = await client.post(
+                    path, cookies=cookies, json=json,
+                    headers={"Origin": "https://example.com"} if headers is None else headers,
+                )
+        return resp, config
 
     # ---- the auth gate ----
 
     async def test_requires_auth(self, tmp_path, monkeypatch):
-        resp = await self._get(tmp_path, monkeypatch, user=None)
+        resp, _ = await self._call(tmp_path, monkeypatch, user=None)
         assert resp.status_code == 401
 
     async def test_forbidden_for_non_admin(self, tmp_path, monkeypatch):
-        resp = await self._get(tmp_path, monkeypatch, user="bob")
+        resp, _ = await self._call(tmp_path, monkeypatch, user="bob")
         assert resp.status_code == 403
 
-    async def test_admin_gets_the_report(self, tmp_path, monkeypatch):
-        resp = await self._get(tmp_path, monkeypatch)
+    async def test_a_run_request_requires_an_admin(self, tmp_path, monkeypatch):
+        resp, config = await self._call(
+            tmp_path, monkeypatch, method="POST", path="/istota/api/admin/doctor/run",
+            user="bob", json={"deep": True},
+        )
+        assert resp.status_code == 403
+        assert doctor.read_reports(config)["request"] is None
+
+    async def test_a_run_request_requires_the_origin(self, tmp_path, monkeypatch):
+        resp, config = await self._call(
+            tmp_path, monkeypatch, method="POST", path="/istota/api/admin/doctor/run",
+            json={"deep": False}, headers={},
+        )
+        assert resp.status_code == 403
+        assert doctor.read_reports(config)["request"] is None
+
+    # ---- what the pane shows ----
+
+    async def test_the_daemons_record_is_the_report(self, tmp_path, monkeypatch):
+        resp, _ = await self._call(tmp_path, monkeypatch, record=_results())
         assert resp.status_code == 200
-
-    # ---- the payload ----
-
-    async def test_shape_matches_render_json(self, tmp_path, monkeypatch):
-        """The image tier asserts over `istota doctor --json`; the dashboard
-        must not need a second shape to learn.
-
-        Asserted against `render_json`'s actual output, not against a hardcoded
-        dict — two surfaces each checked against their own literal can diverge
-        with both suites green, which is what the previous version of this did.
-        """
-        from istota.doctor import render_json
-
-        resp = await self._get(tmp_path, monkeypatch)
         body = resp.json()
-        assert body["checks"] == json.loads(render_json(_results(), secrets=()))
-
-    async def test_carries_a_summary_and_an_overall_status(self, tmp_path, monkeypatch):
-        resp = await self._get(tmp_path, monkeypatch)
-        body = resp.json()
-        assert body["summary"] == {"ok": 1, "warn": 1, "fail": 1, "skip": 1}
+        assert body["checks"] == doctor.check_payload(_results())
+        assert body["checked_at"]
         assert body["status"] == FAIL
+        assert body["summary"] == {OK: 1, WARN: 1, FAIL: 1, SKIP: 1}
 
-    async def test_overall_status_is_warn_when_nothing_failed(self, tmp_path, monkeypatch):
-        results = [
-            CheckResult("a.b", OK, "fine"),
-            CheckResult("c.d", WARN, "iffy", remedy="look"),
-        ]
-        resp = await self._get(tmp_path, monkeypatch, results=results)
-        assert resp.json()["status"] == WARN
-
-    async def test_overall_status_is_ok_when_only_ok_and_skip(self, tmp_path, monkeypatch):
-        results = [CheckResult("a.b", OK, "fine"), CheckResult("c.d", SKIP, "n/a")]
-        resp = await self._get(tmp_path, monkeypatch, results=results)
+    async def test_overall_status_ignores_skips(self, tmp_path, monkeypatch):
+        resp, _ = await self._call(tmp_path, monkeypatch, record=_results()[:2])
         assert resp.json()["status"] == OK
 
-    async def test_remedies_survive_to_the_client(self, tmp_path, monkeypatch):
-        """A finding an operator cannot act on is a log line, not a check."""
-        resp = await self._get(tmp_path, monkeypatch)
-        failing = [c for c in resp.json()["checks"] if c["status"] == FAIL]
-        assert failing[0]["remedy"] == "Install gh."
+    async def test_nothing_recorded_says_so_rather_than_running_here(self, tmp_path, monkeypatch):
+        resp, _ = await self._call(tmp_path, monkeypatch)
+        body = resp.json()
+        assert body["checked_at"] is None
+        assert [(c["name"], c["status"]) for c in body["checks"]] == [("doctor.daemon_report", WARN)]
+        assert body["checks"][0]["remedy"]
 
-    # ---- redaction ----
+    async def test_a_stale_record_is_flagged(self, tmp_path, monkeypatch):
+        from istota import db
 
-    async def test_a_credential_in_a_detail_is_redacted(self, tmp_path, monkeypatch):
-        """Check authors are forbidden from putting a credential in `detail`.
-        The endpoint does not take their word for it: `detail` carries raw
-        exception text, and this crosses an HTTP boundary."""
+        config = self._config_with_admin(tmp_path)
+        config.scheduler.doctor_check_interval = 3600
+        doctor.record_report(config, _results()[:1])
+        with db.get_db(config.db_path) as conn:
+            row = db.shared_kv_get(conn, doctor.REPORT_NAMESPACE, "report")
+            stale = row["value"].replace('"at": "', '"at": "2001-01-01T00:00:00Z", "was": "', 1)
+            db.shared_kv_set(conn, doctor.REPORT_NAMESPACE, "report", stale, "test")
+        resp, _ = await self._call(tmp_path, monkeypatch, config=config)
+        names = {c["name"]: c["status"] for c in resp.json()["checks"]}
+        assert names["doctor.daemon_report"] == WARN
+        assert names["runtime.platform"] == OK
+
+    async def test_a_fresh_record_carries_no_staleness_row(self, tmp_path, monkeypatch):
+        resp, _ = await self._call(tmp_path, monkeypatch, record=_results()[:1])
+        assert "doctor.daemon_report" not in {c["name"] for c in resp.json()["checks"]}
+
+    async def test_the_last_deep_run_is_shown_with_its_own_time(self, tmp_path, monkeypatch):
+        deep = [CheckResult("sandbox.masks", OK, "the databases are masked")]
+        resp, _ = await self._call(tmp_path, monkeypatch, record=_results()[:1], deep_record=deep)
+        body = resp.json()
+        assert [c["name"] for c in body["checks"]] == ["runtime.platform", "sandbox.masks"]
+        assert body["deep"] is True
+        assert body["deep_checked_at"]
+        assert body["deep_request_id"] == "deep1"
+
+    async def test_a_pending_request_is_shown(self, tmp_path, monkeypatch):
+        config = self._config_with_admin(tmp_path)
+        made = doctor.request_run(config, deep=True)
+        resp, _ = await self._call(tmp_path, monkeypatch, config=config, record=_results()[:1])
+        assert resp.json()["pending"] == {"id": made["id"], "deep": True}
+
+    async def test_a_credential_in_a_recorded_detail_is_redacted(self, tmp_path, monkeypatch):
         from istota.config import DeveloperConfig
 
         secret = "NOT-A-REAL-TOKEN-" + "w" * 12
         config = self._config_with_admin(tmp_path)
-        config.developer = DeveloperConfig(
-            enabled=True, repos_dir="/tmp/repos", gitlab_token=secret
-        )
-        monkeypatch.setattr(
-            "istota.doctor.run_checks",
-            lambda cfg, **kw: [
-                CheckResult("x.y", FAIL, f"rejected {secret}", remedy=f"rotate {secret}")
-            ],
-        )
-        app = _patch_app(config)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
-            cookies = await self._login(client, "alice")
-            resp = await client.get("/istota/api/admin/doctor", cookies=cookies)
+        config.developer = DeveloperConfig(enabled=True, repos_dir="/tmp/repos", gitlab_token=secret)
+        doctor.record_report(config, [CheckResult("a.b", FAIL, f"saw {secret}", remedy=f"rotate {secret}")])
+        resp, _ = await self._call(tmp_path, monkeypatch, config=config)
         assert secret not in resp.text
-        assert "[redacted]" in resp.text
 
-    # ---- the deep control ----
+    # ---- asking the daemon ----
 
-    async def test_shallow_by_default(self, tmp_path, monkeypatch):
-        seen = {}
-
-        def _capture(cfg, **kw):
-            seen.update(kw)
-            return _results()
-
-        await self._get(tmp_path, monkeypatch, run_checks=_capture)
-        assert seen.get("deep") is False
-
-    async def test_deep_is_opt_in(self, tmp_path, monkeypatch):
-        seen = {}
-
-        def _capture(cfg, **kw):
-            seen.update(kw)
-            return _results()
-
-        await self._get(
-            tmp_path, monkeypatch, path="/istota/api/admin/doctor?deep=1", run_checks=_capture
+    async def test_a_run_request_is_left_for_the_daemon(self, tmp_path, monkeypatch):
+        resp, config = await self._call(
+            tmp_path, monkeypatch, method="POST", path="/istota/api/admin/doctor/run",
+            json={"deep": True},
         )
-        assert seen.get("deep") is True
+        assert resp.status_code == 202
+        pending = doctor.read_reports(config)["request"]
+        assert resp.json() == {"id": pending["id"], "deep": True}
 
-    async def test_the_deep_phase_runs_only_the_deep_checks(self, tmp_path, monkeypatch):
-        """Two phases, not one. The registry's own bounds cover the shallow
-        phase; the outer timer then covers only what it can actually bound."""
-        calls = []
-
-        def _capture(cfg, **kw):
-            calls.append(kw)
-            return _results() if not kw.get("deep") else []
-
-        await self._get(
-            tmp_path, monkeypatch, path="/istota/api/admin/doctor?deep=1", run_checks=_capture
+    async def test_a_run_request_defaults_to_shallow(self, tmp_path, monkeypatch):
+        resp, config = await self._call(
+            tmp_path, monkeypatch, method="POST", path="/istota/api/admin/doctor/run", json={},
         )
-        assert len(calls) == 2
-        assert calls[0]["deep"] is False
-        assert calls[1]["deep"] is True
-        from istota.doctor import DEEP_CHECKS
+        assert resp.status_code == 202
+        assert doctor.read_reports(config)["request"]["deep"] is False
 
-        assert set(calls[1]["only"]) == set(DEEP_CHECKS)
-
-    async def test_a_second_deep_run_gets_409(self, tmp_path, monkeypatch):
-        """The deep probe spawns a namespace. A second concurrent request is
-        told so rather than queued behind one."""
-        import istota.webui.app as mod
-
-        started = threading.Event()
-        release = threading.Event()
-
-        def _gated(cfg, **kw):
-            if not kw.get("deep"):
-                return _results()
-            started.set()
-            assert release.wait(timeout=10), "deep run was never released"
-            return []
-
-        monkeypatch.setattr("istota.doctor.run_checks", _gated)
-        config = self._config_with_admin(tmp_path)
-        app = _patch_app(config)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
-            cookies = await self._login(client, "alice")
-            first = asyncio.create_task(
-                client.get("/istota/api/admin/doctor?deep=1", cookies=cookies, timeout=30)
-            )
-            await asyncio.to_thread(started.wait, 10)
-            second = await client.get("/istota/api/admin/doctor?deep=1", cookies=cookies)
-            release.set()
-            first_resp = await first
-
-        assert second.status_code == 409
-        assert "in flight" in second.json()["detail"]
-        assert first_resp.status_code == 200
-        assert mod._doctor_deep_slot.acquire(blocking=False)
-        mod._doctor_deep_slot.release()
-
-    async def test_a_shallow_run_is_not_blocked_by_a_deep_run(self, tmp_path, monkeypatch):
-        """Only the namespace-spawning path is single-flight; the cheap read
-        stays available while a deep run is going."""
-        import istota.webui.app as mod
-
-        assert mod._doctor_deep_slot.acquire(blocking=False)
-        try:
-            resp = await self._get(tmp_path, monkeypatch)
-            assert resp.status_code == 200
-        finally:
-            mod._doctor_deep_slot.release()
-
-    async def test_the_slot_is_released_when_the_run_raises(self, tmp_path, monkeypatch):
-        """A wedged slot would make the control dead until the next restart.
-
-        `raise_app_exceptions=False` so the transport reports what a real server
-        would return instead of re-raising into the test — the assertion is
-        about the slot, and a propagated exception proves nothing about it.
-        """
-        import istota.webui.app as mod
-
-        def _boom(cfg, **kw):
-            if kw.get("deep"):
-                raise RuntimeError("probe exploded")
-            return _results()
-
-        monkeypatch.setattr("istota.doctor.run_checks", _boom)
-        config = self._config_with_admin(tmp_path)
-        app = _patch_app(config)
-        transport = ASGITransport(app=app, raise_app_exceptions=False)
-        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
-            cookies = await self._login(client, "alice")
-            resp = await client.get("/istota/api/admin/doctor?deep=1", cookies=cookies)
-        assert resp.status_code == 500
-        assert mod._doctor_deep_slot.acquire(blocking=False)
-        mod._doctor_deep_slot.release()
-
-    async def test_the_slot_is_released_after_a_normal_deep_run(self, tmp_path, monkeypatch):
-        import istota.webui.app as mod
-
-        resp = await self._get(tmp_path, monkeypatch, path="/istota/api/admin/doctor?deep=1")
-        assert resp.status_code == 200
-        assert mod._doctor_deep_slot.acquire(blocking=False)
-        mod._doctor_deep_slot.release()
-
-    async def test_a_deep_run_that_overruns_is_reported_not_hung(self, tmp_path, monkeypatch):
-        """`check_sandbox_masks` bounds its own subprocess, but a check that
-        hangs some other way must not hold the request open forever."""
-        import istota.webui.app as mod
-
-        monkeypatch.setattr(mod, "_doctor_deep_timeout", lambda: 0.1)
-        finish = threading.Event()
-
-        def _hang(cfg, **kw):
-            if not kw.get("deep"):
-                return _results()
-            finish.wait(timeout=10)
-            return []
-
-        try:
-            resp = await self._get(
-                tmp_path, monkeypatch, path="/istota/api/admin/doctor?deep=1", run_checks=_hang
-            )
-            assert resp.status_code == 200
-            body = resp.json()
-            assert body["status"] == FAIL
-
-            # The timeout is reported under a name that is not a registry entry:
-            # the run failed, and blaming `sandbox.masks` would assert a verdict
-            # on a check that may never have been reached.
-            names = [c["name"] for c in body["checks"]]
-            assert "doctor.deep_run" in names
-            assert "sandbox.masks" not in names
-
-            # And the shallow findings survive — an operator who opened the page
-            # to read a real failure still sees it.
-            assert "developer.forge_binaries.gh" in names
-        finally:
-            finish.set()
-
-    async def test_a_timed_out_deep_run_still_holds_the_slot(self, tmp_path, monkeypatch):
-        """The regression that made the lock decorative.
-
-        `asyncio.wait_for` cancels the await, not the OS thread. Releasing on
-        the timeout says "nothing is running" while bwrap is still spawning, so
-        the next request starts a second concurrent namespace. The slot must
-        stay taken until the thread itself finishes.
-        """
-        import istota.webui.app as mod
-
-        monkeypatch.setattr(mod, "_doctor_deep_timeout", lambda: 0.1)
-        finish = threading.Event()
-
-        def _hang(cfg, **kw):
-            if not kw.get("deep"):
-                return _results()
-            finish.wait(timeout=10)
-            return []
-
-        monkeypatch.setattr("istota.doctor.run_checks", _hang)
-        config = self._config_with_admin(tmp_path)
-        app = _patch_app(config)
-        transport = ASGITransport(app=app)
-        try:
-            async with AsyncClient(transport=transport, base_url="https://example.com") as client:
-                cookies = await self._login(client, "alice")
-                first = await client.get("/istota/api/admin/doctor?deep=1", cookies=cookies)
-                assert first.status_code == 200
-                assert first.json()["status"] == FAIL
-
-                # The worker is still inside `_hang`. A second deep request must
-                # be refused, not admitted alongside it.
-                second = await client.get("/istota/api/admin/doctor?deep=1", cookies=cookies)
-                assert second.status_code == 409
-        finally:
-            finish.set()
-
-        # And once the thread does finish, the slot comes back.
-        for _ in range(100):
-            if mod._doctor_deep_slot.acquire(blocking=False):
-                mod._doctor_deep_slot.release()
-                break
-            await asyncio.sleep(0.05)
-        else:
-            raise AssertionError("the slot was never released by the worker thread")
-
-    async def test_the_endpoint_does_not_block_the_event_loop(self, tmp_path, monkeypatch):
-        """`run_checks` is synchronous and spawns subprocesses; run inline it
-        would stall every other request for its duration.
-
-        The tick count is read *while the request is still in flight*. Read
-        after awaiting the ticker it would be 10 either way — blocking only
-        delays the ticks, it cannot lose them — which is a test that cannot
-        fail.
-        """
-        ticks = []
-        ticking = threading.Event()
-
-        def _slowish(cfg, **kw):
-            ticking.wait(timeout=5)
-            return _results()
-
-        config = self._config_with_admin(tmp_path)
-        monkeypatch.setattr("istota.doctor.run_checks", _slowish)
-        app = _patch_app(config)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
-            cookies = await self._login(client, "alice")
-
-            async def _tick():
-                for _ in range(10):
-                    ticks.append(1)
-                    await asyncio.sleep(0.01)
-                # Only now let the (threaded) check return.
-                ticking.set()
-
-            ticker = asyncio.create_task(_tick())
-            resp = await client.get("/istota/api/admin/doctor", cookies=cookies)
-            await ticker
-
-        # Run inline on the loop, `_slowish` would block until `ticking` was set
-        # — which only the ticker sets — and the request would deadlock rather
-        # than return. Reaching here at all is the assertion.
-        assert resp.status_code == 200
-        assert len(ticks) == 10
+    async def test_a_non_boolean_deep_is_refused(self, tmp_path, monkeypatch):
+        resp, config = await self._call(
+            tmp_path, monkeypatch, method="POST", path="/istota/api/admin/doctor/run",
+            json={"deep": "yes"},
+        )
+        assert resp.status_code == 400
+        assert doctor.read_reports(config)["request"] is None

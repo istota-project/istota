@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
+  import { getAdminDoctor, requestDoctorRun, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { Badge, Button, NoticeBanner } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
   let loading = $state(true);
+  let running = $state(false);
   let deepRunning = $state(false);
   let error = $state('');
   let notice = $state('');
@@ -45,33 +46,62 @@
     fail: 'Something this deployment depends on is missing or broken.',
   } as const;
 
-  async function load(deep = false) {
-    if (deep) deepRunning = true;
-    else loading = true;
-    notice = '';
+  // The daemon answers a request on its next tick (a second or so) and a deep
+  // run spawns a sandbox namespace, so this is generous; past it the daemon is
+  // not picking requests up, which is worth saying rather than spinning on.
+  const POLL_MS = 1500;
+  const WAIT_MS = 120_000;
+
+  async function load() {
     try {
-      report = await getAdminDoctor(deep);
+      report = await getAdminDoctor();
       error = '';
-      if (deep) notice = 'Deep checks included — a sandbox namespace was spawned and inspected.';
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Failed to run checks';
-      // A 409 is not a failure of the deployment, it is two admins pressing the
-      // same button. Say which it was rather than colouring the page red.
-      // Matched on the status alone: `apiFetch` throws `API error: <status>`
-      // and discards the body, so the endpoint's "a deep run is in flight"
-      // detail is for API clients and never reaches this page.
-      if (message.includes('409')) {
-        notice = 'A deep run is already in flight. Try again once it finishes.';
-      } else {
-        error = message;
-      }
+      error = e instanceof Error ? e.message : 'Failed to load checks';
     } finally {
       loading = false;
+    }
+  }
+
+  function answered(r: DoctorReport, id: string, deep: boolean): boolean {
+    return r.request_id === id && (!deep || r.deep_request_id === id);
+  }
+
+  async function rerun(deep: boolean) {
+    if (deep) deepRunning = true;
+    else running = true;
+    notice = '';
+    try {
+      const asked = await requestDoctorRun(deep);
+      const wantDeep = asked.deep;
+      const until = Date.now() + WAIT_MS;
+      while (Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+        const next = await getAdminDoctor();
+        report = next;
+        if (answered(next, asked.id, wantDeep)) {
+          error = '';
+          if (wantDeep) {
+            notice =
+              'Deep checks included: the daemon spawned a sandbox namespace and inspected it.';
+          }
+          return;
+        }
+      }
+      notice = 'The daemon has not answered the request yet. Check that it is running.';
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to run checks';
+    } finally {
+      running = false;
       deepRunning = false;
     }
   }
 
-  onMount(() => load(false));
+  function when(at: string | null): string {
+    return at ? new Date(at).toLocaleString() : 'never';
+  }
+
+  onMount(() => load());
 </script>
 
 <div class="settings health-page">
@@ -92,9 +122,9 @@
     >
       <p>
         Each check names one thing the code assumes about the machine it is running on — a binary at
-        a path, a writable directory, a mount that is really mounted. They run here on demand, once
-        when the daemon starts, and on an interval after that; a failure is also sent to the admin
-        channel when it first appears.
+        a path, a writable directory, a mount that is really mounted. The daemon runs them, since it
+        is the process that runs tasks: once when it starts, on an interval after that, and when you
+        ask here. A failure is also sent to the admin channel when it first appears.
       </p>
       <p>
         A <strong>skip</strong> is not a problem: it means the check does not apply to this
@@ -102,7 +132,7 @@
       </p>
       <p>
         <strong>Deep checks</strong> spawn a real sandbox namespace and inspect it from the inside, which
-        is slower and runs one at a time.
+        is slower. Their last result stays on this page until the next deep run.
       </p>
     </NoticeBanner>
 
@@ -114,6 +144,12 @@
       <div class="banner info">{notice}</div>
     {/if}
 
+    <p class="caption run-times">
+      Last run by the daemon: {when(report.checked_at)}{#if report.deep_checked_at}
+        · deep checks: {when(report.deep_checked_at)}{/if}{#if report.pending}
+        · a {report.pending.deep ? 'deep ' : ''}run is waiting for the daemon{/if}
+    </p>
+
     <div class="health-toolbar control-row">
       <div class="counts">
         <Badge variant="success">{report.summary.ok} ok</Badge>
@@ -122,15 +158,20 @@
         {#if report.summary.skip}<Badge variant="neutral">{report.summary.skip} skip</Badge>{/if}
       </div>
       <div class="actions">
-        <Button variant="secondary" onclick={() => load(false)} {loading} loadingLabel="Running…"
-          >Re-run</Button
+        <Button
+          variant="secondary"
+          onclick={() => rerun(false)}
+          loading={running}
+          disabled={deepRunning}
+          loadingLabel="Running…">Re-run</Button
         >
         <Button
           variant="secondary"
-          onclick={() => load(true)}
+          onclick={() => rerun(true)}
           loading={deepRunning}
+          disabled={running}
           loadingLabel="Running deep checks…"
-          title="Spawns a sandbox namespace and inspects it. Slower; one at a time."
+          title="The daemon spawns a sandbox namespace and inspects it. Slower."
           >Run deep checks</Button
         >
       </div>
@@ -159,6 +200,10 @@
 </div>
 
 <style>
+  .run-times {
+    margin: 0;
+  }
+
   .health-toolbar {
     display: flex;
     flex-wrap: wrap;

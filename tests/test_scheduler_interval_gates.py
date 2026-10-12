@@ -68,6 +68,8 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("status-write", None),
     ("db-health", "db_health_check_interval"),
     ("doctor", "doctor_check_interval"),
+    # Added after the baseline extraction: the Health pane's on-demand run.
+    ("doctor-request", None),
     ("worktree-reap", "worktree_reap_interval"),
     ("sandbox-cache-sweep", "sandbox_cache_sweep_interval"),
     ("avatar-import", "avatar_import_interval"),
@@ -115,6 +117,7 @@ EXPECTED_BACKGROUND = {
     "email-poll",
     "db-health",
     "doctor",
+    "doctor-request",
     "worktree-reap",
     "sandbox-cache-sweep",
     "avatar-import",
@@ -1154,6 +1157,7 @@ class TestTheOneShotPathTouchesNoDaemonState:
             "status-write",
             "scheduler-stats",
             "doctor",
+            "doctor-request",
             "host-pressure-sample",
             "backup-stale-alert",
         }

@@ -57,6 +57,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Collection, Iterable
 from datetime import datetime, timezone
 from dataclasses import dataclass, replace
@@ -94,9 +95,9 @@ PROBE_TIMEOUT = 10
 DEEP_TIMEOUT = 30
 
 # How long the live model probe gets. The same 30s both hand-rolled health
-# probes used, kept as its own name rather than borrowing DEEP_TIMEOUT: that
-# one is the deep phase's budget and `web_app._doctor_deep_timeout` does
-# arithmetic on it, so sharing the constant would couple two unrelated waits.
+# probes used, kept as its own name rather than borrowing DEEP_TIMEOUT, which
+# is the deep phase's budget: sharing the constant would couple two unrelated
+# waits.
 MODEL_PROBE_TIMEOUT = 30
 
 # Below this length a configured "credential" is a placeholder or a mode string,
@@ -10298,6 +10299,88 @@ def check_payload(results: list[CheckResult]) -> list[dict]:
         }
         for r in results
     ]
+
+
+# The daemon's own runs, kept for the Health pane. On the Docker stack the web
+# process is another container without the daemon's sandbox profile, cgroup or
+# devbox sockets, so a run there answered for the wrong container. A reserved
+# shared_kv namespace: written by the daemon and the admin route, never by a task.
+REPORT_NAMESPACE = "_doctor"
+_REPORT_KEY = "report"
+_DEEP_REPORT_KEY = "deep_report"
+_REQUEST_KEY = "request"
+
+
+def _report_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def record_report(
+    config: "Config", results: list[CheckResult], *, deep: bool = False,
+    request_id: str | None = None,
+) -> None:
+    """Keep a run's results, already redacted, for the Health pane. Never raises."""
+    if not Path(config.db_path).exists():
+        return
+    from istota import db
+
+    value = json.dumps({"at": _report_now(), "request_id": request_id,
+                        "checks": check_payload(results)})
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.shared_kv_set(conn, REPORT_NAMESPACE,
+                             _DEEP_REPORT_KEY if deep else _REPORT_KEY, value, "daemon")
+    except Exception as exc:  # noqa: BLE001 - a record of the run, not the run
+        logger.warning("doctor_report_unwritten err=%s", exc)
+
+
+def read_reports(config: "Config") -> dict:
+    """The last shallow and deep runs and any pending request, each or None."""
+    out: dict = {"report": None, "deep_report": None, "request": None}
+    if not Path(config.db_path).exists():
+        return out
+    from istota import db
+
+    with db.get_db(config.db_path) as conn:
+        for name, key in (("report", _REPORT_KEY), ("deep_report", _DEEP_REPORT_KEY),
+                          ("request", _REQUEST_KEY)):
+            row = db.shared_kv_get(conn, REPORT_NAMESPACE, key)
+            if row is not None:
+                out[name] = json.loads(row["value"])
+    return out
+
+
+def request_run(config: "Config", *, deep: bool) -> dict:
+    """Ask the daemon for a run on its next tick, joining a request still pending.
+
+    Joined rather than queued: two admins pressing the button want one answer.
+    A pending deep request stays deep.
+    """
+    from istota import db
+
+    with db.get_db(config.db_path) as conn:
+        row = db.shared_kv_get(conn, REPORT_NAMESPACE, _REQUEST_KEY)
+        if row is not None:
+            request = json.loads(row["value"])
+            request["deep"] = bool(request.get("deep")) or deep
+        else:
+            request = {"id": uuid.uuid4().hex[:12], "deep": deep, "at": _report_now()}
+        db.shared_kv_set(conn, REPORT_NAMESPACE, _REQUEST_KEY, json.dumps(request), "web")
+    return request
+
+
+def take_request(config: "Config") -> dict | None:
+    """The pending request, removed in the same transaction, or None."""
+    if not Path(config.db_path).exists():
+        return None
+    from istota import db
+
+    with db.get_db(config.db_path) as conn:
+        row = db.shared_kv_get(conn, REPORT_NAMESPACE, _REQUEST_KEY)
+        if row is None:
+            return None
+        db.shared_kv_delete(conn, REPORT_NAMESPACE, _REQUEST_KEY)
+    return json.loads(row["value"])
 
 
 _STATUS_ORDER = {FAIL: 0, WARN: 1, OK: 2, SKIP: 3}

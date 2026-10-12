@@ -3681,11 +3681,23 @@ function mockLogPage(source: string, params: URLSearchParams) {
   };
 }
 
-// `GET /admin/doctor`. There was no mock for this at all, so the Health pane
-// rendered against nothing in dev. The rows below are copied from what
-// `istota.doctor` actually emits, including the SMS trio: `skip` for an
-// unconfigured provider is a normal single-provider deployment, not a fault.
-function mockAdminDoctor(deep: boolean) {
+// `GET /admin/doctor` and `POST /admin/doctor/run`. The rows below are copied
+// from what `istota.doctor` actually emits, including the SMS trio: `skip` for
+// an unconfigured provider is a normal single-provider deployment, not a fault.
+// The real daemon answers a run request on its next tick; the mock answers it
+// at once, so the pane's wait loop ends on its first poll.
+let mockDoctorAnswered: { id: string; deep: boolean } | null = null;
+let mockDoctorSeq = 0;
+
+function mockAdminDoctorRun(body: unknown) {
+  const deep = !!(body as { deep?: boolean } | null)?.deep;
+  mockDoctorSeq += 1;
+  mockDoctorAnswered = { id: `mock${mockDoctorSeq}`, deep };
+  return mockDoctorAnswered;
+}
+
+function mockAdminDoctor() {
+  const deep = !!mockDoctorAnswered?.deep;
   const checks = [
     {
       name: 'runtime.framework_db',
@@ -3733,11 +3745,17 @@ function mockAdminDoctor(deep: boolean) {
   ];
   const summary = { ok: 0, warn: 0, fail: 0, skip: 0 };
   for (const c of checks) summary[c.status as keyof typeof summary] += 1;
+  const at = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
   return {
     status: summary.fail ? 'fail' : summary.warn ? 'warn' : 'ok',
     summary,
     deep,
     checks,
+    checked_at: at,
+    request_id: mockDoctorAnswered?.id ?? null,
+    deep_checked_at: deep ? at : null,
+    deep_request_id: deep ? (mockDoctorAnswered?.id ?? null) : null,
+    pending: null,
   };
 }
 
@@ -4652,10 +4670,11 @@ const handlers: MockHandler[] = [
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
   ({ url }) => (url === '/istota/api/admin/config' ? mockAdminConfig() : undefined),
-  ({ url }) =>
-    url.startsWith('/istota/api/admin/doctor')
-      ? mockAdminDoctor(url.includes('deep=1'))
+  ({ url, method, body }) =>
+    url === '/istota/api/admin/doctor/run' && method === 'POST'
+      ? mockAdminDoctorRun(body)
       : undefined,
+  ({ url }) => (url === '/istota/api/admin/doctor' ? mockAdminDoctor() : undefined),
   // The live tail is SSE, which this mock layer cannot serve. Answer with an
   // empty 200 rather than letting it 404: an EventSource retries a failed
   // connection forever, so a missing handler turns Follow into a reconnect loop

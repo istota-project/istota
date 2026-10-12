@@ -722,19 +722,37 @@ export interface DoctorReport {
   /** Worst status present: `fail` > `warn` > `ok`. Skips don't count. */
   status: 'ok' | 'warn' | 'fail';
   summary: { ok: number; warn: number; fail: number; skip: number };
+  /** Whether the daemon's last deep run is included. */
   deep: boolean;
   checks: DoctorCheck[];
+  /** When the daemon's last run finished (UTC, `…Z`), or null before its first. */
+  checked_at: string | null;
+  /** The request that run answered, if it answered one. */
+  request_id: string | null;
+  deep_checked_at: string | null;
+  deep_request_id: string | null;
+  /** A run asked for and not yet picked up by the daemon. */
+  pending: { id: string; deep: boolean } | null;
 }
 
 /**
- * The runtime self-check.
- *
- * `deep` opts into the checks that spawn a sandbox namespace. Only one deep run
- * happens at a time — a second concurrent request gets a 409 rather than
- * queueing behind a subprocess.
+ * The daemon's last doctor runs. Nothing is checked in the web process: on the
+ * Docker stack it is another container, without the daemon's sandbox.
  */
-export async function getAdminDoctor(deep = false): Promise<DoctorReport> {
-  return apiFetch<DoctorReport>(`/admin/doctor${deep ? '?deep=1' : ''}`);
+export async function getAdminDoctor(): Promise<DoctorReport> {
+  return apiFetch<DoctorReport>('/admin/doctor');
+}
+
+/**
+ * Ask the daemon for a run on its next tick. A request still pending is joined,
+ * so the id returned is the one to wait for in `request_id` / `deep_request_id`.
+ */
+export async function requestDoctorRun(deep: boolean): Promise<{ id: string; deep: boolean }> {
+  return apiFetch<{ id: string; deep: boolean }>('/admin/doctor/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deep }),
+  });
 }
 
 /**
