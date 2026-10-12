@@ -389,7 +389,8 @@ class TestUpstreamRclone:
     def test_debians_build_is_replaced_and_held(self, tmp_path):
         result, calls, version = self._run(tmp_path)
         assert result.returncode == 0, result.stderr
-        assert (f"curl -fsSL -o {tmp_path}" in calls[0]
+        # Where mktemp puts the file is the platform's business: macOS's ignores TMPDIR.
+        assert (calls[0].startswith("curl -fsSL -o /") and "/rclone.deb " in calls[0]
                 and calls[0].endswith(f"https://downloads.rclone.org/v{version}/"
                                       f"rclone-v{version}-linux-amd64.deb"))
         assert calls[1].startswith("dpkg -i ") and calls[1].endswith("rclone.deb")
