@@ -190,9 +190,18 @@ def check_layout(source: Source) -> None:
         value = old.get(key)
         return _expand(value, home).rstrip("/") if isinstance(value, str) else ""
 
-    if path_of("workspace_path") != root:
+    # The loader's reading, not the raw key: an older standalone config names
+    # its folder as `nextcloud_mount_path`, which load_config takes as the workspace.
+    from istota.config import config_from_document
+
+    try:
+        workspace = config_from_document(old).workspace_path
+    except ValueError as exc:
+        raise Refusal(f"config.toml does not load: {exc}") from None
+    workspace_value = str(workspace) if workspace is not None else ""
+    if _expand(workspace_value, home).rstrip("/") != root:
         raise Refusal(
-            f"config.toml's workspace_path is {old.get('workspace_path')!r}, not the standalone "
+            f"config.toml's workspace is {workspace_value or None!r}, not the standalone "
             f"folder {root}: this is not the layout `istota setup` writes for a standalone install"
         )
     if path_of("db_path") != f"{root}/{STANDALONE_DB}":

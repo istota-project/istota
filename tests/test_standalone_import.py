@@ -417,6 +417,20 @@ class TestAnImport:
         assert f"istota migrate workspace-paths --map {ROOT}=/mnt/shared" in out
 
 
+class TestAnOlderStandaloneConfig:
+    def test_a_folder_named_by_the_old_mount_key_is_the_workspace(self, tmp_path, target):
+        config = STANDALONE_CONFIG.replace(f'workspace_path = "{ROOT}"', f'nextcloud_mount_path = "{ROOT}"')
+        assert "workspace_path" not in config
+        code, out, err = _run(target, _stage(tmp_path, config=config))
+        assert code == 0, out + err
+
+    def test_a_config_naming_no_workspace_is_still_refused(self, tmp_path, target):
+        config = STANDALONE_CONFIG.replace(f'workspace_path = "{ROOT}"\n', "")
+        code, out, err = _run(target, _stage(tmp_path, config=config))
+        assert code == 1, out + err
+        assert "not the standalone folder" in out + err
+
+
 class TestRefusals:
     """A refusal writes nothing: no config, no key, no database."""
 
@@ -461,7 +475,7 @@ class TestRefusals:
         config = STANDALONE_CONFIG.replace(f'workspace_path = "{ROOT}"', 'workspace_path = "/Volumes/x"')
         source = _stage(tmp_path, config=config)
         err = self._refused(target, source)
-        assert "workspace_path" in err
+        assert "workspace is '/Volumes/x'" in err
 
     def test_a_different_master_key_already_there_is_refused(self, target, source):
         (target.data / ".secret_key").write_text(OTHER_KEY)
