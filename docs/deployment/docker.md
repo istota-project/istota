@@ -17,6 +17,51 @@ Every command here runs as root on that machine. `istota-stack compose <...>` is
 | `whatsapp-baileys` (profile) | The WhatsApp sidecar for a paired session |
 | `signaling` (profile) | Talk's signaling server |
 
+## First-run setup
+
+A fresh machine has no `config.toml`, and nothing serves the web UI until one exists. You write it once, in the browser or in the terminal. Both run the same validation and write the same files for the same answers.
+
+### In the browser
+
+```bash
+istota-stack setup --web
+```
+
+This is the default first run. It mints a one-use setup code and a self-signed certificate valid for two days, prints an address with the code in it and the certificate's SHA-256 fingerprint, and runs a setup page on port 443:
+
+```
+Open this address in your browser to set up Istota:
+
+  https://203.0.113.5/istota/setup#code=7KQ2M-X9D4F-H3T8W-QP6ZA
+```
+
+Your browser warns that the connection is not private. Check the fingerprint in its certificate viewer before you continue. The code is in the address's fragment, which the browser never sends to the server, and the page clears it once used.
+
+The page asks one topic per screen: the assistant's name, your name, email and time zone, a password, the AI service (an Anthropic API key, an OpenRouter API key, or a Claude subscription token from `claude setup-token`), how people reach Istota (only on this computer, at your own web address with a certificate from Let's Encrypt, or behind a proxy you run), an optional Nextcloud, an optional email account or calendar, and the features, the web browser included. API keys, Nextcloud, email and the calendar can be tested before you save them. Finish writes the config, the admins file, the secrets and your sign-in, and the page sends you to the sign-in page with your email filled in once the stack answers.
+
+After the page finishes, `istota-stack` installs `.env` and `host.env`, builds what the answers need and the images lack (the browser image, or Claude Code for a subscription), runs `provision.sh` again when the host settings changed, and starts `istota-stack.service`. The first start takes a few minutes when something has to be built.
+
+- `istota-stack setup-code` prints the address, code and fingerprint again while a setup is running.
+- `--local` serves plain HTTP on `127.0.0.1:8080` with no certificate, for a Lima VM on a Mac or your own SSH tunnel.
+- `ISTOTA_SETUP_PUBLISH=0.0.0.0:8443` moves the page off port 443 when something else holds it.
+- The first browser to use the code gets the only session. To start over, stop the running setup (Ctrl-C, or `sudo systemctl stop istota-setup`) and run `istota-stack setup --web` again, which mints a new code.
+- A setup that does not finish installs nothing on the host; if Finish failed partway, the run names any config or secret files it left so you can remove them. After an hour with no request the page stops, and so does the run. Fifty wrong codes stop it too.
+- With `--local` the page answers only at `localhost`, `127.0.0.1` or `[::1]`.
+- On a cloud machine behind its provider's NAT, the printed address is the private one; open the public address instead, and the code still works.
+- It refuses when `config.toml` exists. Change a configured stack by editing `config.toml`, with `istota-stack apply`, or with `istota-stack setup --force`.
+
+`istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `journalctl -u istota-setup` has the same lines.
+
+The page leaves out the operator features: WhatsApp, the Talk signaling server, the developer skill, devboxes, Nextcloud login, the DAV prefix and the auto-share setting. Set those up afterwards in `config.toml` or with the terminal setup.
+
+### In the terminal
+
+```bash
+istota-stack setup
+```
+
+This runs `istota setup` in the image and asks every question, operator settings included. Unlike the web setup it stops after writing the files: run `istota-stack check-image || istota-stack update <tag>`, then `provision.sh`, then `systemctl enable --now istota-stack`. The browser question defaults to yes; a scripted `--yes` run without `--profile browser` still leaves the browser off.
+
 ## Configuration
 
 Everything the stack reads lives under `/srv/app/istota`:
@@ -31,7 +76,7 @@ Everything the stack reads lives under `/srv/app/istota`:
 | `compose.devbox.yml` | the per-user devbox services, rendered from `config.toml` (see [Devboxes](#devboxes)) |
 | `src/` | the repository, checked out at the deployed tag |
 
-`istota-stack setup` runs `istota setup` in the image as uid 10001 and writes these once, plus the master key at `/data/.secret_key`. It updates `.env` and keeps every line it does not own. After that `config.toml` is yours to edit; nothing regenerates it. See [SMS](../features/sms.md) and [WhatsApp](../features/whatsapp.md) for those blocks, which you add to `config.toml` yourself.
+Either first-run setup runs `istota setup` in the image as uid 10001 and writes these once, plus the master key at `/data/.secret_key`. It updates `.env` and keeps every line it does not own. After that `config.toml` is yours to edit; nothing regenerates it. See [SMS](../features/sms.md) and [WhatsApp](../features/whatsapp.md) for those blocks, which you add to `config.toml` yourself.
 
 An estate managed with Ansible can write these files from inventory instead, through `istota-stack apply` and `istota-stack put-files`; see the [Ansible management role](ansible.md).
 
@@ -200,7 +245,7 @@ Two modes, chosen by `[nextcloud] url` in `config.toml`, which `istota setup` wr
 | Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume |
 | Full Nextcloud integration | `url` names your Nextcloud | the VM's rclone mount of the bot's files, bound at `/mnt/shared` |
 
-In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
+In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`, and the mount's `rclone.conf` (one WebDAV remote named `nextcloud`, the app password obscured as `rclone obscure` does it) with `RCLONE_REMOTE=nextcloud` in `host.env`, so the mount needs no hand-written config.
 
 The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
 

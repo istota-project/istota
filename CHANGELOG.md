@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Istota can be set up in the browser.** `istota-stack setup --web` prints an address with a one-use setup code and runs a page of short screens: your name and email, a password, an Anthropic or OpenRouter API key or a Claude subscription, the web address, and optionally Nextcloud, email and a calendar, each of which can be tested before you save it. When you finish it writes the configuration, builds what your answers need, starts the stack and sends you to the sign-in page with your email filled in. A new cloud VM started from `host/cloud-init.yaml` opens it on its own and shows the address on the provider's console; `istota-stack setup-code` prints it again, and the terminal wizard is still there with `istota-stack setup`.
+
 - Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
 
 - Browse My Drive and Shared with me in Workspace, open files in Google Drive, and load more files as needed. Connection errors link to Settings so you can restore access.
@@ -114,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A `## ` section of `USER.md` whose heading ends in `<!-- pinned -->` is kept from the nightly memory curator.** The curator may add to it but cannot remove, rewrite or drop anything in it, and cannot create one; you, or the bot when you ask, still can. A pin covers one `## ` section, so use `### ` for its subsections.
 
 ### Changed
+
+- **Setup now writes the Nextcloud mount's configuration.** Choosing Nextcloud in either setup writes the rclone config and the remote's name for the file mount, so the stack starts without a hand-written file; a `setup --force` re-run replaces an `rclone.conf` written by hand with one for the remote named `nextcloud`. The browser container is now offered as on by default; a scripted `--yes` setup still leaves it off unless you ask for it.
 
 - **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
 
@@ -327,6 +331,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ledger writes, workspace file copies and old-layout memory migrations no longer fail with an input/output error on a Nextcloud workspace mount that rejects extended-attribute calls (#694). The containerized stack's mount answers those calls with an error for every file, and each of these copies asked for the file's extended attributes, so a ledger backup failed before the write it protects. They now copy the contents and permissions only, and `istota doctor` warns when the mount behaves this way, since `cp -a` and `cp -p` out of the workspace still fail there.
 
 ### Security
+
+- **A model provider's error message no longer carries your API key into the logs.** When a provider quoted the key back in an error, that text reached the log and the error shown to you; the key is now removed first.
 
 - **The container's AppArmor profile no longer lets a root shell in the container re-expose kernel settings by bind-mounting them.** It now refuses bind and move mounts out of `/proc` and `/sys` and any new `sysfs` mount, which the task sandbox never needs. Reload the profile on the host after updating (`istota-stack update` does it).
 

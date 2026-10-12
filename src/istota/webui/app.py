@@ -34,7 +34,6 @@ from dataclasses import dataclass, field as _dc_field, replace as _dc_replace
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
@@ -60,7 +59,6 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
-from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -110,79 +108,14 @@ _UNSET = object()
 # leaf, so `doctor`'s `web.static` check can ask the same question without
 # importing this module — which would cost it the whole FastAPI stack and a
 # nested `load_config()`. Aliased under the old private names because this
-# module's own call sites and its tests use them.
+# module's own call sites and its tests use them. The bundle's cache policy and
+# mount are there too, shared with the first-run setup server.
+from .request_guards import BodyError, origin_refusal, read_bounded_body
 from .static_dir import (  # noqa: F401 - re-export, see above
+    cache_header_statics,
     pick_static_dir as _pick_static_dir,
     resolve_static_dir as _resolve_static_dir,
 )
-
-
-# SvelteKit emits two classes of asset and they need opposite caching. Bare
-# `StaticFiles` sends neither header, leaving both to heuristic freshness — and
-# an iOS home-screen PWA takes that as licence to pin the app shell more or less
-# forever. That is how a device ends up running a months-old bundle against a
-# current API: the shell it cached still names hashed chunks the server has
-# since deleted, so nothing 404s loudly, it just never picks up new code.
-def _static_cache_control(path: str) -> str:
-    """The `Cache-Control` for a built asset, by SvelteKit's own two classes."""
-    # `_app/immutable/*` is content-addressed — the hash changes when the bytes
-    # do, so it can be cached indefinitely and never revalidated.
-    if "/_app/immutable/" in f"/{path.lstrip('/')}":
-        return "public, max-age=31536000, immutable"
-    # Everything else is a stable name with changing content: the HTML shell
-    # (which names the hashed chunks), version.json, the manifest, icons.
-    # `no-cache` still allows caching — it requires revalidation, which the
-    # ETag answers with a 304 in the common case.
-    return "no-cache"
-
-
-def _relative_location(location: str) -> str | None:
-    """A path-relative rewrite of an absolute `Location`, or None to leave it.
-
-    `StaticFiles(html=True)` answers a directory URL with a redirect that adds
-    the trailing slash, and it builds that Location as
-    `{scope['scheme']}://{Host header}{path}/` — an absolute URL whose authority
-    is entirely whatever the proxy in front of us chose to forward. Both halves
-    have been wrong: nginx forwarding `$host` drops the port (a stack published
-    on :8282 redirects to `http://localhost/istota/chat/`, which is nothing),
-    and `scope['scheme']` is always `http` because no deployment starts uvicorn
-    with `--proxy-headers`, so a TLS deployment answers with a plaintext URL and
-    recovers only via the port-80 redirect back to https.
-
-    A relative reference has no authority to get wrong: the client resolves it
-    against the URL it actually asked for. RFC 7231 §7.1.2 permits it and has
-    since 2014. The nginx configs forward `$http_host` as well — this is the
-    half that does not depend on the proxy being configured correctly.
-
-    Returns None when there is nothing to do (already relative) or when
-    rewriting would change meaning: a path starting with `//` is a
-    protocol-relative reference, so its first segment would be read as a
-    hostname.
-    """
-    parsed = urlsplit(location)
-    if not parsed.scheme and not parsed.netloc:
-        return None
-    if parsed.path.startswith("//"):
-        return None
-    return urlunsplit(("", "", parsed.path or "/", parsed.query, parsed.fragment))
-
-
-class _CacheHeaderStatics(StaticFiles):
-    """`StaticFiles` that stamps the cache policy above onto every response."""
-
-    def file_response(self, full_path, stat_result, scope, status_code=200):
-        response = super().file_response(full_path, stat_result, scope, status_code)
-        response.headers["Cache-Control"] = _static_cache_control(scope.get("path", ""))
-        return response
-
-    async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
-        location = response.headers.get("location")
-        if location:
-            relative = _relative_location(location)
-            if relative is not None:
-                response.headers["location"] = relative
-        return response
 
 
 _STATIC_DIR = _resolve_static_dir()
@@ -539,16 +472,13 @@ def _verify_origin(request: Request) -> None:
     """
     if _no_auth_mode():
         return
-    origin = request.headers.get("origin") or request.headers.get("referer")
-    if not origin:
+    if not (request.headers.get("origin") or request.headers.get("referer")):
         raise _ForbiddenException("missing origin")
     if not _config or not _config.site.hostname:
         raise _ForbiddenException("site.hostname not configured")
-    hostname = _config.site.hostname
-    from urllib.parse import urlparse
-    parsed = urlparse(origin)
-    if parsed.hostname != hostname.split(":")[0]:
-        raise _ForbiddenException("origin mismatch")
+    refusal = origin_refusal(request.headers, _config.site.hostname)
+    if refusal:
+        raise _ForbiddenException(refusal)
 
 
 def _get_external_origin() -> tuple[str, str]:
@@ -1161,10 +1091,14 @@ async def login(request: Request):
             return Response("Auth not configured", status_code=500, headers=_AUTH_PAGE_HEADERS)
         return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
+    # First-run setup ends here with `?email=`, so the new admin types only the
+    # password. Escaped on the way into the field like every other value.
+    email = request.query_params.get("email", "")
     return HTMLResponse(_render_login_page(
         _config.bot_name, mark, methods=_config.web.auth,
         login_csrf=_csrf_token(request, "login"),
         code_csrf=_csrf_token(request, "sign-in-code-request"),
+        email_prefill=email if len(email) <= 320 else "",
     ), headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1985,6 +1919,17 @@ def _resolve_tz(client_tz: str, fallback: str) -> str:
         return client_tz
     except (ZoneInfoNotFoundError, ValueError):
         return fallback
+
+
+@api_router.get("/setup/state")
+async def setup_state():
+    """The first-run setup page's question, answered by an app that is set up.
+
+    The page is in this bundle too; asked here, it says so and offers Sign in.
+    No session is needed, and no other setup route exists in this app: the
+    setup server (`webui/setup_app.py`) is a separate process.
+    """
+    return {"phase": "configured"}
 
 
 @api_router.get("/me")
@@ -12437,46 +12382,6 @@ def _avatar_hashes(username: str) -> dict:
         return {"user": None, "bot": None}
 
 
-async def _read_bounded_body(request: Request, limit: int) -> bytes:
-    """Read the request body, refusing before it exists in memory.
-
-    Two checks, and neither substitutes for the other. The declared length is
-    what lets the refusal happen before a byte is read; the running total is
-    the enforcement, because the declared length is a claim. The only upstream
-    bound is nginx's `client_max_body_size`, which the deployment renders from
-    the chat attachment limit and sets to 100 MB — so a cap checked on
-    `len(await file.read())` materializes up to that per concurrent request
-    before refusing.
-    """
-    from starlette.requests import ClientDisconnect
-
-    from .avatars import AvatarError
-
-    declared = request.headers.get("content-length")
-    try:
-        length = int(declared)
-    except (TypeError, ValueError):
-        # A multipart upload from a browser always sets it.
-        raise AvatarError(413, "the upload must declare its length") from None
-    if length < 0 or length > limit:
-        raise AvatarError(413, "that upload is too large")
-
-    buf = bytearray()
-    try:
-        async for chunk in request.stream():
-            buf += chunk
-            if len(buf) > limit:
-                # The rest of the stream is not read.
-                raise AvatarError(413, "that upload is too large")
-    except ClientDisconnect:
-        # An upload the user cancels in the picker, or one that dies on a
-        # mobile connection, is the ordinary case rather than the exotic one.
-        # Nothing reaches the caller either way; converting it keeps a
-        # traceback per aborted upload out of the log.
-        raise AvatarError(400, "the upload was interrupted") from None
-    return bytes(buf)
-
-
 async def _avatar_upload_part(request: Request, raw: bytes):
     """The `file` part of an already-bounded multipart body.
 
@@ -12484,7 +12389,7 @@ async def _avatar_upload_part(request: Request, raw: bytes):
     `max_part_size` is checked only for parts *without* a filename
     (`starlette/formparsers.py`, inside `if self._current_part.file is None`),
     so a real upload never sees it. The body is already bounded by
-    `_read_bounded_body` and the part itself by `normalize`. `max_files` and
+    `read_bounded_body` and the part itself by `normalize`. `max_files` and
     `max_fields` are held to what one upload needs, so the envelope stays
     inside the allowance the body read grants it.
     """
@@ -12539,7 +12444,7 @@ async def _secret_multipart(request: Request, *, limit: int, fields: set[str]):
     if not request.headers.get("content-type", "").startswith("multipart/form-data"):
         raise AvatarError(400, "Expected a multipart upload.")
     body_limit = limit + _SECRET_KEYFILE_CAP + _SECRET_FIELDS_CAP
-    raw = await _read_bounded_body(request, body_limit)
+    raw = await read_bounded_body(request, body_limit)
 
     async def chunks(body):
         yield body
@@ -12585,8 +12490,8 @@ async def _secret_multipart(request: Request, *, limit: int, fields: set[str]):
 async def _read_avatar_upload(request: Request) -> tuple[bytes, str]:
     """A multipart request body → normalized WebP bytes and their sha256.
 
-    Raises `AvatarError`; every route renders that the same way. One caller
-    today, the user's own upload; separated from it so the admin bot-icon
+    Raises `BodyError` (an `AvatarError` for the image); every route renders
+    that the same way. One caller today, the user's own upload; separated from it so the admin bot-icon
     upload (Stage 5) takes the two size checks and the decode budget by
     calling this rather than by reproducing them.
     """
@@ -12604,7 +12509,7 @@ async def _read_avatar_upload(request: Request) -> tuple[bytes, str]:
     if not request.headers.get("content-type", "").startswith("multipart/form-data"):
         raise AvatarError(400, "expected a multipart upload with a `file` part")
 
-    raw = await _read_bounded_body(request, max_bytes + _AVATAR_MULTIPART_ALLOWANCE)
+    raw = await read_bounded_body(request, max_bytes + _AVATAR_MULTIPART_ALLOWANCE)
     part, declared = await _avatar_upload_part(request, raw)
 
     loop = asyncio.get_running_loop()
@@ -12707,14 +12612,13 @@ async def settings_upload_avatar(
     is meant to bound had already been spooled.
     """
     from . import avatars
-    from .avatars import AvatarError
 
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
     db_path = _config.db_path
     try:
         image, digest = await _read_avatar_upload(request)
-    except AvatarError as e:
+    except BodyError as e:
         # `ChatFileError`'s shape, not FastAPI's `HTTPException`: the frontend
         # upload helpers read `body.error`.
         return JSONResponse({"error": e.message}, status_code=e.status)
@@ -12797,14 +12701,13 @@ async def admin_upload_bot_avatar(
     would run after the thing it is meant to bound had already been spooled.
     """
     from . import avatars
-    from .avatars import AvatarError
 
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
     db_path = _config.db_path
     try:
         image, digest = await _read_avatar_upload(request)
-    except AvatarError as e:
+    except BodyError as e:
         return JSONResponse({"error": e.message}, status_code=e.status)
 
     await asyncio.to_thread(_store_bot_avatar, db_path, image, digest)
@@ -13266,15 +13169,14 @@ _CREDENTIAL_UPDATE_REQUIRED = ("url", "extra_hosts", "headers", "revealable")
 async def _read_credential_body(request: Request) -> object:
     """The request body as JSON, bounded at 64 KiB. Error details carry no input.
 
-    The bound is `_read_bounded_body`'s, so a body with no declared length is
+    The bound is `read_bounded_body`'s, so a body with no declared length is
     refused too.
     """
-    from .avatars import AvatarError
     from istota.credentials.local import LocalCredentialError
 
     try:
-        raw = await _read_bounded_body(request, _CREDENTIAL_BODY_LIMIT)
-    except AvatarError as exc:
+        raw = await read_bounded_body(request, _CREDENTIAL_BODY_LIMIT)
+    except BodyError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from None
     try:
         return json.loads(raw)
@@ -13419,7 +13321,7 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
                              status_code=503, headers=headers)
     except store.SecretKeyMissingError:
         return JSONResponse({"detail": "The credential store is not configured."}, status_code=503, headers=headers)
-    except AvatarError as exc:
+    except BodyError as exc:
         return JSONResponse({"detail": exc.message}, status_code=exc.status, headers=headers)
     except ValueError as exc:
         reason = str(exc)
@@ -13616,12 +13518,11 @@ _WALLET_POLICY_FIELDS = {"currency": str, "auto_limit_cents": int, "auto_budget_
 
 
 async def _read_wallet_body(request: Request, operation: str) -> dict:
-    from .avatars import AvatarError
     from istota.wallet.cards import Billing, CardError
 
     try:
-        raw = await _read_bounded_body(request, 64 * 1024)
-    except AvatarError as exc:
+        raw = await read_bounded_body(request, 64 * 1024)
+    except BodyError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from None
     try:
         body = json.loads(raw)
@@ -16257,6 +16158,6 @@ app.dependency_overrides[_workspace_require_auth] = _require_api_auth
 if _STATIC_DIR.is_dir():
     app.mount(
         "/istota",
-        _CacheHeaderStatics(directory=str(_STATIC_DIR), html=True),
+        cache_header_statics(_STATIC_DIR),
         name="web-static",
     )
