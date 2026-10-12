@@ -4708,6 +4708,10 @@ def main():
         from istota.maintenance import workspace_paths
 
         sys.exit(workspace_paths.main(argv[2:]))
+    if argv[:2] == ["migrate", "role-vars"]:
+        from istota.maintenance import role_vars
+
+        sys.exit(role_vars.main(argv[2:]))
 
     # `istota money <op> …` forwards operational commands verbatim to the money
     # Click tree. argparse REMAINDER can't capture a leading option (e.g.
@@ -4765,6 +4769,10 @@ def main():
     migrate_subparsers.add_parser(
         "workspace-paths",
         help="Rewrite a migrated install's old host paths in users' bot directories; see --help",
+    )
+    migrate_subparsers.add_parser(
+        "role-vars",
+        help="Write the management role's variables from the old bare-metal role's vault; see --help",
     )
 
     # init

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`istota migrate role-vars` moves an estate from the old Ansible role to the management role.** It reads the old role's decrypted variables and the migrated VM's own files, writes the new role's variables to a private file and prints only names. A credential the new stack has no secrets file for stops it before anything is written.
+
 - **The Ansible management role can follow `main` instead of signed releases.** With `istota_update_mode: latest`, each play deploys the tip of `main` when it has moved, and no release signing key is needed; `release`, the default, still installs only the signed tag you name. Rebuilding the image after a config change no longer fails on a VM running an unsigned tag.
 
 - **The Ansible management role's defaults list every config setting.** Below `istota_config`, a commented reference gives each key at its own nesting with its default and what it does, and marks each credential with the secret to set instead. It is generated from the code, so it names every setting the release reads.

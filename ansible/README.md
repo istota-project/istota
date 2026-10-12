@@ -73,6 +73,21 @@ istota_config:
     native: {model: general}
 ```
 
+### Moving from the old role
+
+An estate that ran `deploy/ansible/` keeps its settings as flat `istota_*` variables in a vault. After the bare-metal import, `istota migrate role-vars` writes this role's variables from that vault and the migrated VM's own files, so the first `--check` reports no drift:
+
+```sh
+ssh vm sudo cat /srv/app/istota/config/config.toml > config.toml   # likewise host.env, .env, rclone.conf
+ansible-vault view group_vars/istota.yml > old.yml
+uv run istota migrate role-vars --old-vars old.yml --config config.toml \
+    --host-env host.env --stack-env .env --rclone-conf rclone.conf --output new.yml
+ansible-vault encrypt new.yml
+shred -u old.yml config.toml rclone.conf
+```
+
+`--old-vars` repeats, later files winning, for a host_vars file on top of group_vars. The output is 0600 and only names are printed. It maps the old secret variables to `istota_secrets`, the users to the ensure flags, and keeps the master key and web token key as `vault_istota_secret_key` and `vault_istota_web_token_key` (no task reads them; the vault is their only copy off the VM). The config comes from the VM's config.toml, not from the old variables, because the import rewrote its paths. A Twilio or WhatsApp Cloud credential has no secrets file, so the converter refuses and writes nothing; every old variable it does not carry is listed.
+
 A secret named in `istota_secrets` is written exactly, an empty string included. A secret left out is created empty if its file is missing and otherwise left alone, so a file the wizard or the import wrote survives a play that does not manage it.
 
 ## A playbook
