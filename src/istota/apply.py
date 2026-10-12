@@ -206,9 +206,8 @@ def _find_null(value: object, where: str) -> str | None:
 def collect(document: object) -> CheckResult:
     """Load `document` as `config.toml` and return what the loader reported.
 
-    The load runs against a scratch copy whose `db_path` names nothing, so the
-    database overlays `load_config` applies (and the clean-up it does on the
-    way) touch no real database while a plan is only being considered.
+    The scratch TOML retains the proposed paths. Database overlays, imports
+    and seeding are disabled while a plan is only being considered.
     """
     from istota.config import load_config
     from istota.config_mapper import collect_problems
@@ -219,18 +218,15 @@ def collect(document: object) -> CheckResult:
     if null:
         return CheckResult(error=f"{null} is null; TOML has no null. Leave the key out for its default.")
     with tempfile.TemporaryDirectory(prefix="istota-apply-") as scratch:
-        probe = dict(document)
-        if isinstance(probe.get("db_path"), str):
-            probe["db_path"] = str(Path(scratch) / "absent" / "istota.db")
         path = Path(scratch) / "config.toml"
         try:
-            path.write_text(toml_write.dumps(probe), encoding="utf-8")
+            path.write_text(toml_write.dumps(document), encoding="utf-8")
         except toml_write.TomlWriteError as exc:
             return CheckResult(error=f"[config]: {exc}")
         error = None
         with collect_problems() as problems:
             try:
-                load_config(path)
+                load_config(path, apply_db_overlays=False)
             except Exception as exc:  # noqa: BLE001 - every loader refusal is a plan refusal
                 error = f"[config] does not load: {exc}"
     scratch_name = str(path)

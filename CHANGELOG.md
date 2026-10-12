@@ -242,6 +242,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Checking or previewing a configuration plan no longer imports credentials or removes obsolete resources when the plan uses the default database location. Validation leaves existing database state untouched.
+
 - A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.
 
 - The Workspace toolbar no longer grows when folder buttons appear after loading. The content below it stays in place.

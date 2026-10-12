@@ -4497,8 +4497,16 @@ def _map_users(data: dict, config: Config) -> None:
         config.users[user_id] = _parse_user_data(user_data, user_id)
 
 
-def load_config(config_path: Path | None = None) -> Config:
-    """Load configuration from TOML file."""
+def load_config(
+    config_path: Path | None = None, *, apply_db_overlays: bool = True,
+) -> Config:
+    """Load TOML and environment configuration, normally with DB overlays.
+
+    With ``apply_db_overlays=False``, return the prospective file/env view
+    without database reads, credential imports, cleanup or briefing seeding.
+    Alias and model tables still change process-wide; inspect prospective
+    configurations in a short-lived process, as apply validation does.
+    """
     if config_path is None:
         # `ISTOTA_CONFIG_PATH` lets a parent process (e.g. the scheduler)
         # propagate its loaded config to subprocesses whose cwd no longer
@@ -4808,37 +4816,38 @@ def load_config(config_path: Path | None = None) -> Config:
 
     _apply_default_log_file(config, data)
 
-    # Phase 6: overlay profile fields from the user_profiles table.
-    # DB rows replace the matching scalar fields on TOML-loaded UserConfig
-    # entries; briefings stay TOML-owned. Users that exist only
-    # in the DB (no TOML entry) get a synthesised UserConfig.
-    _apply_user_profiles(config)
+    if apply_db_overlays:
+        # Phase 6: overlay profile fields from the user_profiles table.
+        # DB rows replace the matching scalar fields on TOML-loaded UserConfig
+        # entries; briefings stay TOML-owned. Users that exist only
+        # in the DB (no TOML entry) get a synthesised UserConfig.
+        _apply_user_profiles(config)
 
-    # Phase 7a: overlay user_resources rows onto config.users[*].resources.
-    # DB rows win over TOML for matching (type, path); distinct (type, path)
-    # pairs coexist. Existing call sites (executor merge, webhook_receiver,
-    # money/feeds loaders, secrets_store import) keep reading
-    # ``config.users[uid].resources`` unchanged.
-    _apply_user_resources(config)
+        # Phase 7a: overlay user_resources rows onto config.users[*].resources.
+        # DB rows win over TOML for matching (type, path); distinct (type, path)
+        # pairs coexist. Existing call sites (executor merge, webhook_receiver,
+        # money/feeds loaders, secrets_store import) keep reading
+        # ``config.users[uid].resources`` unchanged.
+        _apply_user_resources(config)
 
-    # Modules refactor: absorb credentials from `[[resources]]` blocks for
-    # types that have been retired (karakeep base_url, overland.ingest_token,
-    # etc.) into the secrets table, then drop those rows from user_resources
-    # and from the in-memory ``uc.resources`` lists so the rest of the load
-    # cycle sees the post-cleanup state.
-    _migrate_obsolete_resources(config)
+        # Modules refactor: absorb credentials from `[[resources]]` blocks for
+        # types that have been retired (karakeep base_url, overland.ingest_token,
+        # etc.) into the secrets table, then drop those rows from user_resources
+        # and from the in-memory ``uc.resources`` lists so the rest of the load
+        # cycle sees the post-cleanup state.
+        _migrate_obsolete_resources(config)
 
-    # Phase 7b: overlay briefing_configs rows onto config.users[*].briefings.
-    # DB rows replace TOML rows of the same ``name``; distinct names coexist.
-    # ``check_briefings`` and ``get_briefings_for_user`` keep reading
-    # ``user_config.briefings`` unchanged.
-    _apply_user_briefings(config)
+        # Phase 7b: overlay briefing_configs rows onto config.users[*].briefings.
+        # DB rows replace TOML rows of the same ``name``; distinct names coexist.
+        # ``check_briefings`` and ``get_briefings_for_user`` keep reading
+        # ``user_config.briefings`` unchanged.
+        _apply_user_briefings(config)
 
-    # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
-    # config.briefing_shared_blocks. DB wins by name (admin edits survive
-    # operator re-runs); ``check_shared_blocks`` then reads DB-authoritative
-    # definitions.
-    _apply_shared_blocks(config)
+        # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
+        # config.briefing_shared_blocks. DB wins by name (admin edits survive
+        # operator re-runs); ``check_shared_blocks`` then reads DB-authoritative
+        # definitions.
+        _apply_shared_blocks(config)
 
     # Apply operator role-alias overrides globally so every downstream call
     # to ``brain.resolve_model_name`` / ``brain.resolve_alias`` picks up the
