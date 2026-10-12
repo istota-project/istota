@@ -22,12 +22,14 @@ import {
   validateSetupStep,
   checkSetupConnection,
   getSetupModels,
+  finishSetup,
   SetupApiError,
   type SetupDraft,
   type SetupDraftPatch,
   type SetupState,
 } from '$lib/api';
 import Page from './+page.svelte';
+import { browserNavigation } from '$lib/components/setup/finishing';
 
 const MODELS = {
   anthropic: { base_url: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-6' },
@@ -38,6 +40,8 @@ const CREDENTIALS = new Set([
   'native_api_key',
   'claude_code_oauth_token',
   'nextcloud_app_password',
+  'imap_password',
+  'caldav_password',
 ]);
 
 function state(phase: SetupState['phase']): SetupState {
@@ -980,5 +984,362 @@ describe('the Nextcloud screen', () => {
 
     expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
     expect(saved).toMatchObject({ storage: 'local', user_id: 'ada' });
+  });
+});
+
+describe('the Email and calendar screen', () => {
+  const EMAIL_OK = { ok: true, warning: false, message: 'Signed in to the mail server.' };
+  const EMAIL_BAD = { ok: false, warning: false, message: 'That password wasn’t accepted.' };
+
+  async function addEmail() {
+    await openAt('connections');
+    await fireEvent.click((await screen.findAllByRole('button', { name: 'Add' }))[0]);
+    await type(/^Email address/, 'marlowe@example.com');
+    await type(/^Email password/, 'mail-password-1');
+    await type(/^Incoming mail server/, 'imap.example.com');
+  }
+
+  it('offers both connections collapsed, and moves on untested with neither added', async () => {
+    await openAt('connections');
+
+    expect(await screen.findByText('Connect an email account')).toBeInTheDocument();
+    expect(screen.getByText('Connect a calendar')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Add' })).toHaveLength(2);
+    expect(screen.queryByLabelText(/^Incoming mail server/)).toBeNull();
+    expect(
+      screen.getByText(/add or change these later in Admin → Configuration/),
+    ).toBeInTheDocument();
+
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+    expect(checkSetupConnection).not.toHaveBeenCalled();
+  });
+
+  it('tests an added email account on Next, saves it, and moves on', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(EMAIL_OK);
+    await addEmail();
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledWith('email');
+    expect(saved).toMatchObject({
+      email_enabled: true,
+      imap_user: 'marlowe@example.com',
+      imap_password: 'mail-password-1',
+      imap_host: 'imap.example.com',
+    });
+  });
+
+  it('stays on a failed test and offers to continue without it', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(EMAIL_BAD);
+    await addEmail();
+    await next();
+
+    expect(await screen.findByText(EMAIL_BAD.message)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    await continueWithoutTesting();
+    expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledTimes(1);
+    expect(saved).toMatchObject({ email_enabled: true });
+  });
+
+  it('turns email off again with Remove', async () => {
+    await addEmail();
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ email_enabled: false });
+    expect(checkSetupConnection).not.toHaveBeenCalled();
+  });
+
+  it('tests a calendar with its own check', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue({
+      ok: true,
+      warning: false,
+      message: 'Found the calendar.',
+    });
+    await openAt('connections');
+    await fireEvent.click((await screen.findAllByRole('button', { name: 'Add' }))[1]);
+    await type(/^Calendar address/, 'https://calendar.example.com/dav/');
+    await type(/^Calendar username/, 'ada');
+    await type(/^Calendar password/, 'calendar-password-1');
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    expect(await screen.findByText('Found the calendar.')).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledWith('caldav');
+    expect(saved).toMatchObject({ caldav_url: 'https://calendar.example.com/dav/' });
+  });
+
+  it('offers no calendar when Nextcloud was chosen', async () => {
+    vi.mocked(getSetupDraft).mockResolvedValue({ draft: { storage: 'nextcloud' } });
+    await openAt('connections');
+
+    expect(await screen.findByText('Connect an email account')).toBeInTheDocument();
+    expect(screen.queryByText('Connect a calendar')).toBeNull();
+  });
+});
+
+const MODULES = [
+  { field: 'feeds_enabled', module: 'feeds' },
+  { field: 'money_enabled', module: 'money' },
+];
+
+describe('the Features screen', () => {
+  async function openFeatures(memory = 8192) {
+    vi.mocked(getSetupState).mockResolvedValue({
+      ...state('open'),
+      modules_available: MODULES,
+      memory_total_mib: memory,
+    });
+    __history.reset('/setup/?step=features');
+    render(Page);
+    return screen.findByLabelText(/^Let Istota browse the web/);
+  }
+
+  it('starts with every available feature on, the browser included', async () => {
+    const browser = await openFeatures();
+    expect(browser).toBeChecked();
+    expect(screen.getByLabelText(/^Feeds/)).toBeChecked();
+    expect(screen.getByLabelText(/^Money/)).toBeChecked();
+    expect(screen.queryByLabelText(/^Health/)).toBeNull();
+    expect(screen.getByText(/open websites and read them for you/)).toBeInTheDocument();
+    expect(screen.queryByText(/GB of memory/)).toBeNull();
+
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Review' })).toBeInTheDocument();
+    expect(saved).toMatchObject({
+      feeds_enabled: true,
+      money_enabled: true,
+      profiles: ['browser'],
+    });
+  });
+
+  it('saves a feature turned off', async () => {
+    const browser = await openFeatures();
+    await fireEvent.click(browser);
+    await fireEvent.click(screen.getByLabelText(/^Money/));
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Review' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ money_enabled: false, profiles: [] });
+  });
+
+  it('warns about a small machine and leaves the browser on', async () => {
+    const browser = await openFeatures(3072);
+
+    expect(
+      screen.getByText(
+        'This server has 3 GB of memory. The browser uses up to 2 GB of it; you can turn it off if Istota runs slowly.',
+      ),
+    ).toBeInTheDocument();
+    expect(browser).toBeChecked();
+  });
+});
+
+/** Every screen answered, as the server hands it back: credentials redacted. */
+const ANSWERED: SetupDraft = {
+  bot_name: 'Marlowe',
+  display_name: 'Ada Lovelace',
+  user_email: 'ada@example.com',
+  timezone: 'Europe/London',
+  user_id: 'ada',
+  password: { set: true },
+  brain_kind: 'native',
+  native_base_url: MODELS.anthropic.base_url,
+  native_model: 'claude-sonnet-4-6',
+  native_api_key: { set: true },
+  ingress: 'direct',
+  hostname: 'istota.example.com',
+  tls_cert_source: 'acme',
+  storage: 'local',
+  email_enabled: true,
+  imap_host: 'imap.example.com',
+  imap_user: 'marlowe@example.com',
+  imap_password: { set: true },
+  feeds_enabled: true,
+  money_enabled: false,
+  profiles: ['browser'],
+};
+const FINISHED = { login_url: 'https://istota.example.com/istota/login', email: 'ada@example.com' };
+
+async function openReview(draft: SetupDraft = ANSWERED) {
+  vi.mocked(getSetupState).mockResolvedValue({ ...state('open'), modules_available: MODULES });
+  vi.mocked(getSetupDraft).mockResolvedValue({ draft });
+  __history.reset('/setup/?step=review');
+  render(Page);
+  return screen.findByRole('button', { name: 'Finish setup' });
+}
+
+function reviewRow(step: string, label: string): string {
+  const group = document.querySelector(`[data-review-step="${step}"]`);
+  const dt = [...(group?.querySelectorAll('dt') ?? [])].find((d) => d.textContent === label);
+  return dt?.nextElementSibling?.textContent ?? '';
+}
+
+describe('the Review screen', () => {
+  it('shows every answer by screen, credentials as set', async () => {
+    await openReview();
+
+    expect(reviewRow('welcome', 'Your email')).toBe('ada@example.com');
+    expect(reviewRow('welcome', 'Your username')).toBe('ada');
+    expect(reviewRow('account', 'Password')).toBe('set');
+    expect(reviewRow('model', 'AI service')).toBe('Anthropic API key');
+    expect(reviewRow('model', 'API key')).toBe('set');
+    expect(reviewRow('address', 'Web address')).toBe('https://istota.example.com');
+    expect(reviewRow('nextcloud', 'Files')).toBe('On this server');
+    expect(reviewRow('connections', 'Email password')).toBe('set');
+    expect(reviewRow('connections', 'Calendar')).toBe('Not connected');
+    expect(reviewRow('features', 'On')).toBe('Feeds, Web browsing');
+    expect(reviewRow('features', 'Off')).toBe('Money');
+  });
+
+  it('shows the Nextcloud username as the username, and no calendar row', async () => {
+    await openReview({ ...ANSWERED, storage: 'nextcloud', user_id: 'Ada.Lovelace' });
+
+    expect(reviewRow('welcome', 'Your username')).toBe('');
+    expect(reviewRow('nextcloud', 'Your username')).toBe('Ada.Lovelace');
+    expect(reviewRow('connections', 'Calendar')).toBe('');
+  });
+
+  it('goes back to a screen from its Edit link', async () => {
+    await openReview();
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit AI service' }));
+
+    expect(await screen.findByRole('heading', { name: 'AI service' })).toBeInTheDocument();
+    expect(currentUrl()).toBe('/setup/?step=model');
+  });
+
+  it('goes to the screen a refused Finish names, with its errors under the fields', async () => {
+    vi.mocked(finishSetup).mockRejectedValue(
+      new SetupApiError(
+        400,
+        'invalid',
+        'Some answers need fixing before setup can finish.',
+        [
+          { field: 'password', message: 'Use at least 12 characters.', step: 'account' },
+          { field: 'native_model', message: 'Enter a model name.', step: 'model' },
+        ],
+        'account',
+      ),
+    );
+    await fireEvent.click(await openReview());
+
+    expect(await screen.findByRole('heading', { name: 'Your account' })).toBeInTheDocument();
+    expect(screen.getByText('Use at least 12 characters.')).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Password/)).toHaveAttribute('aria-invalid', 'true');
+    expect(
+      screen.getByText('Some answers need fixing before setup can finish.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Enter a model name.')).toBeNull();
+    expect(currentUrl()).toBe('/setup/?step=account');
+  });
+
+  it('stays on Review with the reason when writing fails, so Finish can be tried again', async () => {
+    vi.mocked(finishSetup).mockRejectedValueOnce(
+      new SetupApiError(500, 'write_failed', 'Couldn’t save the settings: No space left on device'),
+    );
+    await fireEvent.click(await openReview());
+
+    expect(
+      await screen.findByText('Couldn’t save the settings: No space left on device'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Review' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Finish setup' })).toBeEnabled();
+  });
+});
+
+describe('Finishing', () => {
+  const fetchMock = vi.fn();
+  let assign: { mockRestore(): void } & ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    // Real time still passes, so the page's own awaits settle; the poll and
+    // the long wait are driven by advancing the clock.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+    assign = vi.spyOn(browserNavigation, 'assign').mockImplementation(() => {}) as never;
+    vi.mocked(finishSetup).mockResolvedValue(FINISHED);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    assign.mockRestore();
+  });
+
+  async function finish(draft: SetupDraft = ANSWERED) {
+    await fireEvent.click(await openReview(draft));
+    await screen.findByText('Settings saved');
+  }
+
+  it('polls the final address and goes to its login page, email filled in, once it answers', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    fetchMock.mockResolvedValue({ type: 'opaque', ok: false });
+    await finish();
+
+    expect(screen.getByText(/Starting Marlowe/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/a few minutes the first time, while Marlowe downloads the web browser\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/asking for a security certificate for istota\.example\.com/),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      FINISHED.login_url,
+      expect.objectContaining({ mode: 'no-cors' }),
+    );
+    expect(assign).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(assign).toHaveBeenCalledWith(
+      'https://istota.example.com/istota/login?email=ada%40example.com',
+    );
+  });
+
+  it('does not take the setup server’s own 404 at the same address for the stack', async () => {
+    fetchMock.mockResolvedValueOnce({ type: 'basic', ok: false });
+    fetchMock.mockResolvedValue({ type: 'basic', ok: true });
+    await finish();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(assign).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  it('says it is taking longer than expected after fifteen minutes, and keeps checking', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    await finish({ ...ANSWERED, storage: 'nextcloud' });
+
+    await vi.advanceTimersByTimeAsync(14 * 60 * 1000);
+    expect(screen.queryByText('This is taking longer than expected')).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(screen.getByText('This is taking longer than expected')).toBeInTheDocument();
+    expect(screen.getByText('sudo istota-stack status')).toBeInTheDocument();
+    expect(screen.getByText('journalctl -u istota-certbot')).toBeInTheDocument();
+    expect(screen.getByText('journalctl -u mount-nextcloud')).toBeInTheDocument();
+    const polls = fetchMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(fetchMock.mock.calls.length).toBe(polls + 1);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it('says under a minute with no browser and no subscription, and asks for no certificate locally', async () => {
+    vi.mocked(finishSetup).mockResolvedValue({
+      login_url: 'http://localhost:8080/istota/login',
+      email: 'ada@example.com',
+    });
+    await finish({ ...ANSWERED, ingress: 'local', hostname: 'localhost:8080', profiles: [] });
+
+    expect(screen.getByText('This usually takes under a minute.')).toBeInTheDocument();
+    expect(screen.queryByText(/security certificate/)).toBeNull();
   });
 });

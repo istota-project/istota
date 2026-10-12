@@ -57,6 +57,48 @@ export function neighbourStep(id: SetupStepId, delta: -1 | 1): SetupStepId | nul
 export const DEFAULT_BOT_NAME = 'Istota';
 
 /**
+ * The Features screen's rows, by module name as `/state`'s
+ * `modules_available` names them; only the modules this image can run are
+ * offered. The browser is a compose profile rather than a module.
+ */
+export const MODULE_FEATURES: Record<string, { title: string; description: string }> = {
+  feeds: {
+    title: 'Feeds',
+    description: 'Follow news sites and blogs, and read them in one place.',
+  },
+  money: { title: 'Money', description: 'Keep accounts, track spending and send invoices.' },
+  health: {
+    title: 'Health',
+    description: 'Keep body measurements, lab results and medical documents.',
+  },
+  briefings: {
+    title: 'Briefings',
+    description: 'Get a summary of your day, your news and your plans on a schedule.',
+  },
+};
+export const BROWSER_PROFILE = 'browser';
+/** Under this much memory the browser row warns; it stays on. */
+export const BROWSER_MEMORY_WARN_MIB = 4096;
+
+/**
+ * Everything on, the browser included (decided 2026-10-12), for any feature
+ * nobody has answered yet. The Features screen applies it when it opens, and
+ * Review too, so a Finish reached without passing Features keeps the default.
+ */
+export function applyFeatureDefaults(
+  draft: SetupDraftStore,
+  modules: { field: string; module: string }[],
+): void {
+  for (const { field } of modules) draft.setDefault(field, true);
+  draft.setDefault('profiles', [BROWSER_PROFILE]);
+}
+
+/** A module's row title, falling back to its name for one this page does not know. */
+export function moduleTitle(module: string): string {
+  return MODULE_FEATURES[module]?.title ?? module.charAt(0).toUpperCase() + module.slice(1);
+}
+
+/**
  * The username the Welcome screen suggests from an email address: its local
  * part, lowercased, with what the login's user-id pattern refuses dropped and
  * cut to 32 characters; `admin` when nothing usable is left. The pattern is
@@ -107,6 +149,8 @@ export interface SetupDraftStore {
    *  comes back. */
   text(field: string): string;
   flag(field: string, fallback: boolean): boolean;
+  /** A list answer (the compose profiles); `[]` when there is none. */
+  list(field: string): string[];
   /** Whether the field has an answer, saved or not. */
   has(field: string): boolean;
   /** Change an answer; it goes to the server with the next `save`. */
@@ -159,6 +203,10 @@ export function createSetupDraft(): SetupDraftStore {
     flag(field, fallback) {
       const value = current(field);
       return typeof value === 'boolean' ? value : fallback;
+    },
+    list(field) {
+      const value = current(field);
+      return Array.isArray(value) ? [...value] : [];
     },
     has(field) {
       return field in edits || field in values;

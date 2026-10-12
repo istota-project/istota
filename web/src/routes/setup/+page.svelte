@@ -6,9 +6,11 @@
   import {
     getSetupState,
     unlockSetup,
+    finishSetup,
     validateSetupStep,
     SetupApiError,
     type SetupFieldError,
+    type SetupFinished,
     type SetupState,
   } from '$lib/api';
   import { Button, NoticeBanner } from '$lib/components/ui';
@@ -20,7 +22,12 @@
   import StepModel from '$lib/components/setup/StepModel.svelte';
   import StepAddress from '$lib/components/setup/StepAddress.svelte';
   import StepNextcloud from '$lib/components/setup/StepNextcloud.svelte';
+  import StepConnections from '$lib/components/setup/StepConnections.svelte';
+  import StepFeatures from '$lib/components/setup/StepFeatures.svelte';
+  import StepReview from '$lib/components/setup/StepReview.svelte';
+  import StepFinishing from '$lib/components/setup/StepFinishing.svelte';
   import {
+    BROWSER_PROFILE,
     DEFAULT_BOT_NAME,
     createSetupDraft,
     isSetupStep,
@@ -32,15 +39,19 @@
   /**
    * What the page is showing. `steps` is the flow itself; the rest are the
    * screens around it. `finishing` is the server's word for a setup that has
-   * written everything and is on its way out.
+   * written everything and is on its way out, found on a reload; `finished`
+   * is this page's own Finish having been answered, which carries where to
+   * go next.
    */
-  type View = 'loading' | 'unreachable' | 'unlock' | 'configured' | 'finishing' | 'steps';
+  type View =
+    'loading' | 'unreachable' | 'unlock' | 'configured' | 'finishing' | 'finished' | 'steps';
 
   let view = $state<View>('loading');
   let setup = $state<SetupState | null>(null);
   let unlockError = $state('');
   let unreachable = $state('');
   let step = $state<SetupStepId>('welcome');
+  let finished = $state<SetupFinished | null>(null);
   // False until the draft is loaded and the address's step applied, so the
   // step selection below writes nothing over a deep link before then.
   let ready = $state(false);
@@ -213,11 +224,48 @@
     }
   }
 
+  /**
+   * Finish: save anything typed since the last Next, then have the server
+   * check and write the lot. A refusal names the earliest screen with an
+   * error, and the page goes there with the errors under their fields.
+   */
+  async function finish() {
+    if (busy) return;
+    busy = true;
+    errors = {};
+    formError = '';
+    try {
+      await draft.save();
+      finished = await finishSetup();
+      view = 'finished';
+    } catch (e) {
+      if (e instanceof SetupApiError && e.status === 401) {
+        view = 'unlock';
+        return;
+      }
+      if (e instanceof SetupApiError && e.status === 409) {
+        // An earlier Finish already wrote everything.
+        view = 'finishing';
+        return;
+      }
+      if (e instanceof SetupApiError && e.status === 400 && e.step && isSetupStep(e.step)) {
+        const target = e.step;
+        if (target !== step) stepSel.push({ step: target });
+        errors = byField(e.fields.filter((f) => !f.step || f.step === target));
+        formError = errors[''] ?? e.message;
+        return;
+      }
+      formError = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   const title = $derived(stepInfo(step).title);
   const isFirst = $derived(neighbourStep(step, -1) === null);
   const isLast = $derived(neighbourStep(step, 1) === null);
   // The screens whose Next runs a connection test that has not passed yet.
-  const testsOnNext = $derived(step === 'model' || step === 'nextcloud');
+  const testsOnNext = $derived(step === 'model' || step === 'nextcloud' || step === 'connections');
 </script>
 
 {#if view === 'loading'}
@@ -242,6 +290,18 @@
       <Button variant="primary" href="{base}/login" reload>Sign in</Button>
     </div>
   </SetupFrame>
+{:else if view === 'finished' && finished}
+  <SetupFrame {botName} title="Finishing setup">
+    <StepFinishing
+      {botName}
+      loginUrl={finished.login_url}
+      email={finished.email}
+      browser={draft.list('profiles').includes(BROWSER_PROFILE)}
+      subscription={draft.text('brain_kind') === 'claude_code'}
+      internet={(draft.text('ingress') || 'local') !== 'local'}
+      nextcloud={draft.text('storage') === 'nextcloud'}
+    />
+  </SetupFrame>
 {:else if view === 'finishing'}
   <SetupFrame {botName} title="Setup has finished">
     <p>Your settings are saved and {botName} is starting. This page can be closed.</p>
@@ -252,9 +312,10 @@
     {step}
     {title}
     onBack={isFirst ? undefined : () => go(-1)}
-    onNext={isLast ? undefined : () => advance()}
+    onNext={isLast ? () => finish() : () => advance()}
+    nextLabel={isLast ? 'Finish setup' : 'Next'}
     nextLoading={busy}
-    nextLoadingLabel={testsOnNext ? 'Testing…' : 'Saving…'}
+    nextLoadingLabel={isLast ? 'Finishing…' : testsOnNext ? 'Testing…' : 'Saving…'}
   >
     {#snippet actions()}
       {#if testsOnNext && offerSkip}
@@ -287,9 +348,24 @@
       <StepAddress bind:this={stepRef} {draft} {errors} host={setup?.host} />
     {:else if step === 'nextcloud'}
       <StepNextcloud bind:this={stepRef} {draft} {errors} {botName} bind:offerSkip />
+    {:else if step === 'connections'}
+      <StepConnections bind:this={stepRef} {draft} {errors} {botName} bind:offerSkip />
+    {:else if step === 'features'}
+      <StepFeatures
+        {draft}
+        {errors}
+        {botName}
+        modules={setup?.modules_available}
+        memoryMib={setup?.memory_total_mib}
+      />
     {:else}
-      <!-- The remaining screens arrive in later stages. -->
-      <p class="muted">This screen is not built yet.</p>
+      <StepReview
+        {draft}
+        {botName}
+        models={setup?.defaults?.models}
+        modules={setup?.modules_available}
+        onEdit={(target) => stepSel.push({ step: target })}
+      />
     {/if}
   </SetupFrame>
 {/if}
