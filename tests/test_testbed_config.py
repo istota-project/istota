@@ -65,7 +65,7 @@ def test_the_full_base_departs_from_the_lean_one_only_where_nextcloud_does(tmp_p
 
     assert document["nextcloud"] == written["nextcloud"]
     assert document["workspace_path"] == written["workspace_path"] == "/mnt/shared"
-    assert document["nextcloud_mount_path"] == written["nextcloud_mount_path"]
+    assert document["workspace_mount_path"] == written["workspace_mount_path"]
     for key in (
         "oauth2_provider", "oauth2_client_id", "oauth2_token_endpoint",
         "oauth2_userinfo_endpoint", "oauth2_redirect_uri",

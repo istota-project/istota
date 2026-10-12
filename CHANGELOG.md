@@ -101,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
+
 - **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
 
 - **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.

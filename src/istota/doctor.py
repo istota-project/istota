@@ -847,18 +847,19 @@ def check_writable_dirs(config: "Config", probe: bool) -> list[CheckResult]:
 
 
 def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
-    """A configured Nextcloud mount is actually mounted.
+    """A configured workspace mount is actually mounted.
 
-    An rclone mount that dropped leaves a plain empty directory behind, which
-    every path check above happily reports as fine while every read returns
-    nothing. ``ismount`` is the only cheap way to tell the two apart.
+    A mount that dropped (an rclone mount, or a host folder shared into a VM)
+    leaves a plain empty directory behind, which every path check above
+    happily reports as fine while every read returns nothing. ``ismount`` is
+    the only cheap way to tell the two apart.
 
-    ``nextcloud_mount_path`` is set only when the workspace uses a real mount.
+    ``workspace_mount_path`` is set only when the workspace uses a real mount.
     """
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_mount_path
     if mount is None:
         return CheckResult(
-            "runtime.mount_liveness", SKIP, "no nextcloud_mount_path configured"
+            "runtime.mount_liveness", SKIP, "no workspace_mount_path configured"
         )
     path = Path(mount)
     if os.path.ismount(path):
@@ -868,8 +869,9 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
         FAIL,
         f"{path} is configured as the workspace mount but is not a mount point",
         remedy=(
-            "Check the rclone mount unit; a dropped mount leaves an empty directory "
-            "that reads as an empty workspace."
+            "Check whatever mounts the workspace (the rclone unit for Nextcloud); "
+            "a dropped mount leaves an empty directory that reads as an empty "
+            "workspace."
         ),
     )
 
@@ -915,9 +917,9 @@ def check_workspace_xattr(config: "Config", probe: bool) -> CheckResult:
     blocks those calls.
     """
     name = "runtime.workspace_xattr"
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_mount_path
     if mount is None:
-        return CheckResult(name, SKIP, "no nextcloud_mount_path configured")
+        return CheckResult(name, SKIP, "no workspace_mount_path configured")
     if not probe:
         return CheckResult(name, SKIP, "probe disabled (the check reads the mount)")
     if not hasattr(os, "listxattr"):

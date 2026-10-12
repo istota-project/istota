@@ -42,7 +42,7 @@ def _config(
         email=EmailConfig(),
         scheduler=SchedulerConfig(**sched),
         workspace_path=mount,
-        nextcloud_mount_path=mount if mount_configured else None,
+        workspace_mount_path=mount if mount_configured else None,
         module_data_dir=tmp_path / "local",
         users={"alice": UserConfig()},
     )
@@ -430,7 +430,7 @@ class TestMountLiveness:
         assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
 
     def _symlinked_mount(self, tmp_path):
-        """Config whose nextcloud_mount_path is a symlink to the real mount."""
+        """Config whose workspace_mount_path is a symlink to the real mount."""
         real_mount = tmp_path / "real-mount"
         (real_mount / "Backups").mkdir(parents=True)
         link_mount = tmp_path / "linked-mount"
@@ -441,7 +441,7 @@ class TestMountLiveness:
             nextcloud_url=self.NC,
         )
         cfg.workspace_path = link_mount
-        cfg.nextcloud_mount_path = link_mount
+        cfg.workspace_mount_path = link_mount
         db.init_db(cfg.db_path)
         return cfg, real_mount
 
@@ -562,7 +562,7 @@ class TestStandaloneInstallIsNotGated:
     def test_adding_a_nextcloud_url_does_not_arm_the_gate(self, tmp_path, monkeypatch):
         cfg = self._standalone(tmp_path, nextcloud_url="https://cloud.example.com")
         assert cfg.storage_is_nextcloud
-        assert cfg.nextcloud_mount_path is None
+        assert cfg.workspace_mount_path is None
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
 

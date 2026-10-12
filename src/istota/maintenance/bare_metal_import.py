@@ -248,8 +248,9 @@ def path_prefixes(old: dict, new: dict) -> list[tuple[str, str]]:
         if isinstance(old_value, str) and old_value.startswith("/") and old_value != new_value:
             pairs.append((old_value.rstrip("/") or "/", new_value))
 
-    add(old.get("nextcloud_mount_path") or old.get("workspace_path"), new["workspace_path"])
-    if old.get("workspace_path") != old.get("nextcloud_mount_path"):
+    old_mount = old.get("workspace_mount_path") or old.get("nextcloud_mount_path")
+    add(old_mount or old.get("workspace_path"), new["workspace_path"])
+    if old.get("workspace_path") != old_mount:
         add(old.get("workspace_path"), new["workspace_path"])
     add(old.get("temp_dir"), new["temp_dir"])
     new_db_dir = _parent(new["db_path"])
@@ -341,10 +342,13 @@ def rewrite_config(
         wizard.CONTAINER_NEXTCLOUD_WORKSPACE if uses_nextcloud else wizard.CONTAINER_LOCAL_WORKSPACE
     )
     assign(("workspace_path",), workspace)
+    # The role wrote the mount under its old name; the container config uses
+    # the new one, and a copy left under the old name would conflict with it.
+    drop(("nextcloud_mount_path",))
     if uses_nextcloud:
-        assign(("nextcloud_mount_path",), wizard.CONTAINER_NEXTCLOUD_WORKSPACE)
+        assign(("workspace_mount_path",), wizard.CONTAINER_NEXTCLOUD_WORKSPACE)
     else:
-        drop(("nextcloud_mount_path",))
+        drop(("workspace_mount_path",))
         changes.append(
             f"workspace: local storage; copy the old workspace into {workspace} by hand"
         )
@@ -1133,7 +1137,7 @@ def _rewrite_workspace(args, source, target, rewrite, out, err) -> int:
 
     try:
         config = load_config(target.config_path)
-        root = Path(args.workspace_root or config.nextcloud_mount_path or config.workspace_path)
+        root = Path(args.workspace_root or config.workspace_mount_path or config.workspace_path)
         result = workspace_paths.run(
             root, config.bot_dir_name, rewrite.prefixes, source.manifest.get("istota_home", ""),
         )

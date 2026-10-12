@@ -1486,7 +1486,7 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
     if a.uses_nextcloud:
         # A real mount, so `runtime.mount_liveness` and the backup's mount
         # guard have something to check.
-        doc["nextcloud_mount_path"] = CONTAINER_NEXTCLOUD_WORKSPACE
+        doc["workspace_mount_path"] = CONTAINER_NEXTCLOUD_WORKSPACE
 
     brain: dict = {"kind": a.brain_kind}
     if a.brain_kind == "native":

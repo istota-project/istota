@@ -1164,7 +1164,7 @@ def full_config(
     public = f"http://localhost:{credentials.nc_port}"
     base = _copy(LEAN_BASE_CONFIG)
     base["workspace_path"] = "/mnt/shared"
-    base["nextcloud_mount_path"] = "/mnt/shared"
+    base["workspace_mount_path"] = "/mnt/shared"
     base["nextcloud"] = {
         "url": "http://nextcloud",
         "username": FULL_IDENTITY["BOT_USER"],

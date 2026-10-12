@@ -393,8 +393,8 @@ def reconcile(config, *, dry_run: bool = False, problems: list[str] | None = Non
         root = config.workspace_path
         if root is None or not root.is_dir():
             raise ValueError("workspace unavailable")
-        if config.nextcloud_mount_path is not None and not os.path.ismount(config.nextcloud_mount_path):
-            raise ValueError("Nextcloud mount unavailable")
+        if config.workspace_mount_path is not None and not os.path.ismount(config.workspace_mount_path):
+            raise ValueError("workspace mount unavailable")
         if config.nextcloud.url:
             if _dav_stat(config, "/") is None:
                 raise ValueError("DAV workspace unavailable")

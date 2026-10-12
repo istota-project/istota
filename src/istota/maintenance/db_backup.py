@@ -155,7 +155,7 @@ def _destination_is_under_mount(dest: Path, mount: Path) -> bool:
     one value for this test *and* for ``os.path.ismount``. Resolving here
     instead would split them, and the two answers disagree in a way that is not
     obvious: ``posixpath.ismount`` short-circuits to False for a symlink ("a
-    symlink can never be a mount point"), so a symlinked ``nextcloud_mount_path``
+    symlink can never be a mount point"), so a symlinked ``workspace_mount_path``
     would be judged to contain the destination and to be permanently down, and
     every backup under a healthy mount would be skipped forever.
 
@@ -189,7 +189,7 @@ def _destination_is_durable(config) -> bool:
     dest = backup_destination(config)
     if dest is None:
         return False
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_mount_path", None)
     if not mount:
         return True
     # Resolved once, then used for both the containment test and the liveness
@@ -397,7 +397,7 @@ def backup_databases(
     root = backup_destination(config)
     if root is None:
         logger.warning(
-            "db_backup skipped: no db_backup_dir and no nextcloud_mount_path — "
+            "db_backup skipped: no db_backup_dir and no workspace_mount_path — "
             "local DBs have no durable backup target configured"
         )
         return []

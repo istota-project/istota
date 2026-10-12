@@ -90,6 +90,16 @@ def test_missing_mount_refuses_so_the_deploy_retries(migrated):
     assert not config.workspace_path.exists()
 
 
+def test_an_unmounted_workspace_mount_refuses_without_nextcloud(migrated, capsys):
+    # A host folder shared into a VM is a workspace mount with no Nextcloud URL.
+    config, old, new = migrated
+    original = put(config, f"Channels/{old}/CHANNEL.md", "notes")
+    config.workspace_mount_path = config.workspace_path
+    assert room_relocate.reconcile_mount(config) == 1
+    assert "refusal: workspace mount unavailable" in capsys.readouterr().err
+    assert original.read_text() == "notes"
+
+
 def test_task_guard_refuses_before_mount_changes(migrated):
     config, old, new = migrated
     original = put(config, f"Channels/{old}/CHANNEL.md", "notes")

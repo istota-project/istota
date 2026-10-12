@@ -16,7 +16,7 @@ def backup(database, cheap, tmp_path, monkeypatch):
     from istota.credentials import backup_export
     import pyrage
     monkeypatch.setattr(cheap, "BACKUP", cheap.INTERACTIVE)
-    config = Config(db_path=database, nextcloud_mount_path=tmp_path / "workspace", users={"alice": UserConfig()})
+    config = Config(db_path=database, workspace_mount_path=tmp_path / "workspace", users={"alice": UserConfig()})
     config.workspace_root("alice").mkdir(parents=True)
     return backup_export, config, pyrage.x25519.Identity.generate()
 

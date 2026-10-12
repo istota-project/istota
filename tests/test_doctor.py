@@ -1649,14 +1649,14 @@ class TestMountLiveness:
     def test_skips_when_no_mount_configured(self, make_config, url):
         from istota.config import NextcloudConfig
 
-        config = make_config(nextcloud=NextcloudConfig(url=url), nextcloud_mount_path=None)
+        config = make_config(nextcloud=NextcloudConfig(url=url), workspace_mount_path=None)
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == SKIP
 
     def test_configured_but_not_mounted_fails_without_nextcloud_url(
         self, make_config, tmp_path,
     ):
-        # `make_config` points nextcloud_mount_path at a plain tmp_path dir,
+        # `make_config` points workspace_mount_path at a plain tmp_path dir,
         # which is on the same filesystem as its parent and so is not a mount.
         config = make_config()
         assert config.storage_is_nextcloud is False
@@ -1727,7 +1727,7 @@ class TestWorkspaceXattr:
         assert r.status == WARN, r.detail
 
     def test_skips_without_a_mount(self, make_config):
-        r = run_checks(make_config(nextcloud_mount_path=None), only=("runtime.workspace_xattr",))[0]
+        r = run_checks(make_config(workspace_mount_path=None), only=("runtime.workspace_xattr",))[0]
         assert r.status == SKIP
 
     def test_skips_where_listxattr_does_not_exist(self, make_config, tmp_path, monkeypatch):
@@ -6654,7 +6654,7 @@ class TestOperatorPersona:
         assert doctor.CHECK_SCOPES[self.NAME] == DEPLOYMENT
 
     def test_skips_without_a_file_root(self, make_config):
-        config = self._config(make_config, workspace_path=None, nextcloud_mount_path=None)
+        config = self._config(make_config, workspace_path=None, workspace_mount_path=None)
         assert not config.has_workspace
         r = self._run(config)
         assert r.status == SKIP

@@ -3106,8 +3106,8 @@ def _admin_storage_section(db_path: Path) -> dict:
     mount_healthy = False
     if _config:
         try:
-            if _config.nextcloud_mount_path is not None:
-                mount_healthy = os.path.ismount(_config.nextcloud_mount_path)
+            if _config.workspace_mount_path is not None:
+                mount_healthy = os.path.ismount(_config.workspace_mount_path)
             elif _config.workspace_path is not None:
                 mount_healthy = Path(_config.workspace_path).is_dir()
         except OSError:

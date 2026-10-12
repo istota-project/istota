@@ -101,7 +101,10 @@ class TestEveryAnswerReachesItsKey:
         assert config.bot_name == "Zed"
         assert str(config.db_path) == "/data/db/istota.db"
         assert str(config.workspace_path) == "/mnt/shared"
-        assert str(config.nextcloud_mount_path) == "/mnt/shared"
+        assert str(config.workspace_mount_path) == "/mnt/shared"
+        written = tomllib.loads(render_container_config(a, inline_credentials=False))
+        assert written["workspace_mount_path"] == "/mnt/shared"
+        assert "nextcloud_mount_path" not in written
         assert config.security.sandbox_enabled is True
         assert config.security.skill_proxy_enabled is True
 
@@ -431,7 +434,7 @@ class TestTheLocalWorkspace:
 
         assert config.storage_backend == "local"
         assert str(config.workspace_path) == "/data/workspace"
-        assert config.nextcloud_mount_path is None
+        assert config.workspace_mount_path is None
 
 
 def _image_default_log_file() -> str:

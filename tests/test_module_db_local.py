@@ -2,7 +2,7 @@
 
 Covers the stall fix (ISSUE-156/157 follow-up):
 * ``Config.module_db_path`` resolves ``{module_data_dir}/{user}/{module}.db``
-  and refuses to sit under ``nextcloud_mount_path`` (WAL -shm SIGBUSes there).
+  and refuses to sit under ``workspace_mount_path`` (WAL -shm SIGBUSes there).
 * Each module loader relocates only the ``.db`` — ``data_dir`` / workspace
   (uploads, ledgers, exports) stay on the mount.
 * Each module ``init_db`` sets WAL (not DELETE) now that the file is local,
@@ -24,7 +24,7 @@ def _config(tmp_path: Path, *, users: dict[str, UserConfig]) -> Config:
     mount.mkdir(exist_ok=True)
     return Config(
         workspace_path=mount,
-        nextcloud_mount_path=mount,
+        workspace_mount_path=mount,
         module_data_dir=tmp_path / "local",
         users=users,
         bot_name="Istota",
@@ -52,7 +52,7 @@ class TestModuleDbPath:
         mount.mkdir(exist_ok=True)
         cfg = Config(
             workspace_path=mount,
-            nextcloud_mount_path=mount,
+            workspace_mount_path=mount,
             module_data_dir=mount / "modules",  # footgun: under the mount
             users={"alice": UserConfig()},
         )
@@ -71,7 +71,7 @@ class TestModuleDbPath:
         cfg = Config(
             db_path=tmp_path / "istota.db",
             workspace_path=tmp_path,  # == db_path.parent
-            nextcloud_mount_path=tmp_path,
+            workspace_mount_path=tmp_path,
             users={"alice": UserConfig()},
         )
         assert cfg.module_data_dir is None

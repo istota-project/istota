@@ -83,7 +83,7 @@ class TestRenderers:
         from istota.config import load_config
         cfg = load_config(p)
         assert cfg.workspace_path == a.workspace
-        assert cfg.nextcloud_mount_path is None
+        assert cfg.workspace_mount_path is None
         assert cfg.web.auth == ["none"]
         assert cfg.web.port == 9000
         assert cfg.talk.enabled is False

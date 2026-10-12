@@ -2316,18 +2316,20 @@ istota_config: {}
 #   briefing_shared_blocks: []
 #
 #   # File Access Configuration
-#   # Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
+#   # Root of the bot's on-disk file tree. Defaults to workspace_mount_path.
 #   # Required when [nextcloud] url is set: the files are reached through it.
 #   # example: "/srv/mount/nextcloud/content"
 #   # unset by default; give it a value or leave it out
 #   # The container layout: `istota setup` writes "/data/workspace" here (code default ).
 #   workspace_path: "/data/workspace"
 #
-#   # The FUSE mountpoint of the bot's Nextcloud files (mount-nextcloud.service),
-#   # when the workspace is one.
+#   # The mountpoint the workspace lives on, when it is one: the rclone mount of the
+#   # bot's Nextcloud files (mount-nextcloud.service), or a host folder shared into
+#   # a VM. Doctor and the backup guard check it is still mounted. Read under its
+#   # old name, nextcloud_mount_path; both names with different paths is an error.
 #   # example: "/srv/mount/nextcloud/content"
 #   # unset by default; give it a value or leave it out
-#   nextcloud_mount_path:
+#   workspace_mount_path:
 #
 #   # Path to skills directory (individual skill files loaded selectively)
 #   skills_dir: "config/skills"
@@ -2352,7 +2354,7 @@ istota_config: {}
 #   # SIGBUSes the process on the rclone FUSE mount, so they'd be stuck on the
 #   # slower DELETE journal mode (no reader/writer concurrency). User-facing files
 #   # (health uploads, money ledgers, feeds exports) stay on the mount; only the
-#   # .db relocates here. A path under nextcloud_mount_path is refused at runtime.
+#   # .db relocates here. A path under workspace_mount_path is refused at runtime.
 #   # example: "data/modules"
 #   # unset by default; give it a value or leave it out
 #   module_data_dir:

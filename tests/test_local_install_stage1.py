@@ -544,7 +544,7 @@ class TestAdminStorageSection:
             db_path=tmp_path / "istota.db",
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             workspace_path=tmp_path / "mount",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_mount_path=tmp_path / "mount",
         )
         out = self._run(cfg)
         assert out["nextcloud_configured"] is True
@@ -555,7 +555,7 @@ class TestAdminStorageSection:
         cfg = Config(
             db_path=tmp_path / "istota.db",
             workspace_path=mount,
-            nextcloud_mount_path=mount,
+            workspace_mount_path=mount,
         )
         monkeypatch.setattr("istota.webui.app.os.path.ismount", lambda path: False)
 
