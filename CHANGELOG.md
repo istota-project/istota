@@ -191,6 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The browser's watchdog and health-check thresholds can be set on the stack again.** `BROWSE_WATCHDOG_DEADLINE_S`, `BROWSE_WATCHDOG_POLL_S`, `BROWSER_CDP_FAILURE_THRESHOLD`, `BROWSER_CDP_FAILURE_WINDOW_S`, `BROWSER_WEDGE_RECOVERY_THRESHOLD` and `BROWSER_WEDGE_RECOVERY_WINDOW_S` were read by the browser image but set only by the retired bare-metal role, so the stack had no way to change them. The compose file now passes them through from the stack's `.env` with the same defaults, and the Docker deployment guide lists them.
+
 - **The stack's output reaches the VM's system journal again.** Since the move to containers, Docker wrote every service's output to its own log files, so `journalctl` and any journal-based log shipping saw nothing from Istota or its nginx. On the VM, services now log to the journal under their container name, and the next `istota-stack update` switches them over. `docker logs` keeps working.
 
 - **`provision.sh` now makes the host config files it writes world-readable even when their content is unchanged.** A file written before the script set its own umask stayed root-only, because an unchanged file was never touched again. The Nextcloud mount's drop-in for `istota-stack.service` was one, and systemd warned about it on every reload. The Docker apt source and `daemon.json` had the same problem. The next provisioning run corrects all of them.
