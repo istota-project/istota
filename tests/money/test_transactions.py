@@ -1,9 +1,12 @@
 """Tests for money.core.transactions module."""
 
+import os
 import re
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from istota.money import config_store
 from istota.money.core import rules as rule_engine
@@ -919,6 +922,17 @@ class TestAddTransaction:
         assert "validation failed" in result["error"]
 
 
+def _xattr_eio(monkeypatch):
+    """`listxattr` as the rclone workspace mount answered it for files (#694)."""
+    import errno
+    import os
+
+    def _raise(path, *a, **kw):
+        raise OSError(errno.EIO, "Input/output error", str(path))
+
+    monkeypatch.setattr(os, "listxattr", _raise)
+
+
 class TestLedgerFileOps:
     def test_backup_ledger(self, tmp_path):
         ledger = tmp_path / "main.beancount"
@@ -932,6 +946,19 @@ class TestLedgerFileOps:
     def test_backup_nonexistent(self, tmp_path):
         result = backup_ledger(tmp_path / "missing.beancount")
         assert result is None
+
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
+    def test_backup_survives_a_mount_whose_xattr_calls_fail(self, tmp_path, monkeypatch):
+        """#694: copy2's xattr step raised EIO on the workspace mount, and a
+        failed backup blocks the ledger write behind it."""
+        _xattr_eio(monkeypatch)
+        ledger = tmp_path / "main.beancount"
+        ledger.write_text("content")
+        ledger.chmod(0o640)
+        result = backup_ledger(ledger)
+        assert result is not None
+        assert result.read_text() == "content"
+        assert result.stat().st_mode & 0o777 == 0o640
 
     def test_append_to_ledger(self, tmp_path):
         ledger = tmp_path / "main.beancount"

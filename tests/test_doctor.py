@@ -1558,6 +1558,67 @@ class TestMountLiveness:
         assert r.status == OK
 
 
+class TestWorkspaceXattr:
+    """#694: the rclone workspace mount answered listxattr on files with EIO,
+    and every copy2 / `cp -a` out of the workspace failed with it."""
+
+    @staticmethod
+    def _mounted(make_config, tmp_path, monkeypatch):
+        (tmp_path / "mount" / "Users" / "alice").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "mount" / "Users" / "alice" / "notes.md").write_text("x")
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        return make_config()
+
+    @staticmethod
+    def _listxattr_raises(monkeypatch, err):
+        import errno as _errno
+
+        def _raise(path, *a, **kw):
+            raise OSError(err, os.strerror(err), str(path))
+
+        monkeypatch.setattr(doctor.os, "listxattr", _raise)
+        return _errno
+
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
+    def test_eio_warns(self, make_config, tmp_path, monkeypatch):
+        import errno as _errno
+
+        config = self._mounted(make_config, tmp_path, monkeypatch)
+        self._listxattr_raises(monkeypatch, _errno.EIO)
+        r = run_checks(config, only=("runtime.workspace_xattr",))[0]
+        assert r.status == WARN
+        assert "EIO" in r.detail
+        assert r.remedy
+
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
+    @pytest.mark.parametrize("name", ["ENOTSUP", "ENODATA"])
+    def test_a_clean_refusal_is_ok(self, make_config, tmp_path, monkeypatch, name):
+        import errno as _errno
+
+        config = self._mounted(make_config, tmp_path, monkeypatch)
+        self._listxattr_raises(monkeypatch, getattr(_errno, name))
+        r = run_checks(config, only=("runtime.workspace_xattr",))[0]
+        assert r.status == OK, r.detail
+
+    def test_skips_without_a_mount(self, make_config):
+        r = run_checks(make_config(nextcloud_mount_path=None), only=("runtime.workspace_xattr",))[0]
+        assert r.status == SKIP
+
+    def test_skips_where_listxattr_does_not_exist(self, make_config, tmp_path, monkeypatch):
+        config = self._mounted(make_config, tmp_path, monkeypatch)
+        monkeypatch.delattr(doctor.os, "listxattr", raising=False)
+        r = run_checks(config, only=("runtime.workspace_xattr",))[0]
+        assert r.status == SKIP
+
+    def test_skips_and_touches_nothing_without_probe(self, make_config, tmp_path, monkeypatch):
+        config = self._mounted(make_config, tmp_path, monkeypatch)
+        calls = []
+        monkeypatch.setattr(doctor.os, "scandir", lambda *a: calls.append(a))
+        r = run_checks(config, only=("runtime.workspace_xattr",), probe=False)[0]
+        assert r.status == SKIP
+        assert calls == []
+
+
 # The root conftest neutralizes `subscription_usage.get_snapshot` for the whole
 # suite, so the doctor sweep on a developer's macOS laptop cannot read the real
 # keychain or issue a live request. This file drives the real function on

@@ -41,6 +41,7 @@ what happened to be imported.
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import ipaddress
 import json
@@ -783,6 +784,82 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
             "that reads as an empty workspace."
         ),
     )
+
+
+# How far `check_workspace_xattr` looks for a file to probe: a FUSE listing
+# is a network round trip, so the walk is bounded in depth and in entries.
+_XATTR_PROBE_DEPTH = 3
+_XATTR_PROBE_ENTRIES = 200
+
+
+def _first_file_under(root: Path) -> Path | None:
+    """A regular file near the top of `root`, breadth-first and bounded."""
+    level = [root]
+    seen = 0
+    for _ in range(_XATTR_PROBE_DEPTH):
+        nxt: list[Path] = []
+        for d in level:
+            try:
+                with os.scandir(d) as it:
+                    for entry in it:
+                        seen += 1
+                        if seen > _XATTR_PROBE_ENTRIES:
+                            return None
+                        if entry.is_file(follow_symlinks=False):
+                            return Path(entry.path)
+                        if entry.is_dir(follow_symlinks=False):
+                            nxt.append(Path(entry.path))
+            except OSError:
+                continue
+        level = nxt
+    return None
+
+
+def check_workspace_xattr(config: "Config", probe: bool) -> CheckResult:
+    """Extended-attribute calls on a workspace file fail cleanly, not with EIO.
+
+    On the containerized shape the rclone workspace mount answered
+    ``listxattr`` on every *file* with ``EIO`` (directories gave the expected
+    ``ENOTSUP``), and ``shutil.copy2`` / ``cp -a`` / ``cp -p`` out of the
+    workspace failed with it (#694). Istota's own copies no longer depend on
+    xattrs, so this is a ``WARN``: what still breaks is shell work in a task.
+    Probe-gated because it lists and stats on the mount, and a hung FUSE mount
+    blocks those calls.
+    """
+    name = "runtime.workspace_xattr"
+    mount = config.nextcloud_mount_path
+    if mount is None:
+        return CheckResult(name, SKIP, "no nextcloud_mount_path configured")
+    if not probe:
+        return CheckResult(name, SKIP, "probe disabled (the check reads the mount)")
+    if not hasattr(os, "listxattr"):
+        return CheckResult(name, SKIP, "listxattr is not available on this platform")
+    path = Path(mount)
+    if not os.path.ismount(path):
+        return CheckResult(
+            name, SKIP, f"{path} is not mounted; runtime.mount_liveness reports it"
+        )
+    sample = _first_file_under(path)
+    if sample is None:
+        return CheckResult(name, SKIP, f"no file found near the top of {path} to probe")
+    try:
+        os.listxattr(sample)
+    except OSError as e:
+        if e.errno in (errno.ENOTSUP, errno.ENODATA, errno.EINVAL):
+            return CheckResult(name, OK, f"the mount does not support xattrs ({errno.errorcode[e.errno]})")
+        code = errno.errorcode.get(e.errno or 0, str(e.errno))
+        return CheckResult(
+            name,
+            WARN,
+            f"listxattr on a workspace file fails with {code}, so `cp -a`, `cp -p` "
+            "and shutil.copy2 out of the workspace fail",
+            remedy=(
+                "Istota's own copies avoid xattrs; for shell work, copy without "
+                "-a/-p. Check the workspace FUSE mount (rclone, the kernel's "
+                "FUSE module) for why it answers this way."
+            ),
+        )
+    return CheckResult(name, OK, "listxattr on a workspace file succeeds")
 
 
 def _session_log_tree(root: Path) -> tuple[int, int]:
@@ -9513,6 +9590,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("runtime.task_failure_rate", check_task_failure_rate),
     ("runtime.writable_dirs", check_writable_dirs),
     ("runtime.mount_liveness", check_mount_liveness),
+    ("runtime.workspace_xattr", check_workspace_xattr),
     ("runtime.session_log_dir", check_session_log_dir),
     ("runtime.task_control_dir", check_task_control_dir),
     ("runtime.bare_metal_import", check_bare_metal_import),
@@ -9607,6 +9685,7 @@ CHECK_SCOPES: dict[str, str] = {
     "runtime.task_failure_rate": DEPLOYMENT,
     "runtime.writable_dirs": DEPLOYMENT,
     "runtime.mount_liveness": DEPLOYMENT,
+    "runtime.workspace_xattr": DEPLOYMENT,
     # Deployment, not image: it walks a directory on the install's own disk and
     # reads the last sweep's row out of the framework database, neither of which
     # a bare `docker run` has.

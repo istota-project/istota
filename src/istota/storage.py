@@ -1936,7 +1936,10 @@ def _migrate_old_layout(user_base: Path) -> None:
     old_memory = context_dir / "memory.md"
     new_memory = user_base / "USER.md"
     if old_memory.exists() and not new_memory.exists():
-        shutil.copy2(old_memory, new_memory)
+        # Not copy2 here or below: its xattr step raises EIO on some FUSE
+        # workspace mounts (#694).
+        shutil.copyfile(old_memory, new_memory)
+        shutil.copymode(old_memory, new_memory)
         logger.info("Migrated %s → %s", old_memory, new_memory)
 
     # Migrate dated files → memories/
@@ -1946,7 +1949,8 @@ def _migrate_old_layout(user_base: Path) -> None:
         if f.is_file() and date_pattern.match(f.name):
             dest = memories_dir / f.name
             if not dest.exists():
-                shutil.copy2(f, dest)
+                shutil.copyfile(f, dest)
+                shutil.copymode(f, dest)
                 logger.info("Migrated %s → %s", f, dest)
 
 
@@ -2480,7 +2484,10 @@ def ensure_channel_directories(config: "Config", conversation_token: str) -> boo
         old_memory = base / "context" / "memory.md"
         new_memory = base / "CHANNEL.md"
         if old_memory.exists() and not new_memory.exists():
-            shutil.copy2(old_memory, new_memory)
+            # Not copy2: its xattr step raises EIO on some FUSE workspace
+            # mounts (#694).
+            shutil.copyfile(old_memory, new_memory)
+            shutil.copymode(old_memory, new_memory)
             logger.info("Migrated channel memory %s → %s", old_memory, new_memory)
 
         logger.debug("Ensured channel directories for %s via mount", conversation_token)

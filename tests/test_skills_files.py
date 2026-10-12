@@ -3,10 +3,13 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import os
+
 import pytest
 
 from istota.config import Config
 from istota.skills.files import (
+    copy_to_local,
     get_local_path,
     list_files,
     mkdir,
@@ -229,3 +232,23 @@ class TestRcloneFileOps:
 
         result = rclone_move("nextcloud", "/src.txt", "/dst.txt")
         assert result is False
+
+
+def _xattr_eio(monkeypatch):
+    """`listxattr` as the rclone workspace mount answered it for files (#694)."""
+    import errno
+    import os
+
+    def _raise(path, *a, **kw):
+        raise OSError(errno.EIO, "Input/output error", str(path))
+
+    monkeypatch.setattr(os, "listxattr", _raise)
+
+
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
+def test_copy_to_local_survives_a_mount_whose_xattr_calls_fail(mount_config, tmp_path, monkeypatch):
+    _xattr_eio(monkeypatch)
+    (mount_config.workspace_path / "report.pdf").write_bytes(b"%PDF-1.4\n")
+    local = tmp_path / "local" / "report.pdf"
+    copy_to_local(mount_config, "/report.pdf", local)
+    assert local.read_bytes() == b"%PDF-1.4\n"

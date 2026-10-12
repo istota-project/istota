@@ -848,6 +848,17 @@ class TestShareFolderWithUser:
         assert call_kwargs.kwargs["data"]["shareWith"] == "alice"
 
 
+def _xattr_eio(monkeypatch):
+    """`listxattr` as the rclone workspace mount answered it for files (#694)."""
+    import errno
+    import os
+
+    def _raise(path, *a, **kw):
+        raise OSError(errno.EIO, "Input/output error", str(path))
+
+    monkeypatch.setattr(os, "listxattr", _raise)
+
+
 class TestMigrateOldLayout:
     """Tests for _migrate_old_layout (context/ → USER.md + memories/)."""
 
@@ -866,6 +877,20 @@ class TestMigrateOldLayout:
 
         assert (tmp_path / "USER.md").exists()
         assert (tmp_path / "USER.md").read_text() == "# My memories\n- likes coffee\n"
+
+    @pytest.mark.skipif(not hasattr(os, "listxattr"), reason="listxattr is Linux-only")
+    def test_survives_a_mount_whose_xattr_calls_fail(self, tmp_path, monkeypatch):
+        """#694: the migration copies out of the workspace mount."""
+        _xattr_eio(monkeypatch)
+        context = tmp_path / "context"
+        context.mkdir()
+        (context / "memory.md").write_text("m")
+        (context / "2026-01-28.md").write_text("day 1")
+
+        _migrate_old_layout(tmp_path)
+
+        assert (tmp_path / "USER.md").read_text() == "m"
+        assert (tmp_path / "memories" / "2026-01-28.md").read_text() == "day 1"
 
     def test_skips_memory_if_user_md_exists(self, tmp_path):
         """Don't overwrite existing USER.md."""
