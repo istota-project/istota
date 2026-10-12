@@ -207,6 +207,31 @@ class TestSweepSkips:
         scheduler.run_startup_checks(make_config())
         assert "runtime.framework_db" not in seen.get("skip", ())
 
+    def test_the_boot_run_leaves_the_devbox_checks_to_the_first_sweep(
+        self, make_config, monkeypatch, sent
+    ):
+        """The devbox services start once the daemon is healthy, so at its boot
+        run their exec sockets do not exist yet and the transport check failed,
+        and alerted, on every restart."""
+        seen = {}
+
+        def _capture(config, **kw):
+            seen.update(kw)
+            return [_ok()]
+
+        monkeypatch.setattr("istota.doctor.run_checks", _capture)
+        scheduler.run_startup_checks(make_config())
+        skipped = seen.get("skip", ())
+        assert "developer.container" in skipped
+        assert "security.devbox_netfilter" in skipped
+
+    def test_the_boot_skips_name_real_checks(self):
+        from istota.doctor import CHECKS
+
+        names = [name for name, _ in CHECKS]
+        for prefix in scheduler.STARTUP_SKIPPED_CHECKS:
+            assert any(n.startswith(prefix) for n in names), prefix
+
     def test_the_skipped_set_names_real_checks(self):
         from istota.doctor import CHECKS
 

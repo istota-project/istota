@@ -258,20 +258,33 @@ class TestTheClockSeeds:
         seeded = _by_name(config)["vault-retire"].seed(config)
         assert before <= seeded <= time.time()
 
-    def test_the_doctor_and_stats_clocks_start_at_now(self):
-        """Seeded to now, not 0. The boot doctor run already swept, and a stats
-        line emitted while startup state is still hydrating is noise."""
+    def test_the_stats_clock_starts_at_now(self):
+        """Seeded to now, not 0: a stats line emitted while startup state is
+        still hydrating is noise."""
         config = Config()
         by_name = {g.name: g for g in build_interval_gates(config)}
         # `seed` is a callable evaluated here, not at table construction, so the
         # window is taken around the calls rather than around the build.
         before = time.time()
-        seeds = {name: by_name[name].seed(config) for name in ("doctor", "scheduler-stats")}
+        value = by_name["scheduler-stats"].seed(config)
         after = time.time()
-        for name, value in seeds.items():
-            # Bounded both ways: `>= before` alone passes a seed of
-            # `time.time() + 86400`, which would hold the first sweep for a day.
-            assert before <= value <= after, name
+        # Bounded both ways: `>= before` alone passes a seed of
+        # `time.time() + 86400`, which would hold the first line for a day.
+        assert before <= value <= after
+
+    def test_the_first_doctor_sweep_comes_soon_after_boot(self):
+        """Not at once, since the boot run just swept, and not a whole interval
+        later: the boot run leaves out the devbox checks, whose containers start
+        after the daemon, and the first sweep is what answers them."""
+        config = Config()
+        interval = config.scheduler.doctor_check_interval
+        by_name = {g.name: g for g in build_interval_gates(config)}
+        before = time.time()
+        seed = by_name["doctor"].seed(config)
+        after = time.time()
+        first_sweep = seed + interval
+        assert before + sched.DOCTOR_FIRST_SWEEP_DELAY <= first_sweep <= after + sched.DOCTOR_FIRST_SWEEP_DELAY
+        assert sched.DOCTOR_FIRST_SWEEP_DELAY <= 600
 
     def test_the_backup_clock_is_seeded_from_the_persisted_stamp(self, monkeypatch):
         """Not 0. Without this the clock reset every boot and a host deploying

@@ -6060,7 +6060,7 @@ def run_startup_checks(config: Config) -> list:
     from . import doctor
 
     try:
-        results = doctor.run_checks(config)
+        results = doctor.run_checks(config, skip=STARTUP_SKIPPED_CHECKS)
         # Redact before anything is logged or sent. `detail` carries observed
         # paths and raw exception text, and the log file and the Talk room are
         # boundaries in exactly the way the admin dashboard is.
@@ -6081,6 +6081,9 @@ def run_startup_checks(config: Config) -> list:
         counts[doctor.OK], counts[doctor.WARN], counts[doctor.FAIL], counts[doctor.SKIP],
     )
     doctor.record_report(config, results)
+    from .executor import effective_sandboxing
+
+    doctor.record_sandbox_verdict(config, effective_sandboxing(config))
     _alert_doctor_failures(config, doctor.failing(results), context="start-up")
     return results
 
@@ -6088,6 +6091,12 @@ def run_startup_checks(config: Config) -> list:
 # The daily DB health check owns the full-database scan. Doctor still runs it
 # at boot and on demand.
 SWEEP_SKIPPED_CHECKS = ("runtime.framework_db",)
+
+# The devbox services start once the daemon reports healthy, so at the boot run
+# their exec sockets do not exist yet: these failed, and alerted, on every
+# restart. The first sweep, DOCTOR_FIRST_SWEEP_DELAY after boot, answers them.
+STARTUP_SKIPPED_CHECKS = ("developer.container", "security.devbox_netfilter")
+DOCTOR_FIRST_SWEEP_DELAY = 300
 
 
 # The hourly sweep and an on-demand request run on separate background threads;
@@ -9767,15 +9776,18 @@ def build_interval_gates(
         ),
         # The drift this catches happens *after* boot — the auto-update cron
         # changes what is installed under a config the daemon already loaded —
-        # so a boot-only check is blind to it. Seeded to now, not 0: the boot
-        # run already swept, and a 0 here would re-run the whole registry
-        # seconds later.
+        # so a boot-only check is blind to it. Seeded so the first sweep lands
+        # DOCTOR_FIRST_SWEEP_DELAY after boot: not at once, since the boot run
+        # just swept, and not an interval later, since that run leaves out the
+        # devbox checks.
         IntervalGate(
             name="doctor",
             run=_doctor,
             field="doctor_check_interval",
             enabled=lambda c: bool(c.scheduler.doctor_check_interval),
-            seed=lambda c: time.time(),
+            seed=lambda c: time.time() - max(
+                0, c.scheduler.doctor_check_interval - DOCTOR_FIRST_SWEEP_DELAY
+            ),
             background=True,
         ),
         # A run the Health pane asked for. One shared_kv read a tick, and on
