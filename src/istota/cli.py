@@ -378,6 +378,9 @@ def cmd_apply(args):
         err("istota apply: --json goes with --check; nothing was written.")
         return apply.EXIT_ERROR
     if args.check:
+        if args.format is not None:
+            err("istota apply: --check uses --json, not --format; nothing was written.")
+            return apply.EXIT_ERROR
         return apply.check(args.file, as_json=args.json, out=print, err=err)
     target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
     if not target:
@@ -390,6 +393,8 @@ def cmd_apply(args):
     return apply.run(
         args.file, Path(target), dry_run=args.dry_run, backup=args.backup,
         out=print, err=err,
+        output_format=args.format or "text", users=args.user,
+        continue_on_error=args.continue_on_error, prune=args.prune, prune_secrets=args.prune_secrets,
     )
 
 
@@ -4955,6 +4960,11 @@ def main():
         "--json", action="store_true",
         help="With --check: print {\"problems\": [...], \"error\": ...} on stdout",
     )
+    apply_parser.add_argument("--format", choices=("text", "json"), help="Execution report format (default: text)")
+    apply_parser.add_argument("--user", action="append", help="Apply only this declared user; repeat for several users")
+    apply_parser.add_argument("--continue-on-error", action="store_true", help="Continue later users after a runtime failure")
+    apply_parser.add_argument("--prune", action="store_true", help="Prune undeclared entries in supplied collections")
+    apply_parser.add_argument("--prune-secrets", action="store_true", help="Prune eligible named secret slots; requires --prune")
 
     def _backup_count(value: str) -> int:
         count = int(value)

@@ -55,6 +55,55 @@ def config_path(tmp_path) -> Path:
 
 
 class TestTheExitCodes:
+    def test_execution_error_json_is_one_safe_result(self, monkeypatch, capsys, tmp_path, config_path):
+        def fail(*args):
+            raise OSError("private credential value")
+
+        monkeypatch.setattr(apply, "_write_config", fail)
+        plan = _write_plan(tmp_path / "p.toml")
+        code, out, err = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--format", "json")
+        result = json.loads(out)
+        assert code == 1 and result["errors"][0]["code"] == "execution_failed"
+        assert result["operations"][0]["status"] == "failed"
+        assert not result["changed"] and "private credential value" not in out + err
+
+    def test_json_config_diff_redacts_nested_credentials(self, monkeypatch, capsys, tmp_path, config_path):
+        config = {"brain": {"native": {"extra_headers": {"x.tenant": "private-header-value"}}}}
+        plan = _write_plan(tmp_path / "p.toml", config)
+        code, out, err = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--format", "json", "--dry-run")
+        assert code == 2 and json.loads(out)["dry_run"]
+        assert "private-header-value" not in out + err
+        assert not config_path.exists()
+
+    def test_text_plan_is_printed_before_writing_and_rechecks_config(self, monkeypatch, tmp_path, config_path):
+        from istota.settings_plan import engine
+
+        plan = _write_plan(tmp_path / "p.toml")
+        original = engine.execute_plan
+        output = []
+
+        def interleave(operations, context):
+            assert output and not config_path.exists()
+            config_path.write_text('bot_name = "External edit"\n')
+            return original(operations, context)
+
+        monkeypatch.setattr(engine, "execute_plan", interleave)
+        errors = []
+        code = apply.run(plan, config_path, dry_run=False, out=output.append, err=errors.append)
+        assert code == 1 and any("state_changed" in line for line in errors)
+        assert config_path.read_text() == 'bot_name = "External edit"\n'
+
+    def test_execution_json_reports_config_change_then_no_drift(self, monkeypatch, capsys, tmp_path, config_path):
+        plan = _write_plan(tmp_path / "p.toml")
+        code, out, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--format", "json")
+        result = json.loads(out)
+        assert code == 2 and result["changed"] and result["restart_required"]
+        assert result["operations"][0]["status"] == "applied"
+        assert result["counts"] == {"planned": 1, "applied": 1, "failed": 0, "skipped": 0}
+        code, out, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--format", "json", "--dry-run")
+        assert code == 0
+        assert json.loads(out)["operations"] == []
+
     def test_a_new_config_is_written_and_answers_2(self, monkeypatch, capsys, tmp_path, config_path):
         plan = _write_plan(tmp_path / "plan.toml")
         code, out, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan))
@@ -267,6 +316,11 @@ class TestTypedProblems:
 
 
 class TestCheck:
+    def test_check_rejects_execution_format(self, monkeypatch, capsys):
+        code, out, err = self._check(monkeypatch, capsys, "[config]\n", "--format", "json")
+        assert code == 1 and "--json" in err
+        assert not out
+
     """`--check` validates a plan and nothing else: no current file is read and
     nothing is written. With `--json` it prints one object the web parses."""
 
@@ -341,6 +395,15 @@ class TestCheck:
 
 
 class TestTheManagementMarker:
+    def test_snapshot_preserves_management_marker(self, monkeypatch, capsys, tmp_path, config_path):
+        plan = _write_plan(tmp_path / "p.toml", meta={"managed": True, "source": "ansible"})
+        _invoke(monkeypatch, capsys, config_path, "-f", str(plan))
+        marker = config_path.parent / "managed.json"
+        before = marker.read_bytes()
+        snapshot = _write_plan(tmp_path / "snapshot.toml", meta={"source": "snapshot"})
+        code, _, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(snapshot))
+        assert code == 0 and marker.read_bytes() == before
+
     """`config/managed.json` says who owns the config. Apply writes its
     `config` entry from the plan's `[meta]`, and a change to the entry alone is
     not a config change: exit 0, so `istota-stack apply` does not restart."""
@@ -407,6 +470,20 @@ class TestTheManagementMarker:
 
 
 class TestBackups:
+    def test_retention_failure_reports_the_config_already_written(self, monkeypatch, capsys, tmp_path, config_path):
+        config_path.write_text('bot_name = "Before"\n')
+
+        def fail(*args):
+            raise OSError("private path")
+
+        monkeypatch.setattr(apply, "_keep_newest_backups", fail)
+        plan = _write_plan(tmp_path / "p.toml")
+        code, out, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--backup", "2", "--format", "json")
+        result = json.loads(out)
+        assert code == 1 and result["changed"] and result["partial"] and result["restart_required"]
+        assert result["operations"][0]["status"] == "applied"
+        assert tomllib.loads(config_path.read_text()) == PLAN_CONFIG
+
     def _apply(self, monkeypatch, capsys, tmp_path, config_path, poll: int, *argv: str) -> int:
         plan = _write_plan(tmp_path / f"p{poll}.toml", dict(PLAN_CONFIG, scheduler={"poll_interval": poll}))
         code, _, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), *argv)

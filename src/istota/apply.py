@@ -469,57 +469,68 @@ def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None) -> int:
 
 def run(
     plan_path: Path | str, config_path: Path, *, dry_run: bool, out, err,
-    backup: int | None = None, stdin=None,
+    backup: int | None = None, stdin=None, output_format: str = "text",
+    users: list[str] | None = None, continue_on_error: bool = False,
+    prune: bool = False, prune_secrets: bool = False,
 ) -> int:
     """Plan every section, print, and write unless `dry_run`. Returns the exit code."""
+    from istota.settings_plan import engine
+    from istota.settings_plan.report import render_text, result_document
+    from istota.settings_plan.schema import SchemaError, parse_plan
+
+    options = engine.Options(dry_run, continue_on_error, users, prune, prune_secrets)
+    context = engine.Context(config_path, options=options, backup=backup)
     try:
-        meta, document = _sections(load_plan(plan_path, stdin=stdin))
-        planned: list[SectionPlan] = []
-        if document is not None:
-            planned.append(plan_config(document, config_path, backup=backup))
-    except PlanError as exc:
-        err(f"istota apply: {exc}")
-        err("istota apply: nothing was written.")
-        return EXIT_ERROR
+        plan = parse_plan(load_plan(plan_path, stdin=stdin))
+        with engine.apply_lock(config_path):
+            operations = engine.build_plan(plan, context, options)
+            if output_format == "text":
+                for line in render_text(engine.ApplyResult(operations, dry_run=True)):
+                    out(line)
+            result = engine.execute_plan(operations, context)
+    except (PlanError, engine.ExecutionError, OSError) as exc:
+        path = exc.problem["path"] if isinstance(exc, SchemaError) else []
+        code = "validation_error"
+        if isinstance(exc, engine.ExecutionError):
+            code, path = exc.code, exc.path
+        elif isinstance(exc, OSError):
+            code = "io_error"
+        result = engine.ApplyResult(dry_run=dry_run, errors=[{"code": code, "path": path}])
+        if output_format == "text":
+            message = str(exc) if isinstance(exc, PlanError) else code
+            where = f"[{path[0]}] " if path else ""
+            err(f"istota apply: {where}{message}")
+            err("istota apply: nothing was written.")
+        else:
+            out(json.dumps(result_document(result)))
+        return result.exit_code
 
-    # Only a plan with a config to own claims it.
-    marker = document is not None and managed_differs(
-        config_path.parent, "config", meta.managed, meta.source,
-    )
-
-    for section in planned:
-        for warning in section.warnings:
-            err(f"istota apply: warning: {warning}")
-        for line in section.diff:
-            out(line)
-    changed = [section for section in planned if section.changed]
+    if output_format == "json":
+        out(json.dumps(result_document(result)))
+        return result.exit_code
+    for warning in result.warnings:
+        err(f"istota apply: warning: {warning}")
+    changed = list(dict.fromkeys(op.section for op in result.operations if op.status in ("planned", "applied")))
+    if result.errors:
+        for error in result.errors:
+            err(f"istota apply: {error['code']}: {error['path']}")
+        for op in result.operations:
+            out(f"{op.status}: {op.section} {op.user or ''} {op.identity}".strip())
+        if result.partial:
+            err("istota apply: partially applied; completed changes remain. Rerun to complete the plan.")
+            if result.restart_required:
+                err("istota apply: committed changes require a restart after completion.")
+        return result.exit_code
     if dry_run:
         if changed:
-            out(f"Would change: {', '.join(section.name for section in changed)} (--dry-run, nothing written).")
-            return EXIT_CHANGED
-        out("Would update: management marker (--dry-run, nothing written)." if marker else "No changes.")
-        return EXIT_UNCHANGED
-    for section in changed:
-        try:
-            section.write()
-        except OSError as exc:
-            err(f"istota apply: writing [{section.name}] failed: {exc}")
-            return EXIT_ERROR
-    if marker:
-        try:
-            write_managed(config_path.parent, {"config": (meta.managed, meta.source)})
-        except OSError as exc:
-            # After a config write the change stands and must still restart.
-            err(f"istota apply: writing {MANAGED_FILE} failed: {exc}")
-            if not changed:
-                return EXIT_ERROR
-            marker = False
-    if changed:
-        out(f"Changed: {', '.join(section.name for section in changed)}.")
-    if marker:
+            out(f"Would change: {', '.join(changed)} (--dry-run, nothing written).")
+        else:
+            out("Would update: management marker (--dry-run, nothing written)." if context.marker_pending else "No changes.")
+        return result.exit_code
+    if result.changed:
+        out(f"Changed: {', '.join(changed)}.")
+    if context.marker_updated:
         out("Updated: management marker." if changed else "Updated: management marker; config.toml is unchanged.")
-    if not changed:
-        if not marker:
-            out("No changes.")
-        return EXIT_UNCHANGED
-    return EXIT_CHANGED
+    if not changed and not context.marker_updated:
+        out("No changes.")
+    return result.exit_code

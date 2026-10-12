@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota apply --format json` reports planned and completed changes, failures, and restart requirements. Direct apply commands serialize writes to the same configuration and refuse an edit made after their preview; config-only text output and marker-only exit codes remain compatible.
+
 - `istota apply --check` accepts the version 1 structure for per-user settings and shared briefing definitions without reading live state. It reports malformed fields through the existing JSON check result; applying these sections remains unavailable until their reconciliation adapters ship.
 
 - **Admins can change the configuration from Admin → Configuration.** Settings, deployment credentials and the admin list are edited in place, reviewed as a diff with any problems shown against their keys, confirmed with an emailed code (and a typed phrase for settings that affect sign-in or confinement), then applied by the host. The page follows the change through the restart and reloads into the new values; settings the host owns, or that a plan manages, stay read-only with the reason shown. Tables are edited as TOML, the whole file can be edited as text with credentials hidden, ignored keys can be removed, and an earlier applied configuration can be restored from the history.
