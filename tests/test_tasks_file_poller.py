@@ -524,3 +524,63 @@ class TestTasksFileIsNotFollowed:
         assert poll_user_tasks_file(
             config, "alice", "/Users/bob/istota/config/TASKS.md") == []
         assert bob.read_text() == "- [ ] bob item\n"
+
+
+# --- TestFinishedMarkerReconcile (ISSUE-726) ---
+
+
+class TestFinishedMarkerReconcile:
+    """The poll writes a finished task's marker that its completion could not."""
+
+    PATH = "/Users/alice/istota/config/TASKS.md"
+
+    def _finished(self, tmp_path, make_config, db_path, *, completed_at):
+        config = make_config()
+        f = tmp_path / "mount/Users/alice/istota/config/TASKS.md"
+        f.parent.mkdir(parents=True)
+        f.write_text("- [ ] first\n")
+        (task_id,) = poll_user_tasks_file(config, "alice", self.PATH)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE istota_file_tasks SET status = 'completed',"
+                " result_summary = 'done', completed_at = ? WHERE task_id = ?",
+                (completed_at, task_id),
+            )
+        return config, f, task_id
+
+    def test_the_marker_carries_the_time_the_task_finished(
+        self, tmp_path, make_config, db_path,
+    ):
+        from datetime import datetime, timezone
+
+        config, f, _ = self._finished(
+            tmp_path, make_config, db_path, completed_at="2026-01-02 03:04:05")
+        poll_user_tasks_file(config, "alice", self.PATH)
+
+        local = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc).astimezone()
+        assert f.read_text() == (
+            f"- [x] {local:%Y-%m-%d %H:%M} | first | Result: done\n")
+
+    def test_a_task_gone_from_tasks_leaves_a_hand_typed_marker_alone(
+        self, tmp_path, make_config, db_path,
+    ):
+        config, f, task_id = self._finished(
+            tmp_path, make_config, db_path, completed_at="2026-01-02 03:04:05")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        poll_user_tasks_file(config, "alice", self.PATH)
+        assert f.read_text() == "- [~] first...\n"
+
+    def test_a_row_from_another_file_is_not_applied(
+        self, tmp_path, make_config, db_path,
+    ):
+        config, f, task_id = self._finished(
+            tmp_path, make_config, db_path, completed_at="2026-01-02 03:04:05")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE istota_file_tasks SET file_path = ? WHERE task_id = ?",
+                ("/Users/alice/istota/config/tasks.md", task_id),
+            )
+        poll_user_tasks_file(config, "alice", self.PATH)
+        assert f.read_text() == "- [~] first...\n"

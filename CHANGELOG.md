@@ -231,6 +231,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.
+
 - The Workspace toolbar no longer grows when folder buttons appear after loading. The content below it stays in place.
 
 - File previews now place their scrollbar at the viewer’s right edge instead of over the document. Text and PDF content keep their padding inside the scrolling area.
