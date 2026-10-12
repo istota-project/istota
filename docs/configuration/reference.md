@@ -31,7 +31,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `username` | `""` | Bot's Nextcloud username |
 | `app_password` | `""` | Nextcloud app password |
 | `share_default_expire_days` | `14` | Default expiry on links the bot creates |
-| `dav_prefix` | `""` | Where the storage root sits in the bot's Nextcloud tree; prefixed onto every DAV/OCS path. Empty for the rclone mount, `"Shared Files"` for the Docker stack's external-storage mount |
+| `dav_prefix` | `""` | Where the storage root sits in the bot's Nextcloud tree; prefixed onto every DAV/OCS path. Empty when the workspace is the root of the bot's files; otherwise the folder that holds it, which `istota setup` asks for. A Nextcloud moved out of an old stack uses `"Shared Files"` (see [Moving the bundled Nextcloud](../deployment/moving-the-bundled-nextcloud.md)) |
 | `auto_share_bot_dir` | `true` | Share the bot workspace back to the user over OCS at boot. False where the deployment already mounts it into the user's tree |
 
 ## `[talk]`
@@ -655,7 +655,7 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 
 ## `[site]`
 
-`hostname` is load-bearing beyond OAuth2 and the origin check: minting a location ingest token refuses with a 409 while it is unset, because the webhook URL it assembles would be a relative path and the phone's QR decoder accepts only `https://`. A standalone local install with no hostname therefore cannot provision a device by QR.
+`hostname` is load-bearing beyond OAuth2 and the origin check: minting a location ingest token refuses with a 409 while it is unset, because the webhook URL it assembles would be a relative path and the phone's QR decoder accepts only `https://`. An install with no hostname, such as `istota serve` on a Mac, therefore cannot provision a device by QR.
 
 The deployment's public DNS name.
 
@@ -681,7 +681,7 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 | `auth_throttle_max_ip` | `30` | Password attempts per client address per window. Inactive while `trusted_proxy_hops` is `0`, since no client address is read |
 | `auth_mail_link_max_email` | `3` | Self-service mails per address per hour, reset links and sign-in codes together |
 | `trusted_proxy_hops` | `0` | How many trusted proxies sit in front of the backend; selects the client address from `X-Forwarded-For` for the IP budget. Set it only when the backend cannot be reached around those proxies |
-| `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"encrypted"` retains them in `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY`. Any other value warns and falls back to ephemeral. **The Docker deployment renders `"encrypted"`**, because its entrypoint mints `/data/.web_token_key` itself; every other shape leaves that key to the operator and so cannot assume it exists. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
+| `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"encrypted"` retains them in `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY`. Any other value warns and falls back to ephemeral. **`istota setup` writes `"encrypted"` on the stack**, because its entrypoint mints `/data/.web_token_key` itself. The standalone wizard leaves it ephemeral, since there the key is the operator's to supply. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
 | `port` | `8766` | Web app port |
 | `oauth2_provider` | `""` | Public Nextcloud URL (browser-facing), no trailing slash |
 | `oauth2_client_id` | `""` | NC OAuth 2.0 client ID |
@@ -738,7 +738,7 @@ The `web.basemap` doctor check reads the same resolver as the endpoint, so it ca
 | Setting | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable GPS webhook receiver |
-| `webhooks_port` | `8765` | Receiver port |
+| `webhooks_port` | `8765` | Port of a standalone receiver process. Unused on the stack and under `istota serve`, where the web app serves the webhook routes |
 | `accuracy_threshold_m` | `100.0` | Discard pings less accurate than this, in metres |
 | `visit_exit_minutes` | `5.0` | Minutes away from a place before a visit is closed |
 | `reconcile_enabled` | `true` | Batch-reconcile visits from pings, cleaning up state-machine drift |
@@ -750,7 +750,7 @@ The `web.basemap` doctor check reads the same resolver as the endpoint, so it ca
 
 ## `[caldav]`
 
-Explicit CalDAV override. When any field is set it wins over the value derived from `[nextcloud]`, which is how a standalone install points calendar at an external CalDAV server (Radicale, Fastmail, Google) with no Nextcloud in the picture. All-blank — the default — falls back to the Nextcloud derivation, so server deployments are unaffected.
+Explicit CalDAV override. When any field is set it wins over the value derived from `[nextcloud]`, which is how an install without Nextcloud points calendar at an external CalDAV server (Radicale, Fastmail, Google) with no Nextcloud in the picture. All-blank — the default — falls back to the Nextcloud derivation, so server deployments are unaffected.
 
 | Setting | Default | Description |
 |---|---|---|

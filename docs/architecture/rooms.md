@@ -137,7 +137,7 @@ The audience does not change what a member's own turn may reach. It decides what
 
 The withheld set is applied at every seam that grants reach: the skill index and selection, the skill proxy's allowed CLIs, setup-env hooks, identity environment, the vault, and the sandbox mount plan. A restricted task gets no workspace bind without `files`, its own temp and deferred-op directory, no Talk bind (attachments are copied in read-only), and Talk writes that check the live roster. The details are in [security](../deployment/security.md) and `.claude/rules/sandbox.md`.
 
-Without bubblewrap (the shipped Docker stack, macOS, the standalone install), withholding removes the scope from the prompt, the skill list and the environment, but the task's own file tools can still reach the host's workspace. `istota doctor` reports this as `security.room_scope_confinement`.
+Without bubblewrap (`istota serve` on macOS, the deprecated standalone install), withholding removes the scope from the prompt, the skill list and the environment, but the task's own file tools can still reach the host's workspace. `istota doctor` reports this as `security.room_scope_confinement`.
 
 **Ambient memory is left out of every shared room**, whatever the turn. A member's turn there does not load `USER.md`, dated memories, recall, knowledge facts or playbooks into the prompt (`executor._ambient_memory_off`), since those arrive without being asked for. The memory skill still works when asked.
 

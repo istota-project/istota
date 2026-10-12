@@ -431,20 +431,22 @@ istota repl [-u USER] [-t TOKEN] [--workspace cwd|standard|PATH] [--model ALIAS]
 
 A streamed, full-stack terminal assistant. Each line becomes a `source_type="repl"` task with `output_target="stream"`, run inline (no daemon needed); `task_events` stream back to the terminal. `--workspace` selects the working directory: `cwd` (default), `standard` (the per-user temp dir the daemon sandboxes), or an explicit path. On the Claude Code brains a repository's own `CLAUDE.md` and `.claude/` settings in that directory are not loaded; ask for the file to be read if you want its conventions applied.
 
-### Local single-user install
+### Setup, serve and update
 
 ```bash
+istota setup --vm-dir DIR [--hostname HOST] [--ingress local|proxied|direct] \
+    [--nextcloud-url URL] [--yes] [--force] ...          # The stack's wizard, run by `istota-stack setup`
 istota setup [--yes] [--workspace DIR] [--brain claude_code|native] \
-    [--native-base-url URL] [--native-model ID] [--native-api-key KEY] \
-    [--user ID] [--display-name NAME] [--timezone TZ] [--port N] \
-    [--email] [--location] [--no-money] [--force]   # Interactive first-run installer
+    [--user ID] [--port N] [--email] [--location] [--force] ...   # The local wizard, for `istota serve`
 istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web server in one process
-istota update [--force] [--channel stable|main]           # Self-update the standalone install
+istota update [--force] [--channel stable|main]           # Self-update the deprecated standalone install
 ```
 
-`istota setup` writes a local workspace (default `~/.istota`) and configures a single user; `--yes` runs non-interactively from flags and defaults. `istota serve` is the combined local launcher — it runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`).
+On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image; it writes `config.toml`, the admins file, the master key and, in the `--vm-dir`, the stack's `.env`, `host.env` and `secrets/`. `istota setup --help` lists every flag. Outside the image (which sets `ISTOTA_SETUP_SHAPE=container`) and without `--vm-dir`, it is the local wizard: a workspace (default `~/.istota`), one user, and `~/.config/istota/`.
 
-`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on a server, which is updated with `istota-stack update`. See [Local install](../getting-started/local-install.md) for the full walkthrough.
+`istota serve` runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). It is the development loop on a Mac checkout, and the deprecated standalone install's launcher; see [development setup](../development/setup.md).
+
+`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on the stack, which is updated with `istota-stack update`. See [Standalone install](../getting-started/local-install.md).
 
 ### Database
 
@@ -475,9 +477,9 @@ istota-skill markets quote AAPL
 
 Used by Claude Code inside the sandbox to invoke skill CLIs with credentials injected server-side.
 
-## `istota` on a server (host wrapper)
+## `istota` on the machine (host wrapper)
 
-`host/provision.sh` installs an `istota` command on the server. It runs the CLI inside the running daemon container as uid 10001, with every capability dropped (`istota-stack exec istota ...`), so a CLI call cannot leave a root-owned file under `/data` that locks the daemon out of its own database. Run it as root; arguments pass straight through.
+`host/provision.sh` installs an `istota` command on the machine. It runs the CLI inside the running daemon container as uid 10001, with every capability dropped (`istota-stack exec istota ...`), so a CLI call cannot leave a root-owned file under `/data` that locks the daemon out of its own database. Run it as root; arguments pass straight through.
 
 ```bash
 istota repl -u alice            # interactive REPL

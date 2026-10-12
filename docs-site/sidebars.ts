@@ -12,8 +12,6 @@ const sidebars: SidebarsConfig = {
       collapsed: false,
       items: [
         'getting-started/quickstart-server',
-        'getting-started/quickstart-docker',
-        'getting-started/local-install',
         'getting-started/post-install',
       ],
     },
@@ -104,11 +102,12 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Deployment',
       items: [
-        'deployment/ansible',
         'deployment/docker',
-        'deployment/moving-the-bundled-nextcloud',
-        'deployment/migrating-from-bare-metal',
         'deployment/security',
+        'deployment/ansible',
+        'deployment/migrating-from-bare-metal',
+        'deployment/moving-the-bundled-nextcloud',
+        'getting-started/local-install',
       ],
     },
     {

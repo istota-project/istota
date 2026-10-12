@@ -1,8 +1,8 @@
-# Server quickstart
+# Quickstart
 
-A server install runs Istota on a Debian 13 machine of its own: a VM, a VPS or a bare-metal box that runs nothing else. It is the Docker stack from `docker/`, with every task in a bubblewrap sandbox, set up by `host/provision.sh` and managed with one command, `istota-stack`. Images are built on the machine from a signed release tag; nothing is pulled from a registry.
+Istota runs one way: the Docker stack from `docker/`, on a Debian 13 machine of its own, with every task in a bubblewrap sandbox. A VM, a VPS or a bare-metal box all work, as long as it runs nothing else. `host/provision.sh` sets the machine up and one command, `istota-stack`, manages it afterwards. Images are built on the machine from a signed release tag; nothing is pulled from a registry.
 
-The machine has to be dedicated to this install. The stack grants its container what bubblewrap needs to build a namespace, which is only acceptable when nothing else shares the host. [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) explains why.
+The machine has to be dedicated to this install. The stack grants its container what bubblewrap needs to build a namespace, which is only acceptable when nothing else shares the host. [Running tasks sandboxed](../deployment/docker.md#running-tasks-sandboxed) explains why. For the same reason the stack does not run directly on a workstation, Docker Desktop included. On a Mac, run it in a Lima VM ([below](#on-a-mac)).
 
 ## Requirements
 
@@ -36,7 +36,7 @@ For a cloud VM, `host/cloud-init.yaml` does the same first half as user data: fi
 
 `istota-stack setup` runs `istota setup` inside the image. It asks for the first admin's user id, the public hostname and how the stack is reached (`local`, `proxied` behind your own reverse proxy, or `direct` with its own TLS certificate), whether to connect to a Nextcloud (its URL, the bot's user and app password, an OAuth2 client for web login), the model backend and its credential, email, GPS location, the modules, the developer skill, and the optional containers.
 
-It writes `config.toml` and the admins file under `/srv/app/istota/config/`, one file per credential under `/srv/app/istota/secrets/` (0400, owned by uid 10001), the stack's `.env` and `host.env`. After that `config.toml` is yours: nothing regenerates it. [Docker deployment](../deployment/docker.md) covers the settings, the [storage modes](../deployment/docker.md#storage) and [ingress and TLS](../deployment/docker.md#ingress-and-tls).
+It writes `config.toml` and the admins file under `/srv/app/istota/config/`, one file per credential under `/srv/app/istota/secrets/` (0400, owned by uid 10001), the stack's `.env` and `host.env`. After that `config.toml` is yours: nothing regenerates it. [Running the stack](../deployment/docker.md) covers the settings, the [storage modes](../deployment/docker.md#storage) and [ingress and TLS](../deployment/docker.md#ingress-and-tls).
 
 ## Day to day
 
@@ -52,6 +52,23 @@ istota user ensure --name bob --display-name "Bob"   # the istota CLI, run in th
 The `istota` command on the machine runs the CLI inside the daemon container as uid 10001, never as root.
 
 To change a setting, edit `/srv/app/istota/config/config.toml` and restart with `istota-stack down && istota-stack up`. A credential is a file under `/srv/app/istota/secrets/`; replace it and restart.
+
+The optional containers (`browser`, `whatsapp-baileys`, `signaling`) are Compose profiles. The wizard turns them on from your answers by writing `COMPOSE_PROFILES` in `/srv/app/istota/.env`; see [Optional profiles](../deployment/docker.md#optional-profiles).
+
+## On a Mac
+
+`host/lima/istota.yaml` is a [Lima](https://lima-vm.io/) template for a VM dedicated to one install: Debian 13 under Apple's virtualization framework, with 4 CPUs, 6 GiB of memory and a 40 GiB disk. It mounts an istota checkout from the Mac read-only and runs `host/provision.sh` from it on first boot, so the VM is set up exactly as a server would be. Lima forwards the VM's port 8080 to the Mac's loopback, and the browser container's amd64 image runs under Rosetta. From a checkout of the repository on the Mac:
+
+```bash
+limactl create --name istota --param ISTOTA_REPO="$PWD" host/lima/istota.yaml
+limactl start istota
+limactl shell istota sudo istota-stack update --unsigned vX.Y.Z
+limactl shell istota sudo istota-stack setup --ingress local --hostname localhost:8080
+limactl shell istota sudo /srv/app/istota/src/host/provision.sh
+limactl shell istota sudo systemctl enable --now istota-stack
+```
+
+The VM's own checkout at `/srv/app/istota/src` is a clone of the mounted one, so `istota-stack update` fetches tags from the Mac checkout. `--unsigned` is needed until `/srv/app/istota/host.env` names a `RELEASE_SIGNING_KEY`; with one, drop the flag and the tag is verified as it is on a server. Then open `http://localhost:8080` and sign in. Everything else on this page applies inside the VM: prefix a command with `limactl shell istota sudo`, or open a shell there with `limactl shell istota`.
 
 ## Managing the machine from Ansible
 

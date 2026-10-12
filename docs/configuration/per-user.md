@@ -7,7 +7,7 @@ Per-user data lives in three DB tables and (optionally) the user's Nextcloud wor
    - `user_resources` — folder mounts (`folder`) and internal `shared_file` organizer state. Only `folder` is declarable after the Resources sunset; the other path-shaped types were retired (calendars are CalDAV-discovered, todo/reminders/notes are workspace-convention files).
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
-2. `[users.alice]` block in main `config/config.toml` (the docker entrypoint path) — DB rows still win at config-load time.
+2. `[users.alice]` block in `config.toml` (`istota setup` writes one for the first admin) — DB rows still win at config-load time.
 3. User workspace files in Nextcloud (`CRON.md`, `HEARTBEAT.md`, `TASKS.md`, `USER.md`).
 
 > The legacy `config/users/{user_id}.toml` file (and its `.user.json` overlay) was retired with the OIDC retirement / Phase 7 sweep. The `config/users/` directory is gone, and `Config.users_dir` / `load_user_configs()` no longer exist.

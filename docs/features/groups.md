@@ -85,7 +85,7 @@ Any member can write a group's store, and any member's task could have been stee
 - `Groups/<id>/` is bound read-write into the sandbox of a task that carries the group. The `Groups/` root and every other group's directory are not bound at all.
 - `GROUP.md` is read host-side with the same hardening as `USER.md` and `CHANNEL.md`: a symlinked directory, a symlinked or special file, or an oversized file is refused rather than followed.
 - Every refusal from `kv --group` and `memory --group` reads `not a member of group '<id>'`, whatever the reason, so the skill CLIs cannot be used to learn which groups exist.
-- On a deployment that runs tasks unsandboxed (the shipped Docker stack, macOS, the standalone install), the group set still decides what loads into the prompt and what the skill CLIs accept, but nothing stops a task's own file tools from reaching other directories under the mount. See [security](../deployment/security.md).
+- Where tasks run unsandboxed (`istota serve` on macOS, the deprecated standalone install), the group set still decides what loads into the prompt and what the skill CLIs accept, but nothing stops a task's own file tools from reaching other directories under the mount. See [security](../deployment/security.md).
 
 ## Not in this version
 

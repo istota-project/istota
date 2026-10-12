@@ -1,6 +1,6 @@
 # Post-install
 
-After installing a [server](quickstart-server.md) or the [Docker stack](quickstart-docker.md), complete these steps. On a server, `istota` runs the CLI inside the daemon container; with a hand-run stack, use `docker compose exec daemon istota-drop istota` in its place.
+After the [quickstart](quickstart-server.md), complete these steps on the machine, as root. `istota` there runs the CLI inside the daemon container. In a Lima VM on a Mac, prefix each command with `limactl shell istota sudo`.
 
 :::tip[Phase 6 — DB-backed user profiles]
 Profile fields (display_name, timezone, email addresses, log/alerts channels, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed them with the CLI (the [Ansible management role](../deployment/ansible.md) runs the same command):
@@ -18,13 +18,16 @@ The web UI at `/istota/settings` lets each user edit their own profile and add p
 Only if you skipped the token at install time (and aren't using `ANTHROPIC_API_KEY` or a native-brain provider key), authenticate manually:
 
 ```bash
-istota-stack exec claude login            # server
-docker compose exec daemon claude login   # a stack you run by hand
+istota-stack exec claude login
 ```
+
+## Open the web app
+
+Open the hostname you gave the wizard (`http://localhost:8080` in a Lima VM) and sign in. Web chat works with or without Nextcloud.
 
 ## Invite the bot to Talk
 
-In Nextcloud, open Talk and add the bot's user (default: `istota`) to a conversation. The bot automatically starts polling conversations it's a member of.
+With Nextcloud integration, open Talk and add the bot's user (default: `istota`) to a conversation. The bot automatically starts polling conversations it's a member of.
 
 ## Test execution
 
@@ -32,7 +35,7 @@ In Nextcloud, open Talk and add the bot's user (default: `istota`) to a conversa
 istota task "Hello" -u alice -x
 ```
 
-## Service management (server)
+## Service management
 
 ```bash
 systemctl status istota-stack
@@ -42,7 +45,7 @@ istota-stack compose logs -f daemon
 
 ## User workspace
 
-After the bot runs for the first time for a user, it creates a directory structure under the Nextcloud mount:
+After the bot runs for the first time for a user, it creates a directory structure in the workspace: the Nextcloud mount with Nextcloud integration, `/data/workspace` on the state volume with local storage.
 
 ```
 /Users/alice/
@@ -60,11 +63,11 @@ After the bot runs for the first time for a user, it creates a directory structu
 └── shared/              # Auto-organized files shared with bot
 ```
 
-Users can edit these files through the Nextcloud web UI, desktop client, or any text editor with WebDAV access. See [per-user configuration](../configuration/per-user.md) for details on each file.
+With Nextcloud, users can edit these files through the Nextcloud web UI, desktop client, or any text editor with WebDAV access. See [per-user configuration](../configuration/per-user.md) for details on each file.
 
 ## What to try next
 
-- Send a message in Talk and watch the bot respond
+- Send a message in web chat, or in Talk, and watch the bot respond
 - Edit `PERSONA.md` at the root of the bot's files (beside `Users/`) to change the bot's personality for everyone; see [Persona](../configuration/persona.md)
 - Set up a [briefing](../features/briefings.md) for morning summaries
 - Configure [scheduled jobs](../features/scheduling.md) via CRON.md

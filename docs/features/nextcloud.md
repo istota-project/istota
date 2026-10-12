@@ -1,6 +1,6 @@
 # Nextcloud
 
-Istota does not require Nextcloud. When configured, it can use Nextcloud for file storage, sharing, contacts, OAuth login, notifications, Talk, and calendars through CalDAV. The standalone shape instead uses a local workspace, built-in web chat, and an optional external CalDAV server.
+Istota does not require Nextcloud. When configured, it can use Nextcloud for file storage, sharing, contacts, OAuth login, notifications, Talk, and calendars through CalDAV. Without it, the stack uses local storage, built-in web chat, email sign-in, and an optional external CalDAV server.
 
 The `nextcloud` skill is the agent's control surface over a connected server: what it supports, who is on it, what is shared with whom, and the file operations the mounted filesystem cannot express.
 
@@ -8,7 +8,7 @@ Everything runs as the bot's own Nextcloud account (`nextcloud.username` / `next
 
 ## Availability
 
-The skill declares `requires_capability: [nextcloud]`, satisfied when `nextcloud.url` is set. On a standalone local install with no Nextcloud it disappears from selection and from the on-demand menu entirely, rather than offering verbs that would all fail.
+The skill declares `requires_capability: [nextcloud]`, satisfied when `nextcloud.url` is set. On an install with no Nextcloud it disappears from selection and from the on-demand menu entirely, rather than offering verbs that would all fail.
 
 Reading and writing ordinary files is **not** part of this skill. The workspace is a mounted filesystem; the `files` skill and ordinary POSIX tools handle that, everywhere, with or without Nextcloud.
 
@@ -142,11 +142,11 @@ dav_prefix = ""                  # mount point of the storage root in the bot's 
 auto_share_bot_dir = true        # share the bot workspace back to the user at boot
 ```
 
-`dav_prefix` exists because the bot's storage root and the root of its Nextcloud file tree are not always the same directory. On the rclone-mount deploy they are, so it stays empty. On the Docker stack `/mnt/shared` is a volume Nextcloud serves through a `files_external` mount, so `/Users/alice` on disk is `/Shared Files/Users/alice` over DAV and OCS; the value is set to that mount point and the request layer puts it in front of every path on the way out and strips it on the way back. Paths on disk, and the paths the skill takes and returns, are unaffected — they stay logical.
+`dav_prefix` exists because the bot's storage root and the root of its Nextcloud file tree are not always the same directory. When the VM's rclone mount is rooted at the top of the bot's files they are, and it stays empty. When the mount is rooted at a folder inside them, `/Users/alice` on disk is, say, `/Shared Files/Users/alice` over DAV and OCS; the value is that folder (`istota setup` asks for it), and the request layer puts it in front of every path on the way out and strips it on the way back. Paths on disk, and the paths the skill takes and returns, are unaffected — they stay logical.
 
-`auto_share_bot_dir` controls the OCS share of the bot workspace back to the user that runs on every boot. Leave it true unless the deployment already puts that directory in the user's file tree some other way; the Docker stack mounts it there at provisioning and sets this false, so the user is not handed the same folder twice.
+`auto_share_bot_dir` controls the OCS share of the bot workspace back to the user that runs on every boot. Leave it true unless the Nextcloud already puts that directory in the user's file tree some other way. The Nextcloud the old stack bundled did, through a `files_external` mount, and set this false so the user was not handed the same folder twice; one moved out of it keeps that value.
 
-**Sharing off a `files_external` mount needs the mount to allow it.** Nextcloud defaults `enable_sharing` to false there, and every share of anything under the mount is then refused with "You are not allowed to share". The Docker stack's `provision-nc.sh` turns it on for both mounts it creates; a hand-built deployment on external storage needs `occ files_external:option <mount_id> enable_sharing true`.
+**Sharing off a `files_external` mount needs the mount to allow it.** Nextcloud defaults `enable_sharing` to false there, and every share of anything under the mount is then refused with "You are not allowed to share". The old stack's `provision-nc.sh` turned it on for both mounts it created; a Nextcloud whose bot storage is external storage set up some other way needs `occ files_external:option <mount_id> enable_sharing true`.
 
 Credentials reach the skill as `NC_URL` / `NC_USER` / `NC_PASS`, and `dav_prefix` as `NC_DAV_PREFIX`. Only `NC_PASS` is `sensitive`, so it is stripped from the model's environment and injected server-side by the skill proxy. With the proxy off, the Nextcloud host is added to the CONNECT allowlist when the skill is authorized.
 

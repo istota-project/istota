@@ -5,7 +5,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
 [![License](https://img.shields.io/github/license/istota-project/istota)](https://github.com/istota-project/istota/blob/main/LICENSE)
 
-**Istota is a self-hosted personal AI operating system.** It runs on your own server or laptop and brings calendars, email, files, location, health, money, feeds, conversations, and memory into one command layer. You can use all of those sources or only the ones you choose.
+**Istota is a self-hosted personal AI operating system.** It runs on a server or VM of your own and brings calendars, email, files, location, health, money, feeds, conversations, and memory into one command layer. You can use all of those sources or only the ones you choose.
 
 The native modules remain useful without a model. They have their own storage, command-line interfaces, and web pages. The agent adds a shared language interface and can reason across the records a task is allowed to read.
 
@@ -50,13 +50,13 @@ Location, health, financial, calendar, email, and conversation records form an u
 
 Self-hosting does not make connected services disappear. A hosted model provider receives the prompts and tool results sent to it, and every service you connect receives the traffic needed to use it. Istota also supports a local OpenAI-compatible model endpoint. Those connections are operator choices rather than requirements of an Istota account or control plane.
 
-A server install confines tasks with bubblewrap, credential isolation, scoped files, an outbound network proxy, and optional confirmation gates. The standalone install runs tasks unsandboxed. Read the [security model](deployment/security.md) before exposing an instance or giving it sensitive resources.
+Every task is confined by bubblewrap, credential isolation, scoped files, an outbound network proxy, and optional confirmation gates. Read the [security model](deployment/security.md) before exposing an instance or giving it sensitive resources.
 
 ## Nextcloud is optional
 
 Nextcloud is a first-class integration, not the foundation of the system. When connected, it provides files, calendars, contacts, OAuth login, notifications, and Talk while Istota acts as an ordinary Nextcloud user over standard protocols.
 
-Without Nextcloud, the workspace is an ordinary local directory, web chat handles conversations, and CalDAV and IMAP can point at other providers. The [standalone install](getting-started/local-install.md) uses this shape. Read the [Nextcloud guide](features/nextcloud.md) for the integration itself.
+Without Nextcloud, the workspace is an ordinary local directory on the stack's state volume, web chat handles conversations, and CalDAV and IMAP can point at other providers. `istota setup` asks which you want. Read the [Nextcloud guide](features/nextcloud.md) for the integration itself.
 
 ## Principles
 
@@ -64,11 +64,11 @@ Istota ships with an [Emissaries](https://github.com/istota-project/emissaries) 
 
 This view shares the humanist premise of [Common Task](https://commontask.org/): people are ends rather than inputs to a system, and technology should be judged by how it affects their agency and well-being.
 
-## Choose an installation
+## Installation
 
-- [Server](getting-started/quickstart-server.md): the persistent, multi-user deployment. The Docker stack runs on a Debian 13 machine of its own, built from a signed release, with bubblewrap and per-task cgroups. Nextcloud is optional.
-- [Docker stack by hand](getting-started/quickstart-docker.md): the same stack, set up with `docker compose` directly.
-- [Local standalone](getting-started/local-install.md): a trusted single-user installation with a local workspace, loopback-only web app, and no required Nextcloud or login screen. It is unsandboxed by design.
+Istota has one deployment: the Docker stack on a Debian 13 machine of its own, built from a signed release, with bubblewrap and per-task cgroups. The machine can be a VPS, a VM on your own hardware, or a Lima VM on a Mac. Nextcloud is optional. The [quickstart](getting-started/quickstart-server.md) covers each.
+
+The older [standalone install](getting-started/local-install.md), an unsandboxed single-user process, is deprecated. Existing installs keep working, but don't start a new one that way.
 
 ## Explore the documentation
 

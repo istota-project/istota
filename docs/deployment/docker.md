@@ -1,6 +1,8 @@
-# Docker deployment
+# Running the stack
 
-This page covers the Docker stack in `docker/`, which is the only way Istota runs on a server. Install it on a machine of its own with the [server quickstart](../getting-started/quickstart-server.md); there `istota-stack` runs these compose commands for you (`istota-stack compose <...>`, and `istota` for the CLI). The plain `docker compose` commands below are what it runs, and what you type on a machine you set up by hand.
+Istota has one deployment: the Docker stack in `docker/`, on a Debian 13 machine dedicated to it, set up by `host/provision.sh` and managed with `istota-stack`. The [quickstart](../getting-started/quickstart-server.md) installs it, on a server or in a Lima VM on a Mac. This page covers running it afterwards.
+
+Every command here runs as root on that machine. `istota-stack compose <...>` is `docker compose` with the stack's own files, paths and settings, and `istota <...>` runs the CLI in the daemon container as uid 10001. Don't run a bare `docker compose` in `src/docker/`: it misses the paths and the log driver `istota-stack` passes, and a `docker compose exec` starts as root with the container's capabilities.
 
 ## Stack overview
 
@@ -17,21 +19,21 @@ This page covers the Docker stack in `docker/`, which is the only way Istota run
 
 ## Configuration
 
-istota's configuration is `/data/config/config.toml` on the state volume. `istota setup`, run inside the image, writes it once; after that it is yours to edit. Nothing regenerates it. The stack's `.env` holds compose settings only (profiles, the hostname, ports), and each credential is a file under `docker/secrets/`, which compose mounts at `/run/secrets`.
+Everything the stack reads lives under `/srv/app/istota`:
 
-```bash
-cd docker
-cp .env.example .env
-docker compose build daemon
-touch host.env && sudo chown 10001:10001 .env host.env
-sudo install -d -o 10001 -g 10001 -m 0700 secrets
-for n in $(docker compose config --format json | python3 -c 'import json,sys; print(*json.load(sys.stdin)["secrets"])'); do
-    sudo install -o 10001 -g 10001 -m 0400 /dev/null "secrets/$n"; done
-docker compose run --rm --no-deps -v "$PWD:/vm" --entrypoint istota-drop daemon istota setup --vm-dir /vm
-docker compose up -d
-```
+| Path | Holds |
+|---|---|
+| `config/config.toml` | istota's configuration; `config/` is bound read-only at `/data/config` in every service |
+| `config/admins` | the admin user ids |
+| `secrets/` | one file per credential (0400, owned by uid 10001), mounted at `/run/secrets` |
+| `.env` | compose settings only: profiles, the hostname, published ports, the deployed and previous tags |
+| `host.env` | the machine's choices: storage and ingress modes, the domain and TLS source, the release key, the Claude Code pin |
+| `compose.devbox.yml` | the per-user devbox services, rendered from `config.toml` (see [Devboxes](#devboxes)) |
+| `src/` | the repository, checked out at the deployed tag |
 
-The empty secret files are there because compose refuses to run a service whose secret file is missing; `istota setup` replaces them. It runs as the daemon's uid 10001, writes the config, `/data/config/admins` and `/data/.secret_key`, and updates `.env` (keeping every line it does not own). See [SMS](../features/sms.md) and [WhatsApp](../features/whatsapp.md) for those blocks, which you add to `config.toml` yourself.
+`istota-stack setup` runs `istota setup` in the image as uid 10001 and writes these once, plus the master key at `/data/.secret_key`. It updates `.env` and keeps every line it does not own. After that `config.toml` is yours to edit; nothing regenerates it. See [SMS](../features/sms.md) and [WhatsApp](../features/whatsapp.md) for those blocks, which you add to `config.toml` yourself.
+
+An estate managed with Ansible can write these files from inventory instead, through `istota-stack apply` and `istota-stack put-files`; see the [Ansible management role](ansible.md).
 
 ### Forge binaries
 
@@ -43,33 +45,34 @@ A config written before the binaries existed names the old default path. Nothing
 
 ## Changing settings
 
-Edit `/data/config/config.toml` and restart:
+Edit `/srv/app/istota/config/config.toml` and restart:
 
 ```bash
-docker compose exec daemon istota-drop vi /data/config/config.toml   # or copy it out and back
-docker compose restart daemon web
+istota-stack down && istota-stack up
 ```
 
-A credential is a file under `docker/secrets/` (0400, owned by uid 10001); replace the file and restart. An existing install keeps the `config.toml` its old entrypoint rendered, unchanged, as its own file; `docker/istota/config-diff.py` in the image compares two configs by key if you want to see what an old render would have changed.
+`istota-stack apply plan.toml` is the other way in: it writes `config.toml` from a plan's `[config]` and restarts the stack only when something changed.
+
+A credential is a file under `/srv/app/istota/secrets/` (0400, owned by uid 10001); replace the file and restart. An existing install keeps the `config.toml` its old entrypoint rendered, unchanged, as its own file; `docker/istota/config-diff.py` in the image compares two configs by key if you want to see what an old render would have changed.
 
 ## Upgrading an existing deployment
 
 ### The daemon service is called `daemon`
 
-The scheduler's compose service was called `istota` and is now `daemon`, so its container is `istota-daemon-1` rather than `istota-istota-1`, and the image built for it is `istota:<tag>` rather than `istota-istota:<tag>`. `istota-stack update` brings the stack up with `docker compose up -d --remove-orphans`, which removes the old `istota-istota-1` container; by hand, run `docker compose up -d --remove-orphans` once after the new build. Nothing moves on disk: the state volume is keyed by its own name, `istota_data`, not by the service, so the new container mounts the same data.
+The scheduler's compose service was called `istota` and is now `daemon`, so its container is `istota-daemon-1` rather than `istota-istota-1`, and the image built for it is `istota:<tag>` rather than `istota-istota:<tag>`. `istota-stack update` brings the stack up with `docker compose up -d --remove-orphans`, which removes the old `istota-istota-1` container. Nothing moves on disk: the state volume is keyed by its own name, `istota_data`, not by the service, so the new container mounts the same data.
 
 ### Room identities: offline maintenance required
 
-When upgrading a volume with legacy room identities, build the new image, then stop all three application services before running the migration. Keep Nextcloud and its database running for the server-side channel directory moves. From `docker/`, with the existing config and workspace volumes retained:
+When upgrading a volume with legacy room identities, update to the new release, then stop both application services before running the migration. Keep Nextcloud running for the server-side channel directory moves.
 
 ```bash
-docker compose build daemon
-docker compose stop daemon web webhooks
-docker compose run --rm --no-deps --entrypoint /app/.venv/bin/istota daemon -c /data/config/config.toml init --relocate-rooms --scheduler-stopped
-docker compose up -d daemon web webhooks
+istota-stack update vX.Y.Z
+istota-stack compose stop daemon web
+istota-stack compose run --rm --no-deps --entrypoint istota-drop daemon istota init --relocate-rooms --scheduler-stopped
+istota-stack up
 ```
 
-Inspect the migration result before the final command. Exit 0 is done. Exit 1 is a refusal with nothing changed: `refusal: live_tasks` means a task was still running, so wait and rerun; any other reason needs fixing first, and the line names it. Exit 2 means partial work needs attention: the failure lines say which rooms or users, and each admin gets a bell notice listing them. Start the services again, fix what the lines name, and rerun in a later window. The command is safe to rerun while the application services remain stopped. `--scheduler-stopped` recovers the task rows a stopped scheduler left in flight, which would otherwise refuse as `live_tasks` on every rerun; leave it off if anything else is executing a task. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the scheduler entrypoint cannot stop sibling web and webhook containers.
+Inspect the migration result before the final command. Exit 0 is done. Exit 1 is a refusal with nothing changed: `refusal: live_tasks` means a task was still running, so wait and rerun; any other reason needs fixing first, and the line names it. Exit 2 means partial work needs attention: the failure lines say which rooms or users, and each admin gets a bell notice listing them. Start the services again, fix what the lines name, and rerun in a later window. The command is safe to rerun while the application services remain stopped. `--scheduler-stopped` recovers the task rows a stopped scheduler left in flight, which would otherwise refuse as `live_tasks` on every rerun; leave it off if anything else is executing a task. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the daemon's entrypoint cannot stop the web container beside it.
 
 
 ### An install that ran the bundled Nextcloud
@@ -102,28 +105,26 @@ Having no failover is a valid choice now, which is why the INFO line exists.
 
 ### The repository-layout migration does not apply here
 
-`python -m istota.maintenance.repos_relocate` moves developer clones from one shared tree into per-user subtrees. The old bare-metal role ran it on every deploy. This stack does not, and does not need to: the old environment-rendered config left `repos_dir` empty and never shipped a value, so a Docker deployment made before the per-user split has no clones in the old layout to move. `istota setup` writes `repos_dir = "/data/repos"` when the developer skill is on, which is the per-user layout from the start.
+`python -m istota.maintenance.repos_relocate` moves developer clones from one shared tree into per-user subtrees. The old bare-metal role ran it on every deploy. The stack does not, and does not need to: the old environment-rendered config left `repos_dir` empty and never shipped a value, so a stack installed before the per-user split has no clones in the old layout to move. A bare-metal install brought over with `istota-stack import-bare-metal` was already in the per-user layout, since its role ran the migration, and the import copies the clones as they are. `istota setup` writes `repos_dir = "/data/repos"` when the developer skill is on, which is the per-user layout from the start.
 
 If you set `repos_dir` by hand on an install predating the per-user split, run the migration yourself once before the clones are used:
 
 ```bash
-docker compose exec daemon python -m istota.maintenance.repos_relocate --dry-run
-docker compose exec daemon python -m istota.maintenance.repos_relocate
+istota-stack exec python -m istota.maintenance.repos_relocate --dry-run
+istota-stack exec python -m istota.maintenance.repos_relocate
 ```
 
 It refuses rather than guessing when it cannot tell whose clones are whose, and exits 0 with nothing to do on an install that never set it.
 
 ## Optional profiles
 
-There are three: `browser`, `whatsapp-baileys` and `signaling`.
+There are three: `browser` (web browsing), `whatsapp-baileys` (WhatsApp through a paired session) and `signaling` (Talk over a WebSocket).
+
+They are turned on by `COMPOSE_PROFILES` in `/srv/app/istota/.env`, a comma-separated list that `istota-stack setup` writes from your answers. Empty means the core stack only. To change it, edit the line and run `istota-stack up`, which starts the containers of a profile that was added and removes those of one that was taken out:
 
 ```bash
-docker compose --profile browser up -d              # Web browsing
-docker compose --profile whatsapp-baileys up -d     # WhatsApp via a paired session
-docker compose --profile browser --profile signaling up -d  # Combine as needed
+COMPOSE_PROFILES=browser,signaling
 ```
-
-Rather than naming them per command, set `COMPOSE_PROFILES` in `.env` — a comma-separated list every `docker compose` in that directory then picks up. `istota setup --vm-dir` writes it from the answers you give it; a hand-copied `.env.example` leaves it empty, which means the core stack only.
 
 The web service serves the webhook receiver's routes too (location pings, SMS and Meta's WhatsApp callbacks), so no profile is needed for them; each route answers only when its feature is enabled in the config. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`. Nginx is the public endpoint for `/webhooks/`.
 
@@ -135,11 +136,7 @@ The browser container requires x86-64 (Chrome has no ARM packages).
 
 ### Talk over the signaling server
 
-```bash
-docker compose --profile signaling up -d
-```
-
-This replaces polling Nextcloud for Talk messages with a WebSocket that Nextcloud pushes to. It cuts inbound latency to a single round trip and removes a request per room per cycle, which is what makes it worth the extra container on a deployment with more than a handful of rooms.
+The `signaling` profile replaces polling Nextcloud for Talk messages with a WebSocket that Nextcloud pushes to. It cuts inbound latency to a single round trip and removes a request per room per cycle, which is what makes it worth the extra container on a deployment with more than a handful of rooms.
 
 **Three things have to line up, and the profile is only the first.**
 
@@ -153,7 +150,7 @@ The registration is a config write on the Nextcloud side and nothing more: in Ta
 
 `[talk.signaling] url` is a separate thing and `istota setup` fills it in: it is the daemon's own route, `http://signaling:8080`, since the daemon is on the container network beside the server. Left empty the daemon reads the browser-facing URL out of Talk's settings, which on this stack is the wrong answer.
 
-One consequence of turning it on before the server is registered: the daemon refuses to boot, and `restart: unless-stopped` makes that a loop that keeps `web` down with it, since it waits for the daemon to be healthy. Set `[talk.signaling] enabled = false` to back out. Note also that nothing orders `istota` after `signaling` (compose would then start the server on every deployment), so a first boot can post its provisioning message while the server is still coming up; the daemon's own watchers retry, but that one post can fail.
+One consequence of turning it on before the server is registered: the daemon refuses to boot, and `restart: unless-stopped` makes that a loop that keeps `web` down with it, since it waits for the daemon to be healthy. Set `[talk.signaling] enabled = false` to back out. Note also that nothing orders `daemon` after `signaling` (compose would then start the server on every deployment), so a first boot can post its provisioning message while the server is still coming up; the daemon's own watchers retry, but that one post can fail.
 
 If the daemon is told to use it and cannot — Talk still in `internal` signaling mode, or the library missing — **it refuses to boot**. That is deliberate: a daemon quietly polling while you believe push is live is worse than one that did not start. `istota doctor --only talk.signaling_reachable` says which of the three is missing.
 
@@ -175,12 +172,7 @@ enabled = true
 users = ["alice"]
 ```
 
-```bash
-docker compose exec daemon istota-drop istota devbox compose-file > compose.devbox.yml
-docker compose -f docker-compose.yml -f compose.devbox.yml up -d
-```
-
-The verb prints one `devbox-<user>` service per entry, plus the `daemon` service's mounts of each user's two socket volumes, and creates each user's repos directory first. On the VM, `istota-stack` does both steps and passes the file as a second `-f` whenever it exists. Re-render after changing `users`; `up -d --remove-orphans` removes the service of a user taken out, and keeps their home volume.
+`istota devbox compose-file` prints one `devbox-<user>` service per entry, plus the `daemon` service's mounts of each user's two socket volumes, and creates each user's repos directory first. `istota-stack` writes its output to `/srv/app/istota/compose.devbox.yml` on `setup`, `update` and an `apply` that changed the config, builds the devbox image, and passes the file as a second `-f` to every compose command. After editing `users` in `config.toml` by hand, run `istota-stack update` with the deployed tag to re-render it. The next `up` removes the service of a user taken out and keeps their home volume.
 
 What each devbox gets, and nothing else:
 
@@ -208,7 +200,7 @@ Two modes, chosen by `[nextcloud] url` in `config.toml`, which `istota setup` wr
 
 In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`.
 
-The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason this file runs in a VM.
+The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
 
 Workspace files have no versions or trash in either mode.
 
@@ -261,7 +253,7 @@ In full Nextcloud integration the workspace is not a volume: it is the VM's rclo
 
 On the VM every service logs to the systemd journal, under the container's name: `journalctl CONTAINER_NAME=istota-daemon-1` reads the daemon, and anything that ships the host's journal ships the stack's output with it. `docker logs` and `istota-stack compose logs` still work. The journal's size cap from `provision.sh` (500 MB) bounds it. Devbox containers are the exception: they keep their own rotated `json-file` logs, because build and test output would push the host's own lines out of the journal.
 
-Run outside `istota-stack` (Docker Desktop, the test tiers), the compose file uses Docker's `json-file` driver, since there is no journald there.
+The compose file's own default is Docker's `json-file` driver, which is what the test tiers get when they run it outside `istota-stack`, on hosts with no journald.
 
 ## Browser profiles
 
@@ -291,7 +283,7 @@ The noVNC console is for operators only. Reach `/instances.html` on the existing
 
 **Upgrade:** Rebuild and recreate the browser container when updating the skill (`istota-stack update` does both). On first boot the old shared profile is parked under `legacy-profile/` in the same volume; no user inherits it. Each user signs in again unless an operator deliberately recovers the old profile. TLS certificates and existing per-user profiles stay in place. A parking collision needs operator attention and does not overwrite either copy. Until the image is updated, non-credential calls warn with `shared_profile` and credential fills refuse. After upgrading, verify `/health` advertises `per_user_profiles: true`. Direct API clients must send `X-Istota-User` on scoped requests; IDs must be single path components, ASCII, without control characters or surrounding whitespace.
 
-## Security differences
+## Security
 
 - **The network allowlist is the default.** `istota setup` leaves `[security.network] enabled` at its default, on, so each task gets `--unshare-net` and the CONNECT proxy's `host:port` allowlist. A config the old entrypoint rendered says `enabled = false`, and keeps saying it until you change it
 - **The filesystem sandbox runs here**, under the run contract the `daemon` service carries. See below
@@ -315,27 +307,21 @@ The `daemon` service in `docker-compose.yml` carries the grant bubblewrap needs 
     cgroup: private
 ```
 
-`seccomp-istota.json` is Docker's default profile plus the six calls bwrap needs to build a namespace (`clone`, `clone3`, `mount`, `pivot_root`, `umount2`, `unshare`), without the default's `CAP_SYS_ADMIN` rule, so `bpf`, `keyctl`, `userfaultfd`, `perf_event_open` and the rest of the default denylist stay refused for every task. `apparmor-istota` is Docker's `docker-default` plus `mount` (with no bind or move out of `/proc` or `/sys` and no `sysfs` mount) and `pivot_root`; it keeps `docker-default`'s refusal of writes to `/proc/sys` and `/proc/sysrq-trigger`, which `systempaths=unconfined` would otherwise leave open to a root `docker exec`. On a host with AppArmor, load it before the stack starts:
+`seccomp-istota.json` is Docker's default profile plus the six calls bwrap needs to build a namespace (`clone`, `clone3`, `mount`, `pivot_root`, `umount2`, `unshare`), without the default's `CAP_SYS_ADMIN` rule, so `bpf`, `keyctl`, `userfaultfd`, `perf_event_open` and the rest of the default denylist stay refused for every task. `apparmor-istota` is Docker's `docker-default` plus `mount` (with no bind or move out of `/proc` or `/sys` and no `sysfs` mount) and `pivot_root`; it keeps `docker-default`'s refusal of writes to `/proc/sys` and `/proc/sysrq-trigger`, which `systempaths=unconfined` would otherwise leave open to a root `docker exec`. `provision.sh` installs the profile and `istota-stack up` loads it before starting anything; if it does not load, the stack is not started.
 
-```bash
-sudo apparmor_parser -r -W docker/istota/apparmor-istota
-```
+The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, gives up `CAP_SYS_ADMIN` straight after the remount that needs it, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, which is why the machine's `istota` command and `istota-stack exec` both run through `istota-drop`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
 
-A host without AppArmor, Docker Desktop among them, ignores the option.
-
-The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, gives up `CAP_SYS_ADMIN` straight after the remount that needs it, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec daemon istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
-
-These settings are meant for a host that runs nothing else, such as a VM dedicated to the install: `systempaths=unconfined` would let a uid-0 process in the container reach host sysctls if AppArmor were not loaded, and nothing in the container runs as uid 0 after the root phase.
+These settings are why the machine has to be dedicated to the install: `systempaths=unconfined` would let a uid-0 process in the container reach host sysctls if AppArmor were not loaded, and nothing in the container runs as uid 0 after the root phase.
 
 ### Acting on the browser container's unhealthy verdict
 
 The browser container's healthcheck probes the liveness endpoint's deep tier, which asks whether the Chrome process is alive, whether Chrome's DevTools endpoint answers, and (since ISSUE-384) whether the API process can still drive the browser it is reporting on. `restart: unless-stopped` reacts to a process exiting, not to a failing healthcheck, so compose alone leaves a wedged container running.
 
-On a machine set up by `host/provision.sh`, a watchdog timer (`istota-browser-watchdog.timer`, enabled when the `browser` profile is on) reads the verdict every minute, restarts the container after a debounce, stops and alerts if the restarts start looping, and restarts it once a day. On a machine you set up by hand nothing acts on it; read the verdict yourself (`docker compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`) when browsing stops working.
+A watchdog timer that `provision.sh` installs (`istota-browser-watchdog.timer`, enabled when the `browser` profile is on) reads the verdict every minute, restarts the container after a debounce, stops and alerts if the restarts start looping, and restarts it once a day. To read the verdict yourself, use `istota-stack compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`.
 
 ## Credentials
 
-Each is a file under `docker/secrets/`, named for the variable the daemon reads it from, lowercased: `claude_code_oauth_token`, `anthropic_api_key`, `istota_brain_native_api_key`, `istota_nextcloud_app_password`, `istota_web_oauth2_client_secret`, `istota_web_session_secret_key`, `istota_email_imap_password`, `istota_caldav_password`, `istota_developer_gitlab_token`, `istota_developer_github_token`, `istota_email_smtp_password`, `istota_sms_telnyx_api_key`, `istota_sms_telnyx_public_key`, `istota_sms_telnyx_messaging_profile_id`, `istota_google_workspace_client_secret`. An empty file is a credential the install does not use; the SMTP password falls back to the IMAP one. Credentials without a file here (the Twilio and WhatsApp ones) go in `config.toml`, which `istota setup` creates 0600.
+Each is a file under `/srv/app/istota/secrets/`, named for the variable the daemon reads it from, lowercased: `claude_code_oauth_token`, `anthropic_api_key`, `istota_brain_native_api_key`, `istota_nextcloud_app_password`, `istota_web_oauth2_client_secret`, `istota_web_session_secret_key`, `istota_email_imap_password`, `istota_caldav_password`, `istota_developer_gitlab_token`, `istota_developer_github_token`, `istota_email_smtp_password`, `istota_sms_telnyx_api_key`, `istota_sms_telnyx_public_key`, `istota_sms_telnyx_messaging_profile_id`, `istota_google_workspace_client_secret`. An empty file is a credential the install does not use; the SMTP password falls back to the IMAP one. Credentials without a file here (the Twilio and WhatsApp ones) go in `config.toml`, which `istota setup` creates 0600.
 
 The stack has no settings of its own for Nextcloud: there is no bundled one to configure.
 
@@ -343,12 +329,12 @@ The stack has no settings of its own for Nextcloud: there is no bundled one to c
 
 nginx is given a generous `NGINX_CLIENT_MAX_BODY_SIZE` (default `512M`), so the binding limit on a chat attachment is the application's own `[web.chat] max_attachment_mb` — 25 MB unless you raise it in `config.toml`. A proxy in front of the stack needs a ceiling at least as large.
 
-The web service also runs uvicorn without `--timeout-graceful-shutdown`, so a `docker compose restart` with a browser tab holding the chat room stream open waits out the stop timeout before the container is killed.
+The web service also runs uvicorn without `--timeout-graceful-shutdown`, so a restart with a browser tab holding the chat room stream open waits out the stop timeout before the container is killed.
 
 ## Signing in without Nextcloud
 
-Set `[web] auth = ["email"]` and `[site] hostname` to the public hostname in `config.toml`, and configure SMTP for email sign-in codes and password resets; `istota setup` writes email sign-in by default when there is no Nextcloud login to offer. Restart `istota` and `web` after changing the config. See [email login setup](../features/web-interface.md#email-login) for the CLI bootstrap and recovery commands. These settings change authentication only; storage and Talk are separate (see [Storage](#storage)).
+Set `[web] auth = ["email"]` and `[site] hostname` to the public hostname in `config.toml`, and configure SMTP for email sign-in codes and password resets; `istota setup` writes email sign-in by default when there is no Nextcloud login to offer. Restart the stack after changing the config. See [email login setup](../features/web-interface.md#email-login) for the CLI bootstrap and recovery commands. These settings change authentication only; storage and Talk are separate (see [Storage](#storage)).
 
 To migrate an existing installation, set `auth = ["nextcloud", "email"]`, attach an email identity to each existing user, and inspect `istota auth list`. Once every user has an enabled identity and a working password or email-code path, change the value to `email`. Existing Nextcloud sessions then stop working. Dropping Nextcloud for storage, Talk and CalDAV is a separate change.
 
-`none` is refused by the Docker web launcher. A loopback backend behind a public proxy is still public. Custom outer proxies must exclude `/istota/auth/set-password`, or omit query strings from access logs; the shipped nginx and uvicorn suppression cannot control an outer proxy.
+`none` is refused by the stack's web launcher. A loopback backend behind a public proxy is still public. Custom outer proxies must exclude `/istota/auth/set-password`, or omit query strings from access logs; the shipped nginx and uvicorn suppression cannot control an outer proxy.

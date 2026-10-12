@@ -242,7 +242,7 @@ The generated passwords, the module switches derived from the profile's service 
 
 ### The storage backend, and why it needs no stack
 
-`Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped install shapes: `local` is what the single-user install runs, not a test convenience. So a change that decouples istota from Nextcloud and breaks the Nextcloud-free install has to go red somewhere.
+`Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped storage modes of the one deployment: `local` is what the stack runs with no Nextcloud, not a test convenience. So a change that decouples istota from Nextcloud and breaks the Nextcloud-free install has to go red somewhere.
 
 It costs no stack, because `storage.py` branches on `has_workspace` rather than on the backend and the testbed writes `workspace_path` as the literal `/mnt/shared` on every profile, as `istota setup` does. Briefings, memory and the tasks file take the identical path under both, while `nextcloud_mount_path` stays unset because the Docker volume is not a FUSE mount. Three things differ, each a pure function of a `Config`: the prompt's file-tool vocabulary and the skill menu (`available_capabilities()` drops `nextcloud` on an empty URL), both prompt content held by the goldens as the `base_nextcloud` / `base_local` pair, and the `runtime.mount_liveness` doctor check, `ok` under `nextcloud` and `skip` under `local` (`tests/test_doctor.py::TestMountLiveness`); whether a setup with no Nextcloud writes a config that loads as `local` at all is in `tests/test_setup_container.py`.
 
