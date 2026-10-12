@@ -3891,6 +3891,13 @@ def cmd_workspace_localize_config(args) -> int:
               file=sys.stderr)
         return wl.EXIT_REFUSED
     try:
+        if args.check:
+            text = wl.read_config_text(Path(target))
+            if wl.localized_config_text(text, args.workspace) is None:
+                print(f"{target}: already a local workspace")
+            else:
+                print(f"{target}: can be moved to {args.workspace}")
+            return 0
         changed = wl.localize_config(Path(target), args.workspace)
     except (wl.LocalizeRefused, OSError, UnicodeDecodeError) as exc:
         print(f"istota workspace localize-config: REFUSE: {exc}; nothing was written.", file=sys.stderr)
@@ -5675,6 +5682,8 @@ def main():
         help="Point config.toml at a local workspace, keeping config.toml.pre-localize (exit 0, or 1 refused)",
     )
     ws_config.add_argument("--workspace", default="/data/workspace", help="The local workspace path")
+    ws_config.add_argument("--check", action="store_true",
+                           help="Only say whether the config can be moved (exit 0) or is refused (1); write nothing")
     ws_reindex = ws_subparsers.add_parser(
         "reindex",
         help="Reindex every user's memory files on the workspace, then drop index rows under the old root",

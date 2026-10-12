@@ -428,18 +428,26 @@ def localized_config_text(text: str, workspace: str) -> str | None:
     return header + toml_write.dumps(document)
 
 
+def _read_config(path: Path) -> tuple[bytes, os.stat_result]:
+    fd = os.open(path, _READ_FLAGS)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise LocalizeRefused(f"{path} is not a regular file")
+        return handle.read(), info
+
+
+def read_config_text(path: Path) -> str:
+    return _read_config(path)[0].decode("utf-8")
+
+
 def localize_config(path: Path, workspace: str) -> bool:
     """Rewrite `path` for a local workspace, keeping the old one beside it.
 
     Returns False when the config is already local. The backup is written
     once, so a second run keeps the original. Raises `LocalizeRefused`.
     """
-    fd = os.open(path, _READ_FLAGS)
-    with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            raise LocalizeRefused(f"{path} is not a regular file")
-        raw = handle.read()
+    raw, info = _read_config(path)
     text = raw.decode("utf-8")
     new = localized_config_text(text, workspace)
     if new is None:

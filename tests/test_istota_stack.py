@@ -60,6 +60,10 @@ case "$args" in
     if [ -n "${STUB_RENAMED_IMAGE_MISSING:-}" ] && [ ! -e "${STUB_CALLS}.tagged" ]; then exit 1; fi
     [ -z "${STUB_IMAGE_ENV:-}" ] || printf '%s\n' "$STUB_IMAGE_ENV" ;;
   *" image inspect "*) [ -z "${STUB_IMAGE_ENV:-}" ] || printf '%s\n' "$STUB_IMAGE_ENV" ;;
+  *" localize-config --check "*) exit "${STUB_LOCALIZE_CHECK_RC:-0}" ;;
+  *" workspace localize "*) exit "${STUB_LOCALIZE_RC:-0}" ;;
+  *" workspace localize-config "*)
+    printf 'config read-only=%s\n' "${ISTOTA_CONFIG_READ_ONLY:-unset}" >> "$STUB_CALLS" ;;
 esac
 exit 0
 """
@@ -90,7 +94,7 @@ class Fixture:
     def run(self, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["bash", str(SCRIPT), *args], capture_output=True, text=True,
-            env={**self.env, **extra_env}, timeout=60,
+            env={**self.env, **extra_env}, timeout=60, stdin=subprocess.DEVNULL,
         )
 
     def tag(self, name: str, *, key: Path | None = None, annotated: bool = True) -> None:
@@ -1145,3 +1149,117 @@ class TestTheWrapperPassesStdin:
         )
         assert result.returncode == 0, result.stderr
         assert seen.read_text() == "the-value"
+
+
+class TestLocalizeWorkspace:
+    """`localize-workspace`: the offline move off the rclone mount.
+
+    The copy, the config edit and the reindex are `istota workspace` verbs in
+    one-shot containers, so what is held here is the order, what each step's
+    exit code does to the next, and that host.env changes only after the copy
+    and the config edit have both succeeded."""
+
+    COPY = (
+        "--entrypoint istota-drop daemon istota workspace localize "
+        "--from /mnt/shared --to /data/workspace"
+    )
+
+    @pytest.fixture
+    def mounted(self, fx):
+        (fx.stack / "host.env").write_text("INGRESS=local\nSTORAGE=nextcloud\nRCLONE_REMOTE=nextcloud\n")
+        provision = fx.src / "host" / "provision.sh"
+        provision.parent.mkdir(parents=True, exist_ok=True)
+        provision.write_text(PROVISION_STUB)
+        provision.chmod(0o755)
+        return fx
+
+    @staticmethod
+    def _index(calls: list[str], fragment: str) -> int:
+        matches = [i for i, call in enumerate(calls) if fragment in call]
+        assert matches, f"no call with {fragment!r}: {calls}"
+        return matches[0]
+
+    def test_the_steps_run_in_order(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        order = [
+            self._index(calls, "istota workspace localize-config --check --workspace /data/workspace"),
+            self._index(calls, " stop daemon web"),
+            self._index(calls, f"{self.COPY} --scheduler-stopped"),
+            self._index(calls, "config read-only=false"),
+            self._index(calls, "provision ran"),
+            self._index(calls, "up -d --remove-orphans"),
+            self._index(calls, "exec -T daemon istota-drop istota workspace reindex --forget-root /mnt/shared"),
+        ]
+        assert order == sorted(order), calls
+        host_env = (fx.stack / "host.env").read_text()
+        assert "STORAGE=local\n" in host_env
+        assert "RCLONE_REMOTE=nextcloud\n" in host_env and "INGRESS=local\n" in host_env
+        assert "config.toml.pre-localize" in result.stdout
+
+    def test_a_config_the_plan_owns_is_refused_before_anything_stops(self, mounted):
+        fx = mounted
+        from istota import apply
+        (fx.stack / "config" / "config.toml").write_text(apply.CONFIG_HEADER + '[brain]\nkind = "native"\n')
+        result = fx.run("localize-workspace", STUB_LOCALIZE_CHECK_RC="1")
+        assert result.returncode == 1
+        assert "--copy-only" in result.stderr and "istota_storage: local" in result.stderr
+        calls = fx.docker_calls()
+        assert not [c for c in calls if " stop " in f"{c} " or "workspace localize " in f"{c} "], calls
+        assert "STORAGE=nextcloud\n" in (fx.stack / "host.env").read_text()
+
+    def test_copy_only_copies_and_changes_nothing_else(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", "--copy-only", STUB_LOCALIZE_CHECK_RC="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any(c.endswith(f"{self.COPY} --scheduler-stopped") for c in calls), calls
+        assert not [c for c in calls if "localize-config" in c or "config read-only" in c or " up " in f"{c} "], calls
+        assert "provision ran" not in calls
+        assert "STORAGE=nextcloud\n" in (fx.stack / "host.env").read_text()
+        assert "change the plan" in result.stdout.lower()
+
+    @pytest.mark.parametrize("rc", ["1", "3"])
+    def test_a_failed_copy_leaves_the_config_and_host_env(self, mounted, rc):
+        fx = mounted
+        result = fx.run("localize-workspace", STUB_LOCALIZE_RC=rc)
+        assert result.returncode == 1
+        assert "--resume" in result.stderr and "istota-stack up" in result.stderr
+        calls = fx.docker_calls()
+        assert "config read-only=false" not in calls
+        assert not [c for c in calls if " up " in f"{c} "], calls
+        assert "STORAGE=nextcloud\n" in (fx.stack / "host.env").read_text()
+
+    def test_skipped_entries_stop_before_the_config_without_a_terminal(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", STUB_LOCALIZE_RC="2")
+        assert result.returncode == 1
+        assert "--accept-skipped" in result.stderr
+        assert "config read-only=false" not in fx.docker_calls()
+        assert "STORAGE=nextcloud\n" in (fx.stack / "host.env").read_text()
+
+    def test_skipped_entries_go_on_when_accepted(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", "--resume", "--accept-skipped", STUB_LOCALIZE_RC="2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any(c.endswith(f"{self.COPY} --resume --scheduler-stopped") for c in calls), calls
+        assert "config read-only=false" in calls
+        assert "STORAGE=local\n" in (fx.stack / "host.env").read_text()
+
+    def test_a_dry_run_stops_nothing_and_writes_nothing(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any(c.endswith(f"{self.COPY} --dry-run") for c in calls), calls
+        assert not [c for c in calls if " stop " in f"{c} " or "localize-config" in c], calls
+        assert "STORAGE=nextcloud\n" in (fx.stack / "host.env").read_text()
+
+    def test_a_local_install_has_nothing_to_move(self, fx):
+        result = fx.run("localize-workspace")
+        assert result.returncode == 1
+        assert "STORAGE=nextcloud" in result.stderr
+        assert fx.docker_calls() == []

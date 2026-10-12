@@ -455,6 +455,18 @@ class TestTheCli:
         assert result.returncode == wl.EXIT_REFUSED
         assert "not mount mode" in result.stderr
 
+    def test_the_check_answers_without_writing(self, install):
+        before = install.read_text()
+        result = self._istota(install, "workspace", "localize-config", "--check")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "can be moved" in result.stdout
+        install.write_text(apply.CONFIG_HEADER + before)
+        result = self._istota(install, "workspace", "localize-config", "--check")
+        assert result.returncode == wl.EXIT_REFUSED
+        assert "the plan owns it" in result.stderr
+        assert install.read_text() == apply.CONFIG_HEADER + before
+        assert not (install.parent / "config.toml.pre-localize").exists()
+
     def test_skipped_entries_exit_2(self, install, mount, tmp_path):
         os.mkfifo(mount / "Groups/g1/pipe")
         result = self._istota(install, "workspace", "localize", "--from", str(mount), "--to", str(tmp_path / "local"),
