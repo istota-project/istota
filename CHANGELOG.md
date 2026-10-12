@@ -217,6 +217,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Workspace toolbar no longer grows when folder buttons appear after loading. The content below it stays in place.
+
 - File previews now place their scrollbar at the viewer’s right edge instead of over the document. Text and PDF content keep their padding inside the scrolling area.
 
 - Running `istota-stack setup --force` again with the same Nextcloud answers no longer reprovisions the VM. Setup re-encoded the app password into `rclone.conf` on every run, so the file changed each time even though nothing about the mount had. It now keeps the existing file when it already holds the same address, user and password.

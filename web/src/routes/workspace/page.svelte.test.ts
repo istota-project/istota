@@ -4,6 +4,7 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { __history } from '../../../vitest-stubs/app-navigation';
 import type { WorkspacePlace } from '$lib/api';
 import Workspace from './+page.svelte';
+import workspaceSource from './+page.svelte?raw';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 const openFile = vi.hoisted(() => vi.fn());
@@ -73,6 +74,28 @@ async function openActions(name: string) {
   const trigger = await screen.findByRole('button', { name: `Actions for ${name}` });
   await fireEvent.keyDown(trigger, { key: 'Enter' });
 }
+
+it('reserves the folder button height while the listing loads', async () => {
+  let resolve!: (value: unknown) => void;
+  api.getWorkspaceListing.mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  const { container } = render(Workspace);
+  await screen.findByRole('checkbox', { name: 'Show hidden' });
+  const actions = container.querySelector('.folder-actions');
+  expect(actions).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
+  // jsdom has no layout; pin the reserved height to the buttons' shared size.
+  expect(workspaceSource).toMatch(
+    /\.folder-actions\s*\{[^}]*min-height:\s*var\(--control-height-sm\)/,
+  );
+  resolve({ place: 'home', path: '', entries: [], truncated: false, skipped_names: 0 });
+  await screen.findByRole('button', { name: 'New folder' });
+  expect(screen.getByRole('button', { name: 'Upload' })).toBeEnabled();
+  expect(container.querySelector('.folder-actions')).toBe(actions);
+});
 
 it('keeps the standard sidebar uncluttered and shows access beside the folder path', async () => {
   const { container } = render(Workspace);
