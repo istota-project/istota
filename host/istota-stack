@@ -10,6 +10,10 @@
 #   istota-stack rollback       back to the previous tag, if its image can run the database;
 #                               reprovisions the host as update does
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
+#   istota-stack setup --web [--local]
+#                               the first setup in a browser: prints an address and a
+#                               one-use code, then installs, builds and starts the stack
+#   istota-stack setup-code     print the address and code of a setup --web in progress
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
@@ -78,6 +82,9 @@ SECRETS_DIR="${STACK}/secrets"
 # Beside .env, not in config/: root passes it to `docker compose`, and config/
 # is uid 10001's to write.
 DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
+# `setup --web`'s own files: the code, the certificate and the instructions,
+# root's alone, so everything it prints comes from a file uid 10001 cannot write.
+SETUP_DIR="${STACK}/.setup"
 LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
 ISTOTA_UID=10001
 PROJECT=istota
@@ -353,6 +360,18 @@ image_lacks_what_config_needs() {
     fi
 }
 
+# The services this stack builds whose image for the tag does not exist, one
+# per line. The set follows COMPOSE_PROFILES, so a setup that turned on a
+# profile (the browser) names a service the tag's first build never built.
+missing_service_images() {
+    local tag="$1" service ref
+    for service in $(WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" build_services); do
+        ref="istota-${service}:${tag}"
+        if [ "$service" = "$(main_service)" ]; then ref="${IMAGE}:${tag}"; fi
+        docker image inspect "$ref" >/dev/null 2>&1 || echo "$service"
+    done
+}
+
 # Keep the current and the previous tag's images, remove every other istota
 # and istota-* image (istota-istota included, which older releases built).
 prune_images() {
@@ -462,7 +481,7 @@ cmd_update() {
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
         stack_up
     else
-        log "no config yet: run \`istota-stack setup\`, then \`systemctl enable --now istota-stack\`."
+        log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
     fi
     prune_images "$tag" "$previous"
     log "now on ${tag} (previous: ${previous:-none})"
@@ -474,14 +493,18 @@ cmd_update() {
 # after the stack runs it. Last and by exec: provision.sh replaces the file bash
 # is reading this from.
 reprovision_if_changed() {
+    provision_outdated || return 0
+    log "the host's provisioning inputs changed; running ${SRC}/host/provision.sh (the stack already runs $(env_get "$ENV_FILE" ISTOTA_TAG))"
+    exec "${SRC}/host/provision.sh"
+}
+
+# Whether the checkout's provision.sh would act on inputs other than the ones
+# its last successful run recorded in .provisioned.
+provision_outdated() {
     local provision="${SRC}/host/provision.sh" digest
-    [ -x "$provision" ] || return 0
+    [ -x "$provision" ] || return 1
     digest="$("$provision" --digest 2>/dev/null || true)"
-    if [ -n "$digest" ] && [ "$digest" = "$(cat "${STACK}/.provisioned" 2>/dev/null || true)" ]; then
-        return 0
-    fi
-    log "the host's provisioning inputs changed; running ${provision} (the stack already runs $(env_get "$ENV_FILE" ISTOTA_TAG))"
-    exec "$provision"
+    [ -z "$digest" ] || [ "$digest" != "$(cat "${STACK}/.provisioned" 2>/dev/null || true)" ]
 }
 
 cmd_rollback() {
@@ -609,23 +632,36 @@ install_setup_staging() {
     fi
 }
 
-cmd_setup() {
-    local tag
-    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
-    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+# What either setup needs before the wizard runs: the directories, every secret
+# file compose declares, and an upgraded Docker install's config copied out.
+prepare_setup() {
     install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$CONFIG_DIR"
     install -d -m 0755 "$MOUNT_DIR" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
     ensure_secret_files
     copy_out_config
+}
 
-    # The wizard runs as uid 10001 and writes .env, host.env and secrets/ in its
-    # --vm-dir, so it gets a staging directory it owns; the files are moved into
-    # place as root afterwards.
+# The wizard runs as uid 10001 and writes .env, host.env and secrets/ in its
+# --vm-dir, so it gets a staging directory, handed to 10001 by the caller once
+# root has put in everything it copies; the files are moved into place as root
+# afterwards. The current .env and host.env go in, so the wizard keeps the
+# lines it does not own.
+new_staging() {
     staging="$(mktemp -d "${STACK}/.setup.XXXXXX")"
-    trap 'rm -rf "${staging:-}"' EXIT
     for f in .env host.env; do
         if [ -f "${STACK}/${f}" ]; then cp "${STACK}/${f}" "${staging}/${f}"; fi
     done
+}
+
+cmd_setup() {
+    case " $* " in *" --web "*) cmd_setup_web "$@" ;; esac
+    local tag
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    prepare_setup
+
+    trap 'rm -rf "${staging:-}"' EXIT
+    new_staging
     chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"
     # A non-interactive run takes credentials from the environment under the
     # names the daemon reads (ANTHROPIC_API_KEY, ISTOTA_NEXTCLOUD_APP_PASSWORD,
@@ -652,6 +688,249 @@ cmd_setup() {
     fi
     render_devbox_compose "$tag"
     log "written. Re-run provision.sh to pick up host.env, then \`systemctl enable --now istota-stack\`."
+}
+
+# --- setup --web --------------------------------------------------------------
+
+refuse_if_set_up() {
+    if [ -e "${CONFIG_DIR}/config.toml" ]; then
+        die "istota is already set up (${CONFIG_DIR}/config.toml exists). Change it on the admin Configuration page, or replace it with \`istota-stack setup --force\`."
+    fi
+}
+
+# flock(2) through python3, since the lock outlives the call: `take` locks
+# descriptor 8, which this shell opened and its children inherit, and a flock
+# belongs to the open file, so it is held until this shell exits. `held` asks,
+# from another process, whether someone holds it.
+SETUP_LOCK_PY='
+import fcntl, os, sys
+mode, path = sys.argv[1], sys.argv[2]
+if mode == "take":
+    fd = 8
+else:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        sys.exit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1 if mode == "take" else 0)
+if mode == "held":
+    sys.exit(1)
+# A run that finished between the open and the lock removed the file it held.
+try:
+    same = os.path.samestat(os.fstat(fd), os.stat(path, follow_symlinks=False))
+except FileNotFoundError:
+    same = False
+sys.exit(0 if same else 1)
+'
+
+setup_lock() {
+    python3 -I -c "$SETUP_LOCK_PY" "$1" "${SETUP_DIR}/lock"
+}
+
+route_source() {
+    awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+}
+
+# The address of this machine's route to the internet: IPv4, or IPv6 on a
+# machine with no IPv4 route. Empty when it has neither.
+primary_address() {
+    local addr=""
+    addr="$(ip -4 route get 1.1.1.1 2>/dev/null | route_source)" || addr=""
+    if [ -z "$addr" ]; then
+        addr="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | route_source)" || addr=""
+    fi
+    printf '%s' "$addr"
+}
+
+# The setup code, the certificate (not with --local) and the instructions, in
+# .setup/, which is root's. Sixteen random bytes, of which the first 100 bits
+# are written as four groups of five Crockford base32 characters, read off a
+# console and typed. In a subshell for the umask: every file here is 0600.
+mint_setup_files() (
+    umask 077
+    local publish="$1" local_mode="$2" code port suffix addr domain names fingerprint urls=() url
+    python3 -I -c '
+import secrets
+alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+n = int.from_bytes(secrets.token_bytes(16), "big") >> 28
+chars = "".join(alphabet[(n >> (5 * i)) & 31] for i in range(20))
+print("-".join(chars[i:i + 5] for i in range(0, 20, 5)))
+' > "${SETUP_DIR}/code"
+    code="$(cat "${SETUP_DIR}/code")"
+    port="${publish##*:}"
+    if [ -n "$local_mode" ]; then
+        suffix=":${port}"
+        if [ "$port" = 80 ]; then suffix=""; fi
+        urls=("http://localhost${suffix}/istota/setup#code=${code}")
+    else
+        suffix=":${port}"
+        if [ "$port" = 443 ]; then suffix=""; fi
+        addr="$(primary_address)"
+        domain="$(env_get "$HOST_ENV" DOMAIN)"
+        domain="${domain%%:*}"
+        names=""
+        if [ -n "$addr" ]; then
+            names="IP:${addr}"
+            case "$addr" in
+                *:*) urls+=("https://[${addr}]${suffix}/istota/setup#code=${code}") ;;
+                *) urls+=("https://${addr}${suffix}/istota/setup#code=${code}") ;;
+            esac
+        fi
+        if [ -n "$domain" ]; then
+            names="${names:+${names},}DNS:${domain}"
+            urls+=("https://${domain}${suffix}/istota/setup#code=${code}")
+        fi
+        if [ "${#urls[@]}" -eq 0 ]; then
+            urls=("https://<this server's address>${suffix}/istota/setup#code=${code}")
+        fi
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 2 -nodes \
+            -subj /CN=istota-setup -addext "subjectAltName=${names:-DNS:istota-setup}" \
+            -keyout "${SETUP_DIR}/key.pem" -out "${SETUP_DIR}/cert.pem" 2>/dev/null
+        fingerprint="$(openssl x509 -in "${SETUP_DIR}/cert.pem" -noout -fingerprint -sha256 | cut -d= -f2)"
+    fi
+    {
+        echo "Open this address in your browser to set up Istota:"
+        echo
+        for url in "${urls[@]}"; do echo "  ${url}"; done
+        echo
+        if [ -z "$local_mode" ]; then
+            echo "Your browser will warn that the connection is not private. That is expected"
+            echo "for setup. Before you continue, check that the certificate's SHA-256"
+            echo "fingerprint is:"
+            echo
+            echo "  ${fingerprint}"
+            echo
+        fi
+        echo "Setup code (if you open the page some other way): ${code}"
+    } > "${SETUP_DIR}/instructions"
+)
+
+# The setup server stopped without writing setup-done, so nothing was
+# installed. Says why, names what it wrote in the config directory, and exits
+# with its code.
+setup_did_not_finish() {
+    local rc="$1" path
+    if [ "$rc" -eq 3 ]; then
+        log "setup timed out after an hour without a request; nothing was changed on the host. Run \`istota-stack setup --web\` again."
+    else
+        log "setup did not finish; nothing was changed on the host."
+        log "If the error above says the port is already in use, run it again with ISTOTA_SETUP_PUBLISH set to a free one (0.0.0.0:8443, for example)."
+    fi
+    while IFS= read -r path; do
+        log "the setup server wrote ${path} before it stopped: remove it before setting up again."
+    done < <(find -P "$CONFIG_DIR" -maxdepth 1 ! -type d -newer "${SETUP_DIR}/code" 2>/dev/null)
+    if [ "$rc" -eq 0 ]; then rc=1; fi
+    exit "$rc"
+}
+
+# A rebuild for what the new config needs and the tag's images lack: Claude
+# Code, which only a build of every image adds, or the images of a profile the
+# setup turned on (the browser), built alone.
+build_what_setup_needs() {
+    local tag="$1" lacking missing
+    lacking="$(image_lacks_what_config_needs "$tag")"
+    if [ -n "$lacking" ]; then
+        log "${lacking}: building ${tag} again"
+        if ! build_images "$tag" || ! build_devbox_images "$tag"; then
+            die "building ${tag} failed. The config is in place; \`istota-stack update ${tag}\` builds it again."
+        fi
+        return 0
+    fi
+    missing="$(missing_service_images "$tag")"
+    [ -n "$missing" ] || return 0
+    log "building $(echo "$missing" | tr '\n' ' ')for ${tag}: the setup turned on what its first build left out"
+    # shellcheck disable=SC2086
+    if ! WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" compose build $missing; then
+        die "building $(echo "$missing" | tr '\n' ' ')for ${tag} failed. The config is in place; \`istota-stack update ${tag}\` builds it again."
+    fi
+}
+
+# `setup --web [--local]`: cmd_setup with the setup server in the middle, and
+# the steps cmd_setup leaves to the operator done after it. Never returns.
+cmd_setup_web() {
+    local local_mode="" arg tag publish inner rc=0 local_arg=()
+    for arg in "$@"; do
+        case "$arg" in
+            --web) ;;
+            --local) local_mode=1 ;;
+            *) usage >&2; exit 64 ;;
+        esac
+    done
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    refuse_if_set_up
+    if [ -n "$local_mode" ]; then
+        publish="${ISTOTA_SETUP_PUBLISH:-127.0.0.1:8080}"
+        inner=8080
+        local_arg=(--local)
+    else
+        publish="${ISTOTA_SETUP_PUBLISH:-0.0.0.0:443}"
+        inner=8443
+    fi
+    [[ "$publish" =~ ^(\[[0-9A-Fa-f:]+\]|[0-9.]+):[0-9]+$ ]] \
+        || die "ISTOTA_SETUP_PUBLISH is an address and a port (0.0.0.0:443, [::]:443), not '${publish}'."
+
+    install -d -m 0700 "$SETUP_DIR"
+    exec 8>>"${SETUP_DIR}/lock"
+    setup_lock take || die "a setup is already running: \`istota-stack setup-code\` prints its address."
+    trap 'rm -rf "${staging:-}" "$SETUP_DIR"' EXIT
+    rm -f "${SETUP_DIR}/code" "${SETUP_DIR}/cert.pem" "${SETUP_DIR}/key.pem" "${SETUP_DIR}/instructions"
+
+    prepare_setup
+    refuse_if_set_up
+    mint_setup_files "$publish" "$local_mode"
+    new_staging
+    install -m 0400 "${SETUP_DIR}/code" "${staging}/setup-code"
+    if [ -z "$local_mode" ]; then
+        install -m 0400 "${SETUP_DIR}/cert.pem" "${staging}/cert.pem"
+        install -m 0400 "${SETUP_DIR}/key.pem" "${staging}/key.pem"
+    fi
+    chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"
+    cat "${SETUP_DIR}/instructions"
+
+    ISTOTA_CONFIG_READ_ONLY=false oneshot -p "${publish}:${inner}" \
+        -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
+        "$(main_service)" istota setup --web --vm-dir /vm "${local_arg[@]}" || rc=$?
+    # Nothing running as 10001 may change staging while root reads it.
+    chown root:root "$staging"
+    chmod 0700 "$staging"
+    if [ ! -f "${staging}/setup-done" ] || [ -L "${staging}/setup-done" ]; then
+        setup_did_not_finish "$rc"
+    fi
+
+    install_setup_staging "$staging"
+    # The wizard owns .env's keys but not this script's.
+    env_set "ISTOTA_TAG=${tag}"
+    render_devbox_compose "$tag"
+    build_what_setup_needs "$tag"
+    # A first setup choosing direct ingress or Nextcloud changes what is
+    # provisioned. Run as a child, not exec'd as an update does it, because the
+    # start comes after it.
+    if provision_outdated; then
+        log "host.env changed what this host provisions; running ${SRC}/host/provision.sh"
+        "${SRC}/host/provision.sh" \
+            || die "provision.sh failed. The config is in place: fix it, run ${SRC}/host/provision.sh, then \`systemctl enable --now istota-stack\`."
+    fi
+    systemctl enable --now istota-stack
+    log "set up, and the stack is starting. The setup page goes to the sign-in page once it answers."
+    # Exit rather than return: provision.sh may have replaced this script's
+    # file, and bash reads the rest of a script from the file as it goes. The
+    # EXIT trap removes staging and .setup/.
+    exit 0
+}
+
+cmd_setup_code() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    if [ ! -d "$SETUP_DIR" ] || ! setup_lock held; then
+        die "no setup in progress. \`istota-stack setup --web\` starts one."
+    fi
+    if [ ! -s "${SETUP_DIR}/instructions" ]; then
+        die "a setup is starting; run this again in a moment."
+    fi
+    cat "${SETUP_DIR}/instructions"
 }
 
 cmd_apply() {
@@ -825,7 +1104,7 @@ cmd_put_files() {
 cmd_up() {
     # Without a config the entrypoint refuses, and the restart policy would
     # loop on it; say what to do instead.
-    [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml yet: run \`istota-stack setup\` first."
+    [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml yet: set istota up first, in a browser with \`istota-stack setup --web\` or \`systemctl start istota-setup\`, or in the terminal with \`istota-stack setup\`."
     load_apparmor || die "the AppArmor profile did not load; the stack was not started."
     stack_up
     # The first certificate: nginx serves the ACME challenge on port 80 from its
@@ -962,6 +1241,7 @@ main() {
         update) cmd_update "$@" ;;
         rollback) cmd_rollback "$@" ;;
         setup) cmd_setup "$@" ;;
+        setup-code) cmd_setup_code "$@" ;;
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
