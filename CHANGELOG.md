@@ -189,6 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The admin dashboard's backup count and last-backup time are real again.** They read a backup layout that only the removed bare-metal deployment wrote, so every current install showed 0 backups and no last backup while backups were being taken. They now report the daily database snapshots: how many dated snapshots are kept, and when the last successful one ran.
+
 - **`istota-stack rollback` puts the host's scripts and units back too.** It returned the stack to the previous release but left `istota-stack` itself, the systemd units and the host scripts at the newer one. Like an update, a rollback now runs the restored checkout's `host/provision.sh` when the host's provisioning inputs differ from the last run.
 
 - Turning off an optional part of the stack, such as the browser, now stops it. Its container kept running after the change, unwatched and still holding memory, until it was removed by hand; the next start or update of the stack now removes it.
