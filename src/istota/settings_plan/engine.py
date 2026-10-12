@@ -237,11 +237,13 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     context.units.clear()
     from istota.settings_plan.profiles import plan_profile
     from istota.settings_plan.resources import plan_resources
+    from istota.settings_plan.briefings import plan_schedules
 
     context.config = None
     context.profiles.clear()
     context.profile_claims.clear()
-    planners = {"config": _plan_config, "profile": plan_profile, "resources": plan_resources, **context.planners}
+    planners = {"config": _plan_config, "profile": plan_profile, "resources": plan_resources,
+                "briefings": plan_schedules, **context.planners}
     sections = []
     if plan.config is not None:
         sections.append(("config", None))

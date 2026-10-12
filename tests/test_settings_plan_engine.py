@@ -86,11 +86,17 @@ def test_stale_state_stops_even_continue_on_error(store, tmp_path):
 
 def test_late_preflight_refusal_cannot_write_config(tmp_path):
     context = engine.Context(tmp_path / "config.toml")
-    plan = parse_plan({"config": {"bot_name": "After"}, "users": {"alice": {"briefings": []}}})
+    context.config_path.write_text("")
+
+    def refuse(plan, user, context, options):
+        raise engine.ExecutionError("validation_error", ["users", user, "briefings"])
+
+    context.planners = {"profile": lambda *args: None, "briefings": refuse}
+    plan = parse_plan({"config": {"scheduler": {"poll_interval": 5}}, "users": {"alice": {"briefings": []}}})
     with pytest.raises(engine.ExecutionError) as exc:
         engine.build_plan(plan, context, context.options)
-    assert exc.value.code == "unsupported_section"
-    assert not context.config_path.exists()
+    assert exc.value.code == "validation_error"
+    assert context.config_path.read_text() == ""
 
 
 @pytest.mark.parametrize("continue_on_error", [False, True])
