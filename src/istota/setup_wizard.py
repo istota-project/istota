@@ -1035,6 +1035,11 @@ def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None
     """Run the setup wizard. Returns a process exit code (0 = success)."""
     import shutil as _shutil
 
+    if getattr(args, "web", False) or getattr(args, "local", False):
+        from .webui import setup_app  # noqa: PLC0415 - FastAPI only for the web setup
+
+        return setup_app.serve(args, out=out)
+
     if setup_shape(args) == "container":
         return run_container_setup(
             args, input_fn=input_fn, out=out,

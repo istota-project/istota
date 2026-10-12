@@ -4918,6 +4918,14 @@ def main():
         "--profile", action="append",
         help="Compose profile to enable: browser, signaling, location, whatsapp-baileys (repeatable)",
     )
+    setup_parser.add_argument(
+        "--web", action="store_true",
+        help="Run the first-run setup in a browser instead (container; needs --vm-dir)",
+    )
+    setup_parser.add_argument(
+        "--local", action="store_true",
+        help="With --web: plain HTTP on port 8080, for a page opened on this machine",
+    )
 
     # serve (combined local launcher: scheduler + web in one process)
     serve_parser = subparsers.add_parser(
