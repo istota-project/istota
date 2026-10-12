@@ -2324,7 +2324,7 @@ def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out
 def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out) -> None:
     """Write everything a set of answers decides, for either front end.
 
-    ``config.toml``, ``admins`` and the master key under ``data_dir``; with a
+    ``config.toml``, ``admins``, ``managed.json`` and the master key under ``data_dir``; with a
     ``vm_dir``, the credential files and the staged ``.env`` and ``host.env``,
     plus ``rclone.conf`` when the answers use Nextcloud.
     Validation is the caller's: this writes what it is given.

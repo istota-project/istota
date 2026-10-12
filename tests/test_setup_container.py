@@ -12,12 +12,13 @@ import re
 import stat
 import tomllib
 from pathlib import Path
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from istota import setup_wizard
+from istota import apply, setup_wizard
 from istota.config import load_config
 from istota.lib import rclone_conf
 from istota.setup_wizard import (
@@ -900,9 +901,11 @@ class TestOneWriterForBothFrontEnds:
     def test_the_same_answers_write_the_same_bytes(
         self, tmp_path, monkeypatch, _no_credentials_in_env, flags, env, payload,
     ):
-        # The session key, the master key and rclone.conf's IV are the generated values.
+        # The session key, the master key and rclone.conf's IV are the generated
+        # values, and managed.json's stamp the clock's.
         monkeypatch.setattr(setup_wizard.secrets, "token_hex", lambda n: "k" * (2 * n))
         monkeypatch.setattr(rclone_conf, "_new_iv", lambda: b"i" * 16)
+        monkeypatch.setattr(apply, "_utc_now", lambda: datetime(2026, 10, 12, tzinfo=timezone.utc))
         for name, value in env.items():
             monkeypatch.setenv(name, value)
         terminal = setup_wizard.collect_container_answers(
@@ -920,8 +923,8 @@ class TestOneWriterForBothFrontEnds:
 
         terminal_files = _written(tmp_path / "terminal")
         assert {
-            "data/config/config.toml", "data/config/admins", "data/.secret_key",
-            "vm/.env", "vm/host.env",
+            "data/config/config.toml", "data/config/admins", "data/config/managed.json",
+            "data/.secret_key", "vm/.env", "vm/host.env",
         } | {f"vm/secrets/{name}" for name in SECRET_NAMES} | (
             {"vm/rclone.conf"} if terminal.uses_nextcloud else set()
         ) == set(terminal_files)
