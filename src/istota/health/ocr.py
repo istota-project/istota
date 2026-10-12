@@ -61,11 +61,11 @@ def _resolve_source_file(ctx: HealthContext, panel: Panel) -> Path | None:
 
 def _pdftotext(path: Path) -> str | None:
     if not shutil.which("pdftotext"):
-        # Not silent: without poppler every PDF drops to the slower vision
-        # path, and nothing else on this route would say why.
+        # Not silent: without poppler every PDF drops to a fallback, and
+        # nothing else on the route would say why.
         logger.warning(
             "health_pdftotext_missing path=%s: install poppler-utils; "
-            "falling back to vision-mode extraction", path,
+            "PDF text extraction is unavailable", path,
         )
         return None
     try:

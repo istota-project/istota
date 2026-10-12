@@ -308,12 +308,6 @@ def check_pdf_tools(config: "Config", probe: bool) -> CheckResult:
     Presence only, so it spawns nothing under either ``probe``.
     """
     name = "runtime.pdf_tools"
-    from istota.modules import module_available
-
-    if not module_available("health"):
-        return CheckResult(
-            name, SKIP, "the health module's dependencies are not installed", scope=IMAGE
-        )
     missing = [b for b in ("pdftotext", "pdftoppm") if shutil.which(b) is None]
     if missing:
         return CheckResult(
