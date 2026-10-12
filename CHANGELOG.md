@@ -177,6 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Turning off an optional part of the stack, such as the browser, now stops it. Its container kept running after the change, unwatched and still holding memory, until it was removed by hand; the next start or update of the stack now removes it.
+
 - The admin Health pane shows the daemon's own checks. On the Docker stack it ran them in the web container, which has none of the daemon's sandbox settings, so it reported the sandbox, credential isolation and devbox checks failing on a stack whose tasks were sandboxed. Re-run and deep checks now ask the daemon, which answers on its next tick, and the page says when each result was taken.
 
 - On the containerized stack, Google Workspace commands run again and developer tasks can commit again (#695). The image shipped without the `gws` and `gitleaks` binaries, so every Google Workspace call failed with a traceback and the pre-commit secret scan refused every unattended commit. Both are now in the image at pinned, checksum-verified versions, `istota doctor` reports either one missing where it is needed, and a missing `gws` gives a clear error instead of a crash.

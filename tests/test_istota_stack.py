@@ -49,6 +49,7 @@ case "$args" in
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
     else echo '{"services": {}}'; fi ;;
+  *" ps -a --filter label=com.docker.compose.project=istota "*) printf '%b' "${STUB_PROJECT_CONTAINERS:-}" ;;
   *" ps -q daemon"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
@@ -661,6 +662,43 @@ class TestApply:
         assert result.returncode == 2, result.stdout + result.stderr
         calls = fx.docker_calls()
         assert not any(call.endswith(" restart") or " up " in f"{call} " for call in calls), calls
+
+
+class TestAProfileTurnedOffStopsItsService:
+    """Compose leaves a container running when its service's profile is no
+    longer active: `down` and `up --remove-orphans` both count it as defined.
+    Found by the vm tier with the browser profile (ISTOTA_VM_CONTROL unset,
+    `tests/vm/test_management_role.py`)."""
+
+    CONTAINERS = "c-daemon daemon\\nc-web web\\nc-browser browser\\n"
+
+    def test_up_removes_the_container_of_a_service_no_profile_names(self, fx):
+        result = fx.run("up", STUB_PROJECT_CONTAINERS=self.CONTAINERS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        up = next(i for i, call in enumerate(calls) if call.endswith("up -d --remove-orphans"))
+        removed = [i for i, call in enumerate(calls) if call.startswith("rm -f ")]
+        assert [calls[i] for i in removed] == ["rm -f c-browser"], calls
+        assert removed[0] > up
+
+    def test_a_config_change_does_the_same(self, fx, tmp_path):
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_PROJECT_CONTAINERS=self.CONTAINERS)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "rm -f c-browser" in fx.docker_calls()
+
+    def test_an_update_does_the_same(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", STUB_PROJECT_CONTAINERS=self.CONTAINERS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "rm -f c-browser" in fx.docker_calls()
+
+    def test_nothing_is_removed_when_every_service_is_active(self, fx):
+        result = fx.run("up", STUB_PROJECT_CONTAINERS="c-daemon daemon\\nc-web web\\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not [call for call in fx.docker_calls() if call.startswith("rm ")]
 
 
 class TestImportBareMetal:
