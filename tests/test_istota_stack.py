@@ -1055,6 +1055,26 @@ class TestTheStackFilesAreCopiedOut:
         assert result.returncode == 0, result.stdout + result.stderr
         assert "ISTOTA_TAG=v1\n" in (self._copied(mounted) / "stack.env").read_text()
 
+    def test_a_vm_with_no_config_keeps_the_days_set(self, mounted):
+        """The Mac's restore runs `create --no-setup`, whose update runs on a
+        new VM with no config: its tag-only `.env` and bare `host.env` must
+        not replace the set the old VM copied in that day, which the restore
+        is about to read."""
+        (mounted.stack / "config" / "config.toml").unlink()
+        day = self._copied(mounted)
+        day.mkdir(parents=True)
+        old_stack_env = "COMPOSE_PROFILES=browser\nNGINX_PUBLISH=127.0.0.1:8080\nISTOTA_TAG=v0\n"
+        old_host_env = "STORAGE=host-folder\nHOST_LOOPBACK_ALLOW=11434\nCLAUDE_CODE_VERSION=2.1.296\n"
+        (day / "stack.env").write_text(old_stack_env)
+        (day / "host.env").write_text(old_host_env)
+        mounted.commit("v1")
+        mounted.tag("v1", key=mounted.release_key)
+        result = mounted.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in mounted.env_text()
+        assert (day / "stack.env").read_text() == old_stack_env
+        assert (day / "host.env").read_text() == old_host_env
+
     def test_a_dry_run_apply_copies_them_too(self, mounted, tmp_path):
         """Nothing in either file changes under apply; the copy is what keeps
         the newest set within the snapshots' retention."""

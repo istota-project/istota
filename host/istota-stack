@@ -1153,7 +1153,9 @@ cmd_import_standalone() {
 # the workspace is a mount, db_backup's rule: the rclone mount, or a host folder
 # with its marker. Run as uid 10001, whose the workspace is, through directory
 # fds that follow no link. Best-effort: a failure is a warning, never the
-# calling verb's. Called by update, setup and apply.
+# calling verb's. Called by update, setup and apply. Nothing is copied before
+# setup has written config.toml: the Mac's restore runs update on a new VM,
+# whose bare .env and host.env would replace the day's set it is about to read.
 COPY_STACK_ENV_PY='
 import os, sys
 root, date, pairs = sys.argv[1], sys.argv[2], sys.argv[3:]
@@ -1190,6 +1192,7 @@ copy_stack_env_out() {
     local storage day drop=()
     storage="$(env_get "$HOST_ENV" STORAGE)"
     case "$storage" in host-folder|nextcloud) ;; *) return 0 ;; esac
+    [ -f "${CONFIG_DIR}/config.toml" ] || return 0
     mountpoint -q "$MOUNT_DIR" 2>/dev/null || return 0
     if [ "$storage" = host-folder ] \
             && { [ -L "${MOUNT_DIR}/.istota-workspace" ] || [ ! -f "${MOUNT_DIR}/.istota-workspace" ]; }; then
