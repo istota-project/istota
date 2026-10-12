@@ -1896,6 +1896,7 @@ WEB_SETUP_FIELDS: dict[str, type] = {
     "listen_port": int,
     "tls_cert_source": str,
     "storage": str,
+    "workspace": str,
     "nextcloud_url": str,
     "nextcloud_public_url": str,
     "nextcloud_username": str,
@@ -1986,6 +1987,13 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
         a.nextcloud_username = text("nextcloud_username") or "istota"
         a.nextcloud_app_password = text("nextcloud_app_password")
         a.talk_enabled = values.get("talk_enabled", True)
+        # The terminal's `--yes` answers: the mount, its root as the bot
+        # folder, shared back; a local workspace has nothing in Nextcloud to share.
+        a.workspace = text("workspace") or "mount"
+        if a.workspace not in WORKSPACE_CHOICES:
+            errors.append(FieldError("workspace", f"Unknown workspace {a.workspace!r}; use mount or local."))
+        elif a.workspace == "local":
+            a.nextcloud_auto_share_bot_dir = False
 
     a.brain_kind = text("brain_kind") or "claude_code"
     if a.brain_kind == "native":

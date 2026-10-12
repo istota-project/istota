@@ -1041,6 +1041,23 @@ class TestFinish:
             "config": (False, "setup"), "secrets": (False, "setup"), "admins": (False, "setup"),
         }
 
+    def test_nextcloud_with_a_local_workspace_writes_no_mount(self, unlocked, dirs):
+        _app, client = unlocked
+        _draft(client, **{
+            **READY, "storage": "nextcloud", "workspace": "local",
+            "nextcloud_url": "https://cloud.example.com", "nextcloud_username": "istota",
+            "nextcloud_app_password": "nc-app-password", "user_id": "alice", "talk_enabled": True,
+        })
+        resp = _finish(client)
+        assert resp.status_code == 200, resp.text
+
+        host_env = (dirs.vm_dir / "host.env").read_text()
+        assert "STORAGE=local" in host_env.splitlines()
+        assert not (dirs.vm_dir / "rclone.conf").exists()
+        config = (dirs.data_dir / "config" / "config.toml").read_text()
+        assert "https://cloud.example.com" in config
+        assert "nextcloud_mount_path" not in config
+
     def test_the_first_admin_can_sign_in(self, unlocked, dirs):
         _app, client = unlocked
         _draft(client, **READY)
@@ -1510,6 +1527,7 @@ _REFUSALS = [
     ({"listen_port": "eighty"}, "listen_port"),
     ({"storage": "attic"}, "storage"),
     ({"storage": "nextcloud"}, "nextcloud_url"),
+    ({**NEXTCLOUD, "workspace": "attic"}, "workspace"),
     ({"talk_enabled": "yes"}, "talk_enabled"),
     ({"brain_kind": "oracle"}, "brain_kind"),
     ({"brain_kind": "native"}, "native_model"),

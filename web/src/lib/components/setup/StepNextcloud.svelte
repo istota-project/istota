@@ -7,6 +7,7 @@
   import { deriveUsername, runSetupCheck, type SetupDraftStore } from './setupDraft.svelte';
 
   type Storage = 'local' | 'nextcloud';
+  type Workspace = 'mount' | 'local';
 
   interface Props {
     draft: SetupDraftStore;
@@ -27,7 +28,20 @@
     {
       value: 'nextcloud',
       title: 'Use my Nextcloud',
-      description: 'Istota becomes a user on your Nextcloud, works in its files and chats in Talk.',
+      description: 'Istota becomes a user on your Nextcloud and chats in Talk.',
+    },
+  ];
+
+  const WORKSPACE_OPTIONS = [
+    {
+      value: 'mount',
+      title: 'In its Nextcloud files',
+      description: 'Istota works in its Nextcloud account’s files and shares its folder with you.',
+    },
+    {
+      value: 'local',
+      title: 'On this server',
+      description: 'Istota keeps its files here, and you see them in the web app.',
     },
   ];
 
@@ -50,6 +64,10 @@
     return draft.text('storage') === 'nextcloud' ? 'nextcloud' : 'local';
   }
 
+  function workspaceOf(): Workspace {
+    return draft.text('workspace') === 'local' ? 'local' : 'mount';
+  }
+
   // The address under More, only when it differs from the one browsers use.
   function internalOf(): string {
     const browsers = draft.text('nextcloud_public_url');
@@ -63,6 +81,7 @@
   }
 
   let storage = $state<Storage>(storageOf());
+  let workspace = $state<Workspace>(workspaceOf());
   let internal = $state(internalOf());
   let talkAvailable = $state(talkFound());
   let testing = $state(false);
@@ -86,6 +105,7 @@
       draft.scratch[LOCAL_USERNAME] = draft.text('user_id');
       draft.set('user_id', '');
       draft.setDefault('nextcloud_username', 'istota');
+      draft.setDefault('workspace', 'mount');
       if (!talkAvailable) draft.set('talk_enabled', false);
     } else {
       draft.set(
@@ -235,7 +255,9 @@
           />
           <Field
             label="Your own Nextcloud username"
-            hint="Istota shares its folder with this account and invites it to chats."
+            hint={workspace === 'local'
+              ? 'Istota invites this account to chats.'
+              : 'Istota shares its folder with this account and invites it to chats.'}
             error={shown.user_id}
           >
             <Input
@@ -263,6 +285,15 @@
               />
             </Field>
           {/if}
+          <OptionCards
+            label="Where Istota keeps its files with Nextcloud"
+            options={WORKSPACE_OPTIONS}
+            value={workspace}
+            onchange={(value) => {
+              workspace = value as Workspace;
+              draft.set('workspace', workspace);
+            }}
+          />
           <SetupMore open={!!(internal && shown.nextcloud_url)}>
             <Field
               label="Address this server uses to reach Nextcloud"

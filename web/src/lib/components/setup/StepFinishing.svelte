@@ -19,10 +19,12 @@
     subscription: boolean;
     /** Reached at its own web address, so a certificate has to be issued first. */
     internet: boolean;
-    nextcloud: boolean;
+    /** The workspace is the VM's rclone mount of the bot's Nextcloud files. */
+    nextcloudMount: boolean;
   }
 
-  let { botName, loginUrl, email, browser, subscription, internet, nextcloud }: Props = $props();
+  let { botName, loginUrl, email, browser, subscription, internet, nextcloudMount }: Props =
+    $props();
 
   let ready = $state(false);
   let longWait = $state(false);
@@ -102,7 +104,8 @@
         <p>
           On the server, run <code>sudo istota-stack status</code> to see what {botName} is doing.
           {#if internet}<code>journalctl -u istota-certbot</code> shows the certificate request.{/if}
-          {#if nextcloud}<code>journalctl -u mount-nextcloud</code> shows the connection to your Nextcloud.{/if}
+          {#if nextcloudMount}<code>journalctl -u mount-nextcloud</code> shows the connection to your
+            Nextcloud.{/if}
           This page keeps checking.
         </p>
       {/snippet}

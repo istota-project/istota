@@ -868,6 +868,25 @@ class TestThePayload:
             setup_wizard.answers_from_payload({**_WEB_BASE, "storage": "nextcloud"})
         assert raised.value.errors[0].field == "nextcloud_url"
 
+    def test_nextcloud_keeps_the_workspace_on_the_mount_unless_told(self, _no_credentials_in_env):
+        nextcloud = {**_WEB_BASE, "storage": "nextcloud", "nextcloud_url": "https://cloud.example.test"}
+        mount = setup_wizard.answers_from_payload(nextcloud)
+        local = setup_wizard.answers_from_payload({**nextcloud, "workspace": "local"})
+
+        assert mount.workspace_is_mount is True
+        assert mount.nextcloud_auto_share_bot_dir is True
+        assert local.uses_nextcloud is True
+        assert local.workspace_is_mount is False
+        assert local.nextcloud_auto_share_bot_dir is False
+
+    def test_an_unknown_workspace_is_a_field_error(self):
+        with pytest.raises(setup_wizard.PayloadError) as raised:
+            setup_wizard.answers_from_payload({
+                **_WEB_BASE, "storage": "nextcloud",
+                "nextcloud_url": "https://cloud.example.test", "workspace": "attic",
+            })
+        assert [e.field for e in raised.value.errors] == ["workspace"]
+
     def test_a_null_is_an_unanswered_question(self, _no_credentials_in_env):
         a = setup_wizard.answers_from_payload({**_WEB_BASE, "bot_name": None, "timezone": None})
         assert (a.bot_name, a.timezone) == ("Istota", "UTC")
@@ -902,6 +921,15 @@ _SHAPES = [
          "nextcloud_app_password": "nc-pass", "talk_enabled": True,
          "email_enabled": True, "imap_host": "imap.example.test",
          "imap_user": "zed@example.test", "imap_password": "imap-pass"},
+    ),
+    (
+        "nextcloud-local-workspace",
+        {"nextcloud_url": "https://cloud.example.test/", "nextcloud_user": "zed-bot",
+         "workspace": "local"},
+        {"ISTOTA_BRAIN_NATIVE_API_KEY": "native-key", "ISTOTA_NEXTCLOUD_APP_PASSWORD": "nc-pass"},
+        {**_WEB_BASE, "storage": "nextcloud", "workspace": "local",
+         "nextcloud_url": "https://cloud.example.test/", "nextcloud_username": "zed-bot",
+         "nextcloud_app_password": "nc-pass", "talk_enabled": True},
     ),
     (
         "proxied-subscription",
@@ -1064,7 +1092,7 @@ class TestOneWriterForBothFrontEnds:
             "data/config/config.toml", "data/config/admins", "data/config/managed.json",
             "data/.secret_key", "vm/.env", "vm/host.env",
         } | {f"vm/secrets/{name}" for name in SECRET_NAMES} | (
-            {"vm/rclone.conf"} if terminal.uses_nextcloud else set()
+            {"vm/rclone.conf"} if terminal.workspace_is_mount else set()
         ) == set(terminal_files)
         assert _written(tmp_path / "web") == terminal_files
 
