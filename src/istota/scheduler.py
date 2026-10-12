@@ -153,6 +153,7 @@ from istota.notifications.store import (
     sweep_retention,
 )
 from istota.notifications.delivery import effective_log_destinations, send_notification
+from istota.sandbox import process_group
 from istota.sandbox.process_group import kill_group_if_live
 from istota.sandbox.host_paths import owner_path_parts, path_under_roots
 from .session.session_log import (
@@ -10637,6 +10638,10 @@ def run_daemon(
     lock_file.write(str(os.getpid()))
     lock_file.flush()
 
+    # The worker pids this process records are in its own PID namespace, so
+    # the cancel paths may signal them here and nowhere else (ISSUE-701).
+    process_group.own_task_pids(True)
+
     # Set up signal handlers (main-thread only; the serve launcher opts out).
     if install_signal_handlers:
         signal.signal(signal.SIGTERM, _signal_handler)
@@ -10995,6 +11000,7 @@ def run_daemon(
         logger.warning("Error stopping persistent asyncio runtime: %s", e)
 
     # Release lock on shutdown
+    process_group.own_task_pids(False)
     fcntl.flock(lock_file, fcntl.LOCK_UN)
     lock_file.close()
 

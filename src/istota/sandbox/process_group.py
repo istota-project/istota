@@ -23,6 +23,16 @@ alone, which is what a cancel wants. ClaudeCodeBrain's non-streaming child is
 the writer that does *not* lead a group: it reports its pid since ISSUE-550,
 and the fallback is what signals it alone rather than the daemon's group.
 
+**A recorded ``worker_pid`` is signalled only by the process that runs the
+scheduler** (ISSUE-701). The pid is a number in the scheduler's PID namespace.
+On the Docker stack the web app is another container with its own namespace,
+where uvicorn is PID 1, so the same number there names nothing or a web-side
+process running as the same uid. `signal_task_worker` is the one entry for the
+cancel paths: it signals only once `run_daemon` has called `own_task_pids`
+under its singleton lock, which covers the daemon and the single-process
+`istota serve`. Anywhere else the cancel rests on `cancel_requested`, which the
+scheduler's cancel check reads.
+
 stdlib-only leaf so any module can import it without a cycle. Never raises.
 """
 
@@ -32,9 +42,43 @@ import logging
 import os
 import signal
 
-__all__ = ["kill_group_if_live", "kill_process_group"]
+__all__ = [
+    "kill_group_if_live",
+    "kill_process_group",
+    "own_task_pids",
+    "signal_task_worker",
+    "task_pids_are_local",
+]
 
 logger = logging.getLogger(__name__)
+
+_task_pids_are_local = False
+
+
+def own_task_pids(owned: bool) -> None:
+    """Record whether this process runs the scheduler that writes `worker_pid`.
+
+    `run_daemon` sets it once it holds the daemon lock and clears it before
+    releasing the lock.
+    """
+    global _task_pids_are_local
+    _task_pids_are_local = owned
+
+
+def task_pids_are_local() -> bool:
+    return _task_pids_are_local
+
+
+def signal_task_worker(pid: int, sig: int = signal.SIGTERM) -> str:
+    """Signal a task's recorded `worker_pid`, if it is this process's to signal.
+
+    Returns ``"elsewhere"`` without signalling when this process is not the
+    scheduler, else what `kill_process_group` returns. Never raises.
+    """
+    if not _task_pids_are_local:
+        logger.debug("signal_task_worker pid=%s skipped: not the scheduler process", pid)
+        return "elsewhere"
+    return kill_process_group(pid, sig)
 
 
 def kill_process_group(pid: int, sig: int = signal.SIGKILL) -> str:

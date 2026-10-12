@@ -27,7 +27,7 @@ from .brain import (
     room_selectable_kinds,
 )
 from .memory import search as memory_search_mod
-from istota.sandbox.process_group import kill_process_group
+from istota.sandbox.process_group import signal_task_worker
 from .config import Config
 # The static room-model table: a stdlib-only leaf importing nothing, so it
 # costs this module — which is imported on the Talk polling path — nothing.
@@ -643,8 +643,10 @@ def _cancel_one(ctx: CommandContext, task_id: int) -> str:
         # recorded pid that is somebody else's child can never resolve to their
         # group. The streaming CLI child and a tmux pane lead their groups, so
         # a tmux `!stop` takes the pane's whole command tree; the non-streaming
-        # CLI child does not, and is signalled alone.
-        kill_process_group(pid_row["worker_pid"], signal.SIGTERM)
+        # CLI child does not, and is signalled alone. Only the scheduler's own
+        # process signals: from the web container the pid is another PID
+        # namespace's, and `cancel_requested` carries the stop (ISSUE-701).
+        signal_task_worker(pid_row["worker_pid"], signal.SIGTERM)
 
     return f"Cancelling task #{task_id}: {label}"
 
