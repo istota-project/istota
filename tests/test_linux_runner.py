@@ -227,6 +227,52 @@ class TestTheLinuxTierCannotSilentlySkip:
         assert "no bwrap here" in str(excinfo.value)
 
 
+def _driver_pytest_argv(*user_args: str) -> list[str]:
+    """The `pytest_args` array the driver builds, evaluated by bash itself."""
+    body = DRIVER.read_text()
+    lines = [
+        line for line in body.splitlines()
+        if line.startswith("default_markers=") or line.startswith("pytest_args=")
+    ]
+    assert len(lines) == 2, f"expected one default_markers= and one pytest_args= line, got {lines}"
+    script = "\n".join(["set -euo pipefail", *lines, 'printf "%s\\0" "${pytest_args[@]}"'])
+    result = subprocess.run(
+        ["bash", "-c", script, "test-linux.sh", *user_args],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.split("\0")[:-1]
+
+
+class TestTheRunnerDropsPassingTmpPaths:
+    """ISSUE-707: the container's `/tmp` is a tmpfs sized from host memory.
+
+    pytest keeps every `tmp_path` for the session by default, and the suite
+    makes about 22,000 of them at about 1.2 MB each, so the tmpfs filled with
+    ENOSPC a few minutes in. The driver keeps only failed tests' directories.
+    The default suite's own config is left alone; `/tmp` there is a disk.
+    """
+
+    def test_the_driver_sets_retention_to_failed(self):
+        argv = _driver_pytest_argv()
+        pairs = list(zip(argv, argv[1:]))
+        assert ("-o", "tmp_path_retention_policy=failed") in pairs, argv
+
+    def test_a_user_override_still_wins(self):
+        """`-o` is last-wins, so the setting must come before the user's args."""
+        argv = _driver_pytest_argv("-o", "tmp_path_retention_policy=all")
+        assert argv.index("tmp_path_retention_policy=failed") < argv.index(
+            "tmp_path_retention_policy=all"
+        )
+
+    def test_pytest_knows_the_option(self, pytestconfig):
+        """The pinned pytest has the ini key; an unknown `-o` key is only a warning.
+
+        A version guard, not the regression test: the two above read the driver.
+        """
+        assert pytestconfig.getini("tmp_path_retention_policy") in {"all", "failed", "none"}
+
+
 class TestRunnerImagePinsItsToolchain:
     """An unpinned tool in the image decides, on its own schedule, that the
     tier is broken. Both of these gate the run: `uv` resolves the dependencies

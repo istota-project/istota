@@ -425,7 +425,13 @@ fi
 # off by default — and it reads the first `default_markers=` in the file, so
 # there must never be a second one inside a branch for it to fall behind.
 default_markers='linux or (not integration and not live and not image and not smoke and not full and not testbed and not deploy and not vm and not ml)'
-pytest_args=(-m "$default_markers" "$@")
+#
+# tmp_path_retention_policy=failed because container mode's /tmp is a tmpfs
+# sized from the host's memory, and pytest otherwise keeps every test's
+# tmp_path for the session: ~22,000 directories filled it with ENOSPC a few
+# minutes in (ISSUE-707). Shared with native mode on purpose: Debian's /tmp
+# is a RAM-sized tmpfs too. Before "$@", so a user's own `-o` still wins.
+pytest_args=(-m "$default_markers" -o tmp_path_retention_policy=failed "$@")
 
 # ---------------------------------------------------------------------------
 # Container mode.

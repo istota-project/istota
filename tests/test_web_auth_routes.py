@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections import OrderedDict
 import re
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock
@@ -38,6 +39,10 @@ def configured(db_path, monkeypatch):
                     admin_users={"alice"})
     monkeypatch.setattr(mod, "_config", config)
     monkeypatch.setattr(mod.app.state, "istota_config", config, raising=False)
+    # Both are process state keyed on the db path, and a tmp_path name is
+    # reused once the previous test's directory is removed (ISSUE-707).
+    monkeypatch.setattr(mod, "_login_ingress", OrderedDict())
+    monkeypatch.setattr(mod, "_mail_link_pending", set())
     oauth = MagicMock()
     oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
     monkeypatch.setattr(mod, "_oauth", oauth)
