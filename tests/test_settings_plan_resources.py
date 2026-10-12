@@ -144,3 +144,27 @@ def test_upserts_and_prune_rollback_together(install):
     result = engine.execute_plan(operations, context)
     assert result.exit_code == 1 and not result.changed
     assert [r.resource_path for r in rows(install)] == ["/Old"]
+
+
+@pytest.mark.parametrize("literal", ["2026-01-01", "12:34:56", "2026-01-01T12:34:56Z"])
+def test_toml_temporal_extra_refused_before_profile_write(install, tmp_path, literal):
+    from istota import apply
+
+    config, database = install
+    plan = tmp_path / "plan.toml"
+    plan.write_text(
+        '[users.alice.profile]\ndisplay_name = "Changed"\n'
+        '[[users.alice.resources]]\ntype = "folder"\npath = "/Documents"\n'
+        f'extra = {{date = {literal}}}\n'
+    )
+    before = database.read_bytes()
+    checked, output, errors = [], [], []
+    assert apply.check(plan, as_json=True, out=checked.append, err=errors.append) == 1
+    assert json.loads(checked[0])["problems"][0]["path"] == [
+        "users", "alice", "resources", 0, "extra", "date"]
+    assert apply.run(plan, config, dry_run=False, output_format="json",
+                     out=output.append, err=errors.append) == 1
+    report = json.loads(output[0])
+    assert not report["changed"] and not report["partial"]
+    assert database.read_bytes() == before
+    assert user_profiles.get_profile(database, "alice").display_name != "Changed"

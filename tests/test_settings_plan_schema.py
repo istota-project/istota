@@ -223,3 +223,30 @@ def test_syntax_errors_have_a_location_but_no_input_excerpt(raw):
         apply.load_plan("-", stdin=io.StringIO(raw))
     assert "line" in str(caught.value) and "column" in str(caught.value)
     assert "private-value" not in str(caught.value)
+
+
+@pytest.mark.parametrize("section", ["options", "source", "shared"])
+def test_json_backed_definitions_reject_nested_temporal_values(section):
+    from datetime import date
+    from istota.settings_plan.schema import SchemaError, parse_plan
+
+    value = {"nested": [date(2026, 1, 1)]}
+    if section == "shared":
+        document = {"shared_briefing_blocks": [{"name": "news", "sources": [
+            {"kind": "browse", "config": value}]}]}
+    else:
+        block = {"options": value} if section == "options" else {
+            "sources": [{"kind": "calendar", "config": value}]}
+        document = {"users": {"alice": {"briefings": [{"name": "daily", "blocks": [block]}]}}}
+    with pytest.raises(SchemaError) as caught:
+        parse_plan(document)
+    assert caught.value.problem["path"][-2:] == ["nested", 0]
+    assert "2026" not in str(caught.value)
+
+
+def test_config_keeps_native_toml_date_values():
+    from datetime import date
+    from istota.settings_plan.schema import parse_plan
+
+    document = {"custom": {"date": date(2026, 1, 1)}}
+    assert parse_plan({"config": document}).config == document

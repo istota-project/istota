@@ -451,3 +451,23 @@ def test_cli_creates_schedule_and_content_then_reapplies_unchanged(install, tmp_
     with bdb.connect(module_path(install)) as conn:
         block, = bdb.list_blocks(conn, "morning")
         assert block.sources[0].kind == "calendar"
+
+
+@pytest.mark.parametrize("output", ["talk:talk-alice", "email,talk:talk-alice"])
+def test_explicit_talk_destination_updates_without_redundant_token(install, output):
+    with db.get_db(install[1]) as conn:
+        db.register_room(conn, "private-alice", "alice", origin="web")
+        db.add_room_binding(conn, "private-alice", "talk", "talk-alice")
+    row = schedule(install, output=output, conversation_token="")
+    declaration = [{"name": "morning", "title": "Updated"}]
+    context, operations = preview(install, declaration)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    stored = user_briefings.get_briefing(install[1], "alice", "morning")
+    assert stored.id == row.id and stored.title == "Updated"
+    assert stored.output == output and stored.conversation_token == ""
+    context, operations = preview(install, declaration)
+    assert engine.execute_plan(operations, context).exit_code == 0
+    with db.get_db(install[1]) as conn:
+        db.add_room_member(conn, "private-alice", "bob")
+    with pytest.raises(engine.ExecutionError, match="validation_error"):
+        preview(install, declaration)

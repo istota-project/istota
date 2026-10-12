@@ -118,19 +118,21 @@ def _fields(value, allowed, path):
         _type(item, allowed[name], [*path, name])
 
 
-def _values(value, path):
+def _values(value, path, *, json_only=True):
     if value is None:
         _fail(path, "null is not supported; omit the field to leave it unmanaged")
     if isinstance(value, float) and not math.isfinite(value):
         _fail(path, "non-finite numbers are not supported")
+    if json_only and type(value) not in (dict, list, str, int, float, bool):
+        _fail(path, "must be a JSON value; quote dates and times as strings")
     if isinstance(value, dict):
         for name, item in value.items():
             if not isinstance(name, str):
                 _fail(path, "object keys must be strings")
-            _values(item, [*path, name])
+            _values(item, [*path, name], json_only=json_only)
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            _values(item, [*path, index])
+            _values(item, [*path, index], json_only=json_only)
 
 
 def _strings(value, path, *, unique=False):
@@ -277,7 +279,7 @@ def validate_user_plan(user_id: str, document: dict) -> UserPlan:
 
 def parse_plan(document: dict) -> Plan:
     """Validate the whole input, before selecting the users to reconcile."""
-    _values(document, [])
+    _values(document, [], json_only=False)
     _fields(document, {"meta": dict, "config": dict, "users": dict, "shared_briefing_blocks": list}, [])
     metadata = document.get("meta", {})
     meta = _check_meta(metadata)
@@ -286,6 +288,7 @@ def parse_plan(document: dict) -> Plan:
         _user_ids(document["users"], ["users"])
         users = {user_id: validate_user_plan(user_id, data) for user_id, data in document["users"].items()}
     if "shared_briefing_blocks" in document:
+        _values(document["shared_briefing_blocks"], ["shared_briefing_blocks"])
         for block, path in _entries(document["shared_briefing_blocks"], SHARED_FIELDS, ["shared_briefing_blocks"]):
             if "render_mode" in block:
                 _choice(block["render_mode"], RENDER_MODES, [*path, "render_mode"])

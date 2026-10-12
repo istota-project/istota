@@ -46,7 +46,9 @@ def _validate_schedule(conn, config, user, definition, path):
     except ValueError:
         raise ExecutionError("validation_error", [*path, "output"]) from None
     token = definition["conversation_token"]
-    if any(dest.surface == "talk" for dest in parse_output_target(definition["output"])) and not token:
+    needs_token = any(dest.surface == "talk" and not dest.channel
+                      for dest in parse_output_target(definition["output"]))
+    if needs_token and not token:
         raise ExecutionError("validation_error", [*path, "conversation_token"])
     if token:
         try:
