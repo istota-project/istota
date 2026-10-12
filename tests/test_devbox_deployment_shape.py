@@ -118,7 +118,7 @@ class TestTheWrapperRefusalNamesTheShape:
             fetch_forge_credentials("github", {}, {})
         message = str(excinfo.value).lower()
         assert "[devbox] users" in message
-        assert "ansible" in message
+        assert "ansible" not in message
         assert "ships no devbox" not in message
 
     def test_it_does_not_lead_with_a_bare_socket_path(self):

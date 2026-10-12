@@ -50,7 +50,6 @@ import math
 import os
 import platform
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -496,18 +495,12 @@ def check_gws(config: "Config", probe: bool) -> CheckResult:
     gw = getattr(config, "google_workspace", None)
     if gw is None or not gw.enabled:
         return CheckResult(name, SKIP, "google_workspace is disabled", scope=IMAGE)
-    # The Ansible role installs gws in the daemon user's ~/.local/bin, which is
-    # on the scheduler unit's PATH but not the web unit's, and the admin Health
-    # pane runs this check in the web process.
     path = shutil.which("gws")
-    if path is None:
-        home_bin = Path.home() / ".local" / "bin" / "gws"
-        path = str(home_bin) if _executable(home_bin) else None
     if path is None:
         return CheckResult(
             name,
             FAIL,
-            "google_workspace is enabled but there is no `gws` on PATH or in ~/.local/bin",
+            "google_workspace is enabled but there is no `gws` on PATH",
             remedy="Install the pinned gws release, or disable [google_workspace].",
             scope=IMAGE,
         )
@@ -2461,8 +2454,7 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
     environment, as do the proxy and TLS names :func:`build_model_cli_env`
     passes through. So the excerpt is safe because the CLI does not print its
     own credential, not because anything here checks. If that stops being true,
-    classify the failure instead of quoting it, the way
-    ``security.devbox_netfilter`` does with ``iptables``.
+    classify the failure instead of quoting it.
     """
     name = "runtime.model_execution"
     if not probe:
@@ -2773,10 +2765,10 @@ def check_skill_model_credential(
                 f"environment is not the daemon's and the credential it would "
                 f"inject is not visible from here",
                 remedy=(
-                    "Run the check as the daemon's user with the daemon's "
-                    "environment loaded (the `<namespace>-run doctor` wrapper "
-                    "on a server install), or read it from the admin "
-                    "dashboard's Health pane."
+                    "Run the check in the daemon's environment (on the VM, "
+                    "`istota doctor`, which runs it in the daemon container as "
+                    "uid 10001), or read it from the admin dashboard's Health "
+                    "pane."
                 ),
             )
         )
@@ -2907,9 +2899,9 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
             f"not the daemon's — {var} is stripped from a task env by design "
             f"and its absence here says nothing about the deployment",
             remedy=(
-                "Run the check as the daemon's user with the daemon's "
-                "environment loaded (the `<namespace>-run doctor` wrapper on a "
-                "server install), or read it from the admin dashboard's Health "
+                "Run the check in the daemon's environment (on the VM, "
+                "`istota doctor`, which runs it in the daemon container as "
+                "uid 10001), or read it from the admin dashboard's Health "
                 "pane."
             ),
         )
@@ -3054,8 +3046,8 @@ def _secret_key_remedy(config: "Config") -> str:
         )
     return (
         f"Set ISTOTA_SECRET_KEY in the daemon's environment ({generate}). "
-        f"Docker persists one to /data/.secret_key on first boot; Ansible "
-        f"passes it as the `istota_secret_key` variable."
+        f"The stack's entrypoint keeps one in /data/.secret_key, or reads the "
+        f"`istota_secret_key` secrets file when the VM holds it there."
     )
 
 
@@ -3499,8 +3491,8 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
         "loses the host's data in the prompt, the skills and the environment "
         "only, not on the filesystem: a shell command can still read and write "
         "the host's files, CRON.md included." + email,
-        remedy="Run istota on Linux with bubblewrap (the Ansible deployment), or "
-        "do not let guests into rooms on this deployment.",
+        remedy="Run istota on Linux with bubblewrap (the stack on a dedicated VM), "
+        "or do not let guests into rooms on this deployment.",
     )
 
 
@@ -3651,8 +3643,8 @@ def check_proxy_peer_check(config: "Config", probe: bool) -> CheckResult:
                 "is best-effort"
             ),
             remedy=(
-                "Run on bare metal with bubblewrap, where each task has its "
-                "own namespace, or keep one user per deployment on this shape."
+                "Run the stack on a dedicated VM, where each task has its own "
+                "bubblewrap namespace, or keep one user per deployment on this shape."
             ),
         )
     return CheckResult(
@@ -4121,9 +4113,8 @@ def check_forge_config_drift(config: "Config", probe: bool) -> list[CheckResult]
                     f"will exec {resolved}"
                 ),
                 remedy=(
-                    f"Rewrite config.toml so {name}_bin_path names the installed binary "
-                    f"(a full Ansible play does; the auto-update cron does not. On "
-                    f"docker, restarting the daemon service re-renders it)."
+                    f"Edit config.toml (or `istota-stack apply` a plan) so "
+                    f"{name}_bin_path names the installed binary, then restart the stack."
                 ),
             )
         )
@@ -4249,7 +4240,7 @@ def check_forge_wrapper_shadowing(config: "Config", probe: bool) -> list[CheckRe
                     OK,
                     (
                         f"`{name}` resolves to {found}, which is the binary this "
-                        f"deployment resolved (the Ansible shape installs on PATH)"
+                        f"deployment resolved"
                     ),
                     scope=IMAGE,
                 )
@@ -5141,11 +5132,8 @@ def check_web_build_current(config: "Config", probe: bool) -> CheckResult:
         WARN,
         f"web/ has changed since the bundle was built from {stamped[:12]}",
         remedy=(
-            "Re-run the Ansible play, which rebuilds the frontend unconditionally. "
-            "The auto-update cron also builds when a commit touches web/, so a bundle "
-            "left behind means that run failed — see the update log. Deleting the "
-            "deployed-revision marker does not force a rebuild; it is re-seeded from "
-            "HEAD on the next tick."
+            "Rebuild the frontend from this checkout (`npm --prefix web run build` "
+            "with ISTOTA_BUILD_SHA set to the commit), so the bundle and web/ agree."
         ),
     )
 
@@ -5306,203 +5294,6 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
     )
 
 
-# ---------------------------------------------------------------------------
-# Devbox network isolation
-# ---------------------------------------------------------------------------
-
-# The chain the role writes into, and the marker every rule it writes carries.
-# The comment is how our rules are told apart from an operator's, and it is
-# already load-bearing elsewhere: `iptables -C` matches on it, so the role's
-# teardown depends on the exact string too.
-DEVBOX_CHAIN = "DOCKER-USER"
-_DEVBOX_RULE_MARK = "istota-devbox:"
-
-# The boot script the Ansible role installs. Read as the *oracle* for what this
-# host is supposed to be blocking, and for which subnet — a count hardcoded here
-# would have to be updated in lockstep with the role's blocklist, and the first
-# time it was not, the check would call a healthy host broken.
-DEVBOX_BOOT_SCRIPT = Path("/usr/local/sbin/istota-devbox-iptables")
-
-# Targets that end a packet's traversal of a user-defined chain without
-# reaching what follows. DROP and REJECT are deliberately absent: a rule that
-# blocks ahead of ours blocks more, not less, and reporting it would be noise.
-_TERMINAL_TARGETS = frozenset({"RETURN", "ACCEPT"})
-
-# Built-in targets, so a `-j` into anything else can be recognised as a jump
-# into a user-defined chain — which this check does not follow, and which
-# terminates traversal for whatever the target chain accepts.
-_BUILTIN_TARGETS = frozenset(
-    {
-        "ACCEPT", "DROP", "RETURN", "REJECT", "LOG", "MARK", "MASQUERADE",
-        "SNAT", "DNAT", "REDIRECT", "TCPMSS", "AUDIT", "CONNMARK", "NFLOG",
-        "NFQUEUE", "NOTRACK", "TEE", "TPROXY", "TRACE", "ULOG",
-    }
-)
-
-# Options that make a rule match less than every packet. `-m comment` is
-# deliberately not one: a comment is an annotation, and treating it as a match
-# condition is what let an annotated unconditional RETURN read as harmless.
-_MATCH_OPTIONS = frozenset(
-    {
-        "-s", "--source", "-d", "--destination", "-i", "--in-interface",
-        "-o", "--out-interface", "-p", "--protocol", "-f", "--fragment",
-    }
-)
-
-_ENSURE_DROP = re.compile(r'^\s*ensure_drop\s+"([^"]+)"\s+"[^"]*"\s*$', re.M)
-_SCRIPT_SUBNET = re.compile(r'^\s*SUBNET="([^"]*)"\s*$', re.M)
-
-
-def parse_devbox_boot_script(text: str) -> set[str]:
-    """The destinations the installed boot script blocks.
-
-    Returns an empty set for anything it cannot read rather than raising —
-    doctor runs on the daemon's start-up path, and a parser that threw on an
-    unexpected file would turn a diagnostic into an outage.
-    """
-    try:
-        return {match.group(1) for match in _ENSURE_DROP.finditer(text or "")}
-    except Exception:  # noqa: BLE001 - a diagnostic must not raise
-        return set()
-
-
-def parse_devbox_boot_subnet(text: str) -> str:
-    """The subnet the installed boot script scopes its rules to, or ""."""
-    match = _SCRIPT_SUBNET.search(text or "")
-    return match.group(1).strip() if match else ""
-
-
-def parse_iptables_rule(line: str, chain: str) -> dict | None:
-    """One ``-A <chain> ...`` line of ``iptables -S``, as fields.
-
-    Tokenised with ``shlex`` rather than picked apart with a regex over the raw
-    line, because a rule carries an arbitrary operator-supplied string in
-    ``--comment``. A regex searching the whole line for ``-j`` finds the one
-    inside ``--comment "see -j DROP note"`` and reports the wrong target, which
-    on this check's FAIL path means reporting a shadowing rule as harmless.
-    ``shlex`` puts the comment in a single token, so scanning tokens can only
-    see real options.
-
-    Returns None for a line this cannot read, so the caller can say it could not
-    read it instead of quietly treating it as benign.
-    """
-    prefix = f"-A {chain}"
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        return None
-    if len(tokens) < 2 or tokens[0] != "-A" or tokens[1] != chain.split()[0]:
-        return None
-    if not line.strip().startswith(prefix):
-        return None
-
-    rule = {
-        "raw": line.strip(),
-        "target": "",
-        "goto": False,
-        "source": "",
-        "destination": "",
-        "comment": "",
-        "conditional": False,
-    }
-    index = 2
-    while index < len(tokens):
-        token = tokens[index]
-        value = tokens[index + 1] if index + 1 < len(tokens) else ""
-        if token == "!":
-            # A negated match is still a match condition.
-            rule["conditional"] = True
-            index += 1
-            continue
-        if token in ("-j", "--jump", "-g", "--goto"):
-            rule["target"] = value
-            rule["goto"] = token in ("-g", "--goto")
-            index += 2
-            continue
-        if token in ("-s", "--source"):
-            rule["source"] = value
-            rule["conditional"] = True
-            index += 2
-            continue
-        if token in ("-d", "--destination"):
-            rule["destination"] = value
-            rule["conditional"] = True
-            index += 2
-            continue
-        if token == "--comment":
-            rule["comment"] = value
-            index += 2
-            continue
-        if token == "-m":
-            # `-m comment` is an annotation, not a condition. Every other match
-            # module narrows what the rule applies to.
-            if value != "comment":
-                rule["conditional"] = True
-            index += 2
-            continue
-        if token in _MATCH_OPTIONS:
-            rule["conditional"] = True
-            index += 2
-            continue
-        if token.startswith("-"):
-            # An option this does not model. Assume it narrows the rule rather
-            # than assuming it does not: over-reporting a conditional rule is a
-            # WARN, under-reporting one is a missed bypass.
-            rule["conditional"] = True
-            index += 2
-            continue
-        index += 1
-    return rule
-
-
-def _is_terminal(rule: dict) -> bool:
-    """Does this rule stop traversal before the rules that follow it?
-
-    A goto always does, and worse than a jump: when the target chain falls off
-    its end, control returns to ``FORWARD``, not to ``DOCKER-USER``. A jump to
-    a user-defined chain may, for whatever that chain accepts — this check does
-    not follow it, so it counts as terminal and is reported as unfollowed.
-    """
-    if not rule["target"]:
-        return False
-    if rule["goto"]:
-        return True
-    if rule["target"] in _TERMINAL_TARGETS:
-        return True
-    return rule["target"] not in _BUILTIN_TARGETS
-
-
-def _covers(rule: dict, subnet: str) -> bool | None:
-    """Would `rule` catch traffic from `subnet`? True, False, or None for unknown.
-
-    Three answers rather than two, because the two-answer versions are wrong in
-    opposite directions and both were reachable here.
-
-    An unscoped terminal rule catches everything, and that is the shape ISSUE-295
-    is about — dockerd's own ``-j RETURN``. A rule scoped by ``-s`` is decidable:
-    ``ufw-docker`` writes ``-s 172.16.0.0/12 -j RETURN``, and the devbox subnet
-    lives inside that, so every devbox packet returns. Calling that merely
-    "conditional" reports a total bypass as a warning nothing alerts on.
-
-    But a rule scoped some other way — Docker Desktop seeds ``-i eth0 -j ACCEPT``
-    — cannot be decided from the chain alone, because the devbox bridge's
-    interface name is a generated hash this check has no way to learn. Answering
-    True there would fire a FAIL on a common healthy shape, and a check that
-    cries wolf is one nobody reads. So: unknown, reported as a WARN that names
-    the rule.
-    """
-    if not rule["conditional"]:
-        return True
-    if not rule["source"] or not subnet:
-        return None
-    try:
-        return ipaddress.ip_network(rule["source"], strict=False).overlaps(
-            ipaddress.ip_network(subnet, strict=False)
-        )
-    except ValueError:
-        return None
-
-
 def check_repos_layout(config: "Config", probe: bool) -> CheckResult:
     """Are this deployment's clones where the daemon now looks for them?
 
@@ -5573,9 +5364,9 @@ def check_repos_layout(config: "Config", probe: bool) -> CheckResult:
             "The daemon now looks under {repos_dir}/{user_id}"
             + (f" — for example {example} — " if example else " ")
             + "and binds nothing when that directory does not exist, so the "
-            "developer skill cannot see these. Re-run the Ansible role with "
-            "`istota_developer_repos_migrate_to` set to the user they belong "
-            "to, or move them by hand."
+            "developer skill cannot see these. Move them into the directory of "
+            "the user they belong to; with a single admin, `python -m "
+            "istota.maintenance.repos_relocate` moves them all to that admin."
         ),
     )
 
@@ -6214,8 +6005,9 @@ def _uv_cache_result(
         bad_remedy=(
             "The cache is {developer.repos_dir}/{user}/.package-caches and "
             "sits inside the repos bind, so a missing directory means that "
-            "bind is wrong or the container predates it. Re-run the role and "
-            "recreate the container. Slow rather than broken — uv falls back "
+            "bind is wrong or the container predates it. Check the mounts "
+            "`istota devbox compose-file` renders and recreate the devbox "
+            "container. Slow rather than broken — uv falls back "
             "to copying every wheel — which is why nothing else will tell you."
         ),
         skip=not reachable,
@@ -6223,6 +6015,10 @@ def _uv_cache_result(
         ok_detail=f"the derived package cache is visible for {len(ok)} devbox user(s)",
     )
 
+
+# ---------------------------------------------------------------------------
+# Devbox network isolation
+# ---------------------------------------------------------------------------
 
 #: What a devbox must not reach, asked from inside it on the stack: cloud
 #: metadata and one RFC 1918 address. The VM's DOCKER-USER rules drop both.
@@ -6234,7 +6030,7 @@ DEVBOX_EGRESS_CONNECT_SECONDS = 3
 
 
 def _devbox_egress_probe(config: "Config", users: list[str], probe: bool) -> CheckResult:
-    """The stack's arm of ``security.devbox_netfilter``: connect from inside.
+    """What ``security.devbox_netfilter`` runs: connect from inside each devbox.
 
     The daemon runs in a container with no view of the VM's DOCKER-USER chain,
     so it cannot read the rules. It asks each devbox, through the exec
@@ -6297,255 +6093,25 @@ def _devbox_egress_probe(config: "Config", users: list[str], probe: bool) -> Che
 
 
 def check_devbox_netfilter(config: "Config", probe: bool) -> CheckResult:
-    """Read the live ``DOCKER-USER`` chain and report anything shadowing our rules.
+    """Whether a devbox can reach what the VM's egress rules drop.
 
-    This is the only witness over the devbox network boundary that looks at a
-    running host. ``tests/test_ansible_devbox_iptables.py`` proves the role asks
-    for the right rules in the right position; it cannot see what an operator,
-    a host-firewall integration or a different Docker version put in the chain
-    afterwards. ISSUE-295 is exactly that gap: four correct rules behind a
-    ``-j RETURN`` are never evaluated, and ``iptables -S`` renders them
-    identically to four that work.
-
-    **Reading the chain needs root and the daemon does not run as root**, so
-    under the scheduler unit this check reports SKIP and says so in as many
-    words. That is a real limitation rather than a quiet one: the detail names
-    the command to run by hand, because a SKIP that reads as "not applicable
-    here" when it means "never runs under this unit" would be the same shape of
-    silence the check exists to break.
+    The rules live in the VM's ``DOCKER-USER`` chain (``host/istota-devbox-egress.sh``),
+    which the daemon's container cannot read, so the check asks each devbox in
+    ``[devbox] users`` to connect out instead (``_devbox_egress_probe``). The
+    vm tier's row 10 witness is the one that runs it against a target that
+    answers.
     """
     name = "security.devbox_netfilter"
-    # This was a disjunction over two switches, guarding the pair where
-    # `backend = devbox` with `devbox.enabled = false` put every build in the
-    # estate inside a container whose egress filtering nothing checked. The
-    # backend is derived from `[devbox] enabled` now, so it can no longer be on
-    # while this is off and the second arm could never fire. One switch, and it
-    # is the one the Ansible role gates the rules themselves on.
     devbox_on = getattr(getattr(config, "devbox", None), "enabled", False)
     if not devbox_on:
+        return CheckResult(name, SKIP, "devbox is disabled ([devbox] enabled)")
+    users = list(getattr(getattr(config, "devbox", None), "users", None) or [])
+    if not users:
         return CheckResult(
             name, SKIP,
-            "devbox is disabled ([devbox] enabled); the role adds no rules",
+            "no devbox users are configured ([devbox] users), so there is no devbox to ask",
         )
-    stack_users = list(getattr(getattr(config, "devbox", None), "users", None) or [])
-    if stack_users:
-        return _devbox_egress_probe(config, stack_users, probe)
-    if not probe:
-        return CheckResult(
-            name,
-            SKIP,
-            f"the live {DEVBOX_CHAIN} chain cannot be read without spawning iptables "
-            "(probe disabled)",
-        )
-
-    result = _run(["iptables", "-S", DEVBOX_CHAIN])
-    if result is None:
-        return CheckResult(
-            name,
-            SKIP,
-            f"iptables could not be run, so the {DEVBOX_CHAIN} chain was not read",
-        )
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        lowered = stderr.lower()
-        if "permission denied" in lowered or "must be root" in lowered:
-            return CheckResult(
-                name,
-                SKIP,
-                f"reading {DEVBOX_CHAIN} needs root, and this process is not root — "
-                "under the scheduler unit this check never runs, so verify the chain "
-                "by hand with `sudo istota doctor --only security.devbox_netfilter`",
-            )
-        if "no chain" in lowered:
-            return CheckResult(
-                name,
-                FAIL,
-                f"the {DEVBOX_CHAIN} chain does not exist, so no devbox rule is present",
-                remedy=(
-                    "Start dockerd, which creates DOCKER-USER, then run "
-                    "`systemctl start istota-devbox-iptables`."
-                ),
-            )
-        return CheckResult(
-            name,
-            SKIP,
-            f"`iptables -S {DEVBOX_CHAIN}` exited {result.returncode} and was not read",
-        )
-
-    # The boot script is the oracle for what this host should block and for the
-    # subnet the rules are scoped to. Read before anything is judged: without it
-    # there is no way to tell "configured to block nothing" from "should be
-    # blocking four things and is blocking none".
-    try:
-        script = DEVBOX_BOOT_SCRIPT.read_text()
-    except OSError:
-        script = ""
-    expected = parse_devbox_boot_script(script)
-    subnet = parse_devbox_boot_subnet(script)
-
-    parsed = [parse_iptables_rule(line, DEVBOX_CHAIN) for line in result.stdout.splitlines()]
-    unreadable = sum(
-        1
-        for line, rule in zip(result.stdout.splitlines(), parsed)
-        if rule is None and line.strip().startswith(f"-A {DEVBOX_CHAIN}")
-    )
-    rules = [rule for rule in parsed if rule is not None]
-
-    marked = [rule for rule in rules if _DEVBOX_RULE_MARK in rule["comment"]]
-    # Carrying our comment is not enough to be one of our rules. A rule with our
-    # marker and a terminal target would otherwise be counted as ours, excluded
-    # from the shadowing scan, and reported as part of a healthy boundary while
-    # being the thing that breaks it.
-    ours = [
-        index
-        for index, rule in enumerate(rules)
-        if _DEVBOX_RULE_MARK in rule["comment"] and rule["target"] == "DROP"
-    ]
-    impostors = [r for r in marked if r["target"] != "DROP"]
-    if impostors:
-        return CheckResult(
-            name,
-            FAIL,
-            f"{len(impostors)} rule(s) in {DEVBOX_CHAIN} carry the devbox comment but "
-            f"jump to {impostors[0]['target']}, not DROP",
-            remedy=(
-                f"Read `iptables -S {DEVBOX_CHAIN}`; a rule wearing the devbox comment "
-                "with another target did not come from this role. Remove it and "
-                "re-run `systemctl restart istota-devbox-iptables`."
-            ),
-        )
-
-    if not ours:
-        if not script:
-            return CheckResult(
-                name,
-                SKIP,
-                f"{DEVBOX_CHAIN} carries no devbox rules and no boot script is "
-                "installed, so there is nothing to say what this host should block",
-            )
-        if not expected:
-            return CheckResult(
-                name,
-                OK,
-                "the devbox is configured to block nothing "
-                "(istota_devbox_block_metadata and istota_devbox_block_rfc1918 are "
-                f"both off) and {DEVBOX_CHAIN} carries no devbox rules, as expected",
-            )
-        return CheckResult(
-            name,
-            FAIL,
-            f"{DEVBOX_CHAIN} carries none of the {len(expected)} devbox DROP rules "
-            f"the installed boot script blocks ({len(rules)} other rule(s) present)",
-            remedy=(
-                "Re-run the Ansible role, or `systemctl start "
-                "istota-devbox-iptables` to re-apply them now."
-            ),
-        )
-
-    # Everything ahead of the *last* of our rules, not the first: a terminal rule
-    # interleaved among them leaves the ones behind it unreachable, and scanning
-    # only up to the first would report that chain as healthy.
-    preceding = [r for r in rules[: ours[-1]] if _DEVBOX_RULE_MARK not in r["comment"]]
-    terminal = [r for r in preceding if _is_terminal(r)]
-    covering = [r for r in terminal if _covers(r, subnet) is True]
-    undecidable = [r for r in terminal if _covers(r, subnet) is None]
-    if covering:
-        first = covering[0]
-        how = "a goto to" if first["goto"] else "a jump to"
-        scope = f" scoped to {first['source']}" if first["source"] else " matching every packet"
-        return CheckResult(
-            name,
-            FAIL,
-            f"{len(covering)} rule(s) ahead of the devbox DROP rules in "
-            f"{DEVBOX_CHAIN} end the chain for devbox traffic — the first is "
-            f"{how} {first['target']}{scope}",
-            remedy=(
-                f"Remove that rule from {DEVBOX_CHAIN}, or re-insert the devbox rules "
-                "in front of it with `systemctl restart istota-devbox-iptables`."
-            ),
-        )
-    if undecidable:
-        first = undecidable[0]
-        return CheckResult(
-            name,
-            WARN,
-            f"{len(undecidable)} rule(s) ahead of the devbox DROP rules in "
-            f"{DEVBOX_CHAIN} end the chain for traffic they match, and whether that "
-            f"includes the devbox cannot be told from the chain — the first jumps "
-            f"to {first['target']}: {first['raw']}",
-            remedy=(
-                f"Read `iptables -S {DEVBOX_CHAIN}` and confirm that rule cannot "
-                "match devbox traffic; if it can, move the devbox rules in front of it."
-            ),
-        )
-    if terminal:
-        # Terminal, but decidably not about us — a rule scoped to a range the
-        # devbox subnet does not overlap. Worth neither an alert nor silence.
-        first = terminal[0]
-        return CheckResult(
-            name,
-            OK,
-            f"{len(ours)} devbox IPv4 DROP rule(s) are in {DEVBOX_CHAIN}; "
-            f"{len(terminal)} rule(s) ahead of them end the chain only for traffic "
-            f"outside the devbox subnet (the first is scoped to {first['source']})",
-        )
-    if unreadable:
-        return CheckResult(
-            name,
-            WARN,
-            f"{unreadable} rule(s) in {DEVBOX_CHAIN} could not be parsed, so whether "
-            "they shadow the devbox rules is unknown",
-            remedy=f"Read `iptables -S {DEVBOX_CHAIN}` by hand and check what precedes the devbox rules.",
-        )
-
-    if expected:
-        present = {rules[i]["destination"] for i in ours}
-        missing = sorted(
-            dest
-            for dest in expected
-            if not _same_network(dest, present)
-        )
-        if missing:
-            return CheckResult(
-                name,
-                WARN,
-                f"{len(present)} of {len(expected)} devbox DROP rules are in "
-                f"{DEVBOX_CHAIN}; missing: {', '.join(missing)}",
-                remedy=(
-                    "Re-apply them with `systemctl restart istota-devbox-iptables` "
-                    "and check the unit's journal — `set -e` means it stops at the "
-                    "first rule the kernel rejects."
-                ),
-            )
-
-    return CheckResult(
-        name,
-        OK,
-        f"{len(ours)} devbox IPv4 DROP rule(s) are in {DEVBOX_CHAIN} with nothing "
-        "ahead of them that ends the chain for devbox traffic",
-    )
-
-
-def _same_network(dest: str, present: set[str]) -> bool:
-    """Is `dest` one of `present`, comparing as networks rather than as strings?
-
-    The kernel renders a bare address with its prefix length, so a boot script
-    naming `169.254.169.254` and a chain carrying `169.254.169.254/32` are the
-    same rule and must not be reported as a missing one.
-    """
-    if dest in present:
-        return True
-    try:
-        wanted = ipaddress.ip_network(dest, strict=False)
-    except ValueError:
-        return False
-    for candidate in present:
-        try:
-            if ipaddress.ip_network(candidate, strict=False) == wanted:
-                return True
-        except ValueError:
-            continue
-    return False
+    return _devbox_egress_probe(config, users, probe)
 
 
 # ---------------------------------------------------------------------------
