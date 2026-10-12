@@ -14,7 +14,6 @@ import logging
 import mimetypes
 import re
 import shutil
-import sqlite3
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -34,6 +33,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from istota.lib.filenames import filename_parts
 from istota.health import db as health_db
 from istota.health import documents as health_documents
+from istota.health import extract_requests
 from istota.health import garmin_sync as health_garmin_sync
 from istota.health._loader import UserNotFoundError, resolve_for_user
 from istota.health._migrate import ensure_initialised
@@ -195,16 +195,31 @@ def _document_to_dict(doc, *, links: list[dict] | None = None) -> dict:
     return out
 
 
-def _max_document_bytes(request: Request) -> int:
-    cfg = getattr(request.app.state, "istota_config", None)
-    health_cfg = getattr(cfg, "health", None) if cfg is not None else None
-    raw = getattr(health_cfg, "max_document_bytes", None)
-    if raw is None:
-        return health_documents.DEFAULT_MAX_DOCUMENT_BYTES
+def _extract_config(request: Request):
+    """The config a hand-off to the daemon needs: its database and temp dir."""
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        raise HTTPException(503, "document extraction is unavailable")
+    return config
+
+
+async def _extract_handoff(fn, *args, **kwargs):
+    """Run a hand-off to the daemon and answer with its request id, or a 429
+    when the user already has as many extractions waiting as one may."""
     try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return health_documents.DEFAULT_MAX_DOCUMENT_BYTES
+        request_id = await asyncio.to_thread(fn, *args, **kwargs)
+    except extract_requests.TooManyRequests:
+        return JSONResponse(
+            {"error": "Too many documents are waiting to be read. Try again shortly."},
+            status_code=429,
+        )
+    return {"id": request_id}
+
+
+def _max_document_bytes(request: Request) -> int:
+    return health_documents.max_document_bytes(
+        getattr(request.app.state, "istota_config", None)
+    )
 
 
 def _entity_exists(conn, entity_type: str, entity_id: int) -> bool:
@@ -243,48 +258,6 @@ def _entity_label(conn, entity_type: str, entity_id: int) -> str:
     }.get(entity_type)
     record = getter(conn, entity_id) if getter else None
     return _format_entity_label(entity_type, entity_id, record)
-
-
-async def _attach_import_document(
-    ctx: HealthContext,
-    result,
-    *,
-    raw: bytes,
-    filename: str,
-    mime: str | None,
-    max_bytes: int,
-) -> dict:
-    """Persist an extract-route upload and stamp ``document_id`` on its payload.
-
-    A storage failure must not cost the user the extraction they just waited
-    for — losing the file is bad, losing both is worse. So the rows come back
-    with ``document_id: null`` and a warning appended instead.
-    """
-    if not isinstance(result, dict):
-        return result
-
-    ocr_text = result.get("ocr_text") or result.get("text") or None
-
-    def _store():
-        with health_db.connect(ctx.db_path) as conn:
-            doc, _created = health_documents.store_document(
-                conn, ctx, raw=raw, filename=filename, mime=mime,
-                source="import", ocr_text=ocr_text, max_bytes=max_bytes,
-            )
-            conn.commit()
-        return doc
-
-    try:
-        doc = await asyncio.to_thread(_store)
-    except (health_documents.DocumentError, OSError, sqlite3.Error) as e:
-        logger.error(
-            "health_import_document_store_failed user=%s filename=%s error=%s",
-            ctx.user_id, filename, e,
-        )
-        warnings = list(result.get("warnings") or [])
-        warnings.append(f"The uploaded file could not be kept: {e}")
-        return {**result, "document_id": None, "warnings": warnings}
-    return {**result, "document_id": doc.id}
 
 
 def _links_payload(conn, document_id: int) -> list[dict]:
@@ -940,34 +913,46 @@ async def api_panel_upload(
     return out
 
 
-@router.post("/panels/{panel_id}/extract")
+@router.post("/panels/{panel_id}/extract", status_code=202)
 async def api_panel_extract(
     panel_id: int,
     request: Request,
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
-    """Run the OCR + LLM extraction pipeline on an uploaded panel source.
+    """Ask the daemon to run the OCR + LLM extraction on an uploaded panel.
 
-    Synchronous; expected to complete in seconds for typical lab PDFs.
-    Returns the extracted biomarkers in an editable shape; the client
-    POSTs them back to ``/panels/{id}/biomarkers`` with ``confirm: true``.
+    Returns ``{"id": …}``; the client polls ``/extract-requests/{id}`` for the
+    extracted biomarkers and POSTs them back to ``/panels/{id}/biomarkers``
+    with ``confirm: true``. Never extracts here (ISSUE-697): see
+    ``extract_requests``.
     """
-    from istota.health.ocr import extract_from_panel
+    config = _extract_config(request)
 
-    config = getattr(request.app.state, "istota_config", None)
-
-    def _extract():
+    def _exists():
         with health_db.connect(ctx.db_path) as conn:
-            panel = health_db.get_panel(conn, panel_id)
-            if not panel:
-                return None
-        return extract_from_panel(ctx, panel, config=config)
+            return health_db.get_panel(conn, panel_id) is not None
 
-    result = await asyncio.to_thread(_extract)
-    if result is None:
+    if not await asyncio.to_thread(_exists):
         raise HTTPException(404, "panel not found")
-    return result
+    return await _extract_handoff(
+        extract_requests.request_extract, config, ctx.user_id,
+        extract_requests.PANEL, panel_id=panel_id,
+    )
+
+
+@router.get("/extract-requests/{request_id}")
+async def api_extract_request(
+    request_id: str,
+    request: Request,
+    ctx: HealthContext = Depends(get_user_context),
+):
+    """Where one of this user's extraction requests stands: ``pending``,
+    ``answered`` with the extractor's ``result``, or ``unknown``."""
+    config = _extract_config(request)
+    return await asyncio.to_thread(
+        extract_requests.extract_state, config, ctx.user_id, request_id,
+    )
 
 
 @router.get("/panels/{panel_id}/source")
@@ -1581,22 +1566,21 @@ async def api_create_encounter(
     return {"status": "ok", "id": eid}
 
 
-@router.post("/encounters/extract")
+@router.post("/encounters/extract", status_code=202)
 async def api_encounter_extract(
     request: Request,
     file: UploadFile = FastAPIFile(...),
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
-    """OCR/vision extraction for a doctor's-visit document.
+    """Ask the daemon for an OCR/vision extraction of a doctor's-visit document.
 
-    The upload is **kept** as a document (``source="import"``) and its id is
-    returned so ``/encounters/bulk`` can link it to every row this import
-    creates. A document nobody confirms is left linkless and collected by
-    the orphan sweep.
-
-    Returns rows in the review-and-confirm shape consumed by
-    ``/encounters/bulk``.
+    Returns ``{"id": …}``; ``/extract-requests/{id}`` answers with rows in the
+    review-and-confirm shape consumed by ``/encounters/bulk``. Never extracts
+    here (ISSUE-697). The daemon **keeps** the upload as a document
+    (``source="import"``) and the answer carries its id, so ``/encounters/bulk``
+    can link it to every row this import creates. A document nobody confirms
+    is left linkless and collected by the orphan sweep.
     """
     raw = await file.read()
     if not raw:
@@ -1609,43 +1593,21 @@ async def api_encounter_extract(
     suffix = filename_parts(file.filename)[1] or (
         mimetypes.guess_extension(mime) or ""
     )
+    config = _extract_config(request)
 
-    config = getattr(request.app.state, "istota_config", None)
-    max_bytes = _max_document_bytes(request)
-
-    def _run():
-        import tempfile
-
-        from istota.executor import daemon_work_dir
-        from istota.health.encounter_ocr import extract_from_file
-
-        # One level below `config.temp_dir`, not the shared root: that is the
-        # directory the OCR sandbox binds read-write, and the root is bound by
-        # nothing (ISSUE-397). `daemon_work_dir` creates it, and falls back to
-        # the shared root when the user id names no directory under it. The
-        # root itself is `config.temp_dir`, or the system temp dir when no
-        # config reached this route — a separate condition, not a second step.
-        tmp_dir = daemon_work_dir(config, ctx.user_id)
-        with tempfile.NamedTemporaryFile(
-            dir=tmp_dir, suffix=suffix or ".bin", delete=False,
-        ) as tmp:
-            tmp.write(raw)
-            # Resolved, like `ocr._resolve_source_file`: this path becomes the
-            # request's `fs_read_roots` entry as well as the path named in the
-            # prompt, and `ToolEnv` compares realpaths (ISSUE-395).
-            tmp_path = Path(tmp.name).resolve()
+    def _hand_off():
+        staged = extract_requests.stage_upload(config, raw, suffix)
         try:
-            return extract_from_file(
-                tmp_path, mime, config=config, user_id=ctx.user_id
+            return extract_requests.request_extract(
+                config, ctx.user_id, extract_requests.ENCOUNTER,
+                staged=staged, mime=mime, filename=file.filename or "",
+                document_mime=file.content_type,
             )
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        except BaseException:
+            extract_requests.discard_staged(config, staged)
+            raise
 
-    result = await asyncio.to_thread(_run)
-    return await _attach_import_document(
-        ctx, result, raw=raw, filename=file.filename or "",
-        mime=file.content_type, max_bytes=max_bytes,
-    )
+    return await _extract_handoff(_hand_off)
 
 
 @router.post("/encounters/bulk")
@@ -2420,20 +2382,22 @@ async def api_immunization_parse(
     }
 
 
-@router.post("/immunizations/extract")
+@router.post("/immunizations/extract", status_code=202)
 async def api_immunization_extract(
     request: Request,
     file: UploadFile = FastAPIFile(...),
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
-    """OCR/vision extraction for an immunization-list screenshot or PDF.
+    """Ask the daemon for an OCR/vision extraction of an immunization list.
 
-    The upload is **kept** as a document (``source="import"``) and its id
-    returned, so ``/immunizations/bulk`` can link it to every row it creates
-    — proof of immunization is a document people are asked to produce, not
-    merely a fact to recall. Returns the same ``rows`` shape as ``/parse``
-    so the review-and-confirm UI is identical for both paths.
+    Returns ``{"id": …}``; ``/extract-requests/{id}`` answers with the same
+    ``rows`` shape as ``/parse``, so the review-and-confirm UI is identical for
+    both paths. Never extracts here (ISSUE-697). The daemon **keeps** the
+    upload as a document (``source="import"``) and the answer carries its id,
+    so ``/immunizations/bulk`` can link it to every row it creates — proof of
+    immunization is a document people are asked to produce, not merely a fact
+    to recall.
     """
     raw = await file.read()
     if not raw:
@@ -2446,47 +2410,21 @@ async def api_immunization_extract(
     suffix = filename_parts(file.filename)[1] or (
         mimetypes.guess_extension(mime) or ""
     )
+    config = _extract_config(request)
 
-    config = getattr(request.app.state, "istota_config", None)
-    max_bytes = _max_document_bytes(request)
-
-    def _run():
-        import tempfile
-
-        from istota.executor import daemon_work_dir
-        from istota.health.immunization_ocr import extract_from_file
-
-        with health_db.connect(ctx.db_path) as conn:
-            refs = health_db.list_immunization_refs(conn)
-        # Process-scoped tmp for the *extractor's* copy. The kept copy goes
-        # through store_document into {uploads_dir}/documents/, so a crash
-        # between write and unlink here can't leak a file next to the
-        # confirmed panel sources.
-        #
-        # One level below `config.temp_dir`, not the shared root: that is the
-        # directory the OCR sandbox binds read-write, and the root is bound by
-        # nothing (ISSUE-397).
-        tmp_dir = daemon_work_dir(config, ctx.user_id)
-        with tempfile.NamedTemporaryFile(
-            dir=tmp_dir, suffix=suffix or ".bin", delete=False,
-        ) as tmp:
-            tmp.write(raw)
-            # Resolved, like `ocr._resolve_source_file`: this path becomes the
-            # request's `fs_read_roots` entry as well as the path named in the
-            # prompt, and `ToolEnv` compares realpaths (ISSUE-395).
-            tmp_path = Path(tmp.name).resolve()
+    def _hand_off():
+        staged = extract_requests.stage_upload(config, raw, suffix)
         try:
-            return extract_from_file(
-                tmp_path, mime, refs, config=config, user_id=ctx.user_id
+            return extract_requests.request_extract(
+                config, ctx.user_id, extract_requests.IMMUNIZATION,
+                staged=staged, mime=mime, filename=file.filename or "",
+                document_mime=file.content_type,
             )
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        except BaseException:
+            extract_requests.discard_staged(config, staged)
+            raise
 
-    result = await asyncio.to_thread(_run)
-    return await _attach_import_document(
-        ctx, result, raw=raw, filename=file.filename or "",
-        mime=file.content_type, max_bytes=max_bytes,
-    )
+    return await _extract_handoff(_hand_off)
 
 
 @router.post("/immunizations/bulk")

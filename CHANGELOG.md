@@ -183,6 +183,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Reading an uploaded lab result, visit document or immunization list now happens in the daemon's sandbox.** On the Docker stack the extraction ran in the web container, which cannot build a sandbox, so on the Claude Code brains the model's file access was not confined there. The upload pages now hand the document to the daemon and wait for its answer.
+
 - **Notices raised from the web app now reach you on WhatsApp.** The notice that an administrator changed your contact details, and the one asking you to reconnect Nextcloud or Garmin, were sent from the web container, which has no WhatsApp connection. On a paired WhatsApp session the send failed, and that notice could never be sent to WhatsApp again. The daemon sends them now; the notices in the bell are unchanged.
 
 - **Stopping a task from web chat on the Docker stack no longer signals a process in the web container.** The web cancel button and `!stop` sent from web chat signalled the task's recorded process id, which belongs to the daemon's container; in the web container that number names nothing, or a web-side process. Only the daemon, or `istota serve`, signals the task's process now; elsewhere, including the bare-metal install's separate web unit, the stop goes through the cancel flag the task already checks. With the Claude Code brain that flag is read at the CLI's next event, so a stop sent from web chat during a long tool call lands when the tool returns.

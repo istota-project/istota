@@ -220,9 +220,9 @@ services:
       # The config, where the daemon service reads it; the root filesystem is
       # read-only, so nothing links it into /app/config.
       ISTOTA_CONFIG_PATH: /data/config/config.toml
-    # The web process calls a model on its own (the health OCR extractors, the
-    # biomarker explainer, shared-block run-now) and talks to Nextcloud, so it
-    # needs the daemon's credentials: the same files, read the same way.
+    # The web process calls a model on its own (the biomarker explainer, which
+    # grants no tool) and talks to Nextcloud, so it needs the daemon's
+    # credentials: the same files, read the same way.
     secrets: *istota_secrets
     # Dropped first, as the daemon's uid like everything else that writes under
     # /data: a root-owned database sidecar locks the daemon out (ISSUE-458).

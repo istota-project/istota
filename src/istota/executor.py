@@ -1122,7 +1122,7 @@ def build_daemon_sandbox(
     ``extra_ro_binds`` is how the caller names the document. The
     ``{mount}/Users/{user_id}`` bind covers a bloodwork panel's upload but not
     every caller: the encounter and immunization routes hand the extractor a
-    temp copy, and ``python -m istota.health.ocr`` an arbitrary local file. A
+    staged copy, and ``python -m istota.health.ocr`` an arbitrary local file. A
     wrap that hides the document is an outage rather than a boundary, so the
     file is bound by name. Read-only even where it falls inside the read-write
     ``work_dir`` bind — the extractor reads it and nothing more, and a later
@@ -1136,7 +1136,7 @@ def build_daemon_sandbox(
     outage. Protecting it would refuse the mask instead, which trades a
     boundary for the outage rather than removing it — the worse of the two. No
     shipped caller lands there: a panel's upload is on the Nextcloud mount, the
-    two routes' temp copies are under ``work_dir``, and
+    two import uploads are staged under ``{temp_dir}/.health-extract``, and
     ``python -m istota.health.ocr`` uses a system temp dir.
 
     ``wrap`` is ``None`` in two cases and they are **not** the same answer, so
@@ -1147,12 +1147,12 @@ def build_daemon_sandbox(
     granting a file tool must decline to run rather than run unconfined.
 
     That the wrap is non-``None`` does not mean a namespace exists. Where
-    bubblewrap is unavailable — macOS, the shipped Docker stack, which grants
-    neither `seccomp:unconfined` nor `systempaths=unconfined` (ISSUE-381) —
-    the flag still reads true, `build_bwrap_cmd` returns its argument
-    unchanged, and the closure is inert. Same posture as an ordinary task on
-    those hosts, which is the whole claim: equal to the rest of the
-    deployment, not better than it.
+    bubblewrap is unavailable — macOS, or the stack's ``web`` container, which
+    has Docker's default seccomp and AppArmor profiles and no ``systempaths``
+    grant — the flag still reads true, `build_bwrap_cmd` returns its argument
+    unchanged, and the closure is inert. The ``daemon`` container carries the
+    run contract and does build one, which is why the health extractors run
+    there and never in the web process (ISSUE-697, ``health/extract_requests``).
 
     **`is_admin` is the caller's real one and stays that way**, which is worth
     stating because narrowing it looks like a free win and is not. For an
