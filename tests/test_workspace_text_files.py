@@ -382,3 +382,36 @@ class TestTasksMdLostUpdate:
         # The next pass picks it up.
         assert len(tasks_file_poller.poll_user_tasks_file(
             config, "alice", TASKS_PATH)) == 1
+
+    @pytest.mark.parametrize("success, marker, suffix", [
+        (True, "- [x]", "Result: all done"),
+        (False, "- [!]", "Error: all done"),
+    ])
+    def test_a_completion_refused_by_a_held_lock_lands_on_the_next_poll(
+        self, config, monkeypatch, success, marker, suffix,
+    ):
+        """ISSUE-726: the marker is applied from the DB row on the next pass."""
+        from istota import db
+
+        path = _config_file(config, "TASKS.md")
+        path.write_text("- [ ] first\n- [ ] other\n")
+        task_ids = tasks_file_poller.poll_user_tasks_file(config, "alice", TASKS_PATH)
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, task_ids[0])
+
+        real = text_files.file_lock
+
+        def _short(cfg, uid, p, *, timeout_seconds=5.0):
+            return real(cfg, uid, p, timeout_seconds=0.1)
+
+        monkeypatch.setattr(text_files, "file_lock", _short)
+        with real(config, "alice", path):
+            tasks_file_poller.handle_tasks_file_completion(
+                config, task, success, "all done")
+        assert path.read_text() == "- [~] first...\n- [~] other...\n"
+
+        assert tasks_file_poller.poll_user_tasks_file(
+            config, "alice", TASKS_PATH) == []
+        first, other, _ = path.read_text().split("\n")
+        assert first.startswith(marker) and first.endswith(f"first | {suffix}")
+        assert other == "- [~] other...", "a still-running task was marked"
