@@ -97,7 +97,8 @@ class Profile:
     web: bool = False
     """Whether a lean stack starts the shipped `web` and `nginx` services.
 
-    Off by default: no lean scenario reads the web app, and two more containers
+    Off by default: only `browser` needs it (its own row 17, and the health
+    extraction hand-off, which runs code in the web container), and two more containers
     per session-scoped stack cost boot time and memory across nine stacks. The
     file booted is the shipped one either way; the full shape always starts
     both, since its scenarios sign in through them.
