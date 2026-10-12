@@ -5,7 +5,8 @@
 # deploys a signed snapshot of this checkout through `istota-stack update`, and
 # runs tests/vm/: parity rows 7, 9, 10, 11, 15, 18, 19 and 20, the halves of 12
 # and 17 Docker Desktop cannot see, the full Nextcloud integration over the
-# rclone mount, the browser built natively for arm64, and the devbox runtime.
+# rclone mount, the browser built natively for arm64, the devbox runtime, and
+# the web config editor's host applier.
 # tests/vm/conftest.py and tests/vm/lima.py say how.
 #
 #   scripts/test-vm.sh                    # the whole tier

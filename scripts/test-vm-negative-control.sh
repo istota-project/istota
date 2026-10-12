@@ -22,6 +22,7 @@
 #              browser-on-default-network (row 17),
 #              update-without-up, update-without-reprovision (istota-stack update),
 #              rollback-without-reprovision (istota-stack rollback)
+#              config-apply-not-triggered (the web config editor's host applier)
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
@@ -105,6 +106,10 @@ control exec-socket-symlink \
 control browser-on-default-network \
     "row 17: the browser container on the default network" \
     "$VM/test_browser.py::TestTheBrowserReachesNoPublishedPort::test_the_browser_reaches_nothing_on_the_default_network_by_address"
+
+control config-apply-not-triggered \
+    "the config editor's applier with istota-config-apply.path and .timer disabled: still pending at the threshold" \
+    "$VM/test_config_editor.py::TestAChangeFromTheWeb::test_the_host_picks_the_request_up"
 
 U="$VM/test_update.py::TestAnUpdateToAnotherRef"
 control update-without-up \
