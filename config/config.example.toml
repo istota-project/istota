@@ -1964,7 +1964,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 
 # [location]
 # enabled = false
-# webhooks_port = 8765
+# webhooks_port = 8765            # unused: the web app serves the webhook routes
 # accuracy_threshold_m = 100.0    # drop pings worse than this from place matching
 # visit_exit_minutes = 5.0        # continuous time away before a visit is closed
 # reconcile_enabled = true        # periodically re-derive closed visits from pings

@@ -2065,6 +2065,8 @@ istota_config: {}
 #
 #   location:
 #     enabled: false
+#
+#     # unused: the web app serves the webhook routes
 #     webhooks_port: 8765
 #
 #     # drop pings worse than this from place matching
