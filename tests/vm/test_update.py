@@ -15,15 +15,19 @@ only `--unsigned` installs it), and the case reads the result off the VM:
   the inputs: the update ran the new checkout's `provision.sh` by `exec`, over
   the very script bash was reading the update from;
 - `istota-stack rollback` returns to the signed release, through the older
-  image's schema check, and the stack is healthy on it.
+  image's schema check, and the stack is healthy on it;
+- the rollback ran the release checkout's `provision.sh` too, so the host's own
+  `istota-stack` is the release's again and `.provisioned` matches (ISSUE-710).
 
 Controls (`scripts/test-vm-negative-control.sh`), each run against a copy of
 the installed `istota-stack` with one fragment replaced (`lima.UPDATE_CONTROLS`):
 `update-without-up` writes `.env` and starts nothing; `update-without-reprovision`
-moves the stack and leaves the host's scripts at the old ref.
+moves the stack and leaves the host's scripts at the old ref;
+`rollback-without-reprovision` returns the stack and leaves them at the new one.
 
-The VM is put back on the release at the end, whatever the case did, and the
-release's host scripts reinstalled: `rollback` does not run `provision.sh`.
+The VM is put back on the release at the end, whatever the case did. Both verbs
+reprovision, so a host script is run by hand only when a case failed partway and
+left `.provisioned` behind the checkout.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ pytestmark = pytest.mark.vm
 
 ENV = f"{lima.STACK}/.env"
 CONTROLS = ("update-without-up", "update-without-reprovision")
+ROLLBACK_CONTROLS = ("rollback-without-reprovision",)
 
 
 @dataclass
@@ -55,8 +60,14 @@ def _restore(vm: lima.Vm, release: str) -> None:
         if not vm.ok(f"{lima.STACK_COMMAND} rollback", timeout=1800) or \
                 lima.env_value(vm, ENV, "ISTOTA_TAG") != release:
             vm.run(f"{lima.STACK_COMMAND} update {shlex.quote(release)}", timeout=lima.BUILD_TIMEOUT)
-    vm.run(f"{lima.STACK}/src/host/provision.sh", timeout=1800)
+    if not _provisioned(vm):
+        vm.run(f"{lima.STACK}/src/host/provision.sh", timeout=1800)
     lima.wait_healthy(vm)
+
+
+def _provisioned(vm: lima.Vm) -> bool:
+    """Whether the host's scripts and units are the checkout's, by provision.sh's own record."""
+    return vm.out(f"{lima.STACK}/src/host/provision.sh --digest") == vm.read(f"{lima.STACK}/.provisioned").strip()
 
 
 @pytest.fixture(scope="module")
@@ -105,14 +116,36 @@ class TestAnUpdateToAnotherRef:
         installed = vm.read(lima.STACK_COMMAND)
         assert f"{lima.NEXT_REF_MARKER} {update.ref}" in installed, \
             "provision.sh did not run from the new checkout\n" + _describe(update)
-        assert vm.out(f"{lima.STACK}/src/host/provision.sh --digest") == vm.read(f"{lima.STACK}/.provisioned").strip()
+        assert _provisioned(vm)
 
-    def test_a_rollback_returns_to_the_release(self, local_stack, update):
+
+@pytest.fixture(scope="module")
+def rollback(local_stack, update):
+    """The rollback, once the update's own cases have read the VM on the new ref."""
+    vm = local_stack
+    control = lima.control() if lima.control() in ROLLBACK_CONTROLS else ""
+    command = lima.stack_command(vm, control)
+    result = vm.run(f"{command} rollback", check=False, timeout=1800)
+    return result.returncode, result.stdout + result.stderr
+
+
+class TestARollbackToTheRelease:
+    def test_a_rollback_returns_to_the_release(self, local_stack, update, rollback):
         vm = local_stack
-        result = vm.run(f"{lima.STACK_COMMAND} rollback", check=False, timeout=1800)
-        assert result.returncode == 0, result.stdout + result.stderr
+        returncode, output = rollback
+        assert returncode == 0, output
         assert lima.env_value(vm, ENV, "ISTOTA_TAG") == update.release
         assert lima.env_value(vm, ENV, "ISTOTA_PREVIOUS_TAG") == update.ref
         lima.wait_healthy(vm)
         for service in ("daemon", "web"):
             assert lima.running_image(vm, service) == f"{lima.IMAGE}:{update.release}", service
+
+    def test_a_rollback_returns_the_hosts_istota_stack(self, local_stack, update, rollback):
+        """ISSUE-710: the rollback runs the release checkout's provision.sh, so
+        the host's scripts and units are not left at the newer ref."""
+        vm = local_stack
+        returncode, output = rollback
+        assert returncode == 0, output
+        assert lima.NEXT_REF_MARKER not in vm.read(lima.STACK_COMMAND), \
+            "the host still runs the newer ref's istota-stack after the rollback\n" + output[-6000:]
+        assert _provisioned(vm)

@@ -822,9 +822,17 @@ class TestTheProvisionDigest:
 
     def test_a_successful_run_records_it_last(self):
         """Read before anything runs and recorded at the very end, so a run
-        that fails partway leaves the old digest and the next play provisions
+        that fails partway leaves no record and the next play provisions
         again."""
         text = PROVISION.read_text()
         assert 'digest="$(inputs_digest)"' in text
         assert text.index('digest="$(inputs_digest)"') < text.index("apt-get update")
         assert text.rindex('"${STACK}/.provisioned"') > text.index("# --- The stack ---")
+
+    def test_a_run_removes_the_old_record_before_it_acts(self):
+        """ISSUE-710: a run that died after installing the new checkout's host
+        files left the previous release's digest, so a rollback to that release
+        read it as provisioned and kept the newer scripts and units."""
+        text = PROVISION.read_text()
+        removal = text.index('rm -f "${STACK}/.provisioned"')
+        assert text.index('digest="$(inputs_digest)"') < removal < text.index("apt-get update")

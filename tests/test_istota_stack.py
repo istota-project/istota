@@ -401,6 +401,64 @@ class TestAnUpdateReprovisionsTheHost:
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+class TestARollbackReprovisionsTheHost:
+    """ISSUE-710: a rollback left the host's scripts and units at the newer ref
+    while the stack ran the older one. It now applies update's rule to the
+    checkout it returns to."""
+
+    @pytest.fixture
+    def rolled_forward(self, fx):
+        script = fx.origin / "host" / "provision.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text(PROVISION_STUB)
+        script.chmod(0o755)
+        _git(fx.origin, "add", "host/provision.sh", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        fx.commit("v2")
+        fx.tag("v2", key=fx.release_key)
+        assert fx.run("update", "v1").returncode == 0
+        assert fx.run("update", "v2").returncode == 0
+        v2 = _git(fx.origin, "rev-parse", "v2^{commit}", env=fx.env)
+        (fx.stack / ".provisioned").write_text(f"digest-{v2}\n")
+        fx.calls.unlink()
+        return fx
+
+    def test_the_older_checkouts_provision_runs_after_the_switch(self, rolled_forward):
+        fx = rolled_forward
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        calls = fx.docker_calls()
+        assert "provision ran" in calls, result.stdout + result.stderr
+        up = next(i for i, call in enumerate(calls) if call.endswith("up -d --remove-orphans"))
+        assert up < calls.index("provision ran")
+
+    def test_unchanged_inputs_are_not_provisioned_again(self, rolled_forward):
+        """A record naming v1 means a v1 provision finished: provision.sh drops
+        the record before it acts (`test_host_units.py`)."""
+        fx = rolled_forward
+        v1 = _git(fx.origin, "rev-parse", "v1^{commit}", env=fx.env)
+        (fx.stack / ".provisioned").write_text(f"digest-{v1}\n")
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "provision ran" not in fx.docker_calls()
+
+    def test_a_failed_provision_fails_the_rollback_with_the_stack_on_the_older_tag(self, rolled_forward):
+        fx = rolled_forward
+        result = fx.run("rollback", STUB_PROVISION_RC="1")
+        assert result.returncode == 1
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "provision.sh" in result.stdout + result.stderr
+
+    def test_a_refused_rollback_provisions_nothing(self, rolled_forward):
+        """A guard on the order: the schema refusal comes before any provision."""
+        fx = rolled_forward
+        result = fx.run("rollback", STUB_CHECK_RC="3")
+        assert result.returncode == 3
+        assert "provision ran" not in fx.docker_calls()
+
+
 class TestAHardenedUmask:
     """A host whose umask is 027 (zorg's) checked the tree out root-only, and
     the image copied those modes in: uid 10001 could not import istota.cli."""

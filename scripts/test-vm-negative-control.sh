@@ -20,7 +20,8 @@
 #              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
 #              browser-on-default-network (row 17),
-#              update-without-up, update-without-reprovision (istota-stack update)
+#              update-without-up, update-without-reprovision (istota-stack update),
+#              rollback-without-reprovision (istota-stack rollback)
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
@@ -112,6 +113,10 @@ control update-without-up \
 control update-without-reprovision \
     "istota-stack update: the stack moves and provision.sh never runs from the new checkout" \
     "$U::test_the_host_runs_the_new_refs_istota_stack"
+R="$VM/test_update.py::TestARollbackToTheRelease"
+control rollback-without-reprovision \
+    "istota-stack rollback: the stack returns and provision.sh never runs from the older checkout" \
+    "$R::test_a_rollback_returns_the_hosts_istota_stack"
 
 control certbot-disabled \
     "row 19: certbot masked before the first issuance" \

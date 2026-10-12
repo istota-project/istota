@@ -7,7 +7,8 @@
 #   istota-stack update --unsigned latest
 #                               the tip of main, recorded as main-<commit>
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
-#   istota-stack rollback       back to the previous tag, if its image can run the database
+#   istota-stack rollback       back to the previous tag, if its image can run the database;
+#                               reprovisions the host as update does
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
 #   istota-stack import-bare-metal <dir> [args]
@@ -468,8 +469,9 @@ cmd_update() {
 }
 
 # provision.sh installs this script, the units and the host scripts, so a
-# release that changed them is provisioned straight after it is running.
-# Last and by exec: provision.sh replaces the file bash is reading this from.
+# checkout that changed them, by update or by rollback, is provisioned straight
+# after the stack runs it. Last and by exec: provision.sh replaces the file bash
+# is reading this from.
 reprovision_if_changed() {
     local provision="${SRC}/host/provision.sh" digest
     [ -x "$provision" ] || return 0
@@ -477,7 +479,7 @@ reprovision_if_changed() {
     if [ -n "$digest" ] && [ "$digest" = "$(cat "${STACK}/.provisioned" 2>/dev/null || true)" ]; then
         return 0
     fi
-    log "the host's provisioning inputs changed; running ${provision} (the stack already runs the new tag)"
+    log "the host's provisioning inputs changed; running ${provision} (the stack already runs $(env_get "$ENV_FILE" ISTOTA_TAG))"
     exec "$provision"
 }
 
@@ -524,6 +526,7 @@ cmd_rollback() {
         "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}"
     stack_up
     log "rolled back to ${previous} (previous: ${current})"
+    reprovision_if_changed
 }
 
 # Every credential file compose declares, empty where it does not exist yet:

@@ -64,6 +64,10 @@ fi
 [ "$(id -u)" -eq 0 ] || die "run as root"
 digest="$(inputs_digest)"
 [ -r /etc/debian_version ] || die "this is for Debian 13"
+# A run that dies partway may already have installed this checkout's host files.
+# With the old record left in place, a rollback to the inputs it names would
+# read as provisioned and keep them (ISSUE-710).
+rm -f "${STACK}/.provisioned"
 
 # host.env, if setup has written one. Values only; the file is not executed.
 host_env() {
@@ -445,6 +449,7 @@ else
     log "then systemctl start istota-stack."
 fi
 
-# Last, so a run that failed anywhere above leaves the previous digest.
+# Last, so a run that failed anywhere above leaves no record and the next
+# update, rollback or play provisions again.
 printf '%s\n' "$digest" > "${STACK}/.provisioned.tmp"
 mv "${STACK}/.provisioned.tmp" "${STACK}/.provisioned"
