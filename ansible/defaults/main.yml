@@ -23,6 +23,11 @@ istota_uid: 10001
 #   differs from the deployed name (main-<12 hex>). Nothing is verified, so no
 #   key is needed, and istota_release is ignored.
 istota_update_mode: release
+# Run the update even when the deployed version already matches, which is what
+# typing `istota-stack update` on the VM does: it rebuilds and restarts. For a
+# one-off `-e istota_update_force=true`; with `--tags istota_update` the play
+# runs only the version update.
+istota_update_force: false
 # release mode: the signed tag to run. Empty: the role deploys nothing and an install with no
 # tag yet stops before the config step. `istota-stack update` runs only when
 # this differs from ISTOTA_TAG in .env, so an update is a deliberate change to

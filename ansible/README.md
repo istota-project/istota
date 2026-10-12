@@ -52,6 +52,13 @@ istota_users:
 istota_update_mode: latest
 ```
 
+To update the version without touching anything else, run the play with `--tags istota_update`: it runs the variable checks, the update for the mode, a provision from the new checkout when the update ran, and waits for the stack to be healthy, and skips the config, the secrets and the users. An update runs only when there is something new, a changed `istota_release` or a moved main. `-e istota_update_force=true` runs it anyway, as typing `istota-stack update` on the VM does, which rebuilds the images and restarts the stack. `--check` reports either.
+
+```sh
+ansible-playbook site.yml --limit istota-vm --tags istota_update
+ansible-playbook site.yml --limit istota-vm --tags istota_update -e istota_update_force=true
+```
+
 ### Writing `istota_config`
 
 `istota_config` is config.toml written as YAML, key for key: a TOML table is a mapping, an array of tables (`[[briefing_shared_blocks]]`) is a list of mappings, and the key names do not change. `defaults/main.yml` carries a commented reference below `istota_config: {}`: every key, at its YAML nesting, with its default and the explanation from `config/config.example.toml`. Credentials are marked with the `istota_secrets` name to set instead. The reference is generated, and `tests/test_config_reference.py` fails when it falls behind the code or the example; regenerate it with `uv run env ISTOTA_UPDATE_CONFIG_REFERENCE=1 pytest tests/test_config_reference.py -n0`. A key left out takes the code's default, and the apply validates the whole plan through the config loader before it writes anything, so an unknown key warns and a bad value is refused.

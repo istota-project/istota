@@ -583,6 +583,85 @@ class TestTheTwoUpdateModes:
             assert "_istota_deployed" in str(_command_argv(task)) and "_istota_deployed" in _when(task)
 
 
+def _when_holds(task: dict, context: dict) -> bool:
+    env = jinja2.Environment(undefined=jinja2.ChainableUndefined)
+    env.filters["bool"] = lambda value: value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "on")
+    when = task.get("when", [])
+    for condition in (when if isinstance(when, list) else [when]):
+        if not env.compile_expression(str(condition))(**context):
+            return False
+    return True
+
+
+class TestAnUpdateOnItsOwn:
+    """`--tags istota_update` runs the version update and nothing else, the
+    play's form of ssh-ing in and running `istota-stack update`; and
+    `istota_update_force` runs it when nothing moved, as the command would."""
+
+    UPDATE_ONLY = [
+        "Check the variables",
+        "Check the VM was bootstrapped from a verified release",
+        "Refuse a VM with no checkout",
+        "Is istota-stack installed",
+        "Read the deployed tag",
+        "What main's tip would install",
+        "Report the update --check would make",
+        "Update to the release",
+        "Follow main",
+        "Provision from the new release",
+        "Read the tag now deployed",
+        "The stack is enabled and running",
+        "Wait for the daemon service to be healthy",
+    ]
+
+    def test_the_tag_selects_exactly_the_update(self):
+        tagged = [t["name"] for t in _tasks() if "istota_update" in (t.get("tags") or [])]
+        assert tagged == self.UPDATE_ONLY
+
+    def test_nothing_that_writes_config_secrets_or_users_is_tagged(self):
+        for task in _tasks():
+            if "istota_update" not in (task.get("tags") or []):
+                continue
+            argv = _command_argv(task) or []
+            assert argv[1:2] not in (["apply"], ["put-files"]), task["name"]
+            assert "ensure" not in task["name"], task["name"]
+
+    def test_force_is_off_by_default(self):
+        assert _defaults()["istota_update_force"] is False
+
+    def _context(self, **overrides) -> dict:
+        context = {
+            "ansible_check_mode": False, "istota_update_force": False,
+            "istota_update_mode": "latest", "istota_release": "",
+            "_istota_current_tag": {"stdout": "main-0123456789ab"},
+            "_istota_latest": {"stdout": "main-0123456789ab"},
+        }
+        context.update(overrides)
+        return context
+
+    def test_latest_with_main_unmoved_updates_only_when_forced(self):
+        follow = _tasks()[_index("Follow main")]
+        assert not _when_holds(follow, self._context())
+        assert _when_holds(follow, self._context(istota_update_force=True))
+
+    def test_release_unchanged_updates_only_when_forced(self):
+        update = _tasks()[_index("Update to the release")]
+        same = dict(istota_update_mode="release", istota_release="v1", _istota_current_tag={"stdout": "v1"})
+        assert not _when_holds(update, self._context(**same))
+        assert _when_holds(update, self._context(istota_update_force=True, **same))
+
+    def test_force_never_updates_in_check_mode(self):
+        for name in ("Update to the release", "Follow main"):
+            task = _tasks()[_index(name)]
+            assert not _when_holds(task, self._context(ansible_check_mode=True, istota_update_force=True,
+                                                       istota_update_mode=task["name"] == "Follow main" and "latest" or "release",
+                                                       istota_release="v1"))
+
+    def test_check_mode_reports_a_forced_update(self):
+        report = _tasks()[_index("Report the update --check would make")]
+        assert "istota_update_force" in _when(report)
+
+
 class TestTheProvisionDecisionIsDurable:
     """A play that dies after host.env, .env or rclone.conf changed and before
     provision.sh finished must still provision on the next play, so the

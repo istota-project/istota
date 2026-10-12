@@ -15,6 +15,7 @@
 # `istota-stack put-files` drops to 10001 before it opens a file there.
 
 - name: Check the variables
+  tags: [istota_update]
   ansible.builtin.assert:
     that:
       - istota_update_mode in ['release', 'latest']
@@ -35,11 +36,13 @@
     quiet: true
 
 - name: Check the VM was bootstrapped from a verified release
+  tags: [istota_update]
   ansible.builtin.stat:
     path: "{{ istota_stack_dir }}/src/host/provision.sh"
   register: _istota_provision_script
 
 - name: Refuse a VM with no checkout
+  tags: [istota_update]
   ansible.builtin.fail:
     msg: >-
       {{ istota_stack_dir }}/src has no host/provision.sh. Bootstrap the VM with
@@ -109,6 +112,7 @@
 # next one; after an update; and where istota-stack is missing.
 
 - name: Is istota-stack installed
+  tags: [istota_update]
   ansible.builtin.stat:
     path: "{{ istota_stack_command }}"
   register: _istota_stack_installed
@@ -187,6 +191,7 @@
 # --- The release -------------------------------------------------------------------
 
 - name: Read the deployed tag
+  tags: [istota_update]
   ansible.builtin.command:
     argv: [awk, "-F=", '$1 == "ISTOTA_TAG" { v = substr($0, index($0, "=") + 1) } END { print v }', "{{ istota_stack_dir }}/.env"]
   register: _istota_current_tag
@@ -199,6 +204,7 @@
 # main's tip would install is compared with the deployed one first. Under
 # --check on a VM provision.sh has not reached yet, there is no istota-stack.
 - name: What main's tip would install
+  tags: [istota_update]
   ansible.builtin.command:
     argv: ["{{ istota_stack_command }}", latest-tag]
   register: _istota_latest
@@ -209,6 +215,7 @@
     - not ansible_check_mode or _istota_stack_installed.stat.exists
 
 - name: Report the update --check would make
+  tags: [istota_update]
   ansible.builtin.debug:
     msg: "would run istota-stack update {{ _istota_target }} (deployed: {{ _istota_current_tag.stdout | default('none', true) }})"
   changed_when: true
@@ -217,9 +224,10 @@
   when:
     - ansible_check_mode
     - _istota_target | length > 0
-    - _istota_target != _istota_current_tag.stdout
+    - _istota_target != _istota_current_tag.stdout or istota_update_force | bool
 
 - name: Update to the release
+  tags: [istota_update]
   ansible.builtin.command:
     argv: ["{{ istota_stack_command }}", update, "{{ istota_release }}"]
   register: _istota_updated
@@ -227,9 +235,10 @@
     - not ansible_check_mode
     - istota_update_mode == 'release'
     - istota_release | length > 0
-    - istota_release != _istota_current_tag.stdout
+    - istota_release != _istota_current_tag.stdout or istota_update_force | bool
 
 - name: Follow main
+  tags: [istota_update]
   ansible.builtin.command:
     argv: ["{{ istota_stack_command }}", update, --unsigned, latest]
   register: _istota_followed
@@ -237,10 +246,11 @@
     - not ansible_check_mode
     - istota_update_mode == 'latest'
     - _istota_latest.stdout | default('') | length > 0
-    - _istota_latest.stdout | default('') != _istota_current_tag.stdout
+    - _istota_latest.stdout | default('') != _istota_current_tag.stdout or istota_update_force | bool
 
 # The release's own host/ files (istota-stack, the units, the AppArmor profile).
 - name: Provision from the new release
+  tags: [istota_update]
   ansible.builtin.command:
     argv: ["{{ istota_stack_dir }}/src/host/provision.sh"]
   when: _istota_updated is changed or _istota_followed is changed
@@ -248,6 +258,7 @@
 # What runs now, and whether it was installed unsigned: main can move between
 # `latest-tag` and the update, so the name is read back rather than assumed.
 - name: Read the tag now deployed
+  tags: [istota_update]
   ansible.builtin.command:
     argv: [awk, "-F=", '$1 == "ISTOTA_TAG" { t = substr($0, index($0, "=") + 1) } $1 == "ISTOTA_TAG_UNSIGNED" { u = substr($0, index($0, "=") + 1) } END { print t; print u }', "{{ istota_stack_dir }}/.env"]
   register: _istota_deployed
@@ -358,6 +369,7 @@
 # --- The running stack -----------------------------------------------------------
 
 - name: The stack is enabled and running
+  tags: [istota_update]
   ansible.builtin.systemd_service:
     name: istota-stack.service
     enabled: true
@@ -366,6 +378,7 @@
 
 # A release from before the rename runs the daemon as the service `istota`.
 - name: Wait for the daemon service to be healthy
+  tags: [istota_update]
   ansible.builtin.shell: |
     set -euo pipefail
     cid=""
