@@ -326,6 +326,12 @@ services:
       BROWSER_MAX_TOTAL_SESSIONS: ${BROWSER_MAX_TOTAL_SESSIONS:-4}
       BROWSER_DISK_CACHE_BYTES: ${BROWSER_DISK_CACHE_BYTES:-104857600}
       MAX_BROWSER_SESSIONS: ${MAX_BROWSER_SESSIONS:-2}
+      BROWSE_WATCHDOG_DEADLINE_S: ${BROWSE_WATCHDOG_DEADLINE_S:-90}
+      BROWSE_WATCHDOG_POLL_S: ${BROWSE_WATCHDOG_POLL_S:-5}
+      BROWSER_CDP_FAILURE_THRESHOLD: ${BROWSER_CDP_FAILURE_THRESHOLD:-3}
+      BROWSER_CDP_FAILURE_WINDOW_S: ${BROWSER_CDP_FAILURE_WINDOW_S:-900}
+      BROWSER_WEDGE_RECOVERY_THRESHOLD: ${BROWSER_WEDGE_RECOVERY_THRESHOLD:-3}
+      BROWSER_WEDGE_RECOVERY_WINDOW_S: ${BROWSER_WEDGE_RECOVERY_WINDOW_S:-900}
     deploy:
       resources:
         limits:
@@ -339,9 +345,9 @@ services:
     # Its third arm reads the CDP heartbeat, so an API process that can no longer
     # drive a perfectly healthy Chrome reads as unhealthy as well (ISSUE-384).
     # Nothing here acts on that verdict: `restart: unless-stopped` reacts to
-    # process exit, and the debounced auto-heal actor is the Ansible shape's
-    # cron watchdog. Documented in docs/deployment/docker.md, alongside the
-    # sandbox posture this stack makes the same choice about.
+    # process exit, and the debounced auto-heal actor is the VM's
+    # host/istota-browser-watchdog.sh. Documented in docs/deployment/docker.md,
+    # alongside the sandbox posture this stack makes the same choice about.
     # A compose healthcheck overrides the image HEALTHCHECK, so this must match it.
     healthcheck:
       test: ["CMD-SHELL", "curl -sf 'http://localhost:9224/live?deep=1' || exit 1"]

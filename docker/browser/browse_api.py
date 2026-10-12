@@ -156,10 +156,11 @@ _inflight_lock = threading.Lock()
 # threshold the age is measured from the most recent failure and the verdict is
 # continuously red. What the window must not be is shorter than the time it takes
 # anything to notice: the image HEALTHCHECK is interval=30s retries=3 (about 90s
-# to `unhealthy`), and the Ansible watchdog then wants 2 consecutive reads at a
-# 1-minute cron (about 120s more). So the floor is roughly 210s, and anything
-# below it makes the arm unreachable rather than merely eager. 900s is that floor
-# with room, which is why it is the default; CDP_WINDOW_FLOOR_S enforces the rest.
+# to `unhealthy`), and the VM's watchdog (host/istota-browser-watchdog.sh) then
+# wants 2 consecutive reads at a 1-minute timer (about 120s more). So the floor
+# is roughly 210s, and anything below it makes the arm unreachable rather than
+# merely eager. 900s is that floor with room, which is why it is the default;
+# CDP_WINDOW_FLOOR_S enforces the rest.
 #
 # What the pair deliberately does NOT do is treat the absence of a success as a
 # fault. An idle container makes no CDP calls for hours and is perfectly healthy;
@@ -193,8 +194,8 @@ CDP_FAILURE_WINDOW_S = max(
 # a relaunch does not clear is exactly what a container restart is for.
 #
 # The window shares CDP_WINDOW_FLOOR_S for the same reason: below roughly 210s
-# the verdict expires before the image HEALTHCHECK (30s x 3) and the Ansible
-# watchdog's debounce (2 reads at a 1-minute cron) can act on it, which makes
+# the verdict expires before the image HEALTHCHECK (30s x 3) and the VM
+# watchdog's debounce (2 reads at a 1-minute timer) can act on it, which makes
 # the arm unreachable rather than merely eager.
 #
 # THRESHOLD 0 disables the arm. The default of 3 is deliberately above the two
