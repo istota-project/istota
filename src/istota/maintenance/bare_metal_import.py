@@ -77,6 +77,7 @@ from pathlib import Path
 from istota import apply as apply_module
 from istota import setup_wizard as wizard
 from istota.lib import sqlite_util, toml_write
+from istota.lib.path_rebase import rebase_json, rebase_path  # compatibility exports
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -266,42 +267,6 @@ def path_prefixes(old: dict, new: dict) -> list[tuple[str, str]]:
             seen.add(prefix)
             unique.append((prefix, target))
     return unique
-
-
-def rebase_path(value: str, prefixes: list[tuple[str, str]]) -> str | None:
-    """``value`` under its new root, or None when no prefix covers it.
-
-    A boundary match: the prefix itself or the prefix plus ``/``, never a
-    sibling that merely starts with the same text.
-    """
-    for prefix, target in prefixes:
-        if value == prefix:
-            return target
-        if value.startswith(prefix + "/"):
-            return target + value[len(prefix):]
-    return None
-
-
-def rebase_json(value, prefixes: list[tuple[str, str]]):
-    """``(rebased, count)`` over every string in a decoded JSON value."""
-    if isinstance(value, str):
-        new = rebase_path(value, prefixes)
-        return (value, 0) if new is None else (new, 1)
-    if isinstance(value, list):
-        out, total = [], 0
-        for item in value:
-            new, count = rebase_json(item, prefixes)
-            out.append(new)
-            total += count
-        return out, total
-    if isinstance(value, dict):
-        out, total = {}, 0
-        for key, item in value.items():
-            new, count = rebase_json(item, prefixes)
-            out[key] = new
-            total += count
-        return out, total
-    return value, 0
 
 
 def _strings(value, where: str):

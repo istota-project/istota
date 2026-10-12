@@ -441,7 +441,7 @@ def _sections(plan: dict) -> tuple[Meta, object]:
     return parsed.meta, parsed.config
 
 
-def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None) -> int:
+def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None, patches=None) -> int:
     """Validate a plan without reading or writing any config. 0 valid, 1 refused.
 
     With `as_json`, prints `{"problems": [...], "error": str | null}` and
@@ -451,13 +451,18 @@ def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None) -> int:
     from istota.settings_plan.schema import SchemaError, parse_plan
 
     try:
-        plan = parse_plan(load_plan(plan_path, stdin=stdin))
+        from istota.settings_plan.paths import patch_document
+
+        document, patch_warnings = patch_document(load_plan(plan_path, stdin=stdin), patches)
+        plan = parse_plan(document)
     except SchemaError as exc:
         result = CheckResult(problems=[exc.problem])
     except PlanError as exc:
         result = CheckResult(error=str(exc))
     else:
         result = collect(plan.config) if plan.config is not None else CheckResult()
+        for warning in patch_warnings:
+            err(f"istota apply: warning: {warning}")
     if as_json:
         out(json.dumps(result.as_json()))
         return EXIT_ERROR if result.refused else EXIT_UNCHANGED
@@ -477,7 +482,7 @@ def run(
     backup: int | None = None, stdin=None, output_format: str = "text",
     users: list[str] | None = None, continue_on_error: bool = False,
     prune: bool = False, prune_secrets: bool = False,
-    secrets_file: Path | str | None = None,
+    secrets_file: Path | str | None = None, patches: list[str] | None = None,
 ) -> int:
     """Plan every section, print, and write unless `dry_run`. Returns the exit code."""
     from istota.settings_plan import engine
@@ -487,7 +492,11 @@ def run(
     options = engine.Options(dry_run, continue_on_error, users, prune, prune_secrets)
     context = engine.Context(config_path, options=options, backup=backup)
     try:
-        plan = parse_plan(load_plan(plan_path, stdin=stdin))
+        from istota.settings_plan.paths import patch_document
+
+        document, patch_warnings = patch_document(load_plan(plan_path, stdin=stdin), patches)
+        context.warnings.extend(patch_warnings)
+        plan = parse_plan(document)
         if secrets_file is not None:
             from istota.settings_plan.secrets import read_sidecar
 

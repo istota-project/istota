@@ -381,7 +381,7 @@ def cmd_apply(args):
         if args.format is not None:
             err("istota apply: --check uses --json, not --format; nothing was written.")
             return apply.EXIT_ERROR
-        return apply.check(args.file, as_json=args.json, out=print, err=err)
+        return apply.check(args.file, as_json=args.json, out=print, err=err, patches=args.patch)
     target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
     if not target:
         print(
@@ -395,7 +395,7 @@ def cmd_apply(args):
         out=print, err=err,
         output_format=args.format or "text", users=args.user,
         continue_on_error=args.continue_on_error, prune=args.prune, prune_secrets=args.prune_secrets,
-        secrets_file=args.secrets_file,
+        secrets_file=args.secrets_file, patches=args.patch,
     )
 
 
@@ -4743,6 +4743,7 @@ def main():
     apply_parser.add_argument("--user", action="append", help="Apply only this declared user; repeat for several users")
     apply_parser.add_argument("--continue-on-error", action="store_true", help="Continue later users after a runtime failure")
     apply_parser.add_argument("--prune", action="store_true", help="Prune undeclared entries in supplied collections")
+    apply_parser.add_argument("--patch", action="append", metavar="SOURCE=DEST", help="Rewrite selected path prefixes; repeat for several patches")
     apply_parser.add_argument("--secrets-file", help="Private TOML/JSON credential sidecar")
     apply_parser.add_argument("--prune-secrets", action="store_true", help="Prune eligible named secret slots; requires --prune")
 
