@@ -196,7 +196,7 @@
   let sharedEditingName = $state<string | null>(null); // non-null = editing existing
   let sharedError = $state('');
   let sharedSaving = $state(false);
-  let sharedRunning = $state<string | null>(null);
+  let sharedRunning = $state<Set<string>>(new Set());
   let confirmSharedDelete = $state<string | null>(null);
 
   const sharedKindOptions: SelectOption[] = $derived(
@@ -263,8 +263,8 @@
   function sharedMenu(b: SharedBlock): KebabItem[] {
     return [
       {
-        label: sharedRunning === b.name ? 'Running…' : 'Run now',
-        disabled: sharedRunning === b.name,
+        label: sharedRunning.has(b.name) ? 'Running…' : 'Run now',
+        disabled: sharedRunning.has(b.name),
         onSelect: () => void doRunShared(b.name),
       },
       { label: 'Edit', onSelect: () => editShared(b) },
@@ -341,16 +341,47 @@
     }
   }
 
+  // The daemon generates the block on its next tick (ISSUE-700). A gather
+  // can take a minute and the model call has a three-minute ceiling, so the
+  // wait is generous, and running out of it is reported as not yet answered.
+  const SHARED_RUN_POLL_MS = 1500;
+  const SHARED_RUN_WAIT_MS = 300_000;
+  const SHARED_RUN_OUTCOMES: Record<string, string> = {
+    kept_prior: 'Nothing was generated; the previous content was kept.',
+    brain_unavailable: 'The primary model is unavailable; the previous content was kept.',
+    failed: 'Run failed; see the daemon log.',
+    not_found: 'The block was deleted before it ran.',
+  };
+
   async function doRunShared(name: string) {
-    sharedRunning = name;
+    sharedRunning = new Set(sharedRunning).add(name);
     try {
-      const res = await runSharedBlock(name);
-      if (res.status === 'error') sharedError = `Run failed: ${res.error}`;
-      await reloadSharedBlocks();
+      const asked = await runSharedBlock(name);
+      const until = Date.now() + SHARED_RUN_WAIT_MS;
+      while (Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, SHARED_RUN_POLL_MS));
+        await reloadSharedBlocks();
+        const block = sharedBlocks.find((b) => b.name === name);
+        if (!block) {
+          sharedError = `${name}: ${SHARED_RUN_OUTCOMES.not_found}`;
+          return;
+        }
+        const answer = block.status.run_answered;
+        if (answer?.id === asked.id) {
+          const message = SHARED_RUN_OUTCOMES[answer.outcome];
+          if (message) sharedError = `${name}: ${message}`;
+          return;
+        }
+      }
+      sharedError =
+        `${name}: the daemon has not answered yet. It may still be generating; ` +
+        'if this persists, check that the daemon is running.';
     } catch (e) {
       sharedError = (e as Error).message || 'Run failed';
     } finally {
-      sharedRunning = null;
+      const next = new Set(sharedRunning);
+      next.delete(name);
+      sharedRunning = next;
     }
   }
 

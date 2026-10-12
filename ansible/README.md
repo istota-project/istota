@@ -44,6 +44,57 @@ istota_users:
   alice: {display-name: Alice, email: [alice@example.com]}
 ```
 
+### Release or latest
+
+`istota_update_mode` picks how the VM is updated. `release` (the default) runs the signed tag in `istota_release`, verified against `istota_release_signing_key`, and updates only when that variable changes. `latest` follows main: each play asks `istota-stack latest-tag` for the name main's tip would install (`main-<12 hex>`, read from origin without fetching) and runs `istota-stack update --unsigned latest` only when it differs from the deployed one. Nothing is verified in `latest` mode, so no key is required and `istota_release` is ignored. Either way the rebuild after a config change uses the way the deployed tag was installed, so an unsigned tag is rebuilt unsigned.
+
+```yaml
+istota_update_mode: latest
+```
+
+To update the version without touching anything else, run the play with `--tags istota_update`: it runs the variable checks, the update for the mode, a provision from the new checkout when the update ran, and waits for the stack to be healthy, and skips the config, the secrets and the users. An update runs only when there is something new, a changed `istota_release` or a moved main. `-e istota_update_force=true` runs it anyway, as typing `istota-stack update` on the VM does, which rebuilds the images and restarts the stack. `--check` reports either.
+
+```sh
+ansible-playbook site.yml --limit istota-vm --tags istota_update
+ansible-playbook site.yml --limit istota-vm --tags istota_update -e istota_update_force=true
+```
+
+### Writing `istota_config`
+
+`istota_config` is config.toml written as YAML, key for key: a TOML table is a mapping, an array of tables (`[[briefing_shared_blocks]]`) is a list of mappings, and the key names do not change. `defaults/main.yml` carries a commented reference below `istota_config: {}`: every key, at its YAML nesting, with its default and the explanation from `config/config.example.toml`. Credentials are marked with the `istota_secrets` name to set instead. The reference is generated, and `tests/test_config_reference.py` fails when it falls behind the code or the example; regenerate it with `uv run env ISTOTA_UPDATE_CONFIG_REFERENCE=1 pytest tests/test_config_reference.py -n0`. A key left out takes the code's default, and the apply validates the whole plan through the config loader before it writes anything, so an unknown key warns and a bad value is refused.
+
+```toml
+# config.toml
+[speech_gate]
+mode = "classifier"
+
+[brain.native]
+model = "general"
+```
+
+```yaml
+# host_vars
+istota_config:
+  speech_gate: {mode: classifier}
+  brain:
+    native: {model: general}
+```
+
+### Moving from the old role
+
+An estate that ran `deploy/ansible/` keeps its settings as flat `istota_*` variables in a vault. After the bare-metal import, `istota migrate role-vars` writes this role's variables from that vault and the migrated VM's own files, so the first `--check` reports no drift:
+
+```sh
+ssh vm sudo cat /srv/app/istota/config/config.toml > config.toml   # likewise host.env, .env, rclone.conf
+ansible-vault view group_vars/istota.yml > old.yml
+uv run istota migrate role-vars --old-vars old.yml --config config.toml \
+    --host-env host.env --stack-env .env --rclone-conf rclone.conf --output new.yml
+ansible-vault encrypt new.yml
+shred -u old.yml config.toml rclone.conf
+```
+
+`--old-vars` repeats, later files winning, for a host_vars file on top of group_vars. The output is 0600 and only names are printed. It maps the old secret variables to `istota_secrets`, the users to the ensure flags, and keeps the master key and web token key as `vault_istota_secret_key` and `vault_istota_web_token_key` (no task reads them; the vault is their only copy off the VM). The config comes from the VM's config.toml, not from the old variables, because the import rewrote its paths. A Twilio or WhatsApp Cloud credential has no secrets file, so the converter refuses and writes nothing; every old variable it does not carry is listed.
+
 A secret named in `istota_secrets` is written exactly, an empty string included. A secret left out is created empty if its file is missing and otherwise left alone, so a file the wizard or the import wrote survives a play that does not manage it.
 
 ## A playbook

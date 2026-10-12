@@ -10,14 +10,15 @@ what the runtime was — and none of them was a Python defect.
 This module writes those assumptions down. Each check answers one question
 about the host, returns a :class:`CheckResult`, and never raises. It runs at
 daemon start-up, on a scheduler interval, from ``istota doctor``, from the admin
-dashboard, from ``!check`` and from the ``self-check`` heartbeat. It is also the
+dashboard and from the ``self-check`` heartbeat. It is also the
 oracle the image and smoke test tiers reuse instead of hand-writing assertions
 that drift from the code.
 
-The last two are recent. ``commands.cmd_check`` and ``heartbeat._check_self``
-each carried a near-verbatim copy of the other — the same five probes in the
-same order, about 180 duplicated lines — and both had drifted from this registry
-and from each other. ``tests/test_doctor.py::test_no_hand_rolled_health_probe``
+The heartbeat is recent. ``heartbeat._check_self`` and the old ``!check``
+command (removed in ISSUE-698, in favour of ``istota doctor``) each carried a
+near-verbatim copy of the other — the same five probes in the same order, about
+180 duplicated lines — and both had drifted from this registry and from each
+other. ``tests/test_doctor.py::test_no_hand_rolled_health_probe``
 is what stops them growing back.
 
 Two constraints shape the design and are easy to violate by accident:
@@ -2274,7 +2275,7 @@ def check_task_failure_rate(config: "Config", probe: bool) -> CheckResult:
     """Are the last hour's tasks mostly failing?
 
     The query and the ``failed > 0 and failed >= completed`` predicate both come
-    verbatim off ``heartbeat._check_self`` and ``commands.cmd_check``, which ran
+    verbatim off ``heartbeat._check_self`` and the old ``!check`` command, which ran
     the same SQL and compared it the same way.
 
     ``WARN``, never ``FAIL``, on the rate itself: a failure rate is a symptom,
@@ -2435,7 +2436,7 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
     the no-spawn rule at the top of this module is unconditional and this is the
     most expensive possible way to break it.
 
-    Lifted off ``heartbeat._check_self`` and ``commands.cmd_check``, with two
+    Lifted off ``heartbeat._check_self`` and the old ``!check`` command, with two
     corrections. It gates the sandbox wrap on
     :func:`executor.effective_sandboxing` rather than on
     ``security.sandbox_enabled``: on the shipped Docker stack the flag is true
@@ -2447,7 +2448,7 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
 
     One property of the FAIL detail is worth stating rather than assuming. It
     quotes a bounded excerpt of the CLI's own stderr, which is what makes the
-    finding actionable and is what ``commands.cmd_check`` already printed. The
+    finding actionable and is what the old ``!check`` command already printed. The
     redaction pass behind :func:`config_secrets` scrubs values it can find in
     the loaded ``Config``, and the credentials this particular call carries are
     not among them — ``CLAUDE_CODE_OAUTH_TOKEN`` comes from the daemon's own
@@ -2833,7 +2834,7 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     defaults to ``""``, ``secrets.env.j2`` renders the line only when it is
     non-empty, and the defaults file documents empty as *disabling* the store —
     so a hand-written Ansible inventory can be deliberately keyless, and a FAIL
-    there pages an operator at every boot, every scheduler interval, ``!check``
+    there pages an operator at every boot, every scheduler interval
     and the self-check heartbeat for a decision they made. ``verdict`` already
     draws that line: a warning that pages someone is a failure wearing the
     wrong label. So the ``secrets`` table settles it — rows present is the
@@ -5047,7 +5048,7 @@ def check_web_build_current(config: "Config", probe: bool) -> CheckResult:
 
     That question needs git, so it is **probe-gated** and answers ``SKIP``
     without one. `probe` is True on every surface that matters — the boot run,
-    the hourly sweep, ``istota doctor``, ``!check``, the admin pane — and False
+    the hourly sweep, ``istota doctor``, the admin pane — and False
     only on ``config.CONFIG_LOAD_CHECKS``, which this is not in.
 
     A mismatch is a **WARN**, and every state this cannot settle is a ``SKIP``.
@@ -5164,10 +5165,9 @@ def check_sandbox_masks(config: "Config", probe: bool) -> CheckResult:
     prompt file not found". A host in that state now passes this check while
     every claude_code task fails.
 
-    What still covers it live is the heartbeat's ``self-check`` and ``!check``,
-    both of which build a CLAUDE sandbox and run the CLI through it — but both
-    are opt-in, where this ran on every ``--deep``. The tier that covers it
-    unconditionally is ``tests/linux/test_sandbox_profiles_real.py``. Probing
+    What still covers it live is the heartbeat's ``self-check``, which builds
+    a CLAUDE sandbox and runs the CLI through it — but it is opt-in, where this
+    ran on every ``--deep``. The tier that covers it unconditionally is ``tests/linux/test_sandbox_profiles_real.py``. Probing
     both profiles here would restore it for two subprocesses; that is a
     deliberate omission rather than an oversight.
     """
@@ -6884,11 +6884,10 @@ def _signaling_gate(config: "Config") -> str:
 def _run_off_loop(make_coro, timeout: float):
     """Run one coroutine to completion on a private loop, from any context.
 
-    doctor is reached from a plain thread (the CLI, the daemon's start-up) and
-    from a worker thread (``asyncio.to_thread`` in the admin pane, in
-    ``!check`` and in the heartbeat). A private loop on a private thread is
-    correct from all of them and stays correct if a fourth caller ever runs on
-    a loop, where ``asyncio.run`` would raise. It also keeps this off the
+    doctor is reached from plain threads: the CLI, the daemon's start-up and
+    the scheduler's threads, including the background-check thread that runs
+    the heartbeat. A private loop on a private thread is correct from all of
+    them and stays correct if a later caller ever runs on a loop, where ``asyncio.run`` would raise. It also keeps this off the
     persistent runtime, whose pooled ``TalkClient`` belongs to the scheduler's
     loop and refuses a foreign one outright.
 
@@ -7368,10 +7367,10 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
 
     stats = sig.read_stats()
     if stats is None:
-        # doctor also runs in the web process, in the CLI and behind `!check`,
-        # where the supervisor lives in another process entirely. Reporting
-        # every watcher down there would page an operator about a process that
-        # was never meant to have any.
+        # doctor also runs outside the daemon (the CLI), where the supervisor
+        # lives in another process entirely. Reporting every watcher down there
+        # would page an operator about a process that was never meant to have
+        # any.
         return CheckResult(
             name, SKIP,
             "no signaling supervisor is running in this process",
@@ -8093,8 +8092,8 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
     would page somebody about a process that was never meant to have one. The
     cost is real and is stated rather than hidden — `istota doctor` from a
     terminal cannot answer this question, and the authoritative surfaces are
-    the boot run, the hourly sweep, `!check` and the admin pane, all of which
-    run inside the daemon.
+    the boot run and the hourly sweep, which run inside the daemon and which the
+    admin pane shows.
     """
     name = "whatsapp.baileys_bridge"
     skipped = _baileys_precondition(name, config)

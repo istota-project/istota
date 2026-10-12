@@ -197,6 +197,60 @@ def _repo_local_modules() -> frozenset[str]:
     return frozenset(names)
 
 
+# Files under `tests/` that the suite never imports: a test reads each as text
+# and runs it inside a built image, so its imports resolve against that image's
+# requirements file, and its local imports against that file's directory, which
+# is the image's build context.
+RUNS_IN_AN_IMAGE = {
+    "tests/image/browser_checkout.py": "docker/browser/requirements.txt",
+}
+
+
+def _in_image(path: Path) -> bool:
+    return path.relative_to(REPO_ROOT).as_posix() in RUNS_IN_AN_IMAGE
+
+
+def _build_context_modules(context: Path) -> frozenset[str]:
+    names = set()
+    for path in context.rglob("*"):
+        if "__pycache__" in path.parts:
+            continue
+        if path.suffix == ".py":
+            names.add(path.stem)
+        elif path.is_dir() and (path / "__init__.py").exists():
+            names.add(path.name)
+    return frozenset(names)
+
+
+def _every_imported_name_part(source: str) -> set[str]:
+    """Every dotted component of every import, relative ones included.
+
+    `_names_from` keeps only the first component of an absolute import, which is
+    right for resolving a distribution and blind to `from .browser_checkout
+    import x`, the form `tests/image/` uses between its own modules.
+    """
+    parts = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts.update(alias.name.split("."))
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                parts.update(node.module.split("."))
+            for alias in node.names:
+                parts.add(alias.name)
+    return parts
+
+
+def _requirements_file_names(path: Path) -> frozenset[str]:
+    lines = [
+        line.strip()
+        for line in path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return frozenset(_requirement_names(lines))
+
+
 def _distribution_candidates(module: str) -> set[str]:
     """The declared names that would satisfy an import of `module`."""
     candidates = {module, IMPORT_TO_DISTRIBUTION.get(module, module)}
@@ -323,7 +377,7 @@ class TestTheTestOnlyDependenciesAreDeclared:
         return sorted(
             p.relative_to(REPO_ROOT).as_posix()
             for p in _TEST_MODULES
-            if module in _all_imports(p)
+            if not _in_image(p) and module in _all_imports(p)
         )
 
     def test_every_package_the_suite_imports_is_reachable_on_a_lean_install(self):
@@ -332,6 +386,8 @@ class TestTheTestOnlyDependenciesAreDeclared:
 
         unreachable = {}
         for path in _TEST_MODULES:
+            if _in_image(path):
+                continue
             for module in _all_imports(path):
                 if module in sys.stdlib_module_names or module in local:
                     continue
@@ -356,6 +412,48 @@ class TestTheTestOnlyDependenciesAreDeclared:
                 for mod, files in sorted(unreachable.items())
             )
         )
+
+    def test_an_in_image_script_imports_only_what_its_image_declares(self):
+        # The other half of the exemption above: a script run inside an image
+        # is held to that image's requirements and build context, so a package
+        # or an `istota` import it gains without the image having it still fails.
+        missing = {}
+        for script, requirements in RUNS_IN_AN_IMAGE.items():
+            requirements_path = REPO_ROOT / requirements
+            declared = _requirements_file_names(requirements_path)
+            local = _build_context_modules(requirements_path.parent)
+            for module in _all_imports(REPO_ROOT / script):
+                if module in sys.stdlib_module_names or module in local:
+                    continue
+                if not _distribution_candidates(module) & declared:
+                    missing.setdefault(script, []).append(module)
+        assert not missing, (
+            f"these in-image scripts import packages their image does not declare: {missing}"
+        )
+
+    def test_no_test_module_imports_an_in_image_script(self):
+        # The exemption holds only while the script is read as text and run in
+        # the image. An import of it from the suite would need its packages on
+        # the lean install after all.
+        stems = {Path(script).stem for script in RUNS_IN_AN_IMAGE}
+        importers = sorted(
+            p.relative_to(REPO_ROOT).as_posix()
+            for p in _TEST_MODULES
+            if not _in_image(p) and _every_imported_name_part(p.read_text()) & stems
+        )
+        assert not importers, f"these test modules import an in-image script: {importers}"
+        for script in RUNS_IN_AN_IMAGE:
+            assert (REPO_ROOT / script).is_file(), script
+
+    def test_the_import_guard_sees_relative_and_package_imports(self):
+        # Control for the guard above: each of these would load the script.
+        for source in (
+            "from .browser_checkout import run",
+            "from . import browser_checkout",
+            "from tests.image import browser_checkout",
+            "import tests.image.browser_checkout",
+        ):
+            assert "browser_checkout" in _every_imported_name_part(source), source
 
     def test_a_declaration_outside_the_lean_install_does_not_count(self):
         # The control for the check above, and the reason it resolves against

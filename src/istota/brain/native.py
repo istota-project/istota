@@ -305,7 +305,8 @@ def _cancel_requested(req: BrainRequest) -> bool:
 
     Only consulted on a terminal path, and only to decide whether a tool-server
     failure is the *cause* of the stop or its *consequence*: `!stop` and the
-    web cancel endpoint kill the recorded `worker_pid`'s process group, which
+    web cancel endpoint may kill the recorded `worker_pid`'s process group
+    (from the scheduler's own process, via `signal_task_worker`), which
     is the tool server, so a cancellation and a crashed sandbox look identical
     from the socket. Asking the source of truth is the only thing that
     separates them.
@@ -2053,8 +2054,8 @@ class NativeBrain:
         #
         # **And a real cancellation outranks it back**, which this brain only
         # had to learn once it started reporting a pid. `!stop` and the web
-        # cancel endpoint set `cancel_requested` *and* `kill_process_group` the
-        # recorded `worker_pid` — which is now the tool server's outer bwrap,
+        # cancel endpoint set `cancel_requested` *and*, from the scheduler's
+        # own process, signal the recorded `worker_pid` — which is now the tool server's outer bwrap,
         # leading its own group. So a user pressing stop kills the server, the
         # reader sees EOF, and without this test the task the user just stopped
         # would come back as a failed attempt on the retry ladder instead of as

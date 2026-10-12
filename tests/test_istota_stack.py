@@ -44,7 +44,7 @@ args=" $* "
 case "$args" in
   *" config --services "*)
     printf 'daemon\nweb\nnginx\n'
-    case "$args" in *compose.devbox.yml*) echo devbox-stefan ;; esac ;;
+    case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
   *" build "*) exit "${STUB_BUILD_RC:-0}" ;;
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
@@ -341,17 +341,17 @@ class TestAStaleDevboxFile:
         (fx.stack / "compose.devbox.yml").write_text('{"services": {"istota": {"volumes": ["x:/y"]}}}\n')
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
-        rendered = '{"services": {"devbox-stefan": {"image": "istota-devbox:v1"}}}'
+        rendered = '{"services": {"devbox-alice": {"image": "istota-devbox:v1"}}}'
 
         result = fx.run("update", "v1", STUB_DEVBOX_COMPOSE=rendered)
 
         assert result.returncode == 0, result.stdout + result.stderr
         calls = fx.docker_calls()
         render = next(i for i, c in enumerate(calls) if "devbox compose-file" in c)
-        core = next(i for i, c in enumerate(calls) if " build " in f"{c} " and "devbox-stefan" not in c)
+        core = next(i for i, c in enumerate(calls) if " build " in f"{c} " and "devbox-alice" not in c)
         assert "compose.devbox.yml" not in calls[core], calls[core]
         assert "compose.devbox.yml" not in calls[render], calls[render]
-        devbox = [c for c in calls[render:] if " build " in f"{c} " and "devbox-stefan" in c]
+        devbox = [c for c in calls[render:] if " build " in f"{c} " and "devbox-alice" in c]
         assert devbox and "compose.devbox.yml" in devbox[0], calls
         assert rendered in (fx.stack / "compose.devbox.yml").read_text()
 
@@ -457,6 +457,22 @@ class TestLatestFollowsMain:
         assert result.returncode == 0, result.stdout + result.stderr
         assert fx.head() == first
         assert f"ISTOTA_TAG={self._name(first)}\n" in fx.env_text()
+
+    def test_latest_tag_names_the_tip_and_changes_nothing(self, fx):
+        """What the management role compares with ISTOTA_TAG before it updates,
+        since an update always rebuilds."""
+        commit = fx.commit("next")
+        before = fx.env_text(), fx.head(), fx.docker_calls()
+        result = fx.run("latest-tag")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.strip() == self._name(commit)
+        assert (fx.env_text(), fx.head(), fx.docker_calls()) == before
+
+    def test_latest_tag_is_the_name_update_installs(self, fx):
+        fx.commit("next")
+        named = fx.run("latest-tag").stdout.strip()
+        assert fx.run("update", "--unsigned", "latest").returncode == 0
+        assert f"ISTOTA_TAG={named}\n" in fx.env_text()
 
     def test_latest_is_never_a_signed_release(self, fx):
         fx.commit("next")

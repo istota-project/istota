@@ -141,6 +141,9 @@ class TestTheRefreshRejectionRaisesIt:
         assert web_tokens.get_access_token(
             config.db_path, config, "alice",
         ) is None
+        # The web process hands the push to the daemon (ISSUE-702).
+        assert sent == []
+        store.deliver_handed_off(config)
 
         rows = _rows(config)
         assert len(rows) == 1
@@ -256,6 +259,7 @@ class TestKeyRotationRaisesIt:
         assert web_tokens.get_access_token(
             config.db_path, config, "alice",
         ) is None
+        store.deliver_handed_off(config)
 
         rows = _rows(config)
         assert len(rows) == 1 and rows[0]["state"] == "open"
@@ -377,7 +381,7 @@ def _row_for(config, service):
 
 
 class TestTheProducerHoldsNoWriteLock:
-    """`raise_notification` opens its own connection and is only safe for a caller
+    """`raise_for_service` opens its own connection and is only safe for a caller
     that holds none. `web_tokens` reaches the DB through `_connect`, which opens
     and closes around each statement — asserted rather than argued."""
 
@@ -388,13 +392,13 @@ class TestTheProducerHoldsNoWriteLock:
         _responder(monkeypatch, 400)
         _sends(monkeypatch)
         probe = _LockProbe(config)
-        real_raise = store.raise_notification
+        real_raise = connected_service.raise_for_service
 
-        def _spy(cfg, user_id, **kwargs):
+        def _spy(*args, **kwargs):
             probe.check()
-            return real_raise(cfg, user_id, **kwargs)
+            return real_raise(*args, **kwargs)
 
-        monkeypatch.setattr("istota.notifications.store.raise_notification", _spy)
+        monkeypatch.setattr(connected_service, "raise_for_service", _spy)
 
         web_tokens.get_access_token(config.db_path, config, "alice")
 
@@ -453,6 +457,7 @@ class TestTheRotationHole:
         sent = _sends(monkeypatch)
 
         web_tokens.get_access_token(config.db_path, config, "alice")
+        store.deliver_handed_off(config)
 
         rows = _rows(config)
         assert len(rows) == 1 and rows[0]["state"] == "open"

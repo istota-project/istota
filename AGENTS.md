@@ -116,7 +116,7 @@ src/istota/
 │   ├── host_paths.py     # Host-path allowlist for the skill CLIs that take one → sandbox.md
 │   ├── cgroup.py         # A cgroup v2 group per task: memory.max, pids.max, cpu.max → sandbox.md
 │   ├── shell_exec.py     # How a command string becomes a shell argv, with `pipefail` on → sandbox.md
-│   ├── process_group.py  # `kill_process_group(pid, sig)`: signal a subprocess and its descendants → sandbox.md
+│   ├── process_group.py  # `kill_process_group(pid, sig)`: signal a subprocess and its descendants; `signal_task_worker` only in the scheduler's process → sandbox.md
 │   ├── peer_process.py   # Who connected to a Unix socket, and whether they descend from a task's root → sandbox.md
 │   ├── forge_cli.py      # The `gh` / `glab` wrapper: deny policy + server-side token injection → sandbox.md
 │   └── net_guard.py      # Whether an address is public: the SSRF rule shared by WebFetch and the wordpress skill → leaf-modules.md

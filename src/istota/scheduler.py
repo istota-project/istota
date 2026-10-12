@@ -95,7 +95,7 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 from istota import confirmations, db
-from istota.webui import avatars
+from istota.webui import admin_browsers, avatars
 from istota.rooms import speech_gate
 from .brain import (
     make_brain,
@@ -153,6 +153,7 @@ from istota.notifications.store import (
     sweep_retention,
 )
 from istota.notifications.delivery import effective_log_destinations, send_notification
+from istota.sandbox import process_group
 from istota.sandbox.process_group import kill_group_if_live
 from istota.sandbox.host_paths import owner_path_parts, path_under_roots
 from .session.session_log import (
@@ -5648,13 +5649,14 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     return [b.name for b in due]
 
 
-def _generate_shared_block(config: Config, block) -> None:
+def _generate_shared_block(config: Config, block) -> str:
     """Gather + synthesize one shared block and write it to shared_kv.
 
     A ``None`` result (no usable sources / all-empty gather / failed Brain call)
     skips the write and leaves the prior value intact — a transient upstream
     outage degrades to last-known-good rather than blanking the section. Runs on
-    a short-lived worker thread; never raises into the caller.
+    a short-lived worker thread; never raises into the caller. Returns what the
+    run came to, one of ``shared_block_runs``' outcomes, for a Run now answer.
 
     ISSUE-181: a ``synthesis`` block needs the primary brain, so when it's
     degraded (breaker open) we skip the whole gather+synthesize — the expensive
@@ -5664,6 +5666,7 @@ def _generate_shared_block(config: Config, block) -> None:
     (verbatim source concatenation), so they still generate when degraded.
     """
     from istota.brain import primary_brain_unavailable
+    from istota.briefings import shared_block_runs as runs
     from istota.briefings.shared_blocks import SYSTEM_IDENTITY, run_shared_block
     from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
 
@@ -5675,18 +5678,18 @@ def _generate_shared_block(config: Config, block) -> None:
                 "(keeping prior content)",
                 block.name,
             )
-            return
+            return runs.BRAIN_UNAVAILABLE
 
     try:
         result = run_shared_block(block, config)
     except Exception as e:  # noqa: BLE001
         logger.error("shared block %s generation failed: %s", block.name, e)
-        return
+        return runs.FAILED
     if result is None:
         logger.warning(
             "shared block %s: nothing generated, keeping prior content", block.name,
         )
-        return
+        return runs.KEPT_PRIOR
     try:
         with db.get_db(config.db_path) as conn:
             db.shared_kv_set(
@@ -5696,6 +5699,84 @@ def _generate_shared_block(config: Config, block) -> None:
         logger.info("shared block %s regenerated", block.name)
     except Exception as e:  # noqa: BLE001
         logger.error("shared block %s write failed: %s", block.name, e)
+        return runs.FAILED
+    return runs.REGENERATED
+
+
+def check_shared_block_requests(config: Config) -> None:
+    """Answer the Run now presses the settings page left (ISSUE-700).
+
+    Here rather than in the web process because the daemon is the one on the
+    browser's network and the one whose brain breaker decides.
+    """
+    from istota.briefings import shared_block_runs as runs
+    from istota.config import shared_block_from_row
+
+    answered: set[str] = set()
+    while True:
+        request = runs.next_request(config)
+        # A request seen twice is one whose answer could not be written;
+        # leave it for the next tick rather than spinning on it.
+        if request is None or request["id"] in answered:
+            return
+        answered.add(request["id"])
+        name = request.get("name", "")
+        with db.get_db(config.db_path) as conn:
+            row = db.get_shared_block_config(conn, name)
+        if row is None:
+            outcome = runs.NOT_FOUND
+        else:
+            try:
+                outcome = _generate_shared_block(config, shared_block_from_row(row))
+            except Exception:  # noqa: BLE001 - the next request must still be answered
+                logger.error("shared block %s run-now failed", name, exc_info=True)
+                outcome = runs.FAILED
+        runs.record_answered(config, request, outcome)
+
+
+def poll_notification_handoffs(config: Config, inflight: dict) -> None:
+    """The `notification-handoff` gate: one read on the dispatch loop, a thread
+    only when the web process left a delivery here (ISSUE-702). Never raises.
+
+    The daemon sends because it holds what a send needs and the web process
+    does not, the WhatsApp bridge first among them.
+    """
+    from istota.notifications import store as notification_store
+
+    try:
+        pending = notification_store.handoffs_pending(config)
+    except sqlite3.OperationalError as exc:
+        logger.debug("notification_handoff_poll_skipped reason=%s", exc)
+        return
+    except Exception:  # noqa: BLE001 - a raise here takes the dispatch loop
+        logger.warning("notification_handoff_poll_failed", exc_info=True)
+        return
+    if pending:
+        _spawn_background_check(
+            "notification-handoff",
+            lambda: notification_store.deliver_handed_off(config),
+            inflight, overlap_expected=True,
+        )
+
+
+def poll_shared_block_requests(config: Config, inflight: dict) -> None:
+    """The `shared-block-request` gate: one read on the dispatch loop, a thread
+    only when there is a request. Never raises."""
+    from istota.briefings import shared_block_runs as runs
+
+    try:
+        pending = runs.requests_pending(config)
+    except sqlite3.OperationalError as exc:
+        logger.debug("shared_block_request_poll_skipped reason=%s", exc)
+        return
+    except Exception:  # noqa: BLE001 - a raise here takes the dispatch loop
+        logger.warning("shared_block_request_poll_failed", exc_info=True)
+        return
+    if pending:
+        _spawn_background_check(
+            "shared-block-request", lambda: check_shared_block_requests(config),
+            inflight, overlap_expected=True,
+        )
 
 
 def _parse_shared_kv_target(target: str) -> tuple[str, str]:
@@ -6167,6 +6248,16 @@ def _check_doctor_locked(
     state["failing"] = failing_names
     doctor.record_report(config, results, request_id=request_id)
     return results
+
+
+def check_browser_instances(config: Config) -> None:
+    """Record the browser pool for the admin Browsers page (ISSUE-699).
+
+    The daemon is the only container on the browser's network, so it takes the
+    snapshot the web process cannot. On a background thread, hence its own loop.
+    """
+    result = asyncio.run(admin_browsers.snapshot(config.browser))
+    admin_browsers.record_snapshot(config, result)
 
 
 def check_doctor_request(config: Config, state: dict) -> None:
@@ -9590,6 +9681,15 @@ def build_interval_gates(
         # is almost always empty is not worth it. It hands off when there is one.
         poll_doctor_request(config, doctor_seen, keeper)
 
+    def _browser_instances(now: float) -> None:
+        check_browser_instances(config)
+
+    def _shared_block_request(now: float) -> None:
+        poll_shared_block_requests(config, keeper)
+
+    def _notification_handoff(now: float) -> None:
+        poll_notification_handoffs(config, keeper)
+
     def _worktree_reap(now: float) -> None:
         check_worktree_reap(config)
 
@@ -9708,6 +9808,21 @@ def build_interval_gates(
             on_error="Error checking shared blocks: %s",
             one_shot=True,
             one_shot_on_error="Error checking shared blocks: %s",
+        ),
+        # Run now from the briefings settings page. One shared_kv read a tick
+        # on the loop, like `doctor-request`; the generation goes to a thread.
+        IntervalGate(
+            name="shared-block-request",
+            run=_shared_block_request,
+            fixed_interval=1,
+            on_error="Error polling shared-block run requests: %s",
+        ),
+        # Notification pushes the web process left for the daemon to send.
+        IntervalGate(
+            name="notification-handoff",
+            run=_notification_handoff,
+            fixed_interval=1,
+            on_error="Error polling notification hand-offs: %s",
         ),
         IntervalGate(
             name="briefing-triggers",
@@ -9835,6 +9950,16 @@ def build_interval_gates(
             run=_doctor_request,
             fixed_interval=1,
             on_error="Error polling doctor requests: %s",
+        ),
+        # The admin Browsers page's data. One read-only GET to the browser API,
+        # which never acquires a browser or extends its idle time.
+        IntervalGate(
+            name="browser-instances",
+            run=_browser_instances,
+            fixed_interval=admin_browsers.RECORD_INTERVAL_SECONDS,
+            enabled=lambda c: c.browser.enabled,
+            background=True,
+            overlap_expected=True,
         ),
         # ISSUE-288. Seeded to 0 for the reason the sweeps below share: the
         # accumulation it clears is the state a restart usually arrives into,
@@ -10548,6 +10673,10 @@ def run_daemon(
     lock_file.write(str(os.getpid()))
     lock_file.flush()
 
+    # The worker pids this process records are in its own PID namespace, so
+    # the cancel paths may signal them here and nowhere else (ISSUE-701).
+    process_group.own_task_pids(True)
+
     # Set up signal handlers (main-thread only; the serve launcher opts out).
     if install_signal_handlers:
         signal.signal(signal.SIGTERM, _signal_handler)
@@ -10906,6 +11035,7 @@ def run_daemon(
         logger.warning("Error stopping persistent asyncio runtime: %s", e)
 
     # Release lock on shutdown
+    process_group.own_task_pids(False)
     fcntl.flock(lock_file, fcntl.LOCK_UN)
     lock_file.close()
 

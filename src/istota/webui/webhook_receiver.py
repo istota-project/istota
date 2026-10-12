@@ -40,6 +40,9 @@ _lock = threading.Lock()
 # ``_maybe_reload_for_signal``.
 _sentinel_stamp: float = 0.0
 
+# Whether `_load_if_never_loaded` has taken its one attempt. See there.
+_never_loaded_claimed = False
+
 # Hysteresis threshold: consecutive pings at new place before opening a visit
 HYSTERESIS_THRESHOLD = 2
 
@@ -192,19 +195,26 @@ def reload_config() -> None:
                 "skipping user '%s' for location ingest: %s", user_id, e,
             )
             continue
-        # Lazily ensure the per-user file exists so the first ping after
-        # provisioning lands in a real DB (Stage 2's lazy init pairs
-        # with Stage 3's data copy).
-        location.init_db(ctx.db_path)
-        tok = secrets_store.get_secret(
-            _config.db_path, user_id, "overland", "ingest_token",
-        )
-        if not tok:
+        # One user's unreadable location.db skips that user, not everyone:
+        # in the web process a raise here fails the whole app's startup.
+        try:
+            # Lazily ensure the per-user file exists so the first ping after
+            # provisioning lands in a real DB (Stage 2's lazy init pairs
+            # with Stage 3's data copy).
+            location.init_db(ctx.db_path)
+            tok = secrets_store.get_secret(
+                _config.db_path, user_id, "overland", "ingest_token",
+            )
+            if not tok:
+                continue
+            with location.connect(ctx.db_path) as conn:
+                places = location.db.get_places(conn)
+        except Exception:
+            logger.exception("skipping user '%s' for location ingest", user_id)
             continue
         token_map[tok] = user_id
         user_contexts[user_id] = ctx
-        with location.connect(ctx.db_path) as conn:
-            places_cache[user_id] = location.db.get_places(conn)
+        places_cache[user_id] = places
 
     with _lock:
         _token_map = token_map
@@ -235,6 +245,7 @@ def _maybe_reload_for_signal() -> None:
 
     config = _config
     if config is None:
+        _load_if_never_loaded()
         return
 
     from istota.location import ingest_signal  # noqa: PLC0415
@@ -252,6 +263,59 @@ def _maybe_reload_for_signal() -> None:
         reload_config()
     except Exception:
         logger.exception("failed to reload location ingest config")
+
+
+def _load_if_never_loaded() -> None:
+    """Load the receiver on first use when nothing loaded it at startup.
+
+    The startup load is the parent app's job (`serve._maybe_mount_webhooks`),
+    and when it was missed every route answered as though nobody had a token
+    or a provider: a 403 or a 404 that no reprovisioning could clear
+    (ISSUE-704). One attempt per process, claimed under ``_lock``: a config
+    that does not load fails the same way on every request, so retrying it per
+    request would rescan every user's DB for nothing.
+    """
+    global _never_loaded_claimed
+
+    if _config is not None:
+        return
+    with _lock:
+        if _never_loaded_claimed:
+            return
+        _never_loaded_claimed = True
+
+    logger.warning("webhook receiver was never loaded at startup; loading on first use")
+    try:
+        reload_config()
+    except Exception:
+        logger.exception("failed to load the webhook receiver on first use")
+
+
+def install_sighup_reload() -> None:
+    """Reload the receiver on SIGHUP, after whatever handler is already there.
+
+    In the web process the web app's own lifespan has installed its SIGHUP
+    reload first, and replacing it would stop that one reloading.
+
+    Skipped off the main thread, where `signal.signal` raises: a lifespan run
+    from a test client's portal thread would otherwise fail to start. The
+    ingest sentinel still reloads the token map per request there.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        logger.info("not on the main thread; no SIGHUP reload for the webhook receiver")
+        return
+    previous = signal.getsignal(signal.SIGHUP)
+
+    def handler(signum, frame):
+        if callable(previous):
+            previous(signum, frame)
+        # On its own thread: the interrupted main thread may be holding
+        # `_lock`, which the reload takes, and it is the web UI's event loop.
+        threading.Thread(
+            target=_reload_config_on_signal, name="webhook-sighup-reload", daemon=True,
+        ).start()
+
+    signal.signal(signal.SIGHUP, handler)
 
 
 def _reload_config_on_signal() -> None:
@@ -279,7 +343,7 @@ async def lifespan(app: FastAPI):
     # See `build_info`.
     logger.info("STARTUP Running %s", build_description())
     reload_config()
-    signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal())
+    install_sighup_reload()
     yield
 
 
@@ -328,6 +392,7 @@ async def _receive_sms(provider: str, request: Request, background: BackgroundTa
         handle_provider_event,
     )
 
+    _load_if_never_loaded()
     config = _config
     providers = _sms_providers
     if config is None or providers is None:
@@ -411,6 +476,7 @@ async def verify_whatsapp_subscription(request: Request):
         verify_subscription,
     )
 
+    _load_if_never_loaded()
     config = _config
     if config is None or not whatsapp_webhooks_enabled(config):
         return Response(status_code=404)
@@ -453,6 +519,7 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
     # has always meant. It now also covers a provider that receives over its
     # own transport, where Meta's signed callback is a route nothing can
     # authenticate.
+    _load_if_never_loaded()
     config = _config
     if config is None or not whatsapp_webhooks_enabled(config):
         return Response(status_code=404)

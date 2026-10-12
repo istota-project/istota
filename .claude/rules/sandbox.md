@@ -139,7 +139,9 @@ Peer identity on a Unix socket and descent from roots (ISSUE-550). `peer_pid`: `
 
 ## sandbox/process_group.py
 
-`kill_process_group(pid, sig)`: signal the group, or only the process when it leads none (a non-leader shares the daemon's group). The streaming CLI child and tmux panes lead groups; `ClaudeCodeBrain`'s non-streaming child does not. Used by ClaudeCodeBrain's streaming kill paths, `!stop`, the web cancel endpoint, scheduler and native-bash timeouts. Never raises (called from a `threading.Timer`).
+`kill_process_group(pid, sig)`: signal the group, or only the process when it leads none (a non-leader shares the daemon's group). The streaming CLI child and tmux panes lead groups; `ClaudeCodeBrain`'s non-streaming child does not. Used by ClaudeCodeBrain's streaming kill paths, scheduler and native-bash timeouts, and through `signal_task_worker` by `!stop` and the web cancel endpoint. Never raises (called from a `threading.Timer`).
+
+`signal_task_worker(pid, sig)` signals a recorded `worker_pid` only in the process that runs the scheduler (ISSUE-701): `run_daemon` calls `own_task_pids(True)` once it holds the daemon lock and clears it before releasing, which covers the daemon and `istota serve`. Anywhere else (the web container, with its own PID namespace where uvicorn is PID 1) it returns `"elsewhere"` and the cancel rests on `cancel_requested`, read by the brain's cancel check. Gap: `ClaudeCodeBrain` reads it only on the CLI's next event (non-streaming: at exit), so a web cancel on Docker or bare metal waits out a long tool call; nothing in the daemon yet signals a task on `cancel_requested`.
 
 ## Credential grant snapshots
 

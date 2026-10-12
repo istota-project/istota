@@ -367,6 +367,7 @@ class TestTheStatsShapeIsTheOneDoctorReads:
             db.set_talk_poll_state(conn, "grp", 10)
 
         await sup.reconcile()
+        await sup.reconcile()
 
         assert sup.stats()["rooms_behind"] == 1
         # And the room was queued rather than fetched inside the pass: the
@@ -703,9 +704,38 @@ class TestWhatTheReviewFound:
             db.set_talk_poll_state(conn, "grp", 10)
 
         await sup.reconcile()
+        await sup.reconcile()
         assert sup.stats()["rooms_behind"] == 1
 
         await sup._stop_watcher("grp")
+
+    @pytest.mark.asyncio
+    async def test_the_first_pass_after_start_is_catch_up(self, config):
+        """A room that took a message while the daemon was down is behind on
+        the first pass. The boot-time doctor run reads it a second later, so
+        counting it warned on every restart."""
+        client = _client([
+            {"token": "grp", "type": 2, "lastMessage": {"id": 900}},
+        ])
+        sup = _supervisor(config, client)
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, "grp", 10)
+
+        await sup.reconcile()
+        stats = sup.stats()
+        assert stats["rooms_behind"] == 0
+        assert stats["caught_up_at_start"] == 1
+        # Still fetched: catch-up is the safety net doing its job.
+        assert "grp" in sup._dirty
+
+        sig.set_stats_source(sup.stats)
+        try:
+            assert "behind their cursor" not in doctor.check_signaling_watchers(
+                config, probe=False,
+            ).detail
+        finally:
+            sig.clear_stats_source()
+            await sup._stop_watcher("grp")
 
     @pytest.mark.asyncio
     async def test_catch_up_defers_to_an_in_flight_drain_fetch(self, config):

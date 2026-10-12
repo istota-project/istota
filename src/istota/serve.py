@@ -259,11 +259,10 @@ def _maybe_mount_webhooks(web_app, config=None) -> None:
     empty, making every correctly-tokened request a 403. Neither surfaced in
     production, which runs the receiver as its own uvicorn behind nginx.
 
-    Including the router puts the path where it belongs and leaves the
-    startup call to the parent, below. Note the receiver's SIGHUP handler
-    lives in *its* lifespan and so is absent here; the ingest sentinel
-    (:mod:`istota.location.ingest_signal`) is the reload path in this shape,
-    and it is the one that works in every shape.
+    Including the router puts the path where it belongs and leaves the load
+    to the parent's lifespan, which :func:`_load_receiver_in_lifespan` wraps.
+    A startup event handler did this until ISSUE-704 and never ran, because
+    the web app has a lifespan of its own.
     """
     if config is not None:
         web_config = config
@@ -301,9 +300,40 @@ def _maybe_mount_webhooks(web_app, config=None) -> None:
             logger.info("Serving WhatsApp webhook receiver at /webhooks/whatsapp")
             attached = True
         if attached:
-            web_app.add_event_handler("startup", webhook_receiver.reload_config)
+            _load_receiver_in_lifespan(web_app, webhook_receiver)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not attach webhook receiver: %s", exc)
+
+
+def _load_receiver_in_lifespan(web_app, webhook_receiver) -> None:
+    """Wrap the parent's lifespan so it loads the receiver and its SIGHUP reload.
+
+    Not a startup event handler: Starlette runs those only through its default
+    lifespan, and drops them without a word on an app built with a lifespan of
+    its own, which the web app is (ISSUE-704). Wrapped once per app, since a
+    second include of a different router would otherwise load twice.
+    """
+    from contextlib import asynccontextmanager
+
+    if getattr(web_app.state, "webhook_receiver_lifespan", False):
+        return
+    web_app.state.webhook_receiver_lifespan = True
+    original = web_app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(app):
+        # A receiver that will not load must not stop the web app serving.
+        try:
+            webhook_receiver.reload_config()
+        except Exception:
+            logger.exception("Could not load the webhook receiver at startup")
+        async with original(app) as state:
+            # Inside the parent's lifespan, so the web app's own SIGHUP
+            # handler is already installed and gets chained, not replaced.
+            webhook_receiver.install_sighup_reload()
+            yield state
+
+    web_app.router.lifespan_context = lifespan
 
 
 # ---------------------------------------------------------------------------

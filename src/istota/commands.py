@@ -27,7 +27,7 @@ from .brain import (
     room_selectable_kinds,
 )
 from .memory import search as memory_search_mod
-from istota.sandbox.process_group import kill_process_group
+from istota.sandbox.process_group import signal_task_worker
 from .config import Config
 # The static room-model table: a stdlib-only leaf importing nothing, so it
 # costs this module — which is imported on the Talk polling path — nothing.
@@ -643,8 +643,10 @@ def _cancel_one(ctx: CommandContext, task_id: int) -> str:
         # recorded pid that is somebody else's child can never resolve to their
         # group. The streaming CLI child and a tmux pane lead their groups, so
         # a tmux `!stop` takes the pane's whole command tree; the non-streaming
-        # CLI child does not, and is signalled alone.
-        kill_process_group(pid_row["worker_pid"], signal.SIGTERM)
+        # CLI child does not, and is signalled alone. Only the scheduler's own
+        # process signals: from the web container the pid is another PID
+        # namespace's, and `cancel_requested` carries the stop (ISSUE-701).
+        signal_task_worker(pid_row["worker_pid"], signal.SIGTERM)
 
     return f"Cancelling task #{task_id}: {label}"
 
@@ -2005,9 +2007,7 @@ async def cmd_usage(ctx: CommandContext):
 
     # Both halves block — SQLite queries, and on a cache miss an HTTPS GET — and
     # this coroutine runs on the loop that polls every Talk conversation. Hence
-    # `to_thread`. This comment used to name `cmd_check`'s bare
-    # `subprocess.run` as the counterexample; that handler now does both of
-    # these, so the precedent runs the other way.
+    # `to_thread`.
     lines = await asyncio.to_thread(_usage_token_sections, config, user_id, is_admin)
 
     if is_admin:
@@ -2672,85 +2672,6 @@ def _format_skill_detail(meta, name, disabled, is_admin):
         lines.append(f"Dependencies: {', '.join(meta.dependencies)}")
 
     return "\n".join(lines)
-
-
-@command("check", "Run a deployment health check")
-async def cmd_check(ctx: CommandContext):
-    """The doctor registry, rendered into a room.
-
-    This used to be a hand-rolled copy of the same five probes
-    `heartbeat._check_self` ran, drifting from doctor's registry and from the
-    other copy. Both are gone; this selects and renders and asserts nothing of
-    its own. Deliberately not an alias for `istota doctor`, which has a
-    different audience: this posts into a room, must redact, and answers a
-    non-admin differently.
-
-    **A non-admin gets the verdict line, not the registry.** The command is
-    registered with no admin gate and must not grow one silently — a non-admin
-    asking whether the bot is healthy is a reasonable question with a one-line
-    answer. But the whole registry is a different thing from the five lines they
-    used to get: `runtime.subscription_usage` reports plan utilization, which
-    `cmd_usage` above deliberately withholds from a non-admin;
-    `config.skill_overlays` labels overlays by user id across users;
-    `developer.container` and `developer.repos_layout` describe other people's
-    trees. `redact` covers configured credential values, not cross-user facts.
-    An allowlist of non-admin-safe check names was the alternative and is worse:
-    a second list to keep in step with a registry that grows, and a check whose
-    detail widens later leaks with nothing going red. A count is a count.
-
-    **`live=True`, and `deep` deliberately not passed.** `live` restores the
-    execution test this command used to run inline. `deep` would add
-    `sandbox.masks` at 30 seconds on top, and neither surface has room:
-    the web chat client aborts the very POST that returns this result at
-    `SEND_TIMEOUT_MS` (30s) and withholds Retry for a `!`-prefixed body, and the
-    Talk path has no timeout but is worse — dispatch runs on the process-global
-    asyncio loop inside the poll batch's open write transaction, on the only
-    Talk poll thread. That loss is real and compensated:
-    `security.sandbox_effective` runs on the shallow path, answers the same
-    availability question from the warm memo at no cost, and is the line an
-    operator needs. An operator who wants the namespace probe itself runs
-    `istota doctor`, which has no surface timeout.
-
-    **The body is fenced.** `render_text` is aligned plain text; posted as
-    markdown its two-space indents collapse into one run-on paragraph and its
-    eight-space remedy lines become code blocks. A fence costs one line and
-    preserves the alignment, where a second renderer in `doctor.py` would be a
-    layout to keep in step with `render_text` for one caller.
-    """
-    import asyncio
-
-    from . import doctor
-
-    # Commit the caller's transaction before blocking, exactly as `cmd_usage`
-    # does above and for the same reason. The Talk poller wraps its whole batch
-    # in one transaction and hands `dispatch` that connection already mid-write,
-    # so holding its write lock across a multi-second probe stalls every other
-    # writer in the daemon — scheduler, workers, web — on their busy timeout.
-    # Nothing here writes, so there is no durability question, only the lock.
-    # This handler is the one `cmd_usage`'s comment named as the anti-pattern:
-    # a bare `subprocess.run` on the loop, at ~34 seconds, with the lock held.
-    if ctx.conn is not None:
-        try:
-            ctx.conn.commit()
-        except sqlite3.Error:
-            logger.debug("!check could not commit the caller's transaction", exc_info=True)
-
-    config = ctx.config
-
-    # The registry names users and the plan's usage, which `!usage` withholds
-    # from a shared room too.
-    if not config.is_admin(ctx.user_id) or _in_shared_room(ctx):
-        results = await asyncio.to_thread(doctor.run_checks, config)
-        healthy, summary = doctor.verdict(results)
-        return f"**Health Check**\n\n{'OK' if healthy else 'PROBLEMS'} — {summary}"
-
-    def _run():
-        results = doctor.run_checks(config, live=True)
-        # `render_text` redacts internally through the `secrets` it is handed,
-        # so this must not also call `redact` — that would double-scrub.
-        return doctor.render_text(results, secrets=doctor.config_secrets(config))
-
-    return "**Health Check**\n\n```\n" + await asyncio.to_thread(_run) + "\n```"
 
 
 # =============================================================================

@@ -93,7 +93,7 @@ from istota.location.logic import (
     resolve_timezone,
     utc_day_bounds,
 )
-from istota.sandbox.process_group import kill_process_group
+from istota.sandbox.process_group import signal_task_worker
 
 logger = logging.getLogger("istota.webui.app")
 
@@ -2362,15 +2362,14 @@ def _write_admin_profile(config, admin: dict, user_id: str, updates: dict) -> tu
 
     Returns the GET body and the fields whose value changed. A refusal raises,
     and every check runs before the first write, so a refused PATCH writes
-    nothing. The notification row commits with the change it reports and is
-    pushed after the commit.
+    nothing. The notification row and its hand-off to the daemon commit with
+    the change they report; the daemon sends the push (ISSUE-702).
     """
     from istota.notifications.resolvers import admin_profile_change
-    from istota.notifications.store import deliver_pending
+    from istota.notifications.store import hand_to_daemon
 
     admin_id = admin["username"]
     whatsapp = updates.pop(_ADMIN_WHATSAPP_FIELD, None)
-    pending = None
     with _db.get_db(config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         stored = user_profiles.get_profile(config.db_path, user_id, conn=conn)
@@ -2414,12 +2413,10 @@ def _write_admin_profile(config, admin: dict, user_id: str, updates: dict) -> tu
 
         contact = admin_profile_change.contact_fields(changed)
         if contact and user_id != admin_id:
-            pending = admin_profile_change.write(
+            hand_to_daemon(conn, [admin_profile_change.write(
                 conn, user_id, admin_name=_admin_display_name(admin), fields=contact,
-            )
+            )])
         detail = _admin_user_detail(conn, config, user_id)
-    if pending is not None:
-        deliver_pending(config, [pending])
     return _with_options(config, detail), changed
 
 
@@ -2515,9 +2512,8 @@ def _write_admin_identity(
     fields that changed.
     """
     from istota.notifications.resolvers import admin_profile_change
-    from istota.notifications.store import deliver_pending
+    from istota.notifications.store import hand_to_daemon
 
-    pending = None
     skipped = None
     with _db.get_db(config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -2553,12 +2549,10 @@ def _write_admin_identity(
                 )
                 fields.append("email_addresses")
         if fields and user_id != admin["username"]:
-            pending = admin_profile_change.write(
+            hand_to_daemon(conn, [admin_profile_change.write(
                 conn, user_id, admin_name=_admin_display_name(admin), fields=fields,
-            )
+            )])
         detail = _admin_user_detail(conn, config, user_id)
-    if pending is not None:
-        deliver_pending(config, [pending])
     return _with_options(config, detail), outcome, skipped, fields
 
 
@@ -5018,9 +5012,9 @@ async def admin_log_stream(
 
 @api_router.get("/admin/browsers")
 async def admin_browser_instances(_: dict = Depends(_require_admin)):
-    from .admin_browsers import snapshot
+    from .admin_browsers import current
 
-    return JSONResponse(await snapshot(_config.browser), headers={"Cache-Control": "no-store"})
+    return JSONResponse(await current(_config), headers={"Cache-Control": "no-store"})
 
 
 @api_router.get("/admin/config")
@@ -11566,8 +11560,10 @@ def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> str | N
     # `running`, but a cancel racing a task that has just finished would read the
     # pre-clear row and signal a pid the OS may since have reused — and a group
     # kill makes that mistake cost a whole group rather than one process.
+    # On the Docker stack this process is not the scheduler and the pid is in
+    # the daemon's PID namespace, so nothing is signalled (ISSUE-701).
     if row and row["worker_pid"] and status in ("running", "locked"):
-        kill_process_group(row["worker_pid"], signal.SIGTERM)
+        signal_task_worker(row["worker_pid"], signal.SIGTERM)
 
 
 @api_router.post("/chat/tasks/{task_id}/confirm")

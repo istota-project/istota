@@ -1160,8 +1160,8 @@ class TestTheSupervisorStatsSeam:
     """Where ``doctor``'s ``talk.signaling_watchers`` reads from.
 
     A process-local registration rather than an import, because the supervisor
-    runs in the scheduler daemon and ``doctor`` also runs in the web process,
-    in the CLI and from ``!check`` — where there is no supervisor and the
+    runs in the scheduler daemon and ``doctor`` also runs outside the
+    daemon, in the CLI — where there is no supervisor and the
     honest answer is that this process has none, not that every watcher is
     down.
     """

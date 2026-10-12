@@ -228,12 +228,17 @@ RUN groupadd -g 10001 istota \
 # Data directories (persistent via volume). Owned by the daemon's uid here so a
 # fresh named volume is seeded with the right owner. /data/workspace is the
 # local storage mode's workspace.
-RUN mkdir -p /data/db /data/config /data/tmp /data/home /data/workspace \
+RUN mkdir -p /data/db /data/config /data/tmp /data/home /data/workspace /data/logs \
     && chown -R 10001:10001 /data
 
 # `istota setup` run in this image writes the container shape's config
 # (/data/config/config.toml), not the standalone install's.
 ENV ISTOTA_SETUP_SHAPE=container
+
+# The app log when the config names no `[logging] file` (ISSUE-703): on the
+# volume the web container mounts too, so the admin Logs pane can read it, and
+# outside /data/db, whose logs/ is the session-transcript root.
+ENV ISTOTA_DEFAULT_LOG_FILE=/data/logs/istota.log
 
 # Entrypoint, the root phase, and the drop every exec path goes through, which
 # reads the compose secrets into the environment (istota-secrets) as uid 10001.

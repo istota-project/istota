@@ -76,7 +76,7 @@ Check for overdue tasks from TASKS.md.
 Tasks should use deadline markers: `@due(2024-01-15)` or `(due: 2024-01-15)`
 
 ### self-check
-System health diagnostics (same checks as `!check` command). Checks: Claude binary in PATH, bwrap presence (if sandbox enabled), DB connectivity, recent task failure rate, and optional Claude CLI execution test.
+System health diagnostics: the `istota doctor` registry minus a short skip list, plus an optional live model execution test.
 - `execution_test`: Whether to run a live Claude invocation test (default: true)
 
 ```toml

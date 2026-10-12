@@ -877,8 +877,8 @@ def list_sources(config: "Config") -> list[LogSource]:
             label="Application log",
             kind="file",
             description=(
-                "Scheduler, pollers, brain and web output — the rotating file "
-                "every istota process writes to."
+                "Scheduler, pollers and brain output, plus any `istota` CLI "
+                "run beside the daemon: the rotating file the daemon writes."
             ),
             available=True,
             detail=f"{len(chain)} file{'s' if len(chain) != 1 else ''} in the rotation chain",
@@ -890,8 +890,10 @@ def list_sources(config: "Config") -> list[LogSource]:
     else:
         if log_cfg.output not in ("file", "both"):
             detail = (
-                f'File logging is off ([logging] output = "{log_cfg.output}"); '
-                "output goes to the console/journal only."
+                f'File logging is off ([logging] output = "{log_cfg.output}"), so '
+                "output goes to the console only (`docker logs` or the journal). "
+                'To read it here, set output = "both" and file = "<path>" under '
+                "[logging], on a disk this process can read, and restart the daemon."
             )
         elif not log_cfg.file:
             detail = "No [logging] file is configured."
@@ -901,7 +903,7 @@ def list_sources(config: "Config") -> list[LogSource]:
             id="app",
             label="Application log",
             kind="file",
-            description="Scheduler, pollers, brain and web output.",
+            description="Scheduler, pollers and brain output.",
             available=False,
             detail=detail,
             time_basis="server-local",

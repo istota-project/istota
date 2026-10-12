@@ -1,11 +1,30 @@
-"""Read-only browser discovery for the admin UI."""
+"""Read-only browser discovery for the admin UI.
+
+On the Docker stack the browser container shares a network with the daemon
+alone, so the web process cannot reach its API (ISSUE-699). The daemon takes
+the snapshot on a gate and records it; the page reads the record, and probes
+for itself only where no daemon has recorded one.
+"""
 import asyncio
+import json
+import logging
 import math
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
-from istota.config import BrowserConfig
+from istota.config import BrowserConfig, Config
+
+logger = logging.getLogger("istota.webui.admin_browsers")
+
+# A reserved shared_kv namespace: written by the daemon, never by a task.
+SNAPSHOT_NAMESPACE = "_browser"
+_SNAPSHOT_KEY = "instances"
+RECORD_INTERVAL_SECONDS = 15
+#: Four missed records: the daemon is down or cannot reach the browser either.
+STALE_AFTER_SECONDS = 60
 
 
 def _console_url(value: str) -> str:
@@ -54,3 +73,44 @@ async def snapshot(config: BrowserConfig) -> dict:
         # Network errors can include private addresses; keep them off the wire.
         result["status"] = "unavailable"
     return result
+
+
+def record_snapshot(config: Config, result: dict, *, at: datetime | None = None) -> None:
+    """Keep the daemon's snapshot for the admin page. Never raises."""
+    if not Path(config.db_path).exists():
+        return
+    from istota import db
+
+    stamp = (at or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    value = json.dumps({**result, "as_of": stamp})
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.shared_kv_set(conn, SNAPSHOT_NAMESPACE, _SNAPSHOT_KEY, value, "daemon")
+    except Exception as exc:  # noqa: BLE001 - a record for the page, not the probe
+        logger.warning("browser_snapshot_unwritten err=%s", exc)
+
+
+def recorded_snapshot(config: Config) -> dict | None:
+    """The daemon's last snapshot, ``unavailable`` once stale, or None if none."""
+    if not Path(config.db_path).exists():
+        return None
+    from istota import db
+
+    with db.get_db(config.db_path) as conn:
+        row = db.shared_kv_get(conn, SNAPSHOT_NAMESPACE, _SNAPSHOT_KEY)
+    if row is None:
+        return None
+    recorded = json.loads(row["value"])
+    at = datetime.strptime(recorded["as_of"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    if (datetime.now(timezone.utc) - at).total_seconds() > STALE_AFTER_SECONDS:
+        recorded.update(status="unavailable", instances=[])
+    return recorded
+
+
+async def current(config: Config) -> dict:
+    """What the admin page shows: the daemon's record where there is one."""
+    if config.browser.enabled:
+        recorded = await asyncio.to_thread(recorded_snapshot, config)
+        if recorded is not None:
+            return recorded
+    return await snapshot(config.browser)

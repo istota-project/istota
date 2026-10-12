@@ -136,7 +136,7 @@ UPDATE_CMD = f"uv run env {UPDATE_ENV}=1 pytest tests/test_prompt_golden.py -n0"
 DRY_RUN_PREFIX = f"{DRY_RUN_PROMPT_HEADER}\n\n"
 
 
-def updating() -> bool:
+def updating(name: str = UPDATE_ENV, command: str = UPDATE_CMD) -> bool:
     """Whether this run rewrites the goldens instead of comparing.
 
     Deliberately not `bool(os.environ.get(...))`. The variable comes from the
@@ -146,7 +146,7 @@ def updating() -> bool:
     `PRECOMMIT_SCANS_REQUIRED`, which the repo already parses this way; anything
     else raises rather than being guessed at.
     """
-    raw = os.environ.get(UPDATE_ENV)
+    raw = os.environ.get(name)
     if raw is None or raw == "":
         return False
     value = raw.strip().lower()
@@ -155,8 +155,8 @@ def updating() -> bool:
     if value in ("0", "false", "no", "off"):
         return False
     raise RuntimeError(
-        f"{UPDATE_ENV}={raw!r} is neither affirmative nor negative. Run "
-        f"`{UPDATE_CMD}` to rewrite the goldens, or unset it to compare."
+        f"{name}={raw!r} is neither affirmative nor negative. Run "
+        f"`{command}` to rewrite, or unset it to compare."
     )
 
 USER = "alice"

@@ -112,6 +112,9 @@ _KEEP_NAMES = frozenset({
     # stamping: it takes only affirmative/negative spellings and raises on
     # anything else, so the strict parse is the guard rather than the scrub.
     "ISTOTA_UPDATE_GOLDEN",
+    # The same, for the istota_config reference in the management role's
+    # defaults (tests/test_config_reference.py), parsed by the same `updating()`.
+    "ISTOTA_UPDATE_CONFIG_REFERENCE",
     "ISTOTA_DEVBOX_IMAGE_TAG",
     "ISTOTA_LINUX_TIER",
     # The `live` tier's counterpart, and kept for the same reason: it is a

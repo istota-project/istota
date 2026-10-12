@@ -4545,6 +4545,8 @@ def load_config(config_path: Path | None = None) -> Config:
     if _native_key:
         config.brain.native.api_key = _native_key
 
+    _apply_default_log_file(config, data)
+
     # Phase 6: overlay profile fields from the user_profiles table.
     # DB rows replace the matching scalar fields on TOML-loaded UserConfig
     # entries; briefings stay TOML-owned. Users that exist only
@@ -5682,6 +5684,22 @@ def _validate_claude_code_brain(config: "Config") -> None:
         cc.subscription_usage_timeout_seconds = _defaults.subscription_usage_timeout_seconds
 
 
+def _apply_default_log_file(config: "Config", data: dict) -> None:
+    """The image's default app log, where the config names no `[logging] file`.
+
+    A default rather than an override: the image sets `ISTOTA_DEFAULT_LOG_FILE`,
+    and a config that writes `file` at all, `file = ""` included, keeps its own
+    choice. `console` becomes `both` so `docker logs` still carries everything.
+    """
+    default = os.environ.get("ISTOTA_DEFAULT_LOG_FILE", "").strip()
+    section = data.get("logging")
+    if not default or (isinstance(section, dict) and "file" in section):
+        return
+    config.logging.file = default
+    if config.logging.output == "console":
+        config.logging.output = "both"
+
+
 def _apply_user_profiles(config: "Config") -> None:
     """Merge ``user_profiles`` rows into ``config.users``.
 
@@ -6010,6 +6028,20 @@ def _apply_user_briefings(config: "Config") -> None:
             user_config.briefings.append(bc)
 
 
+def shared_block_from_row(r) -> BriefingSharedBlock:
+    """A ``shared_block_configs`` row as the definition generation runs."""
+    return BriefingSharedBlock(
+        name=r.name,
+        cron=r.cron,
+        title=r.title or "",
+        directive=r.directive if r.directive else None,
+        render_mode=r.render_mode or "synthesis",
+        enabled=bool(r.enabled),
+        trusted=bool(r.trusted),
+        sources=list(r.sources or []),
+    )
+
+
 def _apply_shared_blocks(config: "Config") -> None:
     """Overlay ``shared_block_configs`` rows onto ``config.briefing_shared_blocks``.
 
@@ -6036,28 +6068,16 @@ def _apply_shared_blocks(config: "Config") -> None:
     if not rows:
         return
 
-    def _from_row(r) -> BriefingSharedBlock:
-        return BriefingSharedBlock(
-            name=r.name,
-            cron=r.cron,
-            title=r.title or "",
-            directive=r.directive if r.directive else None,
-            render_mode=r.render_mode or "synthesis",
-            enabled=bool(r.enabled),
-            trusted=bool(r.trusted),
-            sources=list(r.sources or []),
-        )
-
     db_by_name = {r.name: r for r in rows}
     merged: list[BriefingSharedBlock] = []
     seen: set[str] = set()
     for block in config.briefing_shared_blocks:
         if block.name in db_by_name:
-            merged.append(_from_row(db_by_name[block.name]))
+            merged.append(shared_block_from_row(db_by_name[block.name]))
         else:
             merged.append(block)
         seen.add(block.name)
     for r in rows:
         if r.name not in seen:
-            merged.append(_from_row(r))
+            merged.append(shared_block_from_row(r))
     config.briefing_shared_blocks = merged

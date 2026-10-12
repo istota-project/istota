@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Ansible management role can update the version on its own.** Running the play with `--tags istota_update` performs only the version update and waits for the stack to be healthy, leaving the config, secrets and users alone. `-e istota_update_force=true` runs the update even when the VM is already current, as running `istota-stack update` on the VM does.
+
+- **`istota migrate role-vars` moves an estate from the old Ansible role to the management role.** It reads the old role's decrypted variables and the migrated VM's own files, writes the new role's variables to a private file and prints only names. A credential the new stack has no secrets file for stops it before anything is written.
+
+- **The Ansible management role can follow `main` instead of signed releases.** With `istota_update_mode: latest`, each play deploys the tip of `main` when it has moved, and no release signing key is needed; `release`, the default, still installs only the signed tag you name. Rebuilding the image after a config change no longer fails on a VM running an unsigned tag.
+
+- **The Ansible management role's defaults list every config setting.** Below `istota_config`, a commented reference gives each key at its own nesting with its default and what it does, and marks each credential with the secret to set instead. It is generated from the code, so it names every setting the release reads.
+
 - **`istota-stack update --unsigned latest` deploys the tip of `main`**, so a VM that tracks `main` needs no tag per deploy. It is recorded as `main-<commit>`, which `rollback` returns to like any tag, and only a commit of `main` is accepted under that name.
 
 - **A machine dedicated to Istota is set up by one script and updated from signed releases.** `host/provision.sh` prepares a fresh Debian 13 VM, server or Lima VM on a Mac, and `istota-stack update <tag>` builds the images on the machine from a release tag only after checking its signature against the release key you configured; an unsigned tag, a branch or another key's signature is refused before anything changes. `istota-stack rollback` returns to the previous release, and refuses when a newer release has already migrated the database. An update creates the empty secrets file for any credential a newer release adds.
@@ -168,6 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The bare-metal Ansible install is gone.** A server now runs Istota on a machine dedicated to it, set up by `host/provision.sh` and updated with `istota-stack update`; the optional role in `ansible/` manages such a machine from an inventory. An existing bare-metal install moves over with `istota-stack import-bare-metal`. The standalone Docker helper scripts and the separate browser compose file went with it, and so did the old module paths the bare-metal units started, which the last release still kept.
 
+- **The `!check` chat command is gone.** Sent from web chat it ran the health check inside the web container, which lacks the daemon's sandbox and devbox sockets, so it reported failures that were not there. Run `istota doctor` on the host, or open the admin Health pane, which shows the daemon's own runs.
+
 - **The Docker stack no longer runs its own Nextcloud.** The workspace is a local directory by default, and full Nextcloud integration now points istota at a Nextcloud you run yourself, mounted on the VM. A stack running full integration refuses to start until that mount is up, so nothing is written into an unmounted folder.
 
   **Upgrade note:** An install that ran the bundled Nextcloud is refused at boot until you choose: move that Nextcloud into a compose project of its own, which keeps Talk rooms and files, or copy the workspace into local storage. The deployment docs' page on moving the bundled Nextcloud walks through both.
@@ -178,6 +188,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Turning off an optional part of the stack, such as the browser, now stops it. Its container kept running after the change, unwatched and still holding memory, until it was removed by hand; the next start or update of the stack now removes it.
+
+- **Notices raised from the web app now reach you on WhatsApp.** The notice that an administrator changed your contact details, and the one asking you to reconnect Nextcloud or Garmin, were sent from the web container, which has no WhatsApp connection. On a paired WhatsApp session the send failed, and that notice could never be sent to WhatsApp again. The daemon sends them now; the notices in the bell are unchanged.
+
+- **Stopping a task from web chat on the Docker stack no longer signals a process in the web container.** The web cancel button and `!stop` sent from web chat signalled the task's recorded process id, which belongs to the daemon's container; in the web container that number names nothing, or a web-side process. Only the daemon, or `istota serve`, signals the task's process now; elsewhere, including the bare-metal install's separate web unit, the stop goes through the cancel flag the task already checks. With the Claude Code brain that flag is read at the CLI's next event, so a stop sent from web chat during a long tool call lands when the tool returns.
+
+- **Overland and the iOS app's location pings are accepted again on the Docker stack and under `istota serve`.** The web process never loaded the location webhook's token map, so every ping was refused with a 403 that reprovisioning could not clear, and every SMS provider callback got a 404. The receiver now loads with the web app, a SIGHUP to the web process reloads it, and a receiver that was somehow never loaded loads on its first request.
+
+- A shared briefing block's Run now is generated by the daemon. On the Docker stack it ran in the web container, which cannot reach the browser, so a block with a web page source could be replaced by one missing that content, and a synthesis block ignored the daemon's record of an unavailable model. The settings page now waits for the daemon's answer and says when nothing was generated.
+
+- **A restart no longer warns that Talk messages are arriving the slow way.** Messages that arrived while the daemon was down were counted as a fault in the event stream by the start-up self-check. The catch-up after a start is now reported separately, and the warning is kept for rooms that fall behind later.
+
+- The admin Browsers page lists the live browsers on the Docker stack instead of saying the browser service is unavailable. Only the daemon can reach the browser there, so it reads the browser pool every 15 seconds and the page shows that list with the time it was read.
+
+- The admin Logs pane shows the application log on the Docker stack. The image now writes it to `/data/logs/istota.log`, on the volume the daemon and web containers share, whenever `config.toml` names no `[logging] file`, and keeps writing to `docker logs` as well. Existing stacks pick this up on update with no config change; set `file = ""` under `[logging]` to keep console-only logging.
 
 - The admin Health pane shows the daemon's own checks. On the Docker stack it ran them in the web container, which has none of the daemon's sandbox settings, so it reported the sandbox, credential isolation and devbox checks failing on a stack whose tasks were sandboxed. Re-run and deep checks now ask the daemon, which answers on its next tick, and the page says when each result was taken.
 

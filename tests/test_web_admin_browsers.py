@@ -108,3 +108,98 @@ async def test_timeout_is_unavailable(monkeypatch):
         transport=httpx.MockTransport(respond), **kw))
     result = await admin_browsers.snapshot(BrowserConfig(enabled=True))
     assert result["status"] == "unavailable"
+
+
+# ISSUE-699: on the Docker stack the web container is not on the browser
+# network, so the daemon records what it sees and the page reads that.
+
+def _browser_config(tmp_path):
+    config = _make_config(tmp_path)
+    config.browser.enabled = True
+    config.browser.api_url = "http://browser:9223"
+    return config
+
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _instances_transport(monkeypatch, requests):
+    """Patch the browser API's answer. Call after `_patch_app`: the patch is
+    httpx-wide, and the app's import subclasses the real client."""
+    from istota.webui import admin_browsers
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"instances": [{
+            "user": "alice", "slot": 0, "idle_seconds": 7, "url": "",
+        }]})
+
+    monkeypatch.setattr(admin_browsers.httpx, "AsyncClient", lambda **kw: _REAL_ASYNC_CLIENT(
+        transport=httpx.MockTransport(respond), **kw))
+
+
+async def _get_browsers(app):
+    async with _REAL_ASYNC_CLIENT(transport=httpx.ASGITransport(app=app), base_url="https://example.com") as client:
+        await _login(client, "alice")
+        return await client.get("/istota/api/admin/browsers")
+
+
+async def test_the_page_reads_what_the_daemon_recorded_without_probing(tmp_path, monkeypatch):
+    import asyncio
+    from istota import scheduler
+    config = _browser_config(tmp_path)
+    app = _patch_app(config)
+    requests = []
+    _instances_transport(monkeypatch, requests)
+
+    # The daemon's gate body, on a thread as `_spawn_background_check` runs it.
+    await asyncio.to_thread(scheduler.check_browser_instances, config)
+    assert len(requests) == 1
+
+    response = await _get_browsers(app)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["instances"] == [{"user": "alice", "slot": 0, "idle_seconds": 7, "url": ""}]
+    assert body["as_of"]
+    assert len(requests) == 1, "the web process probed the browser itself"
+
+
+async def test_a_stale_record_reads_as_unavailable(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from istota.webui import admin_browsers
+    config = _browser_config(tmp_path)
+    app = _patch_app(config)
+    requests = []
+    _instances_transport(monkeypatch, requests)
+    old =datetime.now(timezone.utc) - timedelta(seconds=admin_browsers.STALE_AFTER_SECONDS + 5)
+    admin_browsers.record_snapshot(
+        config, {"status": "ok", "console_configured": False,
+                 "instances": [{"user": "alice", "slot": 0, "idle_seconds": 1, "url": ""}]},
+        at=old,
+    )
+
+    body = (await _get_browsers(app)).json()
+    assert body["status"] == "unavailable"
+    assert body["instances"] == []
+    assert not requests
+
+
+async def test_a_disabled_browser_ignores_an_old_record(tmp_path):
+    from istota.webui import admin_browsers
+    config = _browser_config(tmp_path)
+    admin_browsers.record_snapshot(config, {"status": "ok", "console_configured": False, "instances": []})
+    config.browser.enabled = False
+
+    body = (await _get_browsers(_patch_app(config))).json()
+    assert body["status"] == "disabled"
+
+
+def test_the_daemon_records_only_while_the_browser_is_enabled(tmp_path):
+    from istota.scheduler import build_interval_gates
+    config = _make_config(tmp_path)
+    gate = next(g for g in build_interval_gates(config) if g.name == "browser-instances")
+    assert gate.background
+    assert gate.enabled(config) is False
+    config.browser.enabled = True
+    assert gate.enabled(config) is True
