@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { Cloud, File, Folder, X } from '@lucide/svelte';
+  import { Folder, X } from '@lucide/svelte';
   import { CategoryGroup, IconButton } from '$lib/components/ui';
   import type { WorkspacePin, WorkspacePlace } from '$lib/api';
+  import { fileIcon } from './filePresentation';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
     pins,
@@ -37,11 +38,10 @@
   <CategoryGroup label="Pinned">
     {#each pins as pin (pin.id)}
       {@const folder = folderTarget(pin)}
+      {@const PinIcon = pin.is_dir ? Folder : fileIcon(pin.name, pin.mime_type)}
       <div class="list-row pin-row">
         {#snippet content()}
-          {#if pin.provider === 'drive'}<Cloud size={14} />{:else if pin.is_dir}<Folder
-              size={14}
-            />{:else}<File size={14} />{/if}
+          <span class="pin-icon" aria-hidden="true"><PinIcon size={14} /></span>
           <span class="pin-label" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
           >
@@ -81,6 +81,11 @@
 </section>
 
 <style>
+  .pin-icon {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--accent-amber);
+  }
   .pin-row .view-btn,
   .unavailable {
     flex: 1;
