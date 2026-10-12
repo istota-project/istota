@@ -20,6 +20,10 @@
     wide?: boolean;
     /** Label beside the control rather than above it. */
     checkbox?: boolean;
+    /** Label in a column of its own beside the control, from 640px up; a
+     *  stacked field below that. The column is `--field-label-width` wide
+     *  , so a form of these fields lines its controls up. */
+    inline?: boolean;
     /**
      * Render a `<div>` rather than a `<label>`.
      *
@@ -56,6 +60,7 @@
     error,
     wide = false,
     checkbox = false,
+    inline = false,
     labelled = true,
     class: className = '',
     children,
@@ -93,6 +98,7 @@
   class="field control-row"
   class:field-wide={wide}
   class:checkbox
+  class:inline
 >
   {#if checkbox}
     {@render children()}
@@ -185,6 +191,34 @@
 
   .field-wide .field-warning {
     max-width: 36rem;
+  }
+
+  /* Placed explicitly rather than by source order: a checkbox field renders
+     its control before its label. */
+  @media (min-width: 641px) {
+    .field.inline {
+      display: grid;
+      grid-template-columns: var(--field-label-width) minmax(0, 1fr);
+      /* A control's height even for a checkbox, so the rows of a form match. */
+      grid-template-rows: minmax(var(--control-height-lg), auto);
+      column-gap: var(--space-3);
+      row-gap: var(--space-1);
+      align-items: center;
+    }
+
+    .field.inline > :global(*) {
+      grid-column: 2;
+    }
+
+    .field.inline > .field-label {
+      grid-column: 1;
+      grid-row: 1;
+      color: var(--text-muted);
+    }
+
+    .field.inline :global(input[type='checkbox']) {
+      justify-self: start;
+    }
   }
 
   .field-error {
