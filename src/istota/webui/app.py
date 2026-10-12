@@ -520,7 +520,7 @@ def _user_is_web_admin(username: str) -> bool:
         return True
     if not _config or not _config.admin_users:
         return False
-    return username in _config.admin_users
+    return _config.is_named_admin(username)
 
 
 def _require_admin(user: dict = Depends(_require_api_auth)) -> dict:
@@ -1648,6 +1648,7 @@ async def callback(request: Request):
         # Unthrottled: a user added since load must not be refused here just
         # because another request checked within the last second.
         await asyncio.to_thread(refresh_user_profiles_if_changed, _config)
+        username = _config.resolve_user_id(username) or username
     if not username or (_config and _config.users and username not in _config.users):
         return Response("Access denied: user not configured", status_code=403)
 
@@ -1687,6 +1688,9 @@ async def callback(request: Request):
                 and display_name != username
             ):
                 _up.update_profile(_config.db_path, username, display_name=display_name)
+        except ValueError:
+            logger.warning("user_profile auto-seed refused user=%s", username)
+            return await _login_error(403, "Sign-in failed", "Sign-in could not be completed.")
         except Exception as e:  # noqa: BLE001
             logger.warning("user_profile auto-seed failed user=%s: %s", username, e)
 
@@ -2125,7 +2129,7 @@ async def admin_users(_: dict = Depends(_require_admin)):
         profile = profiles.get(user_id)
         identity = identities.get(user_id)
         row = {"user_id": user_id, "display_name": profile.display_name if profile else user_id,
-               "identity": _admin_identity_view(identity), "is_admin": user_id in config.admin_users,
+               "identity": _admin_identity_view(identity), "is_admin": config.is_named_admin(user_id),
                "state": "nextcloud_only" if identity is None else "password_set" if identity.password_hash else "passwordless"}
         (users if profile else orphans).append(row)
     return {"users": users, "orphans": orphans, "email_enabled": config.web.has_method("email")}
@@ -2191,6 +2195,9 @@ async def admin_create_user(request: Request, _: dict = Depends(_require_admin),
         raise HTTPException(status_code=400, detail="Enter a valid email address.")
     if not config.web.has_method("email"):
         raise HTTPException(status_code=400, detail="Email sign-in is not enabled.")
+    canonical = config.resolve_user_id(payload["user_id"])
+    if canonical is not None and canonical != payload["user_id"]:
+        raise HTTPException(status_code=400, detail=f"User ID differs only in case from {canonical!r}")
     identity = await _admin_auth_write(
         web_auth.upsert_identity, config.db_path, payload["user_id"], email,
         create_profile=True, display_name=payload.get("display_name", ""), reject_case_collision=True,
@@ -2320,7 +2327,7 @@ def _admin_user_detail(conn, config, user_id: str) -> dict | None:
         identity_view["state"] = "password_set" if identity.password_hash else "passwordless"
     return {
         "user_id": user_id,
-        "is_admin": user_id in config.admin_users,
+        "is_admin": config.is_named_admin(user_id),
         "identity": identity_view,
         "profile": {field: getattr(profile, field) for field in user_profiles.ADMIN_EDITABLE_FIELDS},
         "channels": {"log_channel": profile.log_channel, "alerts_channel": profile.alerts_channel},

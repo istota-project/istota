@@ -74,6 +74,16 @@ async def test_new_id_validation(client, configured, user_id):
     assert user_profiles.get_profile(configured._config.db_path, user_id) is None
 
 
+async def test_create_refuses_case_collision_with_toml_only_user(client, configured):
+    from istota.config import UserConfig
+    configured._config.users["Carol"] = UserConfig()
+    response = await client.post("/istota/api/admin/users", json={
+        "user_id": "carol", "email": "carol@example.com",
+    })
+    assert response.status_code == 400
+    assert user_profiles.get_profile(configured._config.db_path, "carol") is None
+
+
 async def test_create_lists_states_and_sends_invite(client, configured, monkeypatch):
     mail = []
     loop_thread = threading.get_ident()

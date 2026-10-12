@@ -209,6 +209,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- User IDs now match regardless of case in Talk, Nextcloud sign-in, email plus-addresses and task submission, while keeping their original spelling. Creating an ID that differs only by case from an existing user is refused, so the two cannot share files on a case-insensitive filesystem.
+
 - **The browser's watchdog and health-check thresholds can be set on the stack again.** `BROWSE_WATCHDOG_DEADLINE_S`, `BROWSE_WATCHDOG_POLL_S`, `BROWSER_CDP_FAILURE_THRESHOLD`, `BROWSER_CDP_FAILURE_WINDOW_S`, `BROWSER_WEDGE_RECOVERY_THRESHOLD` and `BROWSER_WEDGE_RECOVERY_WINDOW_S` were read by the browser image but set only by the retired bare-metal role, so the stack had no way to change them. The compose file now passes them through from the stack's `.env` with the same defaults, and the Docker deployment guide lists them.
 
 - **The stack's output reaches the VM's system journal again.** Since the move to containers, Docker wrote every service's output to its own log files, so `journalctl` and any journal-based log shipping saw nothing from Istota or its nginx. On the VM, services now log to the journal under their container name, and the next `istota-stack update` switches them over. `docker logs` keeps working.

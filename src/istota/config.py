@@ -2327,9 +2327,16 @@ class Config:
         """
         return self.module_db_root() / user_id / f"{module}.db"
 
+    def resolve_user_id(self, user_id: str) -> str | None:
+        """Resolve to stored spelling, including users added since config load."""
+        from .lib.user_ids import user_id_index
+
+        # Callers may replace or mutate users; a cached index would go stale.
+        return user_id_index(self.users).get(user_id.casefold())
+
     def get_user(self, nc_username: str) -> UserConfig | None:
         """Get user config by Nextcloud username. Returns None if user not configured."""
-        return self.users.get(nc_username)
+        return self.users.get(self.resolve_user_id(nc_username))
 
     def find_user_by_email(self, email_address: str) -> str | None:
         """Find user_id by email address. Returns None if not found."""
@@ -2739,7 +2746,11 @@ class Config:
         """
         if not self.admin_users:
             return True
-        return user_id in self.admin_users
+        return self.is_named_admin(user_id)
+
+    def is_named_admin(self, user_id: str) -> bool:
+        """Explicit admin membership; an empty list grants nothing."""
+        return user_id.casefold() in {admin.casefold() for admin in self.admin_users}
 
     def is_shared_kv_writer(self, user_id: str) -> bool:
         """Authoritative gate for shared_kv writes. Fail-closed.
@@ -2788,10 +2799,10 @@ class Config:
             not self.admin_users
             and len(self.users) <= 1
             and self.is_standalone
-            and user_id == self.local_user_id
+            and user_id.casefold() == self.local_user_id.casefold()
         ):
             return True
-        return bool(self.admin_users) and user_id in self.admin_users
+        return self.is_named_admin(user_id)
 
 
 def load_admin_users(path: str | None = None) -> set[str]:
@@ -4271,6 +4282,8 @@ def load_config(config_path: Path | None = None) -> Config:
     report_unknown(unknown, config_path)
 
     if "users" in data:
+        from .lib.user_ids import user_id_index
+        user_id_index(data["users"])
         for nc_username, user_data in data["users"].items():
             config.users[nc_username] = _parse_user_data(user_data, nc_username)
 
@@ -4665,6 +4678,8 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_forge_clis(config)
     _validate_forge_urls(config)
 
+    from .lib.user_ids import user_id_index
+    user_id_index(config.users)
     return config
 
 
@@ -5765,6 +5780,9 @@ def _merge_profile_rows(config: "Config", rows: dict) -> None:
     from . import user_profiles as _up  # avoid import cycles at module load
 
     current = config.users
+    from .lib.user_ids import user_id_index
+    # Validate the whole snapshot before changing any existing profile.
+    user_id_index([*current, *rows])
     added: dict[str, UserConfig] = {}
     for user_id, profile in rows.items():
         existing = current.get(user_id)

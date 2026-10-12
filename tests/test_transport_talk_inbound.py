@@ -54,6 +54,8 @@ def make_config(db_path, tmp_path):
     """Create a Config object with tmp paths and test DB."""
     def _make(**overrides):
         config = Config()
+        # Classifier tests opt in and provide their own completer.
+        config.speech_gate.mode = "mention"
         config.db_path = db_path
         config.temp_dir = tmp_path / "temp"
         config.temp_dir.mkdir(exist_ok=True)
@@ -1004,8 +1006,10 @@ class TestPollTalkConversations:
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_creates_task_for_valid_message(self, make_config):
+    @pytest.mark.parametrize("stored_id", ["alice", "Alice"])
+    async def test_creates_task_for_valid_message(self, make_config, stored_id):
         config = make_config()
+        config.users[stored_id] = config.users.pop("alice")
 
         msg = _msg(id=101, actor_id="alice", message="Check my calendar")
 
@@ -1025,7 +1029,7 @@ class TestPollTalkConversations:
 
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, result[0])
-            assert task.user_id == "alice"
+            assert task.user_id == stored_id
             assert task.source_type == "talk"
             assert task.prompt == "Check my calendar"
             assert db.is_canonical_room_token(task.conversation_token)
@@ -2928,6 +2932,24 @@ class TestTalkParticipants:
     """Multiplayer Stage 7: the `config.users` filter moves from recording to
     authority. A guest's turn is stored with a participant and no user; nothing
     it says reaches a command, a confirmation or a task."""
+
+    @pytest.mark.asyncio
+    async def test_mixed_case_user_keeps_native_participant_across_polls(self, make_config):
+        config = make_config(users={"Alice": UserConfig(), "bob": UserConfig()})
+        participant_id = None
+        for message_id in (307, 308):
+            await _poll_group(config, _msg(id=message_id, actor_id="alice", message="hi"))
+            with db.get_db(config.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id, surface_ref, left_at FROM room_participants WHERE user_id = ?",
+                    ("Alice",),
+                ).fetchall()
+            assert len(rows) == 1
+            assert rows[0]["surface_ref"] == "alice"
+            assert rows[0]["left_at"] is None
+            if participant_id is not None:
+                assert rows[0]["id"] == participant_id
+            participant_id = rows[0]["id"]
 
     @pytest.mark.asyncio
     async def test_a_guest_turn_is_recorded_as_a_guest(self, make_config):
