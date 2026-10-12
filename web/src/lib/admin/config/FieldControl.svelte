@@ -180,7 +180,11 @@
     {:else}
       <Field label={field.name} {hint} {badge} inline error={problem} labelled={false}>
         {#if field.secret || field.editor === 'secret'}
-          <Badge variant={field.set ? 'success' : 'partial'}>{field.set ? 'set' : 'not set'}</Badge>
+          <span class="value-badge">
+            <Badge variant={field.set ? 'success' : 'partial'}
+              >{field.set ? 'set' : 'not set'}</Badge
+            >
+          </span>
         {:else}
           <span class="config-value" class:dim={formatValue(field.value) === '—'}
             >{formatValue(field.value)}</span
@@ -190,25 +194,32 @@
     {/if}
 
     {#if showMeta}
-      <div class="field-meta">
-        {#if pendingUnset}
-          <span class="caption">Will reset to the default: {formatValue(field.default)}</span>
-          <Button variant="ghost" size="sm" onclick={undo}>Undo</Button>
-        {:else if pendingSet}
+      <div class="field-meta control-row">
+        {#if pendingSet}
           <Badge size="sm" variant="info">changed</Badge>
-          <Button variant="ghost" size="sm" onclick={undo}>Undo</Button>
-        {:else if !field.in_file && 'default' in field}
-          <span class="caption">Not in config.toml; the default applies.</span>
+        {/if}
+        {#if pendingSet || pendingUnset}
+          <Button variant="secondary" size="sm" onclick={undo}>Undo</Button>
         {/if}
         {#if field.in_file && !pendingUnset}
-          <Button variant="ghost" size="sm" onclick={reset}>Reset to default</Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            title="Remove from config.toml, so the default applies"
+            onclick={reset}>Reset</Button
+          >
         {/if}
       </div>
     {/if}
   </div>
 
+  {#if showMeta && pendingUnset}
+    <p class="caption field-note">Will reset to the default: {formatValue(field.default)}</p>
+  {:else if showMeta && !pendingSet && !field.in_file && 'default' in field}
+    <p class="caption field-note">Not in config.toml; the default applies.</p>
+  {/if}
   {#if editable && field.read_only_reason}
-    <p class="caption reason">{field.read_only_reason}</p>
+    <p class="caption field-note">{field.read_only_reason}</p>
   {/if}
 </div>
 
@@ -228,7 +239,9 @@
     display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
-    column-gap: var(--space-3);
+    /* The gap SecretField leaves before its Clear, so a button beside a field
+       sits the same distance from it whichever component draws it. */
+    column-gap: var(--space-2);
     row-gap: var(--space-1);
   }
 
@@ -251,27 +264,37 @@
     display: none;
   }
 
-  .reason {
+  .field-note {
     margin: var(--space-1) 0 0;
   }
 
-  @media (min-width: 641px) {
-    /* The height of the control's line, so the meta centres on the control
-       rather than on an error under it. */
-    .inline-meta > .field-meta {
-      min-height: var(--control-height-lg);
-    }
-
-    .reason {
-      margin-left: calc(var(--field-label-width) + var(--space-3));
-    }
+  /* Every control-column item that is not itself a control takes the
+     control's height as a floor, centred in it, so it lines up with the
+     label and the meta buttons as an input would. */
+  .value-badge,
+  .choices,
+  .config-value {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-height-lg);
   }
 
-  /* Stacked under the control, a leading button's own padding would indent
-     it from the field's edge. */
-  @media (max-width: 640px) {
-    .field-meta > :global(.btn:first-child) {
-      margin-inline-start: calc(-1 * var(--space-2));
+  .value-badge {
+    justify-self: start;
+    align-self: flex-start;
+  }
+
+  @media (min-width: 641px) {
+    /* The control's line, and top-aligned with it, so the buttons sit level
+       with the control however tall the label or an error makes the field. */
+    .inline-meta > .field-meta {
+      min-height: var(--control-height-lg);
+      align-self: flex-start;
+    }
+
+    /* Under the control, in its column, not under the label. */
+    .field-note {
+      margin-left: calc(var(--field-label-width) + var(--space-3));
     }
   }
 
