@@ -741,8 +741,8 @@ def backoff_delay(attempt: int, *, maximum: float,
 #
 # A process-local registration rather than an import, and that is the whole
 # point of it. The supervisor runs in the scheduler daemon; `doctor` also runs
-# in the web process, in the CLI and behind `!check`, where there is no
-# supervisor and never will be. An importable singleton would make those
+# outside the daemon (the CLI), where there is no supervisor and never will
+# be. An importable singleton would make those
 # processes report every watcher down — a page for a process that was never
 # supposed to have any — where "nothing is registered here" is the honest
 # answer and the one `talk.signaling_watchers` skips on.

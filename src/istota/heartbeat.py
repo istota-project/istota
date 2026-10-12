@@ -729,7 +729,7 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
     Config fields:
         execution_test: whether to run the live model invocation (default: True)
 
-    This used to be a hand-rolled copy of `commands.cmd_check` — the same five
+    This used to be a hand-rolled copy of the old `!check` command — the same five
     probes in the same order, drifting from doctor's registry and from the other
     copy. All five are registry checks now, so this handler selects and renders
     and asserts nothing of its own.
@@ -759,7 +759,7 @@ def _check_self(check: HeartbeatCheck, config: "Config", user_id: str) -> CheckR
     this path delivers to a user and had no reason to be the exception.
 
     **An admin is told which checks failed; everyone else gets the count.** The
-    same disclosure boundary `commands.cmd_check` draws, drawn here for the same
+    disclosure boundary the removed `!check` command drew, kept here for the same
     reason and by the same mechanism, because this handler reaches the same
     audience: ``run_check`` admin-gates only ``shell-command``, and
     ``check_heartbeats`` runs each user's own ``HEARTBEAT.md`` and delivers the

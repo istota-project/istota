@@ -359,7 +359,7 @@ def read_status() -> dict | None:
 
     `doctor`'s reader, shaped like `signaling.read_stats` and for its reasons.
     Two of them are worth restating here. It answers `None` rather than a set
-    of zeros in the web process, the CLI and behind `!check`, because on the
+    of zeros outside the daemon (the CLI, the web process), because on the
     deployment shape where those are separate processes the bridge lives in
     the daemon and reporting it down as well would page an operator about a
     process that was never meant to have one. And it never raises: a

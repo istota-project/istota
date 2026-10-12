@@ -5720,7 +5720,7 @@ class TestSandboxMasksUsesTheNativeProfile:
 class TestVerdict:
     """`verdict` — the adapter for a caller that needs a boolean and a sentence.
 
-    `!check`'s non-admin arm and `heartbeat._check_self` are the two consumers;
+    `heartbeat._check_self` is the consumer (the removed `!check` was the other);
     both used to compute pass/fail from their own hand-rolled probe.
     """
 
@@ -6150,8 +6150,8 @@ class TestSignalingWatchers:
         return doctor.check_signaling_watchers(_signaling_config(make_config, enabled=enabled), probe)
 
     def test_no_supervisor_in_this_process_skips(self, make_config):
-        """doctor also runs in the web process, the CLI and `!check`, which
-        were never supposed to have watchers."""
+        """doctor also runs outside the daemon (the CLI), which was never
+        supposed to have watchers."""
         result = doctor.check_signaling_watchers(_signaling_config(make_config), True)
         assert result.status == SKIP
 

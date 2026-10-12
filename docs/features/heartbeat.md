@@ -47,7 +47,7 @@ When a check fails, the alert is routed through `surface_for_purpose(config, use
 
 If the resolved channel isn't configured, the alert is skipped with a warning and the consecutive-error count is *not* incremented — an undeliverable alert is a deployment gap, not a failing check.
 
-The `!check` command in Talk runs an immediate inline health check (the same diagnostics as `self-check`, independent of the heartbeat schedule).
+For an immediate health check, independent of the heartbeat schedule, run `istota doctor` on the host or open the admin Health pane. There is no chat command for it.
 
 ## Configuration
 
