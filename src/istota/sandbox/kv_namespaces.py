@@ -19,6 +19,8 @@ what the scheduler's cleanup tick reclaimed, so `runtime.session_log_dir` can
 say whether the size ceiling rather than `retention_days` is the retention in
 force — and `_room_backfill`, the scheduler's per-user marker that a minted SMS or
 WhatsApp room's pre-room history has been copied in, and
+`_notification_delivery`, the pushes the web process hands to the daemon
+to send, and
 `_credential_backup`, the recipient and backup status (a task that could write
 its recipient could redirect backups to a key it holds), and
 `_credential_migration`, the one-time retirement marker and retry clock, and
@@ -32,7 +34,7 @@ rows are written by the daemon, by the host-side `memory` skill CLI, by the
 Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
 before it dispatches a verb, so `--shared` — which reads and writes the
 deployment-wide `shared_kv` — is covered by the same line. `_avatar_import`,
-`_session_log_sweep` and `_operator_persona` are `shared_kv` namespaces and
+`_session_log_sweep`, `_notification_delivery` and `_operator_persona` are `shared_kv` namespaces and
 would otherwise be reachable; `_credential_backup` and `_credential_migration` are per-user namespaces.
 
 The rule is a name prefix rather than a list, so a further reserved namespace

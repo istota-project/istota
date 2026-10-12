@@ -178,6 +178,9 @@ class TestGarminTokenExpiry:
         )
 
         assert res.auth_error is True
+        # Handed to the daemon's next tick rather than sent here (ISSUE-702).
+        assert sent == []
+        store.deliver_handed_off(config)
         rows = _rows(config, "connected_service")
         assert len(rows) == 1
         assert rows[0]["user_id"] == "alice"
@@ -205,26 +208,28 @@ class TestGarminTokenExpiry:
     def test_the_raise_holds_no_write_lock_on_the_framework_db(
         self, config, monkeypatch,
     ):
-        """`raise_notification` is only safe for a caller that holds no lock.
+        """`raise_for_service` is only safe for a caller that holds no lock.
 
         Probed at the moment the store is *entered*, with only `sync_garmin` and
         its callers on the stack — so a `False` here means the producer is
         holding the write lock the store is about to want, which in production
         is a silent thirty-second stall that the never-raises contract then
-        swallows. Not probed inside `write_notification`: by then the store's own
-        connection has the lock, and the answer would be `False` for the right
-        reason and prove nothing about the caller.
+        swallows. Not probed inside `write_notification`: by then the producer's
+        own connection has the lock, and the answer would be `False` for the
+        right reason and prove nothing about the caller.
         """
+        from istota.notifications.resolvers import connected_service
+
         ctx = _ctx(config)
         gm.set_adapter_factory(_AuthFailAdapter)
         probe = _LockProbe(config)
-        real_raise = store.raise_notification
+        real_raise = connected_service.raise_for_service
 
-        def _spy(cfg, user_id, **kwargs):
+        def _spy(*args, **kwargs):
             probe.check()
-            return real_raise(cfg, user_id, **kwargs)
+            return real_raise(*args, **kwargs)
 
-        monkeypatch.setattr("istota.notifications.store.raise_notification", _spy)
+        monkeypatch.setattr(connected_service, "raise_for_service", _spy)
         _sends(monkeypatch)
 
         garmin_sync.sync_garmin(
@@ -291,6 +296,7 @@ class TestGarminTokenExpiry:
         assert res.auth_error is True
         assert res.inserted > 0, "the first day must have landed, or nothing is proved"
 
+        store.deliver_handed_off(config)
         rows = _rows(config, "connected_service")
         assert len(rows) == 1
         assert rows[0]["state"] == "open", "the raise was undone by the write-back"

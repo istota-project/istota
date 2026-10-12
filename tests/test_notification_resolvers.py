@@ -1019,7 +1019,7 @@ class TestTheNeverRaisesGuardsSayWhatTheySwallowed:
             raise AssertionError("unreachable: the splat fails before the body")
 
         monkeypatch.setattr(
-            "istota.notifications.store.raise_notification", _renamed,
+            "istota.notifications.store.write_notification", _renamed,
         )
         with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
             assert service_source.raise_for_service(

@@ -39,11 +39,18 @@ def configured(db_path, monkeypatch):
 
 @pytest.fixture
 def delivered(monkeypatch):
-    from istota.notifications import store
+    """Every send, from the web process or from the daemon's hand-off pass."""
+    from istota.notifications import delivery
 
     calls = []
-    monkeypatch.setattr(store, "deliver_pending", lambda config, results: calls.append(list(results)))
+    monkeypatch.setattr(delivery, "send_notification",
+                        lambda config, user_id, message, **kw: calls.append(user_id) or True)
     return calls
+
+
+def _hand_offs(configured):
+    with db.get_db(configured._config.db_path) as conn:
+        return conn.execute("SELECT key FROM shared_kv WHERE namespace = '_notification_delivery'").fetchall()
 
 
 def session(client, mod, username):
@@ -343,13 +350,20 @@ class TestNotifications:
         assert "SMS number" in rows[0]["body"] and "WhatsApp number" in rows[0]["body"]
         assert "Alice" in rows[0]["body"]
         assert "+1555" not in rows[0]["body"]
-        assert len(delivered) == 1
+        # Handed to the daemon, never sent from the web process (ISSUE-702).
+        assert delivered == []
+        assert [r["key"] for r in _hand_offs(configured)] == [f"request:{rows[0]['id']}"]
+        from istota.notifications.store import deliver_handed_off
+
+        deliver_handed_off(configured._config)
+        assert delivered == ["bob"]
 
     async def test_admin_editing_their_own_row_is_not_notified(self, client, configured, delivered):
         response = await client.patch(URL + "/alice", json={"sms_phone_number": "+15550100014"})
         assert response.status_code == 200
         assert _notifications(configured) == []
         assert delivered == []
+        assert _hand_offs(configured) == []
 
     async def test_non_contact_fields_do_not_notify(self, client, configured, delivered):
         response = await client.patch(URL + "/bob", json={"display_name": "R", "max_background_workers": 2,
@@ -409,8 +423,11 @@ class TestIdentityPut:
         assert web_auth.get_identity(configured._config.db_path, "carol").email == "carol@example.com"
         assert _profile(configured, "carol").email_addresses == ["carol@example.com"]
         assert response.json()["identity"]["email"] == "carol@example.com"
-        body = _notifications(configured, "carol")[0]["body"]
+        rows = _notifications(configured, "carol")
+        body = rows[0]["body"]
         assert "login email" in body and "email addresses" in body
+        assert delivered == []
+        assert [r["key"] for r in _hand_offs(configured)] == [f"request:{rows[0]['id']}"]
 
     async def test_change_bumps_epoch_and_voids_tokens(self, client, configured):
         path = configured._config.db_path

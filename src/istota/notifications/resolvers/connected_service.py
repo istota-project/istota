@@ -234,33 +234,37 @@ def write(
 def raise_for_service(
     config: "Config", user_id: str, service: str, reason: str = "",
 ) -> int | None:
-    """Write **and** deliver, on a connection of the store's own.
+    """Write the row and hand its push to the daemon, on a connection of this call's own.
 
-    `raise_notification` rather than the buffered pair, and the reason is the
-    one its docstring demands be named. `sync_garmin` holds
-    no framework-DB transaction at any of its three call sites. It reaches the
-    framework DB only through `secrets_store`, and every one of those helpers
-    opens and closes a connection of its own around a single statement — there
-    is no open write lock for a second connection to wait thirty seconds on. The
-    second caller, `web_tokens.note_credential_lost`, reaches the framework DB
-    only through that module's own short-lived `_connect`, and calls this
-    *outside* the per-user refresh lock for the neighbouring reason: this
-    delivers, and holding a lock across an outbound HTTP call would serialize
-    every other token read for that user behind it.
+    Opening a connection here is safe: `sync_garmin` holds no framework-DB
+    transaction at any of its three call sites (it reaches the framework DB only
+    through `secrets_store`, whose helpers each open and close their own), and
+    `web_tokens.note_credential_lost` reaches it only through that module's own
+    short-lived `_connect`, and calls this outside the per-user refresh lock.
+
+    Handed off rather than sent, whichever process this runs in: both callers
+    run in the web process (the token refresh, and the Health page's Garmin
+    Sync now), which holds no WhatsApp bridge, and a send from there over a
+    Baileys route fails definitely and refuses every later push of this row on
+    WhatsApp (ISSUE-702). From the daemon the push goes out on the next tick.
 
     Never raises: the whole point of this source is a sync that failed, and the
     failure must not turn into a traceback out of the sync engine. The guard is
     here rather than only in the store because `_row_kwargs` is evaluated in
     *this* frame, outside the store's own — and so is the splat into
-    `raise_notification`, which is why a signature change there would surface as
+    `write_notification`, which is why a signature change there would surface as
     a `TypeError` this handler catches and the store's never sees. Swallowing it
     at the same level as a locked database is what ISSUE-460 was: see
     :func:`_log_swallowed` for the split.
     """
     try:
-        from istota.notifications.store import raise_notification
+        from istota import db
+        from istota.notifications.store import hand_to_daemon, write_notification
 
-        return raise_notification(config, user_id, **_row_kwargs(service, reason))
+        with db.get_db(config.db_path) as conn:
+            result = write_notification(conn, user_id, **_row_kwargs(service, reason))
+            hand_to_daemon(conn, [result])
+        return result.notification_id if result is not None else None
     except Exception as exc:
         _log_swallowed("raise", service, user_id, exc)
         return None
