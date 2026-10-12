@@ -100,7 +100,9 @@ case "$args" in
     [ -z "${STUB_IMAGE_ENV:-}" ] || printf '%s\n' "$STUB_IMAGE_ENV" ;;
   *" image inspect "*) [ -z "${STUB_IMAGE_ENV:-}" ] || printf '%s\n' "$STUB_IMAGE_ENV" ;;
   *" localize-config --check "*) exit "${STUB_LOCALIZE_CHECK_RC:-0}" ;;
+  *" workspace localize --check "*) exit "${STUB_LOCALIZE_DEST_RC:-0}" ;;
   *" workspace localize "*) exit "${STUB_LOCALIZE_RC:-0}" ;;
+  *" workspace moved-note "*) exit "${STUB_NOTE_RC:-0}" ;;
   *" workspace localize-config "*)
     printf 'config read-only=%s\n' "${ISTOTA_CONFIG_READ_ONLY:-unset}" >> "$STUB_CALLS" ;;
 esac
@@ -1836,6 +1838,11 @@ class TestLocalizeWorkspace:
         "--entrypoint istota-drop daemon istota workspace localize "
         "--from /mnt/shared --to /data/workspace"
     )
+    CHECK = (
+        "--entrypoint istota-drop daemon istota workspace localize --check "
+        "--from /mnt/shared --to /data/workspace"
+    )
+    NOTE = "--entrypoint istota-drop daemon istota workspace moved-note --from /mnt/shared"
 
     @pytest.fixture
     def mounted(self, fx):
@@ -1859,9 +1866,11 @@ class TestLocalizeWorkspace:
         calls = fx.docker_calls()
         order = [
             self._index(calls, "istota workspace localize-config --check --workspace /data/workspace"),
+            self._index(calls, self.CHECK),
             self._index(calls, " stop daemon web"),
             self._index(calls, f"{self.COPY} --scheduler-stopped"),
             self._index(calls, "config read-only=false"),
+            self._index(calls, self.NOTE),
             self._index(calls, "provision ran"),
             self._index(calls, "up -d --remove-orphans"),
             self._index(calls, "exec -T daemon istota-drop istota workspace reindex --forget-root /mnt/shared"),
@@ -1940,6 +1949,60 @@ class TestLocalizeWorkspace:
         assert any(c.endswith(f"{self.COPY} --resume --scheduler-stopped") for c in calls), calls
         assert "config read-only=false" in calls
         assert "STORAGE=local\n" in (fx.stack / "host.env").read_text()
+
+    def test_a_destination_with_files_is_refused_before_anything_stops(self, mounted):
+        """ISSUE-722: the empty-destination refusal came from the copy, after
+        `compose stop`, so a VM with leftovers in /data/workspace was left down."""
+        fx = mounted
+        result = fx.run("localize-workspace", STUB_LOCALIZE_DEST_RC="1")
+        assert result.returncode == 1
+        assert "nothing was stopped" in result.stderr
+        calls = fx.docker_calls()
+        assert any(c.endswith(self.CHECK) for c in calls), calls
+        assert not [c for c in calls if " stop " in f"{c} " or c.endswith("--scheduler-stopped")], calls
+        assert "STORAGE=nextcloud\n" in (fx.stack / "host.env").read_text()
+
+    def test_the_destination_check_is_asked_with_resume(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", "--resume")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c.endswith(f"{self.CHECK} --resume") for c in fx.docker_calls()), fx.docker_calls()
+
+    def test_copy_only_checks_the_destination_and_writes_no_note(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", "--copy-only", STUB_LOCALIZE_DEST_RC="1")
+        assert result.returncode == 1
+        assert not [c for c in fx.docker_calls() if " stop " in f"{c} "], fx.docker_calls()
+        fx.calls.unlink()
+        result = fx.run("localize-workspace", "--copy-only")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not [c for c in fx.docker_calls() if "moved-note" in c], fx.docker_calls()
+
+    @pytest.mark.parametrize("rc", ["1", "2", "3"])
+    def test_a_copy_that_stops_writes_no_note(self, mounted, rc):
+        """ISSUE-722: exit 2 wrote the note and then stopped before the config,
+        so `istota-stack up` ran on the mount with a note saying edits there
+        were ignored."""
+        fx = mounted
+        result = fx.run("localize-workspace", STUB_LOCALIZE_RC=rc)
+        assert result.returncode == 1
+        assert not [c for c in fx.docker_calls() if "moved-note" in c], fx.docker_calls()
+
+    def test_no_note_skips_the_note(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", "--no-note")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert "config read-only=false" in calls
+        assert not [c for c in calls if "moved-note" in c or "--no-note" in c], calls
+
+    def test_a_failed_note_does_not_stop_the_move(self, mounted):
+        fx = mounted
+        result = fx.run("localize-workspace", STUB_NOTE_RC="2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "WARNING" in result.stdout + result.stderr
+        assert "STORAGE=local\n" in (fx.stack / "host.env").read_text()
+        assert "provision ran" in fx.docker_calls()
 
     def test_a_dry_run_stops_nothing_and_writes_nothing(self, mounted):
         fx = mounted
