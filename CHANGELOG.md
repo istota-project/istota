@@ -262,6 +262,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The daemon container's startup gives up its mount privilege before it touches stored data.** The short root phase needs that privilege only to set up per-task resource limits, and now drops it straight after, so the one-time ownership fix over the state volume runs without it. The container exits at startup if the privilege is still held.
+
 - **The Docker stack now runs every task in the bubblewrap sandbox, and the daemon no longer runs as root.** The `istota` service ships a seccomp profile (Docker's default plus the calls bwrap needs, still denying `bpf`, `keyctl`, `userfaultfd` and the rest) and an AppArmor profile, drops every capability after a short root phase, runs with a read-only root filesystem, and gives each task its own cgroup with `memory.max`, `pids.max` and `cpu.max`. The daemon, `web` and `webhooks` run as uid 10001, and on Linux a daemon whose sandbox cannot be built refuses to start rather than running tasks unconfined.
 
   **Upgrade note:** Rebuild and recreate the stack with the new `docker-compose.yml`; the first boot hands `/data` and the workspace to uid 10001 once. On a host with AppArmor, load the profile first: `sudo apparmor_parser -r -W docker/istota/apparmor-istota`. Run `docker compose exec istota istota-drop istota …` for CLI commands, so nothing under `/data` ends up owned by root.

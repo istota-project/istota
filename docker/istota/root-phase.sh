@@ -1,6 +1,6 @@
 #!/bin/bash
 # The istota container's root phase: the only code in the container that runs
-# as uid 0 before the drop. It does three things, then execs `istota-drop "$@"`,
+# as uid 0 before the drop. It does four things, then execs `istota-drop "$@"`,
 # which becomes uid 10001 with every capability set empty:
 #
 #   1. Delegates the container's own cgroup to the daemon's uid, the container
@@ -10,17 +10,23 @@
 #      (`0::/`): a bind of the host's tree (root `/../..`) and `cgroup: host`
 #      (root `/`, process at the VM's path for the container) are both writable
 #      once remounted, and both are the VM's whole hierarchy.
-#   2. Fixes ownership of /data, the local workspace included, once, for a
+#   2. Re-execs itself without CAP_SYS_ADMIN, with a flag so it cannot loop, and
+#      refuses to go on if the bounding set still holds it. The walk below reads
+#      a tree uid 10001 wrote; without SYS_ADMIN a bug there can give container
+#      root but not a fresh procfs mount, so AppArmor's literal-path denies on
+#      /proc/sys still hold (parity row 20).
+#   3. Fixes ownership of /data, the local workspace included, once, for a
 #      volume an older image wrote as root (recorded by /data/.ownership-10001).
 #      A full-integration workspace is the VM's rclone mount, whose owner the
 #      mount unit sets; nothing here touches it.
-#   3. Checks the sandbox grant: bubblewrap must be able to build the sandbox's
+#   4. Checks the sandbox grant: bubblewrap must be able to build the sandbox's
 #      namespace as uid 10001, or the container exits naming the compose lines.
 #      The drop itself is checked first, so a credential file uid 10001 cannot
 #      read is reported as that rather than as a missing grant.
 #
 # Its capabilities are compose's cap_add (CHOWN, FOWNER, SETUID, SETGID,
-# SETPCAP, SYS_ADMIN); SYS_ADMIN is for the remount alone. Every decision is a
+# SETPCAP, SYS_ADMIN); SYS_ADMIN is for the remount alone, and step 2 is where
+# it goes. Every decision is a
 # function taking its inputs as arguments, and `main` runs only when executed,
 # so tests/test_container_root_phase.py sources this and calls them.
 set -euo pipefail
@@ -29,6 +35,11 @@ ISTOTA_UID=10001
 ISTOTA_GID=10001
 CGROUP_MOUNT=/sys/fs/cgroup
 OWNERSHIP_MARKER=/data/.ownership-10001
+SELF_STATUS=/proc/self/status
+# argv[1] of the re-exec that drops CAP_SYS_ADMIN; its presence means the drop
+# has happened, so the re-exec'd process never re-execs again.
+AFTER_REMOUNT=--after-remount
+CAP_SYS_ADMIN_BIT=21
 
 log() { echo "[istota-root] $*"; }
 
@@ -96,6 +107,26 @@ delegate_cgroup() {
     log "cgroup ${mountpoint} delegated to ${ISTOTA_UID} ($(cat "$mountpoint/cgroup.subtree_control"))"
 }
 
+# The bounding set from a /proc/<pid>/status file, as the kernel prints it.
+capability_bounding_set() {
+    awk '$1 == "CapBnd:" { print $2; exit }' "$1"
+}
+
+# After the re-exec: refuse unless CAP_SYS_ADMIN is gone from the bounding set,
+# and so from every set a uid-0 exec can reach.
+require_no_sys_admin() {
+    local capbnd
+    capbnd="$(capability_bounding_set "$1")"
+    if [ -z "$capbnd" ]; then
+        log "REFUSE: no CapBnd line in $1, so the drop of CAP_SYS_ADMIN cannot be checked."
+        return 77
+    fi
+    if (( (16#$capbnd >> CAP_SYS_ADMIN_BIT) & 1 )); then
+        log "REFUSE: CAP_SYS_ADMIN is still in the bounding set (CapBnd ${capbnd}) after the re-exec that drops it; not walking /data with it."
+        return 77
+    fi
+}
+
 # Whether a path is a read-only mount point (a config directory bound :ro).
 is_ro_mount() {
     awk -v mp="$1" '$5 == mp { split($6, o, ","); for (i in o) if (o[i] == "ro") found = 1 }
@@ -160,7 +191,7 @@ check_drop() {
         log "REFUSE: a credential file under /run/secrets is not readable by uid ${ISTOTA_UID}; on the VM, chown 10001:10001 and chmod 0400 it."
         return 78
     fi
-    log "REFUSE: istota-drop itself failed; the daemon service needs cap_add CHOWN, FOWNER, SETUID, SETGID, SETPCAP and SYS_ADMIN."
+    log "REFUSE: istota-drop itself failed; it needs SETUID, SETGID and SETPCAP in the daemon service's cap_add."
     return 71
 }
 
@@ -191,12 +222,20 @@ main() {
         log "REFUSE: the root phase must start as uid 0 (it delegates the cgroup and then drops to ${ISTOTA_UID}); remove \`user:\` from the daemon service."
         exit 64
     fi
-    require_own_cgroup /proc/self/mountinfo "$CGROUP_MOUNT" || exit $?
-    if delegate_cgroup "$CGROUP_MOUNT"; then
-        export ISTOTA_TASK_CGROUP_ROOT="$CGROUP_MOUNT"
-    else
-        log "WARNING: could not delegate ${CGROUP_MOUNT}; tasks will run without per-task limits (security.task_cgroups reports FAIL)"
+    if [ "${1:-}" != "$AFTER_REMOUNT" ]; then
+        require_own_cgroup /proc/self/mountinfo "$CGROUP_MOUNT" || exit $?
+        if delegate_cgroup "$CGROUP_MOUNT"; then
+            export ISTOTA_TASK_CGROUP_ROOT="$CGROUP_MOUNT"
+        else
+            log "WARNING: could not delegate ${CGROUP_MOUNT}; tasks will run without per-task limits (security.task_cgroups reports FAIL)"
+        fi
+        # A uid-0 process's sets after exec come from the bounding set, so this
+        # takes CAP_SYS_ADMIN out of the effective and permitted sets as well.
+        exec setpriv --bounding-set=-sys_admin --inh-caps=-sys_admin -- "$0" "$AFTER_REMOUNT" "$@"
     fi
+    shift
+    log "CapBnd $(capability_bounding_set "$SELF_STATUS") before the ownership walk"
+    require_no_sys_admin "$SELF_STATUS" || exit $?
     check_drop || exit $?
     fix_ownership
     probe_grant || exit $?

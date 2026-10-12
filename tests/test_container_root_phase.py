@@ -155,6 +155,128 @@ class TestTheDropIsCheckedBeforeTheGrant:
         assert main.index("check_drop") < main.index("fix_ownership") < main.index("probe_grant")
 
 
+#: The root phase's cap_add as the kernel prints CapBnd: CHOWN, FOWNER, SETGID,
+#: SETUID, SETPCAP and SYS_ADMIN (bit 21), then the same without SYS_ADMIN.
+CAPBND_WITH_SYS_ADMIN = "00000000002001c9"
+CAPBND_WITHOUT_SYS_ADMIN = "00000000000001c9"
+
+
+def _status(path: Path, capbnd: str | None) -> Path:
+    lines = ["Name:\tistota-root-ph", "Uid:\t0\t0\t0\t0", "CapInh:\t0000000000000000"]
+    if capbnd is not None:
+        lines.append(f"CapBnd:\t{capbnd}")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+class TestTheSysAdminCheck:
+    def test_a_bounding_set_without_sys_admin_passes(self, tmp_path):
+        status = _status(tmp_path / "status", CAPBND_WITHOUT_SYS_ADMIN)
+
+        result = _call("require_no_sys_admin", str(status))
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_a_bounding_set_with_sys_admin_is_refused(self, tmp_path):
+        status = _status(tmp_path / "status", CAPBND_WITH_SYS_ADMIN)
+
+        result = _call("require_no_sys_admin", str(status))
+
+        assert result.returncode == 77
+        assert CAPBND_WITH_SYS_ADMIN in result.stdout
+
+    def test_a_status_with_no_bounding_set_is_refused(self, tmp_path):
+        result = _call("require_no_sys_admin", str(_status(tmp_path / "status", None)))
+
+        assert result.returncode == 77
+
+
+class TestMainDropsSysAdminBeforeTheWalk:
+    """`main` end to end, with every step that needs a container replaced.
+
+    The steps are shell functions, redefined after sourcing to append their
+    name to a trace; `id`, `setpriv` and `istota-drop` are stubs on PATH. The
+    harness is itself the script the re-exec names (`"$0"`), so the re-exec'd
+    process runs the same stubs. The `setpriv` stub records its arguments and
+    rewrites the fake `/proc/self/status` to what the kernel would show after
+    the drop, unless the case is the one where the drop did not happen.
+    """
+
+    def _run(self, tmp_path, *args: str, drop_works: bool = True) -> tuple[subprocess.CompletedProcess, list[str]]:
+        trace = tmp_path / "trace"
+        status = _status(tmp_path / "status", CAPBND_WITH_SYS_ADMIN)
+        after = _status(tmp_path / "status.after", CAPBND_WITHOUT_SYS_ADMIN if drop_works else CAPBND_WITH_SYS_ADMIN)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        stubs = {
+            "id": 'echo 0\n',
+            "setpriv": (
+                'echo "setpriv $*" >> "$TRACE"\n'
+                'while [ "$1" != "--" ]; do shift; done; shift\n'
+                f'cp "{after}" "{status}"\n'
+                'exec "$@"\n'
+            ),
+            "istota-drop": 'echo "istota-drop $*" >> "$TRACE"\n',
+        }
+        for name, body in stubs.items():
+            stub = bindir / name
+            stub.write_text("#!/bin/sh\n" + body)
+            stub.chmod(0o755)
+        harness = tmp_path / "harness.sh"
+        steps = ("require_own_cgroup", "delegate_cgroup", "check_drop", "fix_ownership", "probe_grant")
+        harness.write_text(
+            "#!/bin/bash\n"
+            f'source "{ROOT_PHASE}"\n'
+            f'SELF_STATUS="{status}"\n'
+            + "".join(f'{step}() {{ echo {step} >> "$TRACE"; }}\n' for step in steps)
+            + 'main "$@"\n'
+        )
+        harness.chmod(0o755)
+        result = subprocess.run(
+            [str(harness), *args],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": f"{bindir}:/usr/bin:/bin", "TRACE": str(trace)},
+        )
+        steps_run = trace.read_text().splitlines() if trace.exists() else []
+        return result, steps_run
+
+    def test_the_remount_then_the_re_exec_then_the_walk(self, tmp_path):
+        result, steps = self._run(tmp_path, "/entrypoint.sh")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert steps == [
+            "require_own_cgroup",
+            "delegate_cgroup",
+            f"setpriv --bounding-set=-sys_admin --inh-caps=-sys_admin -- {tmp_path / 'harness.sh'} --after-remount /entrypoint.sh",
+            "check_drop",
+            "fix_ownership",
+            "probe_grant",
+            "istota-drop /entrypoint.sh",
+        ]
+
+    def test_the_bounding_set_is_logged_before_the_walk(self, tmp_path):
+        result, _ = self._run(tmp_path, "/entrypoint.sh")
+
+        assert f"[istota-root] CapBnd {CAPBND_WITHOUT_SYS_ADMIN} before the ownership walk" in result.stdout
+
+    def test_the_flag_stops_a_second_re_exec(self, tmp_path):
+        # Started with the flag, as the re-exec'd process is: no remount and no
+        # setpriv, whatever the bounding set holds.
+        result, steps = self._run(tmp_path, "--after-remount", "/entrypoint.sh")
+
+        assert not [step for step in steps if step.startswith("setpriv")], steps
+        assert "delegate_cgroup" not in steps
+
+    def test_sys_admin_still_held_after_the_re_exec_stops_before_the_walk(self, tmp_path):
+        result, steps = self._run(tmp_path, "/entrypoint.sh", drop_works=False)
+
+        assert result.returncode == 77, result.stdout + result.stderr
+        assert "CAP_SYS_ADMIN is still in the bounding set" in result.stdout
+        assert [step for step in steps if step.startswith("setpriv")], steps
+        assert "fix_ownership" not in steps
+        assert not [step for step in steps if step.startswith("istota-drop")], steps
+
+
 class TestTheDrop:
     """`istota-drop` is the one spelling of the drop, for the entrypoint and every exec path."""
 

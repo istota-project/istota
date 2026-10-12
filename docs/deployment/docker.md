@@ -317,7 +317,7 @@ sudo apparmor_parser -r -W docker/istota/apparmor-istota
 
 A host without AppArmor, Docker Desktop among them, ignores the option.
 
-The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec daemon istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
+The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, gives up `CAP_SYS_ADMIN` straight after the remount that needs it, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec daemon istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
 
 These settings are meant for a host that runs nothing else, such as a VM dedicated to the install: `systempaths=unconfined` would let a uid-0 process in the container reach host sysctls if AppArmor were not loaded, and nothing in the container runs as uid 0 after the root phase.
 
