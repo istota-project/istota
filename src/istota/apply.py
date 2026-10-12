@@ -101,8 +101,9 @@ class CheckResult:
     """What loading a `[config]` document reported.
 
     `problems` are `{"kind", "path", "message"}` entries from
-    `config_mapper.collect_problems`, `path` a list of strings. `error` is a
-    refusal that stopped the load, or `None`.
+    `config_mapper.collect_problems` or the settings schema. Paths contain
+    string keys and integer indices. `error` is a refusal that stopped the
+    load, or `None`.
     """
 
     problems: list[dict] = field(default_factory=list)
@@ -128,6 +129,19 @@ class Meta:
     source: str = "plan"
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("duplicate JSON object key")
+        result[name] = value
+    return result
+
+
+def _refuse_constant(value: str):
+    raise ValueError("non-finite JSON number")
+
+
 def load_plan(path: Path | str, *, stdin=None) -> dict:
     """The plan document: JSON when the file ends in `.json`, TOML otherwise.
 
@@ -139,8 +153,8 @@ def load_plan(path: Path | str, *, stdin=None) -> dict:
         where = "on stdin"
         try:
             raw = (stdin if stdin is not None else sys.stdin).read()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise PlanError(f"cannot read the plan {where}: {exc}") from None
+        except (OSError, UnicodeDecodeError):
+            raise PlanError(f"cannot read the plan {where}") from None
         is_json = raw.lstrip().startswith("{")
     else:
         path = Path(path)
@@ -152,11 +166,21 @@ def load_plan(path: Path | str, *, stdin=None) -> dict:
         is_json = path.suffix.lower() == ".json"
     try:
         if is_json:
-            document = json.loads(raw)
+            document = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_refuse_constant)
         else:
             document = tomllib.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise PlanError(f"the plan {where} does not parse: {exc}") from None
+    except json.JSONDecodeError as exc:
+        raise PlanError(f"the plan {where} does not parse: invalid JSON at line {exc.lineno}, column {exc.colno}") from None
+    except tomllib.TOMLDecodeError as exc:
+        # Older Python versions expose TOML locations only in the message.
+        # The rest of that message can contain submitted keys and values.
+        location = re.search(r"\(at (?:line \d+, column \d+|end of document)\)$", str(exc))
+        suffix = " " + location.group() if location else ""
+        raise PlanError(f"the plan {where} does not parse: invalid TOML{suffix}") from None
+    except UnicodeDecodeError:
+        raise PlanError(f"the plan {where} does not parse: invalid UTF-8") from None
+    except ValueError:
+        raise PlanError(f"the plan {where} does not parse: duplicate object key or non-finite number") from None
     if not isinstance(document, dict):
         raise PlanError(f"the plan {where} is not a table of sections")
     return document
@@ -406,7 +430,10 @@ def _sections(plan: dict) -> tuple[Meta, object]:
                 "[config] only. Remove it, or apply the plan with the release it "
                 "was written for."
             )
-    return _check_meta(plan.get("meta", {})), plan.get("config")
+    from istota.settings_plan.schema import parse_plan
+
+    parsed = parse_plan(plan)
+    return parsed.meta, parsed.config
 
 
 def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None) -> int:
@@ -416,17 +443,21 @@ def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None) -> int:
     nothing else, whatever the outcome; a plan that does not parse is an
     `error` there.
     """
+    from istota.settings_plan.schema import SchemaError, parse_plan
+
     try:
-        _, document = _sections(load_plan(plan_path, stdin=stdin))
+        plan = parse_plan(load_plan(plan_path, stdin=stdin))
+    except SchemaError as exc:
+        result = CheckResult(problems=[exc.problem])
     except PlanError as exc:
         result = CheckResult(error=str(exc))
     else:
-        result = collect(document) if document is not None else CheckResult()
+        result = collect(plan.config) if plan.config is not None else CheckResult()
     if as_json:
         out(json.dumps(result.as_json()))
         return EXIT_ERROR if result.refused else EXIT_UNCHANGED
     for problem in result.problems:
-        err(f"istota apply: {problem['kind']}: {problem['message']}")
+        err(f"istota apply: {problem['kind']}: {problem['path']}: {problem['message']}")
     if result.error is not None:
         err(f"istota apply: {result.error}")
     if result.refused:
