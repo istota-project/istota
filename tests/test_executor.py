@@ -1132,6 +1132,7 @@ class TestAdminPromptIsolation:
             # feature — the "mounted at" wording requires a Nextcloud backend.
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             workspace_path=mount_path,
+            workspace_mount_path=mount_path,
             admin_users=set() if is_admin else {"bob"},
         )
         if sandbox_enabled:
@@ -1199,9 +1200,13 @@ class TestAdminPromptIsolation:
         assert "sqlite3 for the task database" not in prompt
 
     def test_admin_prompt(self, tmp_path):
+        # An admin is shown `Users/<uid>` too: that is what the sandbox binds
+        # for admins (`sandbox/plan.py`), not the whole root.
         config, composed = self._composed(tmp_path, is_admin=True)
         assert "Privileges: admin" in composed.system
-        assert f"mounted at '{config.workspace_path}'" in composed.system
+        scoped = str(config.workspace_path / "Users" / "alice")
+        assert f"Your files live in Nextcloud at '{scoped}'" in composed.system
+        assert f"'{config.workspace_path}'" not in composed.system
 
     def test_non_admin_prompt(self, tmp_path):
         config, composed = self._composed(tmp_path, is_admin=False)
@@ -1209,9 +1214,74 @@ class TestAdminPromptIsolation:
         assert "Privileges: standard user" in prompt
         assert "Privileges: admin" not in prompt
         scoped = str(config.workspace_path / "Users" / "alice")
-        assert f"mounted at '{scoped}'" in prompt
+        assert f"Your files live in Nextcloud at '{scoped}'" in prompt
         assert "You can ONLY access files under" in prompt
         assert "do NOT have access to the task database" in prompt
+
+
+class TestFileToolsSection:
+    """One file-tools branch for both storage modes (local-workspace stage 4).
+
+    The noun follows `storage_label`, the path is `Users/<uid>` for everyone,
+    and the "rest of the machine" sentence appears only where no sandbox is
+    in effect, since on the stack it was false.
+    """
+
+    def _system(self, tmp_path, *, nextcloud, sandboxed, is_admin=True):
+        mount = tmp_path / "mount"
+        mount.mkdir(parents=True, exist_ok=True)
+        config = Config(
+            db_path=tmp_path / "test.db",
+            nextcloud=NextcloudConfig(url="https://cloud.example.com" if nextcloud else ""),
+            workspace_path=mount,
+            workspace_mount_path=mount if nextcloud else None,
+            admin_users=set() if is_admin else {"bob"},
+        )
+        config.security.sandbox_enabled = True
+        task = db.Task(
+            id=1, status="running", prompt="hi", user_id="alice",
+            source_type="talk", conversation_token="room1",
+            created_at="2024-01-01T00:00:00",
+        )
+        with patch("istota.executor._bwrap_available", return_value=sandboxed):
+            return config, build_prompt(task, [], config, is_admin=is_admin).system
+
+    @pytest.mark.parametrize("nextcloud", [True, False], ids=["mount", "local"])
+    @pytest.mark.parametrize("sandboxed", [True, False], ids=["sandboxed", "unsandboxed"])
+    def test_one_branch_in_both_modes(self, tmp_path, nextcloud, sandboxed):
+        config, system = self._system(tmp_path, nextcloud=nextcloud, sandboxed=sandboxed)
+        scoped = str(config.workspace_path / "Users" / "alice")
+        noun = "Nextcloud" if nextcloud else "your workspace"
+        assert f"- Your files live in {noun} at '{scoped}'." in system
+        assert "Nextcloud files are mounted at" not in system
+        assert ("rest of the machine's filesystem" in system) is (not sandboxed)
+
+    def test_a_local_workspace_with_a_url_reads_as_local(self, tmp_path):
+        """A URL without the mount path is Talk on a local workspace."""
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        config = Config(
+            db_path=tmp_path / "test.db",
+            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            workspace_path=mount,
+        )
+        task = db.Task(
+            id=1, status="running", prompt="hi", user_id="alice",
+            source_type="talk", conversation_token="room1",
+            created_at="2024-01-01T00:00:00",
+        )
+        with patch("istota.executor._bwrap_available", return_value=True):
+            system = build_prompt(task, [], config).system
+        assert "Your files live in your workspace at" in system
+        assert "It is a normal local folder." in system
+
+    def test_no_workspace(self, tmp_path):
+        task = db.Task(
+            id=1, status="running", prompt="hi", user_id="alice",
+            source_type="talk", created_at="2024-01-01T00:00:00",
+        )
+        system = build_prompt(task, [], Config(db_path=tmp_path / "test.db")).system
+        assert "No file workspace is configured for this install." in system
 
 
 @patch("istota.executor.subprocess.run")

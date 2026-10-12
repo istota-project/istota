@@ -531,7 +531,8 @@ class TestProvision:
         for name in ("istota-stack.service", "istota-devbox-egress.service",
                      "istota-browser-watchdog.service", "istota-browser-watchdog.timer",
                      "istota-certbot.service", "istota-certbot.timer", "mount-nextcloud.service",
-                     "istota-setup.service"):
+                     "istota-config-apply.service", "istota-config-apply.path",
+                     "istota-config-apply.timer", "istota-setup.service"):
             assert (HOST / name).is_file(), name
             assert name in self.TEXT, name
         for script in ("istota-stack", "istota-devbox-egress.sh", "istota-browser-watchdog.sh",
@@ -1005,6 +1006,68 @@ class TestTheStackUnit:
         assert unit["Service"]["Type"] == "oneshot"
         assert "docker.service" in unit["Unit"]["Requires"]
 
+    def test_down_outwaits_the_stack_lock(self):
+        """`down` waits up to STACK_LOCK_WAIT for the lock (a config apply may be
+        building an image); systemd's default 90 s stop timeout would kill it
+        first, rather than letting it fail naming the holder."""
+        unit = _unit(HOST / "istota-stack.service")
+        wait = int(re.search(r'^STACK_LOCK_WAIT="\$\{ISTOTA_STACK_LOCK_WAIT:-(\d+)\}"$',
+                             (HOST / "istota-stack").read_text(), re.M).group(1))
+        minutes = re.fullmatch(r"(\d+)min", unit["Service"]["TimeoutStopSec"])
+        assert int(minutes.group(1)) * 60 > wait
+
+
+class TestTheConfigApplier:
+    """The web config editor's host half: the web writes a request id to
+    `requests/config-apply`; a path unit on that file, and a five-minute timer
+    as a backstop, start one oneshot service running `istota-stack config-apply`."""
+
+    PATH_UNIT = HOST / "istota-config-apply.path"
+    SERVICE = HOST / "istota-config-apply.service"
+    TIMER = HOST / "istota-config-apply.timer"
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def test_the_path_unit_watches_the_trigger_the_web_writes(self):
+        from istota.config_editor import applier
+
+        unit = _unit(self.PATH_UNIT)
+        assert unit["Path"]["PathModified"] == f"{STACK_DIR}/requests/config-apply"
+        assert unit["Path"]["Unit"] == "istota-config-apply.service"
+        assert unit["Install"]["WantedBy"] == "paths.target"
+        # The compose override binds the host directory where the web looks.
+        assert applier.DEFAULT_REQUESTS_DIR == "/data/requests"
+
+    def test_the_service_runs_config_apply_once_after_the_stack(self):
+        unit = _unit(self.SERVICE)
+        assert unit["Service"]["Type"] == "oneshot"
+        assert unit["Service"]["ExecStart"] == "/usr/local/sbin/istota-stack config-apply"
+        assert "istota-stack.service" in unit["Unit"]["After"]
+        assert "docker.service" in unit["Unit"]["Requires"]
+        assert "RemainAfterExit" not in unit["Service"], "a oneshot that stays active never runs again"
+        assert "Install" not in unit, "started by the path unit and the timer, never enabled itself"
+
+    def test_the_timer_is_a_five_minute_backstop(self):
+        unit = _unit(self.TIMER)
+        assert unit["Timer"]["OnBootSec"] == "5min"
+        assert unit["Timer"]["OnUnitActiveSec"] == "5min"
+        assert unit["Timer"]["Unit"] == "istota-config-apply.service"
+        assert unit["Install"]["WantedBy"] == "timers.target"
+
+    def test_provision_installs_all_three_and_enables_the_two_triggers(self):
+        loop = self.TEXT.split("for unit in istota-stack.service", 1)[1].split("; do", 1)[0]
+        for name in ("istota-config-apply.service", "istota-config-apply.path", "istota-config-apply.timer"):
+            assert name in loop, name
+        assert re.search(
+            r"^systemctl enable --now istota-config-apply\.path istota-config-apply\.timer\b",
+            self.TEXT, re.M)
+        # Enabled after the units are installed and systemd has read them.
+        assert self.TEXT.index("systemctl enable --now istota-config-apply.path") > self.TEXT.index(
+            'install -m 0644 "${HERE}/${unit}" "${UNITS}/${unit}"')
+
+    def test_provision_makes_the_requests_directory_uid_10001s(self):
+        assert ('install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/requests"'
+                in self.TEXT)
+
 
 class TestTheSetupUnit:
     """`istota-setup.service` is how an unattended bootstrap starts the web
@@ -1082,6 +1145,61 @@ class TestCertbot:
         assert timer["Timer"]["OnCalendar"] == "*-*-* 00,12:00:00"
 
 
+INSTALL_SH = REPO / "install.sh"
+
+
+def _install_function(name: str) -> str:
+    script = INSTALL_SH.read_text()
+    start = script.index(f"\n{name}() {{\n") + 1
+    return script[start:script.index("\n}\n", start) + 3]
+
+
+def _run_server_setup(tmp_path: Path, *, terminal: bool, setup_code_fails: int = 0,
+                      configured: bool = False, unit_active: bool = True,
+                      ) -> tuple[subprocess.CompletedProcess, str]:
+    """Run install.sh's setup step, the part after the build, against stub
+    `systemctl`, `istota-stack` and `sleep`. The rest of `run_server` needs
+    root and Debian; this is the part that decides which setup runs."""
+    script = INSTALL_SH.read_text()
+    helpers = script[script.index("_BOLD="):script.index("show_help() {")]
+    setup = script[script.index("# --- server setup ---"):script.index("# --- end server setup ---")]
+    stack = tmp_path / "stack"
+    (stack / "config").mkdir(parents=True)
+    if configured:
+        (stack / "config" / "config.toml").write_text("")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "calls"
+    log.write_text("")
+    count = tmp_path / "count"
+    _stub(bindir, "systemctl", f"""echo "systemctl $*" >> "{log}"
+[ "$1" = is-active ] && exit {0 if unit_active else 3}
+exit 0
+""")
+    _stub(bindir, "sleep", "exit 0\n")
+    _stub(bindir, "istota-stack", f"""echo "istota-stack $*" >> "{log}"
+[ "$1" = setup-code ] || exit 0
+n=$(cat "{count}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{count}"
+if [ "$n" -le {setup_code_fails} ]; then echo "no setup in progress" >&2; exit 1; fi
+printf 'Open this address in your browser to set up Istota:\\n\\n  https://192.0.2.1/istota/setup#code=TEST\\n\\nSHA-256 fingerprint: AA:BB\\n'
+""")
+    program = "\n".join([
+        "set -euo pipefail",
+        helpers,
+        _install_function("reattach_tty_if_needed"),
+        f'STACK="{stack}"; SRC="{stack}/src"; RELEASE_TAG=v1',
+        f"SETUP_IN_TERMINAL={'true' if terminal else 'false'}",
+        setup,
+        "server_setup",
+    ])
+    result = subprocess.run(
+        ["bash", "-c", program], capture_output=True, text=True, timeout=30,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+        env={"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path)},
+    )
+    return result, log.read_text()
+
+
 class TestBootstrapFiles:
     def test_cloud_init_verifies_the_tag_before_running_anything(self):
         doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
@@ -1126,13 +1244,92 @@ class TestBootstrapFiles:
         checkout = run_server.index('checkout --quiet --detach "${object}^{commit}"')
         assert verify < checkout < run_server.index("host/provision.sh")
         assert run_server.index("host/provision.sh") < run_server.index("istota-stack update")
-        # The first build ran before config.toml existed: a config that needs
-        # Claude Code gets its rebuild after the wizard, before the unit starts.
-        setup = run_server.index("    istota-stack setup\n")
-        check = run_server.index("istota-stack check-image || image_rc=$?")
-        assert setup < check < run_server.index("systemctl enable --now istota-stack\n", check)
-        assert run_server.index('istota-stack update "$RELEASE_TAG"', check) < run_server.index(
+        assert run_server.index("istota-stack update") < run_server.index("    server_setup\n")
+
+    def test_the_terminal_setup_rebuilds_before_the_unit_starts(self):
+        """The first build ran before config.toml existed: a config that needs
+        Claude Code gets its rebuild after the wizard, before the unit starts.
+        The browser setup does the same itself (`build_what_setup_needs`)."""
+        terminal = _install_function("server_setup_in_terminal")
+        setup = terminal.index("    istota-stack setup\n")
+        check = terminal.index("istota-stack check-image || image_rc=$?")
+        assert setup < check < terminal.index("systemctl enable --now istota-stack\n", check)
+        assert terminal.index('istota-stack update "$RELEASE_TAG"', check) < terminal.index(
             "systemctl enable --now istota-stack\n", check)
+
+    def test_the_root_installer_starts_the_setup_unit_cloud_init_starts(self):
+        doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
+        bootstrap = next(f["content"] for f in doc["write_files"] if f["path"] == "/root/istota-bootstrap.sh")
+        browser = _install_function("server_setup_in_browser")
+        for script in (bootstrap, browser):
+            start = script.index("systemctl start istota-setup.service\n")
+            assert start < script.index("istota-stack setup-code 2>/dev/null", start)
+
+    def test_install_server_starts_the_browser_setup_by_default(self, tmp_path):
+        """ISSUE-717: `install.sh --server` ran the terminal wizard, so a server
+        installed with it got a different first run from one cloud-init made."""
+        result, calls = _run_server_setup(tmp_path, terminal=False, setup_code_fails=2)
+        assert result.returncode == 0, result.stderr
+        assert "systemctl start istota-setup.service" in calls
+        assert calls.count("istota-stack setup-code") == 3
+        assert "istota-stack setup\n" not in calls + "\n"
+        assert "https://192.0.2.1/istota/setup#code=TEST" in result.stdout
+        assert "SHA-256 fingerprint" in result.stdout
+
+    def test_install_server_stops_waiting_once_the_unit_has_exited(self, tmp_path):
+        """A setup that refused (a config copied out of an old state volume,
+        port 443 taken) removes its files on exit, so setup-code can never
+        answer; the installer says so at once rather than after five minutes."""
+        result, calls = _run_server_setup(tmp_path, terminal=False, setup_code_fails=1000,
+                                          unit_active=False)
+        assert result.returncode == 1
+        assert calls.count("istota-stack setup-code") == 1
+        assert "journalctl -u istota-setup" in result.stderr
+
+    def test_install_server_names_the_unit_when_no_code_comes(self, tmp_path):
+        result, calls = _run_server_setup(tmp_path, terminal=False, setup_code_fails=1000)
+        assert result.returncode == 1
+        assert calls.count("istota-stack setup-code") == 60
+        assert "journalctl -u istota-setup" in result.stderr
+
+    def test_install_server_on_a_configured_stack_starts_no_setup(self, tmp_path):
+        result, calls = _run_server_setup(tmp_path, terminal=False, configured=True)
+        assert result.returncode == 0, result.stderr
+        assert "systemctl" not in calls
+        assert "already set up" in result.stdout
+
+    def test_install_server_terminal_setup_keeps_the_wizard(self, tmp_path):
+        """--terminal-setup keeps the old path. With no terminal it stops and
+        prints the wizard's steps, as it did before; it never starts the unit."""
+        result, calls = _run_server_setup(tmp_path, terminal=True)
+        assert result.returncode == 0, result.stderr
+        assert "systemctl" not in calls
+        assert "istota-stack setup\n" in result.stdout
+
+    def test_the_server_path_refuses_a_flag_it_does_not_know(self):
+        """A mistyped --terminal-setup used to be dropped silently on the server
+        path, which would now mean the other setup."""
+        result = subprocess.run(
+            ["bash", str(REPO / "install.sh"), "--server", "--terminal-stup"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert "--terminal-stup" in result.stderr
+
+    def test_terminal_setup_is_parsed_and_belongs_to_the_server_path(self):
+        server = subprocess.run(
+            ["bash", str(REPO / "install.sh"), "--server", "--terminal-setup"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        # Parsed: the run gets as far as its root check (or, as root, its
+        # Debian or tag check) rather than refusing the flag.
+        assert "--terminal-setup" not in server.stderr
+        standalone = subprocess.run(
+            ["bash", str(REPO / "install.sh"), "--standalone", "--terminal-setup"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        assert standalone.returncode == 1
+        assert "--terminal-setup" in standalone.stderr
 
     def test_the_root_installer_has_no_bare_metal_or_docker_arm(self):
         """The old --bare arm ran the deleted deploy/install.sh; --docker printed

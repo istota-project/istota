@@ -334,6 +334,43 @@ class TestPanelUpload:
         pid = resp.json()["id"]
         assert [p.name for p in (ctx.uploads_dir / str(pid)).iterdir()] == ["original.pdf"]
 
+    def test_a_leftover_file_at_the_name_is_kept_and_the_upload_numbered(
+        self, client, ctx,
+    ):
+        """Local-workspace spec, stage 3: a file already at the stored name
+        (a rolled-back panel's leftover) is never overwritten."""
+        panel_dir = ctx.uploads_dir / "1"
+        panel_dir.mkdir(parents=True)
+        (panel_dir / "original.pdf").write_bytes(b"leftover")
+
+        resp = client.post(
+            "/istota/api/health/panels/upload",
+            files={"file": ("report.pdf", b"%PDF-1.4 fake pdf", "application/pdf")},
+            data={"drawn_at": "2026-05-08"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        pid = resp.json()["id"]
+        assert pid == 1
+        assert (panel_dir / "original.pdf").read_bytes() == b"leftover"
+        src = client.get(f"/istota/api/health/panels/{pid}/source")
+        assert src.content.startswith(b"%PDF")
+
+    def test_a_symlinked_panel_dir_is_refused(self, client, ctx, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        ctx.uploads_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.uploads_dir / "1").symlink_to(outside, target_is_directory=True)
+
+        resp = client.post(
+            "/istota/api/health/panels/upload",
+            files={"file": ("report.pdf", b"%PDF-1.4 fake pdf", "application/pdf")},
+            data={"drawn_at": "2026-05-08"},
+        )
+
+        assert resp.status_code == 500
+        assert list(outside.iterdir()) == []
+
     def test_empty_upload_rejected(self, client):
         resp = client.post(
             "/istota/api/health/panels/upload",

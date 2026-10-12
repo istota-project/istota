@@ -1,13 +1,15 @@
 <script lang="ts">
-  import { Cloud, File, Folder, X } from '@lucide/svelte';
-  import { CategoryGroup, IconButton } from '$lib/components/ui';
-  import type { WorkspacePin, WorkspacePlace } from '$lib/api';
+  import { CategoryGroup, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import type { WorkspaceConfigFile, WorkspacePin, WorkspacePlace } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
     pins,
     places,
     busy,
     onRemove,
+    configFiles,
+    onEdit,
+    revealAction,
     href,
     onNavigate,
   }: {
@@ -15,9 +17,26 @@
     places: WorkspacePlace[];
     busy: boolean;
     onRemove: (pin: WorkspacePin) => void;
+    configFiles: WorkspaceConfigFile[];
+    onEdit: (file: WorkspaceConfigFile) => void;
+    revealAction: (
+      ref: string | null | undefined,
+      provider?: 'workspace' | 'drive',
+      available?: boolean,
+    ) => KebabItem;
     href: (place: string, path?: string) => string;
     onNavigate: (event: MouseEvent, place: string, path?: string) => void;
   } = $props();
+  function actions(pin: WorkspacePin): KebabItem[] {
+    const items: KebabItem[] = [];
+    if (pin.provider === 'workspace' && pin.available && !pin.is_dir) {
+      const file = configFiles.find((file) => file.editable && file.view_path === pin.ref);
+      if (file) items.push({ label: 'Edit', onSelect: () => onEdit(file) });
+    }
+    items.push(revealAction(pin.ref, pin.provider, pin.available));
+    items.push({ label: 'Remove pin', disabled: busy, onSelect: () => onRemove(pin) });
+    return items;
+  }
   function folderTarget(pin: WorkspacePin) {
     if (!pin.available || !pin.is_dir || pin.provider !== 'workspace') return null;
     const place = places
@@ -34,14 +53,16 @@
 </script>
 
 <section aria-label="Pinned files">
-  <CategoryGroup label="Pinned">
+  <CategoryGroup
+    label="Pinned"
+    collapsible
+    defaultOpen={false}
+    storageKey="workspace:section:pinned"
+  >
     {#each pins as pin (pin.id)}
       {@const folder = folderTarget(pin)}
       <div class="list-row pin-row">
         {#snippet content()}
-          {#if pin.provider === 'drive'}<Cloud size={14} />{:else if pin.is_dir}<Folder
-              size={14}
-            />{:else}<File size={14} />{/if}
           <span class="pin-label" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
           >
@@ -65,17 +86,10 @@
         {:else}
           <div class="unavailable">{@render content()}</div>
         {/if}
-        <IconButton
-          size="sm"
-          class="remove-pin"
-          label={`Remove pin ${pin.name}`}
-          title="Remove pin"
-          disabled={busy}
-          onclick={() => onRemove(pin)}><X size={14} /></IconButton
-        >
+        <KebabMenu ariaLabel={`Actions for ${pin.name}`} items={actions(pin)} />
       </div>
     {:else}
-      <p class="empty-pins caption">Pin a file or folder to keep it here.</p>
+      <p class="caption">Pin a file or folder to keep it here.</p>
     {/each}
   </CategoryGroup>
 </section>
@@ -85,14 +99,15 @@
   .unavailable {
     flex: 1;
     min-width: 0;
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+    color: inherit;
   }
   .unavailable {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-1) var(--space-2);
     color: var(--text-dim);
-    font-size: var(--text-base);
   }
   .pin-label {
     overflow: hidden;
@@ -101,17 +116,5 @@
   }
   .pin-label .caption {
     display: block;
-  }
-  .pin-row :global(svg) {
-    flex-shrink: 0;
-  }
-  .empty-pins {
-    margin: var(--space-1) var(--space-3) var(--space-3);
-  }
-  @media (pointer: coarse) {
-    .pin-row :global(.remove-pin) {
-      min-width: var(--touch-min);
-      min-height: var(--touch-min);
-    }
   }
 </style>

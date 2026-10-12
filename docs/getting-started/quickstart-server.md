@@ -28,13 +28,15 @@ less install.sh
 sudo bash install.sh --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-It clones the repository into `/srv/app/istota/src`, verifies the tag's signature before running anything from it, runs `host/provision.sh` (Docker Engine, the AppArmor and seccomp profiles, zram, the journald cap, the systemd units), builds the images with `istota-stack update <tag>`, runs the setup wizard with `istota-stack setup`, rebuilds the images when `istota-stack check-image` reports the new config needs Claude Code (the first build ran before the config existed), runs `provision.sh` again for the wizard's host settings, and starts `istota-stack.service`. Without a terminal it stops after the build and prints the rest.
+It clones the repository into `/srv/app/istota/src`, verifies the tag's signature before running anything from it, runs `host/provision.sh` (Docker Engine, the AppArmor and seccomp profiles, zram, the journald cap, the systemd units), builds the images with `istota-stack update <tag>`, and starts the setup in the browser (`istota-setup.service`). It ends by printing the address to open, a one-use setup code and the certificate's fingerprint; `sudo istota-stack setup-code` prints them again. When the page finishes, the machine builds what your answers need, runs `provision.sh` again and starts `istota-stack.service`. See [First-run setup](../deployment/docker.md#first-run-setup).
 
-For a cloud VM, `host/cloud-init.yaml` does the same first half as user data: fill in the signing key, the repository and the tag. After the build it starts the setup in the browser and prints its address, setup code and certificate fingerprint to the console, which a VPS provider's web console shows; `sudo istota-stack setup-code` prints them again. See [First-run setup](../deployment/docker.md#first-run-setup).
+To set up in the terminal instead, add `--terminal-setup`. The installer then runs the setup wizard with `istota-stack setup`, rebuilds the images when `istota-stack check-image` reports the new config needs Claude Code (the first build ran before the config existed), runs `provision.sh` again for the wizard's host settings, and starts `istota-stack.service`. Without a terminal that path stops after the build and prints the rest.
+
+For a cloud VM, `host/cloud-init.yaml` does the same as user data: fill in the signing key, the repository and the tag. It prints the setup's address, code and fingerprint to the console, which a VPS provider's web console shows.
 
 ## What the wizard asks
 
-On a machine that is already provisioned and built, `istota-stack setup --web` is the friendlier way to answer these: a few short screens in the browser, which also start the stack at the end. See [First-run setup](../deployment/docker.md#first-run-setup).
+The browser setup the installer starts asks the common questions in a few short screens. See [First-run setup](../deployment/docker.md#first-run-setup). The terminal wizard, which `--terminal-setup` runs and `istota-stack setup` runs on a machine that is already provisioned and built, asks every question, operator settings included.
 
 `istota-stack setup` runs `istota setup` inside the image. It asks for the first admin's user id, the public hostname and how the stack is reached (`local`, `proxied` behind your own reverse proxy, or `direct` with its own TLS certificate), whether to connect to a Nextcloud (its URL, the bot's user and app password, an OAuth2 client for web login), the model backend and its credential, email, GPS location, the modules, the developer skill, and the optional containers.
 

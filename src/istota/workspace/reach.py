@@ -48,9 +48,16 @@ def place_reach(
     plans: dict[str | None, list[list[Mount]]] = {}
     result = {}
     for place in places:
-        if place.kind in {"drive", "nextcloud"}:
-            skill = "google_workspace" if place.kind == "drive" else "nextcloud"
-            mode = "skill" if skill in advertised else "none"
+        if place.kind == "nextcloud":
+            result[place.id] = Reach("none", "none", "none", note=(
+                "This browser uses your personal Nextcloud connection. "
+                "The Nextcloud skill uses the bot’s separate account. "
+                "Files available to a task depend on that account’s access "
+                "and the task’s workspace permissions."
+            ))
+            continue
+        if place.kind == "drive":
+            mode = "skill" if "google_workspace" in advertised else "none"
             result[place.id] = Reach(mode, mode, "none")
             continue
         token = place.conversation_token if place.kind == "room" else None

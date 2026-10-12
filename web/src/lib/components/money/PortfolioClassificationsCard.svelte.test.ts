@@ -93,10 +93,11 @@ describe('PortfolioClassificationsCard', () => {
     const trigger = screen.getByRole('button', { name: 'Asset class' });
     await fireEvent.keyDown(trigger, { key: 'Enter' });
     // bits-ui select items commit on pointerup, not click, and jsdom
-    // synthesizes neither from a click() call.
+    // synthesizes neither from a click() call. A mouse, because jsdom's default
+    // pointerType arms Select's iOS ghost-click guard and it eats the Add click.
     const option = await screen.findByRole('option', { name: 'Stocks' });
-    await fireEvent.pointerDown(option);
-    await fireEvent.pointerUp(option);
+    await fireEvent.pointerDown(option, { pointerType: 'mouse' });
+    await fireEvent.pointerUp(option, { pointerType: 'mouse' });
     await fireEvent.click(option);
 
     const add = screen.getByRole('button', { name: 'Add' });

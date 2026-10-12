@@ -715,7 +715,7 @@ class TestStandaloneInstallIsNotGated:
 
     def test_adding_a_nextcloud_url_does_not_arm_the_gate(self, tmp_path, monkeypatch):
         cfg = self._standalone(tmp_path, nextcloud_url="https://cloud.example.com")
-        assert cfg.storage_is_nextcloud
+        assert cfg.nextcloud_enabled
         assert cfg.workspace_mount_path is None
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)

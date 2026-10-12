@@ -7,6 +7,8 @@
     label: string;
     /** Optional guidance, rendered behind the "?" beside the label. */
     hint?: string;
+    /** Passed to `Field`: the label in a column beside the control. */
+    inline?: boolean;
     type?: 'text' | 'email' | 'password' | 'url';
     configured: boolean;
     value: string;
@@ -21,6 +23,7 @@
   let {
     label,
     hint,
+    inline = false,
     type = 'password',
     configured,
     value,
@@ -48,7 +51,7 @@
   no button there is nothing to steal the association, and clicking the caption
   should focus the input as it does in every other field.
 -->
-<Field {label} {hint} {error} labelled={!showClear}>
+<Field {label} {hint} {inline} {error} labelled={!showClear}>
   <div class="secret-row">
     <Input
       {type}

@@ -13,30 +13,32 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.host_stubs import install_flock
+
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "host" / "istota-stack"
 
 ROLE_FILES = [
-    "etc/systemd/system/zorg-scheduler.service",
-    "etc/systemd/system/zorg-web.service",
-    "etc/systemd/system/zorg-webhooks.service",
-    "etc/systemd/system/zorg-whatsapp-baileys.service",
-    "etc/systemd/system/zorg-devbox-iptables.service",
-    "etc/systemd/system/zorg-devbox-proxy@.service",
-    "etc/cron.d/zorg-backup",
-    "etc/logrotate.d/zorg",
-    "etc/systemd/journald.conf.d/99-zorg.conf",
-    "etc/tmpfiles.d/zorg-exec.conf",
-    "etc/sysctl.d/99-zorg-sandbox.conf",
-    "etc/modules-load.d/zorg-devbox.conf",
-    "etc/nginx/conf.d/zorg.example.com.conf",
-    "usr/local/bin/zorg",
-    "usr/local/bin/zorg-run",
-    "usr/local/bin/zorg-update.sh",
+    "etc/systemd/system/oldbox-scheduler.service",
+    "etc/systemd/system/oldbox-web.service",
+    "etc/systemd/system/oldbox-webhooks.service",
+    "etc/systemd/system/oldbox-whatsapp-baileys.service",
+    "etc/systemd/system/oldbox-devbox-iptables.service",
+    "etc/systemd/system/oldbox-devbox-proxy@.service",
+    "etc/cron.d/oldbox-backup",
+    "etc/logrotate.d/oldbox",
+    "etc/systemd/journald.conf.d/99-oldbox.conf",
+    "etc/tmpfiles.d/oldbox-exec.conf",
+    "etc/sysctl.d/99-oldbox-sandbox.conf",
+    "etc/modules-load.d/oldbox-devbox.conf",
+    "etc/nginx/conf.d/oldbox.example.com.conf",
+    "usr/local/bin/oldbox",
+    "usr/local/bin/oldbox-run",
+    "usr/local/bin/oldbox-update.sh",
     "usr/local/sbin/istota-devbox-iptables",
-    "etc/zorg/secrets.env",
-    "var/lib/zorg/last-deployed-sha",
-    "srv/app/zorg/data/istota.db",
+    "etc/oldbox/secrets.env",
+    "var/lib/oldbox/last-deployed-sha",
+    "srv/app/oldbox/data/istota.db",
 ]
 KEPT_FILES = [
     "etc/systemd/system/mount-nextcloud.service",
@@ -64,10 +66,10 @@ exit 0
 DOCKER = r"""#!/bin/bash
 echo "docker $*" >> "$STUB_CALLS"
 case "$*" in
-  "ps -a --format {{.Names}}") printf '%s\n' zorg-browser istota-daemon-1 devbox-stefan zorgish ;;
-  "volume ls --format {{.Name}}") printf '%s\n' zorg-devbox-home-stefan zorg_data istota_istota_data ;;
-  "network ls --format {{.Name}}") printf '%s\n' bridge zorg_default zorg-devbox-net istota_default ;;
-  "image ls --format {{.Repository}}:{{.Tag}}") printf '%s\n' zorg-browser:latest istota:t1 nginx:1 ;;
+  "ps -a --format {{.Names}}") printf '%s\n' oldbox-browser istota-daemon-1 devbox-alice oldboxish ;;
+  "volume ls --format {{.Name}}") printf '%s\n' oldbox-devbox-home-alice oldbox_data istota_istota_data ;;
+  "network ls --format {{.Name}}") printf '%s\n' bridge oldbox_default oldbox-devbox-net istota_default ;;
+  "image ls --format {{.Repository}}:{{.Tag}}") printf '%s\n' oldbox-browser:latest istota:t1 nginx:1 ;;
 esac
 exit 0
 """
@@ -75,13 +77,13 @@ UFW = r"""#!/bin/bash
 echo "ufw $*" >> "$STUB_CALLS"
 if [ "$*" = "status numbered" ]; then
   echo "[ 1] 22/tcp                     ALLOW IN    Anywhere"
-  echo "[ 2] Anywhere                   ALLOW IN    172.18.0.0/16              # Docker containers (zorg)"
+  echo "[ 2] Anywhere                   ALLOW IN    172.18.0.0/16              # Docker containers (oldbox)"
   echo "[ 3] 443/tcp                    ALLOW IN    192.168.100.10"
 fi
 exit 0
 """
 GETENT = r"""#!/bin/bash
-[ "$1 $2" = "passwd zorg" ] && echo "zorg:x:999:989::${STUB_HOME:-/srv/app/zorg}:/bin/bash" && exit 0
+[ "$1 $2" = "passwd oldbox" ] && echo "oldbox:x:999:989::${STUB_HOME:-/srv/app/oldbox}:/bin/bash" && exit 0
 exit 2
 """
 RECORD = '#!/bin/bash\necho "$(basename "$0") $*" >> "$STUB_CALLS"\nexit 0\n'
@@ -94,13 +96,14 @@ def host(tmp_path):
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x\n")
-    (root / "srv/app/istota/host.env").write_text("DOMAIN=zorg.example.com\n")
+    (root / "srv/app/istota/host.env").write_text("DOMAIN=oldbox.example.com\n")
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for name, body in (("systemctl", SYSTEMCTL), ("docker", DOCKER), ("ufw", UFW), ("getent", GETENT),
                        ("userdel", RECORD), ("groupdel", RECORD), ("nginx", RECORD)):
         (bindir / name).write_text(body)
         (bindir / name).chmod(0o755)
+    install_flock(bindir)
     calls = tmp_path / "calls"
     env = {
         "PATH": f"{bindir}:{os.environ['PATH']}",
@@ -140,22 +143,22 @@ class TestRefusals:
         assert _all_present(host, ROLE_FILES + KEPT_FILES) == []
 
     def test_while_the_stack_is_not_running(self, host):
-        result = host.run("--namespace", "zorg", STUB_STACK_INACTIVE="3")
+        result = host.run("--namespace", "oldbox", STUB_STACK_INACTIVE="3")
         assert result.returncode == 1
         assert "istota-stack" in result.stderr
         assert _all_present(host, ROLE_FILES) == []
 
     @pytest.mark.parametrize("state", ["STUB_ENABLED", "STUB_ACTIVE"])
     def test_while_an_old_unit_is_enabled_or_running(self, host, state):
-        result = host.run("--namespace", "zorg", **{state: "zorg-scheduler.service"})
+        result = host.run("--namespace", "oldbox", **{state: "oldbox-scheduler.service"})
         assert result.returncode == 1
-        assert "zorg-scheduler" in result.stderr
+        assert "oldbox-scheduler" in result.stderr
         assert _all_present(host, ROLE_FILES) == []
         assert not any(c.startswith(("docker", "ufw", "userdel")) and " rm" in c or c.startswith("userdel")
                        for c in host.recorded())
 
     def test_a_home_outside_srv_app_namespace_is_left(self, host):
-        result = host.run("--namespace", "zorg", STUB_HOME="/srv/app/istota")
+        result = host.run("--namespace", "oldbox", STUB_HOME="/srv/app/istota")
         assert result.returncode == 0, result.stderr
         assert (host.root / "srv/app/istota/host.env").exists()
         assert not any(c.startswith("userdel") for c in host.recorded())
@@ -163,11 +166,11 @@ class TestRefusals:
 
 class TestADryRun:
     def test_it_lists_everything_and_changes_nothing(self, host):
-        result = host.run("--namespace", "zorg", "--dry-run")
+        result = host.run("--namespace", "oldbox", "--dry-run")
         assert result.returncode == 0, result.stderr
         assert _all_present(host, ROLE_FILES + KEPT_FILES) == []
-        assert "zorg-scheduler.service" in result.stdout
-        assert "/srv/app/zorg" in result.stdout
+        assert "oldbox-scheduler.service" in result.stdout
+        assert "/srv/app/oldbox" in result.stdout
         changing = [c for c in host.recorded()
                     if c.startswith(("userdel", "groupdel")) or " rm " in f"{c} " or "delete" in c]
         assert changing == []
@@ -175,34 +178,34 @@ class TestADryRun:
 
 class TestRetiring:
     def test_it_removes_what_the_role_installed_and_nothing_else(self, host):
-        result = host.run("--namespace", "zorg")
+        result = host.run("--namespace", "oldbox")
         assert result.returncode == 0, result.stdout + result.stderr
         assert [rel for rel in ROLE_FILES if (host.root / rel).exists()] == []
-        assert not (host.root / "srv/app/zorg").exists()
-        assert not (host.root / "etc/zorg").exists()
+        assert not (host.root / "srv/app/oldbox").exists()
+        assert not (host.root / "etc/oldbox").exists()
         assert _all_present(host, KEPT_FILES) == []
 
     def test_the_old_containers_volumes_networks_and_images_go(self, host):
-        assert host.run("--namespace", "zorg").returncode == 0
+        assert host.run("--namespace", "oldbox").returncode == 0
         calls = host.recorded()
-        assert "docker rm -f zorg-browser" in calls
-        assert "docker volume rm zorg-devbox-home-stefan" in calls
-        assert "docker volume rm zorg_data" in calls
-        assert "docker network rm zorg_default" in calls
-        assert "docker network rm zorg-devbox-net" in calls
-        assert "docker image rm zorg-browser:latest" in calls
+        assert "docker rm -f oldbox-browser" in calls
+        assert "docker volume rm oldbox-devbox-home-alice" in calls
+        assert "docker volume rm oldbox_data" in calls
+        assert "docker network rm oldbox_default" in calls
+        assert "docker network rm oldbox-devbox-net" in calls
+        assert "docker image rm oldbox-browser:latest" in calls
         touched = " ".join(c for c in calls if c.startswith("docker") and "rm" in c)
-        for kept in ("istota", "devbox-stefan", "zorgish", "bridge", "nginx:1"):
+        for kept in ("istota", "devbox-alice", "oldboxish", "bridge", "nginx:1"):
             assert kept not in touched
 
     def test_the_roles_docker_ufw_rule_goes_and_no_other(self, host):
-        assert host.run("--namespace", "zorg").returncode == 0
+        assert host.run("--namespace", "oldbox").returncode == 0
         deletes = [c for c in host.recorded() if c.startswith("ufw") and "delete" in c]
         assert deletes == ["ufw --force delete 2"]
 
     def test_the_service_user_goes_and_nginx_reloads(self, host):
-        assert host.run("--namespace", "zorg").returncode == 0
+        assert host.run("--namespace", "oldbox").returncode == 0
         calls = host.recorded()
-        assert "userdel zorg" in calls
+        assert "userdel oldbox" in calls
         assert "nginx -t" in calls
         assert "systemctl daemon-reload" in calls

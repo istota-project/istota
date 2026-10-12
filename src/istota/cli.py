@@ -371,6 +371,14 @@ def cmd_apply(args):
     """Reconcile the config with a plan; 0 unchanged, 2 changed, 1 refused."""
     from istota import apply
 
+    def err(line):
+        print(line, file=sys.stderr)
+
+    if args.json and not args.check:
+        err("istota apply: --json goes with --check; nothing was written.")
+        return apply.EXIT_ERROR
+    if args.check:
+        return apply.check(args.file, as_json=args.json, out=print, err=err)
     target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
     if not target:
         print(
@@ -380,9 +388,94 @@ def cmd_apply(args):
         )
         return apply.EXIT_ERROR
     return apply.run(
-        Path(args.file), Path(target), dry_run=args.dry_run,
-        out=print, err=lambda line: print(line, file=sys.stderr),
+        args.file, Path(target), dry_run=args.dry_run, backup=args.backup,
+        out=print, err=err,
     )
+
+
+def _config_request_config(args):
+    config = load_config(Path(args.config) if args.config else None)
+    if config.config_path is None:
+        raise SystemExit("istota config-request: no config.toml was found")
+    return config
+
+
+def cmd_config_request_take(args) -> int:
+    """Claim the oldest pending config change and write the host's files.
+
+    Prints the request id, or nothing when there is nothing to take, and
+    exits 0 either way; the host loops until it prints nothing. A request that
+    cannot be turned into files is recorded `refused` and prints nothing.
+    """
+    import hashlib
+    import tomllib
+
+    from istota import apply
+    from istota.config_editor import handoff, requests
+
+    config = _config_request_config(args)
+    config_path = Path(config.config_path)
+    raw = config_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        current = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        current = None
+    admins = sorted(config.admin_users)
+    managed = apply.read_managed(config_path.parent, fail_closed=True)
+    with db.get_db(config.db_path) as conn:
+        taken = requests.take(conn, digest, current_admins=admins, managed=managed)
+    if taken is None:
+        return 0
+    try:
+        plan, files, claude_code = handoff.build(taken, current)
+        handoff.write(Path(args.out), plan, files, claude_code)
+    except (handoff.HandoffError, OSError) as exc:
+        reason = str(exc) if isinstance(exc, handoff.HandoffError) else (
+            f"the host's files could not be written: {exc.strerror or type(exc).__name__}"
+        )
+        with db.get_db(config.db_path) as conn:
+            requests.finish(conn, taken.id, "refused", reason, current_admins=admins)
+        print(f"istota config-request: request {taken.id} refused: {reason}", file=sys.stderr)
+        return 0
+    print(taken.id)
+    return 0
+
+
+def cmd_config_request_finish(args) -> int:
+    """Record the host's outcome, with its output redacted, and notify the admins."""
+    from istota.config_editor import handoff, requests
+
+    config = _config_request_config(args)
+    output_path = Path(args.output_file)
+    try:
+        output = output_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        output = ""
+    output = handoff.redact_output(output, output_path.parent)
+    try:
+        with db.get_db(config.db_path) as conn:
+            requests.finish(
+                conn, args.id, args.status, output, current_admins=sorted(config.admin_users),
+            )
+    except requests.RequestStateError as exc:
+        print(f"istota config-request: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_config_request_mark(args) -> int:
+    """`taken` -> `building`, while the host builds the image the change needs."""
+    from istota.config_editor import requests
+
+    config = _config_request_config(args)
+    try:
+        with db.get_db(config.db_path) as conn:
+            requests.mark(conn, args.id, args.status)
+    except requests.RequestStateError as exc:
+        print(f"istota config-request: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_migrate(args):
@@ -3847,6 +3940,120 @@ def cmd_devbox_compose_file(args) -> int:
     return 0
 
 
+def cmd_workspace_localize(args) -> int:
+    """Copy a mounted workspace to a local tree; see `maintenance/workspace_localize.py`."""
+    from istota.maintenance import workspace_localize as wl
+
+    config = load_config(Path(args.config) if args.config else None)
+    source = Path(args.source)
+    destination = Path(args.destination)
+
+    def refuse(reason: str) -> int:
+        print(f"istota workspace localize: REFUSE: {reason}; nothing was written.", file=sys.stderr)
+        return wl.EXIT_REFUSED
+
+    if not args.scheduler_stopped and not args.dry_run and not args.check:
+        return refuse("pass --scheduler-stopped once daemon, web and whatsapp-baileys are stopped")
+    if not config.storage_is_nextcloud:
+        return refuse("this config is not mount mode (no [nextcloud] url and workspace_mount_path)")
+    if config.workspace_path is None or os.path.realpath(source) != os.path.realpath(config.workspace_path):
+        return refuse(f"--from {source} is not the configured workspace {config.workspace_path}")
+    try:
+        if args.check:
+            wl.check_destination(source, destination, resume=args.resume)
+            print(f"{source} can be copied to {destination}")
+            return wl.EXIT_OK
+        report = wl.copy_workspace(
+            source, destination, bot_dir_name=config.bot_dir_name,
+            dry_run=args.dry_run, resume=args.resume,
+        )
+    except wl.LocalizeRefused as exc:
+        return refuse(str(exc))
+    report_path = Path(args.report) if args.report else destination.parent / "workspace-localize-report.json"
+    try:
+        wl.write_report(report, report_path)
+        print(f"report: {report_path}")
+    except OSError as exc:
+        print(f"istota workspace localize: could not write the report to {report_path}: {exc}", file=sys.stderr)
+    for line in report.summary_lines():
+        print(line)
+    return report.exit_code()
+
+
+def cmd_workspace_moved_note(args) -> int:
+    """`MOVED.md` in each user's bot folder on the tree the workspace moved off."""
+    from istota.maintenance import workspace_localize as wl
+
+    config = load_config(Path(args.config) if args.config else None)
+    source = Path(args.source)
+    if not source.is_dir():
+        print(f"istota workspace moved-note: REFUSE: {source} is not a directory", file=sys.stderr)
+        return wl.EXIT_REFUSED
+    if args.remove:
+        notes = wl.remove_notes(source, bot_dir_name=config.bot_dir_name)
+        verb = "removed"
+    else:
+        # The note says edits on this tree no longer reach the bot, which is
+        # false for as long as the config still names it.
+        if config.workspace_path is not None and os.path.realpath(source) == os.path.realpath(config.workspace_path):
+            print(f"istota workspace moved-note: REFUSE: {source} is the configured workspace; "
+                  "nothing was written.", file=sys.stderr)
+            return wl.EXIT_REFUSED
+        notes = wl.write_notes(source, bot_dir_name=config.bot_dir_name, text=wl.default_note(config))
+        verb = "wrote"
+    print(f"{verb} {wl.NOTE_NAME} for {len(notes.done)} user(s) on {source}")
+    for user, reason in notes.failures:
+        print(f"{user}: {reason}")
+    return wl.EXIT_SKIPPED if notes.failures else wl.EXIT_OK
+
+
+def cmd_workspace_localize_config(args) -> int:
+    """Rewrite config.toml for a local workspace, keeping config.toml.pre-localize."""
+    from istota.maintenance import workspace_localize as wl
+
+    target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
+    if not target:
+        print("istota workspace localize-config: name the config file with -c (or ISTOTA_CONFIG_PATH).",
+              file=sys.stderr)
+        return wl.EXIT_REFUSED
+    try:
+        if args.check:
+            text = wl.read_config_text(Path(target))
+            if wl.localized_config_text(text, args.workspace) is None:
+                print(f"{target}: already a local workspace")
+            else:
+                print(f"{target}: can be moved to {args.workspace}")
+            return 0
+        changed = wl.localize_config(Path(target), args.workspace)
+    except (wl.LocalizeRefused, OSError, UnicodeDecodeError) as exc:
+        print(f"istota workspace localize-config: REFUSE: {exc}; nothing was written.", file=sys.stderr)
+        return wl.EXIT_REFUSED
+    if changed:
+        print(f"{target}: workspace_path = {args.workspace!r}, workspace_mount_path removed, "
+              f"auto_share_bot_dir = false; the previous file is {target}{wl.PRE_LOCALIZE_SUFFIX}")
+    else:
+        print(f"{target}: already a local workspace; unchanged")
+    return 0
+
+
+def cmd_workspace_reindex(args) -> int:
+    """Reindex memory files on the current workspace and drop rows under the old root."""
+    from istota.maintenance import workspace_localize as wl
+
+    config = load_config(Path(args.config) if args.config else None)
+    try:
+        with db.get_db(config.db_path) as conn:
+            stats = wl.reindex_moved_workspace(conn, config, args.forget_root)
+    except (wl.LocalizeRefused, ValueError) as exc:
+        print(f"istota workspace reindex: REFUSE: {exc}", file=sys.stderr)
+        return wl.EXIT_REFUSED
+    print(
+        f"reindexed {stats['users']} user(s): {stats['chunks']} chunks, "
+        f"{stats['playbook_chunks']} playbook chunks; removed {stats['removed']} rows under {args.forget_root}"
+    )
+    return 0
+
+
 def cmd_nextcloud_provision_rooms(args):
     """Create the user's default Talk rooms and seed their channel tokens.
 
@@ -4766,12 +4973,64 @@ def main():
     )
     apply_parser.add_argument(
         "-f", "--file", required=True,
-        help="The plan: TOML, or JSON when the name ends in .json. Its [config] table is the whole config.toml",
+        help=(
+            "The plan: TOML, or JSON when the name ends in .json; - reads it from stdin "
+            "(JSON when it opens with {). Its [config] table is the whole config.toml"
+        ),
     )
     apply_parser.add_argument(
         "--dry-run", action="store_true",
         help="Print the diff and the exit code it would take; write nothing",
     )
+    apply_parser.add_argument(
+        "--check", action="store_true",
+        help="Validate the plan only: read no config, write nothing (exit 0 valid, 1 refused)",
+    )
+    apply_parser.add_argument(
+        "--json", action="store_true",
+        help="With --check: print {\"problems\": [...], \"error\": ...} on stdout",
+    )
+
+    def _backup_count(value: str) -> int:
+        count = int(value)
+        if count < 1:
+            raise argparse.ArgumentTypeError("keep at least one backup")
+        return count
+
+    apply_parser.add_argument(
+        "--backup", type=_backup_count, metavar="N",
+        help="Before replacing config.toml, keep it as config.toml.bak.<UTC time>, and the newest N of those",
+    )
+
+    # config-request: the host applier's half of the web config editor
+    config_request_parser = subparsers.add_parser(
+        "config-request",
+        help="Take, mark and finish a web config change request (run by istota-stack config-apply)",
+    )
+    config_request_subparsers = config_request_parser.add_subparsers(
+        dest="config_request_action", required=True,
+    )
+    config_request_take = config_request_subparsers.add_parser(
+        "take",
+        help="Claim the oldest pending request and write plan.json, files.json and claude-code; print its id",
+    )
+    config_request_take.add_argument("--out", required=True, help="Directory to write the three files into")
+    config_request_finish = config_request_subparsers.add_parser(
+        "finish", help="Record the host's outcome for a taken request",
+    )
+    config_request_finish.add_argument("--id", type=int, required=True, help="Request id")
+    config_request_finish.add_argument(
+        "--status", required=True, choices=["applied", "unchanged", "refused", "failed"],
+    )
+    config_request_finish.add_argument(
+        "--output-file", required=True,
+        help="The host's output; lines holding a credential value from the files beside it are removed",
+    )
+    config_request_mark = config_request_subparsers.add_parser(
+        "mark", help="Mark a taken request as building an image",
+    )
+    config_request_mark.add_argument("--id", type=int, required=True, help="Request id")
+    config_request_mark.add_argument("--status", required=True, choices=["building"])
 
     # migrate
     migrate_parser = subparsers.add_parser("migrate", help="One-time migrations between deployment shapes")
@@ -4856,7 +5115,11 @@ def main():
     setup_parser = subparsers.add_parser(
         "setup", help="First-run installer (the container, or a standalone install)",
     )
-    setup_parser.add_argument("--workspace", help="Workspace directory (default ~/.istota)")
+    setup_parser.add_argument(
+        "--workspace",
+        help="Standalone: workspace directory (default ~/.istota). Container, with "
+        "--nextcloud-url: mount (the rclone mount, the default) or local",
+    )
     setup_parser.add_argument(
         "--brain", choices=["claude_code", "native"], help="Model backend (skip detection)",
     )
@@ -5595,6 +5858,49 @@ def main():
         help="Print compose.devbox.yml: one devbox service per [devbox] users entry",
     )
 
+    # workspace (with subparsers)
+    ws_parser = subparsers.add_parser(
+        "workspace", help="Move a mounted workspace onto local storage (docs/deployment/moving-to-a-local-workspace.md)",
+    )
+    ws_subparsers = ws_parser.add_subparsers(dest="workspace_action", required=True)
+    ws_localize = ws_subparsers.add_parser(
+        "localize",
+        help="Copy the workspace from the mount to a local tree (exit 0 copied, 1 refused, "
+             "2 copied with skipped entries, 3 stopped on an I/O error)",
+    )
+    ws_localize.add_argument("--from", dest="source", required=True, help="The mounted workspace (the configured one)")
+    ws_localize.add_argument("--to", dest="destination", required=True, help="The local tree to copy into")
+    ws_localize.add_argument("--dry-run", action="store_true", help="Walk and report; write nothing but the report")
+    ws_localize.add_argument("--resume", action="store_true",
+                             help="Continue an earlier copy: a destination file of equal size and mtime is kept")
+    ws_localize.add_argument("--check", action="store_true",
+                             help="Only say whether the copy would start (exit 0) or is refused (1); write nothing")
+    ws_localize.add_argument("--report", help="Where the JSON report goes (default: beside the destination)")
+    ws_localize.add_argument(
+        "--scheduler-stopped", action="store_true",
+        help="No writer is running (daemon, web and whatsapp-baileys stopped). Required unless --dry-run",
+    )
+    ws_config = ws_subparsers.add_parser(
+        "localize-config",
+        help="Point config.toml at a local workspace, keeping config.toml.pre-localize (exit 0, or 1 refused)",
+    )
+    ws_config.add_argument("--workspace", default="/data/workspace", help="The local workspace path")
+    ws_config.add_argument("--check", action="store_true",
+                           help="Only say whether the config can be moved (exit 0) or is refused (1); write nothing")
+    ws_note = ws_subparsers.add_parser(
+        "moved-note",
+        help="Write MOVED.md into each user's bot folder on the old workspace, once the config no longer "
+             "names it (exit 0, 1 refused, 2 some users got none)",
+    )
+    ws_note.add_argument("--from", dest="source", required=True, help="The tree the workspace moved off")
+    ws_note.add_argument("--remove", action="store_true",
+                         help="Remove the notes a move wrote instead; a user's own MOVED.md is left")
+    ws_reindex = ws_subparsers.add_parser(
+        "reindex",
+        help="Reindex every user's memory files on the workspace, then drop index rows under the old root",
+    )
+    ws_reindex.add_argument("--forget-root", required=True, help="The workspace root the files were indexed under")
+
     # nextcloud (with subparsers)
     nc_parser = subparsers.add_parser("nextcloud", help="Nextcloud server operations")
     nc_subparsers = nc_parser.add_subparsers(dest="nextcloud_action", required=True)
@@ -5829,6 +6135,16 @@ def main():
         rc = devbox_commands[args.devbox_action](args)
         if rc:
             sys.exit(rc)
+    elif args.command == "workspace":
+        workspace_commands = {
+            "localize": cmd_workspace_localize,
+            "localize-config": cmd_workspace_localize_config,
+            "moved-note": cmd_workspace_moved_note,
+            "reindex": cmd_workspace_reindex,
+        }
+        rc = workspace_commands[args.workspace_action](args)
+        if rc:
+            sys.exit(rc)
     elif args.command == "nextcloud":
         nextcloud_commands = {
             "capabilities": cmd_nextcloud_capabilities,
@@ -5861,6 +6177,15 @@ def main():
             "list": cmd_experimental_list,
         }
         experimental_commands[args.experimental_action](args)
+    elif args.command == "config-request":
+        config_request_commands = {
+            "take": cmd_config_request_take,
+            "finish": cmd_config_request_finish,
+            "mark": cmd_config_request_mark,
+        }
+        rc = config_request_commands[args.config_request_action](args)
+        if rc:
+            sys.exit(rc)
     else:
         # A handler that returns a non-zero code means it. Most return None, so
         # this is a no-op for them — but without it a handler's `return 1` is

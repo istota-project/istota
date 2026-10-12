@@ -48,6 +48,7 @@ NEXTCLOUD_CONFIG = """\
 db_path = "{db}"
 temp_dir = "{tmp}"
 workspace_path = "{ws}"
+workspace_mount_path = "{ws}"
 
 [nextcloud]
 url = "https://cloud.example.test"
@@ -264,6 +265,7 @@ FULL_INTEGRATION_CONFIG = """\
 db_path = "{db}"
 temp_dir = "{tmp}"
 workspace_path = "{ws}"
+workspace_mount_path = "{ws}"
 
 [nextcloud]
 url = "https://cloud.example.test"
@@ -273,10 +275,16 @@ username = "istota"
 enabled = false
 """
 
+# Nextcloud for Talk and the skill, with the workspace on local disk: the URL
+# and no `workspace_mount_path`.
+LOCAL_WORKSPACE_NEXTCLOUD_CONFIG = FULL_INTEGRATION_CONFIG.replace(
+    'workspace_mount_path = "{ws}"\n', "")
+
 BUNDLED_NEXTCLOUD_CONFIG = """\
 db_path = "{db}"
 temp_dir = "{tmp}"
 workspace_path = "{ws}"
+workspace_mount_path = "{ws}"
 
 [nextcloud]
 url = "http://nextcloud"
@@ -509,6 +517,50 @@ class TestTheHostFolderIsTheWorkspace:
         volume.mount_table("fuse.rclone")
 
         assert volume.run(ISTOTA_WORKSPACE_FSTYPE="fuse.rclone").returncode == 0
+
+
+class TestALocalWorkspaceBesideNextcloud:
+    """A URL without `workspace_mount_path` is a local workspace, and only a
+    workspace that is in fact the rclone mount is refused for saying so."""
+
+    @pytest.mark.parametrize("fstype", [None, "ext4"], ids=["no-mount", "own-mount"])
+    def test_a_local_workspace_with_a_url_boots(self, tmp_path, fstype):
+        volume = Volume(tmp_path, LOCAL_WORKSPACE_NEXTCLOUD_CONFIG)
+        volume.mount_table(fstype)
+
+        result = volume.run()
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c.startswith("scheduler --daemon") for c in volume.calls())
+
+    def test_the_rclone_mount_without_the_key_is_refused(self, tmp_path):
+        volume = Volume(tmp_path, LOCAL_WORKSPACE_NEXTCLOUD_CONFIG)
+        volume.mount_table("fuse.rclone")
+
+        result = volume.run()
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "workspace_mount_path" in result.stderr
+        assert str(volume.workspace) in result.stderr
+        assert volume.calls() == []
+
+    def test_the_testbed_concession_does_not_excuse_the_missing_key(self, tmp_path):
+        volume = Volume(tmp_path, LOCAL_WORKSPACE_NEXTCLOUD_CONFIG)
+        volume.mount_table("fuse.rclone")
+
+        result = volume.run(ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE="1")
+
+        assert result.returncode == 78, result.stdout + result.stderr
+
+    def test_a_declared_type_asks_nothing_of_a_config_with_no_mount(self, tmp_path):
+        """host.env still saying STORAGE=nextcloud beside a local workspace: the
+        type istota-stack passes is a mount's, and this config names none."""
+        volume = Volume(tmp_path, LOCAL_WORKSPACE_NEXTCLOUD_CONFIG)
+        volume.mount_table("ext4")
+
+        result = volume.run(ISTOTA_WORKSPACE_FSTYPE="fuse.rclone")
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 class TestThePublicName:

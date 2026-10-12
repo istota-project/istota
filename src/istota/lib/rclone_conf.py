@@ -4,7 +4,8 @@ Two writers produce the VM's ``rclone.conf``: the container wizard
 (``setup_wizard.write_container_setup``, which stages it for ``istota-stack``)
 and the management role's variable converter (``maintenance.role_vars``). Both
 render through ``render_webdav_remote``, so the two cannot disagree on the
-path the mount uses.
+path the mount uses. The wizard goes through ``webdav_remote_for``, which keeps
+the staged copy of the installed file when it already says the same thing.
 
 ``obscure`` is rclone's own scheme (``fs/config/obscure``): AES-256-CTR under a
 key published in rclone's source, a random 16-byte IV prepended, base64url
@@ -81,3 +82,25 @@ def render_webdav_remote(remote: str, url: str, username: str, obscured_password
         f"user = {username}\n"
         f"pass = {obscured_password}\n"
     )
+
+
+def webdav_remote_for(existing: str | None, remote: str, url: str, username: str, password: str) -> str:
+    """The remote for these answers, keeping ``existing`` when it already says it.
+
+    ``obscure`` is salted, so rendering the same answers twice gives two files,
+    and ``provision.sh --digest`` hashes the file: every re-run would read as a
+    host change (#720). ``existing`` is kept only when it is byte for byte the
+    rendering of these answers under its own obscured password.
+    """
+    for line in (existing or "").splitlines():
+        if not line.startswith("pass = "):
+            continue
+        kept = line.removeprefix("pass = ")
+        try:
+            same_password = reveal(kept) == password
+        except (ValueError, UnicodeDecodeError):
+            same_password = False
+        if same_password and render_webdav_remote(remote, url, username, kept) == existing:
+            return existing
+        break
+    return render_webdav_remote(remote, url, username, obscure(password))

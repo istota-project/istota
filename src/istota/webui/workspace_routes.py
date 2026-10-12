@@ -13,6 +13,7 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from istota import db
+from istota.webui import nextcloud_files
 from istota.credentials.google_scopes import levels_from_scopes
 from istota.credentials.google_tokens import access_token_for
 from istota.google import drive
@@ -23,7 +24,8 @@ from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places
 from istota.workspace.reach import deployment_notes, place_reach
-from istota.workspace.writes import make_folder, write_new_file
+from istota.workspace import config_files, text_files
+from istota.workspace.writes import delete_entry, make_folder, write_new_file
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -59,6 +61,8 @@ async def api_workspace_list(
     parts = [part for part in path.split("/") if part]
 
     def query():
+        if place == "nextcloud":
+            return nextcloud_files.list_folder(config, user["username"], parts)
         with db.get_db(config.db_path) as conn:
             places = list_places(config, conn, user["username"])
             selected = next((p for p in places if p.id == place), None)
@@ -237,6 +241,153 @@ async def api_workspace_folder(
         return _filesystem_error(config, exc, "home", write=True)
 
 
+def _no_workspace(config):
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    if not config.has_workspace:
+        return JSONResponse({"error": "No workspace is configured."}, status_code=503)
+    return None
+
+
+_CONFIG_FILE_NOT_FOUND = {"error": "File not found."}
+
+# One body per save outcome. `locked` is 423 rather than the room-memory
+# editor's 409, so a client can tell "try again" from "reload first".
+_SAVE_REFUSALS = {
+    "conflict": (409, "This file changed since it was loaded."),
+    "locked": (423, "This file is being written right now. Try again."),
+    "invalid": (422, "The daemon would not load this file as written."),
+    "too_large": (413, "This file is too large."),
+    "failed": (500, "Could not save this file."),
+}
+
+
+@router.get("/config-files")
+async def api_workspace_config_files(request: Request, user: dict = Depends(require_auth)):
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+    files = await asyncio.to_thread(config_files.list_files, config, user["username"])
+    return {"files": files}
+
+
+@router.get("/config-files/{name:path}")
+async def api_workspace_config_file(
+    request: Request, name: str, user: dict = Depends(require_auth),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+
+    def query():
+        file = config_files.lookup(config, user["username"], name)
+        if file is None:
+            return None, None
+        return file, config_files.read(config, user["username"], file)
+
+    file, text = await asyncio.to_thread(query)
+    if file is None:
+        return JSONResponse(_CONFIG_FILE_NOT_FOUND, status_code=404)
+    if text is None:
+        return JSONResponse({"error": "Could not read this file."}, status_code=500)
+    return {"content": text, "revision": text_files.revision(text), "exists": bool(text.strip())}
+
+
+@router.put("/config-files/{name:path}")
+async def api_workspace_config_file_save(
+    request: Request, name: str,
+    user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    # The revision is required: a client that may omit it can silently
+    # overwrite, which is the failure the revision exists to stop.
+    if (not isinstance(body, dict) or not isinstance(body.get("content"), str)
+            or not isinstance(body.get("revision"), str)):
+        return JSONResponse({"error": "content and revision are required"}, status_code=400)
+
+    def write():
+        file = config_files.lookup(config, user["username"], name)
+        if file is None:
+            return None, None
+        return file, config_files.save(config, user["username"], file, body["content"], body["revision"])
+
+    file, outcome = await asyncio.to_thread(write)
+    if file is None:
+        return JSONResponse(_CONFIG_FILE_NOT_FOUND, status_code=404)
+    if outcome.status == "ok":
+        payload = {"revision": outcome.revision}
+        if file.name == "CRON.md":
+            # The scheduler's sync reads the file; the web does not touch
+            # `scheduled_jobs`, so the jobs change at the next sync.
+            payload["applies"] = "next_sync"
+        return payload
+    status, message = _SAVE_REFUSALS[outcome.status]
+    payload = {"error": message, "code": outcome.status}
+    if outcome.status == "invalid":
+        payload["errors"] = list(outcome.errors)
+    if outcome.status == "too_large":
+        payload["max_bytes"] = file.max_bytes
+    return JSONResponse(payload, status_code=status)
+@router.delete("/files")
+async def api_workspace_delete(
+    request: Request, place: str, path: str, name: str,
+    user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    parts = [part for part in path.split("/") if part]
+
+    def write():
+        root = _home_root(config, user["username"], place)
+        delete_entry(root, parts, name)
+        return {"status": "ok"}
+
+    try:
+        return await asyncio.to_thread(write)
+    except (ListingError, OSError) as exc:
+        return _filesystem_error(config, exc, "home", write=True)
+
+
+def _drive_token(config, username):
+    with db.get_db(config.db_path) as conn:
+        scopes = db.get_google_scopes(conn, username)
+        if not config.google_workspace.enabled or levels_from_scopes(scopes or []).get("drive") not in {"readonly", "full"}:
+            raise drive.DriveError(409, "drive_not_granted")
+        token = access_token_for(conn, config, username)
+    if token is None:
+        raise drive.DriveError(502, drive.RECONNECT_MESSAGE)
+    return token
+
+
+@router.get("/drive/parent")
+async def api_workspace_drive_parent(
+    request: Request, file_id: str, user: dict = Depends(require_auth),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+
+    def query():
+        if not drive.DRIVE_ID.fullmatch(file_id):
+            raise drive.DriveError(400, "Invalid Drive file.")
+        return {"folder": drive.parent_folder(_drive_token(config, user["username"]), file_id)}
+
+    try:
+        return await asyncio.to_thread(query)
+    except drive.DriveError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+
 @router.get("/drive/list")
 async def api_workspace_drive_list(
     request: Request, folder: str = "root", page_token: str | None = None,
@@ -248,13 +399,7 @@ async def api_workspace_drive_list(
 
     def query():
         drive.validate_folder(folder)
-        with db.get_db(config.db_path) as conn:
-            scopes = db.get_google_scopes(conn, user["username"])
-            if not config.google_workspace.enabled or levels_from_scopes(scopes or []).get("drive") not in {"readonly", "full"}:
-                raise drive.DriveError(409, "drive_not_granted")
-            token = access_token_for(conn, config, user["username"])
-        if token is None:
-            raise drive.DriveError(502, drive.RECONNECT_MESSAGE)
+        token = _drive_token(config, user["username"])
         items, next_page = drive.list_folder(token, folder, page_token)
         return {"items": [asdict(item) for item in items], "next_page_token": next_page}
 

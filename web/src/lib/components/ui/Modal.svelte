@@ -23,6 +23,7 @@
     actions?: Snippet;
     navigation?: ViewerNavigation;
     bodyKey?: string | number;
+    bodyPadding?: string;
     open: boolean;
     title: string;
     description?: string;
@@ -56,6 +57,7 @@
     actions,
     navigation,
     bodyKey,
+    bodyPadding,
     height,
   }: Props = $props();
 
@@ -141,7 +143,9 @@
 {/snippet}
 
 {#snippet body()}
-  <div class="ui-modal-body" bind:this={bodyEl}>{@render children()}</div>
+  <div class="ui-modal-body" style:padding={bodyPadding} bind:this={bodyEl}>
+    {@render children()}
+  </div>
   {#if footer}<div class="ui-modal-footer">{@render footer()}</div>{/if}
 {/snippet}
 

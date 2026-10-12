@@ -62,6 +62,7 @@ src/istota/
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── config_mapper.py      # Maps a parsed TOML document onto the `Config` dataclass tree → leaf-modules.md
 ├── apply.py              # `istota apply -f plan`: config.toml from a plan's [config], exit 0/2/1 → config.md
+├── config_editor/        # The web config editor's core: reference (example docs, credential files, setup paths), secrets (one secret-path predicate, sentinels), edits (a change set previewed: ops or raw, credentials, admins, the lockout checks, the redacted document diff `istota apply` prints too), schema (read-only and risky keys, table paths, editor kinds), check (`istota apply --check` in a child process), requests (the `config_change_requests` table, credentials sealed until the host takes a row), handoff (the files `istota config-request take` writes for the host applier), applier (whether the host applier is there, the trigger file, `managed.json` read fail-closed) → config.md, web-ui.md
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (framework tables)
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)
@@ -170,9 +171,11 @@ src/istota/
 │   ├── standalone_import.py  # `istota migrate import-standalone`: a standalone install (staged by the Mac, istota.env on stdin) onto the local VM's stack → maintenance.md
 │   ├── repos_relocate.py # One-shot migrator: `developer.repos_dir` → per-user subtrees
 │   ├── workspace_paths.py # A migrated install's old host paths in users' bot directories, rewritten with backups → maintenance.md
+│   ├── workspace_localize.py # Moving a mounted workspace to local disk: the copy, the config edit, the index cleanup → maintenance.md
 │   ├── room_relocate.py, room_mount_reconcile.py  # The room-identity migration and its mount sweep
 │   ├── persona_retire.py # Deletes or retires the old per-user PERSONA.md copies, from `istota init` → maintenance.md
 │   ├── worktree_reaper.py   # Removes a developer worktree once its work has landed → maintenance.md
+│   ├── talk_media.py     # Retention for Talk attachments fetched into `Channels/<token>/media/` on a local workspace → maintenance.md
 │   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
 │   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
 ├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications
@@ -325,7 +328,7 @@ scripts/test-upgrade.sh          # the current image over an older release's sta
 scripts/test-vm.sh               # the stack on a VM provisioned by host/provision.sh, in Lima
 ```
 
-`image`, `smoke`, `full`, `testbed` and `vm` require `-n0`: their fixtures are session-scoped and build one tagged image or drive one VM. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Three tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-vm-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`); `scripts/test-stack-negative-control.sh` does the same for `istota-stack`'s release checks.
+`image`, `smoke`, `full`, `testbed` and `vm` require `-n0`: their fixtures are session-scoped and build one tagged image or drive one VM. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Three tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-vm-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`); `scripts/test-stack-negative-control.sh` does the same for `istota-stack`'s release checks and its `setup --web` tests.
 
 **The `vm` tier is the dedicated-VM half (the one-deployment-shape spec, Stage 7).** It boots a Lima VM from `host/lima/istota.yaml`, lets `provision.sh` set it up, deploys a signed snapshot of the checkout through `istota-stack update`, and switches the stack between the local, proxied, direct and full-Nextcloud modes with `istota-stack setup`, `apply` and `provision.sh`, as an operator would. It witnesses the parity rows only a real VM can hold (7, 9, 10, 11, 15, 18, 19, 20, and the halves of 12 and 17 Docker Desktop cannot see), and in its host-folder mode the local VM's rows L1 to L4 (`tests/vm/test_host_folder.py`: the workspace marker, the Mac loopback block, what crosses from the Mac, the Mac CLI's uid). It needs `limactl` rather than Docker on the host, keeps its VM (`istota-vm-1`) between sessions, and costs tens of minutes on a first run. `tests/vm/conftest.py` and `tests/vm/lima.py` say how. **On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail** — run the control and write down what it turned red.
 

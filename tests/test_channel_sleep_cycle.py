@@ -597,3 +597,54 @@ class TestChannelSleepCycleDating:
         text = written[0].read_text()
         assert "The first decision" in text
         assert "The second decision" in text
+
+
+class TestChannelMemoryWritesRefuseLinks:
+    """Local-workspace spec, stage 3: any task in the room can plant a link in
+    `Channels/<token>`, so the nightly writer must not follow one."""
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_symlinked_memories_dir_gets_no_write(
+        self, mock_run, mount_config, db_path, tmp_path,
+    ):
+        mock_run.return_value = (True, "- Decided to use GraphQL (alice, 2026-02-07)\n")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        room = mount_config.workspace_path / "Channels" / "room123"
+        room.mkdir(parents=True)
+        (room / "memories").symlink_to(outside, target_is_directory=True)
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Should we use GraphQL?", user_id="alice",
+                conversation_token="room123",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Yes.")
+            result = process_channel_sleep_cycle(mount_config, conn, "room123")
+
+        assert result is False
+        assert list(outside.iterdir()) == []
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_symlinked_room_dir_gets_no_write(
+        self, mock_run, mount_config, db_path, tmp_path,
+    ):
+        mock_run.return_value = (True, "- Decided to use GraphQL (alice, 2026-02-07)\n")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        channels = mount_config.workspace_path / "Channels"
+        channels.mkdir()
+        (channels / "room123").symlink_to(outside, target_is_directory=True)
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Should we use GraphQL?", user_id="alice",
+                conversation_token="room123",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Yes.")
+            result = process_channel_sleep_cycle(mount_config, conn, "room123")
+
+        assert result is False
+        assert list(outside.iterdir()) == []

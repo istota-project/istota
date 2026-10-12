@@ -1,13 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import CredentialHistoryDialog from './CredentialHistoryDialog.svelte';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
-  getCredentialHistory: vi.fn(),
-  startStepUp: vi.fn(),
-  restoreCredentialHistory: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 import { getCredentialHistory, startStepUp, restoreCredentialHistory } from '$lib/api';
 afterEach(() => {
   cleanup();

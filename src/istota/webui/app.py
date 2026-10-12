@@ -76,6 +76,7 @@ from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.lib.audio_sniff import AUDIO_EXTENSIONS, sniff_audio
 from istota.lib.video_sniff import sniff_video
 from istota.storage import NOTES_MAX_BYTES
+from istota.workspace import text_files
 from istota.nextcloud.ocs import OcsError, ocs_data
 from istota.usage.telemetry import SYSTEM_USER_ID
 from istota.location.logic import (
@@ -204,6 +205,8 @@ async def lifespan(app: FastAPI):
     # See `build_info`: the web service is restarted last by the Ansible deploy,
     # so it is the one that stays stale longest.
     logger.info("STARTUP Running %s", build_description())
+    global _started_at
+    _started_at = _utc_stamp()
     _reload_config(app)
     _publish_config(app)
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
@@ -3080,9 +3083,9 @@ def _admin_storage_section(db_path: Path) -> dict:
         "db_size_bytes": db_size,
         "backups_count": backups_count,
         "last_backup": last_backup,
-        # Only meaningful when a Nextcloud server backs the workspace; a local
-        # (standalone) install has no mount, so the frontend hides the row.
-        "nextcloud_configured": bool(_config and _config.storage_is_nextcloud),
+        # Whether a Nextcloud server is configured at all; the frontend hides
+        # the row on an install with none.
+        "nextcloud_configured": bool(_config and _config.nextcloud_enabled),
         "nextcloud_mount_healthy": mount_healthy,
         # The bot's own Nextcloud account, so the bot-icon control can name the
         # picture it is *not* changing rather than implying the two are linked.
@@ -3091,7 +3094,7 @@ def _admin_storage_section(db_path: Path) -> dict:
         # OCS — so the divergence is permanent and worth stating.
         "nextcloud_username": (
             (_config.nextcloud.username or None)
-            if (_config and _config.storage_is_nextcloud) else None
+            if (_config and _config.nextcloud_enabled) else None
         ),
     }
 
@@ -4970,15 +4973,377 @@ async def admin_browser_instances(_: dict = Depends(_require_admin)):
 
 @api_router.get("/admin/config")
 async def admin_config(_: dict = Depends(_require_admin)):
-    """The loaded config, sectioned and credential-redacted. Read-only.
+    """The loaded config, sectioned and credential-redacted, plus what the
+    editor needs.
 
     Shaped field-by-field (dotted key + type + secret flag) rather than as a
-    TOML dump so the same payload can back an editable form later without the
-    frontend changing shape.
+    TOML dump so the same payload backs the config editor's form. The file
+    itself is read for its digest, which keys are in it and the problems a
+    check of it reports (in a child process, once per digest), and
+    `managed.json` for who owns each resource, read fail-closed.
     """
+    from istota.config_editor import applier
+    from istota.config_editor import check as config_check
+
     from . import admin_config_view
 
-    return await asyncio.to_thread(admin_config_view.build_config_view, _config)
+    text = digest = check = managed = None
+    if _config.config_path is not None:
+        config_path = Path(_config.config_path)
+        data = await asyncio.to_thread(_read_config_bytes, config_path)
+        if data is not None:
+            digest = hashlib.sha256(data).hexdigest()
+            text = data.decode("utf-8", errors="replace")
+            check = await config_check.check_current(text, digest)
+        managed = await asyncio.to_thread(applier.read_managed, config_path.parent)
+    view = await asyncio.to_thread(
+        admin_config_view.build_config_view, _config,
+        document=text, document_digest=digest, check=check, managed=managed,
+        applier=applier.detect(_config), started_at=_started_at,
+    )
+    return _no_store(view)
+
+
+# The web process's start time, for the config editor: after a change is
+# applied the page waits for this to pass the request's `finished_at`, so it
+# never reports the state from before the restart as the result.
+_started_at: str | None = None
+
+_CONFIG_CHANGE_BODY_LIMIT = 256 * 1024
+_CONFIG_CHANGE_KEYS = frozenset({"base_digest", "ops", "raw", "secrets", "admins", "confirm", "step_up"})
+_CONFIG_REQUEST_ID = re.compile(r"[1-9][0-9]{0,17}")
+
+
+def _utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _no_store(payload, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store"})
+
+
+class _ConfigRefusal(Exception):
+    """A config editor route's refusal, `{error, detail, ...}`, never echoing input."""
+
+    def __init__(self, status: int, error: str, detail: str, **extra):
+        super().__init__(error)
+        self.status, self.error, self.detail, self.extra = status, error, detail, extra
+
+    def response(self) -> JSONResponse:
+        return _no_store({"error": self.error, "detail": self.detail, **self.extra}, self.status)
+
+
+def _read_config_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+async def _read_config_change_body(request: Request) -> dict:
+    """The change set as a JSON object, bounded at 256 KiB.
+
+    Built on `request_guards.read_bounded_body`, whose errors are worded for
+    an upload, so neither that wording nor a 422 carrying the input comes back.
+    """
+    try:
+        raw = await read_bounded_body(request, _CONFIG_CHANGE_BODY_LIMIT)
+    except BodyError as exc:
+        if exc.status == 413:
+            raise _ConfigRefusal(413, "too_large", "The change is larger than 256 KiB, or did not say its size.") from None
+        raise _ConfigRefusal(400, "invalid_body", "The request was interrupted.") from None
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise _ConfigRefusal(400, "invalid_body", "The request body is not JSON.") from None
+    if not isinstance(body, dict):
+        raise _ConfigRefusal(400, "invalid_body", "The request body must be a JSON object.")
+    if set(body) - _CONFIG_CHANGE_KEYS:
+        raise _ConfigRefusal(400, "invalid_change", "The change set has a field this editor does not read.",
+                             errors=["the change set has a field this editor does not read"], problems=[])
+    return body
+
+
+async def _require_config_identity(user_id: str) -> None:
+    identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
+    if identity is None or identity.disabled:
+        raise _ConfigRefusal(
+            403, "admin_identity_required",
+            "Changing the configuration needs an admin with a live email sign-in identity.",
+        )
+
+
+async def _current_config_file() -> tuple[Path, str, str]:
+    """The live `config.toml`: its path, text and sha256."""
+    path = Path(_config.config_path) if _config is not None and _config.config_path else None
+    data = await asyncio.to_thread(_read_config_bytes, path) if path is not None else None
+    if path is None or data is None:
+        raise _ConfigRefusal(409, "no_applier", "There is no config.toml for this process to change.")
+    return path, data.decode("utf-8", errors="replace"), hashlib.sha256(data).hexdigest()
+
+
+def _check_base_digest(body: dict, digest: str) -> None:
+    if body.get("base_digest") != digest:
+        raise _ConfigRefusal(
+            409, "config_changed",
+            "config.toml changed since the page loaded. Reload to see the current values.",
+            digest=digest,
+        )
+
+
+def _touched_resources(preview) -> list[str]:
+    touched = []
+    if preview.changed_keys:
+        touched.append("config")
+    if preview.file_secrets:
+        touched.append("secrets")
+    if preview.admins_changed:
+        touched.append("admins")
+    return touched
+
+
+async def _check_managed(config_path: Path, preview) -> None:
+    from istota.config_editor import applier
+
+    from .admin_config_view import managed_state
+
+    state = managed_state(await asyncio.to_thread(applier.read_managed, config_path.parent))
+    managed = [resource for resource in _touched_resources(preview) if state[resource]["managed"]]
+    if managed:
+        raise _ConfigRefusal(
+            409, "managed",
+            "A plan manages part of this change, and its next run would revert it. Change it there.",
+            resources=managed,
+        )
+
+
+async def _preview_config_change(user_id: str, body: dict, text: str, *, extra_problems=()):
+    """`edits.preview` of `body` against `text`; a change set it cannot read is a 400."""
+    from istota.config_editor import check as config_check
+    from istota.config_editor import edits
+
+    try:
+        preview = await edits.preview(
+            text, body, config=_config, acting_admin=user_id, run_check=config_check.run_check,
+        )
+    except edits.ChangeError as exc:
+        raise _ConfigRefusal(400, "invalid_change", "The change cannot be read.",
+                             errors=[str(exc)], problems=[]) from None
+    preview.problems.extend(extra_problems)
+    return preview
+
+
+def _preview_payload(preview, digest: str) -> dict:
+    return {**preview.as_json(), "base_digest": digest}
+
+
+@api_router.post("/admin/config/preview")
+async def admin_config_preview(
+    request: Request, user: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    """What a change set would do: the redacted diff, problems, risky keys.
+
+    Answers 200 with blocking problems and errors in the body, so the review
+    dialog can show them against their keys; only a change set that cannot be
+    read at all is a 400. No step-up: nothing is stored.
+    """
+    try:
+        body = await _read_config_change_body(request)
+        await _require_config_identity(user["username"])
+        config_path, text, digest = await _current_config_file()
+        _check_base_digest(body, digest)
+        preview = await _preview_config_change(user["username"], body, text)
+        await _check_managed(config_path, preview)
+    except _ConfigRefusal as refusal:
+        return refusal.response()
+    return _no_store(_preview_payload(preview, digest))
+
+
+def _open_config_request_id() -> int | None:
+    from istota import db
+
+    with db.get_db(_config.db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM config_change_requests WHERE status IN ('pending','taken','building')"
+        ).fetchone()
+    return row[0] if row else None
+
+
+def _create_config_request(preview, user_id: str, digest: str) -> int:
+    from istota import db
+    from istota.config_editor import requests as config_requests
+
+    with db.get_db(_config.db_path) as conn:
+        return config_requests.create(conn, preview, admin_id=user_id, base_digest=digest)
+
+
+@api_router.post("/admin/config/requests", status_code=202)
+async def admin_config_submit(
+    request: Request, user: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    """Store a change for the host applier and touch its trigger file.
+
+    Everything preview checks, plus the applier, managed resources, the open
+    request, the typed confirmations and step-up, which is redeemed last so a
+    refusal the admin must fix first does not spend their code.
+    """
+    from istota.config_editor import applier, edits
+    from istota.config_editor import requests as config_requests
+    from istota.credentials import store as credential_store
+
+    user_id = user["username"]
+    try:
+        body = await _read_config_change_body(request)
+        await _require_config_identity(user_id)
+        found = applier.detect(_config)
+        if not found["available"]:
+            raise _ConfigRefusal(409, "no_applier", found["reason"])
+        config_path, text, digest = await _current_config_file()
+        _check_base_digest(body, digest)
+        preview = await _preview_config_change(user_id, body, text)
+        if preview.blocked:
+            raise _ConfigRefusal(400, "invalid_change", "The change has problems to fix first.",
+                                 errors=preview.errors, problems=preview.blocking)
+        if not preview.changed:
+            raise _ConfigRefusal(400, "invalid_change", "The change set changes nothing.",
+                                 errors=["the change set changes nothing"], problems=[])
+        await _check_managed(config_path, preview)
+        open_id = await asyncio.to_thread(_open_config_request_id)
+        if open_id is not None:
+            raise _ConfigRefusal(409, "request_open", "A change is already waiting for the host.", id=open_id)
+        confirmed = body.get("confirm") or []
+        if not isinstance(confirmed, list) or not all(isinstance(item, str) for item in confirmed):
+            raise _ConfigRefusal(400, "invalid_change", "confirm is not a list of keys.",
+                                 errors=["confirm is not a list of keys"], problems=[])
+        unconfirmed = sorted(set(preview.risky_keys) - set(confirmed))
+        if unconfirmed:
+            raise _ConfigRefusal(409, "confirm_required", "Confirm the risky changes first.", keys=unconfirmed)
+        refusal = await _require_step_up(request, body, "admin_config_change")
+        if refusal is not None:
+            return refusal
+        try:
+            request_id = await asyncio.to_thread(_create_config_request, preview, user_id, digest)
+        except config_requests.RequestOpen as exc:
+            raise _ConfigRefusal(409, "request_open", "A change is already waiting for the host.", id=exc.id) from None
+        except credential_store.SecretKeyMissingError:
+            raise _ConfigRefusal(
+                503, "secret_key_unavailable",
+                "The credential master key is not available to the web process, so the change "
+                "cannot be stored.",
+            ) from None
+    except _ConfigRefusal as refusal:
+        return refusal.response()
+    logger.info(
+        "admin_config_change admin=%s request=%d sections=[%s] keys=%d secrets=[%s] admins_changed=%s",
+        user_id, request_id, ",".join(preview.changed_sections), preview.changed_keys,
+        ",".join(sorted({edits.loggable_secret_name(name) for name in preview.secret_names})),
+        preview.admins_changed,
+    )
+    try:
+        await asyncio.to_thread(applier.trigger, request_id)
+    except OSError as exc:
+        # The host's timer takes a pending request within five minutes anyway.
+        logger.warning("config request %d: trigger file not written: %s", request_id,
+                       exc.strerror or type(exc).__name__)
+    return _no_store({"id": request_id}, 202)
+
+
+def _config_request_id(raw: str) -> int:
+    if not _CONFIG_REQUEST_ID.fullmatch(raw):
+        raise _ConfigRefusal(404, "not_found", "No such request.")
+    return int(raw)
+
+
+def _read_config_request(request_id: int) -> dict | None:
+    from istota import db
+    from istota.config_editor import requests as config_requests
+
+    with db.get_db(_config.db_path) as conn:
+        return config_requests.get(conn, request_id)
+
+
+@api_router.get("/admin/config/requests")
+async def admin_config_requests(limit: int = 50, _: dict = Depends(_require_admin)):
+    from istota import db
+    from istota.config_editor import requests as config_requests
+
+    def read():
+        with db.get_db(_config.db_path) as conn:
+            return config_requests.list_recent(conn, limit)
+
+    return _no_store({"requests": await asyncio.to_thread(read)})
+
+
+@api_router.get("/admin/config/requests/{request_id}")
+async def admin_config_request(request_id: str, _: dict = Depends(_require_admin)):
+    try:
+        found = await asyncio.to_thread(_read_config_request, _config_request_id(request_id))
+        if found is None:
+            raise _ConfigRefusal(404, "not_found", "No such request.")
+    except _ConfigRefusal as refusal:
+        return refusal.response()
+    return _no_store(found)
+
+
+@api_router.post("/admin/config/requests/{request_id}/cancel")
+async def admin_config_request_cancel(
+    request_id: str, user: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    from istota import db
+    from istota.config_editor import requests as config_requests
+
+    def cancel(found_id: int) -> bool:
+        with db.get_db(_config.db_path) as conn:
+            return config_requests.cancel(conn, found_id)
+
+    try:
+        found_id = _config_request_id(request_id)
+        if await asyncio.to_thread(_read_config_request, found_id) is None:
+            raise _ConfigRefusal(404, "not_found", "No such request.")
+        if not await asyncio.to_thread(cancel, found_id):
+            raise _ConfigRefusal(409, "not_pending", "Only a request the host has not taken can be cancelled.")
+    except _ConfigRefusal as refusal:
+        return refusal.response()
+    logger.info("admin_config_cancel admin=%s request=%d", user["username"], found_id)
+    return _no_store({"id": found_id, "status": "cancelled"})
+
+
+@api_router.post("/admin/config/requests/{request_id}/restore")
+async def admin_config_request_restore(
+    request_id: str, user: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin),
+):
+    """A change set restoring an earlier request's document, previewed.
+
+    Nothing is stored: the admin submits the returned change set like any
+    other. Credentials and the admin list stay as they are now; a credential
+    cleared since that request stays cleared.
+    """
+    from istota.config_editor import edits
+
+    try:
+        found_id = _config_request_id(request_id)
+        found = await asyncio.to_thread(_read_config_request, found_id)
+        if found is None:
+            raise _ConfigRefusal(404, "not_found", "No such request.")
+        await _require_config_identity(user["username"])
+        config_path, text, digest = await _current_config_file()
+        try:
+            change_set, dropped = edits.restore_change_set(found["document_toml"], text, digest)
+        except edits.ChangeError as exc:
+            raise _ConfigRefusal(400, "invalid_change", "That request cannot be restored.",
+                                 errors=[str(exc)], problems=[]) from None
+        preview = await _preview_config_change(user["username"], change_set, text, extra_problems=dropped)
+        await _check_managed(config_path, preview)
+    except _ConfigRefusal as refusal:
+        return refusal.response()
+    return _no_store({
+        "change_set": change_set,
+        "preview": _preview_payload(preview, digest),
+        "note": (
+            "Restoring brings back the configuration only; credentials and the admin "
+            "list stay as they are now."
+        ),
+    })
 
 
 # A daemon record older than this many sweep intervals reads as a daemon that
@@ -6812,37 +7177,6 @@ def _chat_room_group(
 _CHANNEL_MEMORY_MAX_BYTES = NOTES_MAX_BYTES
 
 
-def _channel_memory_revision(content: str) -> str:
-    """Opaque revision tag for what a reader will see as the file's content.
-
-    Hashes what `read_channel_memory` **returns**, not the bytes on disk: that
-    reader collapses absent and whitespace-only to None, so a file saved as
-    `"  \\n"` reads back as `""`. Hashing the submitted bytes instead would hand
-    the client a tag the next read can never reproduce, and every subsequent
-    save would be refused as a conflict with no way out but discarding the
-    user's text.
-
-    The save is optimistic: the client sends back the revision it loaded, and a
-    mismatch means something else wrote in between. That check — not the lock —
-    is what covers the case the lock cannot: the anchor dir is per-user
-    (`ISTOTA_DEFERRED_DIR`), so a second member's task writing the same shared
-    Talk-room file takes a *different* anchor and excludes nobody.
-    """
-    normalized = content if content.strip() else ""
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _channel_memory_lock_dir(username: str):
-    """The flock anchor dir the memory skill CLI and the nightly curator use.
-
-    Same expression as `sleep_cycle` and `skills/memory._lock_dir` so a web
-    save and a runtime CLI write against this user's own tasks land on one
-    anchor inode instead of two.
-    """
-    from istota.memory.curation.file_lock import deferred_lock_dir
-    return deferred_lock_dir(_config.temp_dir / username)
-
-
 def _chat_memory_room(username: str, room_id: int):
     """Resolve `room_id` for a channel-memory read or write, or None.
 
@@ -6899,7 +7233,7 @@ def _chat_room_memory(username: str, room_id: int) -> dict | None:
         # Served from the server so the pane's "start from template" can't
         # drift from what `init_channel_memory` writes.
         "template": storage.CHANNEL_MEMORY_TEMPLATE,
-        "revision": _channel_memory_revision(content or ""),
+        "revision": text_files.revision(content or ""),
     }
 
 
@@ -6919,7 +7253,6 @@ def _chat_save_room_memory(
     room, so a per-user count would refuse nothing in the shared case.
     """
     from istota import db, storage
-    from istota.memory.curation.file_lock import MemoryMdLocked, memory_md_lock
     room = _chat_memory_room(username, room_id)
     if room is None:
         return "not_found", None
@@ -6928,30 +7261,15 @@ def _chat_save_room_memory(
             return "busy", None
     if not _config.has_workspace:
         return "failed", None
-    memory_path = _config.workspace_path / "Channels" / room.token / "CHANNEL.md"
-    try:
-        with memory_md_lock(
-            memory_path, timeout_seconds=5.0,
-            lock_dir=_channel_memory_lock_dir(username),
-        ):
-            # Re-read *inside* the lock: the revision the client carries was
-            # taken before it, so comparing outside would leave exactly the
-            # window the check exists to close.
-            current = storage.read_channel_memory(_config, room.token) or ""
-            if _channel_memory_revision(current) != revision:
-                return "conflict", None
-            try:
-                written = storage.write_channel_memory(_config, room.token, content)
-            except OSError as e:
-                # A full disk or a dropped mount is a reportable failure with a
-                # code the client understands, not an unstructured 500.
-                logger.warning("chat room memory save failed for %s: %s", room.token, e)
-                return "failed", None
-            if not written:
-                return "failed", None
-    except MemoryMdLocked:
-        return "locked", None
-    return "ok", _channel_memory_revision(content)
+    outcome = text_files.save(
+        _config, username,
+        _config.workspace_path / "Channels" / room.token / "CHANNEL.md",
+        content, revision,
+        read=lambda: storage.read_channel_memory(_config, room.token),
+        write=lambda text: storage.write_channel_memory(_config, room.token, text),
+        max_bytes=_CHANNEL_MEMORY_MAX_BYTES,
+    )
+    return outcome.status, outcome.revision
 
 
 def _chat_room_notes(username: str, room_id: int) -> dict | None:
@@ -6971,7 +7289,7 @@ def _chat_room_notes(username: str, room_id: int) -> dict | None:
         "token": room.token,
         "content": content or "",
         "exists": content is not None,
-        "revision": _channel_memory_revision(content or ""),
+        "revision": text_files.revision(content or ""),
     }
 
 
@@ -6985,26 +7303,20 @@ def _chat_save_room_notes(
     skill takes for ``memory --room``, keyed on the same resolved path.
     """
     from istota import storage
-    from istota.memory.curation.file_lock import MemoryMdLocked, memory_md_lock
     room = _chat_memory_room(username, room_id)
     if room is None:
         return "not_found", None
     path = storage.room_notes_path(_config, username, room.token)
     if path is None:
         return "failed", None
-    try:
-        with memory_md_lock(
-            path, timeout_seconds=5.0,
-            lock_dir=_channel_memory_lock_dir(username),
-        ):
-            current = storage.read_room_notes(_config, username, room.token) or ""
-            if _channel_memory_revision(current) != revision:
-                return "conflict", None
-            if not storage.write_room_notes(_config, username, room.token, content):
-                return "failed", None
-    except MemoryMdLocked:
-        return "locked", None
-    return "ok", _channel_memory_revision(content)
+    outcome = text_files.save(
+        _config, username, path, content, revision,
+        read=lambda: storage.read_room_notes(_config, username, room.token),
+        write=lambda text: storage.write_room_notes(
+            _config, username, room.token, text),
+        max_bytes=NOTES_MAX_BYTES,
+    )
+    return outcome.status, outcome.revision
 
 
 def _room_talk_binding(username: str, room_id: int) -> str | None:
@@ -13687,6 +13999,7 @@ _STEP_UP_LABELS = {
     "backup_recipient": "change your credential backup recipient",
     "history_restore": "restore credential history",
     "history_purge": "permanently delete credential history",
+    "admin_config_change": "change this instance's configuration",
 }
 
 
@@ -13747,9 +14060,15 @@ def _send_step_up(config, user_id, action, session_key, request_id, name, ip):
 @api_router.post("/settings/step-up")
 async def settings_step_up(request: Request, user: dict = Depends(_require_api_auth),
                            _csrf: None = Depends(_verify_origin)):
-    await _credential_isolation(user["username"])
     body = await _credential_json(request)
     action, name = body.get("action"), body.get("name")
+    if action == "admin_config_change":
+        # The config editor's code guards no vault, so the vault's isolation
+        # gate does not apply; being an admin does.
+        if not _user_is_web_admin(user["username"]):
+            raise _ForbiddenException("admin only")
+    else:
+        await _credential_isolation(user["username"])
     if (not isinstance(action, str) or action not in web_auth.STEP_UP_ACTIONS
             or (name is not None and (not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_.-]{1,128}", name)))):
         raise HTTPException(status_code=400, detail="invalid confirmation action")

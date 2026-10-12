@@ -154,6 +154,44 @@ def _drop_withheld_entries(entries: list) -> list:
     ]
 
 
+def _workspace_is_nextcloud() -> bool:
+    """Whether the workspace is the bot's Nextcloud files, through the mount.
+
+    `Config.storage_is_nextcloud`, handed over by the manifest. Absent (a CLI
+    run outside a task, an older manifest) reads as the mount, which is what
+    every verb here assumed before a local workspace existed.
+    """
+    return os.environ.get("NC_STORAGE_IS_NEXTCLOUD", "True").strip() != "False"
+
+
+def _local_workspace_refusal(verb: str):
+    """The envelope for a verb that names a workspace file in Nextcloud.
+
+    On a local workspace the bot's Nextcloud tree is not the workspace, so the
+    same path there is some other file or none. Refused rather than guessed.
+    """
+    if _workspace_is_nextcloud():
+        return None
+    return error_envelope(
+        f"'{verb}' acts on the file's copy in Nextcloud, and this workspace is "
+        "not in Nextcloud. To post a workspace file into a Talk conversation use "
+        "`istota-skill nextcloud talk share-file`, which uploads a copy; the "
+        "user can download or upload any workspace file in the web UI.",
+        reason="not_in_nextcloud",
+    )
+
+
+def _supports_chunking(config: Config, size: int, chunked: bool) -> bool:
+    if not chunked and size < dav_mod.CHUNKED_UPLOAD_THRESHOLD:
+        return True
+    try:
+        return caps_mod.feature_map(caps_mod.fetch_capabilities(config)).get(
+            "dav.chunking", False
+        )
+    except OcsError:
+        return False
+
+
 def _default_expire_days() -> int:
     raw = os.environ.get("NC_SHARE_DEFAULT_EXPIRE_DAYS", "")
     try:
@@ -274,6 +312,9 @@ def cmd_share_get(args):
 
 
 def cmd_share_create(args):
+    refusal = _local_workspace_refusal("share create")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     share_type = _SHARE_TYPE_MAP.get(args.type)
     if share_type is None:
@@ -349,6 +390,9 @@ def cmd_share_update(args):
 
 
 def cmd_share_link(args):
+    refusal = _local_workspace_refusal("share link")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     path = _scoped(config, args.path, whole_tree=True)
 
@@ -429,11 +473,17 @@ def cmd_share_search(args):
 
 
 def cmd_files_stat(args):
+    refusal = _local_workspace_refusal("files stat")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     return dav_mod.stat(config, _scoped(config, args.path))
 
 
 def cmd_files_list(args):
+    refusal = _local_workspace_refusal("files list")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     path = _scoped(config, args.path)
     entries = _drop_withheld_entries(dav_mod.list_dir(config, path, depth=args.depth))
@@ -441,6 +491,9 @@ def cmd_files_list(args):
 
 
 def cmd_files_search(args):
+    refusal = _local_workspace_refusal("files search")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     scope = _scoped(config, args.scope)
     results = dav_mod.search(
@@ -457,17 +510,14 @@ def cmd_files_search(args):
 
 
 def cmd_files_upload(args):
+    refusal = _local_workspace_refusal("files upload")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     remote = _scoped(config, args.remote)
-
-    supports_chunking = True
-    if args.chunked or Path(args.local).stat().st_size >= dav_mod.CHUNKED_UPLOAD_THRESHOLD:
-        try:
-            supports_chunking = caps_mod.feature_map(
-                caps_mod.fetch_capabilities(config)
-            ).get("dav.chunking", False)
-        except OcsError:
-            supports_chunking = False
+    supports_chunking = _supports_chunking(
+        config, Path(args.local).stat().st_size, bool(args.chunked),
+    )
 
     return dav_mod.upload(
         config,
@@ -479,16 +529,25 @@ def cmd_files_upload(args):
 
 
 def cmd_files_download(args):
+    refusal = _local_workspace_refusal("files download")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     return dav_mod.download(config, _scoped(config, args.remote), Path(args.local))
 
 
 def cmd_files_versions(args):
+    refusal = _local_workspace_refusal("files versions")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     return dav_mod.versions(config, _scoped(config, args.path))
 
 
 def cmd_files_restore_version(args):
+    refusal = _local_workspace_refusal("files restore-version")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     return dav_mod.restore_version(config, _scoped(config, args.path), args.version)
 
@@ -510,6 +569,9 @@ def cmd_files_trash(args):
 
 
 def cmd_files_favorite(args):
+    refusal = _local_workspace_refusal("files favorite")
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
     return dav_mod.set_favorite(config, _scoped(config, args.path), favorite=not args.off)
 
@@ -888,12 +950,93 @@ def cmd_talk_share_file(args):
         return refusal
     config = _config_from_env()
     path = _scoped(config, args.path, whole_tree=True)
+    if not _workspace_is_nextcloud():
+        return _share_local_file(config, args.token, path)
     # A Talk attachment is share type 10 on the same OCS endpoint `share
     # create` uses, so it needs the same mapping — `TalkClient` holds a base
     # URL rather than a Config, so it is applied here. The reply keeps the
     # logical path, which is the one the caller asked about.
     result = _talk_run(lambda c: c.share_file(args.token, to_remote_path(config, path)))
     return {"status": "ok", "token": args.token, "path": path, "share_id": result.get("id")}
+
+
+#: How many numbered names an upload tries before giving up.
+_MAX_UPLOAD_NAMES = 100
+
+
+def _share_local_file(config: Config, token: str, path: str):
+    """Upload a workspace file into the bot's ``Talk/<token>/<day>/``, then share it.
+
+    On a local workspace the file is not in Nextcloud, so posting it means
+    copying it there first. The copy goes where Nextcloud keeps conversation
+    files, under a name no earlier post holds (``If-None-Match: *``, numbered
+    on a 412), so a second post of the same name leaves the first one as it
+    was. A later edit of the workspace file does not reach the posted copy.
+    """
+    from datetime import datetime, timezone
+
+    from istota.lib.filenames import filename_parts, numbered_name, safe_filename
+    from istota.sandbox.host_paths import memory_refusal, resolve_in_roots
+    from istota.skills._hostpath import egress_roots
+    from istota.storage import validate_conversation_token
+
+    try:
+        validate_conversation_token(token)
+    except ValueError:
+        return error_envelope("not a conversation token", reason="invalid_token", token=token)
+
+    workspace = (
+        os.environ.get("ISTOTA_WORKSPACE_PATH", "").strip()
+        or os.environ.get("NEXTCLOUD_MOUNT_PATH", "").strip()
+    )
+    if not workspace:
+        return error_envelope(
+            "no workspace is configured for this task, so there is no file to post",
+            reason="host_path_refused", path=path,
+        )
+    resolved, error = resolve_in_roots(
+        Path(workspace) / path.lstrip("/"), egress_roots(),
+        writable=False, operation="talk share-file --path",
+    )
+    if resolved is not None:
+        error = memory_refusal(resolved)
+    if resolved is None or error:
+        return error_envelope(error or "refused", reason="host_path_refused", path=path)
+    if not resolved.is_file():
+        return error_envelope(
+            "only a regular file can be posted", reason="host_path_refused", path=path,
+        )
+
+    folder = f"Talk/{token}/{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    dav_mod.ensure_dirs(config, folder, prefixed=False)
+    supports_chunking = _supports_chunking(config, resolved.stat().st_size, False)
+    stem, ext = filename_parts(safe_filename(resolved.name))
+    for n in range(1, _MAX_UPLOAD_NAMES + 1):
+        remote = f"/{folder}/{numbered_name(stem, ext, n)}"
+        try:
+            dav_mod.upload(
+                config, resolved, remote, supports_chunking=supports_chunking,
+                prefixed=False, overwrite=False,
+            )
+            break
+        except OcsError as e:
+            if e.http_status != 412:
+                raise
+    else:
+        return error_envelope(
+            f"{folder} already holds {_MAX_UPLOAD_NAMES} files with this name",
+            reason="name_exhausted", path=path,
+        )
+
+    result = _talk_run(lambda c: c.share_file(token, remote))
+    return {
+        "status": "ok",
+        "token": token,
+        "path": path,
+        "uploaded_to": remote,
+        "note": "posted a copy; later edits to the workspace file do not reach it",
+        "share_id": result.get("id"),
+    }
 
 
 def cmd_talk_mentions(args):
@@ -1264,7 +1407,7 @@ def build_parser():
 
     p_tshare = talk_sub.add_parser("share-file", help="Post a file into a conversation")
     p_tshare.add_argument("token", help="Conversation token")
-    p_tshare.add_argument("--path", required=True, help="Nextcloud file path")
+    p_tshare.add_argument("--path", required=True, help="Workspace file path")
 
     p_tment = talk_sub.add_parser("mentions", help="Mention candidates in a conversation")
     p_tment.add_argument("token", help="Conversation token")

@@ -11,6 +11,6 @@
 ARG BASE
 FROM ${BASE}
 
-RUN sed -i 's/^    if not (fstype == expected or (concession and mountpoint == workspace)):$/    if False:/' \
+RUN sed -i 's/^    elif not (fstype == expected or (concession and mountpoint == workspace)):$/    elif False:/' \
         /entrypoint.sh \
-    && grep -q '^    if False:$' /entrypoint.sh
+    && grep -q '^    elif False:$' /entrypoint.sh

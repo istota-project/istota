@@ -22,9 +22,10 @@
 #              browser-on-default-network (row 17),
 #              update-without-up, update-without-reprovision (istota-stack update),
 #              rollback-without-reprovision (istota-stack rollback)
+#              config-apply-not-triggered (the web config editor's host applier)
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
-#   nextcloud: no-storage-refusal (row 9)
+#   nextcloud: no-storage-refusal (row 9), localize-without-config (istota-stack localize-workspace)
 #   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
 #              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18)
@@ -108,6 +109,10 @@ control browser-on-default-network \
     "row 17: the browser container on the default network" \
     "$VM/test_browser.py::TestTheBrowserReachesNoPublishedPort::test_the_browser_reaches_nothing_on_the_default_network_by_address"
 
+control config-apply-not-triggered \
+    "the config editor's applier with istota-config-apply.path and .timer disabled: still pending at the threshold" \
+    "$VM/test_config_editor.py::TestAChangeFromTheWeb::test_the_host_picks_the_request_up"
+
 U="$VM/test_update.py::TestAnUpdateToAnotherRef"
 control update-without-up \
     "istota-stack update: .env names the new ref and nothing starts it" \
@@ -130,6 +135,12 @@ control no-host-bounds \
     "$VM/test_host.py::TestTheHostIsBounded::test_the_journal_is_capped" \
     "$VM/test_host.py::TestTheHostIsBounded::test_zram_swap_is_on_at_the_roles_priority"
 
+L="$VM/test_localize.py::TestAMountedVmMovesToALocalWorkspace"
+control localize-without-config \
+    "istota-stack localize-workspace: the copy and the mount change run and config.toml still names the mount" \
+    "$L::test_the_config_names_the_local_workspace" \
+    "$L::test_a_file_written_before_the_move_is_read_from_the_local_workspace"
+
 control no-storage-refusal \
     "row 9: an entrypoint without the mount refusal" \
     "$VM/test_nextcloud.py::TestNothingIsWrittenIntoAnUnmountedStore::test_with_the_mount_stopped_the_daemon_does_not_start"
@@ -143,11 +154,11 @@ control host-loopback-unblocked \
     "row L2: HOST_LOOPBACK_BLOCK=0, the egress unit re-run" \
     "$H::test_the_daemon_reaches_the_allowed_port_only" \
     "$H::test_the_browser_reaches_the_allowed_port_only"
-L="$VM/test_host_folder.py::TestOnlyTheFolderCrossesFromTheMac"
+M="$VM/test_host_folder.py::TestOnlyTheFolderCrossesFromTheMac"
 control default-mounts-in-template \
     "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \
-    "$L::test_the_vm_mounts_the_read_only_checkout_and_the_folder_alone" \
-    "$L::test_the_vm_reads_nothing_of_the_mac_outside_the_folder"
+    "$M::test_the_vm_mounts_the_read_only_checkout_and_the_folder_alone" \
+    "$M::test_the_vm_reads_nothing_of_the_mac_outside_the_folder"
 control mac-shim-without-drop \
     "row L4: the Mac CLI's exec sent to compose exec daemon, past istota-drop" \
     "$VM/test_host_folder.py::TestTheMacCliExecsAsTheDaemon::test_the_mac_cli_execs_as_10001_with_no_capabilities"

@@ -93,6 +93,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'configuration/overview',
         'configuration/reference',
+        'configuration/web-editor',
         'configuration/per-user',
         'configuration/credentials',
         'configuration/persona',
@@ -109,6 +110,7 @@ const sidebars: SidebarsConfig = {
         'deployment/ansible',
         'deployment/migrating-from-bare-metal',
         'deployment/moving-the-bundled-nextcloud',
+        'deployment/moving-to-a-local-workspace',
         'getting-started/standalone-install',
       ],
     },

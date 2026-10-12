@@ -10,7 +10,7 @@ decrypt path; the LLM sandbox sees only undecryptable ciphertext rows in the
 read-only framework DB.
 
 Consumers (all in the web process): post-as-user Talk mirroring at ingest,
-read-marker sync, and the settings status/disconnect card.
+read-marker sync, Workspace file browsing, and the settings status/disconnect card.
 
 Refresh contract (Nextcloud rotates refresh tokens): every refresh returns a
 new access+refresh pair and invalidates the old refresh token, so persistence

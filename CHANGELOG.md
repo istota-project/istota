@@ -13,6 +13,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The daily database backup also keeps a copy of the config.** Where the workspace is a mounted store, `config.toml` and the admins list are copied, private, into `Backups/config/<date>/` beside the database snapshots and kept for as many days, so a lost VM can be rebuilt from the store. Credentials files and the master key are never copied there.
 
+- **Admins can change the configuration from Admin → Configuration.** Settings, deployment credentials and the admin list are edited in place, reviewed as a diff with any problems shown against their keys, confirmed with an emailed code (and a typed phrase for settings that affect sign-in or confinement), then applied by the host. The page follows the change through the restart and reloads into the new values; settings the host owns, or that a plan manages, stay read-only with the reason shown. Tables are edited as TOML, the whole file can be edited as text with credentials hidden, ignored keys can be removed, and an earlier applied configuration can be restored from the history.
+
+- **The dedicated VM can apply configuration changes requested from the web.** `istota-stack config-apply`, run by the new `istota-config-apply.path` and a five-minute timer, takes each change the web config editor stored, checks it with dry runs before writing anything, builds the image when the new config needs Claude Code, then writes the credentials, admins and `config.toml` (keeping ten backups) and restarts the stack. `provision.sh` installs the units and the `requests/` directory, and the stack picks the applier up at the restart after that.
+
+- **`istota-stack` verbs that write now take one lock**, `/srv/app/istota/.stack.lock`, so an update, setup, apply, put-files, import, workspace move or config change never runs alongside another. A second command waits up to ten minutes and then fails naming the command that holds the lock; `setup --web`, which can hold it for an hour, refuses at once instead of waiting.
+- Workspace puts My files directly below Pinned. My files starts expanded; Pinned and the other sections start collapsed. Filename rows use the same side margins as locations in the Location sidebar.
+
+- Browse your connected Nextcloud files under Workspace → Connections. Open folders in Workspace and files in Nextcloud; if the connection expires, Workspace links you back to Connections to sign in again. The access note explains that browsing uses your personal account while tasks use the bot’s account and their workspace permissions.
+
+- `istota-stack localize-workspace` moves an install whose workspace is the Nextcloud mount onto the VM's own disk, with Talk and the `nextcloud` skill still connected. It stops the stack, copies the files, points the config at the local copy, turns the mount off and starts the stack again; the Nextcloud copy is left as it was, apart from a `MOVED.md` in each user's bot folder, so going back is a config change. Run it with `--dry-run` first to see what it would skip.
+
+  **Upgrade note:** nothing changes until you run it. A VM managed by the Ansible role moves by its plan instead: `--copy-only`, then `istota_storage: local` and no `workspace_mount_path`. A hand-written config with a Nextcloud URL and `workspace_path = "/mnt/shared"` but no `nextcloud_mount_path` is now refused at boot, since it would run as a local workspace with the mount checks off; add `nextcloud_mount_path = "/mnt/shared"` to keep the mount.
+
+- Edit your `USER.md`, `CRON.md`, `TASKS.md`, `HEARTBEAT.md` and your instructions for each skill from the Configuration section of Workspace. A save is checked the way Istota reads the file, so a broken `CRON.md` or `HEARTBEAT.md` is refused with the reasons listed, and a save never overwrites a change Istota made while you were editing. New jobs in `CRON.md` start at the next sync.
+
+- `istota setup` and the browser setup ask where the workspace lives when you connect a Nextcloud: `mount`, the bot's Nextcloud files through the VM's rclone mount, or `local`, a directory on the VM shown in the web UI. Talk and the `nextcloud` skill work with both. `local` writes `STORAGE=local`, so `provision.sh` installs no rclone and no mount unit. A scripted run takes `--workspace mount|local`, and defaults to `mount` when it is given `--nextcloud-url`, so existing scripts get what they got before.
+
+- On an install with Nextcloud whose workspace is not the Nextcloud mount, a file posted in Talk is fetched into the room's folder, `Channels/<room>/media/<message id>/`, once per message, and removed after `[talk] attachment_retention_days` (default 30). Files over `[talk] attachment_max_mb` (default 50) are skipped. `nextcloud talk share-file` uploads a copy of the workspace file into the bot's `Talk/` folder before posting it, and the `files` verbs, `share create` and `share link` refuse there because the file is not in Nextcloud.
+- The dashboard now has a Workspace card when Workspace is available. Open it to browse your files and pinned items.
+
+- Workspace has file-type icons, saved sorting by name, size or date, a folders-first option, filename filtering and refresh. Select visible files with row checkboxes or select all, then confirm deletion of files and empty folders under My files. Share markers stay beside filenames and use icons on narrow screens.
+
 - **Istota can be set up in the browser.** `istota-stack setup --web` prints an address with a one-use setup code and runs a page of short screens: your name and email, a password, an Anthropic or OpenRouter API key or a Claude subscription, the web address, and optionally Nextcloud, email and a calendar, each of which can be tested before you save it. When you finish it writes the configuration, builds what your answers need, starts the stack and sends you to the sign-in page with your email filled in. A new cloud VM started from `host/cloud-init.yaml` opens it on its own and shows the address on the provider's console; `istota-stack setup-code` prints it again, and the terminal wizard is still there with `istota-stack setup`.
 
 - Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
@@ -123,13 +145,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
 
+- Location History now opens on yesterday. Dates and ranges selected through links still take precedence.
+
+- **`istota apply` refuses a plan with a value the loader would throw away.** It used to match the loader's wording and missed several cases, so a typo in a closed choice (`web.token_storage = "plain"`), `scheduler.talk_poll_timeout = 0` or an unknown `[web] auth` method was applied and then silently replaced by the default. Those plans now fail with nothing written. **Upgrade note:** check your plan with `istota apply --check -f plan.json` (or an Ansible `--check` run) before upgrading, since a play that passed before can now fail. Four config shapes that were ignored in silence now log a warning: a `[web] auth` that is not a list, a `[brain] fallback` that is not a string, a `[brain.source_type_overrides]` that is not a table, and a `[[briefings]]` entry that is not a table.
+
+- **`istota apply` gains `--check`, `--json`, `--backup N` and plans on stdin.** `--check` validates a plan without reading or writing any config, and with `--json` prints its problems as one JSON object; `-f -` reads the plan from stdin; `--backup N` keeps the replaced `config.toml` as a dated 0600 copy, and the newest N of those. A plan's `[meta]` can now say who manages the config (`managed`, `source`), recorded in `config/managed.json`; `istota setup` marks everything unmanaged, `istota-stack put-files` records who manages the secrets and the admins, and the Ansible role marks all three as its own. Changing only that record exits 0, so it does not restart the stack.
+
+- Workspace remembers which sidebar sections you leave open. File rows share consistent spacing and menus with Reveal, Edit where supported, and Remove pin for pinned items; pinned filenames no longer have icons.
+
+- **What Istota says about the workspace is accurate on a local one.** The prompt shows every user, admins included, their own `Users/<id>` folder, and says the bot can reach the rest of the machine only on an install with no sandbox. `examples/README.md`, the email attachment line, `!export`, `!memory`, the Talk and web chat guidelines and the `files` and `nextcloud` skills stop saying a file is in Nextcloud when it is not. `istota doctor` adds `backups.off_volume`, which warns when the database snapshots are on the same volume as the database or a local workspace (back up `istota_data` itself, or point `[scheduler] db_backup_dir` at another disk), and `runtime.workspace_disk`, which warns under 10% or 2 GiB free and fails under 2%. Backups keep running in both cases.
 - **Setup now writes the Nextcloud mount's configuration.** Choosing Nextcloud in either setup writes the rclone config and the remote's name for the file mount, so the stack starts without a hand-written file; a `setup --force` re-run replaces an `rclone.conf` written by hand with one for the remote named `nextcloud`. The browser container is now offered as on by default; a scripted `--yes` setup still leaves it off unless you ask for it.
 
 - **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
 
 - **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.
 
-- **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images, runs the setup wizard and starts the stack. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
+- **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images and starts the setup in the browser, with or without a terminal, printing the address, the one-use setup code and the certificate fingerprint as a `host/cloud-init.yaml` bootstrap does. `--terminal-setup` runs the setup wizard in the terminal instead. An option the server install does not know is refused. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
 
 - **The standalone single-user install is deprecated.** Istota has one deployment, the Docker stack on a machine of its own, and the documentation now describes only that, with a Lima VM for running it on a Mac. Existing standalone installs keep working and updating until a Mac desktop app replaces them; `istota serve` stays as the development loop on a Mac checkout.
 
@@ -218,6 +249,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- Admin Configuration showed two warnings for the retired vault sync interval. It now shows only the retirement warning. Review changes and Discard now sit in the app bar, in the same place as the other settings pages' Save button.
+
+- `istota-stack localize-workspace` writes `MOVED.md` into the users' Nextcloud bot folders only after the config has moved, so a copy that stops, or a `--copy-only` run, no longer leaves a note saying edits there are ignored on an install still running on the mount. A user's own `MOVED.md` is kept and copied instead of being overwritten and left out. A non-empty `/data/workspace` is refused before the stack stops, and the rollback steps now remove the notes (`istota workspace moved-note --remove`) and the memory index entries for the local copy.
+
+- A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.
+
+- The Workspace toolbar no longer grows when folder buttons appear after loading. The content below it stays in place.
+
+- File previews now place their scrollbar at the viewer’s right edge instead of over the document. Text and PDF content keep their padding inside the scrolling area.
+
+- Running `istota-stack setup --force` again with the same Nextcloud answers no longer reprovisions the VM. Setup re-encoded the app password into `rclone.conf` on every run, so the file changed each time even though nothing about the mount had. It now keeps the existing file when it already holds the same address, user and password.
+
+- Repeated stack updates no longer leave unused build cache and untagged build images to fill the VM disk. Updates reclaim these artifacts before building and after successful or failed attempts, while keeping the current and previous deployment images for rollback.
 
 - User IDs now match regardless of case in Talk, Nextcloud sign-in, email plus-addresses and task submission, while keeping their original spelling. Creating an ID that differs only by case from an existing user is refused, so the two cannot share files on a case-insensitive filesystem.
 

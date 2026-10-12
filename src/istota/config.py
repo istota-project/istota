@@ -19,11 +19,17 @@ from .config_mapper import (
     _KEEP,
     _warn,
     apply_section,
+    Value,
     coerce_float,
     coerce_int,
+    coerce_str,
+    key_path,
+    report_problem,
     report_unknown,
 )
+from istota.mail.outbound_policy import VALID_POLICIES as OUTBOUND_APPROVAL_POLICIES
 from istota.sandbox.user_scope import paths_overlap, scoped_user_dir
+from istota.webui.map_basemap import provider_names as map_provider_names
 
 if TYPE_CHECKING:
     import sqlite3
@@ -85,7 +91,7 @@ class TalkSignalingConfig:
     already make. The alternative the protocol offers is an *internal client*
     authenticated with the signaling server's shared secret, which joins any
     room on the instance and is rejected for that reason; a field here holding
-    that secret would also need an ``_env_secret_overrides`` entry and an
+    that secret would also need a ``SECRET_ENV_OVERRIDES`` entry and an
     ``admin_config_view`` redaction, neither of which exists because neither is
     needed.
 
@@ -129,6 +135,11 @@ class TalkSignalingConfig:
 class TalkConfig:
     enabled: bool = True
     bot_username: str = "istota"  # istota's Nextcloud username (to filter own messages)
+    # On a local workspace a Talk attachment is fetched over WebDAV into
+    # `Channels/<token>/media/<message id>/`; larger files are skipped.
+    attachment_max_mb: int = 50
+    # Days a fetched attachment's message directory is kept; 0 keeps them.
+    attachment_retention_days: int = 30
     signaling: TalkSignalingConfig = field(default_factory=TalkSignalingConfig)
 
 
@@ -1207,29 +1218,53 @@ class WebMapConfig:
     attribution: str = ""
 
 
-def normalize_auth_methods(raw: object) -> list[str]:
-    """Normalize configured login methods; no-auth is always exclusive."""
+WEB_AUTH_METHODS = ("nextcloud", "email", "none")
+
+WEB_TOKEN_STORAGE_MODES = ("ephemeral", "encrypted")
+
+LOGGING_OUTPUTS = ("console", "file", "both")
+
+BRAIN_KINDS = ("claude_code", "native", "tmux_claude")
+"""Every brain kind ``make_brain`` builds. ``brain.KNOWN_BRAIN_KINDS`` is this.
+
+Here rather than in :mod:`istota.brain` so the config's own vocabulary does
+not import the brain package onto the config-load path.
+"""
+
+SPEECH_GATE_MODES = ("off", "mention", "classifier")
+"""``[speech_gate] mode`` values. ``rooms.speech_gate.MODES`` is this."""
+
+
+def normalize_auth_methods(raw: object, *, kind: str = "discarded") -> list[str]:
+    """Normalize configured login methods; no-auth is always exclusive.
+
+    ``kind`` is how a dropped method is reported: ``discarded`` for the file,
+    ``warning`` for ``ISTOTA_WEB_AUTH``, which no edit of the file can fix.
+    """
+    path = ("web", "auth")
     if isinstance(raw, str):
         values = raw.split(",")
     elif isinstance(raw, list):
         values = raw
     else:
+        report_problem(kind, path, "[web] auth is not a list of methods; ignoring it")
         return []
     methods = []
     for value in values:
         if not isinstance(value, str):
-            logger.warning("[web] auth contains a non-string method; ignoring")
+            report_problem(kind, path, "[web] auth contains a non-string method; ignoring")
             continue
         method = value.strip().lower()
         if not method:
             continue
-        if method not in ("nextcloud", "email", "none"):
-            logger.warning("[web] auth contains unknown method %r; ignoring", method)
+        if method not in WEB_AUTH_METHODS:
+            report_problem(kind, path, "[web] auth contains unknown method %r; ignoring", method)
             continue
         if method not in methods:
             methods.append(method)
     if "none" in methods and len(methods) > 1:
-        logger.warning(
+        report_problem(
+            kind, path,
             "[web] auth method 'none' is exclusive; dropping %s",
             ", ".join(method for method in methods if method != "none"),
         )
@@ -2237,16 +2272,26 @@ class Config:
         return self.workspace_path is not None
 
     @property
-    def storage_is_nextcloud(self) -> bool:
-        """Whether a Nextcloud server backs the file workspace.
+    def nextcloud_enabled(self) -> bool:
+        """Whether a Nextcloud server is configured: Talk, the ``nextcloud``
+        skill, OCS, avatars and DAV calls are possible.
 
-        This selects storage vocabulary, not whether the workspace is mounted.
-        Keyed on the presence of a Nextcloud URL — deliberately NOT
-        ``is_standalone`` (which folds in web auth, an axis orthogonal to file
-        storage). A URL means the files are Nextcloud, reached through the
-        workspace mount; no URL means a plain local folder.
+        Says nothing about where the workspace lives; that is
+        :attr:`storage_is_nextcloud`.
         """
         return bool(self.nextcloud.url)
+
+    @property
+    def storage_is_nextcloud(self) -> bool:
+        """Whether the workspace *is* the bot's Nextcloud files, through the mount.
+
+        A URL and ``workspace_mount_path`` both set. A URL alone is a Nextcloud
+        install with a local workspace, which is described as a workspace, not
+        as Nextcloud. Selects storage vocabulary and every path that only makes
+        sense when the files are in Nextcloud. Deliberately not
+        ``is_standalone``, which folds in web auth.
+        """
+        return self.nextcloud_enabled and self.workspace_mount_path is not None
 
     @property
     def storage_backend(self) -> str:
@@ -2735,10 +2780,9 @@ class Config:
             caps.add("devbox")
         if self.whatsapp.enabled:
             caps.add("whatsapp")
-        # Keyed on the URL for the same reason storage_is_nextcloud is: a
-        # standalone local install has no Nextcloud at all, and every verb of
-        # the nextcloud skill would fail there.
-        if self.nextcloud.url:
+        # A standalone local install has no Nextcloud at all, and every verb
+        # of the nextcloud skill would fail there.
+        if self.nextcloud_enabled:
             caps.add("nextcloud")
         return caps
 
@@ -2856,7 +2900,9 @@ def load_admin_users(path: str | None = None) -> set[str]:
     return admins
 
 
-def _parse_briefing_specs(entries: "list | None") -> list[BriefingConfig]:
+def _parse_briefing_specs(
+    entries: "list | None", path: tuple[str, ...] = ("default_briefings",),
+) -> list[BriefingConfig]:
     """Parse ``[[briefings]]`` / ``[[default_briefings]]`` TOML entries.
 
     Shared by ``_parse_user_data`` (per-user briefings) and the top-level
@@ -2869,11 +2915,16 @@ def _parse_briefing_specs(entries: "list | None") -> list[BriefingConfig]:
     migration-read carrier populated from the DB, never from TOML.
     """
     briefings: list[BriefingConfig] = []
-    for b in entries or []:
+    for index, b in enumerate(entries or []):
         if not isinstance(b, dict):
+            report_problem(
+                "discarded", (*path, str(index)),
+                "[[%s]] entry is not a table; ignoring", ".".join(path),
+            )
             continue
         if "components" in b:
-            logger.warning(
+            report_problem(
+                "retired", (*path, str(index), "components"),
                 "briefing %r: TOML `components =` authoring is retired and ignored; "
                 "use `blocks` instead",
                 b.get("name", "?"),
@@ -2901,14 +2952,16 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
     briefing blocks defer normalisation to the seeder.
     """
     blocks: list[BriefingSharedBlock] = []
-    for b in entries or []:
+    for index, b in enumerate(entries or []):
+        path = ("briefing_shared_blocks", str(index))
         if not isinstance(b, dict):
-            logger.warning("[[briefing_shared_blocks]] entry is not a table; ignoring")
+            report_problem("discarded", path, "[[briefing_shared_blocks]] entry is not a table; ignoring")
             continue
         name = b.get("name", "")
         cron = b.get("cron", "")
         if not name or not cron:
-            logger.warning(
+            report_problem(
+                "discarded", path,
                 "briefing_shared_blocks entry %r missing name/cron; ignoring",
                 name or "?",
             )
@@ -2931,7 +2984,9 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
 def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     """Parse a user data dict (from main config or per-user file) into UserConfig."""
     # Parse briefings
-    briefings = _parse_briefing_specs(user_data.get("briefings", []))
+    briefings = _parse_briefing_specs(
+        user_data.get("briefings", []), ("users", user_id, "briefings"),
+    )
 
     # Parse resources. After the Resources sunset only ``folder`` (and the
     # internal ``shared_file``) are live; obsolete credential types
@@ -2979,7 +3034,8 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     if "email_reply_routing" in user_data:
         # Retired with the origin reply routing it chose between: a reply to
         # mail the bot sent is a turn in the thread's own room.
-        logger.warning(
+        report_problem(
+            "retired", ("users", user_id, "email_reply_routing"),
             "[users.%s] email_reply_routing is no longer used and is ignored", user_id,
         )
 
@@ -2989,7 +3045,10 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     )
 
     if "vault_path" in user_data:
-        logger.warning("[users.%s] vault_path is retired; it is read only for credential migration", user_id)
+        report_problem(
+            "retired", ("users", user_id, "vault_path"),
+            "[users.%s] vault_path is retired; it is read only for credential migration", user_id,
+        )
     return UserConfig(
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
@@ -3035,7 +3094,8 @@ def _vault_path_value(user_id: str, raw: object) -> str:
         return raw
     if raw in (None, ""):
         return ""
-    logging.getLogger("istota.config").warning(
+    report_problem(
+        "discarded", ("users", user_id, "vault_path"),
         "[users.%s] vault_path is not a string (%s); the vault is off for this "
         "user", user_id, type(raw).__name__,
     )
@@ -3088,9 +3148,11 @@ def _parse_container_block(raw: object) -> dict:
     so on every start is the least this can do, and ``doctor``'s
     ``developer.container.backend`` check repeats it where someone will look.
     """
+    base = ("developer", "container")
     if not isinstance(raw, dict):
         if raw:
-            logger.warning(
+            report_problem(
+                "discarded", base,
                 "[developer.container] is not a table; ignoring it. Where "
                 "development work runs is derived from [devbox] enabled.",
             )
@@ -3099,7 +3161,8 @@ def _parse_container_block(raw: object) -> dict:
     kwargs: dict = {}
 
     if "backend" in raw:
-        logger.warning(
+        report_problem(
+            "retired", (*base, "backend"),
             "[developer.container] backend=%r is retired and ignored. Where "
             "development work runs is now derived from [devbox] enabled "
             "together with developer.enabled and developer.repos_dir, so the "
@@ -3113,11 +3176,12 @@ def _parse_container_block(raw: object) -> dict:
         if isinstance(value, str) and value.strip().startswith("/"):
             kwargs["exec_socket_dir"] = value.strip().rstrip("/") or "/"
         else:
-            logger.warning(
-                "[developer.container] exec_socket_dir=%r is not an absolute "
+            report_problem(
+                "discarded", (*base, "exec_socket_dir"),
+                "[developer.container] exec_socket_dir=%s is not an absolute "
                 "path; using the default. A relative socket directory would "
                 "anchor on whatever directory the daemon was started in.",
-                value,
+                Value(value),
             )
 
     for name, caster, floor in (
@@ -3128,17 +3192,19 @@ def _parse_container_block(raw: object) -> dict:
             continue
         value = raw[name]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            logger.warning(
-                "[developer.container] %s=%r is not a number; using the default",
-                name, value,
+            report_problem(
+                "discarded", (*base, name),
+                "[developer.container] %s=%s is not a number; using the default",
+                name, Value(value),
             )
             continue
         if not math.isfinite(value):
             # `int(float("inf"))` raises OverflowError and `int(float("nan"))`
             # raises ValueError, and TOML spells both.
-            logger.warning(
-                "[developer.container] %s=%r is not finite; using the default",
-                name, value,
+            report_problem(
+                "discarded", (*base, name),
+                "[developer.container] %s=%s is not finite; using the default",
+                name, Value(value),
             )
             continue
         kwargs[name] = caster(max(value, floor))
@@ -3149,22 +3215,25 @@ def _parse_container_block(raw: object) -> dict:
             # A bare string iterates as characters, which would install a shim
             # called `n` and one called `p`. Same failure `sandbox_ro_paths`
             # had, so it gets the same explicit refusal.
-            logger.warning(
-                "[developer.container] shim_commands=%r is not a list; using "
-                "the default set", value,
+            report_problem(
+                "discarded", (*base, "shim_commands"),
+                "[developer.container] shim_commands=%s is not a list; using "
+                "the default set", Value(value),
             )
         else:
             commands: list[str] = []
-            for entry in value:
+            for index, entry in enumerate(value):
+                entry_path = (*base, "shim_commands", str(index))
                 name = str(entry).strip() if isinstance(entry, str) else ""
                 # A shim is a file written into a directory on the model's PATH,
                 # so the name has to be a bare command and nothing else. A `/`
                 # would write outside `{dev_bin}`; a dot-prefix or a shell
                 # metacharacter is not a command anyone means.
                 if not name or not _SHIM_NAME_RE.match(name):
-                    logger.warning(
-                        "[developer.container] shim_commands entry %r is not a "
-                        "plain command name; skipping it", entry,
+                    report_problem(
+                        "discarded", entry_path,
+                        "[developer.container] shim_commands entry %s is not a "
+                        "plain command name; skipping it", Value(entry),
                     )
                     continue
                 if name in _UNSHIMMABLE_COMMANDS or _UNSHIMMABLE_RE.match(name):
@@ -3179,7 +3248,8 @@ def _parse_container_block(raw: object) -> dict:
                     # client. The exec client is itself a Python script, and
                     # several `developer/skill.md` recipes parse forge output
                     # with `python3 -c`.
-                    logger.warning(
+                    report_problem(
+                        "discarded", entry_path,
                         "[developer.container] shim_commands entry %r is refused: "
                         "shimming it would route the sandbox's own machinery into "
                         "the container, which has no copy of it. Leave it on the "
@@ -3350,10 +3420,12 @@ def _warn_ro_paths_over_control_tree(config: "Config") -> None:
         # acceptable — and is the shape a well-meaning "let the model read its
         # own control dir" edit takes.
         if paths_overlap(resolved, control_root):
-            if entry in _RO_PATH_CONTROL_TREE_WARNED:
-                continue
+            # Logged once per process, recorded on every load: a collector
+            # asks about this document, not about what this process has said.
+            first = entry not in _RO_PATH_CONTROL_TREE_WARNED
             _RO_PATH_CONTROL_TREE_WARNED.add(entry)
-            logger.warning(
+            report_problem(
+                "warning", ("security", "sandbox_ro_paths"),
                 "[security] sandbox_ro_paths entry %r would bind the task "
                 "control tree (%s) into every sandbox: the framework writes "
                 "each task's assembled prompt, briefing metadata and prepared "
@@ -3362,6 +3434,7 @@ def _warn_ro_paths_over_control_tree(config: "Config") -> None:
                 "need; the control directory a task needs is bound for it "
                 "already.",
                 entry, control_root,
+                log=first,
             )
 
 
@@ -3380,26 +3453,33 @@ def _validate_sandbox_ro_paths(raw: object) -> list[str]:
     ``/`` is refused outright for the same reason; a mount that broad defeats
     every other bind decision in the function.
     """
+    path = ("security", "sandbox_ro_paths")
     if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-        logger.error(
+        report_problem(
+            "discarded", path,
             "[security] sandbox_ro_paths must be a list of paths, got %s — "
             "ignoring it. A bare string would be iterated character by "
             "character and bind-mount the host root.",
             type(raw).__name__,
+            level=logging.ERROR,
         )
         return []
     cleaned: list[str] = []
-    for entry in raw:
+    for index, entry in enumerate(raw):
         if not isinstance(entry, str) or not entry.strip():
-            logger.error(
+            report_problem(
+                "discarded", (*path, str(index)),
                 "[security] sandbox_ro_paths: ignoring non-path entry %r", entry,
+                level=logging.ERROR,
             )
             continue
         resolved = Path(entry).resolve()
         if resolved == Path("/"):
-            logger.error(
+            report_problem(
+                "discarded", (*path, str(index)),
                 "[security] sandbox_ro_paths: refusing to bind the host root "
                 "(%r) into the sandbox", entry,
+                level=logging.ERROR,
             )
             continue
         cleaned.append(entry)
@@ -3479,7 +3559,8 @@ def _validate_authserv_id(raw: object) -> str:
     value = raw if isinstance(raw, str) else ""
     value = value.strip()
     if value and any(ch.isspace() or ch in ';"(' for ch in value):
-        logger.warning(
+        report_problem(
+            "warning", ("email", "authserv_id"),
             "[email] authserv_id = %r contains whitespace or a delimiter. It must "
             "be the single token before the semicolon in your MTA's "
             "Authentication-Results header, without any version number that "
@@ -3501,14 +3582,12 @@ def _validate_outbound_approval_floor(raw: object) -> str:
     who deliberately wrote ``off``. A typo in a security floor should stop the
     process, not pick a policy on the operator's behalf.
     """
-    from istota.mail.outbound_policy import VALID_POLICIES
-
     value = raw if isinstance(raw, str) else ""
     value = value.strip()
-    if value not in VALID_POLICIES:
+    if value not in OUTBOUND_APPROVAL_POLICIES:
         raise ValueError(
             f"[email] outbound_approval_floor={raw!r} is not valid. "
-            f"Use one of: {', '.join(VALID_POLICIES)}."
+            f"Use one of: {', '.join(OUTBOUND_APPROVAL_POLICIES)}."
         )
     return value
 
@@ -3531,7 +3610,8 @@ def _valid_task_queue(raw: object) -> str:
     value = raw.strip() if isinstance(raw, str) else ""
     if value in ("foreground", "background"):
         return value
-    logger.warning(
+    report_problem(
+        "discarded", ("scheduler", "email_task_queue"),
         "[scheduler] email_task_queue=%r is not a queue; using 'background'. "
         "Valid values are 'foreground' and 'background'.",
         raw,
@@ -3580,6 +3660,7 @@ _RETIRED = frozenset({
     "security.sandbox_admin_db_write",
     "rooms",
     "devbox.docker_cli",
+    "scheduler.vault_sync_interval",
     # Still honoured, by `_apply_renamed_keys`, which warns in its own terms.
     "scheduler.istota_file_poll_interval",
 })
@@ -3645,7 +3726,8 @@ def _apply_renamed_keys(data: dict, config: "Config") -> None:
         block = data.get(section)
         if not isinstance(block, dict) or old not in block:
             continue
-        logger.warning(
+        report_problem(
+            "retired", (section, old),
             "[%s] %s was renamed to %s. The old name still works and will be "
             "removed; rename the key.", section, old, new,
         )
@@ -3674,7 +3756,8 @@ def _migrate_workspace_fields(
     config.workspace_path = config.workspace_mount_path
     if not config.storage_is_nextcloud:
         config.workspace_mount_path = None
-    logger.warning(
+    report_problem(
+        "retired", ("nextcloud_mount_path",),
         "nextcloud_mount_path now means the mountpoint only, and is renamed "
         "workspace_mount_path. Set workspace_path to the workspace root; keep "
         "workspace_mount_path only if that path is a real mount."
@@ -3864,7 +3947,10 @@ def _migrate_workspace_mount_path(data: dict) -> None:
     legacy = data.pop("nextcloud_mount_path")
     if "workspace_mount_path" not in data:
         data["workspace_mount_path"] = legacy
-        logger.warning(
+        # "warning", not "retired": the editor offers to unset a retired key,
+        # and dropping the only mount path changes the storage mode.
+        report_problem(
+            "warning", ("nextcloud_mount_path",),
             "nextcloud_mount_path was renamed to workspace_mount_path. The old "
             "name still works; rename the key."
         )
@@ -3880,7 +3966,8 @@ def _migrate_workspace_mount_path(data: dict) -> None:
             "nextcloud_mount_path, to different paths; keep workspace_mount_path "
             "and remove nextcloud_mount_path"
         )
-    logger.warning(
+    report_problem(
+        "retired", ("nextcloud_mount_path",),
         "nextcloud_mount_path was renamed to workspace_mount_path and both are "
         "set; remove nextcloud_mount_path."
     )
@@ -3899,7 +3986,8 @@ def _migrate_web_login_link_ttl(data: dict) -> None:
     legacy = web.pop("auth_login_link_ttl_minutes")
     if "auth_sign_in_code_ttl_minutes" not in web:
         web["auth_sign_in_code_ttl_minutes"] = legacy
-    logger.warning(
+    report_problem(
+        "retired", ("web", "auth_login_link_ttl_minutes"),
         "[web] auth_login_link_ttl_minutes is retired; rename it to "
         "auth_sign_in_code_ttl_minutes (sign-in links are now emailed codes)"
     )
@@ -3948,7 +4036,8 @@ def _apply_legacy_brain_defaults(data: dict, config: "Config") -> None:
             name for name in _LEGACY_BRAIN_DEFAULT_TARGETS
             if not getattr(getattr(config.brain, name, None), old, "")
         ]
-        logger.warning(
+        report_problem(
+            "retired", (old,),
             "[config] top-level `%s` is deprecated: it is the claude_code "
             "brain's default, not a deployment-wide one, and setting it here "
             "shadowed every other brain's own (ISSUE-418). Move it to "
@@ -3992,7 +4081,8 @@ def _warn_native_lost_its_only_model(data: dict, config: "Config") -> None:
     targets |= set((config.brain.source_type_overrides or {}).values())
     if "native" not in targets:
         return
-    logger.warning(
+    report_problem(
+        "warning", ("brain", "native", "model"),
         "[config] the native brain is reachable but [brain.native] model is "
         "empty, and the top-level `model` is no longer applied to it "
         "(ISSUE-418) — an Anthropic model id cannot carry to an openai_compat "
@@ -4010,7 +4100,8 @@ def _advisor_model(raw: object, key: str) -> object:
     """
     if isinstance(raw, str):
         return raw
-    logging.getLogger("istota.config").warning(
+    report_problem(
+        "discarded", key_path(key),
         "advisor_model must be a string, got %s; ignoring", type(raw).__name__,
     )
     return _KEEP
@@ -4022,7 +4113,7 @@ def _wallet_authorization_minutes(raw, key):
             raise ValueError
         value = int(raw)
     except (TypeError, ValueError, OverflowError):
-        logger.warning("%s must be an integer; keeping the default", key)
+        report_problem("discarded", key_path(key), "%s must be an integer; keeping the default", key)
         return _KEEP
     return max(5, min(240, value))
 
@@ -4033,8 +4124,9 @@ def _non_negative_int(raw: object, key: str) -> object:
     if value is _KEEP:
         return _KEEP
     if value < 0:
-        logger.warning(
-            "[config] %s=%r must be >= 0; keeping the default", key, raw,
+        report_problem(
+            "discarded", key_path(key),
+            "[config] %s=%s must be >= 0; keeping the default", key, Value(raw),
         )
         return _KEEP
     return value
@@ -4052,8 +4144,9 @@ def _positive_float(raw: object, key: str) -> object:
     if value is _KEEP:
         return _KEEP
     if value <= 0:
-        logger.warning(
-            "[config] %s=%r is not a positive number; keeping the default", key, raw,
+        report_problem(
+            "discarded", key_path(key),
+            "[config] %s=%s is not a positive number; keeping the default", key, Value(raw),
         )
         return _KEEP
     return value
@@ -4069,8 +4162,9 @@ def _positive_int(raw: object, key: str) -> object:
     if value is _KEEP:
         return _KEEP
     if value <= 0:
-        logger.warning(
-            "[config] %s=%r must be greater than 0; keeping the default", key, raw,
+        report_problem(
+            "discarded", key_path(key),
+            "[config] %s=%s must be greater than 0; keeping the default", key, Value(raw),
         )
         return _KEEP
     return value
@@ -4115,6 +4209,12 @@ def _review_section(raw: object, key: str) -> object:
             "[config] [%s] ignoring settings retired with the second reviewer: %s",
             key, ", ".join(retired),
         )
+    for name in retired:
+        report_problem(
+            "retired", (*key_path(key), name),
+            "[config] [%s] %s was retired with the second reviewer and is ignored",
+            key, name, log=False,
+        )
     review = ReviewConfig()
     unknown: list[str] = []
     apply_section(review, data, prefix=key, hooks=_CONFIG_HOOKS, unknown=unknown)
@@ -4128,8 +4228,9 @@ def _forge_cli_list(raw: object, key: str) -> object:
         return [raw] if raw else []
     if isinstance(raw, (list, tuple)):
         return [str(entry) for entry in raw]
-    logger.warning(
-        "[config] %s=%r is not a list of strings; keeping the default", key, raw,
+    report_problem(
+        "discarded", key_path(key),
+        "[config] %s=%s is not a list of strings; keeping the default", key, Value(raw),
     )
     return _KEEP
 
@@ -4143,17 +4244,22 @@ def _one_of(*valid: str) -> Hook:
     where a wrong value is a *security* decision rather than a mode --
     `email.outbound_approval_floor` and `email.confirm_sender_match` --
     deliberately do not use this and raise instead.
+
+    The hook carries its vocabulary as ``choices``, which is where
+    :data:`FIELD_CHOICES` reads it from.
     """
 
     def hook(raw: object, key: str) -> object:
         if raw in valid:
             return raw
-        logger.warning(
-            "[config] %s=%r is not a known value (expected %s); using the default",
-            key, raw, " or ".join(repr(v) for v in valid),
+        report_problem(
+            "discarded", key_path(key),
+            "[config] %s=%s is not a known value (expected %s); using the default",
+            key, Value(raw), " or ".join(repr(v) for v in valid),
         )
         return _KEEP
 
+    hook.choices = tuple(valid)
     return hook
 
 
@@ -4162,7 +4268,7 @@ def _one_of(*valid: str) -> Hook:
 # set -- or `_KEEP` to leave the dataclass default standing.
 _CONFIG_HOOKS: dict[str, Hook] = {
     "web.auth": lambda raw, key: normalize_auth_methods(raw) or _KEEP,
-    "web.token_storage": _one_of("ephemeral", "encrypted"),
+    "web.token_storage": _one_of(*WEB_TOKEN_STORAGE_MODES),
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
     # `backend = "none"` to keep builds off the container had that honoured
@@ -4183,7 +4289,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "developer.review.snapshot_max_bytes": _positive_int,
     "developer.review.snapshot_max_file_bytes": _positive_int,
     # An empty string means "unset" here, not a relative path of `.`.
-    "security.sandbox_cache_dir": lambda raw, key: str(raw or ""),
+    "security.sandbox_cache_dir": lambda raw, key: coerce_str(raw or "", key),
     "security.sandbox_cache_max_gb": _positive_float,
     "security.credential_broker.scan_max_bytes": _positive_int,
     "security.credential_broker.leaf_validity_hours": _positive_int,
@@ -4235,12 +4341,14 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # A brain name is compared literally downstream, so surrounding whitespace
     # in a rendered config is a name that matches nothing.
     "brain.fallback": lambda raw, key: (
-        raw.strip() if isinstance(raw, str) else _KEEP
+        raw.strip() if isinstance(raw, str) else _warn(key, raw, "a brain kind")
     ),
     # Both sides are stringified: a TOML table can key on a bare word and value
     # it with a number, and every consumer of this map indexes it with strings.
     "brain.source_type_overrides": lambda raw, key: (
-        {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else _KEEP
+        {str(k): str(v) for k, v in raw.items()}
+        if isinstance(raw, dict)
+        else _warn(key, raw, "a table")
     ),
     # Same reason as `brain.fallback`, one level down: each entry is compared
     # literally against the buildable kinds, so a stray space in a rendered
@@ -4257,6 +4365,127 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     ),
 }
 
+
+FIELD_CHOICES: dict[tuple[str, ...], tuple[str, ...]] = {
+    ("web", "token_storage"): _CONFIG_HOOKS["web.token_storage"].choices,
+    ("email", "outbound_approval_floor"): OUTBOUND_APPROVAL_POLICIES,
+    ("email", "confirm_sender_match"): CONFIRM_SENDER_MATCH_POLICIES,
+    ("brain", "kind"): BRAIN_KINDS,
+    # Empty is a value here: no failover (ISSUE-362).
+    ("brain", "fallback"): BRAIN_KINDS + ("",),
+    ("speech_gate", "mode"): SPEECH_GATE_MODES,
+    ("web", "map", "provider"): map_provider_names(),
+    ("logging", "output"): LOGGING_OUTPUTS,
+}
+"""Closed vocabularies, by path: a field whose value must be one of these.
+
+Each tuple is the validator's own constant, so a form offering the choices and
+the code checking them cannot disagree.
+"""
+
+MULTI_CHOICES: dict[tuple[str, ...], Callable[[], tuple[str, ...]]] = {
+    ("web", "auth"): lambda: WEB_AUTH_METHODS,
+    ("brain", "room_selectable"): lambda: BRAIN_KINDS,
+    ("experimental", "features"): lambda: tuple(_known_features()),
+}
+"""List fields whose elements come from a vocabulary, by path.
+
+Callables, so a vocabulary owned by a module the config-load path does not
+import is read only when a caller asks.
+"""
+
+
+def _known_features() -> dict[str, str]:
+    from .experimental import KNOWN_FEATURES
+
+    return KNOWN_FEATURES
+
+
+SECRET_ENV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
+    # Environment variable overrides for secrets (allows EnvironmentFile= usage).
+    # Naming convention: ISTOTA_<SECTION>_<FIELD>, matching the config dataclass
+    # path. Same convention as docker-compose env vars — single source of truth
+    # for "where does this credential come from" across all deploy paths.
+    ("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nextcloud", "app_password"),
+    # `[caldav]` is the section written for the shape with no Nextcloud, so
+    # this is that shape's calendar credential — and it was the only one in
+    # the tree reachable by no route but the config file. The standalone
+    # wizard had to write it into `config.toml` under a generated header
+    # whose own second line says secrets live in the sibling `istota.env`
+    # and never here. Redaction needs no companion entry: `password` is
+    # caught by `admin_config_view.SECRET_NAME_PATTERNS` on its name.
+    ("ISTOTA_CALDAV_PASSWORD", "caldav", "password"),
+    ("ISTOTA_EMAIL_IMAP_PASSWORD", "email", "imap_password"),
+    ("ISTOTA_EMAIL_SMTP_PASSWORD", "email", "smtp_password"),
+    ("ISTOTA_DEVELOPER_GITLAB_TOKEN", "developer", "gitlab_token"),
+    ("ISTOTA_DEVELOPER_GITHUB_TOKEN", "developer", "github_token"),
+    ("ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET", "google_workspace", "client_secret"),
+    ("ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
+    ("ISTOTA_WEB_SESSION_SECRET_KEY", "web", "session_secret_key"),
+    ("ISTOTA_SMS_TWILIO_ACCOUNT_SID", "sms.twilio", "account_sid"),
+    ("ISTOTA_SMS_TWILIO_AUTH_TOKEN", "sms.twilio", "auth_token"),
+    ("ISTOTA_SMS_TWILIO_API_KEY_SID", "sms.twilio", "api_key_sid"),
+    ("ISTOTA_SMS_TWILIO_API_KEY_SECRET", "sms.twilio", "api_key_secret"),
+    (
+        "ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID",
+        "sms.twilio",
+        "messaging_service_sid",
+    ),
+    ("ISTOTA_SMS_TELNYX_API_KEY", "sms.telnyx", "api_key"),
+    ("ISTOTA_SMS_TELNYX_PUBLIC_KEY", "sms.telnyx", "public_key"),
+    (
+        "ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID",
+        "sms.telnyx",
+        "messaging_profile_id",
+    ),
+    # The section moved under `cloud` and the variable names deliberately
+    # did not: these three are what an existing `secrets.env` carries, on a
+    # deployment whose config the role rewrites but whose environment file
+    # it does not. A rename here would take every Cloud deployment's
+    # credentials away at the upgrade that nested the block.
+    ("ISTOTA_WHATSAPP_ACCESS_TOKEN", "whatsapp.cloud", "access_token"),
+    ("ISTOTA_WHATSAPP_APP_SECRET", "whatsapp.cloud", "app_secret"),
+    ("ISTOTA_WHATSAPP_VERIFY_TOKEN", "whatsapp.cloud", "verify_token"),
+)
+"""``(env var, section, field)``: credentials the environment sets over the file.
+
+``ISTOTA_BRAIN_NATIVE_API_KEY`` is read beside this table, not in it.
+"""
+
+
+def _token_storage_from_env(raw: str) -> object:
+    value = raw.strip()
+    if not value:
+        return _KEEP
+    if value in WEB_TOKEN_STORAGE_MODES:
+        return value
+    report_problem(
+        "warning", ("web", "token_storage"),
+        "ISTOTA_WEB_TOKEN_STORAGE=%r is not a known value; ignoring", value,
+    )
+    return _KEEP
+
+
+ENV_OVERRIDES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Docker-path override for the web token-storage mode (not a secret, but it
+    # rides the same env channel as the other web knobs so the compose file can
+    # default the demo stack to encrypted without templating TOML).
+    ("ISTOTA_WEB_TOKEN_STORAGE", ("web", "token_storage")),
+    # Web auth-mode override (local single-user installs set ISTOTA_WEB_AUTH=none
+    # instead of templating TOML). Same validation as the TOML parse.
+    ("ISTOTA_WEB_AUTH", ("web", "auth")),
+)
+"""``(env var, path)``: non-secret settings the environment sets over the file.
+
+A key here is not changed by editing the file while the variable is set.
+``ISTOTA_DEFAULT_LOG_FILE`` is absent on purpose: it is a default the file
+overrides, not an override of the file.
+"""
+
+_ENV_OVERRIDE_PARSERS: dict[str, Callable[[str], object]] = {
+    "ISTOTA_WEB_TOKEN_STORAGE": _token_storage_from_env,
+    "ISTOTA_WEB_AUTH": lambda raw: normalize_auth_methods(raw, kind="warning") or _KEEP,
+}
 
 def _map_document(data: dict, config: Config) -> list[str]:
     """The mechanical half of the load, into ``config``; the unknown keys.
@@ -4359,7 +4588,10 @@ def load_config(config_path: Path | None = None) -> Config:
         data = tomli.load(f)
 
     if isinstance(data.get("scheduler"), dict) and "vault_sync_interval" in data["scheduler"]:
-        logger.warning("[scheduler] vault_sync_interval is retired and ignored")
+        report_problem(
+            "retired", ("scheduler", "vault_sync_interval"),
+            "[scheduler] vault_sync_interval is retired and ignored",
+        )
 
     config = Config()
     config.config_path = config_path
@@ -4393,7 +4625,8 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     if "ntfy" in data:
-        logger.warning(
+        report_problem(
+            "retired", ("ntfy",),
             "[ntfy] block in config.toml is no longer used — ntfy is now per-user "
             "and configured via the secrets table (web settings or `istota secret`)."
         )
@@ -4403,7 +4636,8 @@ def load_config(config_path: Path | None = None) -> Config:
         # into the single-axis selection model (selected ⇒ eager, else ⇒ menu),
         # so there are no skill-routing knobs left. Warn but don't fail so an
         # operator's stale config keeps loading.
-        logger.warning(
+        report_problem(
+            "retired", ("skills",),
             "[skills] block in config.toml is no longer used — skill disclosure "
             "is now intrinsic (no progressive_disclosure / always_eager / "
             "auto_lazy_threshold_chars knobs)."
@@ -4418,12 +4652,23 @@ def load_config(config_path: Path | None = None) -> Config:
     if "models" in data:
         models_section = data["models"]
         if not isinstance(models_section, dict):
+            report_problem(
+                "discarded", ("models",),
+                "[config] [models] must be a table, got %s; ignoring the section",
+                type(models_section).__name__,
+            )
             models_section = {}
         aliases = models_section.get("aliases", {})
         if not isinstance(aliases, dict):
+            report_problem(
+                "discarded", ("models", "aliases"),
+                "[config] [models.aliases] must be a table, got %s; ignoring the section",
+                type(aliases).__name__,
+            )
             aliases = {}
         if "roles" in models_section:
-            logging.getLogger("istota.config").warning(
+            report_problem(
+                "retired", ("models", "roles"),
                 "[models.roles] is ignored — rename it to [models.aliases]. "
                 "The old key no longer configures anything."
             )
@@ -4435,14 +4680,27 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if "experimental" in data:
         exp = data["experimental"]
-        feats = exp.get("features", []) if isinstance(exp, dict) else []
+        if not isinstance(exp, dict):
+            report_problem(
+                "discarded", ("experimental",),
+                "[config] [experimental] must be a table, got %s; ignoring the section",
+                type(exp).__name__,
+            )
+            exp = {}
+        feats = exp.get("features", [])
         if not isinstance(feats, list):
+            report_problem(
+                "discarded", ("experimental", "features"),
+                "[config] experimental.features=%s is not a list; ignoring the value "
+                "and keeping the default", Value(feats),
+            )
             feats = []
         config.experimental = ExperimentalConfig(features=[str(f) for f in feats])
         from .experimental import KNOWN_FEATURES
         for f in config.experimental.features:
             if f not in KNOWN_FEATURES:
-                logger.warning(
+                report_problem(
+                    "warning", ("experimental", "features"),
                     "[experimental] unknown feature %r — typo or stale flag", f,
                 )
 
@@ -4454,7 +4712,10 @@ def load_config(config_path: Path | None = None) -> Config:
         if isinstance(raw_defaults, list):
             config.default_briefings = _parse_briefing_specs(raw_defaults)
         else:
-            logger.warning("[[default_briefings]] must be a list of tables; ignoring")
+            report_problem(
+                "discarded", ("default_briefings",),
+                "[[default_briefings]] must be a list of tables; ignoring",
+            )
 
     # Module-owned shared briefing blocks. An explicit ``[[briefing_shared_blocks]]``
     # (operator/Ansible) replaces the batteries-included defaults wholesale; an
@@ -4465,8 +4726,9 @@ def load_config(config_path: Path | None = None) -> Config:
         if isinstance(raw_shared, list):
             config.briefing_shared_blocks = _parse_shared_block_specs(raw_shared)
         else:
-            logger.warning(
-                "[[briefing_shared_blocks]] must be a list of tables; ignoring"
+            report_problem(
+                "discarded", ("briefing_shared_blocks",),
+                "[[briefing_shared_blocks]] must be a list of tables; ignoring",
             )
     else:
         config.briefing_shared_blocks = _parse_shared_block_specs(DEFAULT_SHARED_BLOCKS)
@@ -4477,9 +4739,10 @@ def load_config(config_path: Path | None = None) -> Config:
         # block from a pre-removal deploy must not fail load, but the operator
         # needs to know nothing is serving that directory on istota's behalf
         # any more — and that nginx may still be.
-        retired = [k for k in ("enabled", "base_path") if k in s]
+        retired = [k for k in ("enabled", "base_path") if k in s] if isinstance(s, dict) else []
         if retired:
-            logger.warning(
+            report_problem(
+                "retired", ("site", retired[0]) if len(retired) == 1 else ("site",),
                 "[site] %s no longer supported and ignored — the agent-writable "
                 "static web root was removed as an ungated exfiltration channel. "
                 "Remove the key(s); if a web server still serves that directory, "
@@ -4488,7 +4751,8 @@ def load_config(config_path: Path | None = None) -> Config:
             )
 
     if "shared_room_data_policy" in (data.get("rooms") or {}):
-        logger.warning(
+        report_problem(
+            "retired", ("rooms", "shared_room_data_policy"),
             "[rooms] shared_room_data_policy is no longer supported and is being "
             "ignored. A member's turn in a shared room runs with that member's "
             "full reach, and their personal memory is never loaded there "
@@ -4496,7 +4760,8 @@ def load_config(config_path: Path | None = None) -> Config:
         )
 
     if "docker_cli" in (data.get("devbox") or {}):
-        logger.warning(
+        report_problem(
+            "retired", ("devbox", "docker_cli"),
             "[devbox] docker_cli is no longer supported and is being ignored. "
             "Nothing in istota calls the Docker CLI: `devbox reset` is a "
             "request on the exec transport and the credential proxy identifies "
@@ -4509,8 +4774,9 @@ def load_config(config_path: Path | None = None) -> Config:
         # rather than renamed: the framework database is bound into no sandbox
         # for anyone now, so there is no bind left to widen and a file still
         # carrying this needs telling rather than a generic "unrecognised".
-        if "sandbox_admin_db_write" in sec:
-            logger.warning(
+        if isinstance(sec, dict) and "sandbox_admin_db_write" in sec:
+            report_problem(
+                "retired", ("security", "sandbox_admin_db_write"),
                 "[security] sandbox_admin_db_write is no longer supported and is "
                 "being ignored. The framework database is not bound into the "
                 "sandbox at all any more (for admins or anyone else); writes go "
@@ -4545,7 +4811,8 @@ def load_config(config_path: Path | None = None) -> Config:
         # `CONFIG_LOAD_CHECKS`, so this warning stays the only one on this path
         # rather than being logged a second time by `_validate_forge_clis`.
         if config.security.sandbox_enabled and not config.security.skill_proxy_enabled:
-            logger.warning(
+            report_problem(
+                "warning", ("security", "skill_proxy_enabled"),
                 "[security] sandbox_enabled with skill_proxy_enabled = false: "
                 "every configured service credential stays in the task "
                 "environment, readable by the model from inside the sandbox "
@@ -4559,59 +4826,19 @@ def load_config(config_path: Path | None = None) -> Config:
     # of the two keys the file names and whichever it inherits.
     _warn_ro_paths_over_control_tree(config)
     if config.security.credential_broker.enabled and not config.security.sandbox_enabled:
-        logger.warning("Credential broker enabled without sandboxing: values are not contained")
+        report_problem(
+            "warning", ("security", "credential_broker", "enabled"),
+            "Credential broker enabled without sandboxing: values are not contained",
+        )
     if config.security.credential_broker.enforce_reveal and not config.security.credential_broker.enabled:
-        logger.warning("[security.credential_broker] enforce_reveal has no effect while enabled = false")
+        report_problem(
+            "warning", ("security", "credential_broker", "enforce_reveal"),
+            "[security.credential_broker] enforce_reveal has no effect while enabled = false",
+        )
 
     config.admin_users = load_admin_users()
 
-    # Environment variable overrides for secrets (allows EnvironmentFile= usage).
-    # Naming convention: ISTOTA_<SECTION>_<FIELD>, matching the config dataclass
-    # path. Same convention as docker-compose env vars — single source of truth
-    # for "where does this credential come from" across all deploy paths.
-    _env_secret_overrides = [
-        ("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nextcloud", "app_password"),
-        # `[caldav]` is the section written for the shape with no Nextcloud, so
-        # this is that shape's calendar credential — and it was the only one in
-        # the tree reachable by no route but the config file. The standalone
-        # wizard had to write it into `config.toml` under a generated header
-        # whose own second line says secrets live in the sibling `istota.env`
-        # and never here. Redaction needs no companion entry: `password` is
-        # caught by `admin_config_view.SECRET_NAME_PATTERNS` on its name.
-        ("ISTOTA_CALDAV_PASSWORD", "caldav", "password"),
-        ("ISTOTA_EMAIL_IMAP_PASSWORD", "email", "imap_password"),
-        ("ISTOTA_EMAIL_SMTP_PASSWORD", "email", "smtp_password"),
-        ("ISTOTA_DEVELOPER_GITLAB_TOKEN", "developer", "gitlab_token"),
-        ("ISTOTA_DEVELOPER_GITHUB_TOKEN", "developer", "github_token"),
-        ("ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET", "google_workspace", "client_secret"),
-        ("ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
-        ("ISTOTA_WEB_SESSION_SECRET_KEY", "web", "session_secret_key"),
-        ("ISTOTA_SMS_TWILIO_ACCOUNT_SID", "sms.twilio", "account_sid"),
-        ("ISTOTA_SMS_TWILIO_AUTH_TOKEN", "sms.twilio", "auth_token"),
-        ("ISTOTA_SMS_TWILIO_API_KEY_SID", "sms.twilio", "api_key_sid"),
-        ("ISTOTA_SMS_TWILIO_API_KEY_SECRET", "sms.twilio", "api_key_secret"),
-        (
-            "ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID",
-            "sms.twilio",
-            "messaging_service_sid",
-        ),
-        ("ISTOTA_SMS_TELNYX_API_KEY", "sms.telnyx", "api_key"),
-        ("ISTOTA_SMS_TELNYX_PUBLIC_KEY", "sms.telnyx", "public_key"),
-        (
-            "ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID",
-            "sms.telnyx",
-            "messaging_profile_id",
-        ),
-        # The section moved under `cloud` and the variable names deliberately
-        # did not: these three are what an existing `secrets.env` carries, on a
-        # deployment whose config the role rewrites but whose environment file
-        # it does not. A rename here would take every Cloud deployment's
-        # credentials away at the upgrade that nested the block.
-        ("ISTOTA_WHATSAPP_ACCESS_TOKEN", "whatsapp.cloud", "access_token"),
-        ("ISTOTA_WHATSAPP_APP_SECRET", "whatsapp.cloud", "app_secret"),
-        ("ISTOTA_WHATSAPP_VERIFY_TOKEN", "whatsapp.cloud", "verify_token"),
-    ]
-    for env_var, section_path, field_name in _env_secret_overrides:
+    for env_var, section_path, field_name in SECRET_ENV_OVERRIDES:
         val = os.environ.get(env_var)
         if val:
             section = config
@@ -4619,24 +4846,14 @@ def load_config(config_path: Path | None = None) -> Config:
                 section = getattr(section, part)
             setattr(section, field_name, val)
 
-    # Docker-path override for the web token-storage mode (not a secret, but it
-    # rides the same env channel as the other web knobs so the compose file can
-    # default the demo stack to encrypted without templating TOML).
-    _token_storage_env = os.environ.get("ISTOTA_WEB_TOKEN_STORAGE", "").strip()
-    if _token_storage_env:
-        if _token_storage_env in ("ephemeral", "encrypted"):
-            config.web.token_storage = _token_storage_env
-        else:
-            logger.warning(
-                "ISTOTA_WEB_TOKEN_STORAGE=%r is not a known value; ignoring",
-                _token_storage_env,
-            )
-
-    # Web auth-mode override (local single-user installs set ISTOTA_WEB_AUTH=none
-    # instead of templating TOML). Same validation as the TOML parse.
-    _web_auth_env = normalize_auth_methods(os.environ.get("ISTOTA_WEB_AUTH", ""))
-    if _web_auth_env:
-        config.web.auth = _web_auth_env
+    for env_var, path in ENV_OVERRIDES:
+        value = _ENV_OVERRIDE_PARSERS[env_var](os.environ.get(env_var, ""))
+        if value is _KEEP:
+            continue
+        section = config
+        for part in path[:-1]:
+            section = getattr(section, part)
+        setattr(section, path[-1], value)
 
     # Native-brain API key lives two levels deep (brain.native.api_key), so it
     # doesn't fit the flat section/field table above.
@@ -4715,11 +4932,12 @@ def load_config(config_path: Path | None = None) -> Config:
             brain = _validator_for(namespace)
             if brain is None:
                 return
+            path = ("models", "aliases", str(name))
             for _msg in brain.validate_alias_override(name, model_str):
                 if namespace == LEGACY_NAMESPACE:
-                    _logger.warning("[models.aliases] %s", _msg)
+                    report_problem("warning", path, "[models.aliases] %s", _msg)
                 else:
-                    _logger.warning("[models.aliases] (%s) %s", namespace, _msg)
+                    report_problem("warning", path, "[models.aliases] (%s) %s", namespace, _msg)
 
         for _name, _value in config.models.aliases.items():
             if isinstance(_value, str):
@@ -4822,7 +5040,7 @@ def sms_credential_errors(config: Config) -> list[str]:
     read — so the role's own deploy-time tasks saw a config the daemon they
     were provisioning for would have loaded fine, and the ISSUE-058 validator,
     which touches no SMS at all, failed the play. Every other credential in
-    ``_env_secret_overrides`` already behaves this way: absent at load,
+    ``SECRET_ENV_OVERRIDES`` already behaves this way: absent at load,
     reported by doctor, fatal only at use. `make_provider_registry` skips an
     incomplete provider rather than raising, so the runtime consequence is a
     send recorded ``unconfigured`` — a state the transport already models.
@@ -4904,16 +5122,20 @@ def sms_config_errors(config: Config) -> list[str]:
 
 
 def _validate_nextcloud_workspace(config: Config) -> None:
-    """A Nextcloud URL needs a workspace: the files are reached through it.
+    """A Nextcloud URL needs a workspace, local or the mount.
 
     There used to be a third shape, a URL with no workspace, where each file
     operation shelled out to the rclone CLI. Most of the daemon skipped itself
     there and the image never shipped rclone, so it is refused rather than run.
+    Keyed on the URL, not on ``storage_is_nextcloud``: that one requires the
+    mount path, which fills ``workspace_path`` when it is unset, so a refusal
+    keyed on it could never fire.
     """
-    if config.storage_is_nextcloud and config.workspace_path is None:
+    if config.nextcloud_enabled and config.workspace_path is None:
         raise ValueError(
             "[nextcloud] url is set but no workspace is configured: set "
-            "workspace_path to the mount of the bot's Nextcloud files"
+            "workspace_path to a local directory, or to the mount of the bot's "
+            "Nextcloud files together with workspace_mount_path"
         )
 
 
@@ -5459,8 +5681,10 @@ def _validate_forge_clis(config: "Config") -> None:
         if result.status in (WARN, FAIL):
             # No literal namespace prefix: `result.name` already carries one,
             # and not every result reaching here is a `developer.*` one — the
-            # skill-proxy posture warning is a `security.*` check.
-            _logger.warning(
+            # skill-proxy posture warning is a `security.*` check. A check name
+            # is not a config key, so the problem is placed on its section.
+            report_problem(
+                "warning", (result.name.split(".", 1)[0],),
                 "%s: %s%s",
                 result.name,
                 result.detail,
@@ -5478,13 +5702,15 @@ def _validate_configured_model_references(config: "Config") -> None:
     from .brain.claude_code import ClaudeCodeBrain
 
     brain = ClaudeCodeBrain()
-    logger = logging.getLogger("istota.config")
     for block, model in (
         ("brain.claude_code", config.brain.claude_code.model),
         ("brain.tmux", config.brain.tmux.model),
     ):
         if model and not brain.is_valid_model_reference(model):
-            logger.warning("[%s] invalid model reference %r", block, model)
+            report_problem(
+                "warning", (*block.split("."), "model"),
+                "[%s] invalid model reference %r", block, model,
+            )
 
 
 def _validate_advisor_model(config: "Config") -> None:
@@ -5507,20 +5733,22 @@ def _validate_advisor_model(config: "Config") -> None:
     raw = (config.advisor_model or "").strip()
     if not raw:
         return
-    _logger = logging.getLogger("istota.config")
+    path = ("advisor_model",)
 
     from .brain._aliases import split_effort
 
     base, suffix_effort = split_effort(raw)
     if suffix_effort:
-        _logger.warning(
+        report_problem(
+            "warning", path,
             "advisor_model=%r carries a :%s effort modifier; the --advisor CLI "
             "flag takes no effort, so it is dropped at resolution time",
             raw, suffix_effort,
         )
 
     if config.brain.kind not in _ANTHROPIC_BRAIN_KINDS:
-        _logger.warning(
+        report_problem(
+            "warning", path,
             "advisor_model=%r is set but brain.kind=%r is not an anthropic-"
             "namespace brain; the advisor tool is Anthropic-only and will "
             "never run for this task",
@@ -5532,9 +5760,10 @@ def _validate_advisor_model(config: "Config") -> None:
     brain = ClaudeCodeBrain()
     pair = brain.resolve_alias(base)
     if not brain.is_valid_model_reference(base):
-        _logger.warning("advisor_model=%r is an invalid model reference", raw)
+        report_problem("warning", path, "advisor_model=%r is an invalid model reference", raw)
     if pair is not None and pair[0] is None:
-        _logger.warning(
+        report_problem(
+            "warning", path,
             "advisor_model=%r resolves to no concrete model (e.g. the "
             '"default" alias); the CLI will reject it as an --advisor value',
             raw,
@@ -5604,7 +5833,8 @@ def _validate_brain_fallback(config: "Config") -> None:
     _logger = logging.getLogger("istota.config")
     fb = (config.brain.fallback or "").strip()
     if fb and fb not in KNOWN_BRAIN_KINDS:
-        _logger.warning(
+        report_problem(
+            "discarded", ("brain", "fallback"),
             "[brain] fallback=%r is not a known brain kind %s; disabling fallback",
             fb, sorted(KNOWN_BRAIN_KINDS),
         )
@@ -5616,7 +5846,10 @@ def _validate_brain_fallback(config: "Config") -> None:
         # here would take that away with no way to express it — the resolved
         # config is the only thing that can tell the two apart, which is why
         # `effective_fallback_kind` carries the per-task half of this rule.
-        _logger.warning(
+        # A warning rather than a discard: a self-fallback could never fire,
+        # so blanking it changes nothing a task would see.
+        report_problem(
+            "warning", ("brain", "fallback"),
             "[brain] fallback=%r is the only brain kind this deployment runs; a "
             "self-fallback can't help — disabling it",
             fb,
@@ -5648,7 +5881,8 @@ def _validate_wordpress_private_hosts(config: "Config") -> None:
         if not re.match(WORDPRESS_PRIVATE_HOST_PATTERN, str(entry).strip())
     ]
     if malformed:
-        logging.getLogger("istota.config").warning(
+        report_problem(
+            "warning", ("wordpress", "private_hosts"),
             "[wordpress] private_hosts entry %s is not a bare host name or IP "
             "address; entries are matched by exact name, so it lifts the "
             "private-address refusal for no site (write the host alone, with "
@@ -5682,7 +5916,8 @@ def _validate_room_selectable(config: "Config") -> None:
         if name not in KNOWN_BRAIN_KINDS
     ]
     if unknown:
-        logging.getLogger("istota.config").warning(
+        report_problem(
+            "warning", ("brain", "room_selectable"),
             "[brain] room_selectable names %s, which %s not a known brain kind "
             "%s; no room will be offered %s",
             ", ".join(repr(name) for name in unknown),
@@ -5722,7 +5957,7 @@ def _validate_claude_code_brain(config: "Config") -> None:
     any stale reading as too old", which is a coherent thing to ask for.
     """
     cc = config.brain.claude_code
-    _logger = logging.getLogger("istota.config")
+    base = ("brain", "claude_code")
 
     def _clamp_percent(name: str, raw: float, default: float) -> float:
         # A non-finite value is not "out of range", it is "not a number", and
@@ -5731,14 +5966,16 @@ def _validate_claude_code_brain(config: "Config") -> None:
         # alarming. Substitute the shipping default instead. (NaN compares
         # False against everything, so min/max would silently keep the 0.0.)
         if not math.isfinite(raw):
-            _logger.warning(
+            report_problem(
+                "discarded", (*base, name),
                 "[brain.claude_code] %s=%r is not a finite number; using %r",
                 name, raw, default,
             )
             return default
         clamped = min(100.0, max(0.0, float(raw)))
         if clamped != raw:
-            _logger.warning(
+            report_problem(
+                "discarded", (*base, name),
                 "[brain.claude_code] %s=%r is outside [0, 100]; using %r",
                 name, raw, clamped,
             )
@@ -5757,7 +5994,8 @@ def _validate_claude_code_brain(config: "Config") -> None:
     )
 
     if cc.subscription_usage_warn_percent > cc.subscription_usage_high_percent:
-        _logger.warning(
+        report_problem(
+            "discarded", (*base, "subscription_usage_warn_percent"),
             "[brain.claude_code] subscription_usage_warn_percent=%r is above "
             "subscription_usage_high_percent=%r, which leaves no amber band; "
             "lowering warn to %r",
@@ -5772,7 +6010,8 @@ def _validate_claude_code_brain(config: "Config") -> None:
     # sailing through — every comparison against NaN is False, which is exactly
     # how a floor written the obvious way lets one past.
     if not (cc.subscription_usage_cache_ttl_seconds >= 1):
-        _logger.warning(
+        report_problem(
+            "discarded", (*base, "subscription_usage_cache_ttl_seconds"),
             "[brain.claude_code] subscription_usage_cache_ttl_seconds=%r would "
             "fetch on every read; using 1",
             cc.subscription_usage_cache_ttl_seconds,
@@ -5780,7 +6019,8 @@ def _validate_claude_code_brain(config: "Config") -> None:
         cc.subscription_usage_cache_ttl_seconds = 1
 
     if not (cc.subscription_usage_timeout_seconds >= 1):
-        _logger.warning(
+        report_problem(
+            "discarded", (*base, "subscription_usage_timeout_seconds"),
             "[brain.claude_code] subscription_usage_timeout_seconds=%r is below "
             "one second; using 1",
             cc.subscription_usage_timeout_seconds,
@@ -5791,7 +6031,8 @@ def _validate_claude_code_brain(config: "Config") -> None:
         # admin config pane cannot serialize — starlette renders JSON with
         # allow_nan=False, so one `inf` here 500s GET /api/admin/config for the
         # whole instance.
-        _logger.warning(
+        report_problem(
+            "discarded", (*base, "subscription_usage_timeout_seconds"),
             "[brain.claude_code] subscription_usage_timeout_seconds=%r is not "
             "finite; using %r",
             cc.subscription_usage_timeout_seconds,

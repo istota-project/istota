@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import types
+from datetime import datetime, timezone
 
 import pytest
 
@@ -970,6 +971,7 @@ class TestConfigFromDocument:
 
 from istota import user_profiles  # noqa: E402
 from istota.config import Config  # noqa: E402
+from istota import apply  # noqa: E402
 from istota.lib import rclone_conf  # noqa: E402
 from istota.webui import auth  # noqa: E402
 
@@ -1004,9 +1006,11 @@ def _written(root):
 
 @pytest.fixture
 def pinned(monkeypatch):
-    """The two random choices the writer makes, fixed so two runs compare."""
+    """The two random choices the writer makes, and managed.json's clock,
+    fixed so two runs compare."""
     monkeypatch.setattr(setup_wizard.secrets, "token_hex", lambda n: "k" * (2 * n))
     monkeypatch.setattr(rclone_conf, "_new_iv", lambda: b"i" * 16)
+    monkeypatch.setattr(apply, "_utc_now", lambda: datetime(2026, 10, 12, tzinfo=timezone.utc))
 
 
 class TestFinish:
@@ -1032,6 +1036,27 @@ class TestFinish:
         assert _written(dirs.data_dir) == _written(terminal / "data")
         assert _written(dirs.vm_dir) == _written(terminal / "vm")
         assert (dirs.vm_dir / "rclone.conf").exists()
+        managed = json.loads((dirs.data_dir / "config" / "managed.json").read_text())
+        assert {name: (e["managed"], e["source"]) for name, e in managed.items()} == {
+            "config": (False, "setup"), "secrets": (False, "setup"), "admins": (False, "setup"),
+        }
+
+    def test_nextcloud_with_a_local_workspace_writes_no_mount(self, unlocked, dirs):
+        _app, client = unlocked
+        _draft(client, **{
+            **READY, "storage": "nextcloud", "workspace": "local",
+            "nextcloud_url": "https://cloud.example.com", "nextcloud_username": "istota",
+            "nextcloud_app_password": "nc-app-password", "user_id": "alice", "talk_enabled": True,
+        })
+        resp = _finish(client)
+        assert resp.status_code == 200, resp.text
+
+        host_env = (dirs.vm_dir / "host.env").read_text()
+        assert "STORAGE=local" in host_env.splitlines()
+        assert not (dirs.vm_dir / "rclone.conf").exists()
+        config = (dirs.data_dir / "config" / "config.toml").read_text()
+        assert "https://cloud.example.com" in config
+        assert "mount_path" not in config
 
     def test_a_host_folder_vm_keeps_its_folder(self, unlocked, dirs):
         _app, client = unlocked
@@ -1513,6 +1538,7 @@ _REFUSALS = [
     ({"listen_port": "eighty"}, "listen_port"),
     ({"storage": "attic"}, "storage"),
     ({"storage": "nextcloud"}, "nextcloud_url"),
+    ({**NEXTCLOUD, "workspace": "attic"}, "workspace"),
     ({"talk_enabled": "yes"}, "talk_enabled"),
     ({"brain_kind": "oracle"}, "brain_kind"),
     ({"brain_kind": "native"}, "native_model"),

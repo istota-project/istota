@@ -50,7 +50,7 @@ After the page finishes, `istota-stack` installs `.env` and `host.env`, builds w
 - On a cloud machine behind its provider's NAT, the printed address is the private one; open the public address instead, and the code still works.
 - It refuses when `config.toml` exists. Change a configured stack by editing `config.toml`, with `istota-stack apply`, or with `istota-stack setup --force`.
 
-`istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `journalctl -u istota-setup` has the same lines.
+`istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `install.sh --server` does the same and prints them in the terminal. `journalctl -u istota-setup` has the same lines.
 
 The page leaves out the operator features: WhatsApp, the Talk signaling server, the developer skill, devboxes, Nextcloud login, the DAV prefix and the auto-share setting. Set those up afterwards in `config.toml` or with the terminal setup.
 
@@ -101,6 +101,10 @@ istota-stack down && istota-stack up
 A credential is a file under `/srv/app/istota/secrets/` (0400, owned by uid 10001); replace the file and restart. An existing install keeps the `config.toml` its old entrypoint rendered, unchanged, as its own file; `docker/istota/config-diff.py` in the image compares two configs by key if you want to see what an old render would have changed.
 
 ## Upgrading an existing deployment
+
+Updates keep the current and previous deployment images for rollback and remove older Istota image tags. Before building and after each update attempt, including a failed build or start, `istota-stack update` removes dangling images labeled for the Istota Compose project and trims unused build cache toward a 2 GB target. Tagged images, containers and volumes are preserved by this cache cleanup. Unlabeled dangling images are left alone because their owner is unknown.
+
+Stack builds use Docker's default builder explicitly. Its cache is shared with other builds on that Docker daemon, so cleanup can make those builds slower too. The target bounds reclaimable cache, not total Docker storage: layers needed by retained images and active builds cannot be reclaimed. Each prune prints the space it reclaimed; a cleanup failure prints a warning without changing the update's exit status.
 
 ### The daemon service is called `daemon`
 
@@ -238,17 +242,26 @@ What each devbox gets, and nothing else:
 
 ## Storage
 
-Three modes. `STORAGE` in `host.env` says which one the machine provides, and `config.toml` says where the workspace is; `istota setup` writes both from your answers:
+Two questions decide the storage: whether istota uses a Nextcloud (`[nextcloud] url`), and where the workspace lives (`workspace_mount_path`, when it is a mount). `STORAGE` in `host.env` says which mount, if any, the machine provides. `istota setup` writes all three from your answers:
 
-| Mode | `STORAGE` | `config.toml` | Workspace |
+| Mode | `config.toml` | Workspace | `host.env` |
 |---|---|---|---|
-| Local (the default) | `local` | no `[nextcloud] url` | `/data/workspace` on the state volume |
-| Full Nextcloud integration | `nextcloud` | `url` names your Nextcloud | the VM's rclone mount of the bot's files, bound at `/mnt/shared` |
-| Host folder (the [local VM](#local-vm)) | `host-folder` | no `[nextcloud] url`; `workspace_mount_path = "/mnt/shared"` | a Mac folder Lima shares into the VM at `/srv/mount/host-folder`, bound at `/mnt/shared` |
+| Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Nextcloud, local workspace | `url` names your Nextcloud, no `workspace_mount_path` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Full Nextcloud integration | `url` names your Nextcloud, `workspace_mount_path = "/mnt/shared"` | the VM's rclone mount of the bot's files, bound at `/mnt/shared` | `STORAGE=nextcloud` |
+| Host folder (the [local VM](#local-vm)) | no `[nextcloud] url`; `workspace_mount_path = "/mnt/shared"` | a Mac folder Lima shares into the VM at `/srv/mount/host-folder`, bound at `/mnt/shared` | `STORAGE=host-folder` |
+
+An older config may name the mount `nextcloud_mount_path`, the key's old name; it is read as `workspace_mount_path`.
+
+When you connect a Nextcloud, setup asks where the workspace should live: `mount` (the default) or `local`. A scripted run takes `--workspace mount|local` and defaults to `mount` when it is given `--nextcloud-url`. The browser setup asks the same on its Nextcloud screen, with the mount chosen until you pick "On this server". With either answer the bot is a regular user on your Nextcloud: Talk, the `nextcloud` skill's user, group, Talk and share-listing verbs, and avatars all work.
+
+With a local workspace, `provision.sh` installs no rclone and no mount unit, and setup writes no `dav_prefix` and turns `auto_share_bot_dir` off, since nothing of the workspace is in Nextcloud. Users reach their files in the web UI, not in Nextcloud. A file posted in Talk is fetched into the room's folder, `Channels/<room>/media/`, and `nextcloud talk share-file` uploads a copy before posting it. The skill's `files` verbs, `share create` and `share link` refuse, because the file they name is not in Nextcloud. Back up the `istota_data` volume, which now holds the workspace too (see [Backing up a local install](#backing-up-a-local-install)).
 
 In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `workspace_mount_path` as `/mnt/shared`, and the mount's `rclone.conf` (one WebDAV remote named `nextcloud`, the app password obscured as `rclone obscure` does it) with `RCLONE_REMOTE=nextcloud` in `host.env`, so the mount needs no hand-written config.
 
 The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. A host folder must be a `virtiofs` mount with a `.istota-workspace` file at its root. A `workspace_mount_path` with no Nextcloud URL and no type that `STORAGE` declares is refused too, so a config for one mode does not start on a machine provisioned for another. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
+
+To move an install in full integration to a local workspace, see [Moving to a local workspace](moving-to-a-local-workspace.md).
 
 Workspace files have no versions or trash in either mode.
 
@@ -292,7 +305,7 @@ To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `
 
 | Volume | Purpose |
 |---|---|
-| `istota_data` | Istota's `/data` — config, databases, and in local storage mode the workspace (`/data/workspace`). **This is the one to back up.** |
+| `istota_data` | Istota's `/data`: the databases (`/data/db`), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a bind of the VM's config directory, not part of the volume. **This is the one to back up.** |
 | `browser_profile` | Persistent Chrome profiles per user, including their logins; also the console TLS certificate and parked legacy profile |
 
 In full Nextcloud integration and on the local VM the workspace is not a volume: it is the VM's rclone mount or the Mac folder, bound at `/mnt/shared`.
@@ -315,6 +328,21 @@ What differs from a server:
 - **Releases.** The VM verifies the tag as a server does. After each `update` the Mac's `istota-stack` copies itself, the `istota` shim and the Lima template out of the VM's verified checkout.
 - **Backups.** The database snapshots and the config copies land in the Mac folder, and `istota-stack update`, `setup` and `apply` copy `.env` and `host.env` there too (`Backups/config/<date>/`). The master key goes to the Mac's login Keychain. `istota-stack restore` on the Mac rebuilds a lost VM from the two; in the VM, `istota-stack restore` is the half that runs `istota migrate restore-workspace` with the key on stdin, onto a stack that was never set up.
 - **The folder's marker.** The daemon will not start without `.istota-workspace` at the folder's root, and `istota doctor`'s `runtime.mount_liveness` fails without it on a running stack. A folder that is renamed or on an unplugged volume reads as an empty `virtiofs` mount, and the marker is how the stack tells.
+
+### Backing up a local install
+
+Istota backs up nothing but its databases. On a timer it snapshots them to `[scheduler] db_backup_dir`, by default `Backups/db/snapshots` under the workspace. In full Nextcloud integration that is on the mount, so the snapshots leave the VM. In local storage mode it is `/data/workspace/Backups/db/snapshots`, on the same `istota_data` volume as the databases themselves: a snapshot there gets you back from a corrupted database file, not from losing the volume. `istota doctor` reports this as a warning under `backups.off_volume`, and `runtime.workspace_disk` warns when the volume runs low on space.
+
+The workspace and the volume as a whole are yours to back up. Either back up the volume with whatever backs up the VM's disk, or stop the stack and archive it:
+
+```bash
+istota-stack down
+docker run --rm -v istota_istota_data:/data:ro -v "$PWD":/backup alpine \
+  tar -czf /backup/istota-data.tar.gz -C /data .
+istota-stack up
+```
+
+Compose prefixes the volume with the project name, so on the VM it is `istota_istota_data`. Unless a secrets file supplies it, the archive holds `/data/.secret_key` beside the databases it decrypts, so keep it somewhere at least as private as the VM (see `docs/deployment/security.md`). To keep the database snapshots off the volume without archiving it, set `db_backup_dir` to a directory on another disk mounted into the stack.
 
 ## Container logs
 

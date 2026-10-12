@@ -72,3 +72,28 @@ def list_folder(token: str, folder: str, page_token: str | None) -> tuple[list[D
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
         logger.warning("Google Drive listing failed type=%s", type(exc).__name__)
         raise DriveError(502, "Could not load Google Drive. Try again.") from exc
+
+
+def parent_folder(token: str, file_id: str) -> str:
+    if not DRIVE_ID.fullmatch(file_id):
+        raise DriveError(400, "Invalid Drive file.")
+    try:
+        with httpx.Client(trust_env=False, timeout=10.0) as client:
+            response = client.get(
+                f"https://www.googleapis.com/drive/v3/files/{file_id}",
+                params={"fields": "parents", "supportsAllDrives": "true"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if response.status_code != 200:
+            logger.warning("Google Drive parent lookup failed status=%s", response.status_code)
+            message = RECONNECT_MESSAGE if response.status_code == 401 else "Could not find the containing folder in Google Drive."
+            raise DriveError(502, message)
+        parents = response.json().get("parents", [])
+        if not parents:
+            raise DriveError(404, "Containing folder is unavailable.")
+        if not isinstance(parents, list) or not isinstance(parents[0], str) or not DRIVE_ID.fullmatch(parents[0]):
+            raise ValueError("invalid parent")
+        return parents[0]
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Google Drive parent lookup failed type=%s", type(exc).__name__)
+        raise DriveError(502, "Could not find the containing folder in Google Drive.") from exc

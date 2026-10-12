@@ -1,16 +1,19 @@
-"""Snapshot local SQLite DBs to durable (off-host) storage.
+"""Snapshot local SQLite DBs to a backup directory.
 
 The framework ``istota.db`` and every per-user module DB (the set is
-``modules.MODULE_NAMES``, never a copy of it) now live on local disk
-(``Config.module_db_path``) so they can run WAL without SIGBUSing on the FUSE
-mount. That took them out of the
-Nextcloud-synced workspaces, so this restores off-host durability: on a timer,
-snapshot each live DB to a backup directory on the Nextcloud mount.
+``modules.MODULE_NAMES``, never a copy of it) live on local disk
+(``Config.module_db_path``) so they can run WAL without SIGBUSing on a FUSE
+mount. On a timer this snapshots each live DB into ``db_backup_dir``, by
+default ``{workspace}/Backups/db/snapshots``. Under the Nextcloud mount that
+is off the host. On a local workspace it is the same volume as the databases,
+which still protects against a corrupted DB file but not against losing the
+volume; ``doctor``'s ``backups.off_volume`` says so, and
+``_destination_is_durable`` deliberately does not refuse it.
 
 The snapshot uses SQLite's online backup API (``Connection.backup``), which
 produces a consistent copy of a *live* WAL DB without stopping writers and
 without copying the ``-wal`` / ``-shm`` sidecars. The destination is a plain
-rollback-journal DB file — safe to sit on the FUSE mount because nothing ever
+rollback-journal DB file — safe to sit on a FUSE mount because nothing ever
 opens it in WAL there; it's cold storage. A ``wal_checkpoint(TRUNCATE)`` runs
 first to keep the source WAL small.
 
@@ -496,7 +499,7 @@ def backup_databases(
     root = backup_destination(config)
     if root is None:
         logger.warning(
-            "db_backup skipped: no db_backup_dir and no workspace_mount_path — "
+            "db_backup skipped: no db_backup_dir and no workspace_path — "
             "local DBs have no durable backup target configured"
         )
         return []

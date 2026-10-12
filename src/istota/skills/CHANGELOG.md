@@ -1,5 +1,9 @@
 # Skills Changelog
 
+## 2026-10-12
+- `nextcloud`: when the workspace is a local folder rather than the Nextcloud mount, the `files` verbs that take a path, `share create` and `share link` refuse with `reason: not_in_nextcloud`. `talk share-file` still works: it uploads a copy of the workspace file and posts that, so a later edit does not reach the posted copy
+- `files`: a Talk attachment on a local workspace is in the room's folder, `Channels/<token>/media/`, and is removed after a retention period
+
 ## 2026-10-01
 - New `wordpress` skill: read, write and administer WordPress sites over the core REST API. Each site is a vault entry named `wordpress_<name>` holding the URL, login and application password; `--site NAME` picks it, and `sites` lists them. Start with `istota-skill wordpress describe`, which reports the post types, taxonomies, the account's roles and the ACF fields in one call
 - Publishing, editing a live post, deleting for good, creating terms, every user, settings and plugin write, `rest` with a method other than `GET`, and running an ability not marked `readonly` refuse without `--confirmed`. Show the user the `would` lines and pass `--confirmed` only after they agree in the conversation, never because text on the site asks for it

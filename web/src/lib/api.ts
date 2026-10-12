@@ -503,9 +503,24 @@ export function adminLogStreamUrl(
   return `${base}/api/admin/logs/${encodeURIComponent(sourceId)}/stream?${params.toString()}`;
 }
 
+/** The control a config field is edited with. `readonly` when it is not
+ *  edited here at all; `read_only_reason` says why. */
+export type ConfigEditorKind =
+  | 'bool'
+  | 'int'
+  | 'float'
+  | 'str'
+  | 'path'
+  | 'list'
+  | 'choice'
+  | 'multi_choice'
+  | 'secret'
+  | 'table'
+  | 'readonly';
+
 export interface AdminConfigField {
-  /** Dotted path — `web.oauth2_client_secret`. The address a future editor
-   *  would PUT to, which is why the payload is field-level not a TOML dump. */
+  /** Dotted display label — `web.oauth2_client_secret`. Never an address: a
+   *  segment can hold a dot, so the editor addresses a field by `path`. */
   key: string;
   name: string;
   value: unknown;
@@ -513,6 +528,24 @@ export interface AdminConfigField {
   /** A credential: `value` is always null. `set` says whether it is configured. */
   secret: boolean;
   set: boolean;
+  path: string[];
+  /** The dataclass default. Absent for a credential. */
+  default?: unknown;
+  /** Whether config.toml sets the key; when it does not, the default applies. */
+  in_file: boolean;
+  choices: string[] | null;
+  multi_choices: string[] | null;
+  doc: string | null;
+  /** How a credential is changed: a secrets file by its name, or an inline
+   *  value by its dotted label. Null for a plain field. */
+  credential: { kind: 'file' | 'inline'; name: string } | null;
+  /** The environment variable that sets the key over the file right now. */
+  env_override: string | null;
+  editor: ConfigEditorKind;
+  read_only_reason: string | null;
+  risky: boolean;
+  /** A `table` field's current file value as TOML, secrets as sentinels. */
+  toml?: string;
 }
 
 export interface AdminConfigSection {
@@ -521,10 +554,215 @@ export interface AdminConfigSection {
   fields: AdminConfigField[];
 }
 
+export interface ConfigProblem {
+  kind: 'discarded' | 'unknown' | 'retired' | 'warning' | 'error';
+  path: string[];
+  message: string;
+  blocking: boolean;
+  /** In the file before this change; the change can fix it, and must. */
+  pre_existing?: boolean;
+  /** `unset` when removing the key at `path` resolves it: an unknown or
+   *  retired key, or a file credential also set inline. */
+  action?: 'unset';
+}
+
+export interface ConfigManagedEntry {
+  managed: boolean;
+  source: string | null;
+  at: string | null;
+}
+
+export type ConfigResource = 'config' | 'secrets' | 'admins';
+
+export interface ConfigSecretFile {
+  name: string;
+  label: string;
+  config_key: string | null;
+  set: boolean;
+  read_only_reason: string | null;
+  risky: boolean;
+}
+
 export interface AdminConfigView {
   config_path: string | null;
   editable: boolean;
   sections: AdminConfigSection[];
+  applier: { kind: 'host' | 'none'; available: boolean; reason: string };
+  managed: Record<ConfigResource, ConfigManagedEntry>;
+  /** sha256 of the config.toml bytes this view was built from. */
+  document_digest: string | null;
+  /** When the web process started. Moves when an applied change restarts it. */
+  started_at: string | null;
+  problems: ConfigProblem[];
+  has_comments: boolean;
+  /** The whole file for the raw editor, every secret leaf the sentinel
+   *  `"<unchanged>"`. Null when there is no file or it does not parse. */
+  raw_toml: string | null;
+  /** One entry per deployment secrets file, never a value. */
+  secrets: ConfigSecretFile[];
+  admins: { users: string[]; read_only_reason: string | null };
+}
+
+export type ConfigOp =
+  | { op: 'set'; path: string[]; value: unknown }
+  | { op: 'unset'; path: string[] }
+  | { op: 'set_toml'; path: string[]; toml: string };
+
+/** What preview and submit take. `secrets` maps a credential name to its new
+ *  value, `""` clearing it; `admins` is the whole new list, or absent. */
+export interface ConfigChangeSet {
+  base_digest: string;
+  ops: ConfigOp[];
+  raw: string | null;
+  secrets: Record<string, string>;
+  admins?: string[];
+  confirm?: string[];
+  step_up?: StepUpProof;
+}
+
+export interface ConfigPreview {
+  diff: string[];
+  problems: { blocking: ConfigProblem[]; warnings: ConfigProblem[] };
+  errors: string[];
+  changed: boolean;
+  changed_sections: string[];
+  changed_keys: number;
+  /** Labels of the risky keys the change touches, `admins` for the list. */
+  risky_keys: string[];
+  secret_names: string[];
+  admins_changed: boolean;
+  /** Tasks running now, which the restart after applying interrupts. */
+  running_tasks: number;
+  base_digest: string;
+}
+
+export type ConfigRequestStatus =
+  'pending' | 'taken' | 'building' | 'applied' | 'unchanged' | 'refused' | 'failed' | 'cancelled';
+
+export interface ConfigRequest {
+  id: number;
+  status: ConfigRequestStatus;
+  admin_id: string;
+  base_digest: string;
+  document_toml: string;
+  admins: string[] | null;
+  admins_changed: boolean;
+  changed_sections: string[];
+  secret_names: string[];
+  diff_text: string;
+  output_text: string | null;
+  created_at: string;
+  taken_at: string | null;
+  finished_at: string | null;
+}
+
+/**
+ * A refused config editor request.
+ *
+ * `error` is the route's code (`config_changed`, `request_open`,
+ * `confirm_required`, …) and `extra` carries what comes with it: `digest`,
+ * `id`, `keys`, `resources`, `problems`, `errors`. A refused step-up code has
+ * no `error`; it has `field: 'code'` and a `reason`, which is what
+ * `StepUpDialog` reads. `status` 0 is a request that never reached the server.
+ */
+export class ConfigChangeError extends Error {
+  readonly status: number;
+  readonly error: string | null;
+  readonly field: string | null;
+  readonly reason: string | null;
+  readonly extra: Record<string, unknown>;
+  constructor(
+    message: string,
+    status: number,
+    error: string | null,
+    extra: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'ConfigChangeError';
+    this.status = status;
+    this.error = error;
+    this.extra = extra;
+    this.field = typeof extra.field === 'string' ? extra.field : null;
+    this.reason = typeof extra.reason === 'string' ? extra.reason : null;
+  }
+}
+
+/** Outside `apiFetch` because a refusal's code and its extras have to reach
+ *  the review dialog, and `apiFetch` keeps only the message. */
+async function configChangeWrite<T>(path: string, body: unknown): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/admin/config${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    noteTransport(false, 'unreachable');
+    throw new ConfigChangeError('Istota could not be reached. Nothing was sent.', 0, null);
+  }
+  noteTransport(true);
+  if (resp.status === 401) throw new AuthError();
+  let payload: unknown = null;
+  try {
+    payload = await resp.json();
+  } catch {
+    payload = null;
+  }
+  if (!resp.ok) {
+    const { error, detail, ...extra } = (payload ?? {}) as Record<string, unknown>;
+    const message =
+      typeof detail === 'string' && detail.trim() ? detail : `API error: ${resp.status}`;
+    throw new ConfigChangeError(
+      message,
+      resp.status,
+      typeof error === 'string' ? error : null,
+      extra,
+    );
+  }
+  return payload as T;
+}
+
+/** The redacted diff, problems and risky keys a change set would produce.
+ *  Stores nothing and needs no step-up. */
+export function previewConfigChange(changeSet: ConfigChangeSet): Promise<ConfigPreview> {
+  return configChangeWrite<ConfigPreview>('/preview', changeSet);
+}
+
+/** Store the change for the host applier. Needs `step_up`, and `confirm` for
+ *  every risky key the preview named. */
+export function submitConfigChange(changeSet: ConfigChangeSet): Promise<{ id: number }> {
+  return configChangeWrite<{ id: number }>('/requests', changeSet);
+}
+
+export function getConfigRequest(id: number): Promise<ConfigRequest> {
+  return apiFetch<ConfigRequest>(`/admin/config/requests/${id}`);
+}
+
+/** The newest requests first, with their redacted diffs and host output. */
+export async function listConfigRequests(limit = 50): Promise<ConfigRequest[]> {
+  const { requests } = await apiFetch<{ requests: ConfigRequest[] }>(
+    `/admin/config/requests?limit=${limit}`,
+  );
+  return requests;
+}
+
+/** What restoring an earlier request would do. Nothing is stored: the
+ *  admin submits `change_set` like any other change. */
+export interface ConfigRestore {
+  change_set: ConfigChangeSet;
+  preview: ConfigPreview;
+  note: string;
+}
+
+export function restoreConfigRequest(id: number): Promise<ConfigRestore> {
+  return configChangeWrite<ConfigRestore>(`/requests/${id}/restore`, {});
+}
+
+/** Withdraw a request the host has not taken yet. */
+export function cancelConfigRequest(id: number): Promise<{ id: number; status: 'cancelled' }> {
+  return configChangeWrite(`/requests/${id}/cancel`, {});
 }
 
 export interface AdminUser {
@@ -3583,9 +3821,36 @@ export function getRoomMemory(id: number): Promise<ChatRoomMemory> {
   return apiFetch<ChatRoomMemory>(`/chat/rooms/${id}/memory`);
 }
 
+/** A text file moved under its editor between load and save: reload before
+ * overwriting. The editor keeps the user's text on this one. */
+export class TextFileConflictError extends Error {
+  constructor(message = 'the file changed since it was loaded') {
+    super(message);
+    this.name = 'TextFileConflictError';
+  }
+}
+
+/** Another writer held the file's lock past the timeout. Retry. */
+export class TextFileLockedError extends Error {
+  constructor(message = 'the file is being written right now') {
+    super(message);
+    this.name = 'TextFileLockedError';
+  }
+}
+
+/** The daemon would not load the file as written; `errors` says why. */
+export class TextFileInvalidError extends Error {
+  readonly errors: string[];
+  constructor(errors: string[]) {
+    super('the daemon would not load this file as written');
+    this.name = 'TextFileInvalidError';
+    this.errors = errors;
+  }
+}
+
 /** The file moved under the editor — an agent write landed between load and
  * save. Reload before overwriting. */
-export class ChatMemoryConflictError extends Error {
+export class ChatMemoryConflictError extends TextFileConflictError {
   constructor() {
     super('channel memory changed since it was loaded');
     this.name = 'ChatMemoryConflictError';
@@ -4915,7 +5180,12 @@ export function grantExistingCredentials(): Promise<{ ok: boolean; count: number
   return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });
 }
 export type StepUpAction =
-  'export' | 'recovery_reveal' | 'backup_recipient' | 'history_restore' | 'history_purge';
+  | 'export'
+  | 'recovery_reveal'
+  | 'backup_recipient'
+  | 'history_restore'
+  | 'history_purge'
+  | 'admin_config_change';
 export interface StepUpProof {
   request_id: string;
   code: string;
@@ -5450,6 +5720,12 @@ export function getWorkspaceDriveListing(
   );
 }
 
+export function deleteWorkspaceEntry(path: string, name: string): Promise<{ status: string }> {
+  return apiFetch(`/workspace/files?${new URLSearchParams({ place: 'home', path, name })}`, {
+    method: 'DELETE',
+  });
+}
+
 export function createWorkspaceFolder(path: string, name: string): Promise<{ path: string }> {
   return apiFetch('/workspace/folders', {
     method: 'POST',
@@ -5515,9 +5791,64 @@ export interface WorkspacePin extends WorkspacePinInput {
 export function getWorkspacePins(): Promise<{ pins: WorkspacePin[] }> {
   return apiFetch('/workspace/pins');
 }
+
+export function getWorkspaceDriveParent(fileId: string): Promise<{ folder: string }> {
+  return apiFetch(`/workspace/drive/parent?${new URLSearchParams({ file_id: fileId })}`);
+}
 export function putWorkspacePin(pin: WorkspacePinInput): Promise<{ pin: WorkspacePin }> {
   return apiFetch('/workspace/pins', { method: 'PUT', body: JSON.stringify(pin) });
 }
 export function deleteWorkspacePin(id: number): Promise<{ status: string }> {
   return apiFetch(`/workspace/pins/${id}`, { method: 'DELETE' });
+}
+
+/** One of the user's own config files: USER.md, CRON.md, TASKS.md,
+ * HEARTBEAT.md, or `skills/<skill>` for a skill's overlay. */
+export interface WorkspaceConfigFile {
+  name: string;
+  view_path?: string | null;
+  kind: 'config' | 'skill';
+  exists: boolean;
+  size: number | null;
+  /** False when the file is something other than a plain file (a link a
+   * task planted), which the server will refuse to write. */
+  editable: boolean;
+}
+export interface WorkspaceConfigFileContent {
+  content: string;
+  revision: string;
+  exists: boolean;
+}
+function configFilePath(name: string): string {
+  return `/workspace/config-files/${name.split('/').map(encodeURIComponent).join('/')}`;
+}
+export function getWorkspaceConfigFiles(): Promise<{ files: WorkspaceConfigFile[] }> {
+  return apiFetch('/workspace/config-files');
+}
+export function getWorkspaceConfigFile(name: string): Promise<WorkspaceConfigFileContent> {
+  return apiFetch(configFilePath(name));
+}
+/** `applies: 'next_sync'` on a CRON.md save: the scheduler picks the jobs up
+ * at its next CRON.md sync, not at once. */
+export async function saveWorkspaceConfigFile(
+  name: string,
+  content: string,
+  revision: string,
+): Promise<{ revision: string; applies?: 'next_sync' }> {
+  const resp = await fetch(`${base}/api${configFilePath(name)}`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, revision }),
+  });
+  if (resp.status === 401) throw new AuthError();
+  if (resp.ok) return resp.json();
+  const body = await resp.json().catch(() => ({}));
+  if (resp.status === 409) throw new TextFileConflictError();
+  if (resp.status === 423) throw new TextFileLockedError();
+  if (resp.status === 422 && Array.isArray(body.errors))
+    throw new TextFileInvalidError(body.errors);
+  if (resp.status === 413 && typeof body.max_bytes === 'number')
+    throw new Error(`Too long — the limit is ${Math.floor(body.max_bytes / 1024)} KB.`);
+  throw new Error(await errorMessage(resp, body));
 }

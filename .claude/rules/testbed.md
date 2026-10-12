@@ -168,13 +168,15 @@ Per-session values go in the env-file `StackPool` writes (`stack.stack_env`, plu
 
 ## The storage backend
 
-`Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped modes, and both are booted now: every lean profile runs local storage (`/data/workspace`, the default an operator gets), and the full profile runs full Nextcloud integration. The pure-function differences are witnessed without a stack as well:
+`Config.storage_is_nextcloud` is a Nextcloud URL *and* `workspace_mount_path` (`nextcloud_enabled` is the URL alone, `.claude/rules/config.md`). Both values are shipped modes, and both are booted now: every lean profile runs local storage (`/data/workspace`, the default an operator gets), and the full profile runs full Nextcloud integration. The pure-function differences are witnessed without a stack as well:
 
 | What differs | Witness |
 |---|---|
 | The prompt's file-tool vocabulary, selected by `storage_backend` | `tests/test_prompt_golden.py`, the `base_nextcloud` / `base_local` pair |
 | The skill menu, since `available_capabilities()` drops `nextcloud` on an empty URL | the same pair |
 | `runtime.mount_liveness`, `ok` under `nextcloud` and `skip` under `local` | `tests/test_doctor.py::TestMountLiveness` |
+| `runtime.workspace_mode`, `ok` on the full shape only under `ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE`, since the workspace is a Docker volume rather than `fuse.rclone` | `tests/test_doctor.py::TestWorkspaceMode` |
+| Which predicate each caller reads, under no URL, URL and mount, and URL alone | `tests/test_storage_predicates.py` |
 
 Plus `tests/test_setup_container.py`: a setup with no Nextcloud writes a config that loads as `storage_backend == "local"` with the workspace at `/data/workspace`. `doctor` assertions on the lean shape name checks rather than comparing whole payloads, since `runtime.mount_liveness` reports `skip` there.
 

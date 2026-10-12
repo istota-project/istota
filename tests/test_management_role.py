@@ -164,6 +164,10 @@ MODES = {
                                 listen_addr="10.0.0.5", listen_port=8443, tls_cert_source="self-signed"),
     "nextcloud-browser": dict(ingress="local", hostname="localhost:8080",
                               nextcloud_url="https://cloud.example.com", profiles=("browser", "signaling")),
+    # Talk with the workspace on the state volume: the role sets
+    # `istota_storage: local` and leaves `workspace_mount_path` out of the plan.
+    "nextcloud-local-workspace": dict(ingress="local", hostname="localhost:8080",
+                                      nextcloud_url="https://cloud.example.com", workspace="local"),
 }
 
 
@@ -176,8 +180,15 @@ def _role_vars(mode: dict) -> dict:
     variables.update(
         istota_ingress=mode["ingress"],
         istota_domain=mode["hostname"],
-        istota_storage="nextcloud" if mode.get("nextcloud_url") else "local",
-        istota_rclone_remote=setup_wizard.RCLONE_REMOTE if mode.get("nextcloud_url") else "",
+        istota_storage=(
+            "nextcloud" if mode.get("nextcloud_url") and mode.get("workspace", "mount") == "mount"
+            else "local"
+        ),
+        istota_rclone_remote=(
+            setup_wizard.RCLONE_REMOTE
+            if mode.get("nextcloud_url") and mode.get("workspace", "mount") == "mount"
+            else ""
+        ),
         istota_compose_profiles=list(mode.get("profiles", ())),
     )
     for answer, var in (("tls_cert_source", "istota_tls_cert_source"),
@@ -338,6 +349,42 @@ class TestRootWritesNothingUid10001Owns:
             assert "stdin" in body, task.get("name")
             assert task.get("no_log") is True, task.get("name")
             assert not any("istota_secrets" in str(arg) for arg in body["argv"]), task.get("name")
+
+
+class TestTheRoleClaimsWhatItWrites:
+    """The role marks what it manages, so the web's config editor shows those
+    resources read-only rather than taking an edit the next play reverts. The
+    plan's `[meta]` claims the config; the `put-files` request's `managed`
+    claims the secrets and the admins, each only while the role sets them."""
+
+    def _env(self):
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        env.filters["string"] = str
+        return env
+
+    def _put_files(self, secrets: dict, admins: list) -> dict:
+        task = next(t for t in _tasks() if t.get("name") == "Secrets and admins")
+        env = self._env()
+        context = {"istota_secret_names": list(setup_wizard.SECRET_NAMES),
+                   "istota_secrets": secrets, "istota_admins": admins}
+        for name, template in task["vars"].items():
+            context[name] = env.from_string(template).render(context)
+        return json.loads(context["_istota_put_files"])
+
+    def test_the_plan_claims_the_config(self):
+        task = next(t for t in _tasks() if t.get("name") == "Write the plan")
+        content = task["ansible.builtin.copy"]["content"]
+        plan = json.loads(self._env().from_string(content).render(istota_config={"bot_name": "Zed"}))
+        assert plan == {"meta": {"managed": True, "source": "ansible"}, "config": {"bot_name": "Zed"}}
+
+    def test_put_files_claims_what_the_role_sets(self):
+        request = self._put_files({"anthropic_api_key": "sk"}, ["alice"])
+        assert request["managed"] == {"source": "ansible", "secrets": True, "admins": True}
+
+    def test_put_files_releases_what_the_role_does_not_set(self):
+        request = self._put_files({}, [])
+        assert request["managed"] == {"source": "ansible", "secrets": False, "admins": False}
 
 
 # --- secrets stay out of output -----------------------------------------------

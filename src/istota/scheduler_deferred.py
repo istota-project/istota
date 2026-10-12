@@ -23,6 +23,7 @@ an op count, and its lifecycle is owned by the result-delivery code.
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1259,7 +1260,6 @@ def _process_deferred_health_ops(
                     # Copy the source file into the uploads dir under the
                     # new panel id, then record the panel row.
                     import mimetypes
-                    import shutil as _shutil
 
                     # Same untrusted-path rule as attach_document: the op
                     # file is written inside the sandbox and the daemon
@@ -1286,18 +1286,26 @@ def _process_deferred_health_ops(
                         source_mime=mime,
                         draft=True,
                     )
-                    target_dir = ctx.uploads_dir / str(pid)
-                    target_dir.mkdir(parents=True, exist_ok=True)
-                    target = target_dir / f"original{src.suffix}"
+                    # The uploads tree is in the user's workspace, which
+                    # their tasks write: the panel directory and the copy
+                    # follow no link, and a leftover name is numbered.
+                    from .workspace.listing import ListingError
+                    from .workspace.writes import open_or_create_dirs, write_new_file
                     try:
-                        _shutil.copyfile(src, target)
-                    except OSError as e:
+                        os.close(open_or_create_dirs(ctx.uploads_dir, [str(pid)]))
+                        with open(src, "rb") as fh:
+                            name = write_new_file(
+                                ctx.uploads_dir, [str(pid)], f"original{src.suffix}",
+                                iter(lambda: fh.read(1024 * 1024), b""),
+                                max_bytes=os.fstat(fh.fileno()).st_size,
+                            )
+                    except (OSError, ValueError, ListingError) as e:
                         logger.warning(
                             "register_upload copy failed for task %d: %s",
-                            task.id, e,
+                            task.id, getattr(e, "errno", None) or type(e).__name__,
                         )
                         continue
-                    rel = str(target.relative_to(ctx.uploads_dir))
+                    rel = f"{pid}/{name}"
                     conn.execute(
                         "UPDATE panels SET source_file = ? WHERE id = ?",
                         (rel, pid),

@@ -1,14 +1,17 @@
 """TASKS.md file polling and task creation."""
 
+import contextlib
 import hashlib
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from . import db
 from .config import Config
 from .skills.files import list_files, read_text, write_text
+from .workspace import text_files
+from .workspace.text_files import MemoryMdLocked
 
 logger = logging.getLogger("istota.tasks_file_poller")
 
@@ -100,6 +103,24 @@ def _write_tasks_file(
         raise PermissionError(f"not this user's TASKS.md: {file_path}")
     if not write_regular_file(config_dir / name, content):
         raise PermissionError(f"refused to write {file_path}")
+
+
+def _tasks_file_lock(config: Config, file_path: str, *, user_id: str):
+    """The lock every writer of this TASKS.md takes, the web editor included.
+
+    Keyed on the resolved path `_write_tasks_file` writes to. No lock without a
+    workspace: nothing else can edit the file then. Raises like the read does
+    for a path that is not the user's TASKS.md.
+    """
+    if not config.has_workspace:
+        return contextlib.nullcontext()
+    from .storage import resolve_user_config_dir
+
+    name = _tasks_file_name(config, user_id, file_path)
+    config_dir = resolve_user_config_dir(config, user_id)
+    if name is None or config_dir is None:
+        raise PermissionError(f"not this user's TASKS.md: {file_path}")
+    return text_files.file_lock(config, user_id, config_dir / name)
 
 
 def discover_tasks_files(config: Config) -> list[DiscoveredTasksFile]:
@@ -216,6 +237,7 @@ def update_task_in_file(
     new_status: str,
     result_summary: str | None = None,
     error_message: str | None = None,
+    timestamp: str | None = None,
 ) -> str:
     """
     Update a task's status in the file content.
@@ -226,6 +248,7 @@ def update_task_in_file(
         new_status: New status ('in_progress', 'completed', 'failed')
         result_summary: Summary for completed tasks
         error_message: Error message for failed tasks
+        timestamp: The marker's ``YYYY-MM-DD HH:MM``; now when not given
 
     Returns:
         Updated file content
@@ -257,7 +280,7 @@ def update_task_in_file(
                 # Remove trailing ellipsis (from in-progress tasks)
                 original_content = re.sub(r'\.{2,}$', '', original_content).strip()
 
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+                stamp = timestamp or datetime.now().strftime('%Y-%m-%d %H:%M')
 
                 if new_status == 'in_progress':
                     # Mark as in progress
@@ -265,11 +288,11 @@ def update_task_in_file(
                 elif new_status == 'completed':
                     # Mark as completed with timestamp and result
                     result_part = f" | Result: {result_summary}" if result_summary else ""
-                    new_line = f"{indent}- [x] {timestamp} | {original_content}{result_part}"
+                    new_line = f"{indent}- [x] {stamp} | {original_content}{result_part}"
                 elif new_status == 'failed':
                     # Mark as failed with timestamp and error
                     error_part = f" | Error: {error_message}" if error_message else ""
-                    new_line = f"{indent}- [!] {timestamp} | {original_content}{error_part}"
+                    new_line = f"{indent}- [!] {stamp} | {original_content}{error_part}"
                 else:
                     new_line = line
 
@@ -292,7 +315,25 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
 
     Returns:
         List of created task IDs
+
+    The read, the task creation and the write back all run under the file's
+    lock, so a web save cannot land between the read and the write and be
+    overwritten. A lock held past its timeout skips the file for this pass;
+    nothing has been created, so the next pass picks the same lines up.
     """
+    try:
+        lock = _tasks_file_lock(config, file_path, user_id=user_id)
+        with lock:
+            return _poll_user_tasks_file_locked(config, user_id, file_path)
+    except MemoryMdLocked:
+        logger.info("TASKS.md for %s is being written; skipping it this pass", user_id)
+        return []
+    except OSError as e:
+        logger.error("Error reading %s for %s: %s", file_path, user_id, e)
+        return []
+
+
+def _poll_user_tasks_file_locked(config: Config, user_id: str, file_path: str) -> list[int]:
     # Read the file (mount-aware)
     try:
         file_content = _read_tasks_file(config, file_path, user_id=user_id)
@@ -309,7 +350,13 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
 
     with db.get_db(config.db_path) as conn:
         for parsed_task in parsed_tasks:
-            # Only process pending tasks
+            if parsed_task.status == 'in_progress':
+                updated_content, applied = _apply_finished_marker(
+                    conn, updated_content, parsed_task, user_id, file_path,
+                )
+                file_updated = file_updated or applied
+                continue
+
             if parsed_task.status != 'pending':
                 continue
 
@@ -356,6 +403,50 @@ def poll_user_tasks_file(config: Config, user_id: str, file_path: str) -> list[i
             logger.error("Error updating %s for %s: %s", file_path, user_id, e)
 
     return created_task_ids
+
+
+def _apply_finished_marker(
+    conn, content: str, parsed_task: ParsedTask, user_id: str, file_path: str,
+) -> tuple[str, bool]:
+    """Write the completion marker a finished task's file write missed (ISSUE-726).
+
+    `handle_tasks_file_completion` records the outcome in the DB before it
+    writes the file, so a write it could not make (the lock held past its
+    timeout, a refused write) is still known here, and the poll applies it
+    under the lock on its next pass.
+
+    Only while the task itself is still in `tasks`: rows in `istota_file_tasks`
+    are never deleted, so without that bound a `[~]` typed by hand months later
+    over the same text would be answered with the old result.
+    """
+    row = db.get_istota_file_task_by_hash(conn, user_id, parsed_task.content_hash)
+    if row is None or row.file_path != file_path or row.task_id is None:
+        return content, False
+    if row.status not in ('completed', 'failed'):
+        return content, False
+    if db.get_task(conn, row.task_id) is None:
+        return content, False
+    stamp = _local_minute(row.completed_at)
+    if row.status == 'completed':
+        return update_task_in_file(
+            content, row.content_hash, 'completed',
+            result_summary=row.result_summary, timestamp=stamp,
+        ), True
+    return update_task_in_file(
+        content, row.content_hash, 'failed',
+        error_message=row.error_message, timestamp=stamp,
+    ), True
+
+
+def _local_minute(utc_text: str | None) -> str | None:
+    """SQLite's UTC ``datetime('now')`` as the local ``YYYY-MM-DD HH:MM`` a marker shows."""
+    if not utc_text:
+        return None
+    try:
+        utc = datetime.strptime(utc_text, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return utc.astimezone().strftime('%Y-%m-%d %H:%M')
 
 
 def poll_all_tasks_files(config: Config) -> list[int]:
@@ -440,22 +531,28 @@ def handle_tasks_file_completion(
 
     # Update the file (using file_path from DB, mount-aware)
     try:
-        file_content = _read_tasks_file(
-            config, istota_task.file_path, user_id=task.user_id,
-        )
+        with _tasks_file_lock(config, istota_task.file_path, user_id=task.user_id):
+            file_content = _read_tasks_file(
+                config, istota_task.file_path, user_id=task.user_id,
+            )
 
-        updated_content = update_task_in_file(
-            file_content,
-            istota_task.content_hash,
-            'completed' if success else 'failed',
-            result_summary=result_summary if success else None,
-            error_message=result_summary if not success else None,
-        )
+            updated_content = update_task_in_file(
+                file_content,
+                istota_task.content_hash,
+                'completed' if success else 'failed',
+                result_summary=result_summary if success else None,
+                error_message=result_summary if not success else None,
+            )
 
-        _write_tasks_file(
-            config, istota_task.file_path, updated_content, user_id=task.user_id,
-        )
+            _write_tasks_file(
+                config, istota_task.file_path, updated_content, user_id=task.user_id,
+            )
         logger.debug("Updated %s with task completion", istota_task.file_path)
+    except MemoryMdLocked:
+        logger.info(
+            "TASKS.md for %s is being written; the next poll writes task %d's marker",
+            task.user_id, task.id,
+        )
     except Exception as e:
         logger.error("Error updating %s after completion for %s: %s", istota_task.file_path, task.user_id, e)
 

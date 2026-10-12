@@ -66,13 +66,14 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Sequence
 
 from istota import db
+from istota.config import SPEECH_GATE_MODES
 from istota.lib.llm_json import candidate_json_blocks
 from istota.lib.untrusted import frame_untrusted
 
 logger = logging.getLogger("istota.rooms.speech_gate")
 
 GateMode = Literal["off", "mention", "classifier"]
-MODES: tuple[str, ...] = ("off", "mention", "classifier")
+MODES: tuple[str, ...] = SPEECH_GATE_MODES
 
 RESERVED = "reserved"
 FRIENDLY = "friendly"

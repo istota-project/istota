@@ -528,6 +528,25 @@ class TestConfigLoading:
         assert any("renamed to workspace_mount_path" in m for m in messages)
         assert not any("unrecognised" in m for m in messages)
 
+    def test_the_rename_is_a_warning_and_a_redundant_old_key_is_retired(self, tmp_path):
+        """The config editor offers to unset a retired key. Unsetting the only
+        mount path would turn a Nextcloud mount into a local workspace, so the
+        bare rename is a warning; beside the new key the old one is redundant."""
+        from istota.config_mapper import collect_problems
+
+        p = tmp_path / "config.toml"
+        kinds = {}
+        for name, text in (
+            ("alone", 'workspace_path = "/mnt/shared"\nnextcloud_mount_path = "/mnt/shared"\n'),
+            ("both", 'workspace_path = "/mnt/shared"\nworkspace_mount_path = "/mnt/shared"\n'
+                     'nextcloud_mount_path = "/mnt/shared"\n'),
+        ):
+            p.write_text(text)
+            with collect_problems() as problems:
+                load_config(p)
+            kinds[name] = [q["kind"] for q in problems if q["path"] == ("nextcloud_mount_path",)]
+        assert kinds == {"alone": ["warning"], "both": ["retired"]}
+
     def test_both_mount_keys_with_the_same_path_load(self, tmp_path):
         p = tmp_path / "config.toml"
         p.write_text(

@@ -22,6 +22,18 @@ A large directory shows at most 2,000 entries and a notice. This is a slice of t
 
 In My files, use Upload or drop files onto the listing. Files upload one at a time, with progress and any error beside each file. Uploads keep existing files: a repeated name gets a number. The default size limit is 100 MB per file. New folder creates a folder in the location shown in the dialog. Room folders, group folders, linked folders and Drive have no upload or new-folder controls.
 
+## Configuration files
+
+The Configuration section in the Files sidebar lists your own config files: `USER.md`, `CRON.md`, `TASKS.md` and `HEARTBEAT.md`, with their sizes. Skill instructions, collapsed below them, has one row per skill you can use. A skill's file is added to that skill's own instructions whenever it loads. Edit opens the file in an editor. You can only reach your own files.
+
+A save checks the file the way Istota reads it, and nothing is written when the check fails:
+
+- `CRON.md` and `HEARTBEAT.md` are parsed first. A TOML error, a job with a bad field or a command job saved by someone who is not an admin is listed under the text, and your text stays in the editor.
+- A skill's file is limited to 32 KB, the size above which Istota does not load it. The safety skills take no user instructions and are not listed.
+- If the file changed since you opened it, usually because Istota wrote to it, the save is refused and your text stays. Reload to see the other version. If Istota is writing the file at that moment, try again.
+
+Jobs saved in `CRON.md` change at the next CRON.md sync, not at once. A file that is not a plain file, such as a link a task left in its place, cannot be edited.
+
 ## Nextcloud and Drive
 
 On a Nextcloud-backed workspace, My files shows a Shared marker when Nextcloud reports a share. Open in Nextcloud appears when the file is shared with your account. If share information is unavailable, browsing still works and a notice explains what is missing. A disconnected Nextcloud folder shows an error instead of an empty listing.

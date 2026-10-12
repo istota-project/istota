@@ -462,3 +462,47 @@ class TestAdminConfig:
             }
             assert fields["web.oauth2_client_secret"]["secret"] is True
             assert fields["web.oauth2_client_secret"]["set"] is True
+
+    async def test_the_file_its_check_and_its_owner_reach_the_view(self, tmp_path, monkeypatch):
+        """The route reads config.toml for its digest and keys, checks it once
+        per digest, and reads managed.json fail-closed."""
+        import hashlib
+
+        from istota.apply import CheckResult
+        from istota.config_editor import check
+
+        checked = []
+
+        async def fake_check(document, **kwargs):
+            checked.append(document)
+            return CheckResult(problems=[
+                {"kind": "discarded", "path": ["scheduler", "talk_poll_timeout"], "message": "m"},
+            ])
+
+        monkeypatch.setattr(check, "run_check", fake_check)
+        check.forget_cached()
+        text = (
+            '[scheduler]\ntalk_poll_timeout = 0\n\n'
+            '[email]\nimap_password = "FILE-SECRET-VALUE"\n'
+        )
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(text, encoding="utf-8")
+        (tmp_path / "managed.json").write_text("{damaged", encoding="utf-8")
+        config = _make_config(tmp_path)
+        config.config_path = config_file
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await _login(client, "alice")
+            first = await client.get("/istota/api/admin/config", cookies=cookies)
+            second = await client.get("/istota/api/admin/config", cookies=cookies)
+        body = first.json()
+        assert body["document_digest"] == hashlib.sha256(text.encode()).hexdigest()
+        assert body["problems"][0]["blocking"] is True
+        assert body["managed"]["config"]["source"] == "unreadable"
+        assert body["editable"] is False
+        fields = {f["key"]: f for s in body["sections"] for f in s["fields"]}
+        assert fields["scheduler.talk_poll_timeout"]["in_file"] is True
+        assert "FILE-SECRET-VALUE" not in first.text
+        assert second.json()["document_digest"] == body["document_digest"]
+        assert len(checked) == 1

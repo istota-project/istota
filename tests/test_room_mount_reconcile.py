@@ -49,6 +49,22 @@ def test_local_sweep_is_resumable_and_reads_legacy_memory(migrated):
     assert room_relocate.reconcile_mount(config) == 0
 
 
+def test_a_local_workspace_beside_nextcloud_takes_the_rename_merge(migrated):
+    """A URL with no `workspace_mount_path` is a local workspace: the DAV
+    branch would move the frozen Nextcloud copy and leave this one in place."""
+    config, old, new = migrated
+    config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud.username = "bot"
+    put(config, f"Channels/{old}/CHANNEL.md", "remember this")
+    with patch("istota.maintenance.room_mount_reconcile.dav_request") as request, patch(
+        "istota.maintenance.room_mount_reconcile.dav.stat"
+    ) as stat:
+        assert room_relocate.reconcile_mount(config) == 0
+    assert request.call_count == 0 and stat.call_count == 0
+    assert not (config.workspace_path / "Channels" / old).exists()
+    assert (config.workspace_path / "Channels" / new / "CHANNEL.md").read_text() == "remember this"
+
+
 def test_reappeared_directory_merges_unique_entries_but_never_conflicts(migrated):
     config, old, new = migrated
     current = put(config, f"Channels/{new}/CHANNEL.md", "current")
@@ -460,8 +476,11 @@ def dav_server(migrated):
     config, old, new = migrated
     config.nextcloud.url = "https://cloud.example.com"
     config.nextcloud.username = "bot"
+    config.workspace_mount_path = config.workspace_path
     server = FakeDav()
-    with patch("istota.maintenance.room_mount_reconcile.dav.stat", side_effect=server.stat), patch(
+    with patch(
+        "istota.maintenance.room_mount_reconcile.os.path.ismount", return_value=True
+    ), patch("istota.maintenance.room_mount_reconcile.dav.stat", side_effect=server.stat), patch(
         "istota.maintenance.room_mount_reconcile.dav.list_dir", side_effect=server.list_dir
     ), patch("istota.maintenance.room_mount_reconcile.dav_request", side_effect=server.request), patch(
         "istota.maintenance.room_mount_reconcile.dav_files_url", side_effect=lambda config, path: path

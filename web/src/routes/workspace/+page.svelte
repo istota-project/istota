@@ -12,6 +12,7 @@
     Input,
     FileDropZone,
     HeaderNav,
+    type KebabItem,
   } from '$lib/components/ui';
   import {
     getWorkspacePins,
@@ -22,12 +23,20 @@
     getWorkspacePlaces,
     getWorkspaceListing,
     getWorkspaceDriveListing,
+    getWorkspaceDriveParent,
     type DriveListing,
     createWorkspaceFolder,
+    deleteWorkspaceEntry,
     uploadWorkspaceFile,
     type WorkspacePlace,
     type WorkspaceListing,
+    getWorkspaceConfigFiles,
+    getWorkspaceConfigFile,
+    saveWorkspaceConfigFile,
+    type WorkspaceConfigFile,
   } from '$lib/api';
+  import TextFileEditor from '$lib/components/TextFileEditor.svelte';
+  import ConfigFileList from '$lib/components/workspace/ConfigFileList.svelte';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
@@ -83,6 +92,51 @@
     } finally {
       pinsBusy = false;
     }
+  }
+
+  let configFiles = $state<WorkspaceConfigFile[]>([]);
+  let configError = $state('');
+  let editing = $state<WorkspaceConfigFile | null>(null);
+  let editorOpen = $state(false);
+  async function loadConfigFiles() {
+    configError = '';
+    try {
+      const result = await getWorkspaceConfigFiles();
+      if (active) configFiles = result.files;
+    } catch {
+      if (active) configError = 'Could not load your configuration files.';
+    }
+  }
+  function editConfigFile(file: WorkspaceConfigFile) {
+    sidebarOpen = false;
+    editing = file;
+    editorOpen = true;
+  }
+  function closeEditor() {
+    editorOpen = false;
+    // Sizes and "not created yet" change with a save.
+    void loadConfigFiles();
+  }
+  async function saveConfigFile(name: string | number, content: string, revision: string) {
+    const result = await saveWorkspaceConfigFile(String(name), content, revision);
+    return {
+      revision: result.revision,
+      note:
+        result.applies === 'next_sync'
+          ? 'Saved. The jobs update at the next CRON.md sync.'
+          : undefined,
+    };
+  }
+  const configDescriptions: Record<string, string> = {
+    'USER.md': 'What the assistant remembers about you, read at the start of every task.',
+    'CRON.md': 'Your scheduled jobs.',
+    'TASKS.md': 'Tasks the assistant picks up from a checklist.',
+    'HEARTBEAT.md': 'Checks the assistant runs on a schedule and alerts you about.',
+  };
+  function editorDescription(file: WorkspaceConfigFile) {
+    if (file.kind === 'skill')
+      return `Your instructions for the ${file.name.slice('skills/'.length)} skill, added to its own whenever it loads.`;
+    return configDescriptions[file.name] ?? '';
   }
 
   type Selection = { place: string; path: string };
@@ -179,6 +233,28 @@
       uploading = false;
     }
   }
+  async function deleteEntries(names: string[]) {
+    const path = selected?.path || '';
+    const request = generation;
+    const deleted: string[] = [];
+    const errors: string[] = [];
+    for (const name of names) {
+      try {
+        await deleteWorkspaceEntry(path, name);
+        deleted.push(name);
+      } catch (e) {
+        errors.push(`${name}: ${e instanceof Error ? e.message : 'Could not delete this item.'}`);
+      }
+    }
+    if (active && request === generation && listing) {
+      listing = {
+        ...listing,
+        entries: listing.entries.filter((entry) => !deleted.includes(entry.name)),
+      };
+    }
+    if (active && deleted.length) void loadPins();
+    return { deleted, errors };
+  }
   let generation = 0;
   let active = true;
   const selection = createUrlSelection<Selection>({
@@ -206,6 +282,46 @@
   }
   function driveFolder(path: string) {
     return path.split('/').filter(Boolean).at(-1)?.split(':')[0] || 'root';
+  }
+  function revealAction(
+    ref: string | null | undefined,
+    provider: 'workspace' | 'drive' = 'workspace',
+    available = true,
+  ): KebabItem {
+    const unavailable = { label: 'Reveal', disabled: true };
+    if (!ref || !available) return unavailable;
+    if (provider === 'drive') {
+      const drive = places.find((place) => place.kind === 'drive' && place.browsable);
+      if (!drive) return unavailable;
+      return { label: 'Reveal', onSelect: () => void revealDrive(ref, drive.id) };
+    }
+    const place = places
+      .filter(
+        (place) =>
+          place.browsable &&
+          place.view_root &&
+          (ref === place.view_root || ref.startsWith(place.view_root + '/')),
+      )
+      .sort((a, b) => b.view_root!.length - a.view_root!.length)[0];
+    if (!place) return unavailable;
+    const relative = ref.slice(place.view_root!.length).replace(/^\//, '');
+    const path = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
+    return {
+      label: 'Reveal',
+      href: href(place.id, path),
+      onClick: (event) => navigate(event, place.id, path),
+    };
+  }
+  async function revealDrive(ref: string, place: string) {
+    pinError = '';
+    try {
+      const result = await getWorkspaceDriveParent(ref);
+      if (!active) return;
+      sidebarOpen = false;
+      selection.push({ place, path: result.folder });
+    } catch (error) {
+      if (active) pinError = error instanceof Error ? error.message : 'Could not reveal this file.';
+    }
   }
   function breadcrumbLabel(part: string) {
     if (place?.kind !== 'drive') return part;
@@ -292,6 +408,7 @@
   onMount(() => {
     void load();
     void loadPins();
+    void loadConfigFiles();
     return () => {
       active = false;
       generation++;
@@ -314,17 +431,38 @@
     </ShellHeader>
   {/snippet}
   {#snippet sidebar()}
-    {#if places.length || pins.length}
+    {#if places.length || pins.length || configFiles.length || configError}
       <Sidebar title="Files" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
         <PinnedList
           {pins}
           {places}
           busy={pinsBusy}
           onRemove={removePin}
+          {configFiles}
+          onEdit={editConfigFile}
+          {revealAction}
           {href}
           onNavigate={navigate}
         />
-        <PlaceList {places} selected={selected?.place || ''} {href} onNavigate={navigate} />
+        <PlaceList
+          places={places.filter((place) => place.kind === 'home')}
+          selected={selected?.place || ''}
+          {href}
+          onNavigate={navigate}
+        />
+        <ConfigFileList
+          files={configFiles}
+          error={configError}
+          onEdit={editConfigFile}
+          onRetry={loadConfigFiles}
+          {revealAction}
+        />
+        <PlaceList
+          places={places.filter((place) => place.kind !== 'home')}
+          selected={selected?.place || ''}
+          {href}
+          onNavigate={navigate}
+        />
       </Sidebar>
     {/if}
   {/snippet}
@@ -373,7 +511,7 @@
         </ol>
       </nav>
       <div class="folder-actions">
-        <ReachBadge access={place.reach.private} />
+        {#if place.kind !== 'nextcloud'}<ReachBadge access={place.reach.private} />{/if}
         {#if place.kind === 'drive'}
           <HeaderNav
             ariaLabel="Drive location"
@@ -468,7 +606,7 @@
         <div class="center-msg">Loading folder…</div>
       {:else if listingError}
         <div class="center-msg error">
-          {#if place.kind === 'drive' && needsConnection(listingError)}
+          {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}
             <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
             <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
           {:else}
@@ -487,6 +625,7 @@
           showHidden={true}
           {href}
           onNavigate={navigate}
+          onRefresh={() => loadFolder(selected!)}
         />
         {#if driveListing.next_page_token}
           <div class="drive-pagination">
@@ -509,6 +648,8 @@
       {:else if listing}
         <FileTable
           {listing}
+          onDelete={place.id === 'home' ? deleteEntries : undefined}
+          onRefresh={() => loadFolder(selected!)}
           {place}
           {showHidden}
           {href}
@@ -521,6 +662,25 @@
     </FileDropZone>
   {/if}
 </AppShell>
+
+{#if editing}
+  <TextFileEditor
+    bind:open={editorOpen}
+    fileKey={editing.name}
+    title={editing.name}
+    description={editorDescription(editing)}
+    ariaLabel={`${editing.name} (markdown)`}
+    placeholder="This file is empty."
+    loadFailed="Couldn't load this file."
+    load={(name) => getWorkspaceConfigFile(String(name))}
+    save={saveConfigFile}
+    onClose={closeEditor}
+  >
+    {#snippet caption()}
+      Markdown. Saved in your workspace config folder.
+    {/snippet}
+  </TextFileEditor>
+{/if}
 
 <Modal
   bind:open={folderOpen}
@@ -564,6 +724,9 @@
   .drive-pagination {
     padding: var(--space-3);
     text-align: center;
+  }
+  .folder-actions {
+    min-height: var(--control-height-sm);
   }
   .folder-actions,
   .upload-heading {

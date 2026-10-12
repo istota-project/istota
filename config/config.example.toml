@@ -81,13 +81,15 @@ module_data_dir = "data/modules"
 # File Access Configuration
 # =============================================================================
 # Root of the bot's on-disk file tree. Defaults to workspace_mount_path.
-# Required when [nextcloud] url is set: the files are reached through it.
+# Required when [nextcloud] url is set, whether or not it is the mount.
 workspace_path = "/srv/mount/nextcloud/content"
 
 # The mountpoint the workspace lives on, when it is one: the rclone mount of the
 # bot's Nextcloud files (mount-nextcloud.service), or a host folder shared into
-# a VM. Doctor and the backup guard check it is still mounted. Read under its
-# old name, nextcloud_mount_path; both names with different paths is an error.
+# a VM. Doctor and the backup guard check it is still mounted. With a Nextcloud
+# URL, set means the workspace is the mount; unset means it is local, and Talk
+# and the nextcloud skill still work. Read under its old name,
+# nextcloud_mount_path; both names with different paths is an error.
 # workspace_mount_path = "/srv/mount/nextcloud/content"
 
 # Path to skills directory (individual skill files loaded selectively)
@@ -566,10 +568,10 @@ features = []
 # install. See docs/deployment/security.md for what is deliberately uncovered.
 
 [nextcloud]
-# Nextcloud server URL. This also drives storage vocabulary: when set, the bot
-# describes files as Nextcloud; when blank (the local/standalone shape), it
-# describes "your workspace" as a plain local folder instead. A URL needs
-# workspace_path, the mount of the bot's Nextcloud files.
+# Nextcloud server URL: Talk, the nextcloud skill, OCS and DAV. A URL needs
+# workspace_path. Whether the workspace is the bot's Nextcloud files is
+# workspace_mount_path's question, not this one: with the mount path set the
+# bot describes files as Nextcloud, without it as a plain local workspace.
 url = "https://nextcloud.example.com"
 # Bot's Nextcloud username
 username = "istota"
@@ -631,6 +633,14 @@ auto_share_bot_dir = true
 enabled = true
 # Bot's Nextcloud username (to filter its own messages)
 bot_username = "istota"
+# When the workspace is not the Nextcloud mount, a file posted in Talk is
+# fetched over WebDAV into the room's folder, Channels/<room>/media/<message id>/,
+# once per message. Files larger than this many megabytes are skipped, and the
+# task runs without them.
+attachment_max_mb = 50
+# Days a fetched attachment is kept before the cleanup pass removes it. 0 keeps
+# them. Not used when the workspace is the mount.
+attachment_retention_days = 30
 
 [talk.signaling]
 # Receive Talk messages over Nextcloud's standalone signaling server (the
@@ -1656,7 +1666,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # service per user (the stack's compose.devbox.yml), and by the daemon, which
 # runs one credential-proxy listener per user. The bare-metal role renders its
 # own containers and leaves `users` empty.
-# users = []                           # e.g. ["alice"]; one devbox each
+# users = []                           # e.g. ["sam"]; one devbox each
 # mem_limit = "4g"
 # cpus = 2.0
 # pids_limit = 512

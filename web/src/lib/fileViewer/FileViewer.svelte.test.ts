@@ -80,6 +80,7 @@ describe('workspace file viewer through the host', () => {
     expect(dialog.querySelector('.ui-viewer-metadata')).toHaveTextContent('20 B');
     expect(dialog.querySelector('time')).toHaveAttribute('datetime', '2026-01-01T00:00:00Z');
     const body = dialog.querySelector('.ui-modal-body')!;
+    expect((body as HTMLElement).style.padding).toBe('0px');
     body.scrollTop = 80;
     await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
     expect(dialog.style.getPropertyValue('--modal-width')).toBe('960px');

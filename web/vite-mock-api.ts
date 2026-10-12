@@ -3769,7 +3769,9 @@ function mockAdminDoctor() {
   };
 }
 
-function mockAdminConfig() {
+/** The read-only payload the pane started with: sections of typed fields. The
+ *  editor's keys are added by `mockAdminConfig` below. */
+function mockAdminConfigBase() {
   const f = (
     key: string,
     value: unknown,
@@ -3839,9 +3841,9 @@ function mockAdminConfig() {
         key: 'nextcloud',
         label: '[nextcloud]',
         fields: [
-          f('url', 'https://cloud.example.com', 'str'),
-          f('username', 'istota', 'str'),
-          f('app_password', null, 'secret', { secret: true, set: true }),
+          f('nextcloud.url', 'https://cloud.example.com', 'str'),
+          f('nextcloud.username', 'istota', 'str'),
+          f('nextcloud.app_password', null, 'secret', { secret: true, set: true }),
         ],
       },
       {
@@ -3889,6 +3891,473 @@ function mockAdminConfig() {
       },
     ],
   };
+}
+
+/**
+ * The config editor's dev-server state.
+ *
+ * A submitted change walks `pending → taken → applied` across status polls, the
+ * way the host applier moves a real one, and the view's `started_at` moves a
+ * moment after `applied` so the page's wait for the restart has something to
+ * wait for. An applied change is written into `values`, so the page reloads
+ * into what it asked for. The file starts with comments and one unknown key,
+ * so the comments banner and a remove action have something to show, and the
+ * history starts with one applied change to restore.
+ */
+const MOCK_SEED_DOCUMENT = '[brain]\nkind = "claude_code"\n\n[logging]\nlevel = "INFO"\n';
+const MOCK_UNKNOWN_KEY = JSON.stringify(['web', 'old_flag']);
+const mockConfigEditor = {
+  digest: 'mock-digest-1',
+  hasComments: true,
+  unknownRemoved: false,
+  startedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+  restartAt: 0,
+  restartedAt: '',
+  admins: ['carol', 'alice'],
+  values: new Map<string, unknown>(),
+  inFile: new Set<string>(['["logging","level"]', '["web","port"]', '["brain","kind"]']),
+  secretsSet: new Map<string, boolean>(),
+  nextId: 2,
+  requests: new Map<number, { row: Record<string, any>; polls: number; ops: any[]; body: any }>([
+    [
+      1,
+      {
+        polls: 0,
+        ops: [],
+        body: {},
+        row: {
+          id: 1,
+          status: 'applied',
+          admin_id: 'alice',
+          base_digest: 'mock-digest-0',
+          document_toml: MOCK_SEED_DOCUMENT,
+          admins: null,
+          admins_changed: false,
+          changed_sections: ['logging'],
+          secret_names: [],
+          diff_text:
+            '--- config.toml\n+++ config.toml\n [logging]\n-level = "DEBUG"\n+level = "INFO"',
+          output_text: 'Updated: config.toml',
+          created_at: '2026-10-01T09:00:00Z',
+          taken_at: '2026-10-01T09:00:05Z',
+          finished_at: '2026-10-01T09:00:40Z',
+        },
+      },
+    ],
+  ]),
+};
+
+/** The file as the raw editor shows it: the in-file keys by section, a
+ *  credential as the sentinel, plus the unknown key until it is removed. */
+function mockRawToml(sections: { key: string; fields: any[] }[]): string {
+  const blocks: string[] = [];
+  for (const section of sections) {
+    const lines = section.fields
+      .filter((field) => field.in_file)
+      .map(
+        (field) =>
+          `${field.name} = ${field.editor === 'secret' ? '"<unchanged>"' : JSON.stringify(field.value)}`,
+      );
+    if (section.key === 'web' && !mockConfigEditor.unknownRemoved) lines.push('old_flag = true');
+    if (!lines.length) continue;
+    blocks.push(
+      section.key === 'general' ? lines.join('\n') : `[${section.key}]\n${lines.join('\n')}`,
+    );
+  }
+  return blocks.length ? `${blocks.join('\n\n')}\n` : '';
+}
+
+/** A line the mock calls TOML: a comment, a header, or `key = value`. */
+const MOCK_TOML_LINE = /^\s*(#.*|\[\[?[^\]]+\]\]?|[A-Za-z0-9_."-]+\s*=\s*[^=\s].*)?\s*$/;
+
+const MOCK_READ_ONLY: Record<string, string> = {
+  'web.port':
+    'Serves the web UI itself; a wrong value has no recovery from here. Change it on the host.',
+  'nextcloud.url':
+    'The Nextcloud mount depends on it. Change it with `istota-stack setup --force` on the host.',
+  'nextcloud.username':
+    'Written into rclone.conf as well. Change it with `istota-stack setup --force` on the host.',
+  db_path: 'The container layout `istota setup` writes. It is not changed from here.',
+  users: 'Per-user configuration lives on the Users pane.',
+  'web.session_secret_key': 'Rotating it ends every session mid-apply. It stays a host action.',
+};
+const MOCK_CHOICES: Record<string, string[]> = {
+  'logging.output': ['console', 'file', 'both'],
+  'logging.level': ['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+  'web.token_storage': ['encrypted', 'plaintext'],
+  'brain.kind': ['claude_code', 'native', 'tmux'],
+  'brain.fallback': ['', 'claude_code', 'native', 'tmux'],
+};
+const MOCK_MULTI: Record<string, string[]> = { 'web.auth': ['email', 'nextcloud'] };
+const MOCK_RISKY = new Set(['web.auth', 'brain.kind', 'brain.fallback']);
+const MOCK_FILE_CREDENTIALS: Record<string, string> = {
+  'sms.twilio.auth_token': 'istota_twilio_auth_token',
+  'sms.twilio.api_key_sid': 'istota_twilio_api_key_sid',
+  'sms.twilio.api_key_secret': 'istota_twilio_api_key_secret',
+  'sms.telnyx.api_key': 'istota_telnyx_api_key',
+  'nextcloud.app_password': 'istota_nextcloud_app_password',
+  'web.oauth2_client_secret': 'istota_web_oauth2_client_secret',
+  'web.session_secret_key': 'istota_web_session_secret_key',
+  'brain.native.api_key': 'istota_brain_native_api_key',
+};
+const MOCK_DOCS: Record<string, string> = {
+  'logging.level': 'Minimum level written to the log.',
+  'brain.native.base_url': 'An OpenAI-compatible endpoint the native brain talks to.',
+};
+
+function mockIso(ms = Date.now()): string {
+  return new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+function mockAdminConfig() {
+  const state = mockConfigEditor;
+  if (state.restartAt && Date.now() >= state.restartAt) {
+    state.startedAt = state.restartedAt;
+    state.restartAt = 0;
+  }
+  const base = mockAdminConfigBase();
+  const sections = base.sections.map((section) => ({
+    ...section,
+    fields: section.fields.map((field) => {
+      const path =
+        section.key === 'general' ? [field.name] : [...section.key.split('.'), field.name];
+      const key = path.join('.');
+      const pkey = JSON.stringify(path);
+      const credentialName = MOCK_FILE_CREDENTIALS[key];
+      const readOnly = MOCK_READ_ONLY[key] ?? null;
+      let value: unknown = state.values.has(pkey) ? state.values.get(pkey) : field.value;
+      if (key === 'web.auth' && !state.values.has(pkey)) value = ['email', 'nextcloud'];
+      const set = credentialName ? (state.secretsSet.get(credentialName) ?? field.set) : field.set;
+      let editor: string = field.type === 'count' ? 'readonly' : field.type;
+      if (credentialName || field.secret) editor = 'secret';
+      if (MOCK_CHOICES[key]) editor = 'choice';
+      if (MOCK_MULTI[key]) editor = 'multi_choice';
+      if (field.type === 'null') editor = 'str';
+      if (readOnly) editor = 'readonly';
+      return {
+        ...field,
+        key,
+        value: field.secret ? null : value,
+        type: key === 'web.auth' ? 'list' : field.type,
+        set,
+        path,
+        ...(field.secret ? {} : { default: field.value }),
+        in_file: state.inFile.has(pkey),
+        choices: MOCK_CHOICES[key] ?? null,
+        multi_choices: MOCK_MULTI[key] ?? null,
+        doc: MOCK_DOCS[key] ?? null,
+        credential: credentialName ? { kind: 'file', name: credentialName } : null,
+        env_override: null,
+        editor,
+        read_only_reason: readOnly,
+        risky: MOCK_RISKY.has(key),
+      };
+    }),
+  }));
+  return {
+    config_path: '/data/config/config.toml',
+    editable: true,
+    sections,
+    applier: { kind: 'host', available: true, reason: '' },
+    managed: {
+      config: { managed: false, source: 'setup', at: null },
+      secrets: { managed: false, source: 'setup', at: null },
+      admins: { managed: false, source: 'setup', at: null },
+    },
+    document_digest: state.digest,
+    started_at: state.startedAt,
+    problems: state.unknownRemoved
+      ? []
+      : [
+          {
+            kind: 'unknown',
+            path: ['web', 'old_flag'],
+            message: '[config] web.old_flag is not a recognised key and is ignored',
+            blocking: false,
+            action: 'unset',
+          },
+        ],
+    has_comments: state.hasComments,
+    raw_toml: mockRawToml(sections),
+    secrets: [
+      {
+        name: 'anthropic_api_key',
+        label: 'Anthropic API key',
+        config_key: null,
+        set: state.secretsSet.get('anthropic_api_key') ?? false,
+        read_only_reason: null,
+        risky: false,
+      },
+      {
+        name: 'claude_code_oauth_token',
+        label: 'Claude Code OAuth token',
+        config_key: null,
+        set: state.secretsSet.get('claude_code_oauth_token') ?? true,
+        read_only_reason: null,
+        risky: false,
+      },
+    ],
+    admins: { users: [...state.admins], read_only_reason: null },
+  };
+}
+
+function mockConfigPreview(body: any) {
+  const state = mockConfigEditor;
+  if (!body || body.base_digest !== state.digest) {
+    return {
+      __status: 409,
+      error: 'config_changed',
+      detail: 'config.toml changed since the page loaded. Reload to see the current values.',
+      digest: state.digest,
+    };
+  }
+  const ops: any[] = Array.isArray(body.ops) ? body.ops : [];
+  const secrets: Record<string, string> = body.secrets ?? {};
+  if (typeof body.raw === 'string') return mockRawPreview(body.raw, ops, secrets);
+  const adminsChanged =
+    Array.isArray(body.admins) &&
+    [...body.admins].sort().join(',') !== [...state.admins].sort().join(',');
+  const diff: string[] = [];
+  const sections = new Set<string>();
+  const risky = new Set<string>();
+  for (const op of ops) {
+    const label = op.path.join('.');
+    sections.add(op.path.length > 1 ? op.path[0] : 'general');
+    if (MOCK_RISKY.has(label)) risky.add(label);
+    diff.push(
+      op.op === 'unset'
+        ? `-${label} (reset to the default)`
+        : `+${label} = ${JSON.stringify(op.value)}`,
+    );
+  }
+  if (adminsChanged) risky.add('admins');
+  const errors: string[] = [];
+  if (adminsChanged && !body.admins.includes('carol')) {
+    errors.push('the admin list must contain you');
+  }
+  return {
+    diff: diff.length ? ['--- config.toml', '+++ config.toml', ...diff] : [],
+    problems: { blocking: [], warnings: [] },
+    errors,
+    changed: ops.length > 0 || Object.keys(secrets).length > 0 || adminsChanged,
+    changed_sections: [...sections].sort(),
+    changed_keys: ops.length,
+    risky_keys: [...risky].sort(),
+    secret_names: Object.keys(secrets).sort(),
+    admins_changed: adminsChanged,
+    running_tasks: 1,
+    base_digest: state.digest,
+  };
+}
+
+function mockRawPreview(raw: string, ops: any[], secrets: Record<string, string>) {
+  const refuse = (error: string) => ({
+    __status: 400,
+    error: 'invalid_change',
+    detail: 'The change cannot be read.',
+    errors: [error],
+    problems: [],
+  });
+  if (ops.length) return refuse('raw replaces the whole file, so ops must be empty');
+  const lines = raw.split('\n');
+  const bad = lines.findIndex((line) => !MOCK_TOML_LINE.test(line));
+  if (bad >= 0) {
+    return refuse(`the TOML does not parse: Invalid statement (at line ${bad + 1}, column 1)`);
+  }
+  const current = (mockAdminConfig().raw_toml ?? '').split('\n');
+  const diff = [
+    ...current.filter((line) => line && !lines.includes(line)).map((line) => `-${line}`),
+    ...lines.filter((line) => line && !current.includes(line)).map((line) => `+${line}`),
+  ];
+  return {
+    diff: diff.length ? ['--- config.toml', '+++ config.toml', ...diff] : [],
+    problems: { blocking: [], warnings: [] },
+    errors: [],
+    changed: diff.length > 0 || Object.keys(secrets).length > 0,
+    changed_sections: diff.length ? ['(whole file)'] : [],
+    changed_keys: diff.length,
+    risky_keys: [],
+    secret_names: Object.keys(secrets).sort(),
+    admins_changed: false,
+    running_tasks: 1,
+    base_digest: mockConfigEditor.digest,
+  };
+}
+
+function mockConfigSubmit(body: any) {
+  const state = mockConfigEditor;
+  const preview = mockConfigPreview(body) as any;
+  if (preview.__status) return preview;
+  if (preview.errors.length) {
+    return {
+      __status: 400,
+      error: 'invalid_change',
+      detail: 'The change has problems to fix first.',
+      errors: preview.errors,
+      problems: [],
+    };
+  }
+  for (const entry of state.requests.values()) {
+    if (['pending', 'taken', 'building'].includes(entry.row.status)) {
+      return {
+        __status: 409,
+        error: 'request_open',
+        detail: 'A change is already waiting for the host.',
+        id: entry.row.id,
+      };
+    }
+  }
+  const confirmed: string[] = Array.isArray(body.confirm) ? body.confirm : [];
+  const unconfirmed = preview.risky_keys.filter((k: string) => !confirmed.includes(k));
+  if (unconfirmed.length) {
+    return {
+      __status: 409,
+      error: 'confirm_required',
+      detail: 'Confirm the risky changes first.',
+      keys: unconfirmed,
+    };
+  }
+  // Any six digits is the code the mock "sent".
+  if (!/^[0-9]{6}$/.test(String(body.step_up?.code ?? ''))) {
+    return {
+      __status: 403,
+      detail: 'That code was not accepted. Try again.',
+      field: 'code',
+      reason: 'bad',
+    };
+  }
+  const id = state.nextId++;
+  state.requests.set(id, {
+    polls: 0,
+    ops: body.ops ?? [],
+    body,
+    row: {
+      id,
+      status: 'pending',
+      admin_id: 'carol',
+      base_digest: state.digest,
+      document_toml: '',
+      admins: preview.admins_changed ? body.admins : null,
+      admins_changed: preview.admins_changed,
+      changed_sections: preview.changed_sections,
+      secret_names: preview.secret_names,
+      diff_text: preview.diff.join('\n'),
+      output_text: null,
+      created_at: mockIso(),
+      taken_at: null,
+      finished_at: null,
+    },
+  });
+  return { __status: 202, id };
+}
+
+function mockConfigApply(entry: { ops: any[]; body: any }) {
+  const state = mockConfigEditor;
+  state.hasComments = false;
+  if (typeof entry.body.raw === 'string' && !entry.body.raw.includes('old_flag')) {
+    state.unknownRemoved = true;
+  }
+  for (const op of entry.ops) {
+    const key = JSON.stringify(op.path);
+    if (key === MOCK_UNKNOWN_KEY && op.op === 'unset') state.unknownRemoved = true;
+    if (op.op === 'unset') {
+      state.values.delete(key);
+      state.inFile.delete(key);
+    } else {
+      state.values.set(key, op.value);
+      state.inFile.add(key);
+    }
+  }
+  for (const [name, value] of Object.entries(entry.body.secrets ?? {})) {
+    state.secretsSet.set(name, value !== '');
+  }
+  if (Array.isArray(entry.body.admins)) state.admins = [...entry.body.admins];
+  state.digest = `mock-digest-${state.nextId}`;
+}
+
+function mockConfigRequest(id: number) {
+  const entry = mockConfigEditor.requests.get(id);
+  if (!entry) return { __status: 404, error: 'not_found', detail: 'No such request.' };
+  const row = entry.row;
+  if (['pending', 'taken'].includes(row.status)) {
+    entry.polls += 1;
+    if (row.status === 'pending' && entry.polls >= 2) {
+      row.status = 'taken';
+      row.taken_at = mockIso();
+    } else if (row.status === 'taken' && entry.polls >= 4) {
+      row.status = 'applied';
+      row.finished_at = mockIso();
+      row.output_text = 'Updated: config.toml';
+      mockConfigApply(entry);
+      row.document_toml = entry.body.raw ?? mockAdminConfig().raw_toml;
+      // The restarted process answers a few seconds later, and its start
+      // time is after the change finished.
+      mockConfigEditor.restartAt = Date.now() + 3_000;
+      mockConfigEditor.restartedAt = mockIso(Date.now() + 3_000);
+    }
+  }
+  return { ...row };
+}
+
+function mockConfigCancel(id: number) {
+  const entry = mockConfigEditor.requests.get(id);
+  if (!entry) return { __status: 404, error: 'not_found', detail: 'No such request.' };
+  if (entry.row.status !== 'pending') {
+    return {
+      __status: 409,
+      error: 'not_pending',
+      detail: 'Only a request the host has not taken can be cancelled.',
+    };
+  }
+  entry.row.status = 'cancelled';
+  entry.row.finished_at = mockIso();
+  return { id, status: 'cancelled' };
+}
+
+function mockConfigRestore(id: number) {
+  const entry = mockConfigEditor.requests.get(id);
+  if (!entry) return { __status: 404, error: 'not_found', detail: 'No such request.' };
+  const changeSet = {
+    base_digest: mockConfigEditor.digest,
+    ops: [],
+    raw: entry.row.document_toml,
+    secrets: {},
+  };
+  return {
+    change_set: changeSet,
+    preview: mockConfigPreview(changeSet),
+    note:
+      'Restoring brings back the configuration only; credentials and the admin list stay as ' +
+      'they are now.',
+  };
+}
+
+function configEditorHandler({ url, method, body }: MockReq): unknown | undefined {
+  if (url === '/istota/api/settings/step-up' && method === 'POST') {
+    return {
+      request_id: 'mock-step-up',
+      email_hint: 's•••@example.com',
+      expires_at: mockIso(Date.now() + 600_000),
+    };
+  }
+  if (url === '/istota/api/admin/config' && method === 'GET') return mockAdminConfig();
+  if (url === '/istota/api/admin/config/preview' && method === 'POST') {
+    return mockConfigPreview(body);
+  }
+  if (url === '/istota/api/admin/config/requests' && method === 'POST') {
+    return mockConfigSubmit(body);
+  }
+  const status = url.match(/^\/istota\/api\/admin\/config\/requests\/(\d+)$/);
+  if (status && method === 'GET') return mockConfigRequest(Number(status[1]));
+  const cancel = url.match(/^\/istota\/api\/admin\/config\/requests\/(\d+)\/cancel$/);
+  if (cancel && method === 'POST') return mockConfigCancel(Number(cancel[1]));
+  if (url.split('?')[0] === '/istota/api/admin/config/requests' && method === 'GET') {
+    const rows = [...mockConfigEditor.requests.values()].map((entry) => ({ ...entry.row }));
+    return { requests: rows.sort((a, b) => b.id - a.id) };
+  }
+  const restore = url.match(/^\/istota\/api\/admin\/config\/requests\/(\d+)\/restore$/);
+  if (restore && method === 'POST') return mockConfigRestore(Number(restore[1]));
+  return undefined;
 }
 
 /**
@@ -4969,7 +5438,10 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
       share: { kind: 'user', count: 2 },
       nextcloud_url: 'https://cloud.example.com/apps/files/files?dir=%2FShared',
     },
-    workspaceEntry('image.png'),
+    { ...workspaceEntry('image.png'), size: 240_000, modified: Date.now() / 1000 - 3600 },
+    { ...workspaceEntry('demo-video.mp4'), size: 12_000_000, modified: Date.now() / 1000 - 86400 },
+    { ...workspaceEntry('recording.mp3'), size: 3_400_000 },
+    { ...workspaceEntry('backup.zip'), size: 1_800_000 },
     workspaceEntry('note.md'),
     workspaceEntry('outside-link', 'link'),
     workspaceEntry('task-socket', 'other'),
@@ -4983,6 +5455,16 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
   Archive: [workspaceEntry('note.txt')],
 };
 let workspacePins: WorkspacePin[] = [
+  {
+    id: 3,
+    provider: 'workspace',
+    ref: '/Users/carol/istota/config/USER.md',
+    name: 'USER.md',
+    mime_type: 'text/markdown',
+    web_url: null,
+    available: true,
+    is_dir: false,
+  },
   {
     id: 1,
     provider: 'workspace',
@@ -5004,7 +5486,85 @@ let workspacePins: WorkspacePin[] = [
     is_dir: false,
   },
 ];
-let nextWorkspacePinId = 3;
+let nextWorkspacePinId = 4;
+
+// The user's config files. Every save status is reachable from the editor:
+// a stale revision is 409, text containing LOCKED is 423, INVALID is 422 with
+// errors, and an overlay over 32 KiB is 413.
+const mockConfigText = new Map<string, string>([
+  ['USER.md', '# About me\n\nPrefers short answers. Works in UTC.\n'],
+  [
+    'CRON.md',
+    '# Scheduled jobs\n\n```toml\n[[jobs]]\nname = "morning"\ncron = "0 8 * * *"\nprompt = "Summarize my day."\n```\n',
+  ],
+  ['skills/notes', 'Keep notes terse.\n'],
+]);
+const mockConfigSkills = ['calendar', 'developer', 'email', 'notes'];
+function mockConfigFiles(path: string, method: string, body: any) {
+  const prefix = '/istota/api/workspace/config-files';
+  if (path === prefix && method === 'GET') {
+    const names = [
+      'USER.md',
+      'CRON.md',
+      'TASKS.md',
+      'HEARTBEAT.md',
+      ...mockConfigSkills.map((skill) => `skills/${skill}`),
+    ];
+    return {
+      files: names.map((name) => {
+        const text = mockConfigText.get(name);
+        return {
+          name,
+          kind: name.startsWith('skills/') ? 'skill' : 'config',
+          view_path: `/Users/carol/istota/config/${name}${name.startsWith('skills/') ? '.md' : ''}`,
+          exists: text !== undefined,
+          size: text === undefined ? null : Buffer.byteLength(text, 'utf8'),
+          editable: true,
+        };
+      }),
+    };
+  }
+  if (!path.startsWith(`${prefix}/`)) return undefined;
+  const name = decodeURIComponent(path.slice(prefix.length + 1));
+  const known =
+    ['USER.md', 'CRON.md', 'TASKS.md', 'HEARTBEAT.md'].includes(name) ||
+    mockConfigSkills.some((skill) => name === `skills/${skill}`);
+  if (!known) return { __status: 404, error: 'File not found.' };
+  const stored = mockConfigText.get(name) ?? '';
+  if (method === 'GET')
+    return { content: stored, revision: mockMemoryRevision(stored), exists: !!stored.trim() };
+  if (method !== 'PUT') return undefined;
+  if (typeof body?.content !== 'string' || typeof body?.revision !== 'string')
+    return { __status: 400, error: 'content and revision are required' };
+  const content: string = body.content;
+  if (name.startsWith('skills/') && Buffer.byteLength(content, 'utf8') > 32 * 1024)
+    return {
+      __status: 413,
+      error: 'This file is too large.',
+      code: 'too_large',
+      max_bytes: 32 * 1024,
+    };
+  if (content.includes('INVALID'))
+    return {
+      __status: 422,
+      error: 'The daemon would not load this file as written.',
+      code: 'invalid',
+      errors: ['TOML error: Expected "=" after a key (at line 3, column 6)'],
+    };
+  if (body.revision !== mockMemoryRevision(stored))
+    return { __status: 409, error: 'This file changed since it was loaded.', code: 'conflict' };
+  if (content.includes('LOCKED'))
+    return {
+      __status: 423,
+      error: 'This file is being written right now. Try again.',
+      code: 'locked',
+    };
+  mockConfigText.set(name, content);
+  return {
+    revision: mockMemoryRevision(content),
+    ...(name === 'CRON.md' ? { applies: 'next_sync' } : {}),
+  };
+}
 const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const driveUrl = new URL(url, 'http://localhost');
   if (driveUrl.pathname === '/istota/api/workspace/pins') {
@@ -5032,6 +5592,9 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
       (pin) => pin.id !== Number(driveUrl.pathname.split('/').at(-1)),
     );
     return { status: 'ok' };
+  }
+  if (driveUrl.pathname === '/istota/api/workspace/drive/parent' && method === 'GET') {
+    return { folder: 'drive_folder_1' };
   }
   if (driveUrl.pathname === '/istota/api/workspace/drive/list' && method === 'GET') {
     const folder = driveUrl.searchParams.get('folder') || 'root';
@@ -5063,6 +5626,9 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
       next_page_token: folder === 'root' && !more ? 'page-2' : null,
     };
   }
+
+  const configFiles = mockConfigFiles(driveUrl.pathname, method, body);
+  if (configFiles !== undefined) return configFiles;
 
   const [path, query] = url.split('?');
   if (
@@ -5097,6 +5663,23 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     if (!upload) workspaceTree[resultPath] = [];
     return upload ? { name, path: resultPath, size: entry.size } : { path: resultPath };
   }
+  if (method === 'DELETE' && path === '/istota/api/workspace/files') {
+    const params = new URLSearchParams(query);
+    const folder = params.get('path') || '';
+    const name = params.get('name') || '';
+    const entries = workspaceTree[folder];
+    const entry = entries?.find((item) => item.name === name);
+    if (params.get('place') !== 'home' || !entry)
+      return { __status: 404, error: 'File or folder not found.' };
+    if (entry.kind !== 'file' && entry.kind !== 'dir')
+      return { __status: 422, error: 'Only regular files and empty folders can be deleted.' };
+    const entryPath = [folder, name].filter(Boolean).join('/');
+    if (entry.kind === 'dir' && workspaceTree[entryPath]?.length)
+      return { __status: 409, error: 'Folder is not empty. Delete its contents first.' };
+    workspaceTree[folder] = entries.filter((item) => item !== entry);
+    if (entry.kind === 'dir') delete workspaceTree[entryPath];
+    return { status: 'ok' };
+  }
   if (method !== 'GET') return undefined;
   if (path === '/istota/api/workspace/places')
     return {
@@ -5113,8 +5696,27 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const selected = workspacePlaces.find((item) => item.id === place);
   if (!selected?.browsable) return { __status: 404, error: 'Place not found.' };
   if (folder === 'Unavailable folder') return { __status: 404, error: 'Folder not found.' };
+  const configEntries =
+    folder === 'istota/config'
+      ? [
+          ...[...mockConfigText.keys()]
+            .filter((name) => !name.startsWith('skills/'))
+            .map((name) => workspaceEntry(name)),
+          workspaceEntry('skills', 'dir'),
+        ]
+      : folder === 'istota/config/skills'
+        ? [...mockConfigText.keys()]
+            .filter((name) => name.startsWith('skills/'))
+            .map((name) => workspaceEntry(`${name.slice('skills/'.length)}.md`))
+        : folder === 'istota'
+          ? [workspaceEntry('config', 'dir')]
+          : undefined;
   const entries =
-    place === 'home' ? workspaceTree[folder] : folder ? undefined : [workspaceEntry('note.md')];
+    place === 'home'
+      ? (configEntries ?? workspaceTree[folder])
+      : folder
+        ? undefined
+        : [workspaceEntry('note.md')];
   if (!entries) return { __status: 404, error: 'Folder not found.' };
   return {
     place,
@@ -5147,7 +5749,7 @@ const handlers: MockHandler[] = [
 
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
-  ({ url }) => (url === '/istota/api/admin/config' ? mockAdminConfig() : undefined),
+  configEditorHandler,
   ({ url, method, body }) =>
     url === '/istota/api/admin/doctor/run' && method === 'POST'
       ? mockAdminDoctorRun(body)
