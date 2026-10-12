@@ -286,6 +286,16 @@ istota devbox compose-file > compose.devbox.yml   # One devbox service per [devb
 
 Prints the stack's second compose file: a `devbox-<user>` service per user and the `daemon` service's mounts of each user's exec and credential socket volumes. It creates each user's repos directory first, and exits 1 naming the key when a socket directory or `repos_dir` is outside `/data`. See [Docker](../deployment/docker.md#devboxes).
 
+### Workspace
+
+```bash
+istota workspace localize --from /mnt/shared --to /data/workspace --scheduler-stopped   # Copy the mounted workspace
+istota workspace localize-config [--check]                                              # Point config.toml at /data/workspace
+istota workspace reindex --forget-root /mnt/shared                                      # Rebuild the memory index on the new paths
+```
+
+The three steps of `istota-stack localize-workspace`, which runs them in order with the stack stopped. `localize` exits 0 copied, 1 refused, 2 copied with entries skipped, 3 stopped on an I/O error. See [Moving to a local workspace](../deployment/moving-to-a-local-workspace.md).
+
 ### Nextcloud
 
 ```bash

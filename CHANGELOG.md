@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota-stack localize-workspace` moves an install whose workspace is the Nextcloud mount onto the VM's own disk, with Talk and the `nextcloud` skill still connected. It stops the stack, copies the files, points the config at the local copy, turns the mount off and starts the stack again; the Nextcloud copy is left as it was, apart from a `MOVED.md` in each user's bot folder, so going back is a config change. Run it with `--dry-run` first to see what it would skip.
+
+  **Upgrade note:** nothing changes until you run it. A VM managed by the Ansible role moves by its plan instead: `--copy-only`, then `istota_storage: local` and no `nextcloud_mount_path`. A hand-written config with a Nextcloud URL and `workspace_path = "/mnt/shared"` but no `nextcloud_mount_path` is now refused at boot, since it would run as a local workspace with the mount checks off; add `nextcloud_mount_path = "/mnt/shared"` to keep the mount.
+
 - Edit your `USER.md`, `CRON.md`, `TASKS.md`, `HEARTBEAT.md` and your instructions for each skill from the Configuration section of Workspace. A save is checked the way Istota reads the file, so a broken `CRON.md` or `HEARTBEAT.md` is refused with the reasons listed, and a save never overwrites a change Istota made while you were editing. New jobs in `CRON.md` start at the next sync.
 
 - `istota setup` asks where the workspace lives when you connect a Nextcloud: `mount`, the bot's Nextcloud files through the VM's rclone mount, or `local`, a directory on the VM shown in the web UI. Talk and the `nextcloud` skill work with both. `local` writes `STORAGE=local`, so `provision.sh` installs no rclone and no mount unit. A scripted run takes `--workspace mount|local`, and defaults to `mount` when it is given `--nextcloud-url`, so existing scripts get what they got before.

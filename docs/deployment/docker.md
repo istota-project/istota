@@ -209,6 +209,8 @@ In full integration the bot sees what users share with it, and users see their b
 
 The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
 
+To move an install in full integration to a local workspace, see [Moving to a local workspace](moving-to-a-local-workspace.md).
+
 Workspace files have no versions or trash in either mode.
 
 ## Ingress and TLS
