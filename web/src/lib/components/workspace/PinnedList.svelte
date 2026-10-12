@@ -35,7 +35,7 @@
 </script>
 
 <section aria-label="Pinned files">
-  <CategoryGroup label="Pinned">
+  <CategoryGroup label="Pinned" collapsible defaultOpen={false}>
     {#each pins as pin (pin.id)}
       {@const folder = folderTarget(pin)}
       {@const PinIcon = pin.is_dir ? Folder : fileIcon(pin.name, pin.mime_type)}

@@ -1,5 +1,6 @@
 """File creation must hold directory descriptors through every write."""
 
+import errno
 import os
 
 import pytest
@@ -75,6 +76,93 @@ def test_interrupted_source_unlinks(tmp_path):
     with pytest.raises(OSError):
         write_new_file(tmp_path, [], "note.txt", chunks(), max_bytes=100)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_unnumbered_name_holds_nothing_until_the_write_is_complete(tmp_path):
+    # ISSUE-724: a reader taking the name mid-write got a partial file.
+    seen = []
+
+    def chunks():
+        yield b"first "
+        seen.append(sorted(p.name for p in tmp_path.iterdir() if not p.name.startswith(".")))
+        yield b"second"
+
+    assert write_new_file(tmp_path, [], "note.txt", chunks(), max_bytes=100, numbered=False) == "note.txt"
+    assert seen == [[]]
+    assert (tmp_path / "note.txt").read_bytes() == b"first second"
+    assert [p.name for p in tmp_path.iterdir()] == ["note.txt"]
+
+
+@pytest.mark.parametrize("existing", ["file", "symlink"])
+def test_unnumbered_name_taken_raises_and_leaves_no_staging_file(tmp_path, existing):
+    target = tmp_path / "target"
+    target.write_bytes(b"keep")
+    root = tmp_path / "root"
+    root.mkdir()
+    leaf = root / "note.txt"
+    if existing == "symlink":
+        leaf.symlink_to(target)
+    else:
+        leaf.write_bytes(b"keep")
+    with pytest.raises(FileExistsError):
+        write_new_file(root, [], "note.txt", [b"replace"], max_bytes=100, numbered=False)
+    assert [p.name for p in root.iterdir()] == ["note.txt"]
+    assert target.read_bytes() == b"keep"
+    if existing == "file":
+        assert leaf.read_bytes() == b"keep"
+    else:
+        assert leaf.is_symlink()
+
+
+def test_unnumbered_interrupted_source_leaves_nothing(tmp_path):
+    def chunks():
+        yield b"partial"
+        raise OSError("source failed")
+    with pytest.raises(OSError):
+        write_new_file(tmp_path, [], "note.txt", chunks(), max_bytes=100, numbered=False)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("err", [errno.EPERM, errno.EOPNOTSUPP])
+def test_unnumbered_publish_without_hard_links_still_lands(tmp_path, monkeypatch, err):
+    def no_links(*args, **kwargs):
+        raise OSError(err, "no hard links here")
+
+    monkeypatch.setattr(writes.os, "link", no_links)
+    assert write_new_file(tmp_path, [], "note.txt", [b"whole"], max_bytes=100, numbered=False) == "note.txt"
+    assert (tmp_path / "note.txt").read_bytes() == b"whole"
+    assert [p.name for p in tmp_path.iterdir()] == ["note.txt"]
+    with pytest.raises(FileExistsError):
+        write_new_file(tmp_path, [], "note.txt", [b"again"], max_bytes=100, numbered=False)
+    assert (tmp_path / "note.txt").read_bytes() == b"whole"
+    assert [p.name for p in tmp_path.iterdir()] == ["note.txt"]
+
+
+@pytest.mark.parametrize("swap", ["symlink", "other file"])
+def test_unnumbered_staging_name_swapped_mid_write_is_not_published(tmp_path, swap):
+    # The room folder is task-writable: a staging name swapped for a link to
+    # another file must not be hard-linked in under the final name.
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"someone else's")
+    root = tmp_path / "room"
+    root.mkdir()
+
+    def chunks():
+        yield b"half"
+        [staging] = [p for p in root.iterdir() if p.name.endswith(".staging")]
+        staging.unlink()
+        if swap == "symlink":
+            staging.symlink_to(secret)
+        else:
+            staging.write_bytes(b"planted")
+        yield b" rest"
+
+    with pytest.raises(OSError):
+        write_new_file(root, [], "photo.jpg", chunks(), max_bytes=100, numbered=False)
+    leaf = root / "photo.jpg"
+    if os.path.lexists(leaf):
+        assert leaf.lstat().st_ino != secret.stat().st_ino
+    assert secret.read_bytes() == b"someone else's"
 
 
 @pytest.mark.parametrize("parts", [["link"], [".."], [""], ["bad\0name"]])
