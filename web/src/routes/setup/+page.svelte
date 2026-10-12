@@ -299,7 +299,7 @@
       browser={draft.list('profiles').includes(BROWSER_PROFILE)}
       subscription={draft.text('brain_kind') === 'claude_code'}
       internet={(draft.text('ingress') || 'local') !== 'local'}
-      nextcloud={draft.text('storage') === 'nextcloud'}
+      nextcloudMount={draft.text('storage') === 'nextcloud' && draft.text('workspace') !== 'local'}
     />
   </SetupFrame>
 {:else if view === 'finishing'}

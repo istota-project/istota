@@ -6,7 +6,7 @@
  * step is its card title, which is enough to tell which one is on screen.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { __history } from '../../../vitest-stubs/app-navigation';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
@@ -857,6 +857,23 @@ describe('the Nextcloud screen', () => {
     });
   });
 
+  it('keeps the files on the Nextcloud mount unless told to keep them here', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await chooseNextcloud();
+    const files = screen.getByRole('radiogroup', {
+      name: 'Where Istota keeps its files with Nextcloud',
+    });
+    const cards = within(files).getAllByRole('radio');
+    expect(cards[0]).toHaveAttribute('aria-checked', 'true');
+
+    await fireEvent.click(cards[1]);
+    await fillIn();
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ storage: 'nextcloud', workspace: 'local' });
+  });
+
   it('renders each line of the check in place, marked by how it went', async () => {
     vi.mocked(checkSetupConnection).mockResolvedValue(passed);
     await chooseNextcloud();
@@ -1202,6 +1219,12 @@ describe('the Review screen', () => {
     expect(reviewRow('connections', 'Calendar')).toBe('');
   });
 
+  it('shows files kept here with Nextcloud as on this server', async () => {
+    await openReview({ ...ANSWERED, storage: 'nextcloud', workspace: 'local', user_id: 'ada' });
+    expect(reviewRow('nextcloud', 'Files')).toBe('On this server');
+    expect(reviewRow('nextcloud', 'Your username')).toBe('ada');
+  });
+
   it('goes back to a screen from its Edit link', async () => {
     await openReview();
     await fireEvent.click(screen.getByRole('button', { name: 'Edit AI service' }));
@@ -1330,6 +1353,15 @@ describe('Finishing', () => {
     await vi.advanceTimersByTimeAsync(3000);
     expect(fetchMock.mock.calls.length).toBe(polls + 1);
     expect(assign).not.toHaveBeenCalled();
+  });
+
+  it('names no mount when Nextcloud keeps no files', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    await finish({ ...ANSWERED, storage: 'nextcloud', workspace: 'local' });
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    expect(screen.getByText('This is taking longer than expected')).toBeInTheDocument();
+    expect(screen.queryByText('journalctl -u mount-nextcloud')).toBeNull();
   });
 
   it('says under a minute with no browser and no subscription, and asks for no certificate locally', async () => {
