@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Ansible management role's defaults list every config setting.** Below `istota_config`, a commented reference gives each key at its own nesting with its default and what it does, and marks each credential with the secret to set instead. It is generated from the code, so it names every setting the release reads.
+
 - **`istota-stack update --unsigned latest` deploys the tip of `main`**, so a VM that tracks `main` needs no tag per deploy. It is recorded as `main-<commit>`, which `rollback` returns to like any tag, and only a commit of `main` is accepted under that name.
 
 - **A machine dedicated to Istota is set up by one script and updated from signed releases.** `host/provision.sh` prepares a fresh Debian 13 VM, server or Lima VM on a Mac, and `istota-stack update <tag>` builds the images on the machine from a release tag only after checking its signature against the release key you configured; an unsigned tag, a branch or another key's signature is refused before anything changes. `istota-stack rollback` returns to the previous release, and refuses when a newer release has already migrated the database. An update creates the empty secrets file for any credential a newer release adds.
