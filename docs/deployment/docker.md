@@ -63,11 +63,11 @@ The scheduler's compose service was called `istota` and is now `daemon`, so its 
 
 ### Room identities: offline maintenance required
 
-When upgrading a volume with legacy room identities, update to the new release, then stop both application services before running the migration. Keep Nextcloud running for the server-side channel directory moves. `istota-stack update` starts the new release before you stop it, and that is safe: no boot runs this migration, so the release already runs against legacy rooms on any install that has not done it yet, and after a partial migration.
+When upgrading a volume with legacy room identities, update to the new release, then stop the two services that write rooms, `daemon` and `web`, and the WhatsApp sidecar before running the migration. The sidecar holds inbound messages in memory for only four minutes while the daemon is away, so stopping it leaves them with WhatsApp instead; naming it is harmless when its profile is off. Leave the rest running. With full Nextcloud integration, keep your Nextcloud and the VM's rclone mount (`mount-nextcloud.service`) up: the channel directories move over WebDAV, and the migration refuses when either is unavailable. `istota-stack update` starts the new release before you stop it, and that is safe: no boot runs this migration, so the release already runs against legacy rooms on any install that has not done it yet, and after a partial migration.
 
 ```bash
 istota-stack update vX.Y.Z
-istota-stack compose stop daemon web
+istota-stack compose stop daemon web whatsapp-baileys
 istota-stack compose run --rm --no-deps --entrypoint istota-drop daemon istota init --relocate-rooms --scheduler-stopped
 istota-stack up
 ```
