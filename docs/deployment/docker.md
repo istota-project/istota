@@ -50,7 +50,7 @@ After the page finishes, `istota-stack` installs `.env` and `host.env`, builds w
 - On a cloud machine behind its provider's NAT, the printed address is the private one; open the public address instead, and the code still works.
 - It refuses when `config.toml` exists. Change a configured stack by editing `config.toml`, with `istota-stack apply`, or with `istota-stack setup --force`.
 
-`istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `journalctl -u istota-setup` has the same lines.
+`istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `install.sh --server` does the same and prints them in the terminal. `journalctl -u istota-setup` has the same lines.
 
 The page leaves out the operator features: WhatsApp, the Talk signaling server, the developer skill, devboxes, Nextcloud login, the DAV prefix and the auto-share setting. Set those up afterwards in `config.toml` or with the terminal setup.
 

@@ -123,7 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.
 
-- **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images, runs the setup wizard and starts the stack. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
+- **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images and starts the setup in the browser, with or without a terminal, printing the address, the one-use setup code and the certificate fingerprint as a `host/cloud-init.yaml` bootstrap does. `--terminal-setup` runs the setup wizard in the terminal instead. An option the server install does not know is refused. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
 
 - **The standalone single-user install is deprecated.** Istota has one deployment, the Docker stack on a machine of its own, and the documentation now describes only that, with a Lima VM for running it on a Mac. Existing standalone installs keep working and updating until a Mac desktop app replaces them; `istota serve` stays as the development loop on a Mac checkout.
 

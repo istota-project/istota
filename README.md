@@ -232,7 +232,7 @@ WhatsApp and SMS carry the answer rather than the conversation: the exchange sta
 
 Istota has one deployment: the Docker stack of the scheduler, web app and nginx, on a Debian 13 machine dedicated to it, with every task in a bubblewrap sandbox with its own cgroup. Nextcloud is optional; without it, storage is local.
 
-Run the installer as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It verifies the release tag against the signing key, provisions the machine, builds the images there, runs the setup wizard and starts the stack. `istota-stack` manages it afterwards.
+Run the installer as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It verifies the release tag against the signing key, provisions the machine, builds the images there and starts the setup in your browser, which starts the stack when it finishes (`--terminal-setup` runs the setup wizard in the terminal instead). `istota-stack` manages it afterwards.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
