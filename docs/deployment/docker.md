@@ -63,7 +63,7 @@ The scheduler's compose service was called `istota` and is now `daemon`, so its 
 
 ### Room identities: offline maintenance required
 
-When upgrading a volume with legacy room identities, update to the new release, then stop both application services before running the migration. Keep Nextcloud running for the server-side channel directory moves.
+When upgrading a volume with legacy room identities, update to the new release, then stop both application services before running the migration. Keep Nextcloud running for the server-side channel directory moves. `istota-stack update` starts the new release before you stop it, and that is safe: no boot runs this migration, so the release already runs against legacy rooms on any install that has not done it yet, and after a partial migration.
 
 ```bash
 istota-stack update vX.Y.Z
@@ -120,11 +120,13 @@ It refuses rather than guessing when it cannot tell whose clones are whose, and 
 
 There are three: `browser` (web browsing), `whatsapp-baileys` (WhatsApp through a paired session) and `signaling` (Talk over a WebSocket).
 
-They are turned on by `COMPOSE_PROFILES` in `/srv/app/istota/.env`, a comma-separated list that `istota-stack setup` writes from your answers. Empty means the core stack only. To change it, edit the line and run `istota-stack up`, which starts the containers of a profile that was added and removes those of one that was taken out:
+They are turned on by `COMPOSE_PROFILES` in `/srv/app/istota/.env`, a comma-separated list that `istota-stack setup` writes from your answers. Empty means the core stack only. To change it, edit the line:
 
 ```bash
 COMPOSE_PROFILES=browser,signaling
 ```
+
+Then run `istota-stack up`, which starts the containers of a profile that was added and removes those of one that was taken out, and re-run `/srv/app/istota/src/host/provision.sh`, which enables or disables the browser watchdog timer to match. Both are needed. `istota-stack up` never runs `provision.sh`, and `provision.sh` does not start or stop containers for a profile change: it runs `istota-stack up` only when it has just installed a different `istota-stack`.
 
 The web service serves the webhook receiver's routes too (location pings, SMS and Meta's WhatsApp callbacks), so no profile is needed for them; each route answers only when its feature is enabled in the config. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`. Nginx is the public endpoint for `/webhooks/`.
 
@@ -172,7 +174,7 @@ enabled = true
 users = ["alice"]
 ```
 
-`istota devbox compose-file` prints one `devbox-<user>` service per entry, plus the `daemon` service's mounts of each user's two socket volumes, and creates each user's repos directory first. `istota-stack` writes its output to `/srv/app/istota/compose.devbox.yml` on `setup`, `update` and an `apply` that changed the config, builds the devbox image, and passes the file as a second `-f` to every compose command. After editing `users` in `config.toml` by hand, run `istota-stack update` with the deployed tag to re-render it. The next `up` removes the service of a user taken out and keeps their home volume.
+`istota devbox compose-file` prints one `devbox-<user>` service per entry, plus the `daemon` service's mounts of each user's two socket volumes, and creates each user's repos directory first. `istota-stack` writes its output to `/srv/app/istota/compose.devbox.yml` on `setup`, `update` and an `apply` that changed the config, and passes the file as a second `-f` to every compose command. Only `update` builds the devbox image. After editing `users` in `config.toml` by hand, run `istota-stack update` with the deployed tag (`ISTOTA_TAG` in `.env`) to re-render the file and build the image. If `.env` has `ISTOTA_TAG_UNSIGNED=1`, as on a Lima VM or an install following main, pass `--unsigned`: `istota-stack update --unsigned main-<commit>` rebuilds that same commit, where `--unsigned latest` would move to main's current tip. The next `up` removes the service of a user taken out and keeps their home volume.
 
 What each devbox gets, and nothing else:
 
@@ -317,7 +319,7 @@ These settings are why the machine has to be dedicated to the install: `systempa
 
 The browser container's healthcheck probes the liveness endpoint's deep tier, which asks whether the Chrome process is alive, whether Chrome's DevTools endpoint answers, and (since ISSUE-384) whether the API process can still drive the browser it is reporting on. `restart: unless-stopped` reacts to a process exiting, not to a failing healthcheck, so compose alone leaves a wedged container running.
 
-A watchdog timer that `provision.sh` installs (`istota-browser-watchdog.timer`, enabled when the `browser` profile is on) reads the verdict every minute, restarts the container after a debounce, stops and alerts if the restarts start looping, and restarts it once a day. To read the verdict yourself, use `istota-stack compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`.
+A watchdog timer that `provision.sh` installs (`istota-browser-watchdog.timer`, enabled when `provision.sh` last ran with the `browser` profile on) reads the verdict every minute, restarts the container after a debounce, stops and alerts if the restarts start looping, and restarts it once a day. To read the verdict yourself, use `istota-stack compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`.
 
 ## Credentials
 

@@ -40,7 +40,7 @@ The SMS and WhatsApp rows are the exception to the credential-proxy sentence int
 
 **The stack**: `istota setup` writes each credential it asks for to a file under `/srv/app/istota/secrets/` (0400, owned by uid 10001), which compose mounts and the container exports as the matching `ISTOTA_*` variable, keeping it out of `config.toml`. Replace a file and restart to change it. The entrypoint generates the master key on first start and keeps it at `/data/.secret_key`.
 
-**A Mac development checkout**: edit `config.toml` directly, or set the `ISTOTA_*` env vars in `istota.env` beside it, which `istota serve` reads.
+**A Mac development checkout**: edit `config.toml` directly, or set the `ISTOTA_*` env vars in an `istota.env` file, which `istota serve` reads before it loads the config. It reads the file named with `--env-file`, else the one beside the config named with `-c`, else `~/.config/istota/istota.env`. A checkout's `config/config.toml` takes precedence over `~/.config/istota/config.toml`, so check which config is loading before you edit one. See [the edit-run loop on a Mac](../development/setup.md#the-edit-run-loop-on-a-mac).
 
 ## Per-user credentials (user's accounts)
 

@@ -1748,8 +1748,9 @@ class Stack:
         never called.
 
         **`/mnt/shared` is knowingly outside this**, and the omission is a
-        decision rather than an oversight. The config writes
-        `workspace_path` as that literal on every profile, so memory
+        decision rather than an oversight. The full profile's config writes
+        `workspace_path` as that literal (a lean one writes `/data/workspace`,
+        which this leaves alone for the same reason), so memory
         files, `TASKS.md` and per-user directories accumulate there for a whole
         session — and the tasks-file poller reads one of them every 30 seconds.
         No scenario in this tier writes there yet, and emptying it wholesale

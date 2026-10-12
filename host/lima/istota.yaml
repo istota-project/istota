@@ -2,8 +2,10 @@
 #
 #   limactl create --name istota --param ISTOTA_REPO=/path/to/istota host/lima/istota.yaml
 #   limactl start istota
-#   limactl shell istota sudo istota-stack update <tag>
+#   limactl shell istota sudo istota-stack update --unsigned <tag>
 #   limactl shell istota sudo istota-stack setup --hostname localhost:8080 ...
+#   limactl shell istota sudo istota-stack check-image ||
+#     limactl shell istota sudo istota-stack update --unsigned <tag>
 #   limactl shell istota sudo /srv/app/istota/src/host/provision.sh
 #   limactl shell istota sudo systemctl start istota-stack
 #

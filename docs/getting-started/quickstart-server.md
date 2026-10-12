@@ -64,11 +64,12 @@ limactl create --name istota --param ISTOTA_REPO="$PWD" host/lima/istota.yaml
 limactl start istota
 limactl shell istota sudo istota-stack update --unsigned vX.Y.Z
 limactl shell istota sudo istota-stack setup --ingress local --hostname localhost:8080
+limactl shell istota sudo istota-stack check-image || limactl shell istota sudo istota-stack update --unsigned vX.Y.Z
 limactl shell istota sudo /srv/app/istota/src/host/provision.sh
 limactl shell istota sudo systemctl enable --now istota-stack
 ```
 
-The VM's own checkout at `/srv/app/istota/src` is a clone of the mounted one, so `istota-stack update` fetches tags from the Mac checkout. `--unsigned` is needed until `/srv/app/istota/host.env` names a `RELEASE_SIGNING_KEY`; with one, drop the flag and the tag is verified as it is on a server. Then open `http://localhost:8080` and sign in. Everything else on this page applies inside the VM: prefix a command with `limactl shell istota sudo`, or open a shell there with `limactl shell istota`.
+The VM's own checkout at `/srv/app/istota/src` is a clone of the mounted one, so `istota-stack update` fetches tags from the Mac checkout. The first build runs before `config.toml` exists, so it leaves Claude Code out; `check-image` exits 2 when the config the wizard wrote needs it, and the second `update` rebuilds the image. `--unsigned` is needed until `/srv/app/istota/host.env` names a `RELEASE_SIGNING_KEY`. After adding one, re-run `provision.sh`, which writes the key to `/srv/app/istota/allowed_signers`; then drop the flag and the tag is verified as it is on a server. Then open `http://localhost:8080` and sign in. Everything else on this page applies inside the VM: prefix a command with `limactl shell istota sudo`, or open a shell there with `limactl shell istota`.
 
 ## Managing the machine from Ansible
 
