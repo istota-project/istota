@@ -124,6 +124,54 @@ export DEBIAN_FRONTEND=noninteractive
 # current Engine come from there, as in the role.
 apt_install() { apt-get install -y -qq --no-install-recommends "$@" >/dev/null; }
 
+# rclone for the Nextcloud mount: rclone.org's own .deb, pinned by version and
+# per-arch SHA-256 (from the release's signed SHA256SUMS), never Debian's
+# package (#694). Debian builds rclone against its own 2016 bazil.org/fuse,
+# which answers any plain errno with EIO, so every xattr call on a workspace
+# file fails and shutil.copy2 out of the mount breaks. rclone.org's builds use
+# the fuse rclone pins, which passes the errno through. Held, so apt never
+# swaps Debian's build back in.
+RCLONE_VERSION=1.75.2
+RCLONE_SHA256_AMD64=efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
+RCLONE_SHA256_ARM64=b8ba161d5c837206fad79ff1aabf0a81aa02a5fb164cdbc0ff5db4160aecd278
+install_rclone() {
+    local have arch sha tmp
+    have="$(rclone version 2>/dev/null || true)"
+    if [ "${have%%$'\n'*}" = "rclone v${RCLONE_VERSION}" ]; then
+        # A run killed between the install and the hold left it unheld.
+        apt-mark hold rclone >/dev/null
+        return 0
+    fi
+    arch="$(dpkg --print-architecture)"
+    case "$arch" in
+        amd64) sha="$RCLONE_SHA256_AMD64" ;;
+        arm64) sha="$RCLONE_SHA256_ARM64" ;;
+        *) die "no pinned rclone checksum for ${arch}" ;;
+    esac
+    tmp="$(mktemp -d)"
+    curl -fsSL -o "${tmp}/rclone.deb" \
+        "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${arch}.deb"
+    if ! echo "${sha}  ${tmp}/rclone.deb" | sha256sum -c - >/dev/null 2>&1; then
+        rm -rf "$tmp"
+        die "rclone ${RCLONE_VERSION} for ${arch} does not match its pinned SHA-256"
+    fi
+    dpkg -i "${tmp}/rclone.deb" >/dev/null
+    rm -rf "$tmp"
+    apt-mark hold rclone >/dev/null
+    log "installed rclone ${RCLONE_VERSION} from rclone.org (was: ${have%%$'\n'*})"
+}
+
+# Whether the running mount's process is an rclone other than the one on disk:
+# dpkg replaced it under the mount, in this run or one that died before the
+# restart. Read off the process, so a re-run still sees it.
+mount_runs_stale_rclone() {
+    local pid exe
+    pid="$(systemctl show -p MainPID --value mount-nextcloud.service 2>/dev/null || true)"
+    [ -n "$pid" ] && [ "$pid" != 0 ] || return 1
+    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || return 1
+    [ "$exe" != /usr/bin/rclone ]
+}
+
 apt-get update -qq
 apt_install ca-certificates curl git python3 iptables apparmor apparmor-utils openssl
 
@@ -319,7 +367,8 @@ dropin="${UNITS}/istota-stack.service.d"
 if [ "$(host_env STORAGE)" = "nextcloud" ]; then
     [ -n "$(host_env RCLONE_REMOTE)" ] \
         || die "STORAGE=nextcloud needs RCLONE_REMOTE in ${HOST_ENV}: the remote's name in ${STACK}/rclone.conf."
-    apt_install rclone fuse3
+    apt_install fuse3
+    install_rclone
     grep -qx 'user_allow_other' /etc/fuse.conf || sed -i 's/^#\s*user_allow_other$/user_allow_other/' /etc/fuse.conf
     grep -qx 'user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fuse.conf
     if [ -f "${STACK}/rclone.conf" ]; then
@@ -344,10 +393,11 @@ EOF
         # mountpoint the mount's user cannot reach.
         chmod o+x "$(dirname "$MOUNT_DIR")"
         systemctl enable --now mount-nextcloud.service
-        # A running mount keeps the flags it started with. Restarting it
-        # restarts the stack too (Requires=), so only on a changed unit.
-        if [ -n "$mount_unit_changed" ]; then
-            log "mount-nextcloud.service changed; restarting it"
+        # A running mount keeps the flags and the binary it started with.
+        # Restarting it restarts the stack too (Requires=), so only on a
+        # changed unit or a replaced rclone.
+        if [ -n "$mount_unit_changed" ] || mount_runs_stale_rclone; then
+            log "mount-nextcloud.service or rclone changed; restarting the mount"
             systemctl restart mount-nextcloud.service
         fi
     fi

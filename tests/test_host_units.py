@@ -11,6 +11,7 @@ against stub `iptables` and `docker` binaries on PATH.
 from __future__ import annotations
 
 import configparser
+import hashlib
 import os
 import re
 import shutil
@@ -319,6 +320,140 @@ class TestProvision:
         mount = _unit(HOST / "mount-nextcloud.service")
         assert mount["Service"]["CacheDirectory"] == "istota-rclone"
         assert "--cache-dir /var/cache/istota-rclone" in mount["Service"]["ExecStart"]
+
+
+
+class TestUpstreamRclone:
+    """The mount runs rclone.org's own build, pinned, never Debian's package (#694).
+
+    Debian links rclone against its own 2016 bazil.org/fuse snapshot, whose
+    error path turns any plain errno into EIO, so every xattr call on a file
+    in the workspace fails with an I/O error and `shutil.copy2` out of it
+    breaks. rclone.org's builds use the 2023 fuse rclone pins, which passes
+    the errno through and lets the kernel mark the mount xattr-less."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, tmp_path, *, installed="rclone v1.60.1-DEV", arch="amd64",
+             payload=b"an upstream rclone .deb", sha=None):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        calls = tmp_path / "calls"
+        calls.touch()
+        source = tmp_path / "payload"
+        source.write_bytes(payload)
+        if installed is None:
+            _stub(bindir, "rclone", "exit 127\n")
+        else:
+            _stub(bindir, "rclone", f'[ "$1" = version ] && printf "%s\\n" "{installed}" "- os/version: debian"\n')
+        _stub(bindir, "curl", (
+            f'echo "curl $*" >> {calls}\n'
+            'while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+            f'cp {source} "$out"\n'
+        ))
+        _stub(bindir, "dpkg", (
+            f'[ "$1" = --print-architecture ] && {{ echo {arch}; exit 0; }}\n'
+            f'echo "dpkg $*" >> {calls}\n'
+        ))
+        _stub(bindir, "apt-mark", f'echo "apt-mark $*" >> {calls}\n')
+        function = re.search(r"^install_rclone\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines install_rclone"
+        pinned = re.search(r"^RCLONE_VERSION=(\S+)$", self.TEXT, re.M)
+        assert pinned, "provision.sh pins RCLONE_VERSION"
+        if sha is None:
+            sha = hashlib.sha256(payload).hexdigest()
+        script = (
+            'set -euo pipefail\n'
+            'log() { echo "$*"; }\ndie() { echo "$*" >&2; exit 1; }\n'
+            f'RCLONE_VERSION={pinned.group(1)}\n'
+            f'RCLONE_SHA256_AMD64={sha}\nRCLONE_SHA256_ARM64={sha}\n'
+            f'{function.group(0)}\n'
+            'install_rclone\necho done\n'
+        )
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=30,
+            env={"PATH": f"{bindir}:{os.environ['PATH']}", "TMPDIR": str(tmp_path)},
+        )
+        return result, calls.read_text().splitlines(), pinned.group(1)
+
+    def test_debian_rclone_is_never_installed(self):
+        assert not re.search(r"apt_install[^\n]*\brclone\b", self.TEXT)
+        assert re.search(r"^\s*apt_install fuse3$", self.TEXT, re.M)
+        assert "install_rclone" in self.TEXT.split('if [ "$(host_env STORAGE)" = "nextcloud" ]; then', 1)[1]
+
+    def test_the_pin_carries_a_digest_per_architecture(self):
+        for arch in ("AMD64", "ARM64"):
+            assert re.search(rf"^RCLONE_SHA256_{arch}=[0-9a-f]{{64}}$", self.TEXT, re.M), arch
+        assert re.search(r"^RCLONE_VERSION=\d+\.\d+\.\d+$", self.TEXT, re.M)
+
+    def test_debians_build_is_replaced_and_held(self, tmp_path):
+        result, calls, version = self._run(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert (f"curl -fsSL -o {tmp_path}" in calls[0]
+                and calls[0].endswith(f"https://downloads.rclone.org/v{version}/"
+                                      f"rclone-v{version}-linux-amd64.deb"))
+        assert calls[1].startswith("dpkg -i ") and calls[1].endswith("rclone.deb")
+        assert calls[2] == "apt-mark hold rclone"
+
+    def test_a_missing_rclone_is_installed(self, tmp_path):
+        result, calls, _ = self._run(tmp_path, installed=None, arch="arm64")
+        assert result.returncode == 0, result.stderr
+        assert calls[0].endswith("-linux-arm64.deb")
+        assert any(c.startswith("dpkg -i ") for c in calls)
+
+    def test_a_wrong_digest_installs_nothing(self, tmp_path):
+        result, calls, _ = self._run(tmp_path, sha="0" * 64)
+        assert result.returncode != 0
+        assert not any(c.startswith(("dpkg", "apt-mark")) for c in calls)
+        assert "done" not in result.stdout
+
+    def test_the_pinned_build_is_left_alone_but_held(self, tmp_path):
+        """A run killed between `dpkg -i` and the hold is finished by the next."""
+        pinned = re.search(r"^RCLONE_VERSION=(\S+)$", self.TEXT, re.M).group(1)
+        result, calls, _ = self._run(tmp_path, installed=f"rclone v{pinned}")
+        assert result.returncode == 0, result.stderr
+        assert calls == ["apt-mark hold rclone"]
+
+    def test_an_unpinned_architecture_is_refused(self, tmp_path):
+        result, calls, _ = self._run(tmp_path, arch="riscv64")
+        assert result.returncode != 0
+        assert calls == []
+
+    def test_a_replaced_binary_restarts_the_mount(self):
+        """A running mount keeps the binary it started with, so the fix would
+        wait for a reboot. Decided from the running process, not from this
+        run, so a re-run after one that died before the restart still does it."""
+        assert re.search(
+            r'if \[ -n "\$mount_unit_changed" \] \|\| mount_runs_stale_rclone; then\n'
+            r'.*\n\s*systemctl restart mount-nextcloud.service', self.TEXT)
+
+    def _stale(self, tmp_path, pid, exe):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        _stub(bindir, "systemctl", f'echo {pid}\n')
+        _stub(bindir, "readlink", f'[ "$1" = /proc/{pid}/exe ] || exit 1\n'
+              + (f'echo "{exe}"\n' if exe is not None else 'exit 1\n'))
+        function = re.search(r"^mount_runs_stale_rclone\(\) \{.*?^\}", self.TEXT, re.M | re.S)
+        assert function, "provision.sh defines mount_runs_stale_rclone"
+        result = subprocess.run(
+            ["bash", "-c", f"set -euo pipefail\n{function.group(0)}\nmount_runs_stale_rclone"],
+            env={"PATH": f"{bindir}:{os.environ['PATH']}"}, capture_output=True, text=True,
+            timeout=30,
+        )
+        assert result.returncode in (0, 1), result.stderr
+        return result.returncode == 0
+
+    def test_a_mount_on_the_replaced_binary_is_stale(self, tmp_path):
+        assert self._stale(tmp_path, 4242, "/usr/bin/rclone (deleted)")
+
+    def test_a_mount_on_the_current_binary_is_not(self, tmp_path):
+        assert not self._stale(tmp_path, 4242, "/usr/bin/rclone")
+
+    def test_a_stopped_mount_is_not(self, tmp_path):
+        assert not self._stale(tmp_path, 0, None)
+
+    def test_a_vanished_process_is_not(self, tmp_path):
+        assert not self._stale(tmp_path, 4242, None)
 
 
 ROLE_MOUNT_UNIT = """[Unit]
