@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota apply` preserves hidden configuration credentials and accepts replacements from a private sidecar. Missing values and attempts to replace deployment credentials inline are refused before writing; previews and errors omit credential values.
+
 - `istota apply` can update heartbeat settings and checks, reset inherited overrides and remove file-watch age limits. Previews validate definitions without running checks; writes refuse concurrent file edits and preserve heartbeat history.
 
 - `istota apply` can reconcile shared briefing definitions and refuses pruning while retained user or configuration definitions still reference them. Shared deletions wait for successful user updates; generated content and run history are preserved.

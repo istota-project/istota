@@ -15,14 +15,14 @@ import json
 import sqlite3
 import tempfile
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
 from istota import apply
 from istota.lib.file_lock import exclusive_lock
 from istota.memory.curation.file_lock import deferred_lock_dir, lock_path_for
-from istota.settings_plan.schema import Plan, select_users
+from istota.settings_plan.schema import Plan, Sidecar, select_users
 
 USER_SECTIONS = ("profile", "resources", "briefings", "briefing_content", "scheduled_jobs", "heartbeat", "secrets")
 
@@ -83,6 +83,7 @@ class Context:
     profiles: dict = field(default_factory=dict, repr=False)
     profile_claims: dict = field(default_factory=dict, repr=False)
     briefing_blocks: dict = field(default_factory=dict, repr=False)
+    sidecar: Sidecar = field(default_factory=Sidecar, repr=False)
     marker_pending: bool = False
     marker_updated: bool = False
 
@@ -233,7 +234,13 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     """Adapters validate all resulting definitions before execution is allowed."""
     if options.prune_secrets and not options.prune:
         raise ExecutionError("prune_required", ["prune_secrets"])
+    from istota.settings_plan.secrets import resolve_config, select_sidecar
+
+    context.sidecar = select_sidecar(plan, context.sidecar, options.users)
     plan = select_users(plan, options.users)
+    config_revision = _file_digest(context.config_path) if plan.config is not None else None
+    if plan.config is not None:
+        plan = replace(plan, config=resolve_config(plan.config, context.config_path, context.sidecar))
     context.options = options
     context.units.clear()
     from istota.settings_plan.profiles import plan_profile
@@ -264,7 +271,6 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
             path = [section] if user is None else ["users", user, section]
             raise ExecutionError("unsupported_section", path)
     mixed = plan.config is not None and any(section != "config" for section, user in sections)
-    config_revision = _file_digest(context.config_path) if mixed else None
     if mixed:
         _check_target_roots(plan, context)
     # Every adapter sees all selected users after their profile updates.
@@ -276,7 +282,7 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
             planners[section](plan, user, context, options)
     if context.config is not None and (plan.shared_briefing_blocks is not None or context.briefing_blocks):
         validate_references(plan, context, options)
-    if mixed and config_revision != _file_digest(context.config_path):
+    if plan.config is not None and config_revision != _file_digest(context.config_path):
         raise ExecutionError("state_changed", ["config"])
     context.units.sort(key=_unit_order)
     operations = []

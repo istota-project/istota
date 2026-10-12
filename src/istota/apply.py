@@ -164,6 +164,11 @@ def load_plan(path: Path | str, *, stdin=None) -> dict:
         except OSError as exc:
             raise PlanError(f"cannot read the plan {where}: {exc.strerror or exc}") from None
         is_json = path.suffix.lower() == ".json"
+    return parse_document(raw, is_json=is_json, where=where)
+
+
+def parse_document(raw: bytes | str, *, is_json: bool, where: str) -> dict:
+    """Parse an already-read document without quoting submitted values in errors."""
     try:
         if is_json:
             document = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_refuse_constant)
@@ -251,8 +256,8 @@ def collect(document: object) -> CheckResult:
         with collect_problems() as problems:
             try:
                 load_config(path, apply_db_overlays=False)
-            except Exception as exc:  # noqa: BLE001 - every loader refusal is a plan refusal
-                error = f"[config] does not load: {exc}"
+            except Exception:  # noqa: BLE001 - loader exceptions may contain credentials
+                error = "[config] does not load: invalid configuration"
     scratch_name = str(path)
     reported = [
         {
@@ -472,6 +477,7 @@ def run(
     backup: int | None = None, stdin=None, output_format: str = "text",
     users: list[str] | None = None, continue_on_error: bool = False,
     prune: bool = False, prune_secrets: bool = False,
+    secrets_file: Path | str | None = None,
 ) -> int:
     """Plan every section, print, and write unless `dry_run`. Returns the exit code."""
     from istota.settings_plan import engine
@@ -482,6 +488,10 @@ def run(
     context = engine.Context(config_path, options=options, backup=backup)
     try:
         plan = parse_plan(load_plan(plan_path, stdin=stdin))
+        if secrets_file is not None:
+            from istota.settings_plan.secrets import read_sidecar
+
+            context.sidecar = read_sidecar(secrets_file)
         with engine.apply_lock(config_path):
             operations = engine.build_plan(plan, context, options)
             if output_format == "text":

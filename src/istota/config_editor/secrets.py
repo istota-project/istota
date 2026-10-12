@@ -35,6 +35,10 @@ _BARE = re.compile(r"^[A-Za-z0-9_-]+$")
 class SentinelError(ValueError):
     """A sentinel stands where the current document has no value to keep."""
 
+    def __init__(self, message: str, *, path: tuple = ()):
+        self.path = path
+        super().__init__(message)
+
 
 def label(path: tuple | list) -> str:
     """`path` as a TOML dotted key, a segment holding a dot or a space quoted.
@@ -186,11 +190,11 @@ def restore_sentinels(new: dict, current: dict, values: dict[str, Any] | None = 
         if not same_elements(new, current, path):
             raise SentinelError(
                 f"{label(path)} is in an array of tables that changed, so its stored "
-                "value cannot be matched to it; type the credential again"
+                "value cannot be matched to it; type the credential again", path=path,
             )
         found, stored = lookup(current, path)
-        if not found:
-            raise SentinelError(f"no stored value to keep at {label(path)}")
+        if not found or stored == SENTINEL:
+            raise SentinelError(f"no stored value to keep at {label(path)}", path=path)
         return stored
 
     return _restore_everywhere(new, (), restore)
