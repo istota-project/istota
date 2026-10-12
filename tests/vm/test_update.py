@@ -116,7 +116,9 @@ class TestAnUpdateToAnotherRef:
             cid = lima.container(vm, service)
             assert vm.out(f"docker inspect -f '{{{{.HostConfig.LogConfig.Type}}}}' {cid}") == "journald", service
             name = f"istota-{service}-1"
-            line = vm.out(f"journalctl CONTAINER_NAME={name} -n1 -o export | grep '^SYSLOG_IDENTIFIER=' || true")
+            # -a: an AppArmor host adds _SELINUX_CONTEXT as a binary field, and
+            # grep would otherwise print "binary file matches" instead of the line.
+            line = vm.out(f"journalctl CONTAINER_NAME={name} -n1 -o export | grep -a '^SYSLOG_IDENTIFIER=' || true")
             assert line == f"SYSLOG_IDENTIFIER={name}", service
 
     def test_the_previous_tags_image_is_kept(self, local_stack, update):
