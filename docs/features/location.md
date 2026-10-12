@@ -46,7 +46,7 @@ Run the receiver:
 uvicorn istota.webui.webhook_receiver:app --port 8765
 ```
 
-On a local install there is no separate receiver process: `istota serve` includes the ingest router into the web app, so the endpoint is `/webhooks/location` on the **web** port and `webhooks_port` is unused. That shape has no SIGHUP handler either — the handler belongs to the receiver's own startup — so the sentinel above is the only way a new token reaches it without a restart.
+On a local install there is no separate receiver process: `istota serve` includes the ingest router into the web app, so the endpoint is `/webhooks/location` on the **web** port and `webhooks_port` is unused. The receiver loads with the web app, and a SIGHUP to the web process reloads both. The sentinel above is still what applies a token generated in the browser without either.
 
 ## Tracking on the device
 

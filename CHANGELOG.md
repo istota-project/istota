@@ -181,6 +181,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Overland and the iOS app's location pings are accepted again on the Docker stack and under `istota serve`.** The web process never loaded the location webhook's token map, so every ping was refused with a 403 that reprovisioning could not clear, and every SMS provider callback got a 404. The receiver now loads with the web app, a SIGHUP to the web process reloads it, and a receiver that was somehow never loaded loads on its first request.
+
 - The admin Browsers page lists the live browsers on the Docker stack instead of saying the browser service is unavailable. Only the daemon can reach the browser there, so it reads the browser pool every 15 seconds and the page shows that list with the time it was read.
 
 - The admin Logs pane shows the application log on the Docker stack. The image now writes it to `/data/logs/istota.log`, on the volume the daemon and web containers share, whenever `config.toml` names no `[logging] file`, and keeps writing to `docker logs` as well. Existing stacks pick this up on update with no config change; set `file = ""` under `[logging]` to keep console-only logging.
