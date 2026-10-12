@@ -94,6 +94,8 @@
     padding: var(--space-2) var(--space-2);
     font-size: var(--text-xs);
     line-height: 1.45;
+    /* A config field's doc is paragraphs separated by blank lines. */
+    white-space: pre-line;
     box-shadow: var(--shadow-md);
   }
 </style>

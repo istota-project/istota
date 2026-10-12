@@ -8,11 +8,12 @@
     /** This table's pending `set_toml`, if any. */
     op: ConfigOp | undefined;
     badge?: string;
+    hint?: string;
     problem?: string;
     onOp: (op: ConfigOp | null, path: string[]) => void;
   }
 
-  let { field, op, badge, problem, onOp }: Props = $props();
+  let { field, op, badge, hint, problem, onOp }: Props = $props();
 
   let original = $derived(field.toml ?? '');
   let text = $derived(op?.op === 'set_toml' ? op.toml : original);
@@ -46,7 +47,7 @@
   different edits. The server parses it; a snippet that does not parse comes
   back from the review as a refusal with the parser's message.
 -->
-<Field label={field.name} {badge} error={emptyError || problem} wide>
+<Field label={field.name} {hint} {badge} inline error={emptyError || problem} wide>
   <TextArea
     monospace
     rows={Math.min(Math.max(text.split('\n').length + 1, 4), 16)}
