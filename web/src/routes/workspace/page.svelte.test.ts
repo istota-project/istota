@@ -846,3 +846,27 @@ it('links to Connections when Nextcloud needs reconnecting', async () => {
     '/settings/connections',
   );
 });
+
+it('explains personal Nextcloud browsing without claiming tasks have no file access', async () => {
+  const note =
+    'This browser uses your personal Nextcloud connection. The Nextcloud skill uses the bot’s separate account. Files available to a task depend on that account’s access and the task’s workspace permissions.';
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      {
+        ...home,
+        id: 'nextcloud',
+        kind: 'nextcloud',
+        label: 'Nextcloud',
+        view_root: null,
+        reach: { private: 'none', shared_member: 'none', restricted: 'none', note },
+      },
+    ],
+    notes: ['Files are stored in your Nextcloud at cloud.example.com.'],
+  });
+  render(Workspace);
+  await screen.findByText(note);
+  expect(screen.queryByText('No access')).toBeNull();
+  expect(screen.queryByText('Private room')).toBeNull();
+  expect(screen.queryByText('Files are stored in your Nextcloud at cloud.example.com.')).toBeNull();
+  expect(screen.getByText('How Istota reaches your files')).toBeTruthy();
+});
