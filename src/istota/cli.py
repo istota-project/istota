@@ -1679,83 +1679,8 @@ def _whatsapp_binding_for_display(db_path, user_id):
         return None
 
 
-def _whatsapp_binding_state(binding) -> tuple | None:
-    """Everything on a binding but `updated_at`, for a before/after compare.
-
-    `user ensure` prints `STATE: created|updated|noop` and
-    `ansible/tasks/main.yml` keys `changed_when` off that one line, so
-    the verdict has to cover every table the command writes. The binding is
-    not on `user_profiles`, so `update_profile_with_status` cannot see it and
-    a WhatsApp-only enrollment reported `noop` — which suppresses the
-    scheduler and web restart handlers and leaves both processes on a config
-    snapshot taken before the user existed on the surface.
-
-    A compare rather than a return value from the three writers, because
-    `set_whatsapp_binding` rewrites the row unconditionally: it cannot tell
-    the operator asking for what is already there from a real change, and a
-    deploy that re-asserts inventory does the former on every run.
-    `updated_at` is excluded for the same reason — it moves on every write.
-    """
-    if binding is None:
-        return None
-    return (
-        binding.bootstrap_phone_number,
-        binding.bsuid,
-        binding.jid,
-        binding.provider,
-        binding.send_id,
-        binding.username,
-        binding.opted_out_at,
-        binding.last_user_message_at,
-        binding.enrolled_at,
-        binding.last_seen_at,
-    )
-
-
-class _EnsureRefused(Exception):
-    """A `user ensure` refusal raised inside its transaction, so it rolls back."""
-
-    def __init__(self, lines: list[str]):
-        super().__init__("; ".join(lines))
-        self.lines = lines
-
-
-def _whatsapp_binding_on(conn, user_id: str):
-    """The binding on `conn`, or None, including on a database without the table.
-
-    `_whatsapp_binding_for_display`'s tolerance, on the caller's connection.
-    """
-    try:
-        return db.get_whatsapp_binding(conn, user_id)
-    except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc):
-            raise
-        return None
-
-
-def _seed_only_empty(updates: dict, whatsapp_op, existing, binding):
-    """`--seed` on an existing row: keep only writes into an empty identity.
-
-    Returns ``(updates, whatsapp_op, kept)``, ``kept`` naming what was left
-    as stored. The SMS number is written only while the stored one is empty and
-    the WhatsApp binding only while it is unbound (no number, BSUID or JID);
-    every other field belongs to the web UI once the row exists. A clear or an
-    identity reset is never a seed.
-    """
-    kept: list[str] = []
-    seeded: dict = {}
-    for field, value in updates.items():
-        if field == "sms_phone_number" and not existing.sms_phone_number:
-            seeded[field] = value
-        else:
-            kept.append(field)
-    unbound = binding is None or not (
-        binding.bootstrap_phone_number or binding.bsuid or binding.jid
-    )
-    if whatsapp_op is not None and not (whatsapp_op == "set" and unbound):
-        kept.append(user_profiles.WHATSAPP_NUMBER_FIELD)
-        whatsapp_op = None
-    return seeded, whatsapp_op, kept
+# Compatibility for callers that compare ensure's enrollment state.
+_whatsapp_binding_state = user_profiles.whatsapp_binding_state
 
 
 def cmd_user_ensure(args):
@@ -1797,9 +1722,7 @@ def cmd_user_ensure(args):
     clear_sms_number = bool(getattr(args, "clear_sms_number", False))
     if sms_number is not None:
         try:
-            updates["sms_phone_number"] = user_profiles.normalize_sms_phone_number(
-                sms_number
-            )
+            updates["sms_phone_number"] = user_profiles.normalize_sms_phone_number(sms_number)
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -1824,63 +1747,12 @@ def cmd_user_ensure(args):
     if args.disabled_skill is not None:
         updates["disabled_skills"] = list(args.disabled_skill)
     if args.disabled_module is not None:
-        from .modules import MODULE_NAMES
-
-        # Drop empty strings so `--disabled-module ""` is the explicit-clear
-        # form (argparse delivers ["" ] when the flag is passed once with no
-        # value). Validate the rest against the module registry — a typo
-        # would silently disable nothing otherwise.
-        names = [m for m in args.disabled_module if m]
-        unknown = [m for m in names if m not in MODULE_NAMES]
-        if unknown:
-            print(
-                f"Error: unknown module name(s): {', '.join(unknown)} "
-                f"(known: {', '.join(sorted(MODULE_NAMES))})",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        updates["disabled_modules"] = names
+        updates["disabled_modules"] = [name for name in args.disabled_module if name]
     if args.default_destination is not None:
-        from .transport import parse_output_target
-        if args.default_destination and not parse_output_target(args.default_destination):
-            print(
-                f"Error: invalid default destination descriptor: "
-                f"{args.default_destination!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
         updates["default_destination"] = args.default_destination or "talk"
     if args.default_room is not None:
-        room = args.default_room.strip()
-        # Membership, the same question the web endpoint asks, and *not* the
-        # operator exemption `_validate_descriptor_rooms` documents. That
-        # exemption exists where an operator's value is one the reader will
-        # honour; here `db.configured_default_room` requires membership itself,
-        # so a room the user is not in is a value every lookup discards. Writing
-        # it would be inert at both ends and silent at both ends. An operator
-        # provisioning a room adds the member first, then pins it.
-        if room:
-            # `db` is the module-level import; a local `from . import db` here
-            # would make the name local to the whole function and unbind every
-            # earlier use of it.
-            with db.get_db(db_path) as conn:
-                if db.get_room(conn, room) is None:
-                    print(
-                        f"Error: no room with token {room!r}",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                if not db.is_room_member(conn, room, user_id):
-                    print(
-                        f"Error: {user_id!r} is not a member of room {room!r}; "
-                        "add them to the room before pinning it",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-        updates["default_room"] = room
+        updates["default_room"] = args.default_room.strip()
     if args.route is not None:
-        from istota.notifications.delivery import PURPOSES
-        from .transport import parse_output_target
         routing: dict[str, str] = {}
         for entry in args.route:
             purpose, sep, descriptor = entry.partition("=")
@@ -1892,58 +1764,18 @@ def cmd_user_ensure(args):
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            # Reject unknown purposes — a typo would persist a dead routing entry
-            # that nothing reads (mirrors the web settings validator).
-            if purpose not in PURPOSES:
-                print(
-                    f"Error: unknown route purpose {purpose!r}; expected one of "
-                    f"{', '.join(PURPOSES)}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            # Empty descriptor clears the route for that purpose.
-            if descriptor and not parse_output_target(descriptor):
-                print(
-                    f"Error: invalid route descriptor for {purpose!r}: "
-                    f"{descriptor!r}",
-                    file=sys.stderr,
-                )
+            try:
+                user_profiles.validate_provisioning_route(purpose, descriptor)
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)
             if descriptor:
                 routing[purpose] = descriptor
         updates["routing"] = routing
-    outbound_approval = getattr(args, "outbound_approval", None)
-    if outbound_approval is not None:
-        from istota.mail.outbound_policy import VALID_POLICIES
-
-        # "" is a real value: unset, meaning "follow the operator's
-        # [email] outbound_approval_floor". It is not the same as "off", which
-        # pins the user below a floor the operator may later raise. Not an
-        # argparse `choices` list, so the error can name the empty case.
-        if outbound_approval not in ("", *VALID_POLICIES):
-            print(
-                f"Error: --outbound-approval must be one of "
-                f"{', '.join(VALID_POLICIES)}, or '' to follow the operator "
-                f"floor; got {outbound_approval!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        updates["outbound_approval"] = outbound_approval
-    external_turn_display = getattr(args, "external_turn_display", None)
-    if external_turn_display is not None:
-        # Belt and braces: the parser's `choices` already rejects an unknown
-        # value, so this only fires for a caller building `args` by hand — the
-        # `_FakeArgs` shim in the tests, and any future programmatic caller.
-        values = user_profiles.EXTERNAL_TURN_DISPLAY_VALUES
-        if external_turn_display not in values:
-            print(
-                f"Error: --external-turn-display must be one of "
-                f"{', '.join(values)}, "
-                f"got {external_turn_display!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        updates["external_turn_display"] = external_turn_display
+    if getattr(args, "outbound_approval", None) is not None:
+        updates["outbound_approval"] = args.outbound_approval
+    if getattr(args, "external_turn_display", None) is not None:
+        updates["external_turn_display"] = args.external_turn_display
     if getattr(args, "default_briefings", None) is not None:
         updates["default_briefings"] = args.default_briefings
     if getattr(args, "briefing_email_html", None) is not None:
@@ -1966,108 +1798,19 @@ def cmd_user_ensure(args):
         whatsapp_op = "set"
     else:
         whatsapp_op = None
-    # What `--managed` records: every field this call asserts, a clear included
-    # (the inventory said "empty", and the web must not re-set it). A BSUID
-    # alone and an identity reset assert no number.
-    asserted = set(updates)
-    if clear_whatsapp or whatsapp_number is not None:
-        asserted.add(user_profiles.WHATSAPP_NUMBER_FIELD)
-
-    # The profile, the binding and the managed set in one transaction, so a
-    # refusal anywhere writes nothing and the web never reads a lock state that
-    # belongs to a different write than the profile beside it.
-    seed_kept: list[str] = []
     try:
-        with db.get_db(db_path) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = user_profiles.get_profile(db_path, user_id, conn=conn)
-            before = _whatsapp_binding_on(conn, user_id)
-            if seed_mode and existing is not None:
-                updates, whatsapp_op, seed_kept = _seed_only_empty(
-                    updates, whatsapp_op, existing, before,
-                )
-
-            # Before anything is written, so an inventory collision fails the
-            # play rather than creating an ambiguous route. A value this user
-            # already holds passes even if somebody else holds it too: see
-            # `find_identity_conflicts`.
-            whatsapp_checked = None
-            if whatsapp_op == "set" and whatsapp_number is not None:
-                try:
-                    whatsapp_checked = user_profiles.normalize_whatsapp_phone_number(
-                        whatsapp_number, allow_empty=True,
-                    )
-                except ValueError:
-                    whatsapp_checked = None  # `set_whatsapp_binding` refuses it below
-            conflicts = user_profiles.find_identity_conflicts(
-                conn, user_id,
-                email_addresses=updates.get("email_addresses"),
-                sms=updates.get("sms_phone_number") or None,
-                whatsapp=whatsapp_checked or None,
-            )
-            if conflicts:
-                phones = {updates.get("sms_phone_number"), whatsapp_checked} - {None, ""}
-                raise _EnsureRefused([
-                    "{} is already held by user {!r}".format(
-                        user_profiles.mask_phone_number(value)
-                        if value in phones else repr(value),
-                        holder,
-                    )
-                    for value, holder in conflicts.items()
-                ])
-
-            try:
-                profile, state = user_profiles.update_profile_with_status(
-                    db_path, user_id, conn=conn, **updates
-                )
-                if whatsapp_op == "clear":
-                    db.clear_whatsapp_binding(conn, user_id)
-                elif whatsapp_op == "reset":
-                    db.reset_whatsapp_identity(conn, user_id)
-                elif whatsapp_op == "set":
-                    db.set_whatsapp_binding(
-                        conn, user_id,
-                        bootstrap_phone_number=whatsapp_number,
-                        bsuid=whatsapp_bsuid,
-                    )
-                if managed_mode:
-                    user_profiles.set_managed_fields(conn, user_id, asserted)
-                elif seed_mode:
-                    user_profiles.set_managed_fields(conn, user_id, ())
-            except ValueError as exc:
-                raise _EnsureRefused([str(exc)]) from None
-            except sqlite3.OperationalError as exc:
-                # The read above tolerates a missing table and this refuses
-                # one, and the difference is who asked. `user ensure` reads the
-                # binding on every invocation, so a deploy landing the code
-                # before the migration must not crash a call nobody pointed at
-                # WhatsApp; a call carrying `--whatsapp-number` (or `--managed`)
-                # did ask, and a missing table is a real error. What it must
-                # not be is a traceback.
-                if "no such table" not in str(exc):
-                    raise
-                raise _EnsureRefused([
-                    "a table this command writes is missing from this "
-                    "database. Run `istota init` to migrate it, then re-run "
-                    "this command. Nothing was written."
-                ]) from None
-            binding = _whatsapp_binding_on(conn, user_id)
-    except _EnsureRefused as refused:
+        result = user_profiles.provision_user(
+            db_path, user_id, updates,
+            mode="managed" if managed_mode else "seed" if seed_mode else "update",
+            whatsapp_op=whatsapp_op, whatsapp_number=whatsapp_number,
+            whatsapp_bsuid=whatsapp_bsuid,
+        )
+    except user_profiles.ProvisioningRefused as refused:
         for line in refused.lines:
             print(f"Error: {line}", file=sys.stderr)
         sys.exit(1)
-
-    if (
-        whatsapp_op is not None
-        and state == "noop"
-        and _whatsapp_binding_state(before) != _whatsapp_binding_state(binding)
-    ):
-        # `created` and `updated` already say the row moved, so only `noop`
-        # is escalated — a first-time user whose enrollment arrives in the
-        # same call must still read as `created`. The managed set does not
-        # move STATE: the role's restart handlers key off it, and the web reads
-        # the managed set live.
-        state = "updated"
+    profile, binding, state = result.profile, result.binding, result.state
+    seed_kept = result.seed_kept
 
     print(f"User {user_id!r} ensured.")
     print(f"  display_name: {profile.display_name}")

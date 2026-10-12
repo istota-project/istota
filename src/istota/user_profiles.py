@@ -26,12 +26,15 @@ import logging
 import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 from istota.webui import avatars
 from istota.lib import sqlite_util
+
+if TYPE_CHECKING:
+    from .db import WhatsAppBinding
 
 logger = logging.getLogger(__name__)
 
@@ -779,22 +782,11 @@ def update_profile(
     sets: list[str] = []
     params: list[object] = []
     for col, value in fields.items():
-        if col == "sms_phone_number":
-            value = normalize_sms_phone_number(value, allow_empty=True)
-        if col in _LIST_COLUMNS:
-            value = json.dumps(list(value or []))
-        elif col in _DICT_COLUMNS:
-            value = json.dumps(dict(value or {}))
+        value = _normalized_profile_value(col, value)
+        if col in _LIST_COLUMNS or col in _DICT_COLUMNS:
+            value = json.dumps(value)
         elif col in _BOOL_COLUMNS:
-            value = 1 if _coerce_bool(value, _BOOL_COLUMN_DEFAULTS[col]) else 0
-        elif col in {"max_foreground_workers", "max_background_workers"}:
-            value = int(value or 0)
-        elif col == "default_destination":
-            value = str(value) if value else "talk"
-        elif col == "external_turn_display":
-            value = str(value) if value else "collapsed"
-        else:
-            value = str(value or "")
+            value = int(value)
         sets.append(f"{col} = ?")
         params.append(value)
 
@@ -825,7 +817,7 @@ def update_profile(
 #
 # A field `istota user ensure --managed` asserted is re-written on every deploy,
 # so the web refuses to edit it rather than let an edit be reverted silently.
-# The CLI is the only writer of `user_profile_managed_fields`.
+# Shared provisioning is the only writer of `user_profile_managed_fields`.
 
 # Not a profile column: the WhatsApp number lives on `whatsapp_user_bindings`.
 WHATSAPP_NUMBER_FIELD = "whatsapp_number"
@@ -952,11 +944,15 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
 
 
 def reject_user_id_case_collision(conn: sqlite3.Connection, user_id: str) -> None:
-    from .lib.user_ids import user_id_index
-
     # Hold the write lock across the check and insert, including first login.
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
+    _check_user_id_case_collision(conn, user_id)
+
+
+def _check_user_id_case_collision(conn: sqlite3.Connection, user_id: str) -> None:
+    from .lib.user_ids import user_id_index
+
     rows = conn.execute("SELECT user_id FROM user_profiles UNION SELECT user_id FROM web_auth_identities")
     user_id_index([*(row["user_id"] for row in rows), user_id])
 
@@ -1133,3 +1129,324 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "routing", dict(profile.routing or {}))
 
     return user_config
+
+
+# --- Shared user provisioning ----------------------------------------------
+
+def whatsapp_binding_state(binding) -> tuple | None:
+    """Everything on a binding but `updated_at`, for a before/after compare.
+
+    `user ensure` prints `STATE: created|updated|noop` and
+    `ansible/tasks/main.yml` keys `changed_when` off that one line, so
+    the verdict has to cover every table the command writes. The binding is
+    not on `user_profiles`, so `update_profile_with_status` cannot see it and
+    a WhatsApp-only enrollment reported `noop` — which suppresses the
+    scheduler and web restart handlers and leaves both processes on a config
+    snapshot taken before the user existed on the surface.
+
+    A compare rather than a return value from the three writers, because
+    `set_whatsapp_binding` rewrites the row unconditionally: it cannot tell
+    the operator asking for what is already there from a real change, and a
+    deploy that re-asserts inventory does the former on every run.
+    `updated_at` is excluded for the same reason — it moves on every write.
+    """
+    if binding is None:
+        return None
+    return (
+        binding.bootstrap_phone_number,
+        binding.bsuid,
+        binding.jid,
+        binding.provider,
+        binding.send_id,
+        binding.username,
+        binding.opted_out_at,
+        binding.last_user_message_at,
+        binding.enrolled_at,
+        binding.last_seen_at,
+    )
+
+
+class ProvisioningRefused(Exception):
+    """A `user ensure` refusal raised inside its transaction, so it rolls back."""
+
+    def __init__(self, lines: list[str]):
+        super().__init__("; ".join(lines))
+        self.lines = lines
+
+
+def _whatsapp_binding_on(conn, user_id: str):
+    """The binding on `conn`, or None, including on a database without the table.
+
+    `_whatsapp_binding_for_display`'s tolerance, on the caller's connection.
+    """
+    from . import db
+
+    try:
+        return db.get_whatsapp_binding(conn, user_id)
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return None
+
+
+def _seed_only_empty(updates: dict, whatsapp_op, existing, binding):
+    """`--seed` on an existing row: keep only writes into an empty identity.
+
+    Returns ``(updates, whatsapp_op, kept)``, ``kept`` naming what was left
+    as stored. The SMS number is written only while the stored one is empty and
+    the WhatsApp binding only while it is unbound (no number, BSUID or JID);
+    every other field belongs to the web UI once the row exists. A clear or an
+    identity reset is never a seed.
+    """
+    kept: list[str] = []
+    seeded: dict = {}
+    for field_name, value in updates.items():
+        if field_name == "sms_phone_number" and not existing.sms_phone_number:
+            seeded[field_name] = value
+        else:
+            kept.append(field_name)
+    unbound = binding is None or not (
+        binding.bootstrap_phone_number or binding.bsuid or binding.jid
+    )
+    if whatsapp_op is not None and not (whatsapp_op == "set" and unbound):
+        kept.append(WHATSAPP_NUMBER_FIELD)
+        whatsapp_op = None
+    return seeded, whatsapp_op, kept
+
+
+
+def _normalized_profile_value(col: str, value: object) -> object:
+    """The value stored by a profile update, before SQLite/JSON encoding."""
+    if col == "sms_phone_number":
+        return normalize_sms_phone_number(value, allow_empty=True)
+    if col in _LIST_COLUMNS:
+        return list(value or [])
+    if col in _DICT_COLUMNS:
+        return dict(value or {})
+    if col in _BOOL_COLUMNS:
+        return _coerce_bool(value, _BOOL_COLUMN_DEFAULTS[col])
+    if col in {"max_foreground_workers", "max_background_workers"}:
+        return int(value or 0)
+    if col == "default_destination":
+        return str(value) if value else "talk"
+    if col == "external_turn_display":
+        return str(value) if value else "collapsed"
+    return str(value or "")
+
+
+def validate_provisioning_fields(
+    conn: sqlite3.Connection, user_id: str, updates: dict[str, object],
+) -> dict[str, object]:
+    """Validate ensure's column-style fields without changing stored state.
+
+    CLI syntax stays in the CLI. This preserves its operator-level rules;
+    settings-plan adapters can impose their stricter schema and reach rules.
+    """
+    from . import db
+    from .mail.outbound_policy import VALID_POLICIES
+    from .modules import MODULE_NAMES
+    from .transport import parse_output_target
+
+    unknown = set(updates) - set(SELF_EDITABLE_FIELDS) - set(ADMIN_EDITABLE_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown profile field(s): {sorted(unknown)}")
+    fields = {name: _normalized_profile_value(name, value) for name, value in updates.items()}
+    if "disabled_modules" in fields:
+        unknown_modules = [name for name in fields["disabled_modules"] if name not in MODULE_NAMES]
+        if unknown_modules:
+            raise ValueError(
+                f"unknown module name(s): {', '.join(unknown_modules)} "
+                f"(known: {', '.join(sorted(MODULE_NAMES))})"
+            )
+    if "default_destination" in fields and not parse_output_target(fields["default_destination"]):
+        raise ValueError(f"invalid default destination descriptor: {fields['default_destination']!r}")
+    if "default_room" in fields:
+        room = fields["default_room"].strip()
+        if room and db.get_room(conn, room) is None:
+            raise ValueError(f"no room with token {room!r}")
+        if room and not db.is_room_member(conn, room, user_id):
+            raise ValueError(
+                f"{user_id!r} is not a member of room {room!r}; "
+                "add them to the room before pinning it"
+            )
+        fields["default_room"] = room
+    if "routing" in fields:
+        routing = fields["routing"]
+        for purpose, descriptor in routing.items():
+            validate_provisioning_route(purpose, descriptor)
+        fields["routing"] = {purpose: descriptor for purpose, descriptor in routing.items() if descriptor}
+    if "outbound_approval" in fields and fields["outbound_approval"] not in ("", *VALID_POLICIES):
+        raise ValueError(
+            f"--outbound-approval must be one of {', '.join(VALID_POLICIES)}, "
+            f"or '' to follow the operator floor; got {fields['outbound_approval']!r}"
+        )
+    if "external_turn_display" in updates and updates["external_turn_display"] not in EXTERNAL_TURN_DISPLAY_VALUES:
+        raise ValueError(
+            f"--external-turn-display must be one of {', '.join(EXTERNAL_TURN_DISPLAY_VALUES)}, "
+            f"got {updates['external_turn_display']!r}"
+        )
+    return fields
+
+
+@dataclass
+class UserProvisioningPlan:
+    """Validated input and prospective profile; never a stored enrollment."""
+
+    user_id: str
+    updates: dict[str, object]
+    profile: UserProfile
+    mode: str
+    asserted: set[str]
+    whatsapp_op: str | None
+    whatsapp_number: str | None
+    whatsapp_bsuid: str | None
+    seed_kept: list[str]
+
+
+@dataclass
+class UserProvisioningResult:
+    profile: UserProfile
+    binding: WhatsAppBinding | None
+    state: str
+    seed_kept: list[str]
+
+
+def plan_user_provisioning(
+    conn: sqlite3.Connection,
+    user_id: str,
+    updates: dict[str, object],
+    *,
+    mode: str = "update",
+    whatsapp_op: str | None = None,
+    whatsapp_number: str | None = None,
+    whatsapp_bsuid: str | None = None,
+) -> UserProvisioningPlan:
+    """Read-only ensure validation, including seed filtering and identity ownership.
+
+    Uses only the supplied connection with sqlite3.Row rows, including a
+    read-only SQLite connection.
+    Execution calls this again under its write transaction; a plan does not
+    grant permission to write a later, potentially changed database state.
+    """
+    from . import db
+
+    try:
+        if mode not in {"update", "managed", "seed"}:
+            raise ValueError("unknown provisioning mode")
+        if whatsapp_op not in {None, "set", "clear", "reset"}:
+            raise ValueError("unknown WhatsApp provisioning operation")
+        _check_user_id_case_collision(conn, user_id)
+        fields = validate_provisioning_fields(conn, user_id, updates)
+        asserted = set(fields)
+        if whatsapp_op == "clear" or whatsapp_number is not None:
+            asserted.add(WHATSAPP_NUMBER_FIELD)
+        row = conn.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
+        existing = _row_to_profile(row) if row else None
+        before = _whatsapp_binding_on(conn, user_id)
+        seed_kept = []
+        if mode == "seed" and existing is not None:
+            fields, whatsapp_op, seed_kept = _seed_only_empty(fields, whatsapp_op, existing, before)
+        number = None
+        if whatsapp_op == "set":
+            number, bsuid = db.prospective_whatsapp_identity(
+                before, bootstrap_phone_number=whatsapp_number, bsuid=whatsapp_bsuid,
+            )
+            if bsuid:
+                holder = db.get_whatsapp_binding_by_bsuid(conn, bsuid)
+                if holder is not None and holder.user_id != user_id:
+                    raise ValueError("WhatsApp BSUID is already assigned to another user")
+        elif whatsapp_op == "reset":
+            db.validate_whatsapp_identity_reset(before, user_id)
+        conflicts = find_identity_conflicts(
+            conn, user_id, email_addresses=fields.get("email_addresses"),
+            sms=fields.get("sms_phone_number") or None, whatsapp=number or None,
+        )
+        if conflicts:
+            phones = {fields.get("sms_phone_number"), number} - {None, ""}
+            raise ProvisioningRefused([
+                "{} is already held by user {!r}".format(
+                    mask_phone_number(value) if value in phones else repr(value), holder,
+                )
+                for value, holder in conflicts.items()
+            ])
+        profile = replace(existing or _seeded_profile(user_id), **fields)
+        return UserProvisioningPlan(
+            user_id, fields, profile, mode, asserted, whatsapp_op,
+            whatsapp_number, whatsapp_bsuid, seed_kept,
+        )
+    except ValueError as exc:
+        raise ProvisioningRefused([str(exc)]) from None
+
+
+def provision_user(
+    db_path: Path,
+    user_id: str,
+    updates: dict[str, object],
+    *,
+    mode: str = "update",
+    whatsapp_op: str | None = None,
+    whatsapp_number: str | None = None,
+    whatsapp_bsuid: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> UserProvisioningResult:
+    """Ensure the profile, enrollment and managed fields in one transaction.
+
+    With ``conn``, the caller must hold a write transaction and owns rollback
+    and commit. Otherwise this function opens and owns BEGIN IMMEDIATE.
+    """
+    from . import db
+
+    if conn is None:
+        with db.get_db(db_path) as own:
+            own.execute("BEGIN IMMEDIATE")
+            return provision_user(
+                db_path, user_id, updates, mode=mode, whatsapp_op=whatsapp_op,
+                whatsapp_number=whatsapp_number, whatsapp_bsuid=whatsapp_bsuid, conn=own,
+            )
+    if not conn.in_transaction:
+        raise ValueError("provision_user requires a caller-owned write transaction")
+    try:
+        plan = plan_user_provisioning(
+            conn, user_id, updates, mode=mode, whatsapp_op=whatsapp_op,
+            whatsapp_number=whatsapp_number, whatsapp_bsuid=whatsapp_bsuid,
+        )
+        before = _whatsapp_binding_on(conn, user_id)
+        profile, state = update_profile_with_status(db_path, user_id, conn=conn, **plan.updates)
+        if plan.whatsapp_op == "clear":
+            db.clear_whatsapp_binding(conn, user_id)
+        elif plan.whatsapp_op == "reset":
+            db.reset_whatsapp_identity(conn, user_id)
+        elif plan.whatsapp_op == "set":
+            db.set_whatsapp_binding(
+                conn, user_id, bootstrap_phone_number=plan.whatsapp_number, bsuid=plan.whatsapp_bsuid,
+            )
+        if mode == "managed":
+            set_managed_fields(conn, user_id, plan.asserted)
+        elif mode == "seed":
+            set_managed_fields(conn, user_id, ())
+        binding = _whatsapp_binding_on(conn, user_id)
+    except ValueError as exc:
+        raise ProvisioningRefused([str(exc)]) from None
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        raise ProvisioningRefused([
+            "a table this command writes is missing from this database. "
+            "Run `istota init` to migrate it, then re-run this command. Nothing was written."
+        ]) from None
+    if plan.whatsapp_op is not None and state == "noop" and whatsapp_binding_state(before) != whatsapp_binding_state(binding):
+        state = "updated"
+    return UserProvisioningResult(profile, binding, state, plan.seed_kept)
+
+
+def validate_provisioning_route(purpose: str, descriptor: str) -> None:
+    """Validate a supplied route, including a CLI route cleared with '='."""
+    from .notifications.delivery import PURPOSES
+    from .transport import parse_output_target
+
+    if purpose not in PURPOSES:
+        raise ValueError(
+            f"unknown route purpose {purpose!r}; expected one of {', '.join(PURPOSES)}"
+        )
+    if descriptor and not parse_output_target(descriptor):
+        raise ValueError(f"invalid route descriptor for {purpose!r}: {descriptor!r}")

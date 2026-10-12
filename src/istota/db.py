@@ -13524,6 +13524,42 @@ def list_whatsapp_bindings(conn: sqlite3.Connection) -> list[WhatsAppBinding]:
     ]
 
 
+def prospective_whatsapp_identity(
+    existing: WhatsAppBinding | None,
+    *,
+    bootstrap_phone_number: str | None = None,
+    bsuid: str | None = None,
+) -> tuple[str, str]:
+    """Validate an enrollment and return its number and BSUID without writing."""
+    from .user_profiles import normalize_whatsapp_phone_number
+
+    old_number = existing.bootstrap_phone_number if existing else ""
+    old_bsuid = existing.bsuid if existing else ""
+
+    number = old_number
+    if bootstrap_phone_number is not None:
+        number = normalize_whatsapp_phone_number(
+            bootstrap_phone_number, allow_empty=True,
+        )
+
+    new_bsuid = old_bsuid
+    if bsuid is not None:
+        new_bsuid = str(bsuid or "").strip()
+    if bootstrap_phone_number is not None and number != old_number and bsuid is None:
+        new_bsuid = ""
+
+    if bootstrap_phone_number is not None and not number and not new_bsuid:
+        # The end state would be a row naming a user and no way to reach or
+        # recognise them, which is `clear_whatsapp_binding` said less clearly
+        # — and `reset_whatsapp_identity` already refuses to produce it.
+        raise ValueError(
+            "unsetting the WhatsApp bootstrap number leaves no identity; "
+            "use --clear-whatsapp to remove the binding instead"
+        )
+
+    return number, new_bsuid
+
+
 def set_whatsapp_binding(
     conn: sqlite3.Connection,
     user_id: str,
@@ -13575,32 +13611,12 @@ def set_whatsapp_binding(
     the inbound path can latch a fresh BSUID, send id and username in one
     call.
     """
-    from .user_profiles import normalize_whatsapp_phone_number
-
     existing = get_whatsapp_binding(conn, user_id)
     old_number = existing.bootstrap_phone_number if existing else ""
     old_bsuid = existing.bsuid if existing else ""
-
-    number = old_number
-    if bootstrap_phone_number is not None:
-        number = normalize_whatsapp_phone_number(
-            bootstrap_phone_number, allow_empty=True,
-        )
-
-    new_bsuid = old_bsuid
-    if bsuid is not None:
-        new_bsuid = str(bsuid or "").strip()
-    if bootstrap_phone_number is not None and number != old_number and bsuid is None:
-        new_bsuid = ""
-
-    if bootstrap_phone_number is not None and not number and not new_bsuid:
-        # The end state would be a row naming a user and no way to reach or
-        # recognise them, which is `clear_whatsapp_binding` said less clearly
-        # — and `reset_whatsapp_identity` already refuses to produce it.
-        raise ValueError(
-            "unsetting the WhatsApp bootstrap number leaves no identity; "
-            "use --clear-whatsapp to remove the binding instead"
-        )
+    number, new_bsuid = prospective_whatsapp_identity(
+        existing, bootstrap_phone_number=bootstrap_phone_number, bsuid=bsuid,
+    )
 
     new_send_id = existing.send_id if existing else ""
     if send_id is not None:
@@ -13700,6 +13716,19 @@ def set_whatsapp_binding(
     return binding
 
 
+def validate_whatsapp_identity_reset(
+    existing: WhatsAppBinding | None, user_id: str,
+) -> None:
+    """Refuse a reset that would leave no operator-supplied identity."""
+    if existing is None:
+        raise ValueError(f"no WhatsApp binding for {user_id!r}")
+    if not existing.bootstrap_phone_number:
+        raise ValueError(
+            "a WhatsApp identity reset needs a bootstrap phone number to keep; "
+            "use --clear-whatsapp to remove the binding instead"
+        )
+
+
 def reset_whatsapp_identity(
     conn: sqlite3.Connection, user_id: str
 ) -> WhatsAppBinding:
@@ -13719,13 +13748,7 @@ def reset_whatsapp_identity(
     alert tells them to run.
     """
     existing = get_whatsapp_binding(conn, user_id)
-    if existing is None:
-        raise ValueError(f"no WhatsApp binding for {user_id!r}")
-    if not existing.bootstrap_phone_number:
-        raise ValueError(
-            "a WhatsApp identity reset needs a bootstrap phone number to keep; "
-            "use --clear-whatsapp to remove the binding instead"
-        )
+    validate_whatsapp_identity_reset(existing, user_id)
     # The same set `set_whatsapp_binding` discards on an identity change, and
     # for the same reason. `last_user_message_at` in particular: it is the only
     # input to the 24-hour service window, so leaving it would let the next
