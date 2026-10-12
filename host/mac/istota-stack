@@ -929,6 +929,15 @@ standalone_running() {
 # files, an online backup of each database (consistent under WAL) in
 # db_backup's snapshot layout, the transcripts, the names under Users/, and a
 # MANIFEST naming the root. istota.env is not among them: it goes on stdin.
+# An online backup inherits the source's WAL mode, and the VM reads staging
+# from a read-only mount, where SQLite cannot open a WAL file: DELETE, as
+# db_backup leaves its snapshots.
+stage_database() {
+    sqlite3 "$1" ".backup '$2'" || fail 1 "could not back up $1; nothing was changed."
+    sqlite3 "$2" "PRAGMA journal_mode=DELETE" >/dev/null \
+        || fail 1 "could not take the copy of $1 out of WAL mode; nothing was changed."
+}
+
 stage_standalone() {
     local from="$1" config="$2" dir="$3" day path user rel
     day="$(date -u +%F)"
@@ -941,15 +950,13 @@ stage_standalone() {
     } > "${dir}/MANIFEST"
     cp "$config" "${dir}/config.toml"
     if [ -f "$(dirname "$config")/admins" ]; then cp "$(dirname "$config")/admins" "${dir}/admins"; fi
-    sqlite3 "${from}/istota.db" ".backup '${dir}/db/${day}/framework/istota.db'" \
-        || fail 1 "could not back up ${from}/istota.db; nothing was changed."
+    stage_database "${from}/istota.db" "${dir}/db/${day}/framework/istota.db"
     for path in "${from}"/modules/*/*.db; do
         [ -f "$path" ] || continue
         rel="${path#"${from}/modules/"}"
         user="${rel%%/*}"
         mkdir -p "${dir}/db/${day}/${user}"
-        sqlite3 "$path" ".backup '${dir}/db/${day}/${rel}'" \
-            || fail 1 "could not back up ${path}; nothing was changed."
+        stage_database "$path" "${dir}/db/${day}/${rel}"
     done
     if [ -d "${from}/logs" ]; then cp -Rp "${from}/logs" "${dir}/logs"; fi
     : > "${dir}/workspace-users"

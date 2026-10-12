@@ -1043,6 +1043,11 @@ class TestImportStandalone:
         assert KEY not in "".join(p.read_text(errors="replace") for p in staged.rglob("*") if p.is_file())
         (snapshot,) = (staged / "db").iterdir()
         assert (snapshot / "alice" / "feeds.db").is_file()
+        # The VM mounts staging read-only, where SQLite cannot open a WAL file
+        # (measured in the VM; a macOS directory without write bits does not
+        # reproduce it). Header bytes 18 and 19 are 2 in WAL mode, 1 otherwise.
+        for copy in staged.rglob("*.db"):
+            assert copy.read_bytes()[18:20] == b"\x01\x01", copy
 
         data, vm = tmp_path / "data", tmp_path / "vm"
         (data / "config").mkdir(parents=True)
