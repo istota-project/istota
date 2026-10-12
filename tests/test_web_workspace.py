@@ -159,6 +159,7 @@ def test_workspace_upload_config_and_nginx_cap(tmp_path):
 async def test_nextcloud_dropped_mount(client, config, monkeypatch, caplog, error, operation):
     import os
     config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     root = config.workspace_root("alice")
     real_open = os.open
 
@@ -185,6 +186,7 @@ async def test_nextcloud_share_markers_and_recipient_urls(client, config):
     from tests.test_nextcloud_http import _ocs_response
 
     config.nextcloud.url = "https://cloud.example.com/"
+    config.nextcloud_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     config.nextcloud.dav_prefix = "Shared Files"
@@ -221,6 +223,7 @@ async def test_nextcloud_share_failure_is_a_note(client, config, caplog):
     from unittest.mock import patch
     from httpx import ReadTimeout
     config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     with patch("istota.nextcloud._http.httpx.get", side_effect=ReadTimeout("sensitive-name")) as get:
@@ -239,6 +242,17 @@ async def test_local_listing_does_not_fetch_share_state(client):
         response = await client.get("/workspace/list", params={"place": "home"})
     assert response.status_code == 200
     shares.assert_not_called()
+
+
+async def test_local_workspace_with_nextcloud_has_no_share_state(client, config):
+    from unittest.mock import patch
+    config.nextcloud.url = "https://cloud.example.com"
+    with patch("istota.nextcloud.shares.list_shares") as shares:
+        response = await client.get("/workspace/list", params={"place": "home", "path": "notes"})
+    assert response.status_code == 200
+    shares.assert_not_called()
+    assert "share" not in response.json()["entries"][0]
+    assert "nextcloud_url" not in response.json()["entries"][0]
 
 
 async def test_drive_not_granted(client, config):
