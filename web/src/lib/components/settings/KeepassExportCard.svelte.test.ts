@@ -1,14 +1,13 @@
 import { webcrypto } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import KeepassExportCard from './KeepassExportCard.svelte';
 import { generateKeyfile } from '$lib/keepass';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
-  startStepUp: vi.fn(),
-  exportKeepass: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 import { startStepUp, exportKeepass } from '$lib/api';
 const password = 'fixture-export-password';
 const downloads: string[] = [];

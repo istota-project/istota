@@ -1,11 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { cleanup, render, screen } from '@testing-library/svelte';
 import CredentialActivity from './CredentialActivity.svelte';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
-  getCredentialActivity: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 import { getCredentialActivity } from '$lib/api';
 afterEach(() => {
   cleanup();

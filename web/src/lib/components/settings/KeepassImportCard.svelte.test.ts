@@ -1,12 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import KeepassImportCard from './KeepassImportCard.svelte';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
-  previewKeepassImport: vi.fn(),
-  applyKeepassImport: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 import { previewKeepassImport, applyKeepassImport } from '$lib/api';
 afterEach(() => {
   cleanup();

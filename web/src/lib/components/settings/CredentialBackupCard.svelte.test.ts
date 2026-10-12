@@ -1,13 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import CredentialBackupCard from './CredentialBackupCard.svelte';
 vi.mock('$app/paths', () => ({ base: '/istota' }));
-vi.mock('$lib/api', async (original) => ({
-  ...(await original<typeof import('$lib/api')>()),
-  startStepUp: vi.fn(),
-  getCredentialBackup: vi.fn(),
-  setCredentialBackup: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 import { startStepUp, getCredentialBackup, setCredentialBackup } from '$lib/api';
 beforeEach(() => {
   vi.mocked(getCredentialBackup).mockResolvedValue({

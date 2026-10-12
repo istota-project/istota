@@ -125,8 +125,8 @@ describe('TransactionRuleCoverageCard', () => {
     const trigger = screen.getByRole('button', { name: 'Coverage field' });
     await fireEvent.keyDown(trigger, { key: 'Enter' });
     const option = await screen.findByRole('option', { name: 'Source accounts' });
-    await fireEvent.pointerDown(option);
-    await fireEvent.pointerUp(option);
+    await fireEvent.pointerDown(option, { pointerType: 'mouse' });
+    await fireEvent.pointerUp(option, { pointerType: 'mouse' });
     await fireEvent.click(option);
 
     expect(mockedCoverage).toHaveBeenLastCalledWith(expect.objectContaining({ field: 'account' }));
