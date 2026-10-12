@@ -401,6 +401,21 @@ class TestClaudeCodeBrainKillsTheGroup:
 # =============================================================================
 
 
+@pytest.fixture
+def in_the_scheduler_process(monkeypatch):
+    """This process holds the daemon lock, as `run_daemon` and `istota serve` do."""
+    from istota.sandbox import process_group
+    monkeypatch.setattr(process_group, "_task_pids_are_local", True)
+
+
+@pytest.fixture
+def outside_the_scheduler_process(monkeypatch):
+    """The web container: this process never ran `run_daemon`."""
+    from istota.sandbox import process_group
+    monkeypatch.setattr(process_group, "_task_pids_are_local", False)
+
+
+@pytest.mark.usefixtures("in_the_scheduler_process")
 class TestCancelEndpointsSignalTheGroup:
     @pytest.mark.asyncio
     async def test_stop_command_signals_the_group(self, tmp_path):
@@ -423,7 +438,7 @@ class TestCancelEndpointsSignalTheGroup:
             db.update_task_status(conn, task_id, "running")
             db.update_task_pid(conn, task_id, 4242)
 
-            with patch("istota.commands.kill_process_group",
+            with patch("istota.sandbox.process_group.kill_process_group",
                        side_effect=lambda pid, sig: sent.append((pid, sig))):
                 await cmd_stop(CommandContext(
                     config=config, conn=conn, user_id="alice",
@@ -454,7 +469,7 @@ class TestCancelEndpointsSignalTheGroup:
         original = mod._config
         mod._config = config
         try:
-            with patch("istota.webui.app.kill_process_group",
+            with patch("istota.sandbox.process_group.kill_process_group",
                        side_effect=lambda pid, sig: sent.append((pid, sig))):
                 mod._chat_cancel_task(task_id)
         finally:
@@ -493,10 +508,172 @@ class TestCancelEndpointsSignalTheGroup:
         original = mod._config
         mod._config = config
         try:
-            with patch("istota.webui.app.kill_process_group",
+            with patch("istota.sandbox.process_group.kill_process_group",
                        side_effect=lambda pid, sig: sent.append((pid, sig))):
                 mod._chat_cancel_task(task_id)
         finally:
             mod._config = original
 
         assert sent == [], "signalled the group of a task that had finished"
+
+
+# =============================================================================
+# Only the process that spawned the pid may signal it (ISSUE-701)
+# =============================================================================
+#
+# `worker_pid` is a pid in the daemon's PID namespace. The web container has
+# its own, where uvicorn is PID 1, so the same number there names nothing or a
+# web-side process running as the same uid. A cancel from a process that is not
+# running the scheduler sets `cancel_requested` and signals nothing.
+
+
+def _running_task_db(tmp_path, *, source_type, token):
+    db_path = tmp_path / "test.db"
+    db.init_db(db_path)
+    with db.get_db(db_path) as conn:
+        task_id = db.create_task(
+            conn, prompt="long one", user_id="alice",
+            source_type=source_type, conversation_token=token,
+        )
+        db.update_task_status(conn, task_id, "running")
+        db.update_task_pid(conn, task_id, 4242)
+    return db_path, task_id
+
+
+def _cancel_requested(db_path, task_id) -> int:
+    with db.get_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT cancel_requested FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    return int(row["cancel_requested"] or 0)
+
+
+@pytest.mark.usefixtures("outside_the_scheduler_process")
+class TestCancelFromAnotherPidNamespace:
+    def test_web_cancel_outside_the_daemon_signals_nothing(self, tmp_path):
+        import istota.webui.app as mod
+        from istota.config import Config, UserConfig
+
+        db_path, task_id = _running_task_db(
+            tmp_path, source_type="web", token="web-alice-1",
+        )
+        config = Config()
+        config.db_path = db_path
+        config.users = {"alice": UserConfig()}
+
+        signalled = []
+        original = mod._config
+        mod._config = config
+        try:
+            with patch("istota.sandbox.process_group._signal",
+                       side_effect=lambda pid, sig: signalled.append(pid) or "process"):
+                mod._chat_cancel_task(task_id, "alice")
+        finally:
+            mod._config = original
+
+        assert signalled == [], "signalled a pid from another PID namespace"
+        assert _cancel_requested(db_path, task_id) == 1
+
+    @pytest.mark.asyncio
+    async def test_stop_outside_the_daemon_signals_nothing(self, tmp_path):
+        from istota.commands import CommandContext, cmd_stop
+        from istota.config import Config, SchedulerConfig, UserConfig
+
+        db_path, task_id = _running_task_db(
+            tmp_path, source_type="talk", token="room1",
+        )
+        config = Config()
+        config.db_path = db_path
+        config.users = {"alice": UserConfig()}
+        config.scheduler = SchedulerConfig()
+
+        signalled = []
+        with db.get_db(db_path) as conn, patch(
+            "istota.sandbox.process_group._signal",
+            side_effect=lambda pid, sig: signalled.append(pid) or "process",
+        ):
+            await cmd_stop(CommandContext(
+                config=config, conn=conn, user_id="alice",
+                conversation_token="room1", args="", surface="web",
+            ))
+
+        assert signalled == [], "signalled a pid from another PID namespace"
+        assert _cancel_requested(db_path, task_id) == 1
+
+    def test_signal_task_worker_reports_elsewhere(self):
+        from istota.sandbox.process_group import signal_task_worker
+
+        with patch("istota.sandbox.process_group._signal") as sig:
+            assert signal_task_worker(4242) == "elsewhere"
+        sig.assert_not_called()
+
+
+class TestTheDaemonOwnsTheTaskPids:
+    """`run_daemon` is the one process that may signal `worker_pid`: the daemon
+    and `istota serve` both run it, the web container never does."""
+
+    def _neutralize(self, monkeypatch, tmp_path):
+        import istota.async_runtime as ar
+        import istota.scheduler as sched
+        import istota.status_writer as sw
+
+        monkeypatch.setattr(sched, "DAEMON_LOCK_PATH", tmp_path / "daemon.lock")
+        monkeypatch.setattr(ar, "get_async_runtime", lambda: None)
+        monkeypatch.setattr(sched, "reset_async_runtime", lambda: None)
+        monkeypatch.setattr(sw, "init_status_writer", lambda *a, **k: None)
+        monkeypatch.setattr(sw, "write_status", lambda *a, **k: None)
+        monkeypatch.setattr(sched, "_shutdown_requested", False)
+
+    def _config(self, tmp_path):
+        from istota.config import (
+            Config, SchedulerConfig, SecurityConfig, TalkConfig, UserConfig,
+        )
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            workspace_path=tmp_path / "workspace",
+            users={"alice": UserConfig()},
+            talk=TalkConfig(enabled=False),
+            security=SecurityConfig(sandbox_enabled=False),
+            scheduler=SchedulerConfig(host_pressure_enabled=False),
+        )
+        db.init_db(cfg.db_path)
+        return cfg
+
+    def test_run_daemon_owns_the_pids_while_it_holds_the_lock(
+        self, tmp_path, monkeypatch,
+    ):
+        import istota.scheduler as sched
+        from istota.sandbox import process_group
+
+        self._neutralize(monkeypatch, tmp_path)
+        monkeypatch.setattr(process_group, "_task_pids_are_local", False)
+        seen = []
+
+        def one_pass(self):
+            seen.append(process_group.task_pids_are_local())
+            sched.request_shutdown()
+
+        monkeypatch.setattr(sched.WorkerPool, "dispatch", one_pass)
+        sched.run_daemon(self._config(tmp_path), install_signal_handlers=False)
+
+        assert seen and seen[0] is True
+        assert process_group.task_pids_are_local() is False
+
+    def test_a_daemon_refused_the_lock_owns_nothing(self, tmp_path, monkeypatch):
+        import fcntl
+        import istota.scheduler as sched
+        from istota.sandbox import process_group
+
+        self._neutralize(monkeypatch, tmp_path)
+        monkeypatch.setattr(process_group, "_task_pids_are_local", False)
+        holder = open(tmp_path / "daemon.lock", "w")
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with pytest.raises(sched._DaemonAlreadyRunning):
+                sched.run_daemon(self._config(tmp_path), install_signal_handlers=False)
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            holder.close()
+
+        assert process_group.task_pids_are_local() is False

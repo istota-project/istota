@@ -93,7 +93,7 @@ from istota.location.logic import (
     resolve_timezone,
     utc_day_bounds,
 )
-from istota.sandbox.process_group import kill_process_group
+from istota.sandbox.process_group import signal_task_worker
 
 logger = logging.getLogger("istota.webui.app")
 
@@ -11564,8 +11564,10 @@ def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> str | N
     # `running`, but a cancel racing a task that has just finished would read the
     # pre-clear row and signal a pid the OS may since have reused — and a group
     # kill makes that mistake cost a whole group rather than one process.
+    # On the Docker stack this process is not the scheduler and the pid is in
+    # the daemon's PID namespace, so nothing is signalled (ISSUE-701).
     if row and row["worker_pid"] and status in ("running", "locked"):
-        kill_process_group(row["worker_pid"], signal.SIGTERM)
+        signal_task_worker(row["worker_pid"], signal.SIGTERM)
 
 
 @api_router.post("/chat/tasks/{task_id}/confirm")
