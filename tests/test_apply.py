@@ -9,7 +9,9 @@ with what it promises about the file on disk.
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import tomllib
 from pathlib import Path
 
@@ -169,7 +171,10 @@ class TestWhatItSays:
 
     def test_a_credential_in_the_config_is_not_printed(self, monkeypatch, capsys, tmp_path, config_path):
         secret = "app-password-that-must-not-be-printed"
-        config = dict(PLAN_CONFIG, nextcloud={"url": "https://cloud.example.com", "app_password": secret})
+        config = dict(
+            PLAN_CONFIG, workspace_path="/mnt/shared",
+            nextcloud={"url": "https://cloud.example.com", "app_password": secret},
+        )
         code, out, err = _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml", config)))
         assert code == 2
         assert secret not in out + err
@@ -186,3 +191,209 @@ class TestWhatItSays:
     def test_the_written_file_is_private(self, monkeypatch, capsys, tmp_path, config_path):
         _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml")))
         assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+class TestTypedProblems:
+    """`istota apply` decides on the kind of problem the loader reports, not on
+    its wording. A value the loader would silently replace is refused, which
+    is what the module always promised and what these three did not get."""
+
+    @pytest.mark.parametrize("config", [
+        dict(PLAN_CONFIG, web={"token_storage": "plain"}),
+        dict(PLAN_CONFIG, scheduler={"talk_poll_timeout": 0}),
+        dict(PLAN_CONFIG, web={"auth": ["email", "carrier-pigeon"]}),
+    ], ids=["token_storage", "talk_poll_timeout", "web_auth"])
+    def test_a_value_the_loader_would_replace_is_refused(self, monkeypatch, capsys, tmp_path, config_path, config):
+        config_path.write_text('bot_name = "Before"\n')
+        before = config_path.read_bytes()
+        code, _, err = _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml", config)))
+        assert code == apply.EXIT_ERROR, err
+        assert config_path.read_bytes() == before
+
+    def test_collect_reports_kinds_and_paths(self):
+        result = apply.collect(dict(PLAN_CONFIG, scheduler={"talk_poll_timeout": 0, "poll_intervall": 3}))
+        assert result.error is None
+        kinds = {(problem["kind"], tuple(problem["path"])) for problem in result.problems}
+        assert ("discarded", ("scheduler", "talk_poll_timeout")) in kinds
+        assert ("unknown", ("scheduler", "poll_intervall")) in kinds
+
+    def test_collect_reports_a_loader_exception_as_an_error(self):
+        result = apply.collect(dict(PLAN_CONFIG, email={"confirm_sender_match": "verify"}))
+        assert result.error
+
+
+class TestCheck:
+    """`--check` validates a plan and nothing else: no current file is read and
+    nothing is written. With `--json` it prints one object the web parses."""
+
+    def _check(self, monkeypatch, capsys, plan_text: str, *argv: str) -> tuple[int, str, str]:
+        monkeypatch.setattr("sys.stdin", io.StringIO(plan_text))
+        monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
+        monkeypatch.setattr("sys.argv", ["istota", "apply", "--check", "-f", "-", *argv])
+        code = 0
+        try:
+            cli.main()
+        except SystemExit as exc:
+            code = exc.code or 0
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def test_a_good_plan_answers_0_with_no_problems(self, monkeypatch, capsys):
+        code, out, _ = self._check(monkeypatch, capsys, json.dumps({"config": PLAN_CONFIG}), "--json")
+        assert code == 0
+        assert json.loads(out) == {"problems": [], "error": None}
+
+    def test_a_discard_is_a_problem_and_answers_1(self, monkeypatch, capsys):
+        plan = {"config": dict(PLAN_CONFIG, scheduler={"talk_poll_timeout": 0})}
+        code, out, _ = self._check(monkeypatch, capsys, json.dumps(plan), "--json")
+        assert code == 1
+        reply = json.loads(out)
+        assert reply["error"] is None
+        assert {"kind": "discarded", "path": ["scheduler", "talk_poll_timeout"]} in [
+            {"kind": p["kind"], "path": p["path"]} for p in reply["problems"]]
+
+    def test_an_unknown_key_is_reported_and_answers_0(self, monkeypatch, capsys):
+        plan = {"config": dict(PLAN_CONFIG, scheduler={"poll_intervall": 3})}
+        code, out, _ = self._check(monkeypatch, capsys, json.dumps(plan), "--json")
+        assert code == 0
+        assert [p["kind"] for p in json.loads(out)["problems"]] == ["unknown"]
+
+    def test_an_unparsable_plan_is_an_error_in_the_json(self, monkeypatch, capsys):
+        code, out, _ = self._check(monkeypatch, capsys, "[config\n", "--json")
+        assert code == 1
+        reply = json.loads(out)
+        assert reply["problems"] == [] and reply["error"]
+
+    def test_a_toml_plan_on_stdin_is_read_too(self, monkeypatch, capsys):
+        from istota.lib import toml_write
+
+        code, out, _ = self._check(monkeypatch, capsys, toml_write.dumps({"config": PLAN_CONFIG}), "--json")
+        assert code == 0, out
+        assert json.loads(out)["error"] is None
+
+    def test_without_json_a_refusal_answers_1(self, monkeypatch, capsys):
+        plan = {"config": dict(PLAN_CONFIG, scheduler={"talk_poll_timeout": 0})}
+        code, _, err = self._check(monkeypatch, capsys, json.dumps(plan))
+        assert code == 1
+        assert "scheduler.talk_poll_timeout" in err
+
+    def test_check_writes_nothing_even_with_a_config_named(self, monkeypatch, capsys, config_path):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"config": PLAN_CONFIG, "meta": {"managed": True}})))
+        code, _, _ = _invoke(monkeypatch, capsys, config_path, "--check", "-f", "-")
+        assert code == 0
+        assert list(config_path.parent.iterdir()) == []
+
+    def test_json_without_check_is_refused(self, monkeypatch, capsys, tmp_path, config_path):
+        code, _, err = _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml")), "--json")
+        assert code == 1
+        assert "--json" in err
+        assert not config_path.exists()
+
+    def test_a_plan_on_stdin_applies_like_a_file(self, monkeypatch, capsys, config_path):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"config": PLAN_CONFIG})))
+        code, _, _ = _invoke(monkeypatch, capsys, config_path, "-f", "-")
+        assert code == 2
+        assert tomllib.loads(config_path.read_text()) == PLAN_CONFIG
+
+
+class TestTheManagementMarker:
+    """`config/managed.json` says who owns the config. Apply writes its
+    `config` entry from the plan's `[meta]`, and a change to the entry alone is
+    not a config change: exit 0, so `istota-stack apply` does not restart."""
+
+    def _marker(self, config_path: Path) -> dict:
+        return json.loads((config_path.parent / "managed.json").read_text())
+
+    def test_a_plan_without_meta_records_an_unmanaged_plan(self, monkeypatch, capsys, tmp_path, config_path):
+        _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml")))
+        entry = self._marker(config_path)["config"]
+        assert (entry["managed"], entry["source"]) == (False, "plan")
+        assert entry["at"]
+        assert (config_path.parent / "managed.json").stat().st_mode & 0o777 == 0o600
+
+    def test_a_meta_only_change_is_written_and_answers_0(self, monkeypatch, capsys, tmp_path, config_path):
+        _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml")))
+        before = config_path.read_bytes()
+        plan = _write_plan(tmp_path / "p2.toml", meta={"managed": True, "source": "ansible", "request": 4})
+
+        code, out, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan))
+
+        assert code == apply.EXIT_UNCHANGED
+        assert "Updated: management marker" in out
+        assert config_path.read_bytes() == before
+        entry = self._marker(config_path)["config"]
+        assert (entry["managed"], entry["source"]) == (True, "ansible")
+
+    def test_the_same_meta_again_rewrites_nothing(self, monkeypatch, capsys, tmp_path, config_path):
+        plan = _write_plan(tmp_path / "p.toml", meta={"managed": True, "source": "ansible"})
+        _invoke(monkeypatch, capsys, config_path, "-f", str(plan))
+        marker = config_path.parent / "managed.json"
+        before = (marker.read_bytes(), marker.stat().st_mtime_ns)
+        code, out, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan))
+        assert code == 0
+        assert "management marker" not in out
+        assert (marker.read_bytes(), marker.stat().st_mtime_ns) == before
+
+    def test_the_other_resources_are_kept(self, monkeypatch, capsys, tmp_path, config_path):
+        secrets = {"managed": True, "source": "ansible", "at": "2026-10-01T00:00:00Z"}
+        (config_path.parent / "managed.json").write_text(json.dumps({"secrets": secrets}))
+        _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml")))
+        assert self._marker(config_path)["secrets"] == secrets
+
+    def test_dry_run_writes_no_marker(self, monkeypatch, capsys, tmp_path, config_path):
+        plan = _write_plan(tmp_path / "p.toml", meta={"managed": True})
+        code, _, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--dry-run")
+        assert code == 2
+        assert not (config_path.parent / "managed.json").exists()
+
+    def test_a_plan_with_no_config_section_writes_no_marker(self, monkeypatch, capsys, tmp_path, config_path):
+        plan = tmp_path / "p.toml"
+        plan.write_text("[meta]\nmanaged = true\n")
+        _invoke(monkeypatch, capsys, config_path, "-f", str(plan))
+        assert not (config_path.parent / "managed.json").exists()
+
+    @pytest.mark.parametrize("meta", [
+        {"managed": "yes"}, {"source": 7}, {"source": "x" * 65}, {"request": "4"}, {"request": True},
+    ])
+    def test_a_bad_meta_is_refused(self, monkeypatch, capsys, tmp_path, config_path, meta):
+        code, _, err = _invoke(monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml", meta=meta)))
+        assert code == apply.EXIT_ERROR, err
+        assert not config_path.exists()
+        assert not (config_path.parent / "managed.json").exists()
+
+
+class TestBackups:
+    def _apply(self, monkeypatch, capsys, tmp_path, config_path, poll: int, *argv: str) -> int:
+        plan = _write_plan(tmp_path / f"p{poll}.toml", dict(PLAN_CONFIG, scheduler={"poll_interval": poll}))
+        code, _, _ = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), *argv)
+        return code
+
+    def _backups(self, config_path: Path) -> list[Path]:
+        return sorted(config_path.parent.glob("config.toml.bak.*"))
+
+    def test_the_previous_file_is_kept_private_and_only_the_newest_n(self, monkeypatch, capsys, tmp_path, config_path):
+        for poll in (1, 2, 3, 4):
+            assert self._apply(monkeypatch, capsys, tmp_path, config_path, poll, "--backup", "2") == 2
+
+        backups = self._backups(config_path)
+        assert len(backups) == 2
+        assert [tomllib.loads(b.read_text())["scheduler"]["poll_interval"] for b in backups] == [2, 3]
+        assert all(b.stat().st_mode & 0o777 == 0o600 for b in backups)
+
+    def test_no_backup_without_a_change_or_a_file(self, monkeypatch, capsys, tmp_path, config_path):
+        self._apply(monkeypatch, capsys, tmp_path, config_path, 1, "--backup", "3")
+        self._apply(monkeypatch, capsys, tmp_path, config_path, 1, "--backup", "3")
+        assert self._backups(config_path) == []
+
+    def test_dry_run_makes_no_backup(self, monkeypatch, capsys, tmp_path, config_path):
+        self._apply(monkeypatch, capsys, tmp_path, config_path, 1)
+        self._apply(monkeypatch, capsys, tmp_path, config_path, 2, "--backup", "3", "--dry-run")
+        assert self._backups(config_path) == []
+
+    def test_a_backup_count_below_one_is_refused(self, monkeypatch, capsys, config_path):
+        monkeypatch.setattr("sys.argv", ["istota", "-c", str(config_path), "apply", "-f", "x", "--backup", "0"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 2
+        assert "argument --backup" in capsys.readouterr().err
+        assert not os.listdir(config_path.parent)

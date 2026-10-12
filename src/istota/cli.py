@@ -369,6 +369,14 @@ def cmd_apply(args):
     """Reconcile the config with a plan; 0 unchanged, 2 changed, 1 refused."""
     from istota import apply
 
+    def err(line):
+        print(line, file=sys.stderr)
+
+    if args.json and not args.check:
+        err("istota apply: --json goes with --check; nothing was written.")
+        return apply.EXIT_ERROR
+    if args.check:
+        return apply.check(args.file, as_json=args.json, out=print, err=err)
     target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
     if not target:
         print(
@@ -378,8 +386,8 @@ def cmd_apply(args):
         )
         return apply.EXIT_ERROR
     return apply.run(
-        Path(args.file), Path(target), dry_run=args.dry_run,
-        out=print, err=lambda line: print(line, file=sys.stderr),
+        args.file, Path(target), dry_run=args.dry_run, backup=args.backup,
+        out=print, err=err,
     )
 
 
@@ -4752,11 +4760,33 @@ def main():
     )
     apply_parser.add_argument(
         "-f", "--file", required=True,
-        help="The plan: TOML, or JSON when the name ends in .json. Its [config] table is the whole config.toml",
+        help=(
+            "The plan: TOML, or JSON when the name ends in .json; - reads it from stdin "
+            "(JSON when it opens with {). Its [config] table is the whole config.toml"
+        ),
     )
     apply_parser.add_argument(
         "--dry-run", action="store_true",
         help="Print the diff and the exit code it would take; write nothing",
+    )
+    apply_parser.add_argument(
+        "--check", action="store_true",
+        help="Validate the plan only: read no config, write nothing (exit 0 valid, 1 refused)",
+    )
+    apply_parser.add_argument(
+        "--json", action="store_true",
+        help="With --check: print {\"problems\": [...], \"error\": ...} on stdout",
+    )
+
+    def _backup_count(value: str) -> int:
+        count = int(value)
+        if count < 1:
+            raise argparse.ArgumentTypeError("keep at least one backup")
+        return count
+
+    apply_parser.add_argument(
+        "--backup", type=_backup_count, metavar="N",
+        help="Before replacing config.toml, keep it as config.toml.bak.<UTC time>, and the newest N of those",
     )
 
     # migrate

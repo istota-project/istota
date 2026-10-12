@@ -339,6 +339,42 @@ class TestRootWritesNothingUid10001Owns:
             assert not any("istota_secrets" in str(arg) for arg in body["argv"]), task.get("name")
 
 
+class TestTheRoleClaimsWhatItWrites:
+    """The role marks what it manages, so the web's config editor shows those
+    resources read-only rather than taking an edit the next play reverts. The
+    plan's `[meta]` claims the config; the `put-files` request's `managed`
+    claims the secrets and the admins, each only while the role sets them."""
+
+    def _env(self):
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        env.filters["string"] = str
+        return env
+
+    def _put_files(self, secrets: dict, admins: list) -> dict:
+        task = next(t for t in _tasks() if t.get("name") == "Secrets and admins")
+        env = self._env()
+        context = {"istota_secret_names": list(setup_wizard.SECRET_NAMES),
+                   "istota_secrets": secrets, "istota_admins": admins}
+        for name, template in task["vars"].items():
+            context[name] = env.from_string(template).render(context)
+        return json.loads(context["_istota_put_files"])
+
+    def test_the_plan_claims_the_config(self):
+        task = next(t for t in _tasks() if t.get("name") == "Write the plan")
+        content = task["ansible.builtin.copy"]["content"]
+        plan = json.loads(self._env().from_string(content).render(istota_config={"bot_name": "Zed"}))
+        assert plan == {"meta": {"managed": True, "source": "ansible"}, "config": {"bot_name": "Zed"}}
+
+    def test_put_files_claims_what_the_role_sets(self):
+        request = self._put_files({"anthropic_api_key": "sk"}, ["alice"])
+        assert request["managed"] == {"source": "ansible", "secrets": True, "admins": True}
+
+    def test_put_files_releases_what_the_role_does_not_set(self):
+        request = self._put_files({}, [])
+        assert request["managed"] == {"source": "ansible", "secrets": False, "admins": False}
+
+
 # --- secrets stay out of output -----------------------------------------------
 
 #: Variables whose value is a credential, or may hold one (a config can).

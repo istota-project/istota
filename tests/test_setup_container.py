@@ -287,6 +287,21 @@ class TestTheRun:
         assert "COMPOSE_PROFILES=" in env and "ISTOTA_SECRETS_DIR=./secrets" in env
         assert "STORAGE=local" in (vm / "host.env").read_text()
 
+    def test_it_marks_every_resource_unmanaged(self, tmp_path):
+        """A fresh setup hands the config, the secrets and the admins to
+        whoever edits next; a management plan claims them back on its run."""
+        import json
+
+        assert setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None) == 0
+
+        marker = tmp_path / "data" / "config" / "managed.json"
+        assert _mode(marker) == 0o600
+        entries = json.loads(marker.read_text())
+        assert set(entries) == {"config", "secrets", "admins"}
+        for entry in entries.values():
+            assert (entry["managed"], entry["source"]) == (False, "setup")
+            assert entry["at"]
+
     def test_an_existing_config_is_refused_without_force(self, tmp_path):
         setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
         with pytest.raises(setup_wizard.SetupError, match="already exists"):

@@ -2050,6 +2050,11 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
     inline = secrets_dir is None
     _write_private(config_path, render_container_config(a, inline_credentials=inline))
     _ensure_admins_file(config_path.parent / "admins", a.user_id, out=out)
+    # Setup hands every resource to whoever edits next; a management plan
+    # claims its own back on its next run.
+    from istota import apply
+
+    apply.write_managed(config_path.parent, {name: (False, "setup") for name in apply.MANAGED_RESOURCES})
     _ensure_master_key(data_dir / ".secret_key", out)
 
     if vm_dir is not None:

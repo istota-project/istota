@@ -737,10 +737,30 @@ cmd_check_image() {
 # nothing changed, 2 when something did (or would, under --dry-run). Nothing
 # printed names a value.
 PUT_FILES_PY='
-import json, os, re, stat, sys, tempfile
+import datetime, json, os, re, stat, sys, tempfile
 
 secrets_dir, config_dir, dry_run = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 request = json.load(sys.stdin)
+
+# Who manages the secrets and the admins, for config/managed.json, in the
+# format istota.apply.write_managed writes (the authoritative copy), restated
+# here because this runs with no istota to import. Checked before anything is
+# written.
+claims = {}
+managed = request.get("managed")
+if managed is not None:
+    if not isinstance(managed, dict):
+        sys.exit("[istota-stack] REFUSE: managed is not an object")
+    source = managed.get("source")
+    if not isinstance(source, str) or len(source) > 64:
+        sys.exit("[istota-stack] REFUSE: managed.source is not a string of at most 64 characters")
+    for key, value in managed.items():
+        if key == "source":
+            continue
+        if key not in ("secrets", "admins") or not isinstance(value, bool):
+            sys.exit(f"[istota-stack] REFUSE: managed.{key} is not secrets or admins set to true or false")
+        claims[key] = value
+
 wanted = []
 for name, value in (request.get("secrets") or {}).items():
     if not re.fullmatch(r"[a-z0-9_]+", name):
@@ -794,6 +814,41 @@ for path, label, value, mode in wanted:
 verb = "would write" if dry_run else "wrote"
 for label in changed:
     print(f"[istota-stack] {verb} {label}")
+
+# A change to who manages a file is not a change to the file: it is written,
+# and the exit code says nothing about it, so nothing restarts for it.
+if claims:
+    marker_path = os.path.join(config_dir, "managed.json")
+    marker = {}
+    found = current(marker_path)
+    if found is not None:
+        try:
+            marker = json.loads(found[0])
+        except ValueError:
+            marker = {}
+        if not isinstance(marker, dict):
+            marker = {}
+    updated = dict(marker)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for resource, value in claims.items():
+        entry = marker.get(resource)
+        if isinstance(entry, dict) and entry.get("managed") is value and entry.get("source") == managed["source"]:
+            continue
+        updated[resource] = {"managed": value, "source": managed["source"], "at": stamp}
+    if updated != marker:
+        if dry_run:
+            print("[istota-stack] would update the management marker")
+        else:
+            fd, tmp = tempfile.mkstemp(dir=config_dir, prefix=".put.")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    os.fchmod(fh.fileno(), 0o600)
+                    fh.write(json.dumps(updated, indent=2, sort_keys=True) + "\n")
+                os.replace(tmp, marker_path)
+            except BaseException:
+                os.unlink(tmp)
+                raise
+            print("[istota-stack] updated the management marker")
 sys.exit(2 if changed else 0)
 '
 

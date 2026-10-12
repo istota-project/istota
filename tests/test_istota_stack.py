@@ -1055,6 +1055,61 @@ class TestPutFiles:
         assert result.returncode == 1
         assert not (fx.stack / "config" / "admins").exists()
 
+    def _marker(self, fx) -> dict:
+        import json
+
+        return json.loads((fx.stack / "config" / "managed.json").read_text())
+
+    def test_the_managed_entries_are_written_for_the_resources_named(self, fx, secrets):
+        import json
+
+        config = {"managed": False, "source": "plan", "at": "2026-10-01T00:00:00Z"}
+        (fx.stack / "config" / "managed.json").write_text(json.dumps({"config": config}))
+
+        result = self._put(fx, {"secrets": {"anthropic_api_key": "sk-1"},
+                                "managed": {"source": "ansible", "secrets": True, "admins": False}})
+
+        assert result.returncode == 2, result.stdout + result.stderr
+        marker = self._marker(fx)
+        assert marker["config"] == config
+        assert (marker["secrets"]["managed"], marker["secrets"]["source"]) == (True, "ansible")
+        assert (marker["admins"]["managed"], marker["admins"]["source"]) == (False, "ansible")
+        assert (fx.stack / "config" / "managed.json").stat().st_mode & 0o777 == 0o600
+
+    def test_a_marker_only_change_answers_0(self, fx, secrets):
+        """As for `apply`: who manages a file is not a change to it, so a role
+        claiming an unchanged install does not restart the stack."""
+        payload = {"secrets": {"anthropic_api_key": "sk-1"}}
+        assert self._put(fx, payload).returncode == 2
+        result = self._put(fx, dict(payload, managed={"source": "ansible", "secrets": True}))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._marker(fx)["secrets"]["managed"] is True
+        assert "management marker" in result.stdout
+
+    def test_the_same_marker_again_rewrites_nothing(self, fx, secrets):
+        payload = {"secrets": {}, "managed": {"source": "ansible", "secrets": True}}
+        self._put(fx, payload)
+        marker = fx.stack / "config" / "managed.json"
+        before = (marker.read_bytes(), marker.stat().st_mtime_ns)
+        result = self._put(fx, payload)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (marker.read_bytes(), marker.stat().st_mtime_ns) == before
+
+    def test_the_dry_run_writes_no_marker(self, fx, secrets):
+        result = self._put(fx, {"managed": {"source": "ansible", "secrets": True}}, "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (fx.stack / "config" / "managed.json").exists()
+
+    @pytest.mark.parametrize("managed", [
+        "ansible", {"source": 7, "secrets": True}, {"source": "x" * 65, "secrets": True},
+        {"source": "ansible", "secrets": "yes"}, {"source": "ansible", "config": True},
+    ])
+    def test_a_bad_marker_is_refused_before_anything_is_written(self, fx, secrets, managed):
+        result = self._put(fx, {"secrets": {"anthropic_api_key": "sk-1"}, "managed": managed})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert list(secrets.iterdir()) == []
+        assert not (fx.stack / "config" / "managed.json").exists()
+
     def test_as_root_it_drops_to_10001_first(self, fx, secrets, tmp_path):
         bindir = Path(fx.env["PATH"].split(":")[0])
         (bindir / "id").write_text('#!/bin/bash\nif [ "$1" = "-u" ]; then echo 0; else exec /usr/bin/id "$@"; fi\n')
