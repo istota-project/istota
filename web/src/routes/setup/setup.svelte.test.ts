@@ -18,10 +18,22 @@ import {
   getSetupState,
   unlockSetup,
   getSetupDraft,
+  putSetupDraft,
+  validateSetupStep,
+  checkSetupConnection,
+  getSetupModels,
   SetupApiError,
+  type SetupDraft,
+  type SetupDraftPatch,
   type SetupState,
 } from '$lib/api';
 import Page from './+page.svelte';
+
+const MODELS = {
+  anthropic: { base_url: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-6' },
+  openrouter: { base_url: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.6' },
+};
+const CREDENTIALS = new Set(['password', 'native_api_key', 'claude_code_oauth_token']);
 
 function state(phase: SetupState['phase']): SetupState {
   return {
@@ -30,8 +42,29 @@ function state(phase: SetupState['phase']): SetupState {
     host: 'localhost:8080',
     modules_available: [],
     memory_total_mib: 8192,
-    defaults: { bot_name: 'Istota', storage: 'local', profiles: ['browser'] },
+    defaults: { bot_name: 'Istota', storage: 'local', profiles: ['browser'], models: MODELS },
   };
+}
+
+/** The server's draft, as `PUT /draft` keeps it: merged, credentials redacted. */
+let saved: Record<string, unknown> = {};
+function redacted(): SetupDraft {
+  const out: SetupDraft = {};
+  for (const [key, value] of Object.entries(saved)) {
+    out[key] = CREDENTIALS.has(key) ? { set: Boolean(value) } : (value as SetupDraft[string]);
+  }
+  return out;
+}
+function serveDraft() {
+  saved = {};
+  vi.mocked(putSetupDraft).mockImplementation(async (patch: SetupDraftPatch) => {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) {
+        if (!CREDENTIALS.has(key)) delete saved[key];
+      } else saved[key] = value;
+    }
+    return { draft: redacted() };
+  });
 }
 
 const currentUrl = () => __history.entries[__history.index].url;
@@ -48,6 +81,9 @@ beforeEach(() => {
   vi.mocked(getSetupState).mockResolvedValue(state('locked'));
   vi.mocked(unlockSetup).mockResolvedValue(undefined);
   vi.mocked(getSetupDraft).mockResolvedValue({ draft: {} });
+  vi.mocked(validateSetupStep).mockResolvedValue({ ok: true, fields: [] });
+  vi.mocked(getSetupModels).mockResolvedValue([]);
+  serveDraft();
 });
 
 afterEach(cleanup);
@@ -230,5 +266,339 @@ describe('the step in the address', () => {
     render(Page);
 
     expect(await screen.findByText('Marlowe')).toBeInTheDocument();
+  });
+});
+
+async function openAt(step: string) {
+  vi.mocked(getSetupState).mockResolvedValue(state('open'));
+  __history.reset(`/setup/?step=${step}`);
+  render(Page);
+}
+
+const next = () => fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+const type = (label: RegExp, value: string) =>
+  fireEvent.input(screen.getByLabelText(label), { target: { value } });
+
+describe('the Welcome screen', () => {
+  it('starts from the bot name and the browser’s time zone', async () => {
+    await openAt('welcome');
+    expect(await screen.findByLabelText(/^What should your assistant be called/)).toHaveValue(
+      'Istota',
+    );
+    expect(screen.getByLabelText(/^Time zone/)).toHaveValue(
+      Intl.DateTimeFormat().resolvedOptions().timeZone,
+    );
+  });
+
+  it('suggests a username from the email until one is typed', async () => {
+    await openAt('welcome');
+    await screen.findByLabelText(/^Your email/);
+    await type(/^Your email/, 'Ada.Lovelace@example.com');
+    expect(screen.getByLabelText(/^Username/)).toHaveValue('ada.lovelace');
+
+    await type(/^Username/, 'countess');
+    await type(/^Your email/, 'ada@example.com');
+    expect(screen.getByLabelText(/^Username/)).toHaveValue('countess');
+  });
+
+  it('saves the answers, has the server check them, and moves on', async () => {
+    await openAt('welcome');
+    await screen.findByLabelText(/^Your name/);
+    await type(/^Your name/, 'Ada Lovelace');
+    await type(/^Your email/, 'ada@example.com');
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Your account' })).toBeInTheDocument();
+    expect(saved).toMatchObject({
+      bot_name: 'Istota',
+      display_name: 'Ada Lovelace',
+      user_email: 'ada@example.com',
+      user_id: 'ada',
+    });
+    expect(validateSetupStep).toHaveBeenCalledWith('welcome');
+    expect(vi.mocked(putSetupDraft).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(validateSetupStep).mock.invocationCallOrder[0],
+    );
+  });
+
+  it('shows the server’s refusals under their fields and stays', async () => {
+    vi.mocked(validateSetupStep).mockResolvedValue({
+      ok: false,
+      fields: [
+        { field: 'user_email', message: "That doesn't look like an email address." },
+        { field: 'user_id', message: 'A username is up to 32 lowercase letters.' },
+      ],
+    });
+    await openAt('welcome');
+    await screen.findByLabelText(/^Your email/);
+    await type(/^Your email/, 'not-an-address');
+    await next();
+
+    expect(await screen.findByText("That doesn't look like an email address.")).toBeInTheDocument();
+    // The username's error opens the fold it sits in.
+    expect(screen.getByText('A username is up to 32 lowercase letters.')).toBeVisible();
+    expect(screen.getByLabelText(/^Your email/)).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByRole('heading', { name: 'Welcome' })).toBeInTheDocument();
+    expect(currentUrl()).toBe('/setup/?step=welcome');
+  });
+
+  it('shows an error about the form as a whole in a banner', async () => {
+    vi.mocked(putSetupDraft).mockRejectedValue(
+      new SetupApiError(0, 'unreachable', "Can't reach the setup service."),
+    );
+    await openAt('welcome');
+    await screen.findByLabelText(/^Your email/);
+    await next();
+
+    expect(await screen.findByText("Can't reach the setup service.")).toBeInTheDocument();
+    expect(validateSetupStep).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: 'Welcome' })).toBeInTheDocument();
+  });
+
+  it('goes back to the unlock screen when the session is gone', async () => {
+    vi.mocked(validateSetupStep).mockRejectedValue(
+      new SetupApiError(401, 'no_session', 'Setup is locked. Enter your setup code to continue.'),
+    );
+    await openAt('welcome');
+    await screen.findByLabelText(/^Your email/);
+    await next();
+    expect(await screen.findByLabelText('Setup code')).toBeInTheDocument();
+  });
+});
+
+describe('Back', () => {
+  it('keeps what was typed on a screen, saved or not', async () => {
+    await openAt('welcome');
+    await screen.findByLabelText(/^Your name/);
+    await type(/^Your name/, 'Ada Lovelace');
+    await type(/^Your email/, 'ada@example.com');
+    await next();
+    await screen.findByRole('heading', { name: 'Your account' });
+
+    await type(/^Password/, 'a long enough passphrase');
+    await fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await screen.findByRole('heading', { name: 'Welcome' });
+    expect(screen.getByLabelText(/^Your name/)).toHaveValue('Ada Lovelace');
+    expect(screen.getByLabelText(/^Your email/)).toHaveValue('ada@example.com');
+
+    await next();
+    await screen.findByRole('heading', { name: 'Your account' });
+    expect(screen.getByLabelText(/^Password/)).toHaveValue('a long enough passphrase');
+    // An unconfirmed password is not saved by another screen's Next.
+    expect(saved).not.toHaveProperty('password');
+  });
+});
+
+describe('the Your account screen', () => {
+  it('refuses two different passwords without saving either', async () => {
+    await openAt('account');
+    await screen.findByLabelText(/^Password/);
+    await type(/^Password/, 'a long enough passphrase');
+    await type(/^Confirm password/, 'a different passphrase');
+    await next();
+
+    expect(await screen.findByText("The two passwords don't match.")).toBeInTheDocument();
+    expect(putSetupDraft).not.toHaveBeenCalled();
+    expect(validateSetupStep).not.toHaveBeenCalled();
+  });
+
+  it('saves a confirmed password and shows the server’s rule when it is refused', async () => {
+    vi.mocked(validateSetupStep).mockResolvedValueOnce({
+      ok: false,
+      fields: [{ field: 'password', message: 'Password must be at least 12 characters' }],
+    });
+    await openAt('account');
+    await screen.findByLabelText(/^Password/);
+    await type(/^Password/, 'too short');
+    await type(/^Confirm password/, 'too short');
+    await next();
+
+    expect(await screen.findByText('Password must be at least 12 characters')).toBeInTheDocument();
+    expect(saved.password).toBe('too short');
+    expect(validateSetupStep).toHaveBeenCalledWith('account');
+    expect(screen.getByRole('heading', { name: 'Your account' })).toBeInTheDocument();
+  });
+
+  it('moves on with a password already saved and nothing typed', async () => {
+    vi.mocked(getSetupDraft).mockResolvedValue({ draft: { password: { set: true } } });
+    await openAt('account');
+    await screen.findByLabelText(/^Password/);
+    await next();
+    expect(await screen.findByRole('heading', { name: 'AI service' })).toBeInTheDocument();
+  });
+});
+
+describe('the AI service screen', () => {
+  const passed = { ok: true, warning: false, message: 'Connected, and the model answered.' };
+  const refused = { ok: false, warning: false, message: 'That API key was not accepted.' };
+
+  it('offers the three services in order, the Anthropic key first and checked', async () => {
+    await openAt('model');
+    const cards = await screen.findAllByRole('radio');
+    expect(cards.map((c) => c.textContent)).toEqual([
+      expect.stringContaining('Anthropic API key'),
+      expect.stringContaining('OpenRouter API key'),
+      expect.stringContaining('Claude subscription'),
+    ]);
+    expect(cards[0]).toHaveAttribute('aria-checked', 'true');
+    expect(cards[0].textContent).toContain('Recommended');
+  });
+
+  it('tests the key on Next and moves on when it connects', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await openAt('model');
+    await screen.findByLabelText(/^Anthropic API key/);
+    await type(/^Anthropic API key/, 'test-key-1');
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Web address' })).toBeInTheDocument();
+    expect(saved).toMatchObject({
+      brain_kind: 'native',
+      native_base_url: MODELS.anthropic.base_url,
+      native_model: MODELS.anthropic.model,
+      native_api_key: 'test-key-1',
+    });
+    expect(checkSetupConnection).toHaveBeenCalledWith('model');
+    // The draft is saved before the test, which reads it.
+    expect(vi.mocked(putSetupDraft).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(checkSetupConnection).mock.invocationCallOrder[0],
+    );
+  });
+
+  it('stays on a failed test and offers to continue without it', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(refused);
+    await openAt('model');
+    await screen.findByLabelText(/^Anthropic API key/);
+    await type(/^Anthropic API key/, 'wrong-key');
+    await next();
+
+    expect(await screen.findByText('That API key was not accepted.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'AI service' })).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Continue without testing' }));
+    expect(await screen.findByRole('heading', { name: 'Web address' })).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledTimes(1);
+    expect(validateSetupStep).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not test again on Next after the Test button passed', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await openAt('model');
+    await screen.findByLabelText(/^Anthropic API key/);
+    await type(/^Anthropic API key/, 'test-key-1');
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+    expect(await screen.findByText(passed.message)).toBeInTheDocument();
+
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Web address' })).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it('tests again once the key changes after a pass', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValueOnce(passed).mockResolvedValueOnce(refused);
+    await openAt('model');
+    await screen.findByLabelText(/^Anthropic API key/);
+    await type(/^Anthropic API key/, 'test-key-1');
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+    await screen.findByText(passed.message);
+
+    await type(/^Anthropic API key/, 'test-key-2');
+    expect(screen.queryByText(passed.message)).toBeNull();
+    await next();
+    expect(await screen.findByText(refused.message)).toBeInTheDocument();
+    expect(checkSetupConnection).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a test the server could not run under the fields it names', async () => {
+    vi.mocked(checkSetupConnection).mockRejectedValue(
+      new SetupApiError(400, 'incomplete', 'Fill in the fields above to test the connection.', [
+        { field: 'native_api_key', message: 'Enter an API key to test.' },
+      ]),
+    );
+    await openAt('model');
+    await screen.findByLabelText(/^Anthropic API key/);
+    await fireEvent.click(screen.getByRole('button', { name: 'Test' }));
+
+    expect(await screen.findByText('Enter an API key to test.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Fill in the fields above to test the connection.'),
+    ).toBeInTheDocument();
+  });
+
+  it('switches to OpenRouter’s address and model, with its models as suggestions', async () => {
+    vi.mocked(getSetupModels).mockResolvedValue(['anthropic/claude-sonnet-4.6', 'z-ai/glm-5']);
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await openAt('model');
+    await fireEvent.click(await screen.findByRole('radio', { name: /OpenRouter API key/ }));
+
+    expect(await screen.findByLabelText(/^OpenRouter API key/)).toBeInTheDocument();
+    expect(getSetupModels).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText(/^Model/)).toHaveValue(MODELS.openrouter.model);
+
+    await type(/^OpenRouter API key/, 'or-key');
+    await type(/^Model/, 'z-ai/glm-5');
+    await next();
+    await screen.findByRole('heading', { name: 'Web address' });
+    expect(saved).toMatchObject({
+      brain_kind: 'native',
+      native_base_url: MODELS.openrouter.base_url,
+      native_model: 'z-ai/glm-5',
+      native_api_key: 'or-key',
+    });
+  });
+
+  it('drops one service’s stored key on switching to the other', async () => {
+    vi.mocked(getSetupDraft).mockResolvedValue({
+      draft: {
+        brain_kind: 'native',
+        native_base_url: MODELS.anthropic.base_url,
+        native_model: MODELS.anthropic.model,
+        native_api_key: { set: true },
+      },
+    });
+    vi.mocked(checkSetupConnection).mockResolvedValue(passed);
+    await openAt('model');
+    await fireEvent.click(await screen.findByRole('radio', { name: /OpenRouter API key/ }));
+    await type(/^OpenRouter API key/, 'or-key');
+    await next();
+    await screen.findByRole('heading', { name: 'Web address' });
+    expect(vi.mocked(putSetupDraft).mock.calls[0][0]).toMatchObject({ native_api_key: 'or-key' });
+
+    // Without a new key, the old service's is erased rather than kept.
+    vi.mocked(putSetupDraft).mockClear();
+    __history.back();
+    await screen.findByRole('heading', { name: 'AI service' });
+    await fireEvent.click(screen.getByRole('radio', { name: /Anthropic API key/ }));
+    await next();
+    expect(vi.mocked(putSetupDraft).mock.calls[0][0]).toMatchObject({ native_api_key: '' });
+  });
+
+  it('asks a subscription for its token and does not test it', async () => {
+    await openAt('model');
+    await fireEvent.click(await screen.findByRole('radio', { name: /Claude subscription/ }));
+    expect(screen.getByText(/claude setup-token/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Test' })).toBeNull();
+
+    await type(/^Claude Code token/, 'subscription-token');
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Web address' })).toBeInTheDocument();
+    expect(saved).toMatchObject({
+      brain_kind: 'claude_code',
+      claude_code_oauth_token: 'subscription-token',
+    });
+    expect(checkSetupConnection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a typed model under More when the server refuses it', async () => {
+    vi.mocked(validateSetupStep).mockResolvedValue({
+      ok: false,
+      fields: [{ field: 'native_model', message: 'Enter a model name.' }],
+    });
+    await openAt('model');
+    await screen.findByLabelText(/^Anthropic API key/);
+    await type(/^Model/, '');
+    await next();
+    expect(await screen.findByText('Enter a model name.')).toBeVisible();
+    expect(checkSetupConnection).not.toHaveBeenCalled();
   });
 });

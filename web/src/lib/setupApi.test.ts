@@ -11,6 +11,7 @@ import {
   AuthError,
   checkSetupConnection,
   finishSetup,
+  getSetupModels,
   getSetupState,
   putSetupDraft,
   SetupApiError,
@@ -129,5 +130,11 @@ describe('the setup API', () => {
     const error = await refusal(getSetupState());
     expect(error.status).toBe(200);
     expect(error.message).toBe('The setup service answered 200.');
+  });
+
+  it('reads the model suggestions out of their object, ids only', async () => {
+    fetchMock.mockResolvedValue(answer(200, { models: ['a/one', 7, 'b/two'] }));
+    expect(await getSetupModels()).toEqual(['a/one', 'b/two']);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/setup/models');
   });
 });

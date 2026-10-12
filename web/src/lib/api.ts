@@ -5215,7 +5215,22 @@ export interface SetupState {
   /** The module toggles this image can offer; `field` is the answer's name. */
   modules_available?: { field: string; module: string }[];
   memory_total_mib?: number;
-  defaults?: { bot_name: string; storage: string; profiles: string[] };
+  defaults?: {
+    bot_name: string;
+    storage: string;
+    profiles: string[];
+    /** Each API-key service's address and default model. */
+    models?: SetupModelDefaults;
+  };
+}
+
+export interface SetupModelService {
+  base_url: string;
+  model: string;
+}
+export interface SetupModelDefaults {
+  anthropic: SetupModelService;
+  openrouter: SetupModelService;
 }
 
 /** A credential the server holds: never its value, only whether it is set. */
@@ -5353,6 +5368,12 @@ export function putSetupDraft(patch: SetupDraftPatch): Promise<{ draft: SetupDra
 /** The saved draft's errors on one screen's fields. */
 export function validateSetupStep(step: string): Promise<SetupValidation> {
   return setupFetch('/validate', 'POST', { step });
+}
+
+/** OpenRouter's model ids, for suggestions only; `[]` when there are none. */
+export async function getSetupModels(): Promise<string[]> {
+  const { models } = await setupFetch<{ models: string[] }>('/models');
+  return Array.isArray(models) ? models.filter((m) => typeof m === 'string') : [];
 }
 
 /** A live test of what the saved draft would write; it takes no body. */

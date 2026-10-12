@@ -3,11 +3,21 @@
   import { base } from '$app/paths';
   import { replaceState } from '$app/navigation';
   import { page } from '$app/state';
-  import { getSetupState, unlockSetup, SetupApiError, type SetupState } from '$lib/api';
+  import {
+    getSetupState,
+    unlockSetup,
+    validateSetupStep,
+    SetupApiError,
+    type SetupFieldError,
+    type SetupState,
+  } from '$lib/api';
   import { Button, NoticeBanner } from '$lib/components/ui';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import SetupFrame from '$lib/components/setup/SetupFrame.svelte';
   import StepUnlock from '$lib/components/setup/StepUnlock.svelte';
+  import StepWelcome from '$lib/components/setup/StepWelcome.svelte';
+  import StepAccount from '$lib/components/setup/StepAccount.svelte';
+  import StepModel from '$lib/components/setup/StepModel.svelte';
   import {
     DEFAULT_BOT_NAME,
     createSetupDraft,
@@ -45,6 +55,9 @@
     read: () => (ready ? { step } : null),
     apply: (selection) => {
       step = selection.step;
+      errors = {};
+      formError = '';
+      offerSkip = false;
     },
   });
   stepSel.start();
@@ -134,9 +147,68 @@
     void start(takeFragmentCode());
   });
 
+  /** What a screen may hand the page before its answers are saved and checked. */
+  interface StepHooks {
+    /** Client-side refusals, by field, that keep the screen from saving. */
+    precheck?: () => Record<string, string> | null;
+    /** After the server has accepted the screen: false to stay (a failed test). */
+    beforeNext?: () => Promise<boolean>;
+  }
+
+  let stepRef = $state<StepHooks | undefined>();
+  let errors = $state<Record<string, string>>({});
+  let formError = $state('');
+  let busy = $state(false);
+  let offerSkip = $state(false);
+
   function go(delta: -1 | 1) {
     const next = neighbourStep(step, delta);
-    if (next) stepSel.push({ step: next });
+    if (!next) return;
+    errors = {};
+    formError = '';
+    offerSkip = false;
+    stepSel.push({ step: next });
+  }
+
+  function byField(fields: SetupFieldError[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const f of fields) if (!(f.field in out)) out[f.field] = f.message;
+    return out;
+  }
+
+  /**
+   * Next: save the screen's answers, have the server check them, then run
+   * whatever the screen still owes (a connection test) before moving on.
+   * `skipChecks` is "Continue without testing", which still saves and
+   * validates.
+   */
+  async function advance(skipChecks = false) {
+    if (busy) return;
+    const refused = stepRef?.precheck?.();
+    if (refused) {
+      errors = refused;
+      return;
+    }
+    busy = true;
+    formError = '';
+    try {
+      await draft.save();
+      const result = await validateSetupStep(step);
+      errors = byField(result.fields);
+      formError = errors[''] ?? '';
+      if (!result.ok) return;
+      if (!skipChecks && stepRef?.beforeNext && !(await stepRef.beforeNext())) return;
+      go(1);
+    } catch (e) {
+      if (e instanceof SetupApiError && e.status === 401) {
+        view = 'unlock';
+        return;
+      }
+      if (e instanceof SetupApiError) errors = byField(e.fields);
+      formError = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
   }
 
   const title = $derived(stepInfo(step).title);
@@ -176,9 +248,40 @@
     {step}
     {title}
     onBack={isFirst ? undefined : () => go(-1)}
-    onNext={isLast ? undefined : () => go(1)}
+    onNext={isLast ? undefined : () => advance()}
+    nextLoading={busy}
+    nextLoadingLabel={step === 'model' ? 'Testing…' : 'Saving…'}
   >
-    <!-- Each screen arrives as its own component in a later stage. -->
-    <p class="muted">This screen is not built yet.</p>
+    {#snippet actions()}
+      {#if step === 'model' && offerSkip}
+        <Button variant="secondary" disabled={busy} onclick={() => advance(true)}
+          >Continue without testing</Button
+        >
+      {/if}
+    {/snippet}
+    {#if formError}
+      <NoticeBanner variant="danger" title={formError} />
+    {/if}
+    {#if step === 'welcome'}
+      <StepWelcome
+        bind:this={stepRef}
+        {draft}
+        {errors}
+        defaultBotName={setup?.defaults?.bot_name}
+      />
+    {:else if step === 'account'}
+      <StepAccount bind:this={stepRef} {draft} {errors} />
+    {:else if step === 'model'}
+      <StepModel
+        bind:this={stepRef}
+        {draft}
+        {errors}
+        models={setup?.defaults?.models}
+        bind:offerSkip
+      />
+    {:else}
+      <!-- The remaining screens arrive in later stages. -->
+      <p class="muted">This screen is not built yet.</p>
+    {/if}
   </SetupFrame>
 {/if}

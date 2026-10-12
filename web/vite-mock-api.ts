@@ -4694,6 +4694,15 @@ function mockSetupErrors(step: string): { field: string; message: string }[] {
     !d.native_api_key
   )
     errors.push({ field: 'native_api_key', message: 'Enter an API key.' });
+  if (
+    (step === 'model' || step === 'review') &&
+    d.brain_kind === 'claude_code' &&
+    !d.claude_code_oauth_token
+  )
+    errors.push({
+      field: 'claude_code_oauth_token',
+      message: 'Paste the token that `claude setup-token` printed.',
+    });
   return errors;
 }
 
@@ -4713,7 +4722,18 @@ const setupHandler: MockHandler = ({ url, method, body }) => {
         { field: 'briefings_enabled', module: 'briefings' },
       ],
       memory_total_mib: 3900,
-      defaults: { bot_name: 'Istota', storage: 'local', profiles: ['browser'] },
+      defaults: {
+        bot_name: 'Istota',
+        storage: 'local',
+        profiles: ['browser'],
+        models: {
+          anthropic: { base_url: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-6' },
+          openrouter: {
+            base_url: 'https://openrouter.ai/api/v1',
+            model: 'anthropic/claude-sonnet-4.6',
+          },
+        },
+      },
     };
   }
   if (route === '/unlock' && method === 'POST') {
@@ -4746,6 +4766,16 @@ const setupHandler: MockHandler = ({ url, method, body }) => {
     }
     return mockSetupDraft();
   }
+  if (route === '/models' && method === 'GET')
+    return {
+      models: [
+        'anthropic/claude-haiku-4.5',
+        'anthropic/claude-opus-4.8',
+        'anthropic/claude-sonnet-4.6',
+        'google/gemini-2.5-pro',
+        'openai/gpt-5',
+      ],
+    };
   if (route === '/validate' && method === 'POST') {
     const fields = mockSetupErrors(String(body?.step ?? ''));
     return { ok: fields.length === 0, fields };
