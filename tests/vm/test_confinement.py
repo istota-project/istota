@@ -21,6 +21,8 @@ Controls (`scripts/test-vm-negative-control.sh`):
   VM's Lima mounts (the Lima default template mounts the whole home);
 - `apparmor-unconfined`: the deployed compose file's `apparmor=istota` becomes
   `apparmor=unconfined` and the daemon service is recreated;
+- `apparmor-unnarrowed`: the loaded `istota` profile loses its three mount
+  denies (no bind or move out of /proc or /sys, no sysfs), as before Stage 9b;
 - `secret-owned-by-root`: one secret file on the VM is chowned to root.
 """
 
@@ -73,6 +75,17 @@ def stack(local_stack, release):
             vm.run(f"git -C {lima.STACK}/src checkout -- docker/docker-compose.yml"
                    " && istota-stack compose up -d daemon", timeout=600)
             lima.wait_healthy(vm)
+        return
+    if name == "apparmor-unnarrowed":
+        # A profile replacement applies to processes already confined by it, so
+        # the next `docker exec` runs under the unnarrowed rules with no restart.
+        vm.run("sed -i '/deny mount options in\\|deny mount fstype=sysfs/d' /etc/apparmor.d/istota"
+               " && apparmor_parser -r /etc/apparmor.d/istota")
+        try:
+            yield vm
+        finally:
+            vm.run(f"install -m 0644 {lima.STACK}/src/docker/istota/apparmor-istota /etc/apparmor.d/istota"
+                   " && apparmor_parser -r /etc/apparmor.d/istota")
         return
     if name == "secret-owned-by-root":
         vm.run(f"chown 0:0 {lima.STACK}/secrets/anthropic_api_key")

@@ -17,7 +17,7 @@
 # Controls, grouped by the stack mode they run in:
 #
 #   local:     mac-home-mounted (row 7), secret-owned-by-root (row 12),
-#              apparmor-unconfined (row 20), no-egress-unit (row 10),
+#              apparmor-unconfined, apparmor-unnarrowed (row 20), no-egress-unit (row 10),
 #              every-cred-volume-everywhere (row 11), exec-socket-symlink (row 11),
 #              browser-on-default-network (row 17)
 #   direct:    certbot-disabled (row 19)
@@ -81,6 +81,10 @@ control apparmor-unconfined \
     "$C::TestTheContainerIsConfinedByAppArmor::test_the_istota_profile_is_in_force" \
     "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_core_pattern" \
     "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_write_the_sysrq_trigger" \
+    "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_bind_proc_sys_kernel"
+
+control apparmor-unnarrowed \
+    "row 20: the istota profile without its bind and sysfs mount denies" \
     "$C::TestTheContainerIsConfinedByAppArmor::test_a_root_exec_cannot_bind_proc_sys_kernel"
 
 D="$VM/test_devbox.py"
