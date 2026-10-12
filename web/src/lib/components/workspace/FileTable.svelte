@@ -1,6 +1,13 @@
 <script lang="ts">
-  import { ExternalLink, File, Folder, Link, Minus, Users } from '@lucide/svelte';
-  import type { DriveItem, WorkspaceListing, WorkspacePlace } from '$lib/api';
+  import { ExternalLink, File, Folder, Link, Minus, Users, Pin, PinOff } from '@lucide/svelte';
+  import type {
+    DriveItem,
+    WorkspaceListing,
+    WorkspacePlace,
+    WorkspacePin,
+    WorkspacePinInput,
+  } from '$lib/api';
+  import { IconButton } from '$lib/components/ui';
   import { formatBytes } from '$lib/format';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -12,7 +19,13 @@
     showHidden,
     href,
     onNavigate,
+    pins = [],
+    pinsBusy = false,
+    onTogglePin,
   }: {
+    pins?: WorkspacePin[];
+    pinsBusy?: boolean;
+    onTogglePin?: (pin: WorkspacePinInput) => void;
     listing?: WorkspaceListing | null;
     driveItems?: DriveItem[];
     drivePath?: string;
@@ -25,6 +38,8 @@
     place.kind === 'drive'
       ? driveItems.map((item) => ({
           key: item.id,
+          ref: item.id,
+          mime_type: item.mime_type,
           name: item.name,
           kind: item.is_folder ? 'dir' : 'file',
           size: item.size,
@@ -41,6 +56,10 @@
           .map((entry) => ({
             ...entry,
             key: entry.name,
+            ref: place.view_root
+              ? [place.view_root, listing?.path, entry.name].filter(Boolean).join('/')
+              : null,
+            mime_type: null,
             modified: new Date(entry.modified * 1000).toISOString(),
             path: [listing?.path, entry.name].filter(Boolean).join('/'),
             web_url: null,
@@ -55,7 +74,7 @@
         ><th scope="col">Name</th><th scope="col" class="size">Size</th><th
           scope="col"
           class="modified">Modified</th
-        ></tr
+        ><th scope="col" class="pin-column"><span class="sr-only">Pin</span></th></tr
       ></thead
     >
     <tbody>
@@ -80,9 +99,7 @@
                 {:else if entry.kind === 'file' && entry.web_url}
                   <a href={entry.web_url} target="_blank" rel="noopener noreferrer">{entry.name}</a>
                 {:else if entry.kind === 'file' && place.view_root}
-                  <button
-                    type="button"
-                    onclick={() => viewer.openFile(`${place.view_root}/${entry.path}`)}
+                  <button type="button" onclick={() => viewer.openFile(entry.ref!)}
                     >{entry.name}</button
                   >
                 {:else}
@@ -117,6 +134,33 @@
             >{#if iso}<time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time
               >{:else}—{/if}</td
           >
+          <td class="pin-column">
+            {#if onTogglePin && entry.ref && (entry.kind === 'file' || entry.kind === 'dir')}
+              {@const provider = place.kind === 'drive' ? 'drive' : 'workspace'}
+              {@const pinned = pins.some(
+                (pin) => pin.provider === provider && pin.ref === entry.ref,
+              )}
+              <IconButton
+                size="sm"
+                class="workspace-pin-action"
+                label={`${pinned ? 'Unpin' : 'Pin'} ${entry.name}`}
+                title={pinned ? 'Unpin' : 'Pin'}
+                active={pinned}
+                pressed={pinned}
+                disabled={pinsBusy}
+                onclick={() =>
+                  onTogglePin!({
+                    provider,
+                    ref: entry.ref!,
+                    name: entry.name,
+                    mime_type: entry.mime_type,
+                    web_url: entry.web_url,
+                  })}
+              >
+                {#if pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
+              </IconButton>
+            {/if}
+          </td>
         </tr>
       {/each}
     </tbody>
@@ -138,6 +182,18 @@
 {/if}
 
 <style>
+  .pin-column {
+    width: 3rem;
+    text-align: center;
+    padding-inline: var(--space-1);
+  }
+  @media (pointer: coarse) {
+    .pin-column :global(.workspace-pin-action) {
+      min-width: var(--touch-min);
+      min-height: var(--touch-min);
+    }
+  }
+
   table {
     width: 100%;
     table-layout: fixed;

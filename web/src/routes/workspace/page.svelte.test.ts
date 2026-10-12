@@ -41,6 +41,9 @@ const entry = (name: string, kind = 'file', hidden = false) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.getWorkspacePins = vi.fn().mockResolvedValue({ pins: [] });
+  api.putWorkspacePin = vi.fn();
+  api.deleteWorkspacePin = vi.fn().mockResolvedValue({ status: 'ok' });
   localStorage.clear();
   __history.reset('/istota/workspace');
   api.getWorkspacePlaces.mockResolvedValue({
@@ -425,4 +428,89 @@ it('links to Connections when Google rejects a stored credential', async () => {
     'href',
     '/settings/connections',
   );
+});
+
+it('pins a file from its row and removes it from the Pinned section', async () => {
+  __history.reset('/istota/workspace?place=home&path=notes');
+  api.putWorkspacePin.mockImplementation(async (body) => ({
+    pin: { ...body, id: 1, available: true, is_dir: false },
+  }));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Pin plan #1.md' }));
+  expect(api.putWorkspacePin).toHaveBeenCalledWith({
+    provider: 'workspace',
+    ref: '/Users/alice/notes/plan #1.md',
+    name: 'plan #1.md',
+    mime_type: null,
+    web_url: null,
+  });
+  expect(screen.getByRole('button', { name: 'Unpin plan #1.md' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  await fireEvent.click(within(pinned).getByRole('button', { name: 'plan #1.md' }));
+  expect(openFile).toHaveBeenCalledWith('/Users/alice/notes/plan #1.md');
+  await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin plan #1.md' }));
+  expect(api.deleteWorkspacePin).toHaveBeenCalledWith(1);
+  await screen.findByRole('button', { name: 'Pin plan #1.md' });
+});
+
+it('keeps unavailable pins removable and reports failed mutations', async () => {
+  api.getWorkspacePins.mockResolvedValue({
+    pins: [
+      {
+        id: 2,
+        provider: 'workspace',
+        ref: '/Users/alice/gone.md',
+        name: 'Gone',
+        available: false,
+        is_dir: false,
+      },
+    ],
+  });
+  api.deleteWorkspacePin.mockRejectedValueOnce(new Error('Try again.'));
+  render(Workspace);
+  await screen.findByText('Unavailable');
+  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  expect(within(pinned).queryByRole('button', { name: 'Gone' })).toBeNull();
+  await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin Gone' }));
+  await screen.findByText('Try again.');
+  expect(within(pinned).getByText('Gone')).toBeTruthy();
+  await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin Gone' }));
+  await waitFor(() => expect(screen.queryByText('Gone')).toBeNull());
+});
+
+it('pins a Drive item with its provider metadata', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...home, id: 'drive', kind: 'drive', label: 'Google Drive', view_root: null }],
+    notes: [],
+  });
+  __history.reset('/istota/workspace?place=drive');
+  const item = {
+    id: 'drive_file_123',
+    name: '<b>Budget</b>',
+    mime_type: 'application/pdf',
+    web_url: 'https://drive.google.com/file/d/drive_file_123',
+    modified: null,
+    size: null,
+    is_folder: false,
+  };
+  api.getWorkspaceDriveListing.mockResolvedValue({ items: [item], next_page_token: null });
+  api.putWorkspacePin.mockImplementation(async (body) => ({
+    pin: { ...body, id: 3, available: true, is_dir: false },
+  }));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Pin <b>Budget</b>' }));
+  expect(api.putWorkspacePin).toHaveBeenCalledWith({
+    provider: 'drive',
+    ref: item.id,
+    name: item.name,
+    mime_type: item.mime_type,
+    web_url: item.web_url,
+  });
+  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  const link = within(pinned).getByRole('link', { name: '<b>Budget</b>' });
+  expect(link.querySelector('b')).toBeNull();
+  expect(link).toHaveAttribute('rel', 'noopener noreferrer');
 });

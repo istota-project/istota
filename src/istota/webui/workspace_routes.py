@@ -17,6 +17,8 @@ from istota.credentials.google_scopes import levels_from_scopes
 from istota.credentials.google_tokens import access_token_for
 from istota.google import drive
 from istota.nextcloud import OcsError, shares
+from istota.webui.chat_files import servable_roots
+from istota.workspace.pins import validate_pin, workspace_pin_kind
 from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir
 from istota.workspace.places import list_places
@@ -252,3 +254,70 @@ async def api_workspace_drive_list(
         return await asyncio.to_thread(query)
     except drive.DriveError as exc:
         return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+
+@router.get("/pins")
+async def api_workspace_pins(request: Request, user: dict = Depends(require_auth)):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+
+    def query():
+        with db.get_db(config.db_path) as conn:
+            roots = servable_roots(config, conn, user["username"])
+            pins = db.list_pins(conn, user["username"])
+            for pin in pins:
+                pin["available"] = True
+                pin["is_dir"] = pin["mime_type"] == "application/vnd.google-apps.folder"
+                if pin["provider"] == "workspace":
+                    try:
+                        pin["is_dir"] = workspace_pin_kind(config, user["username"], pin["ref"], roots)
+                    except (ListingError, OSError):
+                        pin["available"] = False
+            return {"pins": pins}
+
+    return await asyncio.to_thread(query)
+
+
+@router.put("/pins")
+async def api_workspace_pin_put(
+    request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+
+    def write():
+        with db.get_db(config.db_path) as conn:
+            roots = servable_roots(config, conn, user["username"])
+            values, is_dir = validate_pin(config, user["username"], body, roots)
+            pin = db.add_pin(conn, user["username"], **values)
+            if pin is None:
+                raise ListingError(409, "pin_limit")
+            return {"pin": {**pin, "available": True, "is_dir": is_dir}}
+
+    try:
+        return await asyncio.to_thread(write)
+    except (ListingError, OSError) as exc:
+        return _filesystem_error(config, exc, "pins", write=True)
+
+
+@router.delete("/pins/{pin_id}")
+async def api_workspace_pin_delete(
+    request: Request, pin_id: int, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+
+    def write():
+        with db.get_db(config.db_path) as conn:
+            return db.delete_pin(conn, user["username"], pin_id)
+
+    if not await asyncio.to_thread(write):
+        return JSONResponse({"error": "Pin not found."}, status_code=404)
+    return {"status": "ok"}

@@ -14,6 +14,11 @@
     HeaderNav,
   } from '$lib/components/ui';
   import {
+    getWorkspacePins,
+    putWorkspacePin,
+    deleteWorkspacePin,
+    type WorkspacePin,
+    type WorkspacePinInput,
     getWorkspacePlaces,
     getWorkspaceListing,
     getWorkspaceDriveListing,
@@ -27,7 +32,57 @@
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
+  import PinnedList from '$lib/components/workspace/PinnedList.svelte';
   import FileTable from '$lib/components/workspace/FileTable.svelte';
+
+  let pins = $state<WorkspacePin[]>([]);
+  let pinsBusy = $state(false);
+  let pinsLoading = $state(true);
+  let pinError = $state('');
+  async function loadPins() {
+    pinsLoading = true;
+    pinError = '';
+    try {
+      const result = await getWorkspacePins();
+      if (active) pins = result.pins;
+    } catch {
+      if (active) pinError = 'Could not load pins.';
+    } finally {
+      pinsLoading = false;
+    }
+  }
+  async function removePin(pin: WorkspacePin) {
+    if (pinsBusy) return;
+    pinsBusy = true;
+    pinError = '';
+    try {
+      await deleteWorkspacePin(pin.id);
+      if (active) pins = pins.filter((item) => item.id !== pin.id);
+    } catch (e) {
+      pinError = e instanceof Error ? e.message : 'Could not remove this pin.';
+    } finally {
+      pinsBusy = false;
+    }
+  }
+  async function togglePin(input: WorkspacePinInput) {
+    if (pinsBusy || pinsLoading) return;
+    const existing = pins.find((pin) => pin.provider === input.provider && pin.ref === input.ref);
+    if (existing) return removePin(existing);
+    pinsBusy = true;
+    pinError = '';
+    try {
+      const result = await putWorkspacePin(input);
+      if (active) pins = [...pins, result.pin];
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Could not pin this file.';
+      pinError =
+        message === 'pin_limit'
+          ? 'You can pin up to 50 items. Remove a pin to add another.'
+          : message;
+    } finally {
+      pinsBusy = false;
+    }
+  }
 
   type Selection = { place: string; path: string };
   let places = $state<WorkspacePlace[]>([]);
@@ -235,6 +290,7 @@
   }
   onMount(() => {
     void load();
+    void loadPins();
     return () => {
       active = false;
       generation++;
@@ -257,17 +313,34 @@
     </ShellHeader>
   {/snippet}
   {#snippet sidebar()}
-    {#if places.length}
+    {#if places.length || pins.length}
       <Sidebar
         title="Places"
         open={sidebarOpen}
         onClose={() => (sidebarOpen = false)}
         width="260px"
       >
+        <PinnedList
+          {pins}
+          {places}
+          busy={pinsBusy}
+          onRemove={removePin}
+          {href}
+          onNavigate={navigate}
+        />
         <PlaceList {places} selected={selected?.place || ''} {href} onNavigate={navigate} />
       </Sidebar>
     {/if}
   {/snippet}
+  {#if pinError}
+    <div class="pin-error" role="alert">
+      <span class="form-error">{pinError}</span>{#if pinError === 'Could not load pins.'}<Button
+          size="sm"
+          variant="ghost"
+          onclick={loadPins}>Retry pins</Button
+        >{/if}
+    </div>
+  {/if}
   {#if loading}
     <div class="center-msg">Loading workspace…</div>
   {:else if error}
@@ -409,6 +482,9 @@
       {:else if driveListing}
         <FileTable
           {place}
+          {pins}
+          pinsBusy={pinsBusy || pinsLoading}
+          onTogglePin={togglePin}
           driveItems={driveListing.items}
           drivePath={selected?.path || ''}
           showHidden={true}
@@ -434,7 +510,16 @@
           </div>
         {/if}
       {:else if listing}
-        <FileTable {listing} {place} {showHidden} {href} onNavigate={navigate} />
+        <FileTable
+          {listing}
+          {place}
+          {showHidden}
+          {href}
+          {pins}
+          pinsBusy={pinsBusy || pinsLoading}
+          onTogglePin={togglePin}
+          onNavigate={navigate}
+        />
       {/if}
     </FileDropZone>
   {/if}
@@ -473,6 +558,12 @@
 </Modal>
 
 <style>
+  .pin-error {
+    padding: var(--space-2) var(--space-3);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
   .drive-pagination {
     padding: var(--space-3);
     text-align: center;

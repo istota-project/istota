@@ -16,6 +16,7 @@
     danger?: boolean;
     /** Pressed/open state, for a menu trigger. */
     active?: boolean;
+    pressed?: boolean;
     type?: 'button' | 'submit';
     title?: string;
     disabled?: boolean;
@@ -29,6 +30,7 @@
     class: className = '',
     danger = false,
     active = false,
+    pressed,
     type = 'button',
     title,
     disabled,
@@ -46,6 +48,7 @@
   {disabled}
   {onclick}
   aria-label={label}
+  aria-pressed={pressed}
 >
   {@render children()}
 </button>

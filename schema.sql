@@ -2344,3 +2344,15 @@ CREATE TABLE IF NOT EXISTS recovery_fill_authorizations (
     used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_recovery_fill_task ON recovery_fill_authorizations(task_id, name);
+
+CREATE TABLE IF NOT EXISTS workspace_pins (
+    id INTEGER PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK (provider IN ('workspace', 'drive')),
+    ref TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mime_type TEXT,
+    web_url TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, provider, ref)
+);

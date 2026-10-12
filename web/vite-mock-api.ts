@@ -1,5 +1,6 @@
 import type { Plugin } from 'vite';
 import type {
+  WorkspacePin,
   WorkspacePlace,
   WorkspaceEntry,
   AdminStats,
@@ -4778,8 +4779,57 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
   'Empty folder': [],
   Archive: [workspaceEntry('note.txt')],
 };
+let workspacePins: WorkspacePin[] = [
+  {
+    id: 1,
+    provider: 'workspace',
+    ref: '/Users/carol/note.md',
+    name: 'note.md',
+    mime_type: null,
+    web_url: null,
+    available: true,
+    is_dir: false,
+  },
+  {
+    id: 2,
+    provider: 'workspace',
+    ref: '/Users/carol/old-plan.md',
+    name: 'Old plan.md',
+    mime_type: null,
+    web_url: null,
+    available: false,
+    is_dir: false,
+  },
+];
+let nextWorkspacePinId = 3;
 const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const driveUrl = new URL(url, 'http://localhost');
+  if (driveUrl.pathname === '/istota/api/workspace/pins') {
+    if (method === 'GET') return { pins: workspacePins };
+    if (method === 'PUT') {
+      const existing = workspacePins.find(
+        (pin) => pin.provider === body.provider && pin.ref === body.ref,
+      );
+      if (!existing && workspacePins.length >= 50) return { __status: 409, error: 'pin_limit' };
+      const pin = {
+        ...body,
+        id: existing?.id ?? nextWorkspacePinId++,
+        available: true,
+        is_dir:
+          body.mime_type === 'application/vnd.google-apps.folder' ||
+          (body.provider === 'workspace' &&
+            !!workspaceTree[body.ref.split('/').slice(3).join('/')]),
+      };
+      workspacePins = [...workspacePins.filter((item) => item.id !== pin.id), pin];
+      return { pin };
+    }
+  }
+  if (driveUrl.pathname.startsWith('/istota/api/workspace/pins/') && method === 'DELETE') {
+    workspacePins = workspacePins.filter(
+      (pin) => pin.id !== Number(driveUrl.pathname.split('/').at(-1)),
+    );
+    return { status: 'ok' };
+  }
   if (driveUrl.pathname === '/istota/api/workspace/drive/list' && method === 'GET') {
     const folder = driveUrl.searchParams.get('folder') || 'root';
     const item = (id: string, name: string, is_folder = false) => ({

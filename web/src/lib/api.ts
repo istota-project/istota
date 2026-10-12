@@ -5306,3 +5306,25 @@ export function uploadWorkspaceFile(
     xhr.send(form);
   });
 }
+
+export interface WorkspacePinInput {
+  provider: 'workspace' | 'drive';
+  ref: string;
+  name: string;
+  mime_type: string | null;
+  web_url: string | null;
+}
+export interface WorkspacePin extends WorkspacePinInput {
+  id: number;
+  available: boolean;
+  is_dir: boolean;
+}
+export function getWorkspacePins(): Promise<{ pins: WorkspacePin[] }> {
+  return apiFetch('/workspace/pins');
+}
+export function putWorkspacePin(pin: WorkspacePinInput): Promise<{ pin: WorkspacePin }> {
+  return apiFetch('/workspace/pins', { method: 'PUT', body: JSON.stringify(pin) });
+}
+export function deleteWorkspacePin(id: number): Promise<{ status: string }> {
+  return apiFetch(`/workspace/pins/${id}`, { method: 'DELETE' });
+}

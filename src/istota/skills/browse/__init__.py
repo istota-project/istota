@@ -472,12 +472,9 @@ def _workspace_relative(path):
     back beside the host path so the reply's URL is a copy rather than a
     reconstruction.
 
-    **Built against the workspace root, not the mount, because that is the
-    confinement the consumer applies.** `_resolve_chat_file` serves
-    `/Users/{uid}` and nothing else, while `allowed_host_roots` also admits the
-    task's own `{mount}/Channels/{token}` as a destination — so a `--output`
-    there is a legitimate write whose mount-relative spelling is a URL the
-    endpoint refuses by design.
+    This URL producer stays home-only. The web resolver also serves current
+    room, group and linked roots, but this helper has only the task's scoped
+    home identity and does not query those memberships.
 
     **`None` is the ordinary answer now, not the edge case.** Since the derived
     default moved to the per-user temp dir (`screenshot_dir`), every capture

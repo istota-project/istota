@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
+
 - Browse My Drive and Shared with me in Workspace, open files in Google Drive, and load more files as needed. Connection errors link to Settings so you can restore access.
 
 - My files in Workspace now shows Nextcloud shares and opens files in your Nextcloud when they are shared with you. A disconnected Nextcloud folder reports that it is unreachable when browsing or uploading.
