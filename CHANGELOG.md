@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota apply` can reconcile shared briefing definitions and refuses pruning while retained user or configuration definitions still reference them. Shared deletions wait for successful user updates; generated content and run history are preserved.
+
 - `istota apply` can reconcile briefing schedules with partial updates and explicit pruning. Pruning removes schedule and content definitions while keeping archives, items and runtime history; conflicting configuration seeds are refused before any settings change.
 
 - `istota apply` can now reconcile user profiles and WhatsApp enrollment, with read-only previews, identity and destination checks, and explicit update, managed and seed modes. Reapplying unchanged settings reports no change; profile or enrollment changes report that a restart is needed.

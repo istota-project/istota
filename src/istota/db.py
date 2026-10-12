@@ -11158,13 +11158,19 @@ def set_briefing_shared_block_last_run(
 # ============================================================================
 
 
-def _row_to_shared_block_config(row: sqlite3.Row) -> SharedBlockConfigRow:
+def _row_to_shared_block_config(row: sqlite3.Row, *, strict: bool = False) -> SharedBlockConfigRow:
     try:
-        sources = json.loads(row["sources"]) if row["sources"] else []
+        sources = json.loads(row["sources"]) if strict or row["sources"] else []
     except (json.JSONDecodeError, TypeError):
+        if strict:
+            raise ValueError("invalid shared block sources") from None
         sources = []
     if not isinstance(sources, list):
+        if strict:
+            raise ValueError("invalid shared block sources")
         sources = []
+    if strict and (row["enabled"] not in (0, 1) or row["trusted"] not in (0, 1)):
+        raise ValueError("invalid shared block flag")
     return SharedBlockConfigRow(
         id=int(row["id"]),
         name=row["name"],
@@ -11180,12 +11186,12 @@ def _row_to_shared_block_config(row: sqlite3.Row) -> SharedBlockConfigRow:
     )
 
 
-def list_shared_block_configs(conn: sqlite3.Connection) -> list[SharedBlockConfigRow]:
+def list_shared_block_configs(conn: sqlite3.Connection, *, strict: bool = False) -> list[SharedBlockConfigRow]:
     """Return all shared-block definitions, ordered by name."""
     cursor = conn.execute(
         "SELECT * FROM shared_block_configs ORDER BY name"
     )
-    return [_row_to_shared_block_config(r) for r in cursor.fetchall()]
+    return [_row_to_shared_block_config(r, strict=strict) for r in cursor.fetchall()]
 
 
 def get_shared_block_config(

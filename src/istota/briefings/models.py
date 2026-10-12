@@ -14,6 +14,7 @@ section. Mirrors :mod:`istota.feeds.models`.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -180,3 +181,47 @@ def parse_json_list(raw: Any) -> list:
             return []
         return parsed if isinstance(parsed, list) else []
     return []
+
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def validate_shared_block_payload(payload: dict) -> dict:
+    """Validate and normalize a shared-block definition without a web dependency."""
+    from croniter import croniter
+
+    name = (payload.get("name") or "").strip()
+    if not name or not _SLUG_RE.match(name):
+        raise ValueError("name must be a slug: lowercase letters, digits, - and _")
+    cron = (payload.get("cron") or "").strip()
+    if not cron or not croniter.is_valid(cron):
+        raise ValueError(f"invalid cron expression: {cron!r}")
+    render_mode = payload.get("render_mode") or "synthesis"
+    if render_mode not in RENDER_MODES:
+        raise ValueError(f"render_mode must be one of {list(RENDER_MODES)}")
+    raw_sources = payload.get("sources")
+    if raw_sources is None:
+        raw_sources = []
+    if not isinstance(raw_sources, list):
+        raise ValueError("sources must be a list")
+    sources: list = []
+    for s in raw_sources:
+        if not isinstance(s, dict) or "kind" not in s:
+            raise ValueError("each source must be an object with a 'kind'")
+        kind = s["kind"]
+        if kind not in ALLOWED_SHARED_SOURCE_KINDS:
+            raise ValueError(
+                f"source kind {kind!r} not allowed for shared blocks "
+                f"(allowed: {sorted(ALLOWED_SHARED_SOURCE_KINDS)})",
+            )
+        sources.append({"kind": kind, "config": s.get("config") or {}})
+    return {
+        "name": name,
+        "cron": cron,
+        "title": (payload.get("title") or "").strip(),
+        "directive": payload.get("directive") or None,
+        "render_mode": render_mode,
+        "enabled": bool(payload.get("enabled", True)),
+        "trusted": bool(payload.get("trusted", False)),
+        "sources": sources,
+    }

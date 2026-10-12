@@ -82,6 +82,7 @@ class Context:
     config: object | None = field(default=None, repr=False)
     profiles: dict = field(default_factory=dict, repr=False)
     profile_claims: dict = field(default_factory=dict, repr=False)
+    briefing_blocks: dict = field(default_factory=dict, repr=False)
     marker_pending: bool = False
     marker_updated: bool = False
 
@@ -238,12 +239,14 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     from istota.settings_plan.profiles import plan_profile
     from istota.settings_plan.resources import plan_resources
     from istota.settings_plan.briefings import plan_schedules
+    from istota.settings_plan.shared_briefings import plan_shared_blocks, validate_references
 
     context.config = None
     context.profiles.clear()
     context.profile_claims.clear()
+    context.briefing_blocks.clear()
     planners = {"config": _plan_config, "profile": plan_profile, "resources": plan_resources,
-                "briefings": plan_schedules, **context.planners}
+                "briefings": plan_schedules, "shared_briefing_blocks": plan_shared_blocks, **context.planners}
     sections = []
     if plan.config is not None:
         sections.append(("config", None))
@@ -269,6 +272,8 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     for section, user in sections:
         if section != "profile":
             planners[section](plan, user, context, options)
+    if context.config is not None and (plan.shared_briefing_blocks is not None or context.briefing_blocks):
+        validate_references(plan, context, options)
     if mixed and config_revision != _file_digest(context.config_path):
         raise ExecutionError("state_changed", ["config"])
     context.units.sort(key=_unit_order)

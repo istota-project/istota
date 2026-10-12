@@ -208,6 +208,7 @@ def _merge_prefix(previous, declarations, defaults, path, context, prune, *, blo
 def plan_blocks(plan, user, context, options):
     declarations = plan.users[user].sections["briefings"]
     selected = {item["name"] for item in declarations if "blocks" in item}
+    context.briefing_blocks[user] = {}
     if not selected and not options.prune:
         return
     database = context.config.module_db_path(user, "briefings")
@@ -252,6 +253,10 @@ def plan_blocks(plan, user, context, options):
         retained = {item["name"] for item in declarations}
         for name in sorted(existing.keys() - retained):
             operations.append(Operation("briefing_content", name, "delete", user=user, expected_state=expected))
+    context.briefing_blocks[user].update(desired)
+    for operation in operations:
+        if operation.action == "delete":
+            context.briefing_blocks[user][operation.identity] = []
     if not operations:
         return
 
@@ -265,6 +270,12 @@ def plan_blocks(plan, user, context, options):
             conn.commit()
 
     def write(conn, operations):
+        from istota.settings_plan.shared_briefings import validate_live_references
+
+        try:
+            validate_live_references(context.config, user, desired)
+        except ExecutionError:
+            raise ExecutionError("state_changed", path) from None
         for operation in operations:
             if operation.action == "delete":
                 bdb.delete_briefing_definitions(conn, operation.identity)
