@@ -48,8 +48,7 @@ six hand-picked sections; this is that rule over the whole tree.
 **The example is the one artifact.** The guard used to accept a key named by
 the Ansible role's ``config.toml.j2`` as well, since every bare-metal install
 read that file. The role went with the bare-metal shape, and the 22 fields only
-it named were documented in the example then, rather than exempted. The one
-entry in :data:`EXEMPT` is a field on its way out.
+it named were documented in the example then, rather than exempted.
 """
 
 from __future__ import annotations
@@ -82,13 +81,7 @@ DOCUMENTED = REPO / "config" / "config.example.toml"
 #: If the real answer is "this is not a setting", the entry belongs in
 #: ``config._NOT_CONFIGURATION`` instead, where the loader will also refuse it
 #: from the file. Write the reason, not just the name.
-EXEMPT: dict[str, str] = {
-    "namespace": (
-        "named only the Ansible role's /etc/<ns>/ and /srv/app/<ns>/ layout, "
-        "which went with the role; the field itself is removed by the one "
-        "install namespace change, and this entry goes stale with it"
-    ),
-}
+EXEMPT: dict[str, str] = {}
 
 
 def walk_fields(instance: object, prefix: str = "") -> list[str]:
@@ -482,8 +475,8 @@ class TestEveryFieldIsDocumentedOrExempted:
 
 
 class TestTheExemptionRulesCanFail:
-    """`EXEMPT` holds one entry that passes all three rules, so the tests
-    above observe nothing about the rules' failing side. Each rule is driven
+    """`EXEMPT` is empty, so the tests above observe nothing about the rules'
+    failing side. Each rule is driven
     here over a map built for the purpose."""
 
     def test_a_stale_entry_is_caught(self):

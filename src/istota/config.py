@@ -2123,7 +2123,6 @@ class ExperimentalConfig:
 
 @dataclass
 class Config:
-    namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
     # DEPRECATED (ISSUE-418): these were the *claude_code* brain's defaults
@@ -2800,12 +2799,10 @@ def load_admin_users(path: str | None = None) -> set[str]:
 
     Args:
         path: Override file path. If None, checks ISTOTA_ADMINS_FILE env var,
-              then falls back to /etc/istota/admins. The default path is
-              wrong for renamed-namespace installs (e.g. /etc/mybot/admins);
-              such deploys must set ISTOTA_ADMINS_FILE in every entry-point
-              systemd unit. A WARNING is logged when the resolved path is
-              missing so silent fail-closed admin in the web UI is visible
-              in the journal.
+              then falls back to /etc/istota/admins. The stack sets
+              ISTOTA_ADMINS_FILE to the config directory's `admins`. A
+              WARNING is logged when the resolved path is missing so silent
+              fail-closed admin in the web UI is visible in the log.
     """
     explicit_path = path is not None
     env_var_set = "ISTOTA_ADMINS_FILE" in os.environ
