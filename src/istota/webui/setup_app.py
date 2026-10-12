@@ -21,6 +21,7 @@ access log is off and the request log names the path without its query.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hmac
 import json
 import logging
@@ -37,6 +38,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from istota import setup_wizard
 from istota.setup_wizard import FieldError, PayloadError, SetupError
 
+from . import setup_checks
 from .request_guards import BodyError, origin_refusal, read_bounded_body
 from .static_dir import cache_header_statics, resolve_static_dir
 
@@ -53,6 +55,12 @@ _IDLE_POLL_SECONDS = 30
 
 TLS_PORT = 8443
 LOCAL_PORT = 8080
+
+#: Each check makes an outbound request with the user's credentials.
+CHECKS_PER_MINUTE = 20
+_CHECK_WINDOW_SECONDS = 60
+#: How long past its own deadline a check's worker thread is waited for.
+_CHECK_GRACE_SECONDS = 2.0
 
 #: The identity password: a draft key that is not an answers field, because
 #: it is written to the identity row and nowhere else.
@@ -125,6 +133,8 @@ class SetupState:
     draft: dict = field(default_factory=dict)
     failures_total: int = 0
     failures_by_client: dict[str, list[float]] = field(default_factory=dict)
+    check_times: list[float] = field(default_factory=list)
+    check_seconds: float = setup_checks.CHECK_SECONDS
     exit_code: int | None = None
     #: Called once with the exit code when the server should stop; `serve`
     #: points it at uvicorn's `should_exit`.
@@ -245,9 +255,93 @@ def step_errors(draft: dict, step: str) -> list[FieldError]:
     return [e for e in errors if e.field == "" or e.field in wanted]
 
 
+#: What each check needs before it has anything to test: the field, and what
+#: to say under it when it is empty.
+_CHECK_NEEDS: dict[str, dict[str, str]] = {
+    "model": {
+        "native_model": "Enter a model name.",
+        "native_api_key": "Enter an API key to test.",
+    },
+    "nextcloud": {
+        "nextcloud_url": "Enter your Nextcloud's address.",
+        "nextcloud_username": "Enter the assistant's Nextcloud username.",
+        "nextcloud_app_password": "Enter the assistant's app password.",
+        "user_id": "Enter your own Nextcloud username.",
+    },
+    "email": {
+        "imap_host": "Enter the mail server's address.",
+        "imap_user": "Enter the email account's username.",
+        "imap_password": "Enter the email account's password.",
+    },
+    "caldav": {
+        "caldav_url": "Enter the calendar's address.",
+        "caldav_username": "Enter the calendar username.",
+        "caldav_password": "Enter the calendar password.",
+    },
+    "address": {
+        "hostname": "Enter the web address.",
+    },
+}
+CHECK_KINDS = tuple(_CHECK_NEEDS)
+
+
+def _check_refusal(kind: str, a) -> JSONResponse | None:
+    """Why ``kind`` has nothing to test for answers ``a``, or None."""
+    if kind == "model" and a.brain_kind != "native":
+        return _error(
+            400, "no_live_check",
+            "A Claude subscription can't be tested here: it needs Claude Code, which "
+            "Istota installs when setup finishes. The token is checked for shape only.",
+        )
+    if kind == "nextcloud" and not a.uses_nextcloud:
+        return _error(400, "nothing_to_check", "Choose “Use my Nextcloud” to test a Nextcloud connection.")
+    if kind == "email" and not a.email_enabled:
+        return _error(400, "nothing_to_check", "Add an email account to test it.")
+    if kind == "caldav" and a.uses_nextcloud:
+        return _error(400, "nothing_to_check", "With Nextcloud connected, the calendar comes from Nextcloud.")
+    if kind == "address" and a.ingress == "local":
+        return _error(400, "nothing_to_check", "There is no web address to check for “Only on this computer”.")
+    missing = [
+        FieldError(name, message)
+        for name, message in _CHECK_NEEDS[kind].items()
+        if not getattr(a, name)
+    ]
+    if missing:
+        return _error(400, "incomplete", "Fill in the fields above to test the connection.", missing)
+    return None
+
+
+async def _run_check(kind: str, a, browser_host: str, seconds: float) -> setup_checks.CheckResult:
+    """Run one check against the config ``a`` would write, under its deadline."""
+    if kind == "address":
+        host = a.hostname
+        work = functools.partial(setup_checks.check_address, a.hostname, browser_host)
+    else:
+        config = setup_checks.config_for_check(a)
+        if kind == "model":
+            return await setup_checks.check_model(config, seconds=seconds)
+        if kind == "nextcloud":
+            host = setup_checks.host_of(config.nextcloud.url)
+            work = functools.partial(setup_checks.check_nextcloud, config, a.user_id, seconds=seconds)
+        elif kind == "email":
+            host = config.email.imap_host
+            work = functools.partial(setup_checks.check_email, config, seconds=seconds)
+        else:
+            host = setup_checks.host_of(config.caldav_url)
+            work = functools.partial(setup_checks.check_caldav, config, seconds=seconds)
+    try:
+        # The thread is not stopped by the timeout; each client's own timeout
+        # ends it. This only stops it holding the response.
+        return await asyncio.wait_for(asyncio.to_thread(work), timeout=seconds + _CHECK_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        logger.info("setup: check %s passed its deadline", kind)
+        return setup_checks.CheckResult(False, setup_checks.timed_out_message(host, seconds))
+
+
 def create_setup_app(
     *, data_dir: Path, vm_dir: Path, code_path: Path, local: bool,
     clock: Callable[[], float] = time.monotonic,
+    check_seconds: float = setup_checks.CHECK_SECONDS,
 ) -> FastAPI:
     """The setup app over ``data_dir``, refusing when a config already exists."""
     data_dir = Path(data_dir)
@@ -263,7 +357,10 @@ def create_setup_app(
     if not code:
         raise SetupError(f"The setup code file {code_path} is empty.")
 
-    state = SetupState(code=code, local=local, data_dir=data_dir, vm_dir=Path(vm_dir), clock=clock)
+    state = SetupState(
+        code=code, local=local, data_dir=data_dir, vm_dir=Path(vm_dir), clock=clock,
+        check_seconds=check_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -397,6 +494,30 @@ def create_setup_app(
             "ok": not errors,
             "fields": [{"field": e.field, "message": e.message} for e in errors],
         }
+
+    @app.post("/istota/api/setup/check/{kind}")
+    async def check(kind: str, request: Request):
+        _require_session(state, request)
+        _require_origin(request)
+        if kind not in CHECK_KINDS:
+            return _error(400, "unknown_check", "Unknown connection check.")
+        answers = {key: value for key, value in state.draft.items() if key != PASSWORD_FIELD}
+        try:
+            a = setup_wizard.answers_from_payload(answers)
+        except PayloadError as exc:
+            return _error(400, "invalid", "Some answers need fixing before this can be tested.", exc.errors)
+        refusal = _check_refusal(kind, a)
+        if refusal is not None:
+            return refusal
+        now = state.clock()
+        state.check_times = [t for t in state.check_times if now - t < _CHECK_WINDOW_SECONDS]
+        if len(state.check_times) >= CHECKS_PER_MINUTE:
+            return _error(429, "throttled", "That's a lot of tests in a minute. Wait a moment and try again.")
+        state.check_times.append(now)
+
+        result = await _run_check(kind, a, request.headers.get("host", ""), state.check_seconds)
+        logger.info("setup: check %s ok=%s", kind, result.ok)
+        return result.to_json()
 
     @app.api_route(
         "/istota/api/{rest:path}",

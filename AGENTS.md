@@ -152,6 +152,7 @@ src/istota/
 │   ├── webhook_receiver.py  # FastAPI: Overland GPS, etc.
 │   ├── garmin_routes.py  # Module-agnostic Garmin auth router (/api/garmin/*), shared by Health + Location
 │   ├── setup_app.py      # The first-run setup server (`istota setup --web`): runs with no config, one-use setup code, in-memory draft → install.md
+│   ├── setup_checks.py   # Its connection checks (model, Nextcloud, email, calendar, address) against the config setup would write, plain messages only → install.md
 │   ├── request_guards.py # The origin check and the bounded body reader, shared by `app.py` and `setup_app.py`
 │   ├── shutdown.py       # Whether the web process is stopping, where the three SSE generators can see it → leaf-modules.md
 │   ├── router_stubs.py   # The auth/CSRF stubs and the user-context factory every module router shares → leaf-modules.md

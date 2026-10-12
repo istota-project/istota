@@ -48,10 +48,10 @@ def clock():
     return _Clock()
 
 
-def _make(dirs, clock, *, local=False):
+def _make(dirs, clock, *, local=False, **kwargs):
     app = setup_app.create_setup_app(
         data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, code_path=dirs.code_path,
-        local=local, clock=clock,
+        local=local, clock=clock, **kwargs,
     )
     base = "http://testserver" if local else "https://testserver"
     return app, TestClient(app, base_url=base)
@@ -162,6 +162,7 @@ SESSION_ROUTES = [
     ("GET", "/istota/api/setup/draft", None),
     ("PUT", "/istota/api/setup/draft", {"bot_name": "Ada"}),
     ("POST", "/istota/api/setup/validate", {"step": "welcome"}),
+    ("POST", "/istota/api/setup/check/model", None),
 ]
 STATE_CHANGING = [route for route in SESSION_ROUTES if route[0] != "GET"]
 
@@ -545,3 +546,386 @@ class TestRefusals:
         assert settings["port"] == port
         assert settings["access_log"] is False
         assert bool(settings.get("ssl_certfile")) is tls
+
+
+# --- connection checks --------------------------------------------------------
+
+from istota.config import config_from_document  # noqa: E402
+from istota.webui import setup_checks  # noqa: E402
+
+from testbed.services.model_endpoint import serve_script  # noqa: E402
+from tests.support.setup_stubs import (  # noqa: E402
+    CalendarServer, FakeNextcloud, RefusingModel, basic,
+)
+
+UPSTREAM_TEXT = "upstream-said-something-7c1e"
+#: What raw exception text looks like; none of it may reach the browser.
+EXCEPTION_MARKERS = ("Errno", "Traceback", "Error(", "errno", "HTTPConnection", "httpx", "HTTP 4", "HTTP 5")
+
+
+def _check(client, kind, *, headers=ORIGIN):
+    return client.post(f"/istota/api/setup/check/{kind}", headers=headers)
+
+
+def _draft(client, **fields):
+    resp = client.put("/istota/api/setup/draft", json=fields, headers=ORIGIN)
+    assert resp.status_code == 200, resp.text
+    return resp
+
+
+def _plain(resp, *secrets):
+    """The response carries no exception text and none of ``secrets``."""
+    for marker in (*EXCEPTION_MARKERS, *secrets):
+        assert marker not in resp.text, f"{marker!r} reached the browser: {resp.text}"
+
+
+def _closed_port() -> int:
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+NATIVE = {"brain_kind": "native", "native_model": "model-from-the-draft", "native_api_key": SENTINEL}
+
+
+class TestTheCheckRoute:
+    def test_an_unknown_kind_is_refused(self, unlocked):
+        _app, client = unlocked
+        resp = _check(client, "ftp")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "unknown_check"
+
+    def test_a_subscription_has_no_live_check(self, unlocked):
+        _app, client = unlocked
+        _draft(client, brain_kind="claude_code", claude_code_oauth_token=SENTINEL)
+        resp = _check(client, "model")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "no_live_check"
+        assert SENTINEL not in resp.text
+
+    def test_a_check_with_nothing_to_test_names_the_fields(self, unlocked):
+        _app, client = unlocked
+        _draft(client, brain_kind="native", native_model="m")
+        resp = _check(client, "model")
+        assert resp.status_code == 400
+        assert [f["field"] for f in resp.json()["fields"]] == ["native_api_key"]
+
+    def test_checks_are_limited_to_twenty_a_minute(self, unlocked, clock):
+        _app, client = unlocked
+        _draft(client, ingress="direct", hostname="localhost")
+        for _ in range(setup_app.CHECKS_PER_MINUTE):
+            assert _check(client, "address").status_code == 200
+        assert _check(client, "address").status_code == 429
+        clock.now += 61
+        assert _check(client, "address").status_code == 200
+
+    def test_a_check_is_logged_without_its_credential(self, unlocked, caplog):
+        _app, client = unlocked
+        with RefusingModel(status=401, body=UPSTREAM_TEXT).serve() as model:
+            _draft(client, **NATIVE, native_base_url=model.base_url)
+            with caplog.at_level(logging.INFO, logger="istota.setup_web"):
+                _check(client, "model")
+        assert "check model ok=False" in caplog.text
+        assert SENTINEL not in caplog.text
+
+
+class TestTheModelCheck:
+    def test_it_asks_the_endpoint_the_draft_names(self, unlocked):
+        _app, client = unlocked
+        with serve_script([{"text": "OK"}]) as endpoint:
+            _draft(client, **NATIVE, native_base_url=endpoint.url)
+            resp = _check(client, "model")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert [r["model"] for r in endpoint.requests] == ["model-from-the-draft"]
+
+    def test_the_key_is_the_drafts_not_the_environments(self, unlocked, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "from-the-environment")
+        _app, client = unlocked
+        with RefusingModel(status=401).serve() as model:
+            _draft(client, **NATIVE, native_base_url=model.base_url)
+            _check(client, "model")
+        assert model.auth_headers == [f"Bearer {SENTINEL}"]
+
+    @pytest.mark.parametrize(
+        "status,needle",
+        [(401, "API key was not accepted"), (403, "API key was not accepted"),
+         (404, "model-from-the-draft"), (429, "Try again in a minute"), (500, "Try again in a minute")],
+    )
+    def test_a_refusal_is_a_plain_message(self, unlocked, status, needle):
+        _app, client = unlocked
+        with RefusingModel(status=status, body=UPSTREAM_TEXT).serve() as model:
+            _draft(client, **NATIVE, native_base_url=model.base_url)
+            resp = _check(client, "model")
+        body = resp.json()
+        assert resp.status_code == 200 and body["ok"] is False
+        assert needle in body["message"]
+        _plain(resp, UPSTREAM_TEXT, SENTINEL)
+
+    def test_a_closed_port_cannot_be_reached(self, unlocked):
+        # The provider reports a refused connection as "All connection attempts
+        # failed" with nothing to tell it from any other, so the message is the
+        # general one.
+        _app, client = unlocked
+        _draft(client, **NATIVE, native_base_url=f"http://127.0.0.1:{_closed_port()}/v1")
+        resp = _check(client, "model")
+        assert resp.json() == {"ok": False, "warning": False, "message": "Couldn't reach 127.0.0.1."}
+
+    def test_a_name_that_does_not_resolve_says_so(self, unlocked):
+        _app, client = unlocked
+        _draft(client, **NATIVE, native_base_url="http://models.invalid/v1")
+        resp = _check(client, "model")
+        assert resp.json()["message"] == "Couldn't reach models.invalid: the name doesn't resolve."
+        _plain(resp, SENTINEL)
+
+    def test_a_slow_endpoint_meets_the_deadline(self, dirs, clock):
+        _app, client = _make(dirs, clock, check_seconds=0.3)
+        assert _unlock(client).status_code == 200
+        with RefusingModel(status=200, delay=1.0).serve() as model:
+            _draft(client, **NATIVE, native_base_url=model.base_url)
+            resp = _check(client, "model")
+        assert resp.json()["ok"] is False
+        assert "didn't answer within" in resp.json()["message"]
+
+
+NC_USER, NC_PASSWORD = "istota", "nextcloud-app-password-5d2b"
+
+
+def _nextcloud_draft(client, url, **overrides):
+    fields = {
+        "storage": "nextcloud", "nextcloud_url": url, "nextcloud_username": NC_USER,
+        "nextcloud_app_password": NC_PASSWORD, "user_id": "alice",
+    }
+    fields.update(overrides)
+    _draft(client, **fields)
+
+
+def _lines(resp):
+    return {line["key"]: line for line in resp.json()["lines"]}
+
+
+class TestTheNextcloudCheck:
+    def test_a_good_setup_passes_every_line(self, unlocked):
+        _app, client = unlocked
+        with FakeNextcloud(username=NC_USER, password=NC_PASSWORD, sharees=("alice",)).serve() as nc:
+            _nextcloud_draft(client, nc.url)
+            resp = _check(client, "nextcloud")
+        body = resp.json()
+        assert resp.status_code == 200 and body["ok"] is True
+        assert [line["key"] for line in body["lines"]] == list(setup_checks.NEXTCLOUD_LINES)
+        assert all(line["ok"] and not line["warning"] for line in body["lines"])
+        assert body["talk_available"] is True
+        assert set(nc.auth_headers) == {basic(NC_USER, NC_PASSWORD)}
+        assert nc.calls_matching("PROPFIND", f"/remote.php/dav/files/{NC_USER}/")
+        assert nc.calls_matching("GET", "/sharees")[0].query["search"] == ["alice"]
+        _plain(resp, NC_PASSWORD)
+
+    def test_a_wrong_app_password_fails_the_sign_in_line(self, unlocked):
+        _app, client = unlocked
+        with FakeNextcloud(username=NC_USER, password="the-real-one", error_body=UPSTREAM_TEXT).serve() as nc:
+            _nextcloud_draft(client, nc.url)
+            resp = _check(client, "nextcloud")
+        lines = _lines(resp)
+        assert resp.json()["ok"] is False
+        assert lines["server"]["ok"] is True
+        assert lines["signin"]["ok"] is False
+        assert "weren't accepted" in lines["signin"]["message"]
+        assert all(not lines[key]["ok"] for key in ("admin", "files", "talk", "user"))
+        _plain(resp, UPSTREAM_TEXT, NC_PASSWORD)
+
+    def test_warnings_do_not_fail_the_check(self, unlocked):
+        _app, client = unlocked
+        with FakeNextcloud(username=NC_USER, password=NC_PASSWORD, groups=("admin",), talk=False).serve() as nc:
+            _nextcloud_draft(client, nc.url)
+            resp = _check(client, "nextcloud")
+        body = resp.json()
+        lines = _lines(resp)
+        assert body["ok"] is True
+        assert body["talk_available"] is False
+        for key in ("admin", "talk", "user"):
+            assert lines[key]["ok"] is True and lines[key]["warning"] is True, key
+        assert "administrator" in lines["admin"]["message"]
+        assert "web app only" in lines["talk"]["message"]
+        assert "alice" in lines["user"]["message"]
+
+    def test_unreachable_files_fail_their_line(self, unlocked):
+        _app, client = unlocked
+        with FakeNextcloud(
+            username=NC_USER, password=NC_PASSWORD, files_status=403, error_body=UPSTREAM_TEXT,
+        ).serve() as nc:
+            _nextcloud_draft(client, nc.url)
+            resp = _check(client, "nextcloud")
+        assert resp.json()["ok"] is False
+        assert _lines(resp)["files"]["ok"] is False
+        assert "couldn't open the account's files" in _lines(resp)["files"]["message"]
+        _plain(resp, UPSTREAM_TEXT)
+
+    def test_a_server_it_cannot_reach_points_at_the_internal_address(self, unlocked):
+        _app, client = unlocked
+        _nextcloud_draft(client, f"http://127.0.0.1:{_closed_port()}")
+        resp = _check(client, "nextcloud")
+        server = _lines(resp)["server"]
+        assert server["ok"] is False
+        assert "the connection was refused" in server["message"]
+        assert "Address this server uses to reach Nextcloud" in server["message"]
+        _plain(resp, NC_PASSWORD)
+
+    def test_local_storage_has_no_nextcloud_to_check(self, unlocked):
+        _app, client = unlocked
+        _draft(client, storage="local")
+        assert _check(client, "nextcloud").status_code == 400
+
+
+class TestTheCalendarCheck:
+    def test_the_right_password_signs_in(self, unlocked):
+        _app, client = unlocked
+        with CalendarServer(username="ada", password=SENTINEL).serve() as cal:
+            _draft(client, caldav_url=f"{cal.url}/dav/", caldav_username="ada", caldav_password=SENTINEL)
+            resp = _check(client, "caldav")
+        assert resp.json()["ok"] is True
+        assert cal.calls_matching("PROPFIND", "/dav")
+
+    def test_a_wrong_password_is_named(self, unlocked):
+        _app, client = unlocked
+        with CalendarServer(username="ada", password="other", error_body=UPSTREAM_TEXT).serve() as cal:
+            _draft(client, caldav_url=f"{cal.url}/dav/", caldav_username="ada", caldav_password=SENTINEL)
+            resp = _check(client, "caldav")
+        assert resp.json()["ok"] is False
+        assert "weren't accepted" in resp.json()["message"]
+        _plain(resp, UPSTREAM_TEXT, SENTINEL)
+
+
+class TestTheEmailCheckRoute:
+    def test_a_mail_server_that_does_not_resolve(self, unlocked):
+        _app, client = unlocked
+        _draft(client, email_enabled=True, imap_host="mail.invalid", imap_user="ada", imap_password=SENTINEL)
+        resp = _check(client, "email")
+        assert resp.json()["ok"] is False
+        assert "mail.invalid: the name doesn't resolve" in resp.json()["message"]
+        _plain(resp, SENTINEL)
+
+    def test_it_needs_a_password_to_test(self, unlocked):
+        _app, client = unlocked
+        _draft(client, email_enabled=True, imap_host="mail.example.com", imap_user="ada")
+        resp = _check(client, "email")
+        assert resp.status_code == 400
+        assert [f["field"] for f in resp.json()["fields"]] == ["imap_password"]
+
+
+class TestTheAddressCheck:
+    def _at(self, client, browser_host):
+        return client.post(
+            "/istota/api/setup/check/address",
+            headers={"host": browser_host, "origin": f"https://{browser_host}"},
+        )
+
+    def test_a_name_pointing_here_passes(self, unlocked):
+        _app, client = unlocked
+        _draft(client, ingress="direct", hostname="localhost")
+        body = self._at(client, "127.0.0.1").json()
+        assert body["ok"] is True and body["warning"] is False
+
+    def test_a_name_pointing_elsewhere_is_a_warning(self, unlocked):
+        _app, client = unlocked
+        _draft(client, ingress="direct", hostname="localhost")
+        body = self._at(client, "203.0.113.5").json()
+        assert body["ok"] is False and body["warning"] is True
+        assert "203.0.113.5" in body["message"]
+
+    def test_a_name_that_does_not_resolve_yet_is_a_warning(self, unlocked):
+        _app, client = unlocked
+        _draft(client, ingress="direct", hostname="istota.invalid")
+        body = self._at(client, "203.0.113.5").json()
+        assert body["ok"] is False and body["warning"] is True
+        assert "doesn't resolve" in body["message"]
+
+    def test_only_on_this_computer_has_nothing_to_check(self, unlocked):
+        _app, client = unlocked
+        _draft(client, ingress="local")
+        assert _check(client, "address").status_code == 400
+
+
+def _email_config(imap_port, smtp_port, *, password=SENTINEL):
+    return config_from_document({"email": {
+        "enabled": True, "imap_host": "127.0.0.1", "imap_port": imap_port, "imap_user": "ada",
+        "imap_password": password, "smtp_host": "127.0.0.1", "smtp_port": smtp_port,
+    }})
+
+
+@pytest.fixture
+def tls_pair(tmp_path, monkeypatch):
+    from testbed.certs import generate_self_signed
+
+    cert, key = generate_self_signed(tmp_path / "tls", sans=("localhost", "127.0.0.1"))
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert))
+    return cert, key
+
+
+class TestTheEmailCheck:
+    def test_it_signs_in_to_both_and_sends_nothing(self, tls_pair):
+        from tests.support.mail_stub import ImapStub, SmtpStub
+
+        cert, key = tls_pair
+        with ImapStub(cert=cert, key=key, username="ada", password=SENTINEL) as imap, \
+                SmtpStub(cert=cert, key=key, username="ada", password=SENTINEL) as smtp:
+            result = setup_checks.check_email(_email_config(imap.port, smtp.port), seconds=5)
+        assert result.ok is True, result.to_json()
+        assert imap.logins == [("ada", True)] and smtp.logins == [("ada", True)]
+        assert "STARTTLS" in imap.commands and "STARTTLS" in smtp.commands
+        assert "MAIL" not in smtp.commands and "DATA" not in smtp.commands
+
+    def test_a_wrong_password_is_named_for_incoming_mail(self, tls_pair):
+        from tests.support.mail_stub import ImapStub, SmtpStub
+
+        cert, key = tls_pair
+        with ImapStub(cert=cert, key=key, username="ada", password="other") as imap, \
+                SmtpStub(cert=cert, key=key, username="ada", password=SENTINEL) as smtp:
+            result = setup_checks.check_email(_email_config(imap.port, smtp.port), seconds=5)
+        body = json.dumps(result.to_json())
+        assert result.ok is False
+        assert "mail server didn't accept that username and password" in result.message
+        assert SENTINEL not in body and "AUTHENTICATIONFAILED" not in body
+
+    def test_a_wrong_password_is_named_for_outgoing_mail(self, tls_pair):
+        from tests.support.mail_stub import ImapStub, SmtpStub
+
+        cert, key = tls_pair
+        with ImapStub(cert=cert, key=key, username="ada", password=SENTINEL) as imap, \
+                SmtpStub(cert=cert, key=key, username="ada", password="other") as smtp:
+            result = setup_checks.check_email(_email_config(imap.port, smtp.port), seconds=5)
+        assert result.ok is False
+        assert "outgoing mail server didn't accept" in result.message
+
+    def test_an_outgoing_server_without_tls_is_refused(self, tls_pair):
+        from tests.support.mail_stub import ImapStub, SmtpStub
+
+        cert, key = tls_pair
+        with ImapStub(cert=cert, key=key, username="ada", password=SENTINEL) as imap, \
+                SmtpStub(cert=cert, key=key, username="ada", password=SENTINEL, starttls=False) as smtp:
+            result = setup_checks.check_email(_email_config(imap.port, smtp.port), seconds=5)
+        assert result.ok is False
+        assert "secure connection" in result.message
+        assert smtp.logins == []
+
+
+class TestConfigFromDocument:
+    def test_it_maps_what_the_setup_would_write(self):
+        a = setup_wizard.ContainerAnswers(
+            user_id="ada", brain_kind="native", native_model="m", native_api_key=SENTINEL,
+            nextcloud_url="https://cloud.example.com", nextcloud_app_password="pw",
+        )
+        config = config_from_document(setup_wizard.container_config_document(a, inline_credentials=True))
+        assert config.brain.native.api_key == SENTINEL
+        assert config.brain.native.model == "m"
+        assert config.nextcloud.url == "https://cloud.example.com"
+        assert config.nextcloud.app_password == "pw"
+
+    def test_it_leaves_the_callers_document_alone(self):
+        doc = {"whatsapp": {"enabled": True, "phone_number_id": "123"}}
+        before = json.dumps(doc, sort_keys=True)
+        config_from_document(doc)
+        assert json.dumps(doc, sort_keys=True) == before
