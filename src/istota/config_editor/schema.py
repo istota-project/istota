@@ -133,7 +133,7 @@ TABLE_PATHS: frozenset[tuple[str, ...]] = _table_paths()
 
 
 @functools.cache
-def _file_credentials() -> dict[tuple[str, ...], str]:
+def file_credentials() -> dict[tuple[str, ...], str]:
     """Each config path with a stack secrets file, to the file's name."""
     return {
         tuple(dotted.split(".")): name
@@ -153,7 +153,7 @@ def credential_for(path: tuple[str, ...] | list[str]) -> dict | None:
     from istota.config_editor.secrets import label
 
     path = tuple(path)
-    name = _file_credentials().get(path)
+    name = file_credentials().get(path)
     if name:
         return {"kind": "file", "name": name}
     if is_secret_path(path):
@@ -183,7 +183,7 @@ def env_override_for(
     for var, target in config_module.ENV_OVERRIDES:
         if target == path and environ.get(var, "").strip():
             return var
-    if path in _file_credentials():
+    if path in file_credentials():
         return None
     for var, section, key in config_module.SECRET_ENV_OVERRIDES:
         if tuple(section.split(".")) + (key,) == path and environ.get(var, "").strip():

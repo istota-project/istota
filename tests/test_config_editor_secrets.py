@@ -133,3 +133,33 @@ class TestExtractInlineSecrets:
     def test_a_document_of_sentinels_yields_nothing(self):
         _, found = secrets.extract_inline_secrets(secrets.redact_document(DOCUMENT))
         assert found == {}
+
+    def test_against_the_current_document_only_changes_are_taken(self):
+        current = {"brain": {"native": {"extra_headers": {"X-Old": "same", "X-Changed": "before"}}}}
+        new = {"brain": {"native": {"extra_headers": {"X-Old": "same", "X-Changed": "after", "X-Added": "v"}}}}
+        stripped, found = secrets.extract_inline_secrets(new, current)
+        assert found == {
+            "brain.native.extra_headers.X-Changed": "after",
+            "brain.native.extra_headers.X-Added": "v",
+        }
+        assert set(stripped["brain"]["native"]["extra_headers"].values()) == {secrets.SENTINEL}
+
+
+class TestNewValuesAndLabels:
+    def test_a_new_value_wins_over_the_stored_one(self):
+        new = {"brain": {"native": {"extra_headers": {"X-Key": secrets.SENTINEL}}}}
+        current = {"brain": {"native": {"extra_headers": {"X-Key": "old"}}}}
+        restored = secrets.restore_sentinels(new, current, values={"brain.native.extra_headers.X-Key": "new"})
+        assert restored["brain"]["native"]["extra_headers"]["X-Key"] == "new"
+
+    @pytest.mark.parametrize("path", [
+        ("email", "imap_password"),
+        ("brain", "native", "extra_headers", "X-Key.With Dots"),
+        ("brain", "native", "extra_headers", 'quote"d'),
+    ])
+    def test_a_label_parses_back_to_its_path(self, path):
+        assert secrets.parse_label(secrets.label(path)) == path
+
+    @pytest.mark.parametrize("text", ["", "a = 1\nb", "a.", '"a', "a b", "[a]"])
+    def test_text_label_would_not_write_is_no_path(self, text):
+        assert secrets.parse_label(text) is None

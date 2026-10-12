@@ -32,6 +32,18 @@ INCOMPLETE = "the configuration check did not complete"
 BLOCKING_KINDS = frozenset({"discarded", "error"})
 
 
+def problems_of(result: CheckResult) -> list[dict]:
+    """`result` as one list, each problem marked `blocking`; the error, if any,
+    is a blocking problem at the empty path."""
+    found = [
+        {**problem, "blocking": problem.get("kind") in BLOCKING_KINDS}
+        for problem in result.problems
+    ]
+    if result.error is not None:
+        found.append({"kind": "error", "path": [], "message": result.error, "blocking": True})
+    return found
+
+
 def default_command() -> list[str]:
     """`istota apply --check -f - --json`, run by this interpreter.
 

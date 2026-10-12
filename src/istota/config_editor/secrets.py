@@ -21,7 +21,7 @@ from istota.webui.admin_config_view import is_secret_path
 
 __all__ = [
     "SENTINEL", "SentinelError", "extract_inline_secrets", "is_secret_path",
-    "label", "redact_document", "restore_sentinels",
+    "label", "lookup", "parse_label", "redact_document", "restore_sentinels",
 ]
 
 #: What a secret leaf reads as in a document shown to an admin or stored in a
@@ -46,6 +46,30 @@ def label(path: tuple | list) -> str:
         text = str(segment)
         parts.append(text if _BARE.match(text) else toml_write.toml_string(text))
     return ".".join(parts)
+
+
+def parse_label(text: str) -> tuple[str, ...] | None:
+    """The path `label` wrote as `text`, or None for anything `label` would not write.
+
+    Read by parsing `text` as a TOML key and writing it back: only text that
+    comes back identical names a path, so nothing beside the key gets through.
+    """
+    import tomllib
+
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        parsed = tomllib.loads(f"{text} = 0")
+    except (tomllib.TOMLDecodeError, ValueError):
+        return None
+    path: list[str] = []
+    node: Any = parsed
+    while isinstance(node, dict) and len(node) == 1:
+        (key, node), = node.items()
+        path.append(key)
+    if node != 0 or isinstance(node, bool) or not path or label(path) != text:
+        return None
+    return tuple(path)
 
 
 def _walk(value: Any, path: tuple, leaf):
@@ -85,13 +109,15 @@ def redact_pair(current: dict, new: dict) -> tuple[dict, dict]:
     """
 
     def mark(path: tuple, value: Any) -> str:
-        found, stored = _lookup(current, path)
+        found, stored = lookup(current, path)
         return REDACTED if found and stored == value else CHANGED
 
     return redact_document(current, placeholder=REDACTED), _walk(new, (), mark)
 
 
-def _lookup(document: Any, path: tuple) -> tuple[bool, Any]:
+def lookup(document: Any, path: tuple) -> tuple[bool, Any]:
+    """Whether `path` is in `document`, and the value there; an index segment
+    steps into a list."""
     node = document
     for segment in path:
         if isinstance(node, dict) and segment in node:
@@ -103,17 +129,22 @@ def _lookup(document: Any, path: tuple) -> tuple[bool, Any]:
     return True, node
 
 
-def restore_sentinels(new: dict, current: dict) -> dict:
+def restore_sentinels(new: dict, current: dict, values: dict[str, Any] | None = None) -> dict:
     """`new` with the current value put back wherever a sentinel stands.
 
-    A sentinel where `current` holds nothing is refused with `SentinelError`:
-    there is no stored value to keep.
+    `values` are new credential values by `label`, as `extract_inline_secrets`
+    took them out of a document; one there wins over the current value. A
+    sentinel with neither is refused with `SentinelError`: there is no stored
+    value to keep.
     """
+    values = values or {}
 
     def restore(path: tuple, value: Any) -> Any:
         if value != SENTINEL:
             return value
-        found, stored = _lookup(current, path)
+        if label(path) in values:
+            return values[label(path)]
+        found, stored = lookup(current, path)
         if not found:
             raise SentinelError(f"no stored value to keep at {label(path)}")
         return stored
@@ -131,19 +162,27 @@ def _restore_everywhere(value: Any, path: tuple, restore):
     return restore(path, value)
 
 
-def extract_inline_secrets(document: dict) -> tuple[dict, dict[str, Any]]:
+def extract_inline_secrets(
+    document: dict, current: dict | None = None,
+) -> tuple[dict, dict[str, Any]]:
     """Move every secret leaf that is not a sentinel out of `document`.
 
     Returns the document with a sentinel at each of those leaves, and the
     values keyed by `label(path)`. A value an admin typed into a set, a table
     snippet or the raw editor is a new credential, and is stored sealed rather
-    than in the document.
+    than in the document. With `current`, a leaf holding the value `current`
+    holds at the same path is not returned: the sentinel keeps it.
     """
     found: dict[str, Any] = {}
 
     def take(path: tuple, value: Any) -> str:
-        if value != SENTINEL:
-            found[label(path)] = value
+        if value == SENTINEL:
+            return SENTINEL
+        if current is not None:
+            exists, stored = lookup(current, path)
+            if exists and stored == value:
+                return SENTINEL
+        found[label(path)] = value
         return SENTINEL
 
     return _walk(document, (), take), found

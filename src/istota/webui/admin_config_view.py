@@ -427,17 +427,9 @@ def _walk(
 
 
 def _problems(check: Any) -> list[dict]:
-    from istota.config_editor.check import BLOCKING_KINDS
+    from istota.config_editor.check import problems_of
 
-    if check is None:
-        return []
-    found = [
-        {**problem, "blocking": problem.get("kind") in BLOCKING_KINDS}
-        for problem in check.problems
-    ]
-    if check.error is not None:
-        found.append({"kind": "error", "path": [], "message": check.error, "blocking": True})
-    return found
+    return [] if check is None else problems_of(check)
 
 
 def _value_at(config: Any, path: tuple[str, ...]) -> Any:
