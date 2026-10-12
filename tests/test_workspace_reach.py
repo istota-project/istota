@@ -44,6 +44,8 @@ def resources():
     ({"files"}, ["nextcloud_channel_dir", "nextcloud_group_dir"]),
 ])
 def test_mount_gates_and_order(config, withheld, reasons):
+    config.nextcloud.url = "https://cloud.example.com"
+    config.nextcloud_mount_path = config.workspace_path
     mounts = plan.user_data_mounts(config, user_id="alice", conversation_token="room-a",
                                   user_resources=resources(), withheld_scopes=withheld,
                                   group_ids=["team", "team"])
@@ -51,6 +53,14 @@ def test_mount_gates_and_order(config, withheld, reasons):
     assert all(m.user_data for m in mounts)
     if not withheld:
         assert [m.mode for m in mounts] == ["rw", "ro", "rw", "rw", "rw", "ro"]
+
+
+def test_local_workspace_binds_no_talk_dir(config):
+    config.nextcloud.url = "https://cloud.example.com"
+    mounts = plan.user_data_mounts(config, user_id="alice", conversation_token="room-a",
+                                  user_resources=[], withheld_scopes=frozenset(), group_ids=[])
+    assert "nextcloud_talk_dir" not in [m.reason for m in mounts]
+    assert "nextcloud_channel_dir" in [m.reason for m in mounts]
 
 
 def test_mounts_are_read_only_and_quiet(config, tmp_path, caplog):
