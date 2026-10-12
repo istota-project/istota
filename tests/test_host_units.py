@@ -335,17 +335,24 @@ class TestUpstreamRclone:
     TEXT = PROVISION.read_text() if PROVISION.exists() else ""
 
     def _run(self, tmp_path, *, installed="rclone v1.60.1-DEV", arch="amd64",
-             payload=b"an upstream rclone .deb", sha=None):
+             payload=b"an upstream rclone .deb", sha=None, on_path=None):
         bindir = tmp_path / "bin"
         bindir.mkdir()
         calls = tmp_path / "calls"
         calls.touch()
         source = tmp_path / "payload"
         source.write_bytes(payload)
+        # The package's binary lives apart from PATH, as /usr/bin/rclone does
+        # behind /usr/local/bin.
+        pkgdir = tmp_path / "pkg"
+        pkgdir.mkdir()
+        package_bin = pkgdir / "rclone"
         if installed is None:
-            _stub(bindir, "rclone", "exit 127\n")
+            _stub(pkgdir, "rclone", "exit 127\n")
         else:
-            _stub(bindir, "rclone", f'[ "$1" = version ] && printf "%s\\n" "{installed}" "- os/version: debian"\n')
+            _stub(pkgdir, "rclone", f'[ "$1" = version ] && printf "%s\\n" "{installed}" "- os/version: debian"\n')
+        if on_path is not None:
+            _stub(bindir, "rclone", f'[ "$1" = version ] && printf "%s\\n" "{on_path}"\n')
         _stub(bindir, "curl", (
             f'echo "curl $*" >> {calls}\n'
             'while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
@@ -367,6 +374,7 @@ class TestUpstreamRclone:
             'log() { echo "$*"; }\ndie() { echo "$*" >&2; exit 1; }\n'
             f'RCLONE_VERSION={pinned.group(1)}\n'
             f'RCLONE_SHA256_AMD64={sha}\nRCLONE_SHA256_ARM64={sha}\n'
+            f'RCLONE_BIN={package_bin}\n'
             f'{function.group(0)}\n'
             'install_rclone\necho done\n'
         )
@@ -415,6 +423,14 @@ class TestUpstreamRclone:
         assert result.returncode == 0, result.stderr
         assert calls == ["apt-mark hold rclone"]
 
+    def test_the_package_binary_is_asked_not_the_one_on_path(self, tmp_path):
+        """A host moved from the Ansible role keeps its rclone in /usr/local/bin,
+        ahead on PATH. Asking that one reinstalled the package on every run."""
+        pinned = re.search(r"^RCLONE_VERSION=(\S+)$", self.TEXT, re.M).group(1)
+        result, calls, _ = self._run(tmp_path, installed=f"rclone v{pinned}", on_path="rclone v1.73.0")
+        assert result.returncode == 0, result.stderr
+        assert calls == ["apt-mark hold rclone"]
+
     def test_an_unpinned_architecture_is_refused(self, tmp_path):
         result, calls, _ = self._run(tmp_path, arch="riscv64")
         assert result.returncode != 0
@@ -437,7 +453,7 @@ class TestUpstreamRclone:
         function = re.search(r"^mount_runs_stale_rclone\(\) \{.*?^\}", self.TEXT, re.M | re.S)
         assert function, "provision.sh defines mount_runs_stale_rclone"
         result = subprocess.run(
-            ["bash", "-c", f"set -euo pipefail\n{function.group(0)}\nmount_runs_stale_rclone"],
+            ["bash", "-c", f"set -euo pipefail\nRCLONE_BIN=/usr/bin/rclone\n{function.group(0)}\nmount_runs_stale_rclone"],
             env={"PATH": f"{bindir}:{os.environ['PATH']}"}, capture_output=True, text=True,
             timeout=30,
         )
@@ -461,7 +477,7 @@ ROLE_MOUNT_UNIT = """[Unit]
 Description=Nextcloud rclone FUSE mount
 
 [Service]
-User=zorg
+User=assistant
 ExecStart=/usr/bin/rclone mount nextcloud: /srv/mount/nextcloud/content
 """
 

@@ -134,9 +134,13 @@ apt_install() { apt-get install -y -qq --no-install-recommends "$@" >/dev/null; 
 RCLONE_VERSION=1.75.2
 RCLONE_SHA256_AMD64=efbfe852181f7191eb3c9043ed1ab49c9b2d0ba045c61c926a5da111c939ec5c
 RCLONE_SHA256_ARM64=b8ba161d5c837206fad79ff1aabf0a81aa02a5fb164cdbc0ff5db4160aecd278
+# The package's binary, which the mount unit runs, asked by path: a host moved
+# from the Ansible role keeps that role's rclone in /usr/local/bin, ahead on PATH,
+# and asking that one would reinstall the package on every run.
+RCLONE_BIN=/usr/bin/rclone
 install_rclone() {
     local have arch sha tmp
-    have="$(rclone version 2>/dev/null || true)"
+    have="$("$RCLONE_BIN" version 2>/dev/null || true)"
     if [ "${have%%$'\n'*}" = "rclone v${RCLONE_VERSION}" ]; then
         # A run killed between the install and the hold left it unheld.
         apt-mark hold rclone >/dev/null
@@ -169,7 +173,7 @@ mount_runs_stale_rclone() {
     pid="$(systemctl show -p MainPID --value mount-nextcloud.service 2>/dev/null || true)"
     [ -n "$pid" ] && [ "$pid" != 0 ] || return 1
     exe="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || return 1
-    [ "$exe" != /usr/bin/rclone ]
+    [ "$exe" != "$RCLONE_BIN" ]
 }
 
 apt-get update -qq
