@@ -864,6 +864,38 @@ class TestTheNextcloudMount:
         last = (tmp_path / "vm" / "rclone.conf").read_text().splitlines()[-1]
         assert rclone_conf.reveal(last.removeprefix("pass = ")) == "nc-app-pass"
 
+    def test_a_rerun_with_the_same_answers_keeps_the_file_byte_for_byte(self, tmp_path):
+        """`provision.sh --digest` hashes rclone.conf, so a re-run that
+        re-obscured the password reprovisioned the VM every time (#720)."""
+        conf = tmp_path / "vm" / "rclone.conf"
+        setup_wizard.run_setup(self._nextcloud(tmp_path), out=lambda *_: None)
+        first = conf.read_bytes()
+
+        setup_wizard.run_setup(self._nextcloud(tmp_path, force=True), out=lambda *_: None)
+
+        assert conf.read_bytes() == first
+        assert _mode(conf) == 0o600
+
+    @pytest.mark.parametrize("change", ["password", "url", "username"])
+    def test_a_rerun_with_a_changed_answer_rewrites_it(self, tmp_path, monkeypatch, change):
+        conf = tmp_path / "vm" / "rclone.conf"
+        setup_wizard.run_setup(self._nextcloud(tmp_path), out=lambda *_: None)
+        first = conf.read_text()
+        answers = {"nextcloud_url": "https://cloud.example.test/", "nextcloud_user": "zed-bot"}
+        if change == "password":
+            monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nc-new-pass")
+        elif change == "url":
+            answers["nextcloud_url"] = "https://other.example.test/"
+        else:
+            answers["nextcloud_user"] = "other-bot"
+
+        setup_wizard.run_setup(_args(tmp_path, force=True, **answers), out=lambda *_: None)
+
+        text = conf.read_text()
+        assert text != first
+        password = rclone_conf.reveal(text.splitlines()[-1].removeprefix("pass = "))
+        assert password == ("nc-new-pass" if change == "password" else "nc-app-pass")
+
     def test_local_storage_stages_no_remote(self, tmp_path):
         assert setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None) == 0
 
