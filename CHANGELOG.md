@@ -134,6 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Workspace remembers which sidebar sections you leave open. File rows share consistent spacing and menus with Reveal, Edit where supported, and Remove pin for pinned items; pinned filenames no longer have icons.
+
 - **What Istota says about the workspace is accurate on a local one.** The prompt shows every user, admins included, their own `Users/<id>` folder, and says the bot can reach the rest of the machine only on an install with no sandbox. `examples/README.md`, the email attachment line, `!export`, `!memory`, the Talk and web chat guidelines and the `files` and `nextcloud` skills stop saying a file is in Nextcloud when it is not. `istota doctor` adds `backups.off_volume`, which warns when the database snapshots are on the same volume as the database or a local workspace (back up `istota_data` itself, or point `[scheduler] db_backup_dir` at another disk), and `runtime.workspace_disk`, which warns under 10% or 2 GiB free and fails under 2%. Backups keep running in both cases.
 - **Setup now writes the Nextcloud mount's configuration.** Choosing Nextcloud in either setup writes the rclone config and the remote's name for the file mount, so the stack starts without a hand-written file; a `setup --force` re-run replaces an `rclone.conf` written by hand with one for the remote named `nextcloud`. The browser container is now offered as on by default; a scripted `--yes` setup still leaves it off unless you ask for it.
 
@@ -230,6 +232,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.
 
 - The Workspace toolbar no longer grows when folder buttons appear after loading. The content below it stays in place.
 

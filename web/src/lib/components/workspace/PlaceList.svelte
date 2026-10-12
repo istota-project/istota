@@ -25,7 +25,12 @@
 {#each groups as group}
   {@const items = places.filter((place) => group.kinds.includes(place.kind))}
   {#if items.length}
-    <CategoryGroup label={group.label} collapsible defaultOpen={group.kinds[0] === 'home'}>
+    <CategoryGroup
+      label={group.label}
+      collapsible
+      defaultOpen={group.kinds[0] === 'home'}
+      storageKey={`workspace:section:${group.kinds[0]}`}
+    >
       {#each items as place (place.id)}
         <a
           class="view-btn"

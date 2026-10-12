@@ -263,7 +263,8 @@ async def test_drive_not_granted(client, config):
 
 
 @pytest.mark.parametrize("grant", ["off", "readonly", "full"])
-async def test_drive_route_uses_stored_grant_and_user(client, config, monkeypatch, grant):
+@pytest.mark.parametrize("route", ["list", "parent"])
+async def test_drive_route_uses_stored_grant_and_user(client, config, monkeypatch, grant, route):
     import httpx
     from datetime import datetime, timedelta, timezone
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
@@ -277,24 +278,28 @@ async def test_drive_route_uses_stored_grant_and_user(client, config, monkeypatc
     def handle(request):
         requests.append(request)
         assert request.headers["authorization"] == "Bearer alice-token"
-        return httpx.Response(200, json={"files": [{"id": "file_123456", "name": "Plan", "mimeType": "application/pdf"}], "nextPageToken": "next"})
+        return httpx.Response(200, json={"files": [{"id": "file_123456", "name": "Plan", "mimeType": "application/pdf"}], "nextPageToken": "next", "parents": ["folder_12345"]})
     real_client = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
-    response = await client.get("/workspace/drive/list", params={"folder": "shared"})
+    response = await client.get(f"/workspace/drive/{route}", params={"folder": "shared", "file_id": "file_123456"})
     if grant == "off":
         assert response.status_code == 409 and not requests
     else:
         assert response.status_code == 200 and len(requests) == 1
-        assert response.json()["next_page_token"] == "next"
-        assert response.json()["items"][0]["name"] == "Plan"
+        if route == "list":
+            assert response.json()["next_page_token"] == "next"
+            assert response.json()["items"][0]["name"] == "Plan"
+        else:
+            assert response.json() == {"folder": "folder_12345"}
     requests.clear()
-    assert (await client.get("/workspace/drive/list", params={"folder": "bad'id"})).status_code == 400
+    assert (await client.get(f"/workspace/drive/{route}", params={"folder": "bad'id", "file_id": "bad'id"})).status_code == 400
     assert not requests
 
 
 async def test_drive_auth_required(client, app):
     app.dependency_overrides.clear()
     assert (await client.get("/workspace/drive/list")).status_code == 401
+    assert (await client.get("/workspace/drive/parent", params={"file_id": "file_123456"})).status_code == 401
 
 
 async def test_drive_failed_refresh_returns_reconnect(client, config, monkeypatch):
@@ -348,10 +353,11 @@ async def test_config_files_list_offers_the_four_files_and_the_users_skills(clie
     assert response.status_code == 200
     rows = {row["name"]: row for row in response.json()["files"]}
     assert list(rows)[:4] == ["USER.md", "CRON.md", "TASKS.md", "HEARTBEAT.md"]
-    assert rows["USER.md"] == {"name": "USER.md", "kind": "config", "exists": True, "size": 24, "editable": True}
+    assert rows["USER.md"] == {"name": "USER.md", "kind": "config", "exists": True, "size": 24, "editable": True, "view_path": f"/Users/alice/{config.bot_dir_name}/config/USER.md"}
     assert rows["CRON.md"]["exists"] is False and rows["CRON.md"]["size"] is None
     assert rows["skills/notes"]["kind"] == "skill"
     assert rows["skills/notes"]["exists"] is False
+    assert rows["skills/notes"]["view_path"] == f"/Users/alice/{config.bot_dir_name}/config/skills/notes.md"
     assert "skills/sensitive_actions" not in rows
     assert "skills/untrusted_input" not in rows
 
@@ -733,3 +739,17 @@ async def test_nextcloud_listing_filters_and_caps_entries(client, nextcloud_conn
     response = await client.get("/workspace/list", params={"place": "nextcloud"})
     assert len(response.json()["entries"]) == 1
     assert response.json()["truncated"]
+
+
+async def test_config_file_paths_match_pins_with_a_custom_bot_name(client, config):
+    config.bot_name = "Helper"
+    _config_dir(config).mkdir(parents=True)
+    (_config_dir(config) / "USER.md").write_text("My preferences")
+    rows = (await client.get("/workspace/config-files")).json()["files"]
+    user_file = next(row for row in rows if row["name"] == "USER.md")
+    assert user_file["view_path"] == "/Users/alice/helper/config/USER.md"
+    response = await client.put("/workspace/pins", json={
+        "provider": "workspace", "ref": user_file["view_path"], "name": "My preferences",
+    })
+    assert response.status_code == 200
+    assert response.json()["pin"]["ref"] == user_file["view_path"]

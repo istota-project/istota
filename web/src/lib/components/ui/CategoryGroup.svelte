@@ -1,11 +1,13 @@
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
+  import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
   interface Props {
     label: string;
     count?: number;
     collapsible?: boolean;
     defaultOpen?: boolean;
+    storageKey?: string;
     /** When provided, the label becomes a filter button (caret still
      *  collapses) and the header can render an active/selected state. */
     onSelect?: () => void;
@@ -22,15 +24,22 @@
     count,
     collapsible = false,
     defaultOpen = true,
+    storageKey,
     onSelect,
     active = false,
-    open = $bindable(untrack(() => defaultOpen)),
+    open = $bindable(
+      untrack(() => {
+        const saved = storageKey ? loadSetting<unknown>(storageKey, defaultOpen) : defaultOpen;
+        return typeof saved === 'boolean' ? saved : defaultOpen;
+      }),
+    ),
     children,
   }: Props = $props();
 
   function toggle(e: MouseEvent) {
     e.stopPropagation();
     open = !open;
+    if (storageKey) saveSetting(storageKey, open);
   }
 </script>
 
@@ -75,6 +84,10 @@
 <style>
   .cat-group {
     margin-bottom: var(--space-1);
+  }
+
+  .cat-group > :global(p) {
+    margin: var(--space-1) var(--space-3);
   }
 
   .cat-label {
