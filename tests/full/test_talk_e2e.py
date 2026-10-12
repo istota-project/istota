@@ -103,8 +103,10 @@ def _delivered(stack, task_id: int, timeout: float = 60) -> dict:
     )
 
 
-def _assistant_row(stack, token: str, task_id: int, timeout: float = 60) -> dict:
+def _assistant_row(stack, room: str, task_id: int, timeout: float = 60) -> dict:
     """This task's assistant turn, re-read until its Talk id is stamped.
+
+    `room` is the room's own id (`Probe.talk_room`), not the Talk token.
 
     Same race, one table over: the scheduler writes the assistant row when it
     delivers and stamps `external_ids` afterwards, in a third transaction. Also
@@ -116,7 +118,7 @@ def _assistant_row(stack, token: str, task_id: int, timeout: float = 60) -> dict
         rows = [
             row for row in stack.probe.query(
                 "SELECT * FROM messages WHERE room_token = ? AND task_id = ? "
-                "ORDER BY id", [token, task_id]
+                "ORDER BY id", [room, task_id]
             )
             if row["role"] == "assistant"
         ]
@@ -124,7 +126,7 @@ def _assistant_row(stack, token: str, task_id: int, timeout: float = 60) -> dict
             return rows[0]
         time.sleep(1.0)
     raise AssertionError(
-        f"no assistant turn for task {task_id} in {token} carried a Talk id "
+        f"no assistant turn for task {task_id} in {room} carried a Talk id "
         f"within {timeout:.0f}s: {rows}"
     )
 
@@ -141,7 +143,7 @@ def _second_task(stack, token: str, *, after: int, timeout: float = TALK_TIMEOUT
     seen: list[dict] = []
     while time.monotonic() < deadline:
         seen = [
-            row for row in stack.probe.tasks(conversation_token=token)
+            row for row in stack.probe.tasks(talk_token=token)
             if row["id"] > after
         ]
         terminal = [
@@ -203,7 +205,7 @@ class TestATalkRoundTrip:
         inbound = nextcloud.post_message(token, message="what does the script say?")
 
         task = stack.probe.wait_for_task(
-            status="completed", conversation_token=token, timeout=TALK_TIMEOUT
+            status="completed", talk_token=token, timeout=TALK_TIMEOUT
         )
         assert task["status"] == "completed", stack.diagnostics(task)
         assert task["source_type"] == "talk", stack.diagnostics(task)
@@ -248,12 +250,13 @@ class TestATalkRoundTrip:
         nextcloud.post_message(joined, message="the bot can see this")
 
         task = stack.probe.wait_for_task(
-            status="completed", conversation_token=joined, timeout=TALK_TIMEOUT
+            status="completed", talk_token=joined, timeout=TALK_TIMEOUT
         )
         assert task["status"] == "completed", stack.diagnostics(task)
 
         assert not stack.probe.rows_above(
-            "tasks", stack.mark, conversation_token=unjoined
+            "tasks", stack.mark,
+            conversation_token=stack.probe.talk_room(unjoined),
         ), stack.diagnostics(task)
         assert not _bot_messages(
             nextcloud, unjoined, user=nextcloud.test_user
@@ -294,20 +297,24 @@ class TestATalkRoundTrip:
         inbound = nextcloud.post_message(token, message="mirror this into the room")
 
         task = stack.probe.wait_for_task(
-            status="completed", conversation_token=token, timeout=TALK_TIMEOUT
+            status="completed", talk_token=token, timeout=TALK_TIMEOUT
         )
         assert task["status"] == "completed", stack.diagnostics(task)
 
+        # The room's own id, not the Talk token: a Talk room is minted an
+        # `rm_` identity and bound to the token (ISSUE-706).
+        room = stack.probe.talk_room(token)
+        assert room == task["conversation_token"], stack.diagnostics(task)
         rooms = stack.probe.query(
-            "SELECT * FROM rooms WHERE token = ?", [token]
+            "SELECT * FROM rooms WHERE token = ?", [room]
         )
         assert rooms, "the poller registered no room for a room it polled"
         assert rooms[0]["origin"] == "talk", rooms[0]
 
-        assistant = _assistant_row(stack, token, task["id"])
+        assistant = _assistant_row(stack, room, task["id"])
         task = _delivered(stack, task["id"])
         rows = stack.probe.query(
-            "SELECT * FROM messages WHERE room_token = ? ORDER BY id", [token]
+            "SELECT * FROM messages WHERE room_token = ? ORDER BY id", [room]
         )
         inbound_rows = [row for row in rows if row["role"] == "user"]
         assistant_rows = [row for row in rows if row["role"] == "assistant"]
@@ -343,7 +350,7 @@ class TestATalkRoundTrip:
         reply_rows = [
             row for row in stack.probe.query(
                 "SELECT * FROM messages WHERE room_token = ? AND role = 'user' "
-                "ORDER BY id", [token]
+                "ORDER BY id", [room]
             )
         ]
         assert len(reply_rows) == 2, stack.diagnostics(second)
