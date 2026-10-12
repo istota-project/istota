@@ -106,7 +106,7 @@ async def test_writes_gate_origin_and_isolation(signed_client, config, monkeypat
               ("put", "/policy"), ("post", "/purchases/1/cancel")]
     for method, path in writes:
         assert (await signed_client.request(method, BASE + path, json={})).status_code == 403
-    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a: "isolation refused")
+    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *a, **k: "isolation refused")
     assert (await signed_client.get(BASE)).json()["refusal"] == "isolation refused"
     for method, path in writes:
         assert (await signed_client.request(method, BASE + path, json={}, headers=ORIGIN)).status_code == 403

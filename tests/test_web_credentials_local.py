@@ -277,7 +277,7 @@ async def test_isolation_refusal_closes_every_write(signed_client, config, monke
                              binding={**parse_binding("https://portal.example", {}, [],
                                                       source="local"), "credential": "portal"})
     monkeypatch.setattr(secrets_vault, "vault_isolation_refusal",
-                        lambda cfg, user: secrets_vault.VAULT_ISOLATION_REASON)
+                        lambda cfg, user, **k: secrets_vault.VAULT_ISOLATION_REASON)
     for method, path, kwargs in [("post", BASE, {"json": _body()}),
                                  ("patch", BASE + "/portal/local", {"json": _update()}),
                                  ("delete", BASE + "/portal/value", {})]:

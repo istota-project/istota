@@ -69,7 +69,7 @@ async def test_empty_body_validation_origin_isolation_and_semaphore(signed_clien
     monkeypatch.setattr(cheap, "EXPORT_SLOT", Busy())
     response = await signed_client.post(BASE, json=await step_up(signed_client, mail, "export"), headers=ORIGIN)
     assert response.status_code == 503
-    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *args: "isolation-required")
+    monkeypatch.setattr(vault, "vault_isolation_refusal", lambda *args, **k: "isolation-required")
     assert (await signed_client.post(BASE, json={}, headers=ORIGIN)).status_code == 403
     signed_client.cookies.clear()
     assert (await signed_client.post(BASE, json={}, headers=ORIGIN)).status_code == 401

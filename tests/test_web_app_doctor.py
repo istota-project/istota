@@ -189,6 +189,14 @@ class TestAdminDoctor:
         resp, _ = await self._call(tmp_path, monkeypatch, config=config, record=_results()[:1])
         assert resp.json()["pending"] == {"id": made["id"], "deep": True}
 
+    async def test_the_last_answered_request_is_shown(self, tmp_path, monkeypatch):
+        """What the page waits on: a report's own request_id is overwritten by
+        the next sweep."""
+        config = self._config_with_admin(tmp_path)
+        doctor.record_answered(config, {"id": "abc123", "deep": True})
+        resp, _ = await self._call(tmp_path, monkeypatch, config=config, record=_results()[:1])
+        assert resp.json()["answered"] == {"id": "abc123", "deep": True}
+
     async def test_a_credential_in_a_recorded_detail_is_redacted(self, tmp_path, monkeypatch):
         from istota.config import DeveloperConfig
 

@@ -3756,6 +3756,7 @@ function mockAdminDoctor() {
     deep_checked_at: deep ? at : null,
     deep_request_id: deep ? (mockDoctorAnswered?.id ?? null) : null,
     pending: null,
+    answered: mockDoctorAnswered,
   };
 }
 

@@ -10310,6 +10310,10 @@ _REPORT_KEY = "report"
 _DEEP_REPORT_KEY = "deep_report"
 _REQUEST_KEY = "request"
 _SANDBOX_KEY = "sandbox"
+_ANSWERED_KEY = "answered"
+# The request poll runs on the scheduler's dispatch loop every tick, so a held
+# write lock skips the tick rather than stalling it.
+_REQUEST_POLL_BUSY_MS = 2000
 
 
 def _report_now() -> str:
@@ -10371,15 +10375,16 @@ def daemon_sandbox_verdict(config: "Config") -> bool | None:
 
 
 def read_reports(config: "Config") -> dict:
-    """The last shallow and deep runs and any pending request, each or None."""
-    out: dict = {"report": None, "deep_report": None, "request": None}
+    """The last shallow and deep runs, any pending request, and the last
+    request answered, each or None."""
+    out: dict = {"report": None, "deep_report": None, "request": None, "answered": None}
     if not Path(config.db_path).exists():
         return out
     from istota import db
 
     with db.get_db(config.db_path) as conn:
         for name, key in (("report", _REPORT_KEY), ("deep_report", _DEEP_REPORT_KEY),
-                          ("request", _REQUEST_KEY)):
+                          ("request", _REQUEST_KEY), ("answered", _ANSWERED_KEY)):
             row = db.shared_kv_get(conn, REPORT_NAMESPACE, key)
             if row is not None:
                 out[name] = json.loads(row["value"])
@@ -10395,6 +10400,9 @@ def request_run(config: "Config", *, deep: bool) -> dict:
     from istota import db
 
     with db.get_db(config.db_path) as conn:
+        # One write transaction from the read: the daemon taking the request
+        # between them would lose a deep upgrade, or answer it twice.
+        conn.execute("BEGIN IMMEDIATE")
         row = db.shared_kv_get(conn, REPORT_NAMESPACE, _REQUEST_KEY)
         if row is not None:
             request = json.loads(row["value"])
@@ -10405,6 +10413,35 @@ def request_run(config: "Config", *, deep: bool) -> dict:
     return request
 
 
+def request_pending(config: "Config") -> bool:
+    """Whether a run is waiting. One indexed read, for the dispatch loop."""
+    if not Path(config.db_path).exists():
+        return False
+    from istota import db
+
+    with db.get_db(config.db_path, busy_timeout_ms=_REQUEST_POLL_BUSY_MS) as conn:
+        return db.shared_kv_get(conn, REPORT_NAMESPACE, _REQUEST_KEY) is not None
+
+
+def record_answered(config: "Config", request: dict) -> None:
+    """Mark a request answered, whatever its runs found. Never raises.
+
+    What the pane waits on: a report's own ``request_id`` is overwritten by the
+    next sweep, so it is not a reliable sign the request was answered.
+    """
+    if not Path(config.db_path).exists():
+        return
+    from istota import db
+
+    value = json.dumps({"id": request["id"], "deep": bool(request.get("deep")),
+                        "at": _report_now()})
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.shared_kv_set(conn, REPORT_NAMESPACE, _ANSWERED_KEY, value, "daemon")
+    except Exception as exc:  # noqa: BLE001 - a record of the run, not the run
+        logger.warning("doctor_answered_unwritten err=%s", exc)
+
+
 def take_request(config: "Config") -> dict | None:
     """The pending request, removed in the same transaction, or None."""
     if not Path(config.db_path).exists():
@@ -10412,11 +10449,11 @@ def take_request(config: "Config") -> dict | None:
     from istota import db
 
     with db.get_db(config.db_path) as conn:
-        row = db.shared_kv_get(conn, REPORT_NAMESPACE, _REQUEST_KEY)
-        if row is None:
-            return None
-        db.shared_kv_delete(conn, REPORT_NAMESPACE, _REQUEST_KEY)
-    return json.loads(row["value"])
+        row = conn.execute(
+            "DELETE FROM shared_kv WHERE namespace = ? AND key = ? RETURNING value",
+            (REPORT_NAMESPACE, _REQUEST_KEY),
+        ).fetchone()
+    return json.loads(row["value"]) if row is not None else None
 
 
 _STATUS_ORDER = {FAIL: 0, WARN: 1, OK: 2, SKIP: 3}

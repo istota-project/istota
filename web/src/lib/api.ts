@@ -733,6 +733,8 @@ export interface DoctorReport {
   deep_request_id: string | null;
   /** A run asked for and not yet picked up by the daemon. */
   pending: { id: string; deep: boolean } | null;
+  /** The last request the daemon finished, whatever its runs found. */
+  answered: { id: string; deep: boolean } | null;
 }
 
 /**
@@ -745,7 +747,7 @@ export async function getAdminDoctor(): Promise<DoctorReport> {
 
 /**
  * Ask the daemon for a run on its next tick. A request still pending is joined,
- * so the id returned is the one to wait for in `request_id` / `deep_request_id`.
+ * so the id returned is the one to wait for in `answered`.
  */
 export async function requestDoctorRun(deep: boolean): Promise<{ id: string; deep: boolean }> {
   return apiFetch<{ id: string; deep: boolean }>('/admin/doctor/run', {

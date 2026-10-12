@@ -6058,7 +6058,11 @@ def run_startup_checks(config: Config) -> list:
     boot path should do unattended.
     """
     from . import doctor
+    from .executor import effective_sandboxing
 
+    # Published first and outside the run's `try`: a run that raises or hangs on
+    # a mount must not leave a previous boot's verdict for the web routes.
+    doctor.record_sandbox_verdict(config, effective_sandboxing(config))
     try:
         results = doctor.run_checks(config, skip=STARTUP_SKIPPED_CHECKS)
         # Redact before anything is logged or sent. `detail` carries observed
@@ -6081,15 +6085,12 @@ def run_startup_checks(config: Config) -> list:
         counts[doctor.OK], counts[doctor.WARN], counts[doctor.FAIL], counts[doctor.SKIP],
     )
     doctor.record_report(config, results)
-    from .executor import effective_sandboxing
-
-    doctor.record_sandbox_verdict(config, effective_sandboxing(config))
     _alert_doctor_failures(config, doctor.failing(results), context="start-up")
     return results
 
 
 # The daily DB health check owns the full-database scan. Doctor still runs it
-# at boot and on demand.
+# at boot, on demand and for a run the Health pane asks for.
 SWEEP_SKIPPED_CHECKS = ("runtime.framework_db",)
 
 # The devbox services start once the daemon reports healthy, so at the boot run
@@ -6100,11 +6101,16 @@ DOCTOR_FIRST_SWEEP_DELAY = 300
 
 
 # The hourly sweep and an on-demand request run on separate background threads;
-# one at a time, so the transition state they share is not raced.
-_DOCTOR_RUN_LOCK = threading.Lock()
+# one at a time, so the transition state they share is not raced. Re-entrant,
+# because a request holds it across its shallow and deep runs, so a sweep cannot
+# land between the two records.
+_DOCTOR_RUN_LOCK = threading.RLock()
 
 
-def check_doctor(config: Config, state: dict, *, request_id: str | None = None) -> list:
+def check_doctor(
+    config: Config, state: dict, *, request_id: str | None = None,
+    skip: tuple[str, ...] = SWEEP_SKIPPED_CHECKS,
+) -> list:
     """Re-run the doctor registry on the scheduler's interval.
 
     This matters more than the boot run. The drift we actually saw happens
@@ -6123,17 +6129,25 @@ def check_doctor(config: Config, state: dict, *, request_id: str | None = None) 
     pane's request it answers, if any.
     """
     with _DOCTOR_RUN_LOCK:
-        return _check_doctor_locked(config, state, request_id)
+        return _check_doctor_locked(config, state, request_id, skip)
 
 
-def _check_doctor_locked(config: Config, state: dict, request_id: str | None) -> list:
+def _check_doctor_locked(
+    config: Config, state: dict, request_id: str | None, skip: tuple[str, ...],
+) -> list:
     from . import doctor
 
     try:
-        results = doctor.run_checks(config, skip=SWEEP_SKIPPED_CHECKS)
+        results = doctor.run_checks(config, skip=skip)
         results = doctor.redact(results, config)
     except Exception as exc:  # noqa: BLE001 - a periodic diagnostic must not kill the loop
         logger.error("doctor_sweep_failed err=%s", exc, exc_info=True)
+        if request_id is not None:
+            # Somebody is waiting on this run; say it failed rather than nothing.
+            doctor.record_report(config, [doctor.CheckResult(
+                "doctor.run", doctor.FAIL, f"the run raised {type(exc).__name__}",
+                remedy="See the daemon log for doctor_sweep_failed.",
+            )], request_id=request_id)
         return []
 
     failures = doctor.failing(results)
@@ -6167,19 +6181,41 @@ def check_doctor_request(config: Config, state: dict) -> None:
     request = doctor.take_request(config)
     if request is None:
         return
-    check_doctor(config, state, request_id=request["id"])
-    if not request.get("deep"):
-        return
+    with _DOCTOR_RUN_LOCK:
+        check_doctor(config, state, request_id=request["id"], skip=())
+        if request.get("deep"):
+            try:
+                results = doctor.run_checks(
+                    config, only=tuple(sorted(doctor.DEEP_CHECKS)), deep=True)
+                results = doctor.redact(results, config)
+            except Exception as exc:  # noqa: BLE001 - a diagnostic must not kill the loop
+                logger.error("doctor_deep_run_failed err=%s", exc, exc_info=True)
+                results = [doctor.CheckResult(
+                    "doctor.deep_run", doctor.FAIL, f"the deep run raised {type(exc).__name__}",
+                    remedy="See the daemon log for doctor_deep_run_failed.",
+                )]
+            doctor.record_report(config, results, deep=True, request_id=request["id"])
+        doctor.record_answered(config, request)
+
+
+def poll_doctor_request(config: Config, state: dict, inflight: dict) -> None:
+    """The `doctor-request` gate: one read on the dispatch loop, a thread only
+    when there is a request. Never raises."""
+    from . import doctor
+
     try:
-        results = doctor.run_checks(config, only=tuple(sorted(doctor.DEEP_CHECKS)), deep=True)
-        results = doctor.redact(results, config)
-    except Exception as exc:  # noqa: BLE001 - a diagnostic must not kill the loop
-        logger.error("doctor_deep_run_failed err=%s", exc, exc_info=True)
-        results = [doctor.CheckResult(
-            "doctor.deep_run", doctor.FAIL, f"the deep run raised {type(exc).__name__}",
-            remedy="See the daemon log for doctor_deep_run_failed.",
-        )]
-    doctor.record_report(config, results, deep=True, request_id=request["id"])
+        pending = doctor.request_pending(config)
+    except sqlite3.OperationalError as exc:
+        logger.debug("doctor_request_poll_skipped reason=%s", exc)
+        return
+    except Exception:  # noqa: BLE001 - a raise here takes the dispatch loop
+        logger.warning("doctor_request_poll_failed", exc_info=True)
+        return
+    if pending:
+        _spawn_background_check(
+            "doctor-request", lambda: check_doctor_request(config, state), inflight,
+            overlap_expected=True,
+        )
 
 
 #: `executor.SANDBOX_CACHE_ROOT_NAME`, restated. Held equal by
@@ -9550,7 +9586,9 @@ def build_interval_gates(
         check_doctor(config, doctor_seen)
 
     def _doctor_request(now: float) -> None:
-        check_doctor_request(config, doctor_seen)
+        # Inline, like `_whatsapp_pairing`: a thread per tick to read a row that
+        # is almost always empty is not worth it. It hands off when there is one.
+        poll_doctor_request(config, doctor_seen, keeper)
 
     def _worktree_reap(now: float) -> None:
         check_worktree_reap(config)
@@ -9790,13 +9828,13 @@ def build_interval_gates(
             ),
             background=True,
         ),
-        # A run the Health pane asked for. One shared_kv read a tick, and on
-        # even with the sweep off, since an operator asked.
+        # A run the Health pane asked for. One shared_kv read a tick on the
+        # loop, and on even with the sweep off, since an operator asked.
         IntervalGate(
             name="doctor-request",
             run=_doctor_request,
             fixed_interval=1,
-            background=True,
+            on_error="Error polling doctor requests: %s",
         ),
         # ISSUE-288. Seeded to 0 for the reason the sweeps below share: the
         # accumulation it clears is the state a restart usually arrives into,

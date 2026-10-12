@@ -5101,6 +5101,8 @@ def _doctor_view(config) -> dict:
         "deep_checked_at": deep_report["at"] if deep_report else None,
         "deep_request_id": deep_report.get("request_id") if deep_report else None,
         "pending": {"id": request["id"], "deep": bool(request.get("deep"))} if request else None,
+        "answered": ({"id": reports["answered"]["id"], "deep": bool(reports["answered"].get("deep"))}
+                     if reports["answered"] else None),
     }
 
 
@@ -13238,7 +13240,7 @@ def _credential_settings(username: str, action="list", name="", payload=None):
                 row["recovery_remaining"] = state["remaining"] if state else None
             credentials.append(row)
         existing_available = db.kv_get(conn, username, grants.NAMESPACE, "granted_existing") is None
-    refusal = secrets_vault.vault_isolation_refusal(_config, username) or ""
+    refusal = _web_vault_refusal(username) or ""
     return {"credentials": credentials, "rooms": rooms,
             "grant_existing_available": existing_available, "sandboxed": secrets_vault.tasks_sandboxed(_config),
             "can_add": not refusal, "add_blocked_reason": refusal,
@@ -13352,7 +13354,7 @@ async def _write_local_credential(request: Request, user_id: str, name: str | No
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
-    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, user_id)
+    refusal = await asyncio.to_thread(_web_vault_refusal, user_id)
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)
     try:
@@ -13387,7 +13389,7 @@ async def _import_credentials(request: Request, user_id: str, *, preview_only: b
 
     if _config is None:
         raise HTTPException(status_code=503, detail="Credential settings are unavailable.")
-    refusal = vault.vault_isolation_refusal(_config, user_id)
+    refusal = _web_vault_refusal(user_id)
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)
     data, keyfile, fields = None, None, {}
@@ -13663,7 +13665,6 @@ async def _read_wallet_body(request: Request, operation: str) -> dict:
 def _wallet_settings(user_id: str) -> dict:
     from dataclasses import asdict
     from istota import db
-    from istota.credentials.names import vault_isolation_refusal
     from istota.wallet import cards, policy, purchases
     from istota.rooms.scopes import canonical_token
     from istota.wallet.money import CURRENCY_EXPONENTS
@@ -13675,7 +13676,7 @@ def _wallet_settings(user_id: str) -> dict:
             purchase["room_token"] = canonical_token(conn, task.conversation_token) if task and task.user_id == user_id else None
             purchase["extra_hosts"] = json.loads(purchase["extra_hosts"])
         return {"currency_precision": {"default": 2, "exceptions": CURRENCY_EXPONENTS},
-                "refusal": vault_isolation_refusal(_config, user_id),
+                "refusal": _web_vault_refusal(user_id),
                 "cards": [asdict(card) for card in cards.list_cards(conn, user_id)],
                 "policy": asdict(policy.get_policy(conn, user_id)), "purchases": recent}
 
@@ -13705,13 +13706,12 @@ def _mutate_wallet(user_id: str, operation: str, ident: int | None, fields: dict
 
 
 async def _write_wallet(request: Request, user_id: str, operation: str, ident: str | None = None):
-    from istota.credentials.names import vault_isolation_refusal
     from istota.wallet.cards import CardError
     from istota.wallet.purchases import WalletRefusal
 
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="Config not loaded")
-    refusal = await asyncio.to_thread(vault_isolation_refusal, _config, user_id)
+    refusal = await asyncio.to_thread(_web_vault_refusal, user_id)
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)
     # Parse ids here too: framework validation errors can echo arbitrary input.
@@ -13801,11 +13801,18 @@ def _step_up_session(request: Request) -> str:
     return request.session["session_id"]
 
 
+def _web_vault_refusal(user_id: str) -> str | None:
+    """The credential gate as this process must ask it: with the daemon's
+    sandbox verdict, since tasks run there and not in this container."""
+    from istota.credentials import names
+
+    return names.vault_isolation_refusal(_config, user_id, sandboxed=names.tasks_sandboxed(_config))
+
+
 async def _credential_isolation(user_id: str):
-    from istota.credentials import names as vault
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
-    refusal = await asyncio.to_thread(vault.vault_isolation_refusal, _config, user_id)
+    refusal = await asyncio.to_thread(_web_vault_refusal, user_id)
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)
 
@@ -14023,7 +14030,7 @@ async def settings_credential_delete(
         raise HTTPException(status_code=503, detail="config not loaded")
     if name.startswith("forge."):
         raise HTTPException(status_code=400, detail="Deployment credentials are managed in configuration")
-    refusal = await asyncio.to_thread(secrets_vault.vault_isolation_refusal, _config, user["username"])
+    refusal = await asyncio.to_thread(_web_vault_refusal, user["username"])
     if refusal:
         raise HTTPException(status_code=403, detail=refusal)
     def _is_generated() -> bool:
