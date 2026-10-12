@@ -3859,21 +3859,23 @@ def cmd_workspace_localize(args) -> int:
         print(f"istota workspace localize: REFUSE: {reason}; nothing was written.", file=sys.stderr)
         return wl.EXIT_REFUSED
 
-    if not args.scheduler_stopped and not args.dry_run:
+    if not args.scheduler_stopped and not args.dry_run and not args.check:
         return refuse("pass --scheduler-stopped once daemon, web and whatsapp-baileys are stopped")
     if not config.storage_is_nextcloud:
         return refuse("this config is not mount mode (no [nextcloud] url and nextcloud_mount_path)")
     if config.workspace_path is None or os.path.realpath(source) != os.path.realpath(config.workspace_path):
         return refuse(f"--from {source} is not the configured workspace {config.workspace_path}")
     try:
+        if args.check:
+            wl.check_destination(source, destination, resume=args.resume)
+            print(f"{source} can be copied to {destination}")
+            return wl.EXIT_OK
         report = wl.copy_workspace(
             source, destination, bot_dir_name=config.bot_dir_name,
             dry_run=args.dry_run, resume=args.resume,
         )
     except wl.LocalizeRefused as exc:
         return refuse(str(exc))
-    if not args.dry_run and not args.no_note and report.error is None:
-        wl.write_notes(source, report, bot_dir_name=config.bot_dir_name, text=wl.default_note(config))
     report_path = Path(args.report) if args.report else destination.parent / "workspace-localize-report.json"
     try:
         wl.write_report(report, report_path)
@@ -3882,9 +3884,34 @@ def cmd_workspace_localize(args) -> int:
         print(f"istota workspace localize: could not write the report to {report_path}: {exc}", file=sys.stderr)
     for line in report.summary_lines():
         print(line)
-    if report.noted:
-        print(f"wrote {wl.NOTE_NAME} for {len(report.noted)} user(s) on {source}")
     return report.exit_code()
+
+
+def cmd_workspace_moved_note(args) -> int:
+    """`MOVED.md` in each user's bot folder on the tree the workspace moved off."""
+    from istota.maintenance import workspace_localize as wl
+
+    config = load_config(Path(args.config) if args.config else None)
+    source = Path(args.source)
+    if not source.is_dir():
+        print(f"istota workspace moved-note: REFUSE: {source} is not a directory", file=sys.stderr)
+        return wl.EXIT_REFUSED
+    if args.remove:
+        notes = wl.remove_notes(source, bot_dir_name=config.bot_dir_name)
+        verb = "removed"
+    else:
+        # The note says edits on this tree no longer reach the bot, which is
+        # false for as long as the config still names it.
+        if config.workspace_path is not None and os.path.realpath(source) == os.path.realpath(config.workspace_path):
+            print(f"istota workspace moved-note: REFUSE: {source} is the configured workspace; "
+                  "nothing was written.", file=sys.stderr)
+            return wl.EXIT_REFUSED
+        notes = wl.write_notes(source, bot_dir_name=config.bot_dir_name, text=wl.default_note(config))
+        verb = "wrote"
+    print(f"{verb} {wl.NOTE_NAME} for {len(notes.done)} user(s) on {source}")
+    for user, reason in notes.failures:
+        print(f"{user}: {reason}")
+    return wl.EXIT_SKIPPED if notes.failures else wl.EXIT_OK
 
 
 def cmd_workspace_localize_config(args) -> int:
@@ -5684,8 +5711,8 @@ def main():
     ws_localize.add_argument("--dry-run", action="store_true", help="Walk and report; write nothing but the report")
     ws_localize.add_argument("--resume", action="store_true",
                              help="Continue an earlier copy: a destination file of equal size and mtime is kept")
-    ws_localize.add_argument("--no-note", action="store_true",
-                             help="Write no MOVED.md into each user's bot folder on the mount")
+    ws_localize.add_argument("--check", action="store_true",
+                             help="Only say whether the copy would start (exit 0) or is refused (1); write nothing")
     ws_localize.add_argument("--report", help="Where the JSON report goes (default: beside the destination)")
     ws_localize.add_argument(
         "--scheduler-stopped", action="store_true",
@@ -5698,6 +5725,14 @@ def main():
     ws_config.add_argument("--workspace", default="/data/workspace", help="The local workspace path")
     ws_config.add_argument("--check", action="store_true",
                            help="Only say whether the config can be moved (exit 0) or is refused (1); write nothing")
+    ws_note = ws_subparsers.add_parser(
+        "moved-note",
+        help="Write MOVED.md into each user's bot folder on the old workspace, once the config no longer "
+             "names it (exit 0, 1 refused, 2 some users got none)",
+    )
+    ws_note.add_argument("--from", dest="source", required=True, help="The tree the workspace moved off")
+    ws_note.add_argument("--remove", action="store_true",
+                         help="Remove the notes a move wrote instead; a user's own MOVED.md is left")
     ws_reindex = ws_subparsers.add_parser(
         "reindex",
         help="Reindex every user's memory files on the workspace, then drop index rows under the old root",
@@ -5942,6 +5977,7 @@ def main():
         workspace_commands = {
             "localize": cmd_workspace_localize,
             "localize-config": cmd_workspace_localize_config,
+            "moved-note": cmd_workspace_moved_note,
             "reindex": cmd_workspace_reindex,
         }
         rc = workspace_commands[args.workspace_action](args)

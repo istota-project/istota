@@ -1052,16 +1052,19 @@ LOCALIZE_WRITERS="daemon web whatsapp-baileys"
 # The offline move from the rclone mount to /data/workspace on the state volume
 # (docs/deployment/moving-to-a-local-workspace.md). The copy, the config edit
 # and the reindex are `istota workspace` verbs run as uid 10001, so root reads
-# and writes nothing under config/ or the mount. A config `istota apply` wrote
-# is refused before anything stops, since the plan would undo the edit: that
-# install moves by its plan, after a --copy-only run here.
+# and writes nothing under config/ or the mount. A config `istota apply` wrote,
+# and a destination the copy would refuse, are refused before anything stops;
+# the plan would undo the edit, so that install moves by its plan, after a
+# --copy-only run here. MOVED.md goes onto the mount only once the config no
+# longer names it, and never under --copy-only.
 cmd_localize_workspace() {
-    local copy_only="" dry_run="" accept="" rc=0 pass=() service stop=() answer=""
+    local copy_only="" dry_run="" accept="" note=1 rc=0 pass=() resume=() service stop=() answer=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --copy-only) copy_only=1 ;;
             --dry-run) dry_run=1; pass+=(--dry-run) ;;
-            --resume|--no-note) pass+=("$1") ;;
+            --resume) resume=(--resume); pass+=(--resume) ;;
+            --no-note) note="" ;;
             --accept-skipped) accept=1 ;;
             *) usage >&2; exit 64 ;;
         esac
@@ -1075,6 +1078,9 @@ cmd_localize_workspace() {
             || die "config.toml cannot be moved here (above); nothing was stopped. A config written by \`istota apply\` moves by its plan: run \`istota-stack localize-workspace --copy-only\`, then set istota_storage: local, workspace_path = \"${LOCAL_WORKSPACE}\", no nextcloud_mount_path and auto_share_bot_dir = false in the plan, and apply it."
     fi
     if [ -z "$dry_run" ]; then
+        oneshot "$(main_service)" istota workspace localize --check \
+            --from "$CONTAINER_MOUNT" --to "$LOCAL_WORKSPACE" "${resume[@]}" \
+            || die "the copy cannot start (above); nothing was stopped."
         for service in $LOCALIZE_WRITERS; do
             if compose config --services | grep -qxF "$service"; then stop+=("$service"); fi
         done
@@ -1113,6 +1119,10 @@ cmd_localize_workspace() {
     fi
     ISTOTA_CONFIG_READ_ONLY=false oneshot "$(main_service)" istota workspace localize-config --workspace "$LOCAL_WORKSPACE" \
         || die "the config change failed; the copy is in ${LOCAL_WORKSPACE} and the stack is down. \`istota-stack up\` returns to the mount."
+    if [ -n "$note" ]; then
+        oneshot "$(main_service)" istota workspace moved-note --from "$CONTAINER_MOUNT" \
+            || log "WARNING: not every user got MOVED.md in their Nextcloud bot folder (above); the move goes on."
+    fi
     file_set "$HOST_ENV" STORAGE=local
     log "host.env: STORAGE=local"
     if [ -x "${SRC}/host/provision.sh" ]; then
@@ -1121,7 +1131,7 @@ cmd_localize_workspace() {
     cmd_up
     stack_exec istota workspace reindex --forget-root "$CONTAINER_MOUNT" \
         || log "WARNING: the memory reindex failed; run \`istota-stack exec istota workspace reindex --forget-root ${CONTAINER_MOUNT}\` again."
-    log "the workspace is now ${LOCAL_WORKSPACE}. To go back: restore config/config.toml.pre-localize, set STORAGE=nextcloud in host.env, run provision.sh, then \`istota-stack up\`."
+    log "the workspace is now ${LOCAL_WORKSPACE}. To go back, follow \"Going back\" in docs/deployment/moving-to-a-local-workspace.md: it restores config/config.toml.pre-localize, removes the MOVED.md notes and the index rows under ${LOCAL_WORKSPACE}."
 }
 
 # Read-only: origin is asked, not fetched, so the checkout and its refs stay as

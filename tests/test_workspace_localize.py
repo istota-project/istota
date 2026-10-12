@@ -239,34 +239,77 @@ class TestCopy:
 class TestNotes:
     def test_moved_md_is_written_to_the_source_only(self, mount, tmp_path):
         dest = tmp_path / "local"
-        report = wl.copy_workspace(mount, dest, bot_dir_name=BOT_DIR)
-        wl.write_notes(mount, report, bot_dir_name=BOT_DIR, text="moved\n")
+        wl.copy_workspace(mount, dest, bot_dir_name=BOT_DIR)
+        notes = wl.write_notes(mount, bot_dir_name=BOT_DIR, text="moved\n")
         assert (mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").read_text() == "moved\n"
         assert not (dest / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
         # bob has no bot folder, so no note and no folder made for one.
-        assert report.noted == ["alice"]
+        assert notes.done == ["alice"]
         assert not (mount / f"Users/bob/{BOT_DIR}").exists()
 
     def test_a_resumed_copy_does_not_carry_the_note(self, mount, tmp_path):
         dest = tmp_path / "local"
-        report = wl.copy_workspace(mount, dest, bot_dir_name=BOT_DIR)
-        wl.write_notes(mount, report, bot_dir_name=BOT_DIR, text="moved\n")
+        wl.copy_workspace(mount, dest, bot_dir_name=BOT_DIR)
+        wl.write_notes(mount, bot_dir_name=BOT_DIR, text=wl.note_text("Istota", datetime(2026, 10, 12)))
         wl.copy_workspace(mount, dest, bot_dir_name=BOT_DIR, resume=True)
         assert not (dest / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
+
+    def test_a_users_own_moved_md_is_kept_and_reported(self, mount):
+        """ISSUE-722: the note was opened `O_TRUNC` and replaced the user's file."""
+        own = _put(mount, f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}", "my own notes on moving house\n")
+        notes = wl.write_notes(mount, bot_dir_name=BOT_DIR, text="moved\n")
+        assert own.read_text() == "my own notes on moving house\n"
+        assert notes.done == []
+        assert [user for user, _ in notes.failures] == ["alice"]
+        assert "already" in notes.failures[0][1]
+
+    def test_an_earlier_moves_note_is_replaced(self, mount):
+        wl.write_notes(mount, bot_dir_name=BOT_DIR, text=wl.note_text("Istota", datetime(2026, 1, 1)))
+        notes = wl.write_notes(mount, bot_dir_name=BOT_DIR, text=wl.note_text("Istota", datetime(2026, 10, 12)))
+        assert notes.done == ["alice"] and notes.failures == []
+        bot = mount / f"Users/alice/{BOT_DIR}"
+        assert "2026-10-12" in (bot / wl.NOTE_NAME).read_text()
+        assert sorted(p.name for p in bot.iterdir()) == ["MOVED.md", "config"]
+
+    def test_a_source_with_no_users_is_a_failure(self, tmp_path):
+        empty = tmp_path / "not-mounted"
+        empty.mkdir()
+        assert wl.remove_notes(empty, bot_dir_name=BOT_DIR).failures
+        assert wl.write_notes(empty, bot_dir_name=BOT_DIR, text="moved\n").failures
+
+    def test_a_users_own_moved_md_is_copied(self, mount, tmp_path):
+        """ISSUE-722: the copy left out any `MOVED.md` in a bot folder, the user's
+        own included, without saying so."""
+        _put(mount, f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}", "my own notes on moving house\n")
+        dest = tmp_path / "local"
+        report = wl.copy_workspace(mount, dest, bot_dir_name=BOT_DIR)
+        assert report.exit_code() == wl.EXIT_OK
+        assert (dest / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").read_text() == "my own notes on moving house\n"
+
+    def test_remove_takes_our_notes_and_leaves_a_users_own(self, mount):
+        _put(mount, f"Users/carol/{BOT_DIR}/{wl.NOTE_NAME}", "carol's own\n")
+        wl.write_notes(mount, bot_dir_name=BOT_DIR, text=wl.note_text("Istota", datetime(2026, 10, 12)))
+        notes = wl.remove_notes(mount, bot_dir_name=BOT_DIR)
+        assert not (mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
+        assert (mount / f"Users/carol/{BOT_DIR}/{wl.NOTE_NAME}").read_text() == "carol's own\n"
+        assert notes.done == ["alice"]
+        assert [user for user, _ in notes.failures] == ["carol"]
 
     def test_a_symlinked_bot_folder_gets_no_note(self, mount, tmp_path):
         target = tmp_path / "target"
         target.mkdir()
         _put(mount, "Users/carol/placeholder", "")
         (mount / f"Users/carol/{BOT_DIR}").symlink_to(target)
-        report = wl.Report("", "", False)
-        wl.write_notes(mount, report, bot_dir_name=BOT_DIR, text="moved\n")
+        notes = wl.write_notes(mount, bot_dir_name=BOT_DIR, text="moved\n")
         assert list(target.iterdir()) == []
-        assert [user for user, _ in report.note_failures] == ["carol"]
+        assert [user for user, _ in notes.failures] == ["carol"]
 
     def test_the_note_says_where_the_files_went(self):
         text = wl.note_text("Istota", datetime(2026, 10, 12, tzinfo=timezone.utc))
         assert "web UI" in text and "2026-10-12" in text and "does not reach Istota" in text
+        assert wl.is_our_note(text.encode())
+        assert not wl.is_our_note(b"my own notes\n")
+        assert not wl.is_our_note(text.encode() + b"and something I added\n")
 
 
 # --- the config -------------------------------------------------------------------
@@ -432,15 +475,22 @@ class TestTheCli:
         assert result.returncode == wl.EXIT_REFUSED, result.stdout + result.stderr
         assert "not the configured workspace" in result.stderr
 
-    def test_the_copy_reports_writes_the_note_and_then_the_config_moves(self, install, mount, tmp_path):
+    def test_the_copy_reports_then_the_config_moves_then_the_note(self, install, mount, tmp_path):
         dest = tmp_path / "local"
         report = tmp_path / "report.json"
         result = self._istota(install, "workspace", "localize", "--from", str(mount), "--to", str(dest),
                               "--scheduler-stopped", "--report", str(report))
         assert result.returncode == wl.EXIT_OK, result.stdout + result.stderr
         assert (dest / "PERSONA.md").read_text() == "persona\n"
-        assert (mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
+        # ISSUE-722: the copy writes no note; the move is not final yet.
+        assert not (mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
         assert json.loads(report.read_text())["entries"]["Users"]["files"] == 3
+
+        # While the config still names the mount, the note is refused.
+        result = self._istota(install, "workspace", "moved-note", "--from", str(mount))
+        assert result.returncode == wl.EXIT_REFUSED, result.stdout + result.stderr
+        assert "is the configured workspace" in result.stderr
+        assert not (mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
 
         result = self._istota(install, "workspace", "localize-config", "--workspace", str(dest))
         assert result.returncode == 0, result.stdout + result.stderr
@@ -448,6 +498,15 @@ class TestTheCli:
         assert document["workspace_path"] == str(dest)
         assert "nextcloud_mount_path" not in document
         assert (install.parent / "config.toml.pre-localize").exists()
+
+        result = self._istota(install, "workspace", "moved-note", "--from", str(mount))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert wl.is_our_note((mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").read_bytes())
+
+        # Going back: the note comes off again.
+        result = self._istota(install, "workspace", "moved-note", "--from", str(mount), "--remove")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
 
         # The copy refuses once the config no longer says mount.
         result = self._istota(install, "workspace", "localize", "--from", str(mount), "--to", str(dest),
@@ -470,7 +529,29 @@ class TestTheCli:
     def test_skipped_entries_exit_2(self, install, mount, tmp_path):
         os.mkfifo(mount / "Groups/g1/pipe")
         result = self._istota(install, "workspace", "localize", "--from", str(mount), "--to", str(tmp_path / "local"),
-                              "--scheduler-stopped", "--no-note", "--report", str(tmp_path / "r.json"))
+                              "--scheduler-stopped", "--report", str(tmp_path / "r.json"))
         assert result.returncode == wl.EXIT_SKIPPED, result.stdout + result.stderr
         assert "skipped Groups/g1/pipe: fifo" in result.stdout
         assert not (mount / f"Users/alice/{BOT_DIR}/{wl.NOTE_NAME}").exists()
+
+    def test_the_check_refuses_a_destination_with_files_and_writes_nothing(self, install, mount, tmp_path):
+        """ISSUE-722: the empty-destination check ran only inside the copy, after
+        `istota-stack` had stopped the stack. `--check` asks it first."""
+        dest = tmp_path / "local"
+        _put(dest, "Users/alice/left-over.md", "from an earlier local install")
+        result = self._istota(install, "workspace", "localize", "--from", str(mount), "--to", str(dest), "--check")
+        assert result.returncode == wl.EXIT_REFUSED, result.stdout + result.stderr
+        assert "--resume" in result.stderr
+        assert _tree(dest) == {"Users/alice/left-over.md": "from an earlier local install"}
+        assert not (tmp_path / "workspace-localize-report.json").exists()
+
+        result = self._istota(install, "workspace", "localize", "--from", str(mount), "--to", str(dest),
+                              "--check", "--resume")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _tree(dest) == {"Users/alice/left-over.md": "from an earlier local install"}
+
+    def test_the_check_passes_an_empty_destination(self, install, mount, tmp_path):
+        result = self._istota(install, "workspace", "localize", "--from", str(mount),
+                              "--to", str(tmp_path / "local"), "--check")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (tmp_path / "local").exists()

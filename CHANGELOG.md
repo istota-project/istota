@@ -233,6 +233,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `istota-stack localize-workspace` writes `MOVED.md` into the users' Nextcloud bot folders only after the config has moved, so a copy that stops, or a `--copy-only` run, no longer leaves a note saying edits there are ignored on an install still running on the mount. A user's own `MOVED.md` is kept and copied instead of being overwritten and left out. A non-empty `/data/workspace` is refused before the stack stops, and the rollback steps now remove the notes (`istota workspace moved-note --remove`) and the memory index entries for the local copy.
+
 - A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.
 
 - The Workspace toolbar no longer grows when folder buttons appear after loading. The content below it stays in place.
