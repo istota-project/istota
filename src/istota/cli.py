@@ -1584,7 +1584,7 @@ def _whatsapp_binding_state(binding) -> tuple | None:
     """Everything on a binding but `updated_at`, for a before/after compare.
 
     `user ensure` prints `STATE: created|updated|noop` and
-    `deploy/ansible/tasks/main.yml` keys `changed_when` off that one line, so
+    `ansible/tasks/main.yml` keys `changed_when` off that one line, so
     the verdict has to cover every table the command writes. The binding is
     not on `user_profiles`, so `update_profile_with_status` cannot see it and
     a WhatsApp-only enrollment reported `noop` — which suppresses the

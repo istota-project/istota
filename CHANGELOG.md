@@ -164,6 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The bare-metal Ansible install is gone.** A server now runs Istota on a machine dedicated to it, set up by `host/provision.sh` and updated with `istota-stack update`; the optional role in `ansible/` manages such a machine from an inventory. An existing bare-metal install moves over with `istota-stack import-bare-metal`. The standalone Docker helper scripts and the separate browser compose file went with it, and so did the old module paths the bare-metal units started, which the last release still kept.
+
 - **The Docker stack no longer runs its own Nextcloud.** The workspace is a local directory by default, and full Nextcloud integration now points istota at a Nextcloud you run yourself, mounted on the VM. A stack running full integration refuses to start until that mount is up, so nothing is written into an unmounted folder.
 
   **Upgrade note:** An install that ran the bundled Nextcloud is refused at boot until you choose: move that Nextcloud into a compose project of its own, which keeps Talk rooms and files, or copy the workspace into local storage. The deployment docs' page on moving the bundled Nextcloud walks through both.

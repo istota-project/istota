@@ -31,16 +31,10 @@ Two exclusions, and each is a different reason rather than a variation of one:
     `FROM ${BASE}` and inherit whatever the tier hands them. Asserting on those
     would be asserting on a build argument.
 
-**Not every `docker/test/Dockerfile.*` is a control**, which this file assumed
-when the only ones were. `Dockerfile.deploy` (ISSUE-439) is the deploy tier's
-*runner*: it boots systemd as PID 1 so the Ansible role can converge on it, and
-it owns its base outright — it is the deployment target, not a derivative of
-another image. So it is named in `BASE_OWNING_DOCKERFILES` and held to the
-release check, which is what anyone would want: the tier exists to converge the
-role on the release production runs, and an image a release behind would be
-converging it on the wrong one. `_is_control` distinguishes by content rather
-than by filename for that reason — a control is a file that actually builds
-`FROM ${BASE}`.
+**Not every `docker/test/Dockerfile.*` has to be a control.** One that owns its
+base outright belongs in `BASE_OWNING_DOCKERFILES` and is held to the release
+check. `_is_control` distinguishes by content rather than by filename for that
+reason — a control is a file that actually builds `FROM ${BASE}`.
 
 `docker/browser/Dockerfile` was a third exclusion until ISSUE-440's own
 condition was met. It is **vendored** from the stealth-browser repo, which owns
@@ -56,11 +50,10 @@ release check runs over both lists, and a re-sync that brought bookworm back is
 red rather than silent. An upstream release this repository has not adopted
 lands here as a failure too, which is the decision point the guard is for.
 
-No tier here builds this image, but `deploy/ansible` does, on the deploy host,
-from this build context and on a rebuild triggered by a hash over these very
-files — so a base landing here reaches a production container without anything
-in between having compiled it. That is an argument for checking the string,
-not against it.
+No default-suite tier builds this image, but `istota-stack update` does, on the
+VM, from this build context — so a base landing here reaches a production
+container without anything in between having compiled it. That is an argument
+for checking the string, not against it.
 
 That image's base is named in a second place this file does not read:
 `docker/browser/BOT_DETECTION.md`, under "Container Configuration". It is prose
@@ -86,8 +79,8 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 DOCKER = REPO / "docker"
 
-# The release every supported deployment runs. `deploy/ansible/README.md` says
-# "Debian 13+", and `docker/devbox/Dockerfile` was already here.
+# The release every supported deployment runs: the VM is Debian 13, and
+# `docker/devbox/Dockerfile` was already here.
 TARGET = "trixie"
 
 # Enough of them to recognise a base that names one. Anything not in this set
@@ -101,7 +94,6 @@ DEBIAN_CODENAMES = frozenset({
 BASE_OWNING_DOCKERFILES = (
     Path("docker/istota/Dockerfile"),
     Path("docker/test/Dockerfile"),
-    Path("docker/test/Dockerfile.deploy"),
     Path("docker/devbox/Dockerfile"),
     Path("docker/whatsapp-baileys/Dockerfile"),
 )
@@ -160,9 +152,8 @@ def _is_control(path: Path) -> bool:
 
     By content, not by filename. This used to be "any `docker/test/Dockerfile.*`
     that is not `Dockerfile`", which held only while every such file was a
-    control — `Dockerfile.deploy` is the deploy tier's runner and owns its base,
-    so the name-based test classified it as a control and then failed it for not
-    building `FROM ${BASE}`.
+    control — a runner that owned its base was classified as a control and then
+    failed for not building `FROM ${BASE}`.
 
     A file naming no base at all is not a control: that is a malformed
     Dockerfile, and calling it one would exempt it from every check in this

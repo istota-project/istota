@@ -701,8 +701,7 @@ class BriefingSharedBlock:
 # windows, so morning and evening briefings each read a fresh copy; a consuming
 # briefing reads them via a ``shared_block`` source with a freshness window,
 # so a stale/not-yet-generated block degrades to an omitted section
-# (harmless). Kept in step with the Ansible defaults
-# (``istota_briefing_shared_blocks`` in ``deploy/ansible/defaults/main.yml``).
+# (harmless).
 DEFAULT_SHARED_BLOCKS: list[dict] = [
     {
         "name": "world-headlines",
@@ -3817,14 +3816,9 @@ def _migrate_whatsapp_flat(data: dict) -> None:
 def normalize_legacy_document(data: dict) -> None:
     """Every rewrite :func:`load_config` applies before the dataclass walk.
 
-    One named step rather than a call buried in the loader, because two kinds
-    of caller have to agree on it. The loader is the first. The second is the
-    drift guard over the Ansible generator
-    (``tests/test_ansible_config_template.py``),
-    which answers "does the loader read every key this file renders" by driving
-    ``apply_section`` itself — so a rewrite the loader does and it does not
-    reads to it as a rendered key nothing consumes, which is the opposite of
-    what it is.
+    One named step rather than a call buried in the loader, so a second caller
+    driving ``apply_section`` itself applies the same rewrites rather than
+    reading a rewritten key as one nothing consumes.
 
     Mutates ``data`` in place, like the walk it feeds. A caller that needs the
     document afterwards copies it first.

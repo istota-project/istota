@@ -5579,13 +5579,3 @@ class TestBasemapEndpoint:
         assert resp.status_code == 200
         body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
         assert "api_key=typed-in-the-ui" in body["dark"]
-
-
-@_needs_web_deps
-def test_the_old_module_path_serves_the_same_app():
-    """Units rendered before the `webui/` move start uvicorn on the old path,
-    and the auto-update cron restarts them without re-rendering."""
-    import istota.web_app as stub  # move-modules: keep
-    import istota.webui.app as app_module
-
-    assert stub.app is app_module.app
