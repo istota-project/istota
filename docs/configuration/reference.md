@@ -738,7 +738,7 @@ The `web.basemap` doctor check reads the same resolver as the endpoint, so it ca
 | Setting | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable GPS webhook receiver |
-| `webhooks_port` | `8765` | Port of a standalone receiver process. Unused on the stack and under `istota serve`, where the web app serves the webhook routes |
+| `webhooks_port` | `8765` | Unused: nothing reads it. The web app serves the webhook routes. Kept so an older config that sets it still loads |
 | `accuracy_threshold_m` | `100.0` | Discard pings less accurate than this, in metres |
 | `visit_exit_minutes` | `5.0` | Minutes away from a place before a visit is closed |
 | `reconcile_enabled` | `true` | Batch-reconcile visits from pings, cleaning up state-machine drift |

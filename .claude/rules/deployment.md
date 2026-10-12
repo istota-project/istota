@@ -80,7 +80,7 @@ In full Nextcloud integration the VM mounts the bot's Nextcloud files at `/srv/m
 
 ## Native web login
 
-`[web] auth` in `config.toml`, defaulting to `["nextcloud"]` even with no Nextcloud URL; `istota setup` asks. The nginx template has no-access-log exact locations for the set-password and sign-in-link paths, and the web launcher disables uvicorn's access log. An outer proxy needs the same protection. The public launchers reject no-auth even when the backend binds loopback; only direct local `istota serve` may set the required in-process marker.
+`[web] auth` in `config.toml`, defaulting to `["nextcloud"]` even with no Nextcloud URL; `istota setup` asks. The nginx template has a no-access-log exact location for `/istota/auth/set-password`, and the web launcher disables uvicorn's access log. An outer proxy needs the same protection. The public launchers reject no-auth even when the backend binds loopback; only direct local `istota serve` may set the required in-process marker.
 
 ## Leaving the bare-metal shape
 

@@ -55,6 +55,8 @@ See [Secret scanning](secret-scanning.md).
 
 A Mac checkout runs Istota as one unsandboxed process on loopback, which is what `istota serve` is for. It is a development loop, not a deployment: there is no bubblewrap on macOS, so nothing confines a task, and the web app skips sign-in.
 
+There are two ways to give that process a config: let the wizard write one in your home directory, or [write one in the checkout by hand](#initialize-by-hand). Pick one. When both exist, the checkout's `config/config.toml` wins, because the config search order checks it before `~/.config/istota/config.toml`.
+
 ```bash
 uv run istota setup              # writes ~/.config/istota/config.toml and istota.env, workspace ~/.istota
 uv run istota serve              # scheduler + web app at http://127.0.0.1:8766/istota
@@ -63,15 +65,21 @@ npm --prefix web run dev         # optional: the Vite dev server, proxying the A
 
 `serve` serves `web/build` when it exists, so `npm --prefix web run build` is the other way to see frontend changes. `setup` here is the same wizard the deprecated [standalone install](../getting-started/local-install.md) uses; that page lists what it writes and what is off in this shape.
 
+If the checkout also has a `config/config.toml`, a bare `istota serve` run from the repo root loads that file and ignores the one the wizard wrote. Name the wizard's file with the global `-c`, which goes before the subcommand: `uv run istota -c ~/.config/istota/config.toml serve`.
+
 To run what operators run, sandbox included, use the Lima VM from the [quickstart](../getting-started/quickstart-server.md#on-a-mac). `scripts/test-vm.sh` drives the same template for the `vm` test tier.
 
 ## Initialize by hand
+
+The alternative to the wizard is a config in the checkout.
 
 ```bash
 uv run istota init               # Create database from schema.sql
 ```
 
-Create `config/config.toml` from `config/config.example.toml` and fill in what your test setup needs.
+Create `config/config.toml` from `config/config.example.toml` and fill in what your test setup needs. Commands run from the repo root load it ahead of anything under `~/.config/istota/`.
+
+`istota serve` reads secrets from an env file, separate from the config. With no `-c` it reads `~/.config/istota/istota.env`, even when the config it loads is the checkout's. With `-c` it reads the `istota.env` beside the named config, which for `-c config/config.toml` is `config/istota.env`, a path `.gitignore` does not cover. `--env-file PATH` overrides both, and keeps the secrets out of the checkout: `uv run istota -c config/config.toml serve --env-file ~/.config/istota/istota.env`.
 
 ## Run
 

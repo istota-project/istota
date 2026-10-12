@@ -145,7 +145,7 @@ The two secrets are files under `/srv/app/istota/secrets/` (`istota_web_oauth2_c
 
 Restart the stack (`istota-stack down && istota-stack up`). The web app is the stack's `web` service, built into the image with the frontend, and its logs are `istota-stack compose logs -f web`.
 
-The stack's nginx is the only listener, and it already routes `/istota/` and keeps the set-password and sign-in-link paths out of its access log. A reverse proxy of your own in front of it (`proxied` ingress) forwards the whole hostname, and needs the same access-log exclusion for `/istota/auth/set-password`, or no query strings in its logs. See [Ingress and TLS](../deployment/docker.md#ingress-and-tls).
+The stack's nginx is the only listener, and it already routes `/istota/` and keeps `/istota/auth/set-password` out of its access log. A reverse proxy of your own in front of it (`proxied` ingress) forwards the whole hostname, and needs the same access-log exclusion for `/istota/auth/set-password`, or no query strings in its logs. See [Ingress and TLS](../deployment/docker.md#ingress-and-tls).
 
 TLS is required — session cookies are set with `secure=true` and the registered redirect URI must use HTTPS. `direct` ingress gets a certificate from certbot; `proxied` takes it from your proxy.
 
