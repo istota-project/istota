@@ -19,23 +19,25 @@ def read_sidecar(path: Path | str) -> Sidecar:
     """Read once from a private regular file, checking the opened descriptor."""
     if str(path) == "-":
         raise SchemaError(["secrets_file"], "--secrets-file requires a private file, not stdin")
+    return parse_sidecar(read_private_document(path, field="secrets_file", option="--secrets-file"))
+
+
+def read_private_document(path, *, field, option):
+    """Parse one private regular file for sidecars and credential-bearing input."""
     path = Path(path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as source:
             info = os.fstat(source.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-                raise SchemaError(["secrets_file"], "--secrets-file must be a private regular file (mode 0600)")
+                raise SchemaError([field], f"{option} must be a private regular file (mode 0600)")
             raw = source.read()
     except OSError:
-        raise SchemaError(["secrets_file"], "cannot read --secrets-file as a private regular file without following links") from None
+        raise SchemaError([field], f"cannot read {option} as a private regular file without following links") from None
     try:
-        document = apply.parse_document(raw, is_json=path.suffix.lower() == ".json", where="in --secrets-file")
-        return parse_sidecar(document)
-    except SchemaError:
-        raise
+        return apply.parse_document(raw, is_json=path.suffix.lower() == ".json", where=f"in {option}")
     except apply.PlanError as exc:
-        raise SchemaError(["secrets_file"], str(exc)) from None
+        raise SchemaError([field], str(exc)) from None
 
 
 def select_sidecar(plan: Plan, sidecar: Sidecar, users: list[str] | None) -> Sidecar:

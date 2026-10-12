@@ -381,7 +381,7 @@ def cmd_apply(args):
         if args.format is not None:
             err("istota apply: --check uses --json, not --format; nothing was written.")
             return apply.EXIT_ERROR
-        return apply.check(args.file, as_json=args.json, out=print, err=err, patches=args.patch)
+        return apply.check(args.file, as_json=args.json, out=print, err=err, patches=args.patch, input_format=args.input_format)
     target = args.config or os.environ.get("ISTOTA_CONFIG_PATH")
     if not target:
         print(
@@ -395,7 +395,7 @@ def cmd_apply(args):
         out=print, err=err,
         output_format=args.format or "text", users=args.user,
         continue_on_error=args.continue_on_error, prune=args.prune, prune_secrets=args.prune_secrets,
-        secrets_file=args.secrets_file, patches=args.patch,
+        secrets_file=args.secrets_file, patches=args.patch, input_format=args.input_format,
     )
 
 
@@ -844,7 +844,7 @@ def _coerce_extras_value(raw: str):
         return raw
 
 
-def _build_resource_extras(args) -> "dict[str, object] | None":
+def resource_ensure_extras(args) -> "dict[str, object] | None":
     """Assemble the extras payload from CLI flags.
 
     Returns ``None`` when the operator hasn't expressed an intent — neither
@@ -862,29 +862,33 @@ def _build_resource_extras(args) -> "dict[str, object] | None":
     if extras_json is not None:
         try:
             decoded = json.loads(extras_json)
-        except json.JSONDecodeError as e:
-            print(f"Error: --extras-json is not valid JSON: {e}", file=sys.stderr)
-            sys.exit(1)
+        except json.JSONDecodeError:
+            raise ValueError("--extras-json is not valid JSON") from None
         if not isinstance(decoded, dict):
-            print("Error: --extras-json must decode to a JSON object", file=sys.stderr)
-            sys.exit(1)
+            raise ValueError("--extras-json must decode to a JSON object")
         return decoded
 
     if extras_kv:
         result: dict[str, object] = {}
         for pair in extras_kv:
             if "=" not in pair:
-                print(f"Error: --extras pair must be key=value, got {pair!r}", file=sys.stderr)
-                sys.exit(1)
+                raise ValueError("--extras pair must be key=value")
             key, _, value = pair.partition("=")
             key = key.strip()
             if not key:
-                print(f"Error: --extras key cannot be empty in {pair!r}", file=sys.stderr)
-                sys.exit(1)
+                raise ValueError("--extras key cannot be empty")
             result[key] = _coerce_extras_value(value)
         return result
 
     return None
+
+
+def _build_resource_extras(args):
+    try:
+        return resource_ensure_extras(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_resource(args):
@@ -1697,33 +1701,8 @@ def _whatsapp_binding_for_display(db_path, user_id):
 _whatsapp_binding_state = user_profiles.whatsapp_binding_state
 
 
-def cmd_user_ensure(args):
-    """Create or update a user_profiles row (idempotent).
-
-    Drop-in replacement for templating per-user TOML files via Ansible.
-    Only the flags the operator passes are written; omitted flags leave
-    the existing column value untouched (or use defaults on first insert).
-
-    ``--managed`` also records the fields this call asserted, which the web
-    then refuses to edit; ``--seed`` writes only into a new row or an empty
-    identity and releases every lock. Neither leaves the managed set alone, so
-    a hand-run ensure neither locks nor unlocks anything.
-    """
-    from . import user_profiles
-
-    config = load_config(Path(args.config) if args.config else None)
-    user_id = args.name
-    db_path = config.db_path
-
-    canonical = config.resolve_user_id(user_id)
-    if canonical is not None and canonical != user_id:
-        print(f"Error: User ID differs only in case from {canonical!r}", file=sys.stderr)
-        sys.exit(1)
-
-    if not Path(db_path).exists():
-        print(f"Error: DB not found at {db_path}; run `istota init` first", file=sys.stderr)
-        sys.exit(1)
-
+def user_ensure_updates(args):
+    """Normalize supplied ensure flags into a partial profile update."""
     # Build the partial-update dict from flags the user actually passed.
     updates: dict[str, object] = {}
     if args.display_name is not None:
@@ -1735,17 +1714,9 @@ def cmd_user_ensure(args):
     sms_number = getattr(args, "sms_number", None)
     clear_sms_number = bool(getattr(args, "clear_sms_number", False))
     if sms_number is not None:
-        try:
-            updates["sms_phone_number"] = user_profiles.normalize_sms_phone_number(sms_number)
-        except ValueError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
+        updates["sms_phone_number"] = user_profiles.normalize_sms_phone_number(sms_number)
     elif clear_sms_number:
         updates["sms_phone_number"] = ""
-    whatsapp_number = getattr(args, "whatsapp_number", None)
-    whatsapp_bsuid = getattr(args, "whatsapp_bsuid", None)
-    clear_whatsapp = bool(getattr(args, "clear_whatsapp", False))
-    reset_whatsapp = bool(getattr(args, "reset_whatsapp_identity", False))
     if args.trusted_sender is not None:
         updates["trusted_email_senders"] = list(args.trusted_sender)
     if args.quiet_sender is not None:
@@ -1773,16 +1744,8 @@ def cmd_user_ensure(args):
             purpose = purpose.strip()
             descriptor = descriptor.strip()
             if not sep or not purpose:
-                print(
-                    f"Error: --route expects purpose=descriptor, got {entry!r}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            try:
-                user_profiles.validate_provisioning_route(purpose, descriptor)
-            except ValueError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
+                raise ValueError("--route expects purpose=descriptor")
+            user_profiles.validate_provisioning_route(purpose, descriptor)
             if descriptor:
                 routing[purpose] = descriptor
         updates["routing"] = routing
@@ -1796,6 +1759,46 @@ def cmd_user_ensure(args):
         updates["briefing_email_html"] = args.briefing_email_html
     if getattr(args, "timezone_follow_location", None) is not None:
         updates["timezone_follow_location"] = args.timezone_follow_location
+
+    return updates
+
+
+def cmd_user_ensure(args):
+    """Create or update a user_profiles row (idempotent).
+
+    Drop-in replacement for templating per-user TOML files via Ansible.
+    Only the flags the operator passes are written; omitted flags leave
+    the existing column value untouched (or use defaults on first insert).
+
+    ``--managed`` also records the fields this call asserted, which the web
+    then refuses to edit; ``--seed`` writes only into a new row or an empty
+    identity and releases every lock. Neither leaves the managed set alone, so
+    a hand-run ensure neither locks nor unlocks anything.
+    """
+    from . import user_profiles
+
+    config = load_config(Path(args.config) if args.config else None)
+    user_id = args.name
+    db_path = config.db_path
+
+    canonical = config.resolve_user_id(user_id)
+    if canonical is not None and canonical != user_id:
+        print(f"Error: User ID differs only in case from {canonical!r}", file=sys.stderr)
+        sys.exit(1)
+
+    if not Path(db_path).exists():
+        print(f"Error: DB not found at {db_path}; run `istota init` first", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        updates = user_ensure_updates(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    whatsapp_number = getattr(args, "whatsapp_number", None)
+    whatsapp_bsuid = getattr(args, "whatsapp_bsuid", None)
+    clear_whatsapp = bool(getattr(args, "clear_whatsapp", False))
+    reset_whatsapp = bool(getattr(args, "reset_whatsapp_identity", False))
 
     managed_mode = bool(getattr(args, "managed", False))
     seed_mode = bool(getattr(args, "seed", False))
@@ -4670,6 +4673,231 @@ def cmd_session_stats(args):
         print(f"  {user:<16} {entry['files']:>5} file(s)  {_fmt_bytes(entry['bytes']):>9}")
 
 
+def add_user_ensure_arguments(user_ensure_parser):
+    """Shared argument definitions for the CLI and role compatibility input."""
+    user_ensure_parser.add_argument("--name", required=True, help="User ID (Nextcloud username)")
+    provisioning_mode = user_ensure_parser.add_mutually_exclusive_group()
+    provisioning_mode.add_argument(
+        "--managed",
+        action="store_true",
+        help=(
+            "Record the fields this call writes as set by provisioning. The web "
+            "UI then refuses to edit them, and a field left out of a later call "
+            "is released."
+        ),
+    )
+    provisioning_mode.add_argument(
+        "--seed",
+        action="store_true",
+        help=(
+            "Write a new user in full, but on an existing one only fill an "
+            "empty SMS number or an unbound WhatsApp binding. Releases every "
+            "field this user had managed, so the web UI owns them."
+        ),
+    )
+    user_ensure_parser.add_argument("--display-name", help="Display name shown in prompts")
+    user_ensure_parser.add_argument("--tz", "--timezone", dest="tz", help="IANA timezone (e.g. America/Los_Angeles)")
+    user_ensure_parser.add_argument(
+        "--email", action="append", help="User email address (repeatable; replaces existing list when passed)"
+    )
+    sms_assignment = user_ensure_parser.add_mutually_exclusive_group()
+    sms_assignment.add_argument(
+        "--sms-number",
+        help=(
+            "Bind an exact E.164 phone number. The number gains full authority "
+            "to create tasks and answer pending confirmations as this user."
+        ),
+    )
+    sms_assignment.add_argument(
+        "--clear-sms-number",
+        action="store_true",
+        help="Remove the user's SMS identity binding.",
+    )
+    # Not one mutually exclusive group: `--whatsapp-number` and
+    # `--whatsapp-bsuid` are the documented explicit-enrollment pair (a
+    # username-only user cannot bootstrap by phone), while each of the two
+    # destructive flags conflicts with everything else.
+    whatsapp_removal = user_ensure_parser.add_mutually_exclusive_group()
+    whatsapp_removal.add_argument(
+        "--whatsapp-number",
+        help=(
+            "Bind an exact E.164 WhatsApp number. Used for the first binding "
+            "and as an outbound fallback; changing it clears the learned "
+            "BSUID unless --whatsapp-bsuid is given in the same command."
+        ),
+    )
+    whatsapp_removal.add_argument(
+        "--clear-whatsapp",
+        action="store_true",
+        help="Remove the user's whole WhatsApp binding.",
+    )
+    whatsapp_removal.add_argument(
+        "--reset-whatsapp-identity",
+        action="store_true",
+        help=(
+            "Clear only the learned WhatsApp identity (BSUID, send id, "
+            "username, service window), keeping the bootstrap number."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--whatsapp-bsuid",
+        help=(
+            "Bind a Business-Scoped User ID explicitly. The durable WhatsApp "
+            "identity; required for a user who has no phone number on "
+            "WhatsApp."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--trusted-sender", action="append",
+        help="Trusted email sender pattern (repeatable; fnmatch syntax)",
+    )
+    user_ensure_parser.add_argument(
+        "--quiet-sender", action="append",
+        help="Quiet email sender pattern — mail filed silently, no task "
+             "(repeatable; fnmatch syntax)",
+    )
+    user_ensure_parser.add_argument("--log-channel", help="Talk room token for verbose execution logs")
+    user_ensure_parser.add_argument("--alerts-channel", help="Talk room token for confirmations and alerts")
+    user_ensure_parser.add_argument("--max-foreground-workers", type=int, help="Per-user fg worker cap (0 = global default)")
+    user_ensure_parser.add_argument("--max-background-workers", type=int, help="Per-user bg worker cap (0 = global default)")
+    user_ensure_parser.add_argument(
+        "--disabled-skill", action="append",
+        help="Skill name to exclude from selection (repeatable)",
+    )
+    user_ensure_parser.add_argument(
+        "--disabled-module", action="append",
+        help=(
+            "Module to opt this user out of (repeatable). One of "
+            "feeds, money, location. Pass an empty value to clear."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--default-destination",
+        help=(
+            "Fallback delivery descriptor (e.g. talk, email, both, talk:<token>). "
+            "Default 'talk'."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--default-room",
+        metavar="TOKEN",
+        help=(
+            "Canonical room token a destination naming no room lands in, on "
+            "web and on Talk. Empty clears it, and the per-surface default is "
+            "worked out again."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--route", action="append", metavar="PURPOSE=DESCRIPTOR",
+        help=(
+            "Per-purpose delivery route (repeatable; replaces the routing table "
+            "when passed). PURPOSE is one of reply/alert/log/briefing/"
+            "notification; DESCRIPTOR is an output_target like email or "
+            "matrix:<room>. Empty descriptor clears that purpose."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--outbound-approval",
+        metavar="POLICY",
+        help=(
+            "Outbound email approval policy for this user: 'off' (send "
+            "everything), 'untrusted' (hold unless every recipient is trusted), "
+            "or 'all' (hold unless every recipient is one of their own "
+            "addresses). Pass '' to follow the operator's "
+            "[email] outbound_approval_floor, which is the default. The floor "
+            "is a minimum — a value weaker than it has no effect."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--external-turn-display",
+        # From the shared constant, not a literal: argparse rejects the value
+        # before `cmd_user_ensure`'s own check ever runs, so a hardcoded list
+        # here is the one that decides, and a fourth copy would make adding a
+        # display mode fail with argparse's message while the handler's own
+        # error advertised the value as valid.
+        choices=list(user_profiles.EXTERNAL_TURN_DISPLAY_VALUES),
+        help=(
+            "How much of a turn that arrived from outside the room (an email "
+            "from an external contact) is shown inline in web chat: 'full', "
+            "'collapsed' (default — sender and subject, expandable), or "
+            "'hidden'. The turn itself is always shown."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--default-briefings",
+        dest="default_briefings", default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Seed the shared [[default_briefings]] set into this user (default on). "
+            "Pass --no-default-briefings to opt out; already-seeded briefings are "
+            "left intact."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--briefing-email-html",
+        dest="briefing_email_html", default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Send briefing email as multipart/alternative — HTML with clickable "
+            "links plus a plain-text fallback (default on). Pass "
+            "--no-briefing-email-html for plain text only."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--timezone-follow-location",
+        dest="timezone_follow_location", default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Set this user's timezone from their GPS position once they have "
+            "settled in a new zone (default off). Needs the location module; "
+            "the user is notified on every change."
+        ),
+    )
+
+
+def add_resource_arguments(resource_parser):
+    """Shared argument definitions for the CLI and role compatibility input."""
+    resource_parser.add_argument("-u", "--user", required=True, help="User ID")
+    resource_parser.add_argument("-t", "--type", choices=["folder"], help="Resource type (folder only — other types were retired by the Resources sunset)")
+    resource_parser.add_argument("-p", "--path", help="Resource path (required for folder)")
+    resource_parser.add_argument("-n", "--name", help="Display name")
+    resource_parser.add_argument("--permissions", help="Permissions: read (default) or readwrite")
+    resource_parser.add_argument(
+        "--extras", action="append",
+        help="Extra resource-specific config as key=value (repeatable). "
+             "Values parsed as JSON when possible (e.g. default_radius=75 → int).",
+    )
+    resource_parser.add_argument(
+        "--extras-json",
+        help="Full extras payload as a JSON object. Overrides --extras pairs.",
+    )
+    resource_parser.add_argument(
+        "--extras-clear", action="store_true",
+        help="Wipe extras on the row. Use to explicitly clear what --extras would otherwise preserve.",
+    )
+
+
+def add_briefing_arguments(briefing_parser):
+    """Shared argument definitions for the CLI and role compatibility input."""
+    briefing_parser.add_argument("-u", "--user", help="User id (required for ensure/delete)")
+    briefing_parser.add_argument("--name", help="Briefing name (e.g. 'morning')")
+    briefing_parser.add_argument("--cron", help="Cron expression (user TZ), e.g. '0 7 * * 1-5'")
+    briefing_parser.add_argument(
+        "--conversation-token",
+        help="Talk room token (required when output includes 'talk')",
+    )
+    briefing_parser.add_argument(
+        "--output", default="talk",
+        help="Delivery target: talk / email / ntfy, or a comma list / "
+             "surface:channel descriptor (validated by parse_output_target)",
+    )
+    briefing_parser.add_argument(
+        "--disabled",
+        action="store_true",
+        help="Mark this briefing as disabled (drops the corresponding TOML entry without scheduling)",
+    )
+
+
 def main():
     # `istota migrate import-bare-metal …` belongs to the module, whose own
     # `--config` names the file it writes rather than the one to load. Peeled
@@ -4757,6 +4985,7 @@ def main():
     apply_parser.add_argument("--continue-on-error", action="store_true", help="Continue later users after a runtime failure")
     apply_parser.add_argument("--prune", action="store_true", help="Prune undeclared entries in supplied collections")
     apply_parser.add_argument("--patch", action="append", metavar="SOURCE=DEST", help="Rewrite selected path prefixes; repeat for several patches")
+    apply_parser.add_argument("--input-format", choices=("plan", "role-vars"), default="plan", help="Plan or private role variable envelope")
     apply_parser.add_argument("--secrets-file", help="Private TOML/JSON credential sidecar")
     apply_parser.add_argument("--prune-secrets", action="store_true", help="Prune eligible named secret slots; requires --prune")
 
@@ -5074,47 +5303,14 @@ def main():
     # for mounting an out-of-workspace path into the sandbox.
     resource_parser = subparsers.add_parser("resource", help="Manage user folder mounts")
     resource_parser.add_argument("action", choices=["list", "add", "ensure"], help="Action")
-    resource_parser.add_argument("-u", "--user", required=True, help="User ID")
-    resource_parser.add_argument("-t", "--type", choices=["folder"], help="Resource type (folder only — other types were retired by the Resources sunset)")
-    resource_parser.add_argument("-p", "--path", help="Resource path (required for folder)")
-    resource_parser.add_argument("-n", "--name", help="Display name")
-    resource_parser.add_argument("--permissions", help="Permissions: read (default) or readwrite")
-    resource_parser.add_argument(
-        "--extras", action="append",
-        help="Extra resource-specific config as key=value (repeatable). "
-             "Values parsed as JSON when possible (e.g. default_radius=75 → int).",
-    )
-    resource_parser.add_argument(
-        "--extras-json",
-        help="Full extras payload as a JSON object. Overrides --extras pairs.",
-    )
-    resource_parser.add_argument(
-        "--extras-clear", action="store_true",
-        help="Wipe extras on the row. Use to explicitly clear what --extras would otherwise preserve.",
-    )
+    add_resource_arguments(resource_parser)
 
     # briefing
     briefing_parser = subparsers.add_parser("briefing", help="Manage briefings")
     briefing_parser.add_argument(
         "action", choices=["list", "ensure", "delete"], help="Action",
     )
-    briefing_parser.add_argument("-u", "--user", help="User id (required for ensure/delete)")
-    briefing_parser.add_argument("--name", help="Briefing name (e.g. 'morning')")
-    briefing_parser.add_argument("--cron", help="Cron expression (user TZ), e.g. '0 7 * * 1-5'")
-    briefing_parser.add_argument(
-        "--conversation-token",
-        help="Talk room token (required when output includes 'talk')",
-    )
-    briefing_parser.add_argument(
-        "--output", default="talk",
-        help="Delivery target: talk / email / ntfy, or a comma list / "
-             "surface:channel descriptor (validated by parse_output_target)",
-    )
-    briefing_parser.add_argument(
-        "--disabled",
-        action="store_true",
-        help="Mark this briefing as disabled (drops the corresponding TOML entry without scheduling)",
-    )
+    add_briefing_arguments(briefing_parser)
 
     # secret (encrypted per-user credentials)
     secret_parser = subparsers.add_parser(
@@ -5215,184 +5411,8 @@ def main():
         "ensure",
         help="Create or update a user profile row (idempotent; for Ansible)",
     )
-    user_ensure_parser.add_argument("--name", required=True, help="User ID (Nextcloud username)")
-    provisioning_mode = user_ensure_parser.add_mutually_exclusive_group()
-    provisioning_mode.add_argument(
-        "--managed",
-        action="store_true",
-        help=(
-            "Record the fields this call writes as set by provisioning. The web "
-            "UI then refuses to edit them, and a field left out of a later call "
-            "is released."
-        ),
-    )
-    provisioning_mode.add_argument(
-        "--seed",
-        action="store_true",
-        help=(
-            "Write a new user in full, but on an existing one only fill an "
-            "empty SMS number or an unbound WhatsApp binding. Releases every "
-            "field this user had managed, so the web UI owns them."
-        ),
-    )
-    user_ensure_parser.add_argument("--display-name", help="Display name shown in prompts")
-    user_ensure_parser.add_argument("--tz", "--timezone", dest="tz", help="IANA timezone (e.g. America/Los_Angeles)")
-    user_ensure_parser.add_argument(
-        "--email", action="append", help="User email address (repeatable; replaces existing list when passed)"
-    )
-    sms_assignment = user_ensure_parser.add_mutually_exclusive_group()
-    sms_assignment.add_argument(
-        "--sms-number",
-        help=(
-            "Bind an exact E.164 phone number. The number gains full authority "
-            "to create tasks and answer pending confirmations as this user."
-        ),
-    )
-    sms_assignment.add_argument(
-        "--clear-sms-number",
-        action="store_true",
-        help="Remove the user's SMS identity binding.",
-    )
-    # Not one mutually exclusive group: `--whatsapp-number` and
-    # `--whatsapp-bsuid` are the documented explicit-enrollment pair (a
-    # username-only user cannot bootstrap by phone), while each of the two
-    # destructive flags conflicts with everything else.
-    whatsapp_removal = user_ensure_parser.add_mutually_exclusive_group()
-    whatsapp_removal.add_argument(
-        "--whatsapp-number",
-        help=(
-            "Bind an exact E.164 WhatsApp number. Used for the first binding "
-            "and as an outbound fallback; changing it clears the learned "
-            "BSUID unless --whatsapp-bsuid is given in the same command."
-        ),
-    )
-    whatsapp_removal.add_argument(
-        "--clear-whatsapp",
-        action="store_true",
-        help="Remove the user's whole WhatsApp binding.",
-    )
-    whatsapp_removal.add_argument(
-        "--reset-whatsapp-identity",
-        action="store_true",
-        help=(
-            "Clear only the learned WhatsApp identity (BSUID, send id, "
-            "username, service window), keeping the bootstrap number."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--whatsapp-bsuid",
-        help=(
-            "Bind a Business-Scoped User ID explicitly. The durable WhatsApp "
-            "identity; required for a user who has no phone number on "
-            "WhatsApp."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--trusted-sender", action="append",
-        help="Trusted email sender pattern (repeatable; fnmatch syntax)",
-    )
-    user_ensure_parser.add_argument(
-        "--quiet-sender", action="append",
-        help="Quiet email sender pattern — mail filed silently, no task "
-             "(repeatable; fnmatch syntax)",
-    )
-    user_ensure_parser.add_argument("--log-channel", help="Talk room token for verbose execution logs")
-    user_ensure_parser.add_argument("--alerts-channel", help="Talk room token for confirmations and alerts")
-    user_ensure_parser.add_argument("--max-foreground-workers", type=int, help="Per-user fg worker cap (0 = global default)")
-    user_ensure_parser.add_argument("--max-background-workers", type=int, help="Per-user bg worker cap (0 = global default)")
-    user_ensure_parser.add_argument(
-        "--disabled-skill", action="append",
-        help="Skill name to exclude from selection (repeatable)",
-    )
-    user_ensure_parser.add_argument(
-        "--disabled-module", action="append",
-        help=(
-            "Module to opt this user out of (repeatable). One of "
-            "feeds, money, location. Pass an empty value to clear."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--default-destination",
-        help=(
-            "Fallback delivery descriptor (e.g. talk, email, both, talk:<token>). "
-            "Default 'talk'."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--default-room",
-        metavar="TOKEN",
-        help=(
-            "Canonical room token a destination naming no room lands in, on "
-            "web and on Talk. Empty clears it, and the per-surface default is "
-            "worked out again."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--route", action="append", metavar="PURPOSE=DESCRIPTOR",
-        help=(
-            "Per-purpose delivery route (repeatable; replaces the routing table "
-            "when passed). PURPOSE is one of reply/alert/log/briefing/"
-            "notification; DESCRIPTOR is an output_target like email or "
-            "matrix:<room>. Empty descriptor clears that purpose."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--outbound-approval",
-        metavar="POLICY",
-        help=(
-            "Outbound email approval policy for this user: 'off' (send "
-            "everything), 'untrusted' (hold unless every recipient is trusted), "
-            "or 'all' (hold unless every recipient is one of their own "
-            "addresses). Pass '' to follow the operator's "
-            "[email] outbound_approval_floor, which is the default. The floor "
-            "is a minimum — a value weaker than it has no effect."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--external-turn-display",
-        # From the shared constant, not a literal: argparse rejects the value
-        # before `cmd_user_ensure`'s own check ever runs, so a hardcoded list
-        # here is the one that decides, and a fourth copy would make adding a
-        # display mode fail with argparse's message while the handler's own
-        # error advertised the value as valid.
-        choices=list(user_profiles.EXTERNAL_TURN_DISPLAY_VALUES),
-        help=(
-            "How much of a turn that arrived from outside the room (an email "
-            "from an external contact) is shown inline in web chat: 'full', "
-            "'collapsed' (default — sender and subject, expandable), or "
-            "'hidden'. The turn itself is always shown."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--default-briefings",
-        dest="default_briefings", default=None,
-        action=argparse.BooleanOptionalAction,
-        help=(
-            "Seed the shared [[default_briefings]] set into this user (default on). "
-            "Pass --no-default-briefings to opt out; already-seeded briefings are "
-            "left intact."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--briefing-email-html",
-        dest="briefing_email_html", default=None,
-        action=argparse.BooleanOptionalAction,
-        help=(
-            "Send briefing email as multipart/alternative — HTML with clickable "
-            "links plus a plain-text fallback (default on). Pass "
-            "--no-briefing-email-html for plain text only."
-        ),
-    )
-    user_ensure_parser.add_argument(
-        "--timezone-follow-location",
-        dest="timezone_follow_location", default=None,
-        action=argparse.BooleanOptionalAction,
-        help=(
-            "Set this user's timezone from their GPS position once they have "
-            "settled in a new zone (default off). Needs the location module; "
-            "the user is notified on every change."
-        ),
-    )
+    add_user_ensure_arguments(user_ensure_parser)
+
     # user show  (Phase 6: dump the DB row as JSON)
     user_show_parser = user_subparsers.add_parser("show", help="Show stored profile row as JSON")
     user_show_parser.add_argument("--name", required=True, help="User ID")

@@ -441,7 +441,24 @@ def _sections(plan: dict) -> tuple[Meta, object]:
     return parsed.meta, parsed.config
 
 
-def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None, patches=None) -> int:
+def load_input(path, *, input_format="plan", stdin=None):
+    """Load the plan and any embedded private role sidecar through one parser."""
+    from istota.settings_plan.schema import Sidecar, parse_sidecar
+
+    if input_format == "plan":
+        return load_plan(path, stdin=stdin), Sidecar()
+    if input_format != "role-vars":
+        raise PlanError("unsupported input format")
+    from istota.settings_plan.role_input import convert_role_input
+    from istota.settings_plan.secrets import read_private_document
+
+    document = (load_plan(path, stdin=stdin) if str(path) == "-" else
+                read_private_document(path, field="role_vars", option="role-vars input"))
+    plan, sidecar = convert_role_input(document)
+    return plan, parse_sidecar(sidecar)
+
+
+def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None, patches=None, input_format="plan") -> int:
     """Validate a plan without reading or writing any config. 0 valid, 1 refused.
 
     With `as_json`, prints `{"problems": [...], "error": str | null}` and
@@ -453,7 +470,8 @@ def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None, patches
     try:
         from istota.settings_plan.paths import patch_document
 
-        document, patch_warnings = patch_document(load_plan(plan_path, stdin=stdin), patches)
+        document, _ = load_input(plan_path, input_format=input_format, stdin=stdin)
+        document, patch_warnings = patch_document(document, patches)
         plan = parse_plan(document)
     except SchemaError as exc:
         result = CheckResult(problems=[exc.problem])
@@ -483,6 +501,7 @@ def run(
     users: list[str] | None = None, continue_on_error: bool = False,
     prune: bool = False, prune_secrets: bool = False,
     secrets_file: Path | str | None = None, patches: list[str] | None = None,
+    input_format: str = "plan",
 ) -> int:
     """Plan every section, print, and write unless `dry_run`. Returns the exit code."""
     from istota.settings_plan import engine
@@ -494,12 +513,15 @@ def run(
     try:
         from istota.settings_plan.paths import patch_document
 
-        document, patch_warnings = patch_document(load_plan(plan_path, stdin=stdin), patches)
+        document, context.sidecar = load_input(plan_path, input_format=input_format, stdin=stdin)
+        document, patch_warnings = patch_document(document, patches)
         context.warnings.extend(patch_warnings)
         plan = parse_plan(document)
         if secrets_file is not None:
             from istota.settings_plan.secrets import read_sidecar
 
+            if context.sidecar.users or context.sidecar.config:
+                raise PlanError("use either embedded role credentials or --secrets-file, not both")
             context.sidecar = read_sidecar(secrets_file)
         with engine.apply_lock(config_path):
             operations = engine.build_plan(plan, context, options)
