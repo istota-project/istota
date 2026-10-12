@@ -100,6 +100,7 @@ def _read_cap(file: ConfigFile) -> int:
 
 def list_files(config: "Config", user_id: str) -> list[dict]:
     skills = overlay_skill_names(config, user_id)
+    user_root = config.workspace_root(user_id)
     names = [*CORE_FILES, *(SKILL_PREFIX + skill for skill in skills)]
     directories: dict[str, Path | None] = {}
     rows = []
@@ -109,8 +110,11 @@ def list_files(config: "Config", user_id: str) -> list[dict]:
         if file.kind not in directories:
             directories[file.kind] = _directory(config, user_id, file)
         directory = directories[file.kind]
-        row = {"name": name, "kind": file.kind, "exists": False, "size": None, "editable": False}
+        row = {"name": name, "kind": file.kind, "exists": False, "size": None, "editable": False, "view_path": None}
         if directory is not None:
+            if user_root is not None:
+                relative = (directory / file.leaf).relative_to(user_root.resolve())
+                row["view_path"] = f"/Users/{user_id}/{relative.as_posix()}"
             try:
                 st = os.lstat(directory / file.leaf)
             except FileNotFoundError:

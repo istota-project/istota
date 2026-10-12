@@ -358,6 +358,36 @@ async def api_workspace_delete(
         return _filesystem_error(config, exc, "home", write=True)
 
 
+def _drive_token(config, username):
+    with db.get_db(config.db_path) as conn:
+        scopes = db.get_google_scopes(conn, username)
+        if not config.google_workspace.enabled or levels_from_scopes(scopes or []).get("drive") not in {"readonly", "full"}:
+            raise drive.DriveError(409, "drive_not_granted")
+        token = access_token_for(conn, config, username)
+    if token is None:
+        raise drive.DriveError(502, drive.RECONNECT_MESSAGE)
+    return token
+
+
+@router.get("/drive/parent")
+async def api_workspace_drive_parent(
+    request: Request, file_id: str, user: dict = Depends(require_auth),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+
+    def query():
+        if not drive.DRIVE_ID.fullmatch(file_id):
+            raise drive.DriveError(400, "Invalid Drive file.")
+        return {"folder": drive.parent_folder(_drive_token(config, user["username"]), file_id)}
+
+    try:
+        return await asyncio.to_thread(query)
+    except drive.DriveError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+
 @router.get("/drive/list")
 async def api_workspace_drive_list(
     request: Request, folder: str = "root", page_token: str | None = None,
@@ -369,13 +399,7 @@ async def api_workspace_drive_list(
 
     def query():
         drive.validate_folder(folder)
-        with db.get_db(config.db_path) as conn:
-            scopes = db.get_google_scopes(conn, user["username"])
-            if not config.google_workspace.enabled or levels_from_scopes(scopes or []).get("drive") not in {"readonly", "full"}:
-                raise drive.DriveError(409, "drive_not_granted")
-            token = access_token_for(conn, config, user["username"])
-        if token is None:
-            raise drive.DriveError(502, drive.RECONNECT_MESSAGE)
+        token = _drive_token(config, user["username"])
         items, next_page = drive.list_folder(token, folder, page_token)
         return {"items": [asdict(item) for item in items], "next_page_token": next_page}
 

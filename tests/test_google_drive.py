@@ -84,3 +84,28 @@ def test_upstream_errors_are_redacted(upstream, caplog, status):
         assert caught.value.message == "Google rejected the stored credential. Reconnect in Settings."
     assert "private upstream detail" not in str(caught.value) + caplog.text
     assert str(status) in caplog.text
+
+
+def test_parent_folder_uses_file_metadata(upstream):
+    requests, options, response = upstream
+    response["body"] = {"parents": ["folder_12345"]}
+    assert drive.parent_folder("test-token", "file_123456") == "folder_12345"
+    assert requests[0].url.path == "/drive/v3/files/file_123456"
+    assert requests[0].url.params == httpx.QueryParams({"fields": "parents", "supportsAllDrives": "true"})
+    assert requests[0].headers["authorization"] == "Bearer test-token"
+    assert options == [{"trust_env": False, "timeout": 10.0}]
+
+
+def test_parent_folder_refuses_bad_ids_and_missing_parent(upstream):
+    with pytest.raises(drive.DriveError):
+        drive.parent_folder("test-token", "bad/id")
+    assert not upstream[0]
+    upstream[2]["body"] = {"parents": []}
+    with pytest.raises(drive.DriveError, match="Containing folder is unavailable"):
+        drive.parent_folder("test-token", "file_123456")
+
+
+def test_parent_folder_redacts_upstream_errors(upstream):
+    upstream[2].update(status=401, body={"error": "private detail"})
+    with pytest.raises(drive.DriveError, match="Reconnect in Settings"):
+        drive.parent_folder("test-token", "file_123456")

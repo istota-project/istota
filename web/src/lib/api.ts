@@ -5548,6 +5548,10 @@ export interface WorkspacePin extends WorkspacePinInput {
 export function getWorkspacePins(): Promise<{ pins: WorkspacePin[] }> {
   return apiFetch('/workspace/pins');
 }
+
+export function getWorkspaceDriveParent(fileId: string): Promise<{ folder: string }> {
+  return apiFetch(`/workspace/drive/parent?${new URLSearchParams({ file_id: fileId })}`);
+}
 export function putWorkspacePin(pin: WorkspacePinInput): Promise<{ pin: WorkspacePin }> {
   return apiFetch('/workspace/pins', { method: 'PUT', body: JSON.stringify(pin) });
 }
@@ -5559,6 +5563,7 @@ export function deleteWorkspacePin(id: number): Promise<{ status: string }> {
  * HEARTBEAT.md, or `skills/<skill>` for a skill's overlay. */
 export interface WorkspaceConfigFile {
   name: string;
+  view_path?: string | null;
   kind: 'config' | 'skill';
   exists: boolean;
   size: number | null;
