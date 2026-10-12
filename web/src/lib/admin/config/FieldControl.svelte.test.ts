@@ -22,6 +22,37 @@ function mount(field: AdminConfigField, extra: { op?: ConfigOp; secretPending?: 
   return { ...view, onOp, onSecret };
 }
 
+describe('the field doc', () => {
+  it.each([
+    ['a string field', configField({ doc: 'Where mail is read from.' })],
+    ['a bool field', configField({ doc: 'Where mail is read from.', editor: 'bool', value: true })],
+    [
+      'a credential field',
+      configField({
+        doc: 'Where mail is read from.',
+        secret: true,
+        set: true,
+        value: null,
+        editor: 'secret',
+        credential: { kind: 'file', name: 'istota_email_imap_password' },
+      }),
+    ],
+  ])('is behind the label hint on %s, not a disclosure', async (_kind, field) => {
+    const { container } = mount(field);
+    expect(container.querySelector('details')).toBeNull();
+    expect(screen.queryByText('Where mail is read from.')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText(`About ${field.name}`));
+    expect(await screen.findByText('Where mail is read from.')).toBeInTheDocument();
+  });
+
+  it('puts Reset to default on the control row', () => {
+    const { container } = mount(configField({ in_file: true }));
+    const reset = screen.getByRole('button', { name: 'Reset to default' });
+    expect(reset.closest('.field-row.inline-meta')).toBe(container.querySelector('.field-row'));
+    expect(container.querySelector('.field-row .field.inline')).not.toBeNull();
+  });
+});
+
 describe('a control per editor kind', () => {
   it('a string field emits a set at its path', async () => {
     const { onOp } = mount(configField({ path: ['email', 'imap_host'], value: 'old' }));

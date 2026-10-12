@@ -246,6 +246,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Workspace no longer lists a Talk attachments location on a local workspace, where no `Talk/` folder exists. Files posted in Talk are under each room's own location there.
 
+- Admin Configuration showed two warnings for the retired vault sync interval. It now shows only the retirement warning. Review changes and Discard now sit in the app bar, in the same place as the other settings pages' Save button.
+
 - `istota-stack localize-workspace` writes `MOVED.md` into the users' Nextcloud bot folders only after the config has moved, so a copy that stops, or a `--copy-only` run, no longer leaves a note saying edits there are ignored on an install still running on the mount. A user's own `MOVED.md` is kept and copied instead of being overwritten and left out. A non-empty `/data/workspace` is refused before the stack stops, and the rollback steps now remove the notes (`istota workspace moved-note --remove`) and the memory index entries for the local copy.
 
 - A finished `TASKS.md` task no longer stays marked `[~]` when the file was being saved from the web editor at the moment it finished. The next poll writes the `[x]` or `[!]` marker and its result.

@@ -24,8 +24,20 @@
       takes it out of the accessibility tree, so it is not announced when it
       does not apply.
     -->
-    <span class="dirty-badge" class:reserved={!save.dirty}>Unsaved changes</span>
-    <Button variant="primary" size="sm" onclick={save.save} disabled={!save.dirty || save.saving}>
+    <span class="dirty-badge" class:reserved={!save.dirty}
+      >{save.dirtyLabel ?? 'Unsaved changes'}</span
+    >
+    {#if save.discard}
+      <Button variant="ghost" size="sm" onclick={save.discard} disabled={!save.dirty || save.saving}
+        >Discard</Button
+      >
+    {/if}
+    <Button
+      variant="primary"
+      size="sm"
+      onclick={save.save}
+      disabled={!save.dirty || save.saving || save.disabled}
+    >
       {save.saving ? 'Saving…' : (save.label ?? 'Save changes')}
     </Button>
   </span>

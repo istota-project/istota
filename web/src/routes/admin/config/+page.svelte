@@ -14,6 +14,7 @@
   } from '$lib/api';
   import { Button, Input, NoticeBanner } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
+  import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
   import FieldControl from '$lib/admin/config/FieldControl.svelte';
   import HistoryList from '$lib/admin/config/HistoryList.svelte';
@@ -60,6 +61,22 @@
   let opCount = $derived(Object.keys(draft.ops).length);
   /** The form's fields, locked while the raw editor holds the whole file. */
   let formEditable = $derived(editable && draft.raw === null);
+
+  useSettingsSave(() =>
+    editable
+      ? {
+          dirty: count > 0,
+          saving: false,
+          disabled: requestId !== null || !view?.document_digest,
+          label: 'Review changes',
+          dirtyLabel: count > 0 ? (count === 1 ? '1 change' : `${count} changes`) : undefined,
+          save: () => {
+            reviewing = true;
+          },
+          discard,
+        }
+      : null,
+  );
 
   const RESOURCE_LABELS: Record<ConfigResource, string> = {
     config: 'config.toml',
@@ -443,21 +460,6 @@
       />
     {/if}
 
-    {#if count > 0}
-      <div class="change-footer" role="region" aria-label="Pending changes">
-        <span>{count === 1 ? '1 change' : `${count} changes`}</span>
-        <div class="footer-actions">
-          <Button variant="ghost" onclick={discard}>Discard</Button>
-          <Button
-            variant="primary"
-            onclick={() => (reviewing = true)}
-            disabled={!editable || requestId !== null || !view.document_digest}
-            >Review changes</Button
-          >
-        </div>
-      </div>
-    {/if}
-
     {#if reviewing && view.document_digest}
       <ReviewDialog
         changeSet={buildChangeSet(draft, view.document_digest)}
@@ -513,25 +515,5 @@
     justify-content: space-between;
     gap: var(--space-2);
     padding: var(--space-1) 0;
-  }
-
-  .change-footer {
-    position: sticky;
-    bottom: 0;
-    z-index: var(--z-sticky);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-md);
-  }
-
-  .footer-actions {
-    display: flex;
-    gap: var(--space-2);
   }
 </style>
