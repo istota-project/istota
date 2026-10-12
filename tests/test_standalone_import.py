@@ -177,6 +177,54 @@ def _stage(tmp_path: Path, *, config: str = STANDALONE_CONFIG, profiles: tuple[s
     return source
 
 
+#: An older standalone install's istota.env: every credential, no master key.
+ENV_WITHOUT_KEY = "\n".join(
+    line for line in STANDALONE_ENV.splitlines() if not line.startswith("ISTOTA_SECRET_KEY=")
+) + "\n"
+
+#: A row in each table the master key encrypts into, as its writer leaves one.
+ENCRYPTED_ROWS = {
+    "secrets": (
+        "INSERT INTO secrets (user_id, service, key, encrypted_value) VALUES ('alice', 'karakeep', 'api_key', :ct)"
+    ),
+    "secrets_history": (
+        "INSERT INTO secrets_history (user_id, service, key, encrypted_value, op, actor) "
+        "VALUES ('alice', 'karakeep', 'api_key', :ct, 'update', 'alice')"
+    ),
+    "google_oauth_tokens": (
+        "INSERT INTO google_oauth_tokens (user_id, access_token, refresh_token, token_expiry) "
+        "VALUES ('alice', :ct, :ct, '2026-10-12T00:00:00Z')"
+    ),
+}
+
+
+def _framework_conn(source: Path) -> sqlite3.Connection:
+    return sqlite3.connect(source / "db" / DATE / "framework" / "istota.db")
+
+
+def _encrypted_row(source: Path, table: str) -> None:
+    from cryptography.fernet import Fernet
+
+    conn = _framework_conn(source)
+    try:
+        conn.execute(ENCRYPTED_ROWS[table], {"ct": Fernet(Fernet.generate_key()).encrypt(b"value")})
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _plaintext_google_row(source: Path) -> None:
+    conn = _framework_conn(source)
+    try:
+        conn.execute(
+            "INSERT INTO google_oauth_tokens (user_id, access_token, refresh_token, token_expiry) "
+            "VALUES ('alice', 'ya29.plain', '1//plain', '2026-10-12T00:00:00Z')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class Target:
     """`/data`, the config file, `secrets/` and the staging directory, as
     `create --no-setup` and `istota-stack import-standalone` leave them."""
@@ -392,9 +440,17 @@ class TestRefusals:
         err = self._refused(target, source)
         assert "ALICE" in err
 
-    def test_no_master_key_is_refused(self, target, source):
-        err = self._refused(target, source, env="ISTOTA_BRAIN_NATIVE_API_KEY=native-key\n")
+    def test_a_master_key_line_too_short_to_use_is_refused(self, target, source):
+        err = self._refused(target, source, env="ISTOTA_SECRET_KEY=short\nISTOTA_BRAIN_NATIVE_API_KEY=native-key\n")
         assert "ISTOTA_SECRET_KEY" in err
+
+    @pytest.mark.parametrize("table", sorted(ENCRYPTED_ROWS))
+    def test_no_master_key_with_rows_encrypted_under_one_is_refused(self, tmp_path, target, table):
+        source = _stage(tmp_path)
+        _encrypted_row(source, table)
+        err = self._refused(target, source, env=ENV_WITHOUT_KEY)
+        assert "ISTOTA_SECRET_KEY" in err
+        assert f"{table} (1 row)" in err
 
     def test_an_unknown_variable_is_refused_by_name_only(self, target, source):
         err = self._refused(target, source, env=STANDALONE_ENV + "MY_OTHER_TOKEN=hunter2\n")
@@ -427,6 +483,88 @@ class TestRefusals:
     def test_a_manifest_of_another_format_is_refused(self, target, source):
         (source / "MANIFEST").write_text("format=1\n")
         self._refused(target, source)
+
+
+class TestAnInstallWithNoMasterKey:
+    """An older standalone install's istota.env has no ISTOTA_SECRET_KEY. With
+    nothing in its database encrypted under one, the stack gets a new key, as
+    `istota setup` makes one, and every other credential still comes across."""
+
+    def test_a_new_key_is_made_and_the_credentials_come_across(self, target, source):
+        code, out, err = _run(target, source, env=ENV_WITHOUT_KEY)
+        assert code == 0, out + err
+        key = (target.data / ".secret_key").read_text()
+        assert len(key) == 64 and set(key) <= set("0123456789abcdef")
+        assert key not in out + err
+        assert ((target.data / ".secret_key").stat().st_mode & 0o777) == 0o600
+        assert (target.secrets / "istota_brain_native_api_key").read_text() == "native-key"
+        assert (target.secrets / "istota_caldav_password").read_text() == "caldav-password"
+        assert "new master key" in out
+        assert target.rows("SELECT prompt FROM tasks") == [("look",)]
+
+    def test_a_plaintext_google_token_is_not_counted(self, tmp_path, target):
+        """Without a key the standalone never encrypted its Google tokens; the
+        stack's migration encrypts them under the new key at its first start."""
+        source = _stage(tmp_path)
+        _plaintext_google_row(source)
+        code, out, err = _run(target, source, env=ENV_WITHOUT_KEY)
+        assert code == 0, out + err
+        assert (target.data / ".secret_key").is_file()
+
+    def test_a_key_already_on_the_vm_is_kept(self, target, source):
+        """A partial run made one; the re-run keeps it rather than refusing a
+        key that differs from a freshly made one."""
+        (target.data / ".secret_key").write_text(OTHER_KEY)
+        code, out, err = _run(target, source, env=ENV_WITHOUT_KEY)
+        assert code == 0, out + err
+        assert (target.data / ".secret_key").read_text() == OTHER_KEY
+
+    def test_a_dry_run_says_so_and_writes_nothing(self, target, source):
+        before = target.snapshot()
+        code, out, err = _run(target, source, "--dry-run", env=ENV_WITHOUT_KEY)
+        assert code == 0, out + err
+        assert "new master key" in out
+        assert target.snapshot() == before
+
+
+def test_the_encrypted_tables_are_every_table_the_master_key_writes():
+    """`credentials.store.MASTER_KEY_COLUMNS` is what the import counts. It is
+    held to the code: every table the store inserts into, and every table a
+    function elsewhere inserts into after taking the store's Fernet. A new
+    module taking it fails the first assertion, so its tables get looked at."""
+    import ast
+    import importlib
+    import re
+
+    from istota.credentials import store
+    from tests.support.drift import source_of
+
+    src = Path(store.__file__).resolve().parents[1]
+    callers = set()
+    for path in src.rglob("*.py"):
+        if path != Path(store.__file__).resolve() and re.search(
+            r"\._get_fernet\(|import[^\n]*\b_get_fernet\b", path.read_text(encoding="utf-8")
+        ):
+            callers.add(str(path.relative_to(src)))
+    # doctor decrypts wallet rows of `secrets` to check them and writes nothing.
+    assert callers == {"db.py", "doctor.py"}
+
+    def inserts(node) -> set[str]:
+        found = set()
+        for leaf in ast.walk(node):
+            if isinstance(leaf, ast.Constant) and isinstance(leaf.value, str):
+                found.update(re.findall(r"INSERT INTO\s+(\w+)", leaf.value))
+        return found
+
+    tables = inserts(ast.parse(source_of(store)))
+    for name in sorted(callers):
+        module = importlib.import_module("istota." + name.removesuffix(".py").replace("/", "."))
+        for fn in ast.walk(ast.parse(source_of(module))):
+            if isinstance(fn, ast.FunctionDef) and any(
+                isinstance(n, ast.Attribute) and n.attr == "_get_fernet" for n in ast.walk(fn)
+            ):
+                tables |= inserts(fn)
+    assert tables == set(store.MASTER_KEY_COLUMNS)
 
 
 class TestADryRun:

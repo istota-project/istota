@@ -28,9 +28,13 @@ container with the stack down (`istota-stack import-standalone`), onto a VM
 made with `create --no-setup`. In order, stopping at the first failure:
 
 1. Checks everything before writing anything: the manifest, a config in the
-   standalone layout, a master key on stdin and a home for every other name in
-   it, user ids that stay distinct on a case-insensitive folder (the rule
-   `lib.user_ids` holds the stack to), no master key or work already there.
+   standalone layout, a home for every name `istota.env` holds, user ids that
+   stay distinct on a case-insensitive folder (the rule `lib.user_ids` holds
+   the stack to), no different master key and no work already there. An older
+   standalone install has no `ISTOTA_SECRET_KEY`: when its database holds
+   nothing encrypted under one (`credentials.store.count_master_key_rows`) the
+   stack gets a new key, as `istota setup` makes one, and otherwise it is
+   refused with the tables and their row counts.
 2. Writes `config.toml` through `container_config_document` for the local VM
    (host folder, local ingress, sandbox on, the native login in place of
    `auth = "none"`), keeping the brain, email, CalDAV and briefing settings and
@@ -403,6 +407,8 @@ class SecretsPlan:
     keys: dict[str, str] = field(default_factory=dict)
     files: dict[str, str] = field(default_factory=dict)
     left: list[str] = field(default_factory=list)
+    #: What became of the master key when istota.env had none.
+    key_note: str = ""
 
 
 def map_secrets(env: dict[str, str], inline: dict[str, str]) -> SecretsPlan:
@@ -428,14 +434,60 @@ def map_secrets(env: dict[str, str], inline: dict[str, str]) -> SecretsPlan:
             "stack (its credentials are the files setup_wizard.SECRET_NAMES lists). Remove the "
             "line from istota.env, or move the value where the stack reads it. Nothing was written."
         )
-    key = plan.keys.get(".secret_key", "")
-    if len(key) < _MIN_KEY_LEN:
-        raise Refusal("istota.env has no usable ISTOTA_SECRET_KEY; every stored credential needs it")
+    key = plan.keys.pop(".secret_key", "")
+    if key and len(key) < _MIN_KEY_LEN:
+        raise Refusal(
+            f"istota.env's ISTOTA_SECRET_KEY is shorter than a usable key ({_MIN_KEY_LEN} characters); "
+            "it cannot be the key the install used"
+        )
+    if key:
+        plan.keys[".secret_key"] = key
     for name, value in inline.items():
         plan.files.setdefault(name, value)
     if not plan.files.get("istota_web_session_secret_key"):
         plan.files["istota_web_session_secret_key"] = secrets.token_hex(32)
     return plan
+
+
+def settle_master_key(source: Source, target: bmi.Target, plan: SecretsPlan) -> None:
+    """A master key for an install whose istota.env has none, or a refusal.
+
+    Without a key the standalone could encrypt nothing, but a key once set and
+    later removed from the file leaves rows only it opens, so the staged
+    database is asked. A key already in `/data` (an earlier partial run's) is
+    kept, since nothing here is encrypted under any key.
+    """
+    from istota.credentials import store as secrets_store
+
+    if plan.keys.get(".secret_key"):
+        return
+    conn = sqlite_util.connect_read_only(source.snapshot / "framework" / "istota.db")
+    try:
+        encrypted = secrets_store.count_master_key_rows(conn)
+    finally:
+        conn.close()
+    if encrypted:
+        listing = ", ".join(
+            f"{table} ({count} row{'' if count == 1 else 's'})" for table, count in sorted(encrypted.items())
+        )
+        raise Refusal(
+            f"istota.env has no ISTOTA_SECRET_KEY, and the standalone database holds rows encrypted "
+            f"under one: {listing}. Put the key the install used back in istota.env, or remove those "
+            "credentials in the standalone install first"
+        )
+    existing = wizard._read_secret_file(target.data_dir / ".secret_key")
+    if len(existing) >= secrets_store._MIN_KEY_LEN:
+        plan.keys[".secret_key"] = existing
+        plan.key_note = (
+            "master key: none in istota.env and nothing encrypted under one; "
+            "keeping the new master key an earlier run made"
+        )
+        return
+    plan.keys[".secret_key"] = secrets.token_hex(32)
+    plan.key_note = (
+        "master key: none in istota.env and nothing encrypted under one; "
+        "a new master key is made, as `istota setup` makes one"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +561,10 @@ def _print_plan(rewrite: ConfigRewrite, section, plan: SecretsPlan, out) -> None
     for name in sorted(plan.files):
         out(f"  secrets/{name}")
     for name in sorted(plan.keys):
-        out(f"  /data/{name} (carried byte for byte)")
+        if name == ".secret_key" and plan.key_note:
+            out(f"  /data/{name} ({plan.key_note})")
+        else:
+            out(f"  /data/{name} (carried byte for byte)")
     for line in plan.left:
         out(f"  not carried: {line}")
 
@@ -557,6 +612,7 @@ def run(args, *, env_text: str, out, err) -> int:
             profile_user_ids(source.snapshot / "framework" / "istota.db"),
             source.workspace_users,
         )
+        settle_master_key(source, target, plan)
         try:
             section = apply_module.plan_config(rewrite.document, target.config_path)
         except apply_module.PlanError as exc:

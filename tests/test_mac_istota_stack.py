@@ -1080,8 +1080,28 @@ class TestImportStandalone:
         assert result.returncode == 78, result.stdout + result.stderr
         assert mac.calls("limactl") == []
 
-    def test_an_env_file_without_a_key_is_refused_first(self, mac, standalone):
+    def test_an_env_file_without_a_key_goes_to_the_vm_to_decide(self, mac, standalone):
+        """An older install has no master key; the VM's import makes one when
+        nothing in the database needs the old one, and refuses otherwise."""
+        env_text = "ANTHROPIC_API_KEY=sk-test-only\n"
+        (standalone.config.parent / "istota.env").write_text(env_text)
+        result = _import(mac)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.state()["import_stdin"] == env_text
+        assert mac.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+
+    def test_without_a_key_a_keychain_item_is_refused_first(self, mac, standalone):
+        """The VM would make a new key, which the Keychain's item for this
+        instance would then not match."""
         (standalone.config.parent / "istota.env").write_text("ANTHROPIC_API_KEY=sk-test-only\n")
+        mac.set(keychain={"istota.local/secret-key-istota": "ab" * 32})
+        result = _import(mac)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "Keychain" in result.stderr
+        assert mac.calls("limactl") == []
+
+    def test_a_key_line_that_is_not_usable_is_refused_first(self, mac, standalone):
+        (standalone.config.parent / "istota.env").write_text("ISTOTA_SECRET_KEY=short\nANTHROPIC_API_KEY=sk-test-only\n")
         result = _import(mac)
         assert result.returncode == 78, result.stdout + result.stderr
         assert "ISTOTA_SECRET_KEY" in result.stderr
