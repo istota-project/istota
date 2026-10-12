@@ -41,11 +41,20 @@ const entry = (name: string, kind = 'file', hidden = false) => ({
   modified: 1767268800,
 });
 
+const configFiles = [
+  { name: 'USER.md', kind: 'config', exists: true, size: 2048, editable: true },
+  { name: 'CRON.md', kind: 'config', exists: false, size: null, editable: true },
+  { name: 'TASKS.md', kind: 'config', exists: false, size: null, editable: false },
+  { name: 'HEARTBEAT.md', kind: 'config', exists: false, size: null, editable: true },
+  { name: 'skills/notes', kind: 'skill', exists: false, size: null, editable: true },
+];
+
 beforeEach(() => {
   vi.clearAllMocks();
   api.getWorkspacePins = vi.fn().mockResolvedValue({ pins: [] });
   api.putWorkspacePin = vi.fn();
   api.deleteWorkspacePin = vi.fn().mockResolvedValue({ status: 'ok' });
+  api.getWorkspaceConfigFiles.mockResolvedValue({ files: configFiles });
   localStorage.clear();
   __history.reset('/istota/workspace');
   api.getWorkspacePlaces.mockResolvedValue({
@@ -610,4 +619,76 @@ it('offers file downloads and keeps non-regular entries without actions', async 
   expect(download.getAttribute('href')).toContain(
     encodeURIComponent('/Users/alice/notes & drafts/plan #1.md'),
   );
+});
+
+function editorBox(): HTMLTextAreaElement {
+  const box = document.querySelector('[role=dialog] textarea');
+  if (!box) throw new Error('no editor open');
+  return box as HTMLTextAreaElement;
+}
+
+it('lists the configuration files with their sizes and keeps a refused one read-only', async () => {
+  render(Workspace);
+  const section = await screen.findByRole('region', { name: 'Configuration' });
+  await within(section).findByText('USER.md');
+  expect(within(section).getByText('2 KB')).toBeTruthy();
+  expect(within(section).getAllByText('Not created yet').length).toBe(2);
+  expect(within(section).getByRole('button', { name: 'Edit TASKS.md' })).toBeDisabled();
+  expect(within(section).queryByText('notes')).toBeNull();
+  await fireEvent.click(within(section).getByRole('button', { name: /Skill instructions/ }));
+  expect(within(section).getByRole('button', { name: 'Edit skills/notes' })).toBeEnabled();
+});
+
+it('edits CRON.md with the loaded revision and says when the jobs change', async () => {
+  api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'rev-0', exists: false });
+  api.saveWorkspaceConfigFile.mockResolvedValue({ revision: 'rev-1', applies: 'next_sync' });
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Edit CRON.md' }));
+  await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md'));
+  await waitFor(() => editorBox());
+  await fireEvent.input(editorBox(), { target: { value: '# Jobs\n' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() =>
+    expect(api.saveWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md', '# Jobs\n', 'rev-0'),
+  );
+  await screen.findByText('Saved. The jobs update at the next CRON.md sync.');
+  await fireEvent.click(screen.getAllByRole('button', { name: 'Close' }).at(-1)!);
+  // The list is refetched so a size or "not created yet" is current.
+  await waitFor(() => expect(api.getWorkspaceConfigFiles).toHaveBeenCalledTimes(2));
+});
+
+it('keeps the text on a conflict and on validator errors, and lists the errors', async () => {
+  api.getWorkspaceConfigFile.mockResolvedValue({
+    content: 'old\n',
+    revision: 'rev-0',
+    exists: true,
+  });
+  api.saveWorkspaceConfigFile.mockRejectedValueOnce(
+    new actualApi.TextFileInvalidError(['TOML error: expected a value']),
+  );
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Edit HEARTBEAT.md' }));
+  await waitFor(() => expect(editorBox().value).toBe('old\n'));
+  await fireEvent.input(editorBox(), { target: { value: 'broken' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('TOML error: expected a value');
+  expect(editorBox().value).toBe('broken');
+
+  api.saveWorkspaceConfigFile.mockRejectedValueOnce(new actualApi.TextFileConflictError());
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await screen.findByText(/changed this file while you were editing/);
+  expect(editorBox().value).toBe('broken');
+
+  api.saveWorkspaceConfigFile.mockRejectedValueOnce(new actualApi.TextFileLockedError());
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await screen.findByText(/being written right now/);
+  expect(editorBox().value).toBe('broken');
+});
+
+it('reports a failed configuration list without hiding the places', async () => {
+  api.getWorkspaceConfigFiles.mockRejectedValue(new Error('network'));
+  render(Workspace);
+  await screen.findByText('Could not load your configuration files.');
+  expect(screen.getByRole('link', { name: 'Project room' })).toBeTruthy();
 });

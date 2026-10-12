@@ -3583,9 +3583,36 @@ export function getRoomMemory(id: number): Promise<ChatRoomMemory> {
   return apiFetch<ChatRoomMemory>(`/chat/rooms/${id}/memory`);
 }
 
+/** A text file moved under its editor between load and save: reload before
+ * overwriting. The editor keeps the user's text on this one. */
+export class TextFileConflictError extends Error {
+  constructor(message = 'the file changed since it was loaded') {
+    super(message);
+    this.name = 'TextFileConflictError';
+  }
+}
+
+/** Another writer held the file's lock past the timeout. Retry. */
+export class TextFileLockedError extends Error {
+  constructor(message = 'the file is being written right now') {
+    super(message);
+    this.name = 'TextFileLockedError';
+  }
+}
+
+/** The daemon would not load the file as written; `errors` says why. */
+export class TextFileInvalidError extends Error {
+  readonly errors: string[];
+  constructor(errors: string[]) {
+    super('the daemon would not load this file as written');
+    this.name = 'TextFileInvalidError';
+    this.errors = errors;
+  }
+}
+
 /** The file moved under the editor — an agent write landed between load and
  * save. Reload before overwriting. */
-export class ChatMemoryConflictError extends Error {
+export class ChatMemoryConflictError extends TextFileConflictError {
   constructor() {
     super('channel memory changed since it was loaded');
     this.name = 'ChatMemoryConflictError';
@@ -5328,4 +5355,54 @@ export function putWorkspacePin(pin: WorkspacePinInput): Promise<{ pin: Workspac
 }
 export function deleteWorkspacePin(id: number): Promise<{ status: string }> {
   return apiFetch(`/workspace/pins/${id}`, { method: 'DELETE' });
+}
+
+/** One of the user's own config files: USER.md, CRON.md, TASKS.md,
+ * HEARTBEAT.md, or `skills/<skill>` for a skill's overlay. */
+export interface WorkspaceConfigFile {
+  name: string;
+  kind: 'config' | 'skill';
+  exists: boolean;
+  size: number | null;
+  /** False when the file is something other than a plain file (a link a
+   * task planted), which the server will refuse to write. */
+  editable: boolean;
+}
+export interface WorkspaceConfigFileContent {
+  content: string;
+  revision: string;
+  exists: boolean;
+}
+function configFilePath(name: string): string {
+  return `/workspace/config-files/${name.split('/').map(encodeURIComponent).join('/')}`;
+}
+export function getWorkspaceConfigFiles(): Promise<{ files: WorkspaceConfigFile[] }> {
+  return apiFetch('/workspace/config-files');
+}
+export function getWorkspaceConfigFile(name: string): Promise<WorkspaceConfigFileContent> {
+  return apiFetch(configFilePath(name));
+}
+/** `applies: 'next_sync'` on a CRON.md save: the scheduler picks the jobs up
+ * at its next CRON.md sync, not at once. */
+export async function saveWorkspaceConfigFile(
+  name: string,
+  content: string,
+  revision: string,
+): Promise<{ revision: string; applies?: 'next_sync' }> {
+  const resp = await fetch(`${base}/api${configFilePath(name)}`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, revision }),
+  });
+  if (resp.status === 401) throw new AuthError();
+  if (resp.ok) return resp.json();
+  const body = await resp.json().catch(() => ({}));
+  if (resp.status === 409) throw new TextFileConflictError();
+  if (resp.status === 423) throw new TextFileLockedError();
+  if (resp.status === 422 && Array.isArray(body.errors))
+    throw new TextFileInvalidError(body.errors);
+  if (resp.status === 413 && typeof body.max_bytes === 'number')
+    throw new Error(`Too long — the limit is ${Math.floor(body.max_bytes / 1024)} KB.`);
+  throw new Error(await errorMessage(resp, body));
 }

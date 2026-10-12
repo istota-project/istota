@@ -4806,6 +4806,83 @@ let workspacePins: WorkspacePin[] = [
   },
 ];
 let nextWorkspacePinId = 3;
+
+// The user's config files. Every save status is reachable from the editor:
+// a stale revision is 409, text containing LOCKED is 423, INVALID is 422 with
+// errors, and an overlay over 32 KiB is 413.
+const mockConfigText = new Map<string, string>([
+  ['USER.md', '# About me\n\nPrefers short answers. Works in UTC.\n'],
+  [
+    'CRON.md',
+    '# Scheduled jobs\n\n```toml\n[[jobs]]\nname = "morning"\ncron = "0 8 * * *"\nprompt = "Summarize my day."\n```\n',
+  ],
+  ['skills/notes', 'Keep notes terse.\n'],
+]);
+const mockConfigSkills = ['calendar', 'developer', 'email', 'notes'];
+function mockConfigFiles(path: string, method: string, body: any) {
+  const prefix = '/istota/api/workspace/config-files';
+  if (path === prefix && method === 'GET') {
+    const names = [
+      'USER.md',
+      'CRON.md',
+      'TASKS.md',
+      'HEARTBEAT.md',
+      ...mockConfigSkills.map((skill) => `skills/${skill}`),
+    ];
+    return {
+      files: names.map((name) => {
+        const text = mockConfigText.get(name);
+        return {
+          name,
+          kind: name.startsWith('skills/') ? 'skill' : 'config',
+          exists: text !== undefined,
+          size: text === undefined ? null : Buffer.byteLength(text, 'utf8'),
+          editable: true,
+        };
+      }),
+    };
+  }
+  if (!path.startsWith(`${prefix}/`)) return undefined;
+  const name = decodeURIComponent(path.slice(prefix.length + 1));
+  const known =
+    ['USER.md', 'CRON.md', 'TASKS.md', 'HEARTBEAT.md'].includes(name) ||
+    mockConfigSkills.some((skill) => name === `skills/${skill}`);
+  if (!known) return { __status: 404, error: 'File not found.' };
+  const stored = mockConfigText.get(name) ?? '';
+  if (method === 'GET')
+    return { content: stored, revision: mockMemoryRevision(stored), exists: !!stored.trim() };
+  if (method !== 'PUT') return undefined;
+  if (typeof body?.content !== 'string' || typeof body?.revision !== 'string')
+    return { __status: 400, error: 'content and revision are required' };
+  const content: string = body.content;
+  if (name.startsWith('skills/') && Buffer.byteLength(content, 'utf8') > 32 * 1024)
+    return {
+      __status: 413,
+      error: 'This file is too large.',
+      code: 'too_large',
+      max_bytes: 32 * 1024,
+    };
+  if (content.includes('INVALID'))
+    return {
+      __status: 422,
+      error: 'The daemon would not load this file as written.',
+      code: 'invalid',
+      errors: ['TOML error: Expected "=" after a key (at line 3, column 6)'],
+    };
+  if (body.revision !== mockMemoryRevision(stored))
+    return { __status: 409, error: 'This file changed since it was loaded.', code: 'conflict' };
+  if (content.includes('LOCKED'))
+    return {
+      __status: 423,
+      error: 'This file is being written right now. Try again.',
+      code: 'locked',
+    };
+  mockConfigText.set(name, content);
+  return {
+    revision: mockMemoryRevision(content),
+    ...(name === 'CRON.md' ? { applies: 'next_sync' } : {}),
+  };
+}
 const workspaceHandler: MockHandler = ({ url, method, body }) => {
   const driveUrl = new URL(url, 'http://localhost');
   if (driveUrl.pathname === '/istota/api/workspace/pins') {
@@ -4864,6 +4941,9 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
       next_page_token: folder === 'root' && !more ? 'page-2' : null,
     };
   }
+
+  const configFiles = mockConfigFiles(driveUrl.pathname, method, body);
+  if (configFiles !== undefined) return configFiles;
 
   const [path, query] = url.split('?');
   if (
