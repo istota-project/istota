@@ -1,5 +1,14 @@
 <script lang="ts">
-  import { File, Folder, Link, Minus, Users } from '@lucide/svelte';
+  import {
+    Folder,
+    Link,
+    Minus,
+    Users,
+    ArrowUp,
+    ArrowDown,
+    ArrowUpDown,
+    RefreshCw,
+  } from '@lucide/svelte';
   import type {
     DriveItem,
     WorkspaceListing,
@@ -7,10 +16,20 @@
     WorkspacePin,
     WorkspacePinInput,
   } from '$lib/api';
-  import { KebabMenu, type KebabItem } from '$lib/components/ui';
+  import {
+    Button,
+    Input,
+    Select,
+    IconButton,
+    ConfirmDialog,
+    KebabMenu,
+    type KebabItem,
+  } from '$lib/components/ui';
   import { chatFileUrl } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
+  import { fileIcon } from './filePresentation';
+  import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
     listing = null,
@@ -23,7 +42,11 @@
     pins = [],
     pinsBusy = false,
     onTogglePin,
+    onDelete,
+    onRefresh,
   }: {
+    onDelete?: (names: string[]) => Promise<{ deleted: string[]; errors: string[] }>;
+    onRefresh?: () => void;
     pins?: WorkspacePin[];
     pinsBusy?: boolean;
     onTogglePin?: (pin: WorkspacePinInput) => void;
@@ -35,7 +58,7 @@
     href: (place: string, path?: string) => string;
     onNavigate: (event: MouseEvent, place: string, path?: string) => void;
   } = $props();
-  let entries = $derived(
+  let allEntries = $derived(
     place.kind === 'drive'
       ? driveItems.map((item) => ({
           key: item.id,
@@ -68,6 +91,82 @@
             web_url: null,
           })),
   );
+  type SortKey = 'name' | 'size' | 'modified';
+  const saved = loadSetting<{ key?: string; descending?: boolean } | null>('workspace.sort', null);
+  let sortKey = $state<SortKey>(
+    saved?.key === 'size' || saved?.key === 'modified' ? saved.key : 'name',
+  );
+  let descending = $state(saved?.descending === true);
+  let foldersFirst = $state(loadSetting<boolean>('workspace.foldersFirst', true) !== false);
+  let query = $state('');
+  let selectedKeys = $state<string[]>([]);
+  let deleteOpen = $state(false);
+  let deleting = $state(false);
+  let deleteErrors = $state<string[]>([]);
+  let pendingNames = $state<string[]>([]);
+  let entries = $derived.by(() => {
+    const visible = allEntries.filter((entry) =>
+      entry.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+    );
+    return visible.sort((a, b) => {
+      if (foldersFirst && (a.kind === 'dir') !== (b.kind === 'dir'))
+        return a.kind === 'dir' ? -1 : 1;
+      let order = 0;
+      if (sortKey === 'name')
+        order = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      else {
+        const av = sortKey === 'size' ? a.size : a.modified ? Date.parse(a.modified) : null;
+        const bv = sortKey === 'size' ? b.size : b.modified ? Date.parse(b.modified) : null;
+        if (av === null && bv !== null) return 1;
+        if (bv === null && av !== null) return -1;
+        order = (av ?? 0) - (bv ?? 0);
+      }
+      return (
+        (descending ? -order : order) ||
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
+    });
+  });
+  let selectable = $derived(
+    entries.filter((entry) => entry.kind === 'file' || entry.kind === 'dir'),
+  );
+  let selectedEntries = $derived(selectable.filter((entry) => selectedKeys.includes(entry.key)));
+  let folderContext = $derived(`${place.id}:${listing?.path ?? drivePath}`);
+  $effect(() => {
+    query;
+    showHidden;
+    folderContext;
+    selectedKeys = [];
+  });
+  function sort(key: SortKey) {
+    descending = key === sortKey ? !descending : key !== 'name';
+    sortKey = key;
+    saveSetting('workspace.sort', { key: sortKey, descending });
+  }
+  function toggle(key: string) {
+    selectedKeys = selectedKeys.includes(key)
+      ? selectedKeys.filter((item) => item !== key)
+      : [...selectedKeys, key];
+  }
+  function requestDelete(names = selectedEntries.map((entry) => entry.name)) {
+    pendingNames = names;
+    deleteOpen = true;
+  }
+  async function deleteSelected() {
+    if (!onDelete || deleting || !pendingNames.length) return;
+    deleteOpen = false;
+    deleting = true;
+    deleteErrors = [];
+    try {
+      const result = await onDelete([...pendingNames]);
+      selectedKeys = selectedKeys.filter((key) => !result.deleted.includes(key));
+      deleteErrors = result.errors;
+    } catch (e) {
+      deleteErrors = [e instanceof Error ? e.message : 'Could not delete the selected items.'];
+    } finally {
+      deleting = false;
+    }
+  }
   function menuItems(entry: (typeof entries)[number]): KebabItem[] {
     if (entry.kind !== 'file' && entry.kind !== 'dir') return [];
     const items: KebabItem[] = [];
@@ -98,35 +197,147 @@
         target: '_blank',
       });
     }
+    if (onDelete)
+      items.push({
+        label: 'Delete',
+        disabled: deleting,
+        onSelect: () => requestDelete([entry.name]),
+      });
     return items;
   }
 </script>
 
+<div class="file-controls control-row">
+  <div class="file-filter">
+    <Input
+      aria-label="Filter files"
+      placeholder="Filter files…"
+      bind:value={query}
+      disabled={deleting}
+    />
+  </div>
+  <label class="folders-toggle"
+    ><input
+      type="checkbox"
+      bind:checked={foldersFirst}
+      onchange={() => saveSetting('workspace.foldersFirst', foldersFirst)}
+    />Folders first</label
+  >
+  <div class="mobile-sort">
+    <Select
+      ariaLabel="Sort files"
+      value={sortKey}
+      options={[
+        { value: 'name', label: 'Name' },
+        { value: 'modified', label: 'Modified' },
+        { value: 'size', label: 'Size' },
+      ]}
+      onValueChange={(value) => sort(value as SortKey)}
+    /><IconButton
+      label={descending ? 'Sort ascending' : 'Sort descending'}
+      onclick={() => sort(sortKey)}
+      >{#if descending}<ArrowDown size={16} />{:else}<ArrowUp size={16} />{/if}</IconButton
+    >
+  </div>
+  {#if onRefresh}<IconButton
+      label="Refresh files"
+      title="Refresh files"
+      disabled={deleting}
+      onclick={onRefresh}><RefreshCw size={16} /></IconButton
+    >{/if}
+</div>
+<div class="selection-toolbar">
+  <span class="muted" role="status"
+    >{selectedEntries.length ? `${selectedEntries.length} selected · ` : ''}{entries.length}
+    {entries.length === 1 ? 'item' : 'items'}</span
+  >
+  {#if selectedEntries.length}<Button
+      variant="ghost"
+      size="sm"
+      disabled={deleting}
+      onclick={() => (selectedKeys = [])}>Clear selection</Button
+    >{/if}
+  {#if onDelete}<Button
+      variant="danger"
+      size="sm"
+      disabled={!selectedEntries.length || deleting}
+      loading={deleting}
+      loadingLabel="Deleting…"
+      onclick={() => requestDelete()}>Delete selected</Button
+    >{/if}
+</div>
+{#if deleteErrors.length}<div class="delete-errors form-error" role="alert">
+    {#each deleteErrors as message}<p>{message}</p>{/each}
+  </div>{/if}
+<ConfirmDialog
+  bind:open={deleteOpen}
+  title={`Delete ${pendingNames.length === 1 ? pendingNames[0] : `${pendingNames.length} items`}`}
+  message="This permanently deletes the selected files and empty folders. Folders containing files cannot be deleted here. This cannot be undone."
+  onConfirm={deleteSelected}
+/>
 {#if entries.length}
   <table aria-label="Files">
     <thead
-      ><tr
-        ><th scope="col">Name</th><th scope="col" class="size">Size</th><th
-          scope="col"
-          class="modified">Modified</th
-        ><th scope="col" class="actions-column"><span class="sr-only">Actions</span></th></tr
-      ></thead
+      ><tr>
+        <th scope="col" class="selection-column"
+          ><input
+            type="checkbox"
+            aria-label="Select all visible items"
+            disabled={deleting || !selectable.length}
+            checked={!!selectable.length && selectedEntries.length === selectable.length}
+            indeterminate={selectedEntries.length > 0 && selectedEntries.length < selectable.length}
+            onchange={(event) =>
+              (selectedKeys = event.currentTarget.checked
+                ? selectable.map((entry) => entry.key)
+                : [])}
+          /></th
+        >
+        {#each [{ key: 'name', label: 'Name' }, { key: 'size', label: 'Size' }, { key: 'modified', label: 'Modified' }] as column}
+          <th
+            scope="col"
+            class={column.key === 'name' ? '' : column.key}
+            aria-sort={sortKey === column.key ? (descending ? 'descending' : 'ascending') : 'none'}
+          >
+            <button
+              class="sort-button touch-target"
+              aria-label={`Sort by ${column.key}`}
+              onclick={() => sort(column.key as SortKey)}
+              >{column.label}{#if sortKey !== column.key}<ArrowUpDown
+                  size={14}
+                />{:else if descending}<ArrowDown size={14} />{:else}<ArrowUp
+                  size={14}
+                />{/if}</button
+            >
+          </th>
+        {/each}
+        <th scope="col" class="actions-column" aria-label="Actions"></th>
+      </tr></thead
     >
     <tbody>
       {#each entries as entry (entry.key)}
         {@const iso = entry.modified}
         {@const actions = menuItems(entry)}
-        <tr>
+        {@const EntryIcon = fileIcon(entry.name, entry.mime_type)}
+        <tr class:selected={selectedKeys.includes(entry.key)}>
+          <td class="selection-column"
+            ><input
+              type="checkbox"
+              aria-label={`Select ${entry.name}`}
+              disabled={deleting || (entry.kind !== 'file' && entry.kind !== 'dir')}
+              checked={selectedKeys.includes(entry.key)}
+              onchange={() => toggle(entry.key)}
+            /></td
+          >
           <td>
             <div class="entry-name">
               <span class="entry-icon" aria-hidden="true">
                 {#if entry.kind === 'dir'}<Folder size={16} />{:else if entry.kind === 'link'}<Link
                     size={16}
-                  />{:else if entry.kind === 'file'}<File size={16} />{:else}<Minus
+                  />{:else if entry.kind === 'file'}<EntryIcon size={16} />{:else}<Minus
                     size={16}
                   />{/if}
               </span>
-              <div class="entry-label">
+              <div class="entry-label" title={entry.name}>
                 {#if entry.kind === 'dir'}
                   <a
                     href={href(place.id, entry.path)}
@@ -142,14 +353,21 @@
                   <span>{entry.name}</span>
                 {/if}
                 {#if entry.share}
-                  <span class="share-marker" title={`Nextcloud ${entry.share.kind} shares`}>
-                    <Users size={12} aria-hidden="true" /> Shared{entry.share.count > 1
-                      ? ` · ${entry.share.count}`
-                      : ''}
+                  <span
+                    class="share-marker"
+                    role="img"
+                    aria-label={`Shared · ${entry.share.count} ${entry.share.kind} shares`}
+                    title={`Nextcloud ${entry.share.kind} shares`}
+                  >
+                    <Users size={14} aria-hidden="true" /><span class="marker-label"
+                      >Shared{entry.share.count > 1 ? ` · ${entry.share.count}` : ''}</span
+                    >
                   </span>
                 {/if}
-                {#if entry.kind === 'link'}<span class="caption">Symbolic link · not followed</span
-                  >{:else if entry.kind === 'other'}<span class="caption">Not a regular file</span
+                {#if entry.kind === 'link'}<span class="caption marker-label"
+                    >Symbolic link · not followed</span
+                  >{:else if entry.kind === 'other'}<span class="caption marker-label"
+                    >Not a regular file</span
                   >{/if}
               </div>
             </div>
@@ -170,7 +388,11 @@
   </table>
 {:else}
   <div class="center-msg">
-    {listing?.entries.length ? 'No visible files in this folder.' : 'This folder is empty.'}
+    {query
+      ? 'No matching files.'
+      : listing?.entries.length
+        ? 'No visible files in this folder.'
+        : 'This folder is empty.'}
   </div>
 {/if}
 {#if listing && (listing.truncated || listing.skipped_names || listing.notes?.length)}
@@ -185,6 +407,84 @@
 {/if}
 
 <style>
+  .file-controls,
+  .selection-toolbar,
+  .folders-toggle,
+  .mobile-sort {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .file-controls,
+  .selection-toolbar {
+    padding: var(--space-2) var(--space-3);
+    flex-wrap: wrap;
+    font-size: var(--text-sm);
+  }
+  .file-filter {
+    flex: 1;
+    min-width: 10rem;
+    max-width: 24rem;
+  }
+  .folders-toggle {
+    white-space: nowrap;
+    gap: var(--space-2);
+    color: var(--text-muted);
+  }
+  .mobile-sort {
+    display: none;
+  }
+  .selection-column {
+    width: 2.5rem;
+    text-align: center;
+    padding-inline: var(--space-2);
+  }
+  input[type='checkbox'] {
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .sort-button {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  tr.selected {
+    background: var(--surface-raised);
+  }
+  .delete-errors {
+    padding: var(--space-2) var(--space-3);
+  }
+  .delete-errors p {
+    margin: 0;
+  }
+  .entry-label > span:not(.share-marker) {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @media (max-width: 640px) {
+    .mobile-sort {
+      display: flex;
+    }
+    .marker-label {
+      display: none;
+    }
+    .file-controls {
+      gap: var(--space-2);
+    }
+    th,
+    td {
+      padding-inline: var(--space-2);
+    }
+  }
+
   .actions-column {
     width: 3rem;
     text-align: center;
@@ -218,6 +518,7 @@
     white-space: nowrap;
   }
   .entry-name {
+    min-height: var(--touch-min);
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -225,20 +526,24 @@
   }
   .entry-icon {
     display: flex;
-    color: var(--text-muted);
+    color: var(--accent-amber);
     flex-shrink: 0;
   }
   .entry-label {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
     min-width: 0;
-    overflow-wrap: anywhere;
   }
   .entry-label a,
   .entry-label button {
     color: var(--text-primary);
     text-decoration: none;
     text-align: left;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .entry-label button {
     background: none;
@@ -253,6 +558,8 @@
     text-decoration: underline;
   }
   .share-marker {
+    flex-shrink: 0;
+    white-space: nowrap;
     display: flex;
     align-items: center;
     gap: var(--space-1);
@@ -277,6 +584,7 @@
       width: 4.5rem;
     }
     .entry-name {
+      min-height: var(--touch-min);
       gap: var(--space-2);
     }
   }

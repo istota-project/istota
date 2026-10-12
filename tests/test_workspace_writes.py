@@ -98,3 +98,57 @@ def test_make_folder_and_conflict(tmp_path):
 
 def test_empty_name_fallback(tmp_path):
     assert write_new_file(tmp_path, [], "...", [b"x"], max_bytes=100) == "upload"
+
+
+def test_delete_file_and_empty_folder(tmp_path):
+    (tmp_path / "note.txt").write_text("remove")
+    (tmp_path / "empty").mkdir()
+    writes.delete_entry(tmp_path, [], "note.txt")
+    writes.delete_entry(tmp_path, [], "empty")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["..", ".", "", "../outside", "bad\0name"])
+def test_delete_refuses_invalid_leaf(tmp_path, name):
+    with pytest.raises(ListingError) as exc:
+        writes.delete_entry(tmp_path, [], name)
+    assert exc.value.status == 422
+
+
+def test_delete_refuses_links_and_nonempty_folders(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "link").symlink_to(outside)
+    for parts, name in [([], "link"), (["link"], "keep.txt"), (["..", "outside"], "keep.txt")]:
+        with pytest.raises(ListingError):
+            writes.delete_entry(root, parts, name)
+    with pytest.raises(ListingError) as exc:
+        writes.delete_entry(tmp_path, [], "outside")
+    assert exc.value.status == 409
+    assert (outside / "keep.txt").read_text() == "keep"
+
+
+def test_delete_pins_parent_before_directory_swap(tmp_path, monkeypatch):
+    parent = tmp_path / "root" / "notes"
+    parent.mkdir(parents=True)
+    (parent / "note.txt").write_text("remove")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "note.txt").write_text("keep")
+    real_open = os.open
+    held = parent.with_name("held")
+
+    def open_then_swap(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if path == "notes":
+            parent.rename(held)
+            parent.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(os, "open", open_then_swap)
+    writes.delete_entry(tmp_path / "root", ["notes"], "note.txt")
+    assert not (held / "note.txt").exists()
+    assert (outside / "note.txt").read_text() == "keep"

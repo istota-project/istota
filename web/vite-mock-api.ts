@@ -4969,7 +4969,10 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
       share: { kind: 'user', count: 2 },
       nextcloud_url: 'https://cloud.example.com/apps/files/files?dir=%2FShared',
     },
-    workspaceEntry('image.png'),
+    { ...workspaceEntry('image.png'), size: 240_000, modified: Date.now() / 1000 - 3600 },
+    { ...workspaceEntry('demo-video.mp4'), size: 12_000_000, modified: Date.now() / 1000 - 86400 },
+    { ...workspaceEntry('recording.mp3'), size: 3_400_000 },
+    { ...workspaceEntry('backup.zip'), size: 1_800_000 },
     workspaceEntry('note.md'),
     workspaceEntry('outside-link', 'link'),
     workspaceEntry('task-socket', 'other'),
@@ -5096,6 +5099,23 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     );
     if (!upload) workspaceTree[resultPath] = [];
     return upload ? { name, path: resultPath, size: entry.size } : { path: resultPath };
+  }
+  if (method === 'DELETE' && path === '/istota/api/workspace/files') {
+    const params = new URLSearchParams(query);
+    const folder = params.get('path') || '';
+    const name = params.get('name') || '';
+    const entries = workspaceTree[folder];
+    const entry = entries?.find((item) => item.name === name);
+    if (params.get('place') !== 'home' || !entry)
+      return { __status: 404, error: 'File or folder not found.' };
+    if (entry.kind !== 'file' && entry.kind !== 'dir')
+      return { __status: 422, error: 'Only regular files and empty folders can be deleted.' };
+    const entryPath = [folder, name].filter(Boolean).join('/');
+    if (entry.kind === 'dir' && workspaceTree[entryPath]?.length)
+      return { __status: 409, error: 'Folder is not empty. Delete its contents first.' };
+    workspaceTree[folder] = entries.filter((item) => item !== entry);
+    if (entry.kind === 'dir') delete workspaceTree[entryPath];
+    return { status: 'ok' };
   }
   if (method !== 'GET') return undefined;
   if (path === '/istota/api/workspace/places')

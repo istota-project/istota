@@ -24,6 +24,7 @@
     getWorkspaceDriveListing,
     type DriveListing,
     createWorkspaceFolder,
+    deleteWorkspaceEntry,
     uploadWorkspaceFile,
     type WorkspacePlace,
     type WorkspaceListing,
@@ -178,6 +179,28 @@
     } finally {
       uploading = false;
     }
+  }
+  async function deleteEntries(names: string[]) {
+    const path = selected?.path || '';
+    const request = generation;
+    const deleted: string[] = [];
+    const errors: string[] = [];
+    for (const name of names) {
+      try {
+        await deleteWorkspaceEntry(path, name);
+        deleted.push(name);
+      } catch (e) {
+        errors.push(`${name}: ${e instanceof Error ? e.message : 'Could not delete this item.'}`);
+      }
+    }
+    if (active && request === generation && listing) {
+      listing = {
+        ...listing,
+        entries: listing.entries.filter((entry) => !deleted.includes(entry.name)),
+      };
+    }
+    if (active && deleted.length) void loadPins();
+    return { deleted, errors };
   }
   let generation = 0;
   let active = true;
@@ -487,6 +510,7 @@
           showHidden={true}
           {href}
           onNavigate={navigate}
+          onRefresh={() => loadFolder(selected!)}
         />
         {#if driveListing.next_page_token}
           <div class="drive-pagination">
@@ -509,6 +533,8 @@
       {:else if listing}
         <FileTable
           {listing}
+          onDelete={place.id === 'home' ? deleteEntries : undefined}
+          onRefresh={() => loadFolder(selected!)}
           {place}
           {showHidden}
           {href}

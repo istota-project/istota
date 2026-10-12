@@ -1,6 +1,8 @@
 """Descriptor-relative writes below a trusted workspace or temp root."""
 
 import os
+import errno
+import stat
 from pathlib import Path
 from collections.abc import Iterable
 
@@ -93,3 +95,33 @@ def make_folder(root: Path, parts: list[str], name: str) -> str:
     finally:
         os.close(fd)
     return name
+
+
+def delete_entry(root: Path, parts: list[str], name: str) -> None:
+    """Remove one regular file or empty directory through its pinned parent."""
+    try:
+        _validate_parts([name])
+    except ValueError as exc:
+        raise ListingError(422, "Invalid file name.") from exc
+    fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
+    if fd is None:
+        raise ListingError(404, "Folder not found.")
+    try:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISREG(info.st_mode):
+            os.unlink(name, dir_fd=fd)
+        elif stat.S_ISDIR(info.st_mode):
+            try:
+                os.rmdir(name, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                    raise ListingError(409, "Folder is not empty. Delete its contents first.") from exc
+                raise
+        else:
+            raise ListingError(422, "Only regular files and empty folders can be deleted.")
+    except FileNotFoundError as exc:
+        raise ListingError(404, "File or folder not found.") from exc
+    except PermissionError as exc:
+        raise ListingError(403, "You do not have permission to delete this item.") from exc
+    finally:
+        os.close(fd)
