@@ -13,6 +13,7 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from istota import db
+from istota.webui import nextcloud_files
 from istota.credentials.google_scopes import levels_from_scopes
 from istota.credentials.google_tokens import access_token_for
 from istota.google import drive
@@ -60,6 +61,8 @@ async def api_workspace_list(
     parts = [part for part in path.split("/") if part]
 
     def query():
+        if place == "nextcloud":
+            return nextcloud_files.list_folder(config, user["username"], parts)
         with db.get_db(config.db_path) as conn:
             places = list_places(config, conn, user["username"])
             selected = next((p for p in places if p.id == place), None)

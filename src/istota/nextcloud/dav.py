@@ -133,7 +133,7 @@ def href_to_path(config: Config, href: str) -> str:
     was the account name; the mount point is a value an operator types.
     """
     raw = unquote(urlparse(href).path)
-    prefix = _files_prefix(config)
+    prefix = unquote(urlparse(nc_base_url(config)).path).rstrip("/") + _files_prefix(config)
     if raw == prefix:
         raw = "/"
     elif raw.startswith(prefix + "/"):

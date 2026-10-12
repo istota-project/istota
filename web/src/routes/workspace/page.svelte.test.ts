@@ -808,3 +808,41 @@ it('cancels deletion without a request and clears selection on navigation', asyn
   expect(screen.getByRole('checkbox', { name: 'Select plan #1.md' })).not.toBeChecked();
   expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
 });
+
+it('browses Nextcloud folders and opens files in the connected account', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null }],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockImplementation(async (place, path) => ({
+    place,
+    path,
+    truncated: false,
+    skipped_names: 0,
+    entries: path
+      ? [{ ...entry('report.pdf'), nextcloud_url: 'https://cloud.example.com/index.php/f/11' }]
+      : [entry('Notes & plans', 'dir')],
+  }));
+  render(Workspace);
+  await fireEvent.click(await screen.findByRole('link', { name: 'Notes & plans' }));
+  expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('nextcloud', 'Notes & plans');
+  const file = await screen.findByRole('link', { name: 'report.pdf' });
+  expect(file).toHaveAttribute('href', 'https://cloud.example.com/index.php/f/11');
+  expect(file).toHaveAttribute('target', '_blank');
+  expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
+  await openActions('report.pdf');
+  expect(await screen.findByRole('menuitem', { name: 'Open in Nextcloud' })).toBeTruthy();
+});
+
+it('links to Connections when Nextcloud needs reconnecting', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null }],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockRejectedValue(new Error('Reconnect in Settings.'));
+  render(Workspace);
+  expect(await screen.findByRole('link', { name: 'Connections' })).toHaveAttribute(
+    'href',
+    '/settings/connections',
+  );
+});
