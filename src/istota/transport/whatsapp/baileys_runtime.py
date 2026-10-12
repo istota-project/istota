@@ -1307,9 +1307,9 @@ def _orphan_message(row: dict) -> str:
     **Not "request a re-pair again".** The session directory here is the empty
     one the re-pair created: a sidecar sits in it in pairing mode, so nothing
     re-latches a permanent fatal, and `repair_session`'s confirmation gate then
-    refuses the next request as `session_live` — the durable channel carries no
-    `force`, so the unforced default is all the poll can ask for. The remedy has
-    to be one of the two surfaces that *can* confirm.
+    refuses an unforced request as `session_live` — the poll passes `force`
+    only when the row carries it. The remedy has to be one of the two surfaces
+    that *can* confirm.
 
     **Since ISSUE-504 this has two producers and neither is the restart it used
     to be about**: a row whose deadline `_pairing_adoption` could not parse,

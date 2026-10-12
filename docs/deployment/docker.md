@@ -132,7 +132,7 @@ The web service serves the webhook receiver's routes too (location pings, SMS an
 
 **Only the Baileys adapter needs a profile.** Meta's Cloud API receives over a signed HTTP callback, which the web service already serves; a paired WhatsApp Web session receives over a Unix socket from the Node sidecar, which `whatsapp-baileys` starts. A profile cannot read the config, so turn it on only when `[whatsapp] provider = "baileys"`.
 
-Pairing a Baileys session is not reachable from inside this stack — `istota whatsapp pair` starts a sidecar of its own and the istota image ships neither the program nor its dependencies. Pair on a host with a checkout and node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as.
+A Baileys session is paired from the running stack, the first time and every time after. On a host that has never paired, the sidecar is up and offering codes. Pair from Admin, Connections with the control that asks you to type a phrase, or run `istota whatsapp pair --reset` and type the phrase. A plain `istota whatsapp pair` is refused, because the daemon cannot tell a session that was never paired from a working one. See [WhatsApp](../features/whatsapp.md).
 
 The browser container requires x86-64 (Chrome has no ARM packages).
 

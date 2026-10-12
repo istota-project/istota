@@ -623,8 +623,8 @@ class TestTheModeSelector:
     **Attach mode spawns nothing**, because the bridge on the other end of that
     socket already holds the session directory and two Baileys clients on one
     auth state corrupt it. **Own-sidecar mode writes no request row**, because
-    there is no daemon to service one — which is also the case a developer
-    checkout and a first-ever compose pair are.
+    there is no daemon to service one — which is the case on a developer
+    checkout. A first pairing on compose is attach mode with `--reset`.
 
     Both halves are asserted, so the selector cannot be removed in either
     direction without something going red: collapsed to own-sidecar mode the
