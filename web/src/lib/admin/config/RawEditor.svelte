@@ -48,8 +48,9 @@
     {#if lockedReason}<p class="banner warn raw-note">{lockedReason}</p>{/if}
     {#if initial === null}
       <p class="banner warn raw-note">
-        config.toml does not parse, so it cannot be shown here with its credentials hidden. Text
-        written here replaces the whole file, and a credential it held has to be set again.
+        config.toml does not parse, so it cannot be changed from here. Fix it on the host with
+        <code>istota-stack apply</code>, or copy back a
+        <code>config.toml.bak.&lt;timestamp&gt;</code>.
       </p>
     {/if}
     <Field label="config.toml" wide>

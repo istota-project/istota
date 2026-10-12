@@ -7,7 +7,7 @@ The web inserts a row (`create`) and touches a trigger file; the host runs
 
     pending -> taken [-> building] -> applied | unchanged | refused | failed
     pending -> cancelled
-    pending -> refused          (config.toml changed since the request was made)
+    pending -> refused          (config.toml changed, or a plan claimed what it changes)
 
 At most one row is open (`pending`, `taken`, `building`); a partial unique
 index holds that, so a second `create` raises `RequestOpen`.
@@ -197,8 +197,23 @@ def _close(
         _notify(conn, row, status, current_admins)
 
 
+def _managed_now(row: sqlite3.Row, managed: dict | None) -> list[str]:
+    """The resources the request changes that a plan manages now."""
+    from istota.setup_wizard import SECRET_NAMES
+    from istota.webui.admin_config_view import managed_state
+
+    touched = ["config"]
+    if any(name in SECRET_NAMES for name in json.loads(row["secret_names_json"])):
+        touched.append("secrets")
+    if row["admins_json"] is not None:
+        touched.append("admins")
+    state = managed_state(managed)
+    return [resource for resource in touched if state[resource]["managed"]]
+
+
 def take(
     conn: sqlite3.Connection, live_digest: str, *, current_admins: Iterable[str] = (),
+    managed: dict | None = None,
 ) -> TakenRequest | None:
     """Claim the oldest `pending` request, in one `BEGIN IMMEDIATE`.
 
@@ -206,9 +221,13 @@ def take(
     stack lock, which proves no other run owns one. A request whose
     `base_digest` is not `live_digest` (the sha256 of `config.toml` now) is
     `refused`, so a write made on the host after the request is never reverted.
-    The claimed row's sealed credentials are unsealed for the caller and nulled
-    on the row. `current_admins` is the admin list now, recorded as the "before"
-    list a notification goes to.
+    So is one changing a resource `managed` (`config/managed.json`, read
+    fail-closed) says a plan manages now: a plan can claim the admins file or
+    the credentials without touching `config.toml`, and the request's
+    `[meta] managed = false` would hand the claim back. The claimed row's
+    sealed credentials are unsealed for the caller and nulled on the row.
+    `current_admins` is the admin list now, recorded as the "before" list a
+    notification goes to.
     """
     from istota.credentials import store
 
@@ -226,6 +245,11 @@ def take(
             return None
         if row["base_digest"] != live_digest:
             _close(conn, row, "refused", DIGEST_OUTPUT, current_admins)
+            continue
+        claimed = _managed_now(row, managed)
+        if claimed:
+            _close(conn, row, "refused", f"a plan now manages {', '.join(claimed)}; change it there",
+                   current_admins)
             continue
         try:
             values = json.loads(store.unseal(row["secrets_sealed"])) if row["secrets_sealed"] else {}

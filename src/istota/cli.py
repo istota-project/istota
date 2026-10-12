@@ -408,18 +408,21 @@ def cmd_config_request_take(args) -> int:
     import hashlib
     import tomllib
 
+    from istota import apply
     from istota.config_editor import handoff, requests
 
     config = _config_request_config(args)
-    raw = Path(config.config_path).read_bytes()
+    config_path = Path(config.config_path)
+    raw = config_path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     try:
         current = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
-        current = {}
+        current = None
     admins = sorted(config.admin_users)
+    managed = apply.read_managed(config_path.parent, fail_closed=True)
     with db.get_db(config.db_path) as conn:
-        taken = requests.take(conn, digest, current_admins=admins)
+        taken = requests.take(conn, digest, current_admins=admins, managed=managed)
     if taken is None:
         return 0
     try:

@@ -131,6 +131,38 @@ class TestTake:
         assert row["output_text"] == "config.toml changed since this request was made"
         assert FILE_VALUE not in _columns(db_path, request_id)
 
+    @pytest.mark.parametrize("managed, overrides, named", [
+        ({"config": {"managed": True, "source": "ansible"}}, {}, "config"),
+        ({"secrets": {"managed": True, "source": "ansible"}}, {}, "secrets"),
+        ({"admins": {"managed": True, "source": "ansible"}}, {}, "admins"),
+        ({"config": "damaged"}, {}, "config"),
+    ])
+    def test_a_resource_a_plan_claimed_since_refuses_the_request(self, db_path, managed, overrides, named):
+        """A plan claiming a resource without changing config.toml keeps the
+        digest; taking the request anyway would hand the claim back to the web."""
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn, **overrides)
+        with db.get_db(db_path) as conn:
+            assert requests.take(conn, DIGEST, managed=managed) is None
+            row = requests.get(conn, request_id)
+        assert row["status"] == "refused"
+        assert row["output_text"] == f"a plan now manages {named}; change it there"
+        assert FILE_VALUE not in _columns(db_path, request_id)
+
+    def test_a_managed_resource_the_request_does_not_touch_is_no_refusal(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(
+                conn, file_secrets={}, admins=None, admins_changed=False,
+                secret_names=["brain.native.extra_headers.X-Key"],
+            )
+        managed = {
+            "secrets": {"managed": True, "source": "ansible"},
+            "admins": {"managed": True, "source": "ansible"},
+            "config": {"managed": False, "source": "web"},
+        }
+        with db.get_db(db_path) as conn:
+            assert requests.take(conn, DIGEST, managed=managed).id == request_id
+
     def test_a_stale_taken_row_is_failed_first(self, db_path):
         with db.get_db(db_path) as conn:
             stale = _create(conn)

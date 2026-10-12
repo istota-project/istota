@@ -108,6 +108,35 @@ class TestRestoreSentinels:
             secrets.restore_sentinels(new, DOCUMENT)
         assert str(caught.value) == "no stored value to keep at email.smtp_password"
 
+    BLOCKS = {"briefing_shared_blocks": [
+        {"name": "a", "api_token": "PW-A"}, {"name": "b", "api_token": "PW-B"},
+    ]}
+
+    def test_a_sentinel_in_an_unchanged_array_keeps_its_element_value(self):
+        new = secrets.redact_document(self.BLOCKS)
+        new["email"] = {"imap_host": "imap.example.org"}
+        restored = secrets.restore_sentinels(new, self.BLOCKS)
+        assert [block["api_token"] for block in restored["briefing_shared_blocks"]] == ["PW-A", "PW-B"]
+
+    @pytest.mark.parametrize("blocks", [
+        [{"name": "b", "api_token": secrets.SENTINEL}],
+        [{"name": "b", "api_token": secrets.SENTINEL}, {"name": "a", "api_token": secrets.SENTINEL}],
+        [{"name": "a", "api_token": secrets.SENTINEL}, {"name": "b", "api_token": secrets.SENTINEL},
+         {"name": "c", "api_token": "PW-C"}],
+        [{"name": "a", "api_token": secrets.SENTINEL}, {"name": "c", "api_token": secrets.SENTINEL}],
+    ])
+    def test_a_sentinel_in_a_changed_array_is_refused_not_moved(self, blocks):
+        """Deleting the first element must not hand its credential to the second."""
+        with pytest.raises(secrets.SentinelError, match="type the credential again"):
+            secrets.restore_sentinels({"briefing_shared_blocks": blocks}, self.BLOCKS)
+
+    def test_a_retyped_value_in_a_changed_array_is_extracted_as_new(self):
+        """Once refused, the admin types the value again; one equal to the old
+        element's at that index is still a new value, or the host would refuse it."""
+        new = {"briefing_shared_blocks": [{"name": "b", "api_token": "PW-A"}]}
+        _, found = secrets.extract_inline_secrets(new, self.BLOCKS)
+        assert found == {"briefing_shared_blocks.0.api_token": "PW-A"}
+
     def test_a_label_quotes_a_segment_holding_a_dot(self):
         new = {"brain": {"native": {"extra_headers": {"x.tenant": secrets.SENTINEL}}}}
         with pytest.raises(secrets.SentinelError, match=r'brain\.native\.extra_headers\."x\.tenant"'):
@@ -176,3 +205,13 @@ class TestDropMissingSentinels:
         assert kept == {"email": {"imap_password": secrets.SENTINEL}, "list": ["plain"]}
         assert dropped == ["email.smtp_password", "list.0"]
         assert document["email"]["smtp_password"] == secrets.SENTINEL
+
+    def test_a_sentinel_whose_array_changed_is_dropped_too(self):
+        current = {"briefing_shared_blocks": [{"name": "b", "api_token": "PW-B"}]}
+        document = {"briefing_shared_blocks": [
+            {"name": "a", "api_token": secrets.SENTINEL}, {"name": "b", "api_token": secrets.SENTINEL},
+        ]}
+        kept, dropped = secrets.drop_missing_sentinels(document, current)
+        assert kept == {"briefing_shared_blocks": [{"name": "a"}, {"name": "b"}]}
+        assert dropped == ["briefing_shared_blocks.0.api_token", "briefing_shared_blocks.1.api_token"]
+        assert secrets.restore_sentinels(kept, current) == kept

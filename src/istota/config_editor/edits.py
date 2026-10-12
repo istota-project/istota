@@ -73,11 +73,14 @@ def diff_documents(
 
     Both are redacted before they are rendered (`secrets.redact_pair`), rather
     than lines of a rendered diff being redacted by key name, which let a
-    header value under `[brain.native.extra_headers]` through. Both sides go
+    header value under `[brain.native.extra_headers]` through. A key the view
+    masks rather than redacts (`MASKED_KEYS`) is masked here too, since the
+    diff is stored with the request and shown in its history. Both sides go
     through `toml_write`, so a hand-written file's formatting and comments make
     no diff lines.
     """
     current_redacted, new_redacted = secrets.redact_pair(current, new)
+    _mask_pair(current, new, current_redacted, new_redacted)
     return [
         line.rstrip("\n")
         for line in difflib.unified_diff(
@@ -89,11 +92,39 @@ def diff_documents(
     ]
 
 
+def _mask_pair(current: dict, new: dict, current_shown: dict, new_shown: dict) -> None:
+    """The view's masked keys (`MASKED_KEYS`) masked in the two documents a diff
+    renders, in place. A changed value whose mask reads the same is marked, so
+    it still makes a diff line."""
+    from istota.webui.admin_config_view import MASKED_KEYS
+
+    for dotted, mask in MASKED_KEYS.items():
+        path = tuple(dotted.split("."))
+        found_current, value_current = secrets.lookup(current, path)
+        found_new, value_new = secrets.lookup(new, path)
+        if found_current:
+            _set_at(current_shown, path, mask(value_current))
+        if found_new:
+            shown = mask(value_new)
+            if found_current and value_new != value_current and shown == mask(value_current):
+                shown += " (changed)"
+            _set_at(new_shown, path, shown)
+
+
 class ChangeError(ValueError):
     """A change set that cannot be read, so nothing can be previewed.
 
     The message never repeats a value from the change set.
     """
+
+
+#: Why nothing is changed from the web while the live file does not parse:
+#: every check compares against it, and against nothing a document dropping
+#: `db_path` would pass.
+UNREADABLE_CONFIG = (
+    "config.toml does not parse, so it cannot be changed from here; fix it on "
+    "the host with `istota-stack apply`, or copy back a `config.toml.bak.<timestamp>`"
+)
 
 
 _MAX_SEGMENTS = 16
@@ -611,9 +642,9 @@ async def preview(
     if not isinstance(change_set, dict):
         raise ChangeError("the change set is not an object")
     try:
-        current = tomllib.loads(current_text)
+        base = tomllib.loads(current_text)
     except tomllib.TOMLDecodeError:
-        current = None
+        raise ChangeError(UNREADABLE_CONFIG) from None
     ops = change_set.get("ops") or []
     raw = change_set.get("raw")
     if raw is not None:
@@ -621,10 +652,7 @@ async def preview(
             raise ChangeError("raw replaces the whole file, so ops must be empty")
         candidate = apply_raw(raw)
     else:
-        if current is None:
-            raise ChangeError("config.toml does not parse; fix it in the raw editor")
-        candidate = apply_ops(current, ops)
-    base = current or {}
+        candidate = apply_ops(base, ops)
     try:
         new = secrets.restore_sentinels(candidate, base)
     except secrets.SentinelError as exc:

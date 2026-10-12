@@ -92,6 +92,24 @@ class TestApplyOps:
             edits.apply_raw('a = 1\nb = = 2\n')
 
 
+class TestDiffDocuments:
+    def test_a_masked_key_is_masked_and_a_change_still_shows(self):
+        current = {"whatsapp": {"business_phone_number": "+15550001234"}}
+        new = {"whatsapp": {"business_phone_number": "+15559991234"}}
+        lines = edits.diff_documents(current, new)
+        text = "\n".join(lines)
+        assert "0001234" not in text and "9991234" not in text
+        assert '-business_phone_number = "+*******1234"' in lines
+        assert '+business_phone_number = "+*******1234 (changed)"' in lines
+
+    def test_an_unchanged_masked_key_makes_no_line(self):
+        document = {"whatsapp": {"business_phone_number": "+15550001234"}, "email": {"imap_host": "a"}}
+        changed = {"whatsapp": {"business_phone_number": "+15550001234"}, "email": {"imap_host": "b"}}
+        lines = edits.diff_documents(document, changed)
+        assert not [line for line in lines if line[:1] in "+-" and "business_phone_number" in line]
+        assert "0001234" not in "\n".join(lines)
+
+
 class TestCheckAdmins:
     def _identity(self, db_path, user_id):
         user_profiles.ensure_profile(db_path, user_id)
@@ -243,6 +261,17 @@ class TestPreview:
     def test_a_sentinel_with_no_stored_value_is_refused(self):
         with pytest.raises(ChangeError, match="no stored value to keep at brain.native.api_key"):
             _preview(CURRENT, {"raw": f'[brain.native]\napi_key = "{SENTINEL}"\n'})
+
+    @pytest.mark.parametrize("change_set", [
+        {"raw": 'db_path = "/data/istota.db"\ntemp_dir = "/data/tmp"\n'},
+        {"raw": '[email]\nimap_host = "imap.example.org"\n'},
+        {"ops": [{"op": "set", "path": ["email", "imap_host"], "value": "imap.example.org"}]},
+    ])
+    def test_a_current_file_that_does_not_parse_refuses_every_change(self, change_set):
+        """Against nothing, the read-only check refuses a raw document that keeps
+        the layout keys and passes one that drops them."""
+        with pytest.raises(ChangeError, match=r"fix it on the host with `istota-stack apply`"):
+            _preview('db_path = "/data/istota.db"\n[email\n', change_set)
 
     def test_raw_and_ops_together_are_refused(self):
         with pytest.raises(ChangeError, match="ops must be empty"):

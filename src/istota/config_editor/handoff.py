@@ -66,14 +66,18 @@ def needs_claude_code(document: dict) -> bool:
     return any(isinstance(kind, str) and kind in _CLAUDE_CODE_KINDS for kind in kinds)
 
 
-def build(taken: Any, current: dict) -> tuple[dict, dict, bool]:
+def build(taken: Any, current: dict | None) -> tuple[dict, dict, bool]:
     """The plan, the put-files request and the Claude Code flag for `taken`.
 
     `taken` is a `requests.TakenRequest`; `current` the live `config.toml` as
-    a document, whose values fill every sentinel no new value replaces.
+    a document, whose values fill every sentinel no new value replaces, or
+    None when it does not parse, which refuses the request.
     """
+    from istota.config_editor.edits import UNREADABLE_CONFIG
     from istota.setup_wizard import SECRET_NAMES
 
+    if current is None:
+        raise HandoffError(UNREADABLE_CONFIG)
     try:
         document = tomllib.loads(taken.document_toml)
     except tomllib.TOMLDecodeError as exc:

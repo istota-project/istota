@@ -21,7 +21,9 @@ The applier exists only on the dedicated VM, set up by `host/provision.sh`. Anyw
 - Settings that can lock admins out or change the security posture (`web.auth`, the OAuth client, `security.sandbox_enabled`, `security.skill_proxy_enabled`, `brain.kind`, any change to the admin list, and a few more) need a typed confirmation.
 - `[web] auth` must keep `email`, and the admin list must not be empty, must keep the acting admin, and may name only users with a live sign-in identity. Give a user an identity on the Users page first.
 - A value the loader would discard blocks the change, including one already in the file. The page shows it against its key so it can be fixed in the same change.
-- If `config.toml` changes on the host after the page loaded, the submit is refused, and so is a request the host takes after such a change. A write made on the host is never reverted by an older web request.
+- If `config.toml` changes on the host after the page loaded, the submit is refused, and so is a request the host takes after such a change, so a host edit to `config.toml` is never reverted by an older web request. That check covers `config.toml` only: a credential or the admins file written on the host with `put-files` between the submit and the take is overwritten for the names the request changes.
+- A request is refused when a plan has taken over what it changes (`config/managed.json`) since it was made.
+- While `config.toml` does not parse, nothing is changed from the page. Fix it on the host with `istota-stack apply`, or copy back a `config.toml.bak.<timestamp>`.
 - Only one request is open at a time. A request the host has not taken can be cancelled.
 - Every other admin gets an `admin_config_change` notification when a change is applied or fails.
 

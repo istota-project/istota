@@ -22,7 +22,7 @@ from istota.webui.admin_config_view import is_secret_path
 __all__ = [
     "SENTINEL", "SentinelError", "drop_missing_sentinels", "extract_inline_secrets",
     "is_secret_path", "label", "lookup", "parse_label", "redact_document",
-    "restore_sentinels",
+    "restore_sentinels", "same_elements",
 ]
 
 #: What a secret leaf reads as in a document shown to an admin or stored in a
@@ -130,13 +130,51 @@ def lookup(document: Any, path: tuple) -> tuple[bool, Any]:
     return True, node
 
 
+def _element_scalars(element: Any, path: tuple) -> dict | None:
+    """What identifies an array element: its non-secret scalar values."""
+    if not isinstance(element, dict):
+        return None
+    return {
+        key: value for key, value in element.items()
+        if not isinstance(value, (dict, list)) and value != SENTINEL
+        and not is_secret_path(path + (key,))
+    }
+
+
+def same_elements(new: Any, current: Any, path: tuple) -> bool:
+    """Whether every array on the way to `path` is, in `new`, the array
+    `current` has: the same length, and at the index taken the element's
+    non-secret scalars the same.
+
+    A sentinel inside an array is restored by index, so without this a deleted
+    or reordered element would hand its credential to whichever moved into its
+    place.
+    """
+    new_node, current_node = new, current
+    for depth, segment in enumerate(path):
+        if isinstance(new_node, list):
+            if not isinstance(current_node, list) or len(current_node) != len(new_node):
+                return False
+            index = int(segment)
+            where = path[:depth + 1]
+            if _element_scalars(new_node[index], where) != _element_scalars(current_node[index], where):
+                return False
+            new_node, current_node = new_node[index], current_node[index]
+        elif isinstance(new_node, dict) and isinstance(current_node, dict):
+            new_node, current_node = new_node.get(segment), current_node.get(segment)
+        else:
+            return True
+    return True
+
+
 def restore_sentinels(new: dict, current: dict, values: dict[str, Any] | None = None) -> dict:
     """`new` with the current value put back wherever a sentinel stands.
 
     `values` are new credential values by `label`, as `extract_inline_secrets`
     took them out of a document; one there wins over the current value. A
     sentinel with neither is refused with `SentinelError`: there is no stored
-    value to keep.
+    value to keep. So is one inside an array that is not `current`'s
+    (`same_elements`), whose credential has to be typed again.
     """
     values = values or {}
 
@@ -145,6 +183,11 @@ def restore_sentinels(new: dict, current: dict, values: dict[str, Any] | None = 
             return value
         if label(path) in values:
             return values[label(path)]
+        if not same_elements(new, current, path):
+            raise SentinelError(
+                f"{label(path)} is in an array of tables that changed, so its stored "
+                "value cannot be matched to it; type the credential again"
+            )
         found, stored = lookup(current, path)
         if not found:
             raise SentinelError(f"no stored value to keep at {label(path)}")
@@ -158,13 +201,13 @@ def drop_missing_sentinels(document: dict, current: dict) -> tuple[dict, list[st
 
     For restoring a history entry: a credential cleared since the entry was
     applied stays cleared, rather than refusing the whole restore the way
-    `restore_sentinels` refuses a sentinel with nothing to keep. An array
-    element is dropped with its slot.
+    `restore_sentinels` refuses a sentinel with nothing to keep, or one in an
+    array that changed since. An array element is dropped with its slot.
     """
     dropped: list[str] = []
 
     def keep(value: Any, path: tuple) -> bool:
-        if value != SENTINEL or lookup(current, path)[0]:
+        if value != SENTINEL or (lookup(current, path)[0] and same_elements(document, current, path)):
             return True
         dropped.append(label(path))
         return False
@@ -206,7 +249,8 @@ def extract_inline_secrets(
     values keyed by `label(path)`. A value an admin typed into a set, a table
     snippet or the raw editor is a new credential, and is stored sealed rather
     than in the document. With `current`, a leaf holding the value `current`
-    holds at the same path is not returned: the sentinel keeps it.
+    holds at the same path is not returned: the sentinel keeps it, unless
+    `restore_sentinels` would refuse that sentinel (`same_elements`).
     """
     found: dict[str, Any] = {}
 
@@ -215,7 +259,7 @@ def extract_inline_secrets(
             return SENTINEL
         if current is not None:
             exists, stored = lookup(current, path)
-            if exists and stored == value:
+            if exists and stored == value and same_elements(document, current, path):
                 return SENTINEL
         found[label(path)] = value
         return SENTINEL

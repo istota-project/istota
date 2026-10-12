@@ -193,6 +193,29 @@ class TestTake:
             assert requests.get(conn, request_id)["status"] == "refused"
 
 
+    def test_a_plan_claiming_a_resource_since_refuses_the_request(self, install):
+        request_id = install.submit(CHANGE)
+        (install.config_path.parent / "managed.json").write_text(
+            json.dumps({"secrets": {"managed": True, "source": "ansible", "at": "2026-10-12T00:00:00Z"}})
+        )
+        result = install.run("config-request", "take", "--out", str(install.out))
+        assert result.returncode == 0 and result.stdout == ""
+        assert not (install.out / "plan.json").exists()
+        with db.get_db(install.db_path) as conn:
+            row = requests.get(conn, request_id)
+        assert row["status"] == "refused"
+        assert row["output_text"] == "a plan now manages secrets; change it there"
+
+
+class TestBuild:
+    def test_a_current_file_that_does_not_parse_refuses_the_build(self, install):
+        install.submit({"ops": [{"op": "set", "path": ["email", "imap_host"], "value": "x.example.org"}]})
+        with db.get_db(install.db_path) as conn:
+            taken = requests.take(conn, install.digest())
+        with pytest.raises(handoff.HandoffError, match=r"fix it on the host with `istota-stack apply`"):
+            handoff.build(taken, None)
+
+
 class TestFinishAndMark:
     def test_finish_stores_the_output_without_a_credential_line(self, install):
         request_id = install.submit(CHANGE)
