@@ -9,6 +9,7 @@ from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
 
 from istota import db
 from istota.maintenance import db_backup
@@ -334,6 +335,95 @@ class TestBackupPermissions:
         # Dir 0700, file 0600 -> no group/other bits.
         assert stat.S_IMODE(dated.stat().st_mode) == 0o700
         assert stat.S_IMODE(snap.stat().st_mode) == 0o600
+
+
+class TestTheHostFolderMarker:
+    """A host folder shared into the local VM that went away still reads as a
+    mount of the same type; only `.istota-workspace` says it is the workspace
+    (row L1). A snapshot into the empty stand-in would be lost with it."""
+
+    def test_a_mount_without_its_marker_is_not_written(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+        assert not (tmp_path / "mount" / "Backups").exists()
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_a_mount_with_its_marker_is_written(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+        (tmp_path / "mount" / ".istota-workspace").write_text("")
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+
+class TestTheConfigCopy:
+    """`config.toml` and `admins` beside the snapshots, for a restore that has
+    lost the VM: the snapshots alone cannot rebuild a stack (the local VM's
+    recovery). Only where the workspace is a mount, which is off the VM."""
+
+    @pytest.fixture
+    def config_files(self, tmp_path, monkeypatch):
+        directory = tmp_path / "config"
+        directory.mkdir()
+        (directory / "config.toml").write_text('bot_name = "Zed"\n')
+        (directory / "admins").write_text("alice\n")
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(directory / "admins"))
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        return directory
+
+    def _cfg(self, tmp_path, config_files, **kw):
+        cfg = _config(tmp_path, db_backup_dir="", **kw)
+        cfg.config_path = config_files / "config.toml"
+        db.init_db(cfg.db_path)
+        return cfg
+
+    def test_both_files_are_copied_private_beside_the_snapshots(
+        self, tmp_path, config_files, monkeypatch,
+    ):
+        cfg = self._cfg(tmp_path, config_files)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        dated = tmp_path / "mount" / "Backups" / "config" / FIXED_DAY
+        assert (dated / "config.toml").read_text() == 'bot_name = "Zed"\n'
+        assert (dated / "admins").read_text() == "alice\n"
+        assert stat.S_IMODE(dated.stat().st_mode) == 0o700
+        for name in ("config.toml", "admins"):
+            assert stat.S_IMODE((dated / name).stat().st_mode) == 0o600, name
+
+    def test_nothing_is_copied_without_a_workspace_mount(self, tmp_path, config_files):
+        cfg = self._cfg(tmp_path, config_files, mount_configured=False)
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        assert not (tmp_path / "mount" / "Backups" / "config").exists()
+
+    def test_nothing_is_copied_into_an_unmounted_store(self, tmp_path, config_files, monkeypatch):
+        cfg = self._cfg(tmp_path, config_files)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        assert not (tmp_path / "mount" / "Backups").exists()
+
+    def test_the_copies_keep_the_snapshots_retention(self, tmp_path, config_files, monkeypatch):
+        cfg = self._cfg(tmp_path, config_files, db_backup_retention=2)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        start = _date.fromisoformat(FIXED_DAY)
+
+        for offset in range(4):
+            db_backup.backup_databases(cfg, today=(start + timedelta(days=offset)).isoformat())
+
+        kept = sorted(p.name for p in (tmp_path / "mount" / "Backups" / "config").iterdir())
+        assert kept == [(start + timedelta(days=offset)).isoformat() for offset in (2, 3)]
 
 
 class TestMountLiveness:

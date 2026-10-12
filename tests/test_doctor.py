@@ -1670,6 +1670,33 @@ class TestMountLiveness:
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == OK
 
+    def test_a_host_folder_without_its_marker_fails(self, make_config, tmp_path, monkeypatch):
+        """The folder shared into the local VM went away under a running stack:
+        the mount point stays a mount of the same type, and only the marker
+        says the folder is not the workspace any more (row L1)."""
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+        config = make_config()
+        r = run_checks(config, only=("runtime.mount_liveness",))[0]
+        assert r.status == FAIL
+        assert ".istota-workspace" in r.detail
+        assert str(tmp_path / "mount") in r.detail
+        assert r.remedy
+
+    def test_a_host_folder_with_its_marker_is_ok(self, make_config, tmp_path, monkeypatch):
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+        (tmp_path / "mount" / ".istota-workspace").parent.mkdir(exist_ok=True)
+        (tmp_path / "mount" / ".istota-workspace").write_text("")
+        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+        assert r.status == OK
+
+    def test_a_mount_that_needs_no_marker_is_not_asked_for_one(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.os.path, "ismount", lambda p: True)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        r = run_checks(self._nextcloud_backed(make_config), only=("runtime.mount_liveness",))[0]
+        assert r.status == OK
+
 
 class TestWorkspaceXattr:
     """#694: the rclone workspace mount answered listxattr on files with EIO,

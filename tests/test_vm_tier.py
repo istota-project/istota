@@ -107,3 +107,21 @@ class TestTheLimaTemplate:
         probe = template.split("probes:", 1)[1].split("portForwards:", 1)[0]
         assert "/usr/local/sbin/istota-stack" in probe
         assert "command -v istota-stack" not in probe
+
+
+class TestTheEntrypointControls:
+    """The vm tier's entrypoint controls `sed` one line of the deployed
+    entrypoint; a line that no longer matches fails the build in the VM, minutes
+    in, and a pattern matching twice removes more than the one refusal."""
+
+    @staticmethod
+    def _pattern(dockerfile: Path) -> str:
+        match = re.search(r"sed -i 's/\^(.*?)\$/", dockerfile.read_text())
+        assert match, dockerfile.name
+        return match.group(1).replace("\\.", ".")
+
+    def test_each_matches_exactly_one_line_of_the_entrypoint(self):
+        entrypoint = (REPO / "docker" / "istota" / "entrypoint.sh").read_text().splitlines()
+        for name in ("Dockerfile.no-storage-refusal", "Dockerfile.no-workspace-marker"):
+            line = self._pattern(REPO / "docker" / "test" / name)
+            assert entrypoint.count(line) == 1, (name, line)

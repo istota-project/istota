@@ -25,6 +25,7 @@
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9)
+#   host-folder: no-workspace-marker (row L1)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18)
 #
 # Run scripts/test-vm.sh first: the controls reuse its VM and images. No arrays:
@@ -131,6 +132,10 @@ control no-host-bounds \
 control no-storage-refusal \
     "row 9: an entrypoint without the mount refusal" \
     "$VM/test_nextcloud.py::TestNothingIsWrittenIntoAnUnmountedStore::test_with_the_mount_stopped_the_daemon_does_not_start"
+
+control no-workspace-marker \
+    "row L1: an entrypoint without the host folder's marker refusal" \
+    "$VM/test_host_folder.py::TestAFolderThatWentAwayIsNotWritten::test_without_its_marker_the_daemon_does_not_start"
 
 P="$VM/test_proxied.py"
 control no-allow-list \

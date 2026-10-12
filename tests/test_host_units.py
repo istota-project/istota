@@ -331,6 +331,58 @@ class TestProvision:
         assert "--cache-dir /var/cache/istota-rclone" in mount["Service"]["ExecStart"]
 
 
+class TestTheHostFolder:
+    """STORAGE=host-folder: a folder on the Mac, shared into the local VM by
+    Lima, is the workspace mount. provision.sh installs istota-stack and so
+    cannot source it; each carries the directory rule, held equal here."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+    STACK = (HOST / "istota-stack").read_text()
+
+    @staticmethod
+    def _function(text: str) -> str:
+        match = re.search(r"^mount_dir_for_storage\(\) \{.*?^\}", text, re.M | re.S)
+        assert match, "mount_dir_for_storage is defined"
+        return match.group(0)
+
+    def test_both_scripts_carry_the_same_rule(self):
+        assert self._function(self.TEXT) == self._function(self.STACK)
+
+    @pytest.mark.parametrize("storage,expected", [
+        ("host-folder", "/srv/mount/host-folder"),
+        ("nextcloud", "/srv/mount/nextcloud/content"),
+        ("local", "/srv/mount/nextcloud/content"),
+        ("", "/srv/mount/nextcloud/content"),
+    ])
+    def test_the_directory_follows_storage(self, storage, expected):
+        script = f"set -euo pipefail\n{self._function(self.TEXT)}\nmount_dir_for_storage \"$1\""
+        result = subprocess.run(["bash", "-c", script, "_", storage], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected
+
+    def test_the_stack_waits_for_the_folder_and_only_in_that_mode(self):
+        block = self.TEXT.split('if [ "$(host_env STORAGE)" = "host-folder" ]; then', 1)
+        assert len(block) == 2, "provision.sh has no host-folder branch"
+        branch, rest = block[1].split("\nelse\n", 1)
+        assert '"${dropin}/host-folder.conf"' in branch
+        assert "RequiresMountsFor=${MOUNT_DIR}" in branch
+        assert 'rm -f "${dropin}/host-folder.conf"' in rest.split("\nfi\n", 1)[0]
+
+    def test_neither_script_changes_the_folders_mode_or_owner(self):
+        """The folder is the user's own on the Mac, and a guest chmod reaches it
+        (Stage 1). `install -d -m 0755` on an existing directory sets its mode."""
+        for name, text in (("provision.sh", self.TEXT), ("istota-stack", self.STACK)):
+            creates = [line for line in text.splitlines()
+                       if "install -d" in line and '"$MOUNT_DIR"' in line]
+            assert creates, name
+            for line in creates:
+                assert '[ -n "$host_folder" ] ||' in line, (name, line)
+        nextcloud = self.TEXT.split('if [ "$(host_env STORAGE)" = "nextcloud" ]; then', 1)[1].split("\nfi\n", 1)[0]
+        for line in self.TEXT.splitlines():
+            if '"$MOUNT_DIR"' in line and re.search(r"\b(chown|chmod)\b", line):
+                assert line in nextcloud.splitlines(), line
+
+
 class TestChangedFile:
     """A file written under a hardened umask before `umask 022` landed keeps its
     content, so it is never rewritten; the mode has to be set anyway (#714)."""
@@ -579,7 +631,7 @@ class TestABareMetalInstallOnTheSameHost:
         assert 'bare_metal_mount_live && bare_metal_mount=1' in self.TEXT
         assert ('if [ "$unit" = mount-nextcloud.service ] && [ -n "$bare_metal_mount" ]; then'
                 in self.TEXT)
-        assert '[ -n "$bare_metal_mount" ] || install -d -m 0755 "$MOUNT_DIR"' in self.TEXT
+        assert '[ -n "$bare_metal_mount" ] || [ -n "$host_folder" ] || install -d -m 0755 "$MOUNT_DIR"' in self.TEXT
         nextcloud = self.TEXT.split('if [ "$(host_env STORAGE)" = "nextcloud" ]; then', 1)[1]
         nextcloud = nextcloud.split("# --- Firewall", 1)[0]
         guarded = nextcloud.split('if [ -n "$bare_metal_mount" ]; then', 1)
@@ -652,7 +704,11 @@ class TestTheHostLayout:
     def test_provision_defaults_to_the_estate_paths(self):
         text = PROVISION.read_text()
         assert f'STACK="${{ISTOTA_STACK_DIR:-{STACK_DIR}}}"' in text
-        assert f'MOUNT_DIR="${{ISTOTA_MOUNT_DIR:-{MOUNT_DIR}}}"' in text
+        assert 'MOUNT_DIR="${ISTOTA_MOUNT_DIR:-$(mount_dir_for_storage "$(host_env STORAGE)")}"' in text
+        rule = re.search(r"^mount_dir_for_storage\(\) \{.*?^\}", text, re.M | re.S).group(0)
+        result = subprocess.run(["bash", "-c", f"{rule}\nmount_dir_for_storage ''"],
+                                capture_output=True, text=True, timeout=30)
+        assert result.stdout.strip() == MOUNT_DIR
         assert '"${STACK}/mount"' not in text
 
     def test_istota_stack_defaults_to_the_estate_paths(self):

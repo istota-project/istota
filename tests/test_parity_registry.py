@@ -11,6 +11,7 @@ witness is added; name it in the closing run of any change that moves one.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from tests.support import parity
 TESTS = Path(__file__).resolve().parent
 
 
-def _witness_rows(decorator: ast.expr) -> list[int] | None:
+def _witness_rows(decorator: ast.expr) -> list[int | str] | None:
     """The rows a `parity.witness(...)` or `witness(...)` decorator names."""
     if not isinstance(decorator, ast.Call):
         return None
@@ -33,15 +34,15 @@ def _witness_rows(decorator: ast.expr) -> list[int] | None:
         return None
     rows = []
     for arg in decorator.args:
-        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, int)):
+        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, (int, str))):
             raise AssertionError(f"parity.witness takes literal row numbers, got {ast.dump(arg)}")
         rows.append(arg.value)
     return rows
 
 
-def scan_witnesses(root: Path) -> dict[int, list[str]]:
+def scan_witnesses(root: Path) -> dict[int | str, list[str]]:
     """Row number to the `file::name` of every class or function witnessing it."""
-    found: dict[int, list[str]] = {}
+    found: dict[int | str, list[str]] = {}
     for path in sorted(root.rglob("test_*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -55,13 +56,19 @@ def scan_witnesses(root: Path) -> dict[int, list[str]]:
 
 
 @pytest.fixture(scope="module")
-def witnesses() -> dict[int, list[str]]:
+def witnesses() -> dict[int | str, list[str]]:
     return scan_witnesses(TESTS)
 
 
 class TestTheMatrix:
     def test_rows_are_numbered_one_to_twenty_without_gaps(self):
-        assert sorted(parity.ROWS) == list(range(1, 21))
+        assert sorted(row for row in parity.ROWS if isinstance(row, int)) == list(range(1, 21))
+
+    def test_the_local_vm_rows_are_l_rows_without_gaps(self):
+        """The local-VM spec's rows, `L1` onward, each added with its witness."""
+        local = [row for row in parity.ROWS if not isinstance(row, int)]
+        assert local and all(re.fullmatch(r"L[1-9]\d*", row) for row in local), local
+        assert sorted(int(row[1:]) for row in local) == list(range(1, len(local) + 1))
 
     def test_row_14_alone_is_not_witnessed_by_design(self):
         assert set(parity.NOT_WITNESSED) == {14}
@@ -151,7 +158,13 @@ class TestTheDecorator:
         assert marked is Target
         assert Target.__parity_rows__ == (3, 2)
 
-    @pytest.mark.parametrize("rows", [(), (0,), (21,)])
+    def test_it_takes_a_local_vm_row_by_name(self):
+        def target():
+            pass
+
+        assert parity.witness("L1")(target).__parity_rows__ == ("L1",)
+
+    @pytest.mark.parametrize("rows", [(), (0,), (21,), ("L0",), ("1",)])
     def test_it_refuses_no_row_or_an_unknown_one(self, rows):
         with pytest.raises(ValueError):
             parity.witness(*rows)

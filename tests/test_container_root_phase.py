@@ -309,3 +309,57 @@ class TestTheDrop:
     def test_the_root_phase_ends_by_execing_it(self):
         lines = [line.strip() for line in ROOT_PHASE.read_text().splitlines()]
         assert 'exec istota-drop "$@"' in lines
+
+
+class TestTheOwnershipWalkStaysInData:
+    """The root phase hands `/data` to uid 10001 and nothing else.
+
+    `/mnt/shared` is the workspace mount: the rclone mount, or on the local VM
+    the user's own folder on the Mac, where a chown walk as root would rewrite
+    a home directory's tree. Run with `find`, `chown` and `stat` recording
+    what they are asked, against a mount table holding a volume at `/data`,
+    a read-only config bind under it and a virtiofs workspace at `/mnt/shared`.
+    """
+
+    MOUNTS = (
+        "30 1 0:30 / / rw,relatime - overlay overlay rw\n"
+        "40 30 254:1 /volumes/istota_data/_data /data rw,relatime - ext4 /dev/vda1 rw\n"
+        "41 40 254:1 /srv/app/istota/config /data/config ro,relatime - ext4 /dev/vda1 rw\n"
+        "42 40 0:42 / /data/tmp rw,nosuid,nodev - tmpfs tmpfs rw\n"
+        "43 30 0:43 / /mnt/shared rw,relatime - virtiofs lima-0123 rw\n"
+    )
+
+    def _walk(self, tmp_path) -> list[str]:
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        record = tmp_path / "calls"
+        for name in ("find", "chown"):
+            (bindir / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{record}"\n')
+            (bindir / name).chmod(0o755)
+        (bindir / "stat").write_text("#!/bin/sh\necho 0\n")
+        (bindir / "stat").chmod(0o755)
+        (bindir / "istota-drop").write_text("#!/bin/sh\nexit 0\n")
+        (bindir / "istota-drop").chmod(0o755)
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(self.MOUNTS)
+        script = (
+            f'export PATH="{bindir}:$PATH"; source "{ROOT_PHASE}"; '
+            f'MOUNTINFO="{mountinfo}"; OWNERSHIP_MARKER="{tmp_path / "absent-marker"}"; fix_ownership'
+        )
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return record.read_text().splitlines() if record.exists() else []
+
+    def test_the_walk_starts_at_data_and_never_names_the_workspace(self, tmp_path):
+        calls = self._walk(tmp_path)
+
+        walks = [c for c in calls if c.startswith("find ")]
+        assert walks and all(c.split()[1] == "/data" for c in walks), calls
+        assert not [c for c in calls if "/mnt/shared" in c], calls
+        # The read-only bind is pruned and the writable tmpfs handed over.
+        assert "-path /data/config -prune" in walks[0]
+        assert "chown 10001:10001 /data/tmp" in calls
+
+    def test_the_script_never_names_the_workspace_mount(self):
+        text = ROOT_PHASE.read_text()
+        assert "/mnt/shared" not in text.split("set -euo pipefail", 1)[1]

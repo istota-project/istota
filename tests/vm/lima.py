@@ -578,6 +578,63 @@ def nextcloud_mode(model_url: str, nc_url: str, bot_password: str, rclone_conf: 
     )
 
 
+#: Where Lima shares the Mac folder in, in the host-folder mode (provision.sh's
+#: directory for STORAGE=host-folder).
+HOST_FOLDER_MOUNT = "/srv/mount/host-folder"
+#: The marker the entrypoint, doctor and the backup ask the folder for.
+HOST_FOLDER_MARKER = ".istota-workspace"
+
+
+def host_folder_mode(model_url: str) -> Mode:
+    """The local VM's shape: local ingress, the workspace a folder on the Mac."""
+    return Mode(
+        name="host-folder",
+        setup_args=common_args(model_url) + [
+            "--ingress", "local", "--hostname", "localhost:8080", "--storage", "host-folder",
+        ],
+    )
+
+
+def host_folder() -> Path:
+    """The Mac folder the host-folder mode shares in, kept between sessions so
+    an unchanged mount list costs no VM restart."""
+    folder = _workdir() / "host-folder"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _mounts(release: Release, *extra: dict) -> list[dict]:
+    return [{"location": str(release.repo), "mountPoint": REPO_MOUNT, "writable": False}, *extra]
+
+
+def _current_mounts(vm: Vm) -> list[tuple]:
+    mounts = ((vm.info() or {}).get("config") or {}).get("mounts") or []
+    return [(m.get("location"), m.get("mountPoint"), bool(m.get("writable"))) for m in mounts]
+
+
+def set_mounts_if_changed(vm: Vm, mounts: list[dict]) -> None:
+    """`Vm.set_mounts`, skipped when the VM already has exactly these."""
+    wanted = [(m["location"], m["mountPoint"], m["writable"]) for m in mounts]
+    if _current_mounts(vm) != wanted:
+        vm.set_mounts(mounts)
+
+
+def share_host_folder(vm: Vm, release: Release, folder: Path) -> None:
+    """The VM with `folder` shared in writable at HOST_FOLDER_MOUNT, beside the checkout."""
+    set_mounts_if_changed(vm, _mounts(release, {
+        "location": str(folder), "mountPoint": HOST_FOLDER_MOUNT, "writable": True}))
+
+
+def unshare_host_folder(vm: Vm, release: Release) -> None:
+    """Back to the checkout alone, which row 7 asserts, leaving the stack for
+    the next mode to set up: a host folder in host.env would otherwise be kept
+    by its setup, and the stack would refuse to start without the folder."""
+    vm.run(f"systemctl stop istota-stack.service || true; rm -f {MODE_FILE}", timeout=600)
+    env_file_set(vm, f"{STACK}/host.env", {"STORAGE": "local"})
+    vm.run(f"{STACK}/src/host/provision.sh", timeout=1800)
+    set_mounts_if_changed(vm, _mounts(release))
+
+
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
     for key, value in over.items():

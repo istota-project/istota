@@ -16,7 +16,8 @@
 # The machine's choices come from /srv/app/istota/host.env, written by
 # `istota setup --vm-dir`:
 #
-#   STORAGE              local | nextcloud (the rclone mount)
+#   STORAGE              local | nextcloud (the rclone mount) | host-folder (a
+#                        folder Lima shares in, the local VM)
 #   INGRESS              local | proxied | direct
 #   DOMAIN, TLS_CERT_SOURCE, UPSTREAM_PROXY, LISTEN_ADDR, LISTEN_PORT
 #   RELEASE_SIGNING_KEY  the release key, one line of an SSH public key
@@ -32,9 +33,6 @@ umask 022
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
 STACK="${ISTOTA_STACK_DIR:-/srv/app/istota}"
-# The Nextcloud mount, outside the stack directory at the path the bare-metal
-# installs use. mount-nextcloud.service names it too; the override is the tests'.
-MOUNT_DIR="${ISTOTA_MOUNT_DIR:-/srv/mount/nextcloud/content}"
 HOST_ENV="${STACK}/host.env"
 ISTOTA_UID=10001
 UNITS=/etc/systemd/system
@@ -74,6 +72,27 @@ host_env() {
     [ -f "$HOST_ENV" ] || return 0
     awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { if (v != "") print v }' "$HOST_ENV"
 }
+
+# The workspace mount's directory on this VM, by host.env's STORAGE: the
+# rclone mount's for nextcloud (and for local, which mounts nothing there), the
+# folder Lima shares in for host-folder. provision.sh installs istota-stack and
+# cannot source it, so each carries this; tests/test_host_units.py holds the
+# two equal.
+mount_dir_for_storage() {
+    case "$1" in
+        host-folder) echo /srv/mount/host-folder ;;
+        *) echo /srv/mount/nextcloud/content ;;
+    esac
+}
+
+# The workspace mount, outside the stack directory: the rclone mount at the
+# path the bare-metal installs use (mount-nextcloud.service names it too), or
+# the local VM's shared folder. The override is the tests'.
+MOUNT_DIR="${ISTOTA_MOUNT_DIR:-$(mount_dir_for_storage "$(host_env STORAGE)")}"
+# The folder is the user's own on the Mac: a mode or owner set on it here
+# reaches their home directory, so nothing here creates or changes it.
+host_folder=""
+[ "$(host_env STORAGE)" != "host-folder" ] || host_folder=1
 
 changed_file() {
     # Write $2 to $1 when it differs; answer whether it did. The mode is set
@@ -317,7 +336,7 @@ bare_metal_mount_live && bare_metal_mount=1
 
 # --- /srv/app/istota ---------------------------------------------------------
 install -d -m 0755 "$STACK" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
-[ -n "$bare_metal_mount" ] || install -d -m 0755 "$MOUNT_DIR"
+[ -n "$bare_metal_mount" ] || [ -n "$host_folder" ] || install -d -m 0755 "$MOUNT_DIR"
 install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/config"
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/secrets"
 [ -f "${STACK}/.env" ] || install -m 0644 /dev/null "${STACK}/.env"
@@ -377,8 +396,21 @@ else
     log "no AppArmor on this kernel; the stack's apparmor=istota option is ignored."
 fi
 
-# --- Full Nextcloud integration: the rclone mount ----------------------------
+# --- The local VM: a host folder as the workspace ----------------------------
+# Lima mounts it before the stack can start; the stack waits for it, and the
+# entrypoint refuses an empty stand-in for a folder that went away.
 dropin="${UNITS}/istota-stack.service.d"
+if [ "$(host_env STORAGE)" = "host-folder" ]; then
+    changed_file "${dropin}/host-folder.conf" "$(cat <<EOF
+[Unit]
+RequiresMountsFor=${MOUNT_DIR}
+EOF
+)" || true
+else
+    rm -f "${dropin}/host-folder.conf"
+fi
+
+# --- Full Nextcloud integration: the rclone mount ----------------------------
 if [ "$(host_env STORAGE)" = "nextcloud" ]; then
     [ -n "$(host_env RCLONE_REMOTE)" ] \
         || die "STORAGE=nextcloud needs RCLONE_REMOTE in ${HOST_ENV}: the remote's name in ${STACK}/rclone.conf."

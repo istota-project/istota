@@ -19,6 +19,9 @@ The decorator changes nothing about collection or running. What reads it is
 than importing the tier modules, so a witness in an artifact tier is counted
 without that tier's fixtures being loaded.
 
+Rows 1 to 20 are that spec's. The local-VM spec (a Lima VM on the Mac running
+the same stack) adds its own as `L1` onward, held the same way.
+
 Every row is in exactly one of three states: witnessed (some test carries the
 decorator for it), pending (named in `PENDING` with the stage that will close
 it), or not witnessed by design (`NOT_WITNESSED`, row 14 only). `PENDING` may
@@ -35,7 +38,7 @@ from typing import Callable, TypeVar
 
 T = TypeVar("T")
 
-ROWS: dict[int, str] = {
+ROWS: dict[int | str, str] = {
     1: "per-task mount plan: database masks, control dir read-only, no other user's workspace or repos, --disable-userns",
     2: "task network: --unshare-net, CONNECT allowlist, broker interception for bound hosts",
     3: "skill and network proxy peer check (ISSUE-550)",
@@ -56,6 +59,8 @@ ROWS: dict[int, str] = {
     18: "proxied listener reachable only from the upstream",
     19: "TLS in direct mode",
     20: "container MAC confinement",
+    # The local-VM spec's rows, each added with its witness.
+    "L1": "the daemon never writes into a workspace that is not the user's folder",
 }
 
 NOT_WITNESSED: dict[int, str] = {
@@ -83,7 +88,7 @@ PENDING_AT_STAGE_1: frozenset[int] = frozenset(
 OUTSTANDING_HALVES: dict[int, str] = {}
 
 
-def witness(*rows: int) -> Callable[[T], T]:
+def witness(*rows: int | str) -> Callable[[T], T]:
     """Mark a test class or function as the witness for one or more rows."""
     unknown = [row for row in rows if row not in ROWS]
     if not rows or unknown:

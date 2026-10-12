@@ -861,6 +861,40 @@ class TestTheMount:
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == f"mount={fx.root / 'mount'}"
 
+    @pytest.mark.parametrize("storage,mount,fstype,marker", [
+        ("host-folder", "/srv/mount/host-folder", "virtiofs", "1"),
+        ("nextcloud", "/srv/mount/nextcloud/content", "fuse.rclone", ""),
+        ("local", "/srv/mount/nextcloud/content", "", ""),
+    ])
+    def test_storage_decides_what_the_containers_are_told_about_the_mount(
+        self, fx, storage, mount, fstype, marker,
+    ):
+        """What host.env's STORAGE means for the workspace bind: the directory
+        on the VM, the filesystem type the entrypoint requires there, and
+        whether the folder must carry `.istota-workspace`."""
+        (fx.stack / "host.env").write_text(f"STORAGE={storage}\nINGRESS=local\n")
+        env = {k: v for k, v in fx.env.items() if k != "ISTOTA_MOUNT_DIR"}
+        result = subprocess.run(
+            ["bash", "-c", f'source "{SCRIPT}"; docker() {{ echo "mount=${{ISTOTA_MOUNT_DIR}} '
+             'fstype=${ISTOTA_WORKSPACE_FSTYPE-unset} marker=${ISTOTA_WORKSPACE_MARKER_REQUIRED-unset}"; }; '
+             "compose ps"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"mount={mount} fstype={fstype} marker={marker}"
+
+    def test_the_daemon_and_web_receive_both_from_compose(self):
+        import yaml
+
+        from istota.lib import workspace_marker
+
+        services = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())["services"]
+        for name in ("daemon", "web"):
+            environment = services[name]["environment"]
+            assert environment["ISTOTA_WORKSPACE_FSTYPE"] == "${ISTOTA_WORKSPACE_FSTYPE:-}", name
+            assert environment[workspace_marker.REQUIRED_ENV] == (
+                "${" + workspace_marker.REQUIRED_ENV + ":-}"), name
+
 
 class TestRootNeverReadsWhatUid10001Can:
     """Root on the VM must not act on a file uid 10001 can write or replace.

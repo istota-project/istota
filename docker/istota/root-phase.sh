@@ -17,8 +17,8 @@
 #      /proc/sys still hold (parity row 20).
 #   3. Fixes ownership of /data, the local workspace included, once, for a
 #      volume an older image wrote as root (recorded by /data/.ownership-10001).
-#      A full-integration workspace is the VM's rclone mount, whose owner the
-#      mount unit sets; nothing here touches it.
+#      /mnt/shared is never walked: it is the VM's rclone mount, whose owner
+#      the mount unit sets, or on the local VM the user's own folder on the Mac.
 #   4. Checks the sandbox grant: bubblewrap must be able to build the sandbox's
 #      namespace as uid 10001, or the container exits naming the compose lines.
 #      The drop itself is checked first, so a credential file uid 10001 cannot
@@ -35,6 +35,9 @@ ISTOTA_UID=10001
 ISTOTA_GID=10001
 CGROUP_MOUNT=/sys/fs/cgroup
 OWNERSHIP_MARKER=/data/.ownership-10001
+# The mount table the ownership walk reads; tests/test_container_root_phase.py
+# sets it after sourcing, to run the walk against a fabricated one.
+MOUNTINFO=/proc/self/mountinfo
 SELF_STATUS=/proc/self/status
 # argv[1] of the re-exec that drops CAP_SYS_ADMIN; its presence means the drop
 # has happened, so the re-exec'd process never re-execs again.
@@ -142,7 +145,7 @@ require_setpcap() {
 # Whether a path is a read-only mount point (a config directory bound :ro).
 is_ro_mount() {
     awk -v mp="$1" '$5 == mp { split($6, o, ","); for (i in o) if (o[i] == "ro") found = 1 }
-        END { exit !found }' /proc/self/mountinfo
+        END { exit !found }' "$MOUNTINFO"
 }
 
 # chown -R, skipping read-only mounts below the path rather than failing on them.
@@ -152,7 +155,7 @@ chown_tree() {
         if [ "$mp" != "$path" ] && is_ro_mount "$mp"; then
             ro_mounts+=(-path "$mp" -prune -o)
         fi
-    done < <(awk -v p="$path" 'index($5, p "/") == 1 { print $5 }' /proc/self/mountinfo)
+    done < <(awk -v p="$path" 'index($5, p "/") == 1 { print $5 }' "$MOUNTINFO")
     # Without CAP_DAC_READ_SEARCH this phase cannot list a 0700 directory 10001
     # already owns; what is in one was written by 10001 and needs nothing.
     find "$path" "${ro_mounts[@]}" \( ! -user "$ISTOTA_UID" -o ! -group "$ISTOTA_GID" \) \
@@ -166,7 +169,7 @@ writable_mounts_under() {
     awk -v p="$1" 'index($5, p "/") == 1 {
         split($6, o, ","); ro = 0; for (i in o) if (o[i] == "ro") ro = 1
         if (!ro) print $5
-    }' /proc/self/mountinfo
+    }' "$MOUNTINFO"
 }
 
 # This phase holds CAP_CHOWN and CAP_FOWNER but not CAP_DAC_OVERRIDE, so it can

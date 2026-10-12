@@ -381,6 +381,117 @@ class TestTheExternalStoreMustBeMounted:
         assert result.returncode == 78, result.stdout + result.stderr
 
 
+HOST_FOLDER_CONFIG = """\
+db_path = "{db}"
+temp_dir = "{tmp}"
+workspace_path = "{ws}"
+workspace_mount_path = "{ws}"
+
+[talk]
+enabled = false
+"""
+
+#: What `istota-stack` passes for STORAGE=host-folder.
+HOST_FOLDER_ENV = {"ISTOTA_WORKSPACE_FSTYPE": "virtiofs", "ISTOTA_WORKSPACE_MARKER_REQUIRED": "1"}
+
+
+class TestTheHostFolderIsTheWorkspace:
+    """The local VM's workspace is a Mac folder shared in with virtiofs.
+
+    The unit half of row L1; the vm tier's `tests/vm/test_host_folder.py` is
+    its witness.
+
+    A folder renamed, deleted or on an unplugged volume leaves an empty
+    directory of the same type in its place (Lima recreates a missing one at
+    start), so the marker at its root is what tells the two apart.
+    """
+
+    def _volume(self, tmp_path, *, marker: bool = True, fstype: str | None = "virtiofs",
+                config: str = HOST_FOLDER_CONFIG) -> Volume:
+        volume = Volume(tmp_path, config)
+        volume.workspace.mkdir()
+        if marker:
+            (volume.workspace / ".istota-workspace").write_text("")
+        volume.mount_table(fstype)
+        return volume
+
+    def test_the_folder_with_its_marker_passes(self, tmp_path):
+        volume = self._volume(tmp_path)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c.startswith("scheduler --daemon") for c in volume.calls())
+
+    def test_a_folder_without_its_marker_is_refused_by_name(self, tmp_path):
+        volume = self._volume(tmp_path, marker=False)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert str(volume.workspace) in result.stderr
+        assert ".istota-workspace" in result.stderr
+        assert volume.calls() == []
+        assert not (volume.root / ".secret_key").exists()
+
+    def test_a_directory_named_like_the_marker_is_not_the_marker(self, tmp_path):
+        volume = self._volume(tmp_path, marker=False)
+        (volume.workspace / ".istota-workspace").mkdir()
+
+        assert volume.run(**HOST_FOLDER_ENV).returncode == 78
+
+    def test_a_workspace_on_another_filesystem_type_is_refused(self, tmp_path):
+        volume = self._volume(tmp_path, fstype="ext4")
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "virtiofs" in result.stderr
+        assert str(volume.workspace) in result.stderr
+
+    def test_a_workspace_with_no_mount_of_its_own_is_refused(self, tmp_path):
+        volume = self._volume(tmp_path, fstype=None)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "overlay" in result.stderr
+
+    def test_a_config_that_does_not_use_the_folder_is_refused(self, tmp_path):
+        """host.env says the workspace is the shared folder and the config
+        writes to the state volume: the user's folder would go unused."""
+        volume = self._volume(tmp_path, config=LOCAL_CONFIG)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "workspace_mount_path" in result.stderr
+        assert "--storage host-folder" in result.stderr
+
+    def test_without_the_hosts_word_no_marker_is_asked_for(self, tmp_path):
+        """A mount path with no host behind it (a developer's own) is checked
+        by doctor's liveness check at run time, as before."""
+        volume = self._volume(tmp_path, marker=False, fstype="ext4")
+
+        assert volume.run().returncode == 0
+
+    def test_the_rclone_refusal_is_unchanged_with_the_type_passed(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("ext4")
+
+        result = volume.run(ISTOTA_WORKSPACE_FSTYPE="fuse.rclone")
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "fuse.rclone" in result.stderr
+        assert "mount-nextcloud" in result.stderr
+
+    def test_the_rclone_mount_needs_no_marker(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("fuse.rclone")
+
+        assert volume.run(ISTOTA_WORKSPACE_FSTYPE="fuse.rclone").returncode == 0
+
+
 class TestThePublicName:
     """`DOMAIN` and `[site] hostname` drifting is a login that fails its origin check."""
 

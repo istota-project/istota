@@ -67,6 +67,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from istota.lib import du
 from istota.lib import sqlite_util
+from istota.lib.workspace_marker import MARKER_NAME, marker_present, marker_required
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.user_scope import is_within, paths_overlap
 
@@ -855,6 +856,10 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     the only cheap way to tell the two apart.
 
     ``workspace_mount_path`` is set only when the workspace uses a real mount.
+
+    A host folder shared into the local VM that went away is still a mount of
+    the same type (Lima recreates a missing one empty), so where the host says
+    the folder carries ``.istota-workspace`` the marker is checked too (row L1).
     """
     mount = config.workspace_mount_path
     if mount is None:
@@ -863,6 +868,18 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
         )
     path = Path(mount)
     if os.path.ismount(path):
+        if marker_required() and not marker_present(path):
+            return CheckResult(
+                "runtime.mount_liveness",
+                FAIL,
+                f"{path} is mounted but has no {MARKER_NAME}: the shared folder is not "
+                "the one this install was set up with",
+                remedy=(
+                    "The folder on the host was renamed, moved, deleted or is on a volume "
+                    "that is not connected, and an empty directory stands in for it. Put "
+                    "it back where it was, then restart the stack."
+                ),
+            )
         return CheckResult("runtime.mount_liveness", OK, f"{path} is a mount point")
     return CheckResult(
         "runtime.mount_liveness",

@@ -4892,6 +4892,11 @@ def main():
         "--tls-cert-source", choices=["acme", "files", "self-signed", "none"],
         help="Certificate source: acme or files for direct ingress; self-signed, files or none for proxied",
     )
+    setup_parser.add_argument(
+        "--storage", choices=["local", "host-folder"],
+        help="Workspace: the state volume, or a folder the host shares in at /mnt/shared "
+        "(the local VM; kept on a re-run). A Nextcloud is --nextcloud-url (container)",
+    )
     setup_parser.add_argument("--nextcloud-url", help="Existing Nextcloud, as the stack reaches it")
     setup_parser.add_argument("--nextcloud-public-url", help="The same Nextcloud, as browsers reach it")
     setup_parser.add_argument("--nextcloud-user", help="The bot's Nextcloud user")

@@ -255,7 +255,7 @@ def _args(tmp_path: Path, **kw):
         imap_host=None, imap_user=None, smtp_host=None, bot_email=None,
         caldav_url=None, caldav_username=None, location=False, developer=False,
         profile=None, no_money=False, no_health=False, no_feeds=False,
-        no_briefings=False,
+        no_briefings=False, storage=None,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -435,6 +435,64 @@ class TestTheLocalWorkspace:
         assert config.storage_backend == "local"
         assert str(config.workspace_path) == "/data/workspace"
         assert config.workspace_mount_path is None
+
+
+class TestTheHostFolder:
+    """`--storage host-folder`: the local VM's workspace is a folder on the Mac,
+    shared in and bound at /mnt/shared. A mount, so the liveness check and the
+    backup's guard cover it; not Nextcloud, so the vocabulary is "workspace"."""
+
+    def test_it_writes_the_mount_as_the_workspace_and_no_nextcloud(self, tmp_path, monkeypatch):
+        a = _full_answers(nextcloud_url="", oauth_client_id="", host_folder=True)
+        text = render_container_config(a, inline_credentials=True)
+        config = _load(tmp_path, text, monkeypatch)
+
+        assert str(config.workspace_path) == "/mnt/shared"
+        assert str(config.workspace_mount_path) == "/mnt/shared"
+        assert config.nextcloud.url == ""
+        assert config.storage_is_nextcloud is False
+        assert config.storage_backend == "local"
+        assert "nextcloud" not in tomllib.loads(text)
+
+    def test_the_host_env_says_host_folder(self):
+        a = _full_answers(nextcloud_url="", oauth_client_id="", host_folder=True)
+        assert _env(render_host_env(a))["STORAGE"] == "host-folder"
+
+    def test_the_flag_selects_it(self):
+        args = SimpleNamespace(yes=True, user="alice", storage="host-folder")
+        a = setup_wizard.collect_container_answers(
+            args, input_fn=input, out=lambda *_: None, getpass_fn=None,
+        )
+        assert a.host_folder is True
+        assert a.uses_nextcloud is False
+
+    def test_it_is_refused_beside_a_nextcloud(self):
+        args = SimpleNamespace(yes=True, user="alice", storage="host-folder",
+                               nextcloud_url="https://cloud.example.test")
+        with pytest.raises(setup_wizard.SetupError, match="host-folder"):
+            setup_wizard.collect_container_answers(
+                args, input_fn=input, out=lambda *_: None, getpass_fn=None,
+            )
+
+    def test_a_rerun_without_the_flag_keeps_the_folder(self, tmp_path, monkeypatch):
+        """A plain `istota-stack setup --force` on the local VM must not move the
+        workspace off the user's folder onto the state volume."""
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        assert setup_wizard.run_setup(_args(tmp_path, storage="host-folder"), out=lambda *_: None) == 0
+        assert setup_wizard.run_setup(_args(tmp_path, force=True), out=lambda *_: None) == 0
+
+        assert _env((tmp_path / "vm" / "host.env").read_text())["STORAGE"] == "host-folder"
+        written = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        assert written["workspace_mount_path"] == "/mnt/shared"
+
+    def test_local_storage_asked_for_explicitly_leaves_the_folder(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        setup_wizard.run_setup(_args(tmp_path, storage="host-folder"), out=lambda *_: None)
+        setup_wizard.run_setup(_args(tmp_path, force=True, storage="local"), out=lambda *_: None)
+
+        assert _env((tmp_path / "vm" / "host.env").read_text())["STORAGE"] == "local"
 
 
 def _image_default_log_file() -> str:

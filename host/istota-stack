@@ -37,9 +37,11 @@
 #   secrets/          one file per credential, 0400, owned by uid 10001
 #   certs/ letsencrypt/ acme/   nginx's certificate sources and the ACME webroot
 #
-# The rclone mount, in full Nextcloud integration, is outside it at
-# /srv/mount/nextcloud/content (ISTOTA_MOUNT_DIR, for the tests), the path the
-# bare-metal installs use; mount-nextcloud.service names it too.
+# The workspace mount is outside it: in full Nextcloud integration the rclone
+# mount at /srv/mount/nextcloud/content, the path the bare-metal installs use
+# (mount-nextcloud.service names it too); on the local VM the Mac folder Lima
+# shares in at /srv/mount/host-folder. host.env's STORAGE picks which, and
+# ISTOTA_MOUNT_DIR overrides it for the tests.
 #
 # The compose file is the checkout's own (src/docker/docker-compose.yml), so the
 # compose file, the seccomp and AppArmor profiles and the images always come
@@ -68,7 +70,6 @@ set -euo pipefail
 umask 022
 
 STACK="${ISTOTA_STACK_DIR:-/srv/app/istota}"
-MOUNT_DIR="${ISTOTA_MOUNT_DIR:-/srv/mount/nextcloud/content}"
 SRC="${STACK}/src"
 ALLOWED_SIGNERS="${STACK}/allowed_signers"
 ENV_FILE="${STACK}/.env"
@@ -110,6 +111,20 @@ env_get() {
     [ -f "$file" ] || return 0
     awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { if (v != "") print v }' "$file"
 }
+
+# The workspace mount's directory on this VM, by host.env's STORAGE: the
+# rclone mount's for nextcloud (and for local, which mounts nothing there), the
+# folder Lima shares in for host-folder. provision.sh installs istota-stack and
+# cannot source it, so each carries this; tests/test_host_units.py holds the
+# two equal.
+mount_dir_for_storage() {
+    case "$1" in
+        host-folder) echo /srv/mount/host-folder ;;
+        *) echo /srv/mount/nextcloud/content ;;
+    esac
+}
+
+MOUNT_DIR="${ISTOTA_MOUNT_DIR:-$(mount_dir_for_storage "$(env_get "$HOST_ENV" STORAGE)")}"
 
 # Set KEY=VALUE pairs in .env, keeping every other line, through a rename so a
 # reader never sees half a file.
@@ -154,6 +169,14 @@ compose() {
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
     local pin
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
+    # What the entrypoint requires at /mnt/shared: the filesystem type, and for
+    # a host folder its .istota-workspace marker (an empty stand-in for a folder
+    # that went away is a virtiofs mount too).
+    local fstype="" marker=""
+    case "$(env_get "$HOST_ENV" STORAGE)" in
+        nextcloud) fstype=fuse.rclone ;;
+        host-folder) fstype=virtiofs; marker=1 ;;
+    esac
     (
         # Only a pin that is set: compose passes an empty variable as an empty
         # build arg, which overrides the Dockerfile's default and fails the build.
@@ -161,6 +184,8 @@ compose() {
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
         ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
         ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
+        ISTOTA_WORKSPACE_FSTYPE="$fstype" \
+        ISTOTA_WORKSPACE_MARKER_REQUIRED="$marker" \
         ISTOTA_HOST_ENV="$HOST_ENV" \
         CERTS_DIR="$certs" \
         ACME_WEBROOT="${STACK}/acme" \
@@ -601,7 +626,11 @@ cmd_setup() {
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
     install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$CONFIG_DIR"
-    install -d -m 0755 "$MOUNT_DIR" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+    install -d -m 0755 "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+    # A host folder is the user's own on the Mac, and a mode set here reaches it.
+    local host_folder=""
+    [ "$(env_get "$HOST_ENV" STORAGE)" != "host-folder" ] || host_folder=1
+    [ -n "$host_folder" ] || install -d -m 0755 "$MOUNT_DIR"
     ensure_secret_files
     copy_out_config
 
