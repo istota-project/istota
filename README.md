@@ -178,7 +178,7 @@ Sharing is a separate, explicit act. Talk rooms and Nextcloud files create commo
 
 ## Secure defaults, explicit boundaries
 
-The rails are enforced in code rather than left as instructions in the prompt. Istota treats model output as untrusted input. The supported bare-metal server deployment uses several independent controls to limit what a task can reach:
+The rails are enforced in code rather than left as instructions in the prompt. Istota treats model output as untrusted input. A server install uses several independent controls to limit what a task can reach:
 
 - **Filesystem isolation.** Each task runs in a bubblewrap sandbox with a scoped view of the current user's files. Framework and module databases are masked from the sandbox, and one administrator's repositories are never mounted into another's task.
 
@@ -230,28 +230,20 @@ WhatsApp and SMS carry the answer rather than the conversation: the exchange sta
 
 ## Install
 
-Istota has three deployment shapes.
+Istota has two deployment shapes.
 
 | Shape | Intended use | Nextcloud | Task sandbox |
 | --- | --- | --- | --- |
-| **Bare-metal server** | A persistent, multi-user installation on a Debian or Ubuntu VM | Connects to an existing Nextcloud | Bubblewrap and cgroups |
-| **Docker server** | A server stack of the Istota scheduler, web app and nginx, in a VM dedicated to it | Optional: local storage, or an existing Nextcloud | Sandboxed under the shipped Compose run contract |
+| **Server** | A persistent, multi-user installation: the Docker stack of the Istota scheduler, web app and nginx, on a Debian 13 machine dedicated to it | Optional: local storage, or an existing Nextcloud | Bubblewrap and per-task cgroups, under the shipped Compose run contract |
 | **Standalone** | A trusted single-user installation on your own machine | Not required | Unsandboxed by design |
 
-### Bare-metal server
+### Server
 
-This is the recommended production shape. It installs Istota as system services and connects to an existing Nextcloud instance.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
-```
-
-### Docker server
-
-This starts the self-contained Compose stack and its own Nextcloud.
+Run as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It verifies the release tag against the signing key, provisions the machine, builds the images there, runs the setup wizard and starts the stack. `istota-stack` manages it afterwards.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
+  | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
 ### Local standalone
@@ -270,7 +262,7 @@ istota setup
 istota serve
 ```
 
-Read an installer before piping it into a shell. For prerequisites, setup choices, and updates, use the [Docker quickstart](https://istota.cynium.com/docs/getting-started/quickstart-docker/), [bare-metal quickstart](https://istota.cynium.com/docs/getting-started/quickstart-bare-metal/), or [standalone guide](https://istota.cynium.com/docs/getting-started/local-install/).
+Read an installer before piping it into a shell. For prerequisites, setup choices, and updates, use the [server quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/), or [standalone guide](https://istota.cynium.com/docs/getting-started/local-install/).
 
 ## Configuration
 
@@ -292,7 +284,7 @@ See the [configuration overview](https://istota.cynium.com/docs/configuration/ov
 
 ## Development
 
-Istota's backend and task runtime are Python. The web app is SvelteKit. The repository also contains the Ansible role, Docker stack, browser service, deployment tests, and a full local testbed.
+Istota's backend and task runtime are Python. The web app is SvelteKit. The repository also contains the Docker stack, the host provisioning scripts, an optional Ansible management role, the browser service, deployment tests, and a full local testbed.
 
 ```bash
 uv sync --extra test

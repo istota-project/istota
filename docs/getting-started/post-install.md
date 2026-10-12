@@ -1,9 +1,9 @@
 # Post-install
 
-After deploying via [Docker](quickstart-docker.md) or [bare metal](quickstart-bare-metal.md), complete these steps.
+After installing a [server](quickstart-server.md) or the [Docker stack](quickstart-docker.md), complete these steps. On a server, `istota` runs the CLI inside the daemon container; with a hand-run stack, use `docker compose exec daemon istota-drop istota` in its place.
 
 :::tip[Phase 6 — DB-backed user profiles]
-Profile fields (display_name, timezone, email addresses, log/alerts channels, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed via Ansible:
+Profile fields (display_name, timezone, email addresses, log/alerts channels, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed them with the CLI (the [Ansible management role](../deployment/ansible.md) runs the same command):
 ```bash
 istota user ensure --name alice --display-name "Alice" \
   --tz "America/Los_Angeles" --email alice@example.com
@@ -13,20 +13,13 @@ The web UI at `/istota/settings` lets each user edit their own profile and add p
 
 ## Claude authentication
 
-Both installers collect a long-lived Claude Code OAuth token during setup (the bare-metal wizard's "Claude Authentication" prompt; the Docker `istota setup` "Claude Code OAuth token" prompt, which writes it to `secrets/claude_code_oauth_token`), and provision the credentials file for you. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
+`istota setup` collects a long-lived Claude Code OAuth token (the "Claude Code OAuth token" prompt, which writes it to `secrets/claude_code_oauth_token`), and the entrypoint provisions the credentials file for you. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
 
 Only if you skipped the token at install time (and aren't using `ANTHROPIC_API_KEY` or a native-brain provider key), authenticate manually:
 
-Bare metal:
-
 ```bash
-sudo -u istota HOME=/srv/app/istota claude login
-```
-
-Docker:
-
-```bash
-docker compose exec daemon claude login
+istota-stack exec claude login            # server
+docker compose exec daemon claude login   # a stack you run by hand
 ```
 
 ## Invite the bot to Talk
@@ -35,25 +28,16 @@ In Nextcloud, open Talk and add the bot's user (default: `istota`) to a conversa
 
 ## Test execution
 
-Bare metal:
-
 ```bash
-sudo -u istota HOME=/srv/app/istota \
-  /srv/app/istota/.venv/bin/istota task "Hello" -u alice -x
+istota task "Hello" -u alice -x
 ```
 
-Docker:
+## Service management (server)
 
 ```bash
-docker compose exec daemon istota task "Hello" -u alice -x
-```
-
-## Service management (bare metal)
-
-```bash
-systemctl status istota-scheduler
-systemctl restart istota-scheduler
-journalctl -u istota-scheduler -f
+systemctl status istota-stack
+istota-stack down && istota-stack up
+istota-stack compose logs -f daemon
 ```
 
 ## User workspace

@@ -4,7 +4,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 
 // The markdown lives at the repository root in `docs/`, not inside this
 // directory. Hundreds of references across the tree name those paths —
-// `docs/features/whatsapp.md` in Ansible defaults, in docker-compose comments,
+// `docs/features/whatsapp.md` in docker-compose comments,
 // in `.claude/rules/`, in source docstrings — so the files stay where they are
 // and the site points at them.
 const config: Config = {
