@@ -20,14 +20,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
-from jinja2 import Environment
 
 from istota import db, user_profiles
 
 REPO = Path(__file__).resolve().parent.parent
-TASKS_FILE = REPO / "deploy" / "ansible" / "tasks" / "main.yml"
-DEFAULTS_FILE = REPO / "deploy" / "ansible" / "defaults" / "main.yml"
 ENTRYPOINT = REPO / "docker" / "istota" / "entrypoint.sh"
 
 
@@ -773,98 +769,6 @@ class TestProvisionRoomsCli:
 
         assert seen["nextcloud_action"] == "provision-rooms"
         assert seen["user"] == "alice"
-
-
-# ---------------------------------------------------------------------------
-# Ansible wiring — the actual reported gap
-# ---------------------------------------------------------------------------
-
-TASK_NAME = "Provision default Talk rooms and seed log/alerts channels"
-
-
-def _tasks():
-    return yaml.safe_load(TASKS_FILE.read_text())
-
-
-def _task(name):
-    for task in _tasks():
-        if isinstance(task, dict) and task.get("name") == name:
-            return task
-    raise AssertionError(f"task {name!r} not found in tasks/main.yml")
-
-
-class TestAnsibleProvisionsRooms:
-    def test_task_exists_and_calls_the_cli(self):
-        task = _task(TASK_NAME)
-        env = Environment()
-        rendered = env.from_string(task["command"]).render(
-            istota_home="/srv/app/istota",
-            istota_package="istota",
-            istota_repo_dir="/srv/app/istota",
-            user_item={"key": "alice", "value": {}},
-        )
-        assert "nextcloud provision-rooms" in rendered
-        assert "--user alice" in rendered
-
-    def test_runs_after_the_user_profile_row_exists(self):
-        # Seeding writes into user_profiles; running before `user ensure`
-        # would insert a bare row and then have inventory values applied on
-        # top, inverting the precedence the seeding rule depends on.
-        names = [t.get("name") for t in _tasks() if isinstance(t, dict)]
-        assert names.index("Ensure user_profiles rows") < names.index(TASK_NAME)
-
-    def test_changed_when_follows_the_state_line(self):
-        task = _task(TASK_NAME)
-        assert "STATE: noop" in task["changed_when"]
-
-    def test_gated_on_nextcloud_being_configured(self):
-        task = _task(TASK_NAME)
-        conditions = task["when"]
-        if isinstance(conditions, str):
-            conditions = [conditions]
-        joined = " ".join(conditions)
-        assert "istota_web_only" in joined
-        assert "istota_nextcloud_url" in joined
-        assert "istota_provision_talk_rooms" in joined
-        # Talk configured off must not still get three Talk rooms.
-        assert "istota_talk_enabled" in joined
-
-    def test_passes_the_app_password_in_the_environment(self):
-        # `istota_use_environment_file` defaults to true, so config.toml.j2
-        # deliberately omits app_password — it reaches the daemon through
-        # systemd's EnvironmentFile, which an Ansible `command:` never reads.
-        # Without this the CLI finds no credential and exits 1 on every deploy.
-        task = _task(TASK_NAME)
-        env = task.get("environment") or {}
-        assert "ISTOTA_NEXTCLOUD_APP_PASSWORD" in env
-        assert "istota_nextcloud_app_password" in env["ISTOTA_NEXTCLOUD_APP_PASSWORD"]
-
-    def test_skipped_when_no_app_password_is_configured(self):
-        task = _task(TASK_NAME)
-        conditions = task["when"]
-        if isinstance(conditions, str):
-            conditions = [conditions]
-        assert any("istota_nextcloud_app_password" in c for c in conditions)
-
-    def test_retries_a_transient_nextcloud(self):
-        # spreed migrations lag a Nextcloud upgrade; the docker entrypoint waits
-        # up to two minutes for the same reason.
-        task = _task(TASK_NAME)
-        assert int(task["retries"]) >= 2
-        assert "until" in task
-
-    def test_a_failed_invite_fails_the_task(self):
-        # A room the user was never added to is one they cannot read.
-        task = _task(TASK_NAME)
-        assert "invite FAILED" in task["failed_when"]
-
-    def test_restarts_the_services_that_snapshot_the_profile(self):
-        task = _task(TASK_NAME)
-        assert "restart istota-scheduler" in task["notify"]
-
-    def test_defaults_expose_the_toggle(self):
-        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
-        assert defaults["istota_provision_talk_rooms"] is True
 
 
 class TestDockerEntrypointMatchesTheCli:

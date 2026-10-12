@@ -30,7 +30,7 @@ The pin that matters most is neither of those. Both per-file guards name their f
 
 **A client is whoever reached the socket, and the socket is fixed per user.** `devbox/proxy.py` binds one listener per `[devbox] users` entry, on the daemon's event loop (`start_in_daemon`, called from `run_daemon` beside the WhatsApp bridge), and each answers as its user whatever the peer sends. User U's socket is in the volume `devbox-cred-U`, mounted by U's devbox and the istota container and nothing else, and no task sandbox binds any credential socket directory (`tests/test_executor_exec_bind.py::TestNoCredentialSocketDirectory`). The other processes that can connect are the daemon and an admin's unsandboxed cron `command` or heartbeat `shell-command`, which can read the database and the secret key already. The one-deployment-shape spec's Decisions record this; parity row 11 is its witness, in the vm tier.
 
-The `docker container inspect` plus `/proc/<pid>/cgroup` peer check this replaced (`devbox/peer.py`, deleted) needed the Docker socket and the host PID namespace, which would have handed the daemon root of the VM. The bare-metal role still runs one `istota-devbox-proxy@` unit per user until Stage 9 deletes it; those listeners now rely on the socket directory's mode alone, and `[devbox] users` stays empty there so the daemon binds nothing beside them.
+The `docker container inspect` plus `/proc/<pid>/cgroup` peer check this replaced (`devbox/peer.py`, deleted) needed the Docker socket and the host PID namespace, which would have handed the daemon root of the VM.
 
 ## devbox/compose_file.py
 

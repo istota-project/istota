@@ -2,7 +2,7 @@
 # deploy/ansible/templates/config.toml.j2 against the role's own defaults with
 # developer, devbox, browser, email and the Baileys adapter switched on and
 # example.test names. Rendered once with tests/test_ansible_config_template.py's
-# render() and frozen, because the role is deleted in the spec's last stage and
+# render() and frozen (both deleted in 6796ae4a), because the role is gone and
 # `istota migrate import-bare-metal` must keep reading what it wrote.
 #
 # Istota configuration - managed by Ansible

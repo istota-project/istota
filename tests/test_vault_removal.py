@@ -71,7 +71,8 @@ SWEPT = (
     "src",
     "web/src",
     "web/vite-mock-api.ts",
-    "deploy",
+    "ansible",
+    "host",
     "docker",
     "config",
     "docs",
@@ -141,7 +142,7 @@ class TestTheNamesAreGone:
         assert len(files) > 500, len(files)
         rels = {p.relative_to(REPO).as_posix() for p in files}
         roots = {r.split("/")[0] for r in rels}
-        assert {"src", "web", "deploy", "docker", "config", "docs"} <= roots
+        assert {"src", "web", "ansible", "host", "docker", "config", "docs"} <= roots
         # The two single-file entries, which no directory root covers.
         assert {"schema.sql", "CHANGELOG.md"} <= rels
 

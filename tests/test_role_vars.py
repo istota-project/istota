@@ -20,7 +20,6 @@ from istota.maintenance.bare_metal_import import Refusal
 from tests.test_management_role import _defaults, _render
 
 REPO = Path(__file__).resolve().parent.parent
-OLD_SECRETS_TEMPLATE = REPO / "deploy" / "ansible" / "templates" / "secrets.env.j2"
 
 CONFIG_TOML = """\
 bot_name = "Helper"
@@ -157,23 +156,6 @@ def test_the_master_key_and_web_token_key_are_kept_in_the_vault_for_recovery():
 def test_a_plain_reference_to_another_variable_is_resolved():
     old = _old() | {"istota_email_smtp_password": "{{ istota_email_imap_password }}"}
     assert _convert(old).vars["istota_secrets"]["istota_email_smtp_password"] == "imap-pass-0002"
-
-
-def test_the_old_secrets_template_and_the_table_agree():
-    """Every credential secrets.env.j2 rendered is mapped to a stack file or named as having none."""
-    lines = re.findall(r"^([A-Z_]+)=\{\{ (istota_\w+)", OLD_SECRETS_TEMPLATE.read_text(), re.M)
-    assert lines
-    for env_name, variable in lines:
-        if variable in role_vars.KEY_VARS:
-            continue
-        if variable in role_vars.NO_STACK_FILE:
-            assert env_name.lower() not in setup_wizard.SECRET_NAMES
-            continue
-        assert role_vars.SECRET_VARS[variable] == env_name.lower(), variable
-    assert set(role_vars.SECRET_VARS.values()) <= set(setup_wizard.SECRET_NAMES)
-
-
-# --- rclone ----------------------------------------------------------------
 
 
 def test_rclone_conf_is_rendered_from_the_old_variables_and_the_live_remote():

@@ -7,14 +7,6 @@ Operator-scoped flags for features that ship in the tree but are off by default.
 features = ["money_tax", "money_wash_sales"]
 ```
 
-Or via Ansible (`group_vars` / `host_vars`):
-
-```yaml
-istota_experimental_features:
-  - money_tax
-  - money_wash_sales
-```
-
 Run `uv run istota experimental list` on the host to see the current registry and which flags are on. Unknown names in the TOML list log a warning at startup but don't fail.
 
 These flags are **operator-scoped** — not per-user, not exposed in the web UI, not toggleable via chat. The web UI implies "this is supported"; experimental features explicitly don't carry that contract. Per-user gating, when needed, reuses `disabled_skills` (opt-out) — experimental flags are opt-in.

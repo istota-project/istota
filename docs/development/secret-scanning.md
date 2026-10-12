@@ -23,8 +23,8 @@ On Linux, take the release tarball from
 <https://github.com/gitleaks/gitleaks/releases> and put the binary on your PATH.
 **Not the distribution package**: Debian 13 ships 8.16, and the hook calls
 `gitleaks git --staged`, a subcommand that arrived in 8.19 when it replaced
-`detect` and `protect`. The Ansible role installs the pinned upstream release on
-any host with the developer skill enabled, for the same reason.
+`detect` and `protect`. The istota image installs the pinned upstream release,
+for the same reason.
 
 `scripts/setup.sh` is what enables the hook — a checked-in hook does nothing
 until `core.hooksPath` points at it, and that is per-clone local config. Run it

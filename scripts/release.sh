@@ -25,7 +25,7 @@ done
 : "${NEW:?version required, e.g. 0.7.0}"
 DATE=$(date +%Y-%m-%d)
 TAG="v$NEW"
-REPO_URL="https://gitlab.com/cynium/istota"
+REPO_URL="https://github.com/istota-project/istota"
 
 if ! git diff-index --quiet HEAD --; then
   echo "working tree dirty — commit or stash first" >&2
@@ -110,8 +110,8 @@ text = text.replace(
     1,
 )
 old_unrel = re.search(r"^\[Unreleased\]:.*$", text, re.M).group(0)
-new_unrel = f"[Unreleased]: {url}/-/compare/v{new}...main"
-new_link = f"[{new}]: {url}/-/releases/v{new}"
+new_unrel = f"[Unreleased]: {url}/compare/v{new}...main"
+new_link = f"[{new}]: {url}/releases/tag/v{new}"
 text = text.replace(old_unrel, f"{new_unrel}\n{new_link}")
 path.write_text(text)
 PY

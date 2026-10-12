@@ -2237,9 +2237,8 @@ class TestTheExampleDocumentsEveryLiveSection:
     """Six live `Config` sections were in `config.example.toml` nowhere at all.
 
     A field an operator cannot learn about is a field nobody sets, and the
-    example is the only place several of these are described — `[caldav]` and
-    `[location]` are rendered by the Ansible template with no prose, `[devbox]`
-    and `[browser]` gate whole containers, and `[brain.native.web_fetch]` is
+    example is the only place several of these are described — `[devbox]` and
+    `[browser]` gate whole containers, and `[brain.native.web_fetch]` is
     the one tool that leaves the sandbox's network namespace.
 
     Shaped after `test_config_native_session_log.py`'s own guard, which is
@@ -2247,13 +2246,10 @@ class TestTheExampleDocumentsEveryLiveSection:
     assignment per field inside the block.
 
     Three guards, deliberately apart, one question each. This one holds six
-    hand-picked blocks to the *example*, which is the strictest of the three —
-    a key the Ansible template renders does not satisfy it, because these six
-    are the blocks whose prose is the only description that exists.
-    `tests/test_config_section_coverage.py` holds the whole tree to the
-    section. `tests/test_config_field_coverage.py` (ISSUE-438) holds the whole
-    tree to the field, accepting rendered or documented; it subsumes this one
-    everywhere except that stricter example-only requirement.
+    hand-picked blocks to a commented assignment for every field, the strictest
+    of the three. `tests/test_config_section_coverage.py` holds the whole tree
+    to the section. `tests/test_config_field_coverage.py` (ISSUE-438) holds the
+    whole tree to the field.
     """
 
     EXAMPLE = Path(__file__).resolve().parent.parent / "config" / "config.example.toml"
@@ -2332,164 +2328,23 @@ class TestConfigToplevelKeyOrdering:
                     f"{key} ended up under [brain] — table header is positioned wrong"
                 )
 
-    def test_ansible_template_brain_below_toplevel_keys(self):
-        """Verify the [brain] header in deploy/ansible/templates/config.toml.j2
-        appears AFTER all top-level key assignments (db_path, temp_dir, etc.).
-        TOML places every key after a table header into that table.
-        """
-        template = Path(__file__).resolve().parent.parent / "deploy" / "ansible" / "templates" / "config.toml.j2"
-        text = template.read_text()
-        brain_idx = text.find("\n[brain]\n")
-        assert brain_idx >= 0, "[brain] section missing from Ansible template"
-        # Top-level keys that must be defined before any table header.
-        for key in ("db_path", "temp_dir", "skills_dir", "rclone_remote"):
-            key_idx = text.find(f"\n{key} = ")
-            assert key_idx >= 0, f"{key} assignment missing from template"
-            assert key_idx < brain_idx, (
-                f"{key} is defined AFTER [brain] in the Ansible template — "
-                "it will be parsed as brain.{key}, breaking config loading"
-            )
 
+def test_config_example_blocks_round_trip():
+    """The worked example in config.example.toml parses and seeds cleanly."""
+    import tomllib
 
-class TestAnsibleValidateConfigScript:
-    """ISSUE-058: deploy/ansible/files/validate_config.py is the post-render
-    structural check the role runs before restarting the scheduler.
-    """
+    from istota.briefings import normalize_block_specs
+    from istota.config import _parse_user_data
 
-    @staticmethod
-    def _run(tmp_path, cfg_text, expected_db, expected_tmp):
-        import subprocess
-        import sys
-
-        cfg = tmp_path / "config.toml"
-        cfg.write_text(cfg_text)
-        script = (
-            Path(__file__).resolve().parent.parent
-            / "deploy" / "ansible" / "files" / "validate_config.py"
-        )
-        proc = subprocess.run(
-            [sys.executable, str(script), str(cfg), "istota", expected_db, expected_tmp],
-            capture_output=True, text=True,
-        )
-        return proc
-
-    def test_passes_on_well_formed_config(self, tmp_path):
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            "\n[brain]\nkind = \"claude_code\"\n"
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 0, proc.stderr
-        assert "ok" in proc.stdout
-
-    def test_fails_when_root_keys_leak_under_brain(self, tmp_path):
-        cfg = (
-            'bot_name = "Test"\n'
-            "\n[brain]\n"
-            'kind = "claude_code"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 1
-        assert "leaked under [brain]" in proc.stderr
-        assert "db_path" in proc.stderr and "temp_dir" in proc.stderr
-
-    def test_fails_when_db_path_does_not_match_expected(self, tmp_path):
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/wrong/path.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            "\n[brain]\nkind = \"claude_code\"\n"
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 1
-        assert "db_path" in proc.stderr and "/wrong/path.db" in proc.stderr
-
-    def test_fails_on_unparseable_toml(self, tmp_path):
-        proc = self._run(tmp_path, "this is not [valid TOML\n", "x", "y")
-        assert proc.returncode == 1
-        assert "TOML parse error" in proc.stderr
-
-    def test_brain_kind_alone_does_not_trip_leak_check(self, tmp_path):
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            "\n[brain]\n"
-            'kind = "claude_code"\n'
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 0, proc.stderr
-
-    def test_advisor_model_non_string_fails(self, tmp_path):
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            "advisor_model = 5\n"
-            "\n[brain]\nkind = \"claude_code\"\n"
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 1
-        assert "advisor_model must be a string" in proc.stderr
-
-    def test_advisor_model_under_native_warns_not_fails(self, tmp_path):
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            'advisor_model = "opus"\n'
-            "\n[brain]\nkind = \"native\"\n"
-            "\n[brain.native]\nmodel = \"anthropic/claude-opus-4.8\"\n"
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 0, proc.stderr
-        assert "not an anthropic-namespace brain" in proc.stderr
-
-    def test_advisor_model_under_native_still_warns_with_anthropic_fallback(self, tmp_path):
-        # A fallback doesn't rescue the setting: the executor only ever
-        # resolves `advisor` for the primary brain when its namespace is
-        # anthropic, and a native->anthropic fallback never picks one up.
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            'advisor_model = "opus"\n'
-            "\n[brain]\nkind = \"native\"\nfallback = \"claude_code\"\n"
-            "\n[brain.native]\nmodel = \"anthropic/claude-opus-4.8\"\n"
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 0, proc.stderr
-        assert "not an anthropic-namespace brain" in proc.stderr
-
-    def test_advisor_model_under_claude_code_is_silent(self, tmp_path):
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            'advisor_model = "opus"\n'
-            "\n[brain]\nkind = \"claude_code\"\n"
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 0, proc.stderr
-        assert "advisor_model" not in proc.stderr
-
-    def test_advisor_model_with_no_brain_kind_is_silent(self, tmp_path):
-        # BrainConfig.kind defaults to "claude_code" — an omitted [brain]/kind
-        # key must not read as brain.get("kind") is None and trip the
-        # not-anthropic warning for a perfectly working default deployment.
-        cfg = (
-            'bot_name = "Test"\n'
-            'db_path = "/srv/app/istota/data/istota.db"\n'
-            'temp_dir = "/srv/app/istota/tmp"\n'
-            'advisor_model = "opus"\n'
-        )
-        proc = self._run(tmp_path, cfg, "/srv/app/istota/data/istota.db", "/srv/app/istota/tmp")
-        assert proc.returncode == 0, proc.stderr
-        assert "advisor_model" not in proc.stderr
+    example = Path(__file__).resolve().parent.parent / "config" / "config.example.toml"
+    parsed = tomllib.loads(example.read_text())
+    alice = parsed["users"]["alice"]
+    world = [b for b in alice["briefings"] if b["name"] == "world"]
+    assert world, "expected a config-authored 'world' briefing with blocks"
+    uc = _parse_user_data(alice, "alice")
+    world_bc = [b for b in uc.briefings if b.name == "world"][0]
+    specs = normalize_block_specs(world_bc.blocks, briefing_name="world")
+    assert [s["title"] for s in specs] == ["World News", "Markets"]
 
 
 class TestApplyUserResources:

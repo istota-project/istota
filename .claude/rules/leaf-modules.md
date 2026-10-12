@@ -20,7 +20,7 @@ Single-purpose modules whose reasoning does not fit anywhere else. Each is a lea
 
 The mechanical half of `load_config`: walks `dataclasses.fields` over the `Config` tree and maps a parsed TOML document onto it, instead of restating the schema as hand-written `if "x" in data` lines. That second copy carried three defect classes, each a thing a duplicated schema does:
 
-- **A field the loader never read.** Declared, rendered by Ansible or Docker, documented, and silently defaulted: `security.sandbox_ro_paths` and `scheduler.max_subtasks_per_task` (a cap on prompt-injection blast radius) among them.
+- **A field the loader never read.** Declared, rendered by the old config generators, documented, and silently defaulted: `security.sandbox_ro_paths` and `scheduler.max_subtasks_per_task` (a cap on prompt-injection blast radius) among them.
 - **Two defaults for one field.** The dataclass said `True` and the loader's `.get(key, default)` said `False`, so a bare `[sleep_cycle]` header switched nightly memory extraction off. Here the dataclass default is the only default.
 - **A typo that did nothing.** `[breifings]` or `max_subtask_dept` was discarded silently. The walk knows the whole schema and reports unknown keys as a warning, not a refusal, since refusing to boot turns a forward-compatible config into a hard failure on rollback.
 
@@ -134,7 +134,7 @@ stdlib-only leaf.
 
 ## rooms/provision.py
 
-Default Talk rooms (general/logs/alerts) for a user: reuse by remembered token first, participant-scoped name lookup only on a first provision, group (not public) rooms, and seeding `log_channel`/`alerts_channel` only where empty. Behind `istota nextcloud provision-rooms`, called by the Ansible role on every deploy; the bare-metal counterpart to the Docker entrypoint, which persists `GENERAL_TOKEN` in its provisioning flag file and never had the bug below.
+Default Talk rooms (general/logs/alerts) for a user: reuse by remembered token first, participant-scoped name lookup only on a first provision, group (not public) rooms, and seeding `log_channel`/`alerts_channel` only where empty. Behind `istota nextcloud provision-rooms`, which the stack's entrypoint runs for the first admin and an operator runs for anyone else (deployment.md, "Default Talk rooms").
 
 **The token record is the ISSUE-342 fix**, in the reserved `_provisioned_rooms` KV namespace. A display-name match cannot survive a user's rename, so the next deploy minted a second room; `general` was the usual victim because `CHANNEL_FIELDS` gives it no column. Reusing a remembered room never counts as `seedable`, so a channel column the user cleared on purpose is not refilled.
 

@@ -3136,7 +3136,9 @@ def _admin_storage_section(db_path: Path) -> dict:
 def _scan_db_backups(backups_dir: Path) -> tuple[int, str | None]:
     """Count *.db.gz files under daily/ and weekly/, return latest mtime as ISO Z.
 
-    Mirrors the layout produced by deploy/ansible/templates/istota-backup.sh.j2.
+    The layout the deleted Ansible role's backup script wrote. Nothing on the
+    stack writes it, so there this reads (0, None); the in-process snapshots
+    (``maintenance.db_backup``) live elsewhere.
     """
     count = 0
     latest: float | None = None

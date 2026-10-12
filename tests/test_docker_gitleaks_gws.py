@@ -4,7 +4,7 @@ The Ansible role installed both. The image did not, so on the containerized
 shape the pre-commit hook refused every unattended commit and every
 google_workspace call died at `execvp`. These pin the image's install: both
 binaries are fetched at a pinned version, checksum-verified per architecture,
-land on PATH, and gitleaks stays in step with the role's pin.
+and land on PATH.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPO / "docker" / "istota" / "Dockerfile"
-ROLE_DEFAULTS = REPO / "deploy" / "ansible" / "defaults" / "main.yml"
 
 # `gitleaks git` replaced `detect`/`protect` in 8.19; the hook calls the new one.
 GIT_SUBCOMMAND_FLOOR = (8, 19, 0)
@@ -90,16 +89,3 @@ def test_the_build_runs_the_hooks_probe(layer):
 def test_gitleaks_clears_the_git_subcommand_floor(args):
     version = tuple(int(p) for p in args["GITLEAKS_VERSION"].split("."))
     assert version >= GIT_SUBCOMMAND_FLOOR
-
-
-def test_gitleaks_matches_the_role(args):
-    """Same binary on both shapes until the role is deleted (Stage 9)."""
-    defaults = ROLE_DEFAULTS.read_text()
-    version = re.search(r'^istota_developer_gitleaks_version:\s*"([^"]+)"', defaults, re.M)
-    checksums = defaults[defaults.index("istota_developer_gitleaks_checksums:"):]
-    amd64 = re.search(r'^\s+amd64:\s*"([0-9a-f]{64})"', checksums, re.M)
-    arm64 = re.search(r'^\s+arm64:\s*"([0-9a-f]{64})"', checksums, re.M)
-    assert version and amd64 and arm64
-    assert args["GITLEAKS_VERSION"] == version.group(1)
-    assert args["GITLEAKS_SHA256_AMD64"] == amd64.group(1)
-    assert args["GITLEAKS_SHA256_ARM64"] == arm64.group(1)

@@ -98,11 +98,12 @@ services:
     #     CAP_SYS_ADMIN rule (Docker applies it per container, so with the root
     #     phase's SYS_ADMIN below it would open bpf and perf_event_open to every
     #     sandbox). bpf, keyctl, userfaultfd and the rest stay denied.
-    #   - apparmor=istota is docker-default plus mount and pivot_root. It has to
-    #     be loaded on the host (provision.sh does it); a host without AppArmor
-    #     ignores the option. It keeps docker-default's denial of writes to
-    #     /proc/sys, which systempaths=unconfined would otherwise open to a
-    #     uid-0 `docker exec`.
+    #   - apparmor=istota is docker-default plus mount (no bind or move out of
+    #     /proc or /sys, no sysfs) and pivot_root. It has to be loaded on the
+    #     host (provision.sh does it); a host without AppArmor ignores the
+    #     option. It keeps docker-default's denial of writes to /proc/sys,
+    #     which systempaths=unconfined would otherwise open to a uid-0
+    #     `docker exec`.
     #   - systempaths=unconfined unmasks /proc, without which the kernel refuses
     #     a procfs mount in a nested user namespace.
     #
@@ -117,8 +118,9 @@ services:
     # The root phase (root-phase.sh) needs these six and nothing after it:
     # CHOWN and FOWNER for the one-time ownership fix, SETUID, SETGID and
     # SETPCAP for the drop (SETPCAP is what empties the bounding set), and
-    # SYS_ADMIN for the cgroup remount alone. `istota-drop` removes all six
-    # before the daemon starts. A `docker exec` does not inherit the drop, so
+    # SYS_ADMIN for the cgroup remount alone: the root phase re-execs itself
+    # without it straight after, before it reads anything under /data.
+    # `istota-drop` removes the other five before the daemon starts. A `docker exec` does not inherit the drop, so
     # every exec path goes through `istota-drop` too.
     cap_drop: [ALL]
     cap_add: [CHOWN, FOWNER, SETUID, SETGID, SETPCAP, SYS_ADMIN]

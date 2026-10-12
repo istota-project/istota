@@ -1,6 +1,6 @@
 # Migrating a bare-metal install
 
-A bare-metal install is one the Ansible role converged onto a Debian host: systemd units named after the install's namespace (`<ns>-scheduler`, `<ns>-web`, …), state under `/srv/app/<ns>`, secrets in `/etc/<ns>/secrets.env`, and a two-minute update cron. This page moves such an install onto a dedicated VM running the stack: provisioned by `host/provision.sh`, updated by `istota-stack update <tag>`.
+A bare-metal install is one the old Ansible role (formerly `deploy/ansible/`, now removed) converged onto a Debian host: systemd units named after the install's namespace (`<ns>-scheduler`, `<ns>-web`, …), state under `/srv/app/<ns>`, secrets in `/etc/<ns>/secrets.env`, and a two-minute update cron. This page moves such an install onto a dedicated VM running the stack: provisioned by `host/provision.sh`, updated by `istota-stack update <tag>`.
 
 There is no general export format. The two shapes share the database schema, the master key and the workspace, so the move is a stopped-service copy plus one rewrite step:
 

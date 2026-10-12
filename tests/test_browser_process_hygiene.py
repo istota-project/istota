@@ -44,7 +44,6 @@ import types
 from pathlib import Path
 from unittest import mock
 
-import jinja2
 import pytest
 
 from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
@@ -551,31 +550,12 @@ class TestTheContainerHasAnInit:
         )
         assert compose["services"]["browser"].get("init") is True
 
-    def test_the_ansible_template_runs_an_init(self):
-        template = (
-            _REPO_ROOT / "deploy" / "ansible" / "templates"
-            / "docker-compose.browser.yml.j2"
-        ).read_text()
-        assert "init: true" in template
-
 
 class TestTheContainerDumpsNoCore:
     """A crashed renderer must not write a ~1.1G core into the writable layer."""
 
-    @pytest.mark.parametrize("name", ["docker-compose.yml", "docker-compose.browser.yml"])
-    def test_the_compose_files_disable_core_dumps(self, name):
-        compose = yaml.safe_load((_REPO_ROOT / "docker" / name).read_text())
-        assert compose["services"]["browser"]["ulimits"]["core"] == 0
-
-    def test_the_ansible_template_disables_core_dumps(self):
-        template = (
-            _REPO_ROOT / "deploy" / "ansible" / "templates"
-            / "docker-compose.browser.yml.j2"
-        ).read_text()
-        rendered = jinja2.Environment(undefined=jinja2.ChainableUndefined).from_string(
-            template,
-        ).render(istota_browser_vnc_bind_address="127.0.0.1")
-        compose = yaml.safe_load(rendered)
+    def test_the_compose_file_disables_core_dumps(self):
+        compose = yaml.safe_load((_REPO_ROOT / "docker" / "docker-compose.yml").read_text())
         assert compose["services"]["browser"]["ulimits"]["core"] == 0
 
 

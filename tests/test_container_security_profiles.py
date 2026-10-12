@@ -117,6 +117,17 @@ def _significant(text: str) -> list[str]:
     return out
 
 
+#: Row 20's narrowing of `mount,`: a root exec holding the root phase's
+#: SYS_ADMIN could otherwise bind `/proc/sys/kernel` somewhere writable and
+#: reach `core_pattern` past the literal-path denies. bwrap binds nothing from
+#: either tree and mounts no sysfs, so it still starts (measured 2026-10-10).
+NARROWING = (
+    "deny mount options in (bind,rbind,move) /proc/** -> /**,",
+    "deny mount options in (bind,rbind,move) /sys/** -> /**,",
+    "deny mount fstype=sysfs,",
+)
+
+
 class TestTheAppArmorProfile:
     REMOVED = {
         "deny mount,",
@@ -130,6 +141,7 @@ class TestTheAppArmorProfile:
         "deny @{PROC}/sys/user/[^m]** w,",
         "deny @{PROC}/sys/user/max_[^u]** w,",
         "deny @{PROC}/sys/user/max_u[^s]** w,  # leaves max_user_namespaces alone writable",
+        *NARROWING,
     }
 
     def test_it_is_docker_default_with_exactly_the_mount_changes(self):
@@ -147,6 +159,10 @@ class TestTheAppArmorProfile:
         shipped = APPARMOR.read_text()
         assert "deny @{PROC}/sysrq-trigger rwklx," in shipped
         assert "deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w," in shipped
+
+    @pytest.mark.parametrize("rule", NARROWING)
+    def test_binds_out_of_proc_and_sys_are_refused(self, rule):
+        assert rule in _significant(APPARMOR.read_text())
 
 
 def _service(compose_file: Path, name: str = "daemon") -> dict:

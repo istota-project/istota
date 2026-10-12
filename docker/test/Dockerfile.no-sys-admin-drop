@@ -1,0 +1,26 @@
+# Negative control for parity row 20's root-phase half: a root phase that keeps
+# CAP_SYS_ADMIN past the cgroup remount.
+#
+# Two lines change. The re-exec through `setpriv --bounding-set=-sys_admin`
+# becomes `set -- "$AFTER_REMOUNT" "$@"`, so the script carries on in the same
+# process with the flag in place, and the refusal that would stop it at a
+# bounding set still holding SYS_ADMIN becomes `:`. Without the second, the
+# stack would not boot and every witness would error rather than fail. The
+# remount, the delegation and the drop to 10001 are untouched, so row 4 and
+# row 5 stay green.
+#
+#   docker build -f docker/test/Dockerfile.no-sys-admin-drop --build-arg BASE=<lean tag> \
+#       -t istota-test/no-sys-admin-drop:<suffix> docker/test
+#
+# Expected: tests/smoke/test_run_contract.py::TestTheRootPhaseWalksDataWithoutSysAdmin
+# fails, the logged CapBnd carrying bit 21.
+ARG BASE
+FROM ${BASE}
+
+RUN sed -i \
+        -e 's/^        exec setpriv --bounding-set=-sys_admin .*$/        set -- "$AFTER_REMOUNT" "$@"/' \
+        -e 's/^    require_no_sys_admin "\$SELF_STATUS" || exit \$?$/    :/' \
+        /usr/local/sbin/istota-root-phase \
+    && grep -q '^        set -- "$AFTER_REMOUNT" "$@"$' /usr/local/sbin/istota-root-phase \
+    && ! grep -q 'bounding-set=-sys_admin' /usr/local/sbin/istota-root-phase \
+    && ! grep -q '^    require_no_sys_admin' /usr/local/sbin/istota-root-phase

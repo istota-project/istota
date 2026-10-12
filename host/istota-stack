@@ -288,6 +288,24 @@ print(1 if kinds & {"claude_code", "tmux_claude"} else 0)
 PY
 }
 
+# `up -d`, then the containers of services no active profile names removed:
+# compose counts a service whose profile was turned off as defined, so neither
+# `down` nor `--remove-orphans` stops its container. One-off containers (setup,
+# apply) are left alone.
+stack_up() {
+    local active id service
+    compose up -d --remove-orphans
+    active="$(compose config --services)"
+    docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
+            --format '{{.ID}} {{.Label "com.docker.compose.service"}}' | while read -r id service; do
+        [ -n "$id" ] || continue
+        if ! printf '%s\n' "$active" | grep -qxF -- "$service"; then
+            log "removing the ${service} container: no active profile names it"
+            docker rm -f "$id" >/dev/null || log "WARNING: could not remove the ${service} container (${id})"
+        fi
+    done
+}
+
 # The services this stack builds. web runs the daemon service's
 # image, so building them again would only repeat it.
 build_services() {
@@ -440,7 +458,7 @@ cmd_update() {
     env_set "ISTOTA_TAG=${tag}" "ISTOTA_TAG_UNSIGNED=${unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
-        compose up -d --remove-orphans
+        stack_up
     else
         log "no config yet: run \`istota-stack setup\`, then \`systemctl enable --now istota-stack\`."
     fi
@@ -504,7 +522,7 @@ cmd_rollback() {
     fi
     env_set "ISTOTA_TAG=${previous}" "ISTOTA_TAG_UNSIGNED=${previous_unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}"
-    compose up -d --remove-orphans
+    stack_up
     log "rolled back to ${previous} (previous: ${current})"
 }
 
@@ -674,7 +692,7 @@ restart_for_config() {
         return 0
     fi
     log "the config changed; restarting the stack"
-    compose up -d --remove-orphans
+    stack_up
     compose restart
 }
 
@@ -793,7 +811,7 @@ cmd_up() {
     # loop on it; say what to do instead.
     [ -f "${CONFIG_DIR}/config.toml" ] || die "no ${CONFIG_DIR}/config.toml yet: run \`istota-stack setup\` first."
     load_apparmor || die "the AppArmor profile did not load; the stack was not started."
-    compose up -d --remove-orphans
+    stack_up
     # The first certificate: nginx serves the ACME challenge on port 80 from its
     # bootstrap template until one exists, and certbot's deploy hook restarts it
     # onto the full template.

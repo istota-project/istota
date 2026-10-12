@@ -133,6 +133,10 @@ class TestNothingIsWrittenIntoAnUnmountedStore:
             assert "REFUSE: the workspace /mnt/shared" in logs, logs[-2000:]
             assert after == before, f"row 9: written into the unmounted store: {after}"
         finally:
-            stack.run("istota-stack compose rm -sf istota >/dev/null 2>&1 || true; "
+            # The hand-started container goes first: left restarting, `up` reads it as a failed
+            # dependency. Then whatever it wrote (the no-storage-refusal control writes), since
+            # rclone will not mount over a non-empty directory; only ever while unmounted.
+            stack.run("istota-stack compose rm -sf daemon >/dev/null 2>&1 || true\n"
+                      f"if ! mountpoint -q {MOUNT}; then find {MOUNT} -mindepth 1 -delete; fi\n"
                       "systemctl start istota-stack.service", timeout=1800)
             lima.wait_healthy(stack)

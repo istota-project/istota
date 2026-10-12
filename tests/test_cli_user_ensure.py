@@ -540,3 +540,37 @@ class TestUserEnsureIdentityUniqueness:
             config=str(cfg), name="bob", email=["bob@example.com"],
             sms_number="+15550100001", whatsapp_number="+15550100002",
         ))
+
+
+class TestUserEnsureIsSafeToReassert:
+    """A management role re-runs the same `user ensure` on every converge, and
+    keys `changed_when` off the CLI's `STATE:` line (`ansible/tasks/main.yml`)."""
+
+    def test_a_web_set_timezone_survives_a_second_ensure(self, cfg_with_db):
+        """No `--tz` in the invocation, so the user's own choice stands."""
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice"))
+        user_profiles.update_profile(db_path, "alice", timezone="Europe/Lisbon")
+
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice"))
+
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile is not None
+        assert profile.timezone == "Europe/Lisbon"
+
+    def test_the_state_line_says_created_then_noop(self, tmp_path, capsys):
+        """A reworded line would report `changed` on every converge."""
+        from istota.cli import cmd_user_ensure
+
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(f'db_path = "{db_path}"\ntemp_dir = "{tmp_path / "tmp"}"\n')
+
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice"))
+        assert "STATE: created" in capsys.readouterr().out
+
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice"))
+        assert "STATE: noop" in capsys.readouterr().out

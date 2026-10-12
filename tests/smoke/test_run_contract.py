@@ -19,6 +19,10 @@ exactly that mechanism and requires the named tests here to go red:
 - row 6, a read-only root: a uid-0 write fails with EROFS, the one errno a
   permission check never produces.
 - row 8, no Docker API: no socket at any path, none mounted, no DOCKER_HOST.
+- row 20, the root phase's capability window: the bounding set it logs before
+  the ownership walk over /data lacks CAP_SYS_ADMIN, which it held only for
+  the cgroup remount. The daemon's own empty set cannot show this; the drop
+  that matters happens before the daemon exists.
 - row 16, a task's syscall surface: bpf, keyctl, add_key, userfaultfd and
   perf_event_open are EPERM from inside a live sandbox. The arguments are the
   Stage 1 spike's, chosen so that a kernel that let the call through answers
@@ -98,6 +102,34 @@ class TestTheDaemonIsUnprivileged:
 
         assert found.strip().endswith("END"), found
         assert found.replace("END", "").strip() == "", f"root-owned under /data:\n{found}"
+
+
+CAP_CHOWN = 1 << 0
+CAP_SYS_ADMIN = 1 << 21
+ROOT_PHASE_CAPBND = re.compile(r"\[istota-root\] CapBnd ([0-9a-f]{16}) before the ownership walk")
+
+
+@parity.witness(20)
+class TestTheRootPhaseWalksDataWithoutSysAdmin:
+    """Row 20's root-phase half: no CAP_SYS_ADMIN while uid 0 reads /data.
+
+    With it, a bug in the ownership walk over a tree uid 10001 wrote could
+    mount a fresh procfs and reach the sysctls AppArmor denies only at their
+    literal paths. The root phase re-execs itself without it straight after
+    the cgroup remount and logs its bounding set before the walk; every boot
+    of this stack's daemon must have logged one, without bit 21. CAP_CHOWN is
+    required too, so the line read is the root phase's and not an emptied set.
+    """
+
+    def test_the_ownership_walk_runs_without_cap_sys_admin(self, stack):
+        logs = stack.logs(tail=100000)
+        logged = ROOT_PHASE_CAPBND.findall(logs)
+
+        assert logged, f"the root phase logged no bounding set\n--- daemon logs ---\n{stack.logs(80)}"
+        for capbnd in logged:
+            value = int(capbnd, 16)
+            assert not value & CAP_SYS_ADMIN, f"row 20: the root phase walked /data holding CAP_SYS_ADMIN (CapBnd {capbnd})"
+            assert value & CAP_CHOWN, f"CapBnd {capbnd} lacks CAP_CHOWN, so it is not the root phase's"
 
 
 @parity.witness(6)

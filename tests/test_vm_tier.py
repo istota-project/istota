@@ -86,6 +86,19 @@ class TestTheControls:
                 assert f'"{name}"' in (REPO / file).read_text(), f"{file} never applies the control {name}"
 
 
+class TestTheUpdateControls:
+    def test_each_mutation_applies_once_to_istota_stack(self):
+        """The update controls edit a copy of the installed script; a fragment
+        that no longer matches would fail the control in the VM, minutes in."""
+        from tests.vm import lima
+
+        script = (REPO / "host" / "istota-stack").read_text()
+        assert lima.UPDATE_CONTROLS
+        for name, (old, new) in lima.UPDATE_CONTROLS.items():
+            assert script.count(old) == 1, name
+            assert old != new, name
+
+
 class TestTheLimaTemplate:
     def test_the_probe_does_not_rely_on_roots_path(self):
         """Lima runs the probe as the user, whose PATH has no /usr/local/sbin, so

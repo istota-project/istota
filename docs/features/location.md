@@ -144,7 +144,7 @@ scripts/import_garmin_tracks.py --user alice --days-back 7
 
 The webhook receiver must be reachable from the Overland app on your phone. Two approaches:
 
-**Reverse proxy (recommended)**: expose the webhook endpoint through nginx or another reverse proxy with TLS. The Ansible role generates the nginx config automatically when `istota_location_enabled` is true:
+**Reverse proxy (recommended)**: expose the webhook endpoint through nginx or another reverse proxy with TLS. The stack's nginx already routes `/webhooks/` to the web service; for a proxy of your own, the location is:
 
 ```nginx
 location /webhooks/ {

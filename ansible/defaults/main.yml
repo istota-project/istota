@@ -147,8 +147,6 @@ istota_config: {}
 # differs. A TOML table is a mapping here and [[x]] a list of mappings.
 #
 # istota_config:
-#   namespace: "istota"
-#
 #   # The name your bot uses in chat, emails, and folder names.
 #   # Change this to whatever you want to call your assistant.
 #   bot_name: "Istota"
@@ -186,6 +184,10 @@ istota_config: {}
 #
 #   # example: "high"
 #   effort: ""
+#
+#   # Advisor model for the anthropic-namespace brains: an ID or alias, resolved
+#   # like `model` but carrying no effort. Empty = no advisor. It must be a model
+#   # that can act as an advisor; a cheap tier fails every task it runs on.
 #   advisor_model: ""
 #
 #   # How much recalled memory a task prompt may carry. Both are deployment-wide
@@ -623,7 +625,11 @@ istota_config: {}
 #
 #     # Max chars per bot response in conversation context (0 to disable truncation)
 #     context_truncation: 0
+#
+#     # Include older messages only if they fall within this many hours (0 = no window)
 #     context_recency_hours: 0
+#
+#     # Always include at least this many recent messages, whatever their age
 #     context_min_messages: 10
 #
 #     # Number of recent unfiltered tasks to inject into context (ensures scheduled/briefing
@@ -747,15 +753,26 @@ istota_config: {}
 #
 #     # Seconds between polling TASKS.md files for new tasks
 #     tasks_file_poll_interval: 30
+#
+#     # Background sweeps and retention. Every interval is in seconds; 0 turns it off.
+#     # shared-file organization checks
 #     shared_file_check_interval: 120
+#
+#     # HEARTBEAT.md checks
 #     heartbeat_check_interval: 60
+#
+#     # SQLite quick_check over per-user DBs
 #     db_health_check_interval: 86400
 #
 #     # Runtime self-check re-run. The auto-update cron changes what is installed
 #     # under a config the daemon already loaded, so a boot-only check is blind to it.
 #     # seconds between `istota doctor` re-runs (0 = disabled)
 #     doctor_check_interval: 3600
+#
+#     # removes developer worktrees whose work has landed
 #     worktree_reap_interval: 21600
+#
+#     # bounds the per-user package caches
 #     sandbox_cache_sweep_interval: 21600
 #
 #     # 0 disables scheduled credential backups
@@ -786,6 +803,8 @@ istota_config: {}
 #
 #     # empty = {workspace_path}/Backups/db/snapshots
 #     db_backup_dir: ""
+#
+#     # newest dated snapshot dirs kept (0 = keep all)
 #     db_backup_retention: 7
 #
 #     # Seconds between scheduler_stats health-line emits (threads / fds / rss /
@@ -917,6 +936,8 @@ istota_config: {}
 #     # Auto-fail tasks pending longer than N hours (default: 24 = 1 day)
 #     # example: 24
 #     stale_pending_fail_hours: 2
+#
+#     # don't retry stuck tasks older than this
 #     max_retry_age_minutes: 60
 #
 #     # How often a running worker pings liveness, in seconds (default: 60; 0 disables).
@@ -954,6 +975,8 @@ istota_config: {}
 #     # A row still referenced by the stored conversation transcript is always
 #     # kept — it also carries the sender attribution for that turn.
 #     processed_email_retention_days: 90
+#
+#     # delete temp files older than this (0 = never)
 #     temp_file_retention_days: 7
 #
 #     # Cumulative-idle seconds a worker lingers (re-checking for new work on a fine
@@ -985,10 +1008,22 @@ istota_config: {}
 #     # Global per-user worker defaults (individual users can override in their config)
 #     user_max_foreground_workers: 2
 #     user_max_background_workers: 1
+#
+#     # Long tasks. A foreground task running past the threshold stops counting
+#     # against its user's interactive workers, up to the two caps below.
+#     # 0 disables
 #     long_task_threshold_minutes: 10
+#
+#     # per-user cap on discounted long tasks
 #     user_max_long_workers: 1
+#
+#     # instance-wide cap, inside max_foreground_workers
 #     max_long_workers: 2
+#
+#     # auto-disable a job after this many failures (0 = never)
 #     scheduled_job_max_consecutive_failures: 5
+#
+#     # skip a job whose missed run is older than this after an outage (0 = run them all)
 #     cron_max_staleness_minutes: 60
 #
 #     # Deferred subtask creation limits (defense against prompt-injection-driven fan-out).
@@ -1007,6 +1042,8 @@ istota_config: {}
 #
 #     # Max cached talk messages per conversation (default: 200)
 #     talk_cache_max_per_conversation: 200
+#
+#     # delete location pings older than this (0 = never)
 #     location_ping_retention_days: 365
 #
 #     # Include selected skills in log channel messages (default: true)
@@ -1151,6 +1188,7 @@ istota_config: {}
 #       # any OpenAI-compatible endpoint
 #       base_url: "https://api.anthropic.com/v1"
 #
+#       # prefer the ISTOTA_BRAIN_NATIVE_API_KEY override
 #       # A credential: set it as istota_secrets.istota_brain_native_api_key, not here.
 #       api_key: ""
 #
@@ -1268,6 +1306,10 @@ istota_config: {}
 #         # data it read. For a deployment ingesting content
 #         # it does not trust.
 #         require_url_provenance: false
+#
+#       # write Bash output past the per-tool cap to a
+#       # temp file the model can Read, rather than
+#       # dropping the tail.
 #       bash_spill_full_output: true
 #
 #       # pace the model as it nears max_turns: inject an
@@ -1706,8 +1748,56 @@ istota_config: {}
 #     # # installed; set them by hand if gh or glab is somewhere else.
 #     gh_bin_path: "/usr/local/bin/gh"
 #     glab_bin_path: "/usr/local/bin/glab"
+#
+#     # Where project code builds and runs
+#     # **There is no key for this.** It is derived from `[devbox] enabled` together
+#     # with `[developer] enabled` and a non-empty `repos_dir`. A deploy-time choice,
+#     # not a runtime one: within a deployment there is exactly one place a build
+#     # happens, which is what keeps the property a per-command fallback would cost —
+#     # nothing on the host ever consumes an environment the container built, so no
+#     # parity rule has to hold.
+#     #
+#     # Without a devbox, npm, uv, cargo and the rest run on the host inside the
+#     # task's bwrap sandbox, where they cannot reach a registry that is not on the
+#     # CONNECT allowlist and cannot install a system package. With one, they run in
+#     # that user's devbox over a Unix-socket exec transport.
+#     #
+#     # A `backend` key used to sit in the block below and say which. It is retired,
+#     # and a file still carrying it gets a warning at load and a WARN from `doctor`.
+#     # Retiring it removed two states rather than a knob: the devbox on with the
+#     # backend off offered the model a devbox skill whose every verb but `reset`
+#     # refused, and the backend on with the devbox off asked the developer skill to
+#     # reach a container nothing had built. If you set it to "none" to keep builds on
+#     # the host, turn `[devbox] enabled` off instead — that is now the one switch.
+#     #
+#     # The devbox image has to be built with the daemon's own uid; the Ansible role
+#     # does that from a `getent` lookup. A mismatched uid is the one failure with no
+#     # error message anywhere that names it: the container cannot write into a
+#     # worktree the daemon made, and once that is worked around the daemon cannot
+#     # unlink a tree the container made, so every worktree that ever ran a build
+#     # becomes permanently unreapable.
+#     #
+#     # Check it with `istota doctor --only developer.container`, which answers four
+#     # questions that each fail silently: does this file derive what the running
+#     # daemon believes, does the transport answer, do the two sides agree on uid and
+#     # repos root, and is the uv cache mounted.
+#     #
+#     # Note `repos_dir` above is a *per-user root* **on every backend, including
+#     # "none"**: the daemon derives `{repos_dir}/{user_id}` and hands that to the
+#     # sandbox bind, `DEVELOPER_REPOS_DIR` and the credential scrub. That is what
+#     # closes cross-user worktree access, and it has nothing to do with containers —
+#     # so an upgraded host must move its existing clones down a level before the
+#     # developer skill can see them again. The Ansible role does it; with more than
+#     # one configured user it needs `istota_developer_repos_migrate_to` and fails the
+#     # play until it gets one, because a green play there is followed by a daemon
+#     # restart into a state where the bind names an empty directory.
+#     #
+#     # The devbox credential proxy: one socket per user under this directory, which
+#     # lets the forge CLIs and pushes in a devbox authenticate without holding a token.
 #     devbox_proxy_enabled: true
 #     devbox_proxy_socket_dir: "/var/run/istota"
+#
+#     # empty = journal only; a path adds a file
 #     devbox_proxy_audit_log: ""
 #
 #     # # Worktree reaping. Nothing used to remove a task's worktree, so `repos_dir`

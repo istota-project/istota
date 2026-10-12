@@ -1,7 +1,7 @@
-"""Every *field* of the ``Config`` tree is rendered, documented, or exempted.
+"""Every *field* of the ``Config`` tree is documented or exempted.
 
 ``tests/test_config_section_coverage.py`` is this guard one layer up: it holds
-every TOML *section* the dataclass tree declares to the Ansible template or to
+every TOML *section* the dataclass tree declares to
 ``config/config.example.toml``. This one asks the same question of the leaf
 fields inside those sections, which is where a setting an operator cannot learn
 about actually hides — a documented ``[scheduler]`` block says nothing about
@@ -45,27 +45,10 @@ artifact into blocks and asks whether ``[a.b]`` assigns ``c``, which is what
 ``test_config.py::TestTheExampleDocumentsEveryLiveSection`` already does for
 six hand-picked sections; this is that rule over the whole tree.
 
-**Named by the template counts, exactly as it does one layer up.** 23 leaf
-fields are written by ``config.toml.j2`` and documented in the example nowhere.
-That is a gap worth closing one day and it is not this guard's claim: the
-section-level rule is "an operator has *some* way to learn this exists", and a
-key in the file every bare-metal deployment reads is such a way. Requiring both
-would make this guard a 23-entry todo list on the day it landed, which is how a
-guard becomes something people route around.
-
-"Named by the template" is the honest phrasing and is weaker than "rendered":
-30 of the template's 38 section headers sit inside a ``{% if %}``, and
-``brain.native.api_key`` is gated on two conditions of its own, so a field can
-satisfy this guard while appearing in no particular deployment's rendered
-``config.toml``. The claim is that an operator has somewhere to read the key,
-which the template source is; it is not that every deployment writes it.
-
-Measured with the rule above, on the tree this landed with: 353 leaf fields,
-350 after the ``_NOT_CONFIGURATION`` filter, 23 of those undocumented in the
-example, and zero in neither artifact. Nothing pins those three numbers, so
-treat them as the reading that motivated the shape rather than as a contract —
-the one the guard actually holds is the zero. :data:`EXEMPT` is empty, and the
-emptiness is the point.
+**The example is the one artifact.** The guard used to accept a key named by
+the Ansible role's ``config.toml.j2`` as well, since every bare-metal install
+read that file. The role went with the bare-metal shape, and the 22 fields only
+it named were documented in the example then, rather than exempted.
 """
 
 from __future__ import annotations
@@ -82,12 +65,11 @@ from istota.config import Config
 from istota.config_mapper import _nested_dataclass
 
 REPO = Path(__file__).resolve().parents[1]
-RENDERED = REPO / "deploy" / "ansible" / "templates" / "config.toml.j2"
 DOCUMENTED = REPO / "config" / "config.example.toml"
 
-#: Leaf fields that belong in neither artifact, each with the reason.
+#: Leaf fields the example does not document, each with the reason.
 #:
-#: Empty, and it stayed empty through the change that introduced this guard:
+#: It stayed empty through the change that introduced this guard:
 #: the nine fields ISSUE-438 found in neither artifact were documented rather
 #: than exempted. That order matters. Writing the guard first and exempting
 #: what it caught would have shipped a nine-entry map on day one, and a guard
@@ -151,7 +133,7 @@ def _collection_of_dataclasses(owner: type, field: dataclasses.Field) -> bool:
 _HEADER = re.compile(r"^[ \t]*(?:#[ \t]*)?\[{1,2}([a-z_][a-z0-9_.]*)\]{1,2}[ \t]*(?:#.*)?$")
 
 #: A header whose name is built by Jinja — ``[models.aliases."{{ name }}"]`` in
-#: the template. It is a real section boundary that :data:`_HEADER` cannot name,
+#: a template. It is a real section boundary that :data:`_HEADER` cannot name,
 #: so without this the walk keeps the *previous* header current and files every
 #: assignment after it into the wrong section. Harmless where it stands today,
 #: and silently wrong the moment one of those keys collides with a real field of
@@ -172,7 +154,7 @@ _UNNAMEABLE = "\x00dynamic"
 #: ``name =`` pattern records as ``[scheduler]`` documenting a key called
 #: ``lower``. Costs nothing — measured, the two patterns cover exactly the same
 #: fields — and removes one of the two live prose collisions in the file.
-#: ``{{``/``{%`` are values in the Jinja template.
+#: ``{{``/``{%`` are values in a Jinja template.
 _ASSIGN = re.compile(
     r"""^[ \t]*(?:\#[ \t]*)?([a-z_][a-z0-9_]*)[ \t]*=[ \t]*
         (?:["'\[{]|-?\d|true|false|\{\{|\{%)""",
@@ -203,13 +185,12 @@ def assignments(path: Path) -> dict[str, set[str]]:
 def assignments_of(text: str) -> dict[str, set[str]]:
     """``{section path: {names assigned under it}}``, with ``""`` the preamble.
 
-    Line-oriented rather than a TOML parse, because both artifacts are mostly
-    *commented out* — the example documents by commented block, and the Ansible
-    template is Jinja and not valid TOML until it is rendered. A real parser
-    sees almost nothing in either.
+    Line-oriented rather than a TOML parse, because the example is mostly
+    *commented out*: it documents by commented block, which a real parser
+    does not see.
 
     Takes text rather than a path so the scanning rules can be driven by a
-    control. A parser that can only be pointed at the two real files is one
+    control. A parser that can only be pointed at the real file is one
     whose edge cases are asserted by nothing.
     """
     blocks: dict[str, set[str]] = {"": set()}
@@ -273,14 +254,11 @@ def bare_exemptions(exempt: dict[str, str]) -> list[str]:
 def redundant_exemptions(
     exempt: dict[str, str],
     fields: list[str],
-    rendered: dict[str, set[str]],
     documented: dict[str, set[str]],
 ) -> list[str]:
     live = set(fields)
     return sorted(
-        name
-        for name in exempt
-        if name in live and (covered_by(name, rendered) or covered_by(name, documented))
+        name for name in exempt if name in live and covered_by(name, documented)
     )
 
 
@@ -349,7 +327,7 @@ class TestTheWalkItself:
             )
 
     def test_a_dynamic_header_ends_the_block_above_it(self):
-        """`[models.aliases."{{ name }}"]` in the template is a real section
+        """`[models.aliases."{{ name }}"]` in a template is a real section
         boundary `_HEADER` cannot name. Left unhandled the walk keeps the
         previous header current and files the keys under it into that section,
         which is a false pass waiting for a name collision."""
@@ -381,13 +359,12 @@ class TestTheWalkItself:
         assert _AUDIT_ASSIGN.match("# shim_commands = [")
         assert _AUDIT_ASSIGN.match('# cron = "0 2 * * *"   # 2am')
 
-    def test_both_artifacts_still_parse_as_blocks(self):
-        for artifact in (RENDERED, DOCUMENTED):
-            blocks = assignments(artifact)
-            assert len(blocks) > 30, f"{artifact.name} yielded almost no sections"
-            assert sum(len(v) for v in blocks.values()) > 100, (
-                f"{artifact.name} yielded almost no assignments"
-            )
+    def test_the_example_still_parses_as_blocks(self):
+        blocks = assignments(DOCUMENTED)
+        assert len(blocks) > 30, f"{DOCUMENTED.name} yielded almost no sections"
+        assert sum(len(v) for v in blocks.values()) > 100, (
+            f"{DOCUMENTED.name} yielded almost no assignments"
+        )
 
     def test_prose_naming_a_section_is_not_a_header(self):
         """The section guard's own negative control, repeated because here a
@@ -413,69 +390,60 @@ class TestTheWalkItself:
         assert not covered_by("enabled", blocks)
 
     def test_a_top_level_field_is_read_from_the_preamble(self):
-        """Top-level keys sit above the first header in both artifacts, so
-        they are covered by the `""` block or by nothing at all."""
+        """Top-level keys sit above the first header, so they are covered by
+        the `""` block or by nothing at all."""
         assert covered_by("bot_name", assignments(DOCUMENTED))
 
 
-class TestEveryFieldIsRenderedDocumentedOrExempted:
+class TestEveryFieldIsDocumentedOrExempted:
     """The guard itself.
 
-    Read the failure message rather than this docstring — it says which of the
-    three places to add the field to.
+    Read the failure message rather than this docstring — it says where to add
+    the field.
     """
 
-    def test_no_field_is_reachable_from_neither_artifact(self, fields):
-        rendered = assignments(RENDERED)
+    def test_no_field_is_undocumented(self, fields):
         documented = assignments(DOCUMENTED)
 
         missing = sorted(
-            f
-            for f in fields
-            if not covered_by(f, rendered)
-            and not covered_by(f, documented)
-            and f not in EXEMPT
+            f for f in fields if not covered_by(f, documented) and f not in EXEMPT
         )
         assert not missing, (
-            f"{missing} are live settings of the Config dataclass tree that no "
-            "operator-facing artifact assigns. The loader reads them and there "
-            "is no way to learn they exist. Do one of three things, in this "
-            "order of preference:\n"
+            f"{missing} are live settings of the Config dataclass tree that the "
+            "example does not assign. The loader reads them and there is no way "
+            "to learn they exist. Do one of two things, in this order of "
+            "preference:\n"
             f"  1. document the key in {DOCUMENTED.relative_to(REPO)} under its "
             "own section header — a commented `# key = value` counts, and that "
             "is how most of the tree is documented;\n"
-            f"  2. render it from {RENDERED.relative_to(REPO)}, which is what "
-            "every deployed bare-metal install reads;\n"
-            "  3. if it is not a setting at all — the loader owns it, or it is "
+            "  2. if it is not a setting at all — the loader owns it, or it is "
             "a test seam — add it to `_NOT_CONFIGURATION` in config.py, which "
             "also stops an operator writing it into the file and being ignored. "
-            f"Only if it is a real setting that belongs in neither artifact does "
-            f"it go in EXEMPT in {Path(__file__).name}, with the reason. A name "
+            f"Only if it is a real setting that belongs in no artifact does it "
+            f"go in EXEMPT in {Path(__file__).name}, with the reason. A name "
             "with no reason is not an exemption.\n"
             "Note the section scoping: the key has to appear under its own "
             "header. A `model =` in some other block does not document this one."
         )
 
-    def test_a_field_that_reaches_neither_artifact_is_reported(self, fields):
+    def test_an_undocumented_field_is_reported(self, fields):
         """The guard's own failure path, exercised.
 
-        `test_no_field_is_reachable_from_neither_artifact` computes `missing`
-        over the real files and finds nothing, which is the answer we want and
-        is indistinguishable from a walk that produced no fields, a `covered_by`
-        that returns True unconditionally, or an artifact that parsed as one
-        enormous section. Feed the same computation a field path that cannot be
-        in either file and require it to come back.
+        `test_no_field_is_undocumented` computes `missing` over the real file
+        and finds nothing, which is the answer we want and is indistinguishable
+        from a walk that produced no fields, a `covered_by` that returns True
+        unconditionally, or an artifact that parsed as one enormous section.
+        Feed the same computation a field path that cannot be in the file and
+        require it to come back.
         """
-        rendered = assignments(RENDERED)
         documented = assignments(DOCUMENTED)
         planted = "scheduler.__not_a_real_field__"
-        assert not covered_by(planted, rendered)
         assert not covered_by(planted, documented)
 
         missing = [
             f
             for f in [*fields, planted]
-            if not covered_by(f, rendered) and not covered_by(f, documented)
+            if not covered_by(f, documented) and f not in EXEMPT
         ]
         assert missing == [planted]
 
@@ -496,12 +464,10 @@ class TestEveryFieldIsRenderedDocumentedOrExempted:
         )
 
     def test_an_exemption_is_not_a_second_home_for_a_documented_field(self, fields):
-        """An exemption that is also rendered or documented is a hole nobody
-        opened on purpose: the field reached an artifact and the entry stayed,
-        so the next field to take that path is exempt by accident."""
-        redundant = redundant_exemptions(
-            EXEMPT, fields, assignments(RENDERED), assignments(DOCUMENTED)
-        )
+        """An exemption that is also documented is a hole nobody opened on
+        purpose: the field reached the example and the entry stayed, so the
+        next field to take that path is exempt by accident."""
+        redundant = redundant_exemptions(EXEMPT, fields, assignments(DOCUMENTED))
         assert not redundant, (
             f"{redundant} are exempted and also covered by an artifact. Drop "
             "the exemption; the field is documented."
@@ -509,15 +475,9 @@ class TestEveryFieldIsRenderedDocumentedOrExempted:
 
 
 class TestTheExemptionRulesCanFail:
-    """`EXEMPT` is empty, so the three tests above pass over an empty mapping
-    and observe nothing about their own logic.
-
-    That is defensible — the machinery is for a future entry — but it means
-    three of this file's tests are no-ops in every green run, which is worth
-    knowing rather than discovering. Each rule is driven here over a map built
-    for the purpose, so the logic is covered now and the first real entry
-    inherits tests that have already been shown to work.
-    """
+    """`EXEMPT` is empty, so the tests above observe nothing about the rules'
+    failing side. Each rule is driven
+    here over a map built for the purpose."""
 
     def test_a_stale_entry_is_caught(self):
         assert stale_exemptions({"scheduler.gone": "r"}, ["scheduler.poll_interval"]) == [
@@ -531,13 +491,12 @@ class TestTheExemptionRulesCanFail:
     def test_an_entry_an_artifact_covers_is_caught(self):
         live = ["scheduler.poll_interval"]
         documented = {"scheduler": {"poll_interval"}}
-        empty: dict[str, set[str]] = {}
         assert redundant_exemptions(
-            {"scheduler.poll_interval": "r"}, live, empty, documented
+            {"scheduler.poll_interval": "r"}, live, documented
         ) == ["scheduler.poll_interval"]
         # Covered under some *other* section is not covered, same as the guard.
         assert redundant_exemptions(
-            {"scheduler.poll_interval": "r"}, live, empty, {"browser": {"poll_interval"}}
+            {"scheduler.poll_interval": "r"}, live, {"browser": {"poll_interval"}}
         ) == []
 
 
@@ -545,7 +504,7 @@ class TestTheCoveringLinesAreRealAssignments:
     """Every field this guard counts as covered is covered by a line that is
     actually an assignment, not by a sentence that reads like one.
 
-    This is what bounds `_ASSIGN`'s tolerance. Both artifacts are prose-heavy
+    This is what bounds `_ASSIGN`'s tolerance. The example is prose-heavy
     and a commented assignment is the documenting form, so the matcher has to
     accept `# key = value` — which also accepts a comment that happens to open
     that way. `config.example.toml:290` is exactly that:
@@ -562,8 +521,8 @@ class TestTheCoveringLinesAreRealAssignments:
     starts to.
     """
 
-    @pytest.mark.parametrize("artifact", [RENDERED, DOCUMENTED], ids=["rendered", "documented"])
-    def test_every_covered_field_has_a_terminated_assignment(self, fields, artifact):
+    def test_every_covered_field_has_a_terminated_assignment(self, fields):
+        artifact = DOCUMENTED
         blocks = assignments(artifact)
         prose_covered = []
         checked = 0

@@ -113,8 +113,9 @@ testbed/             # Staging environment for the deployment tiers -- compose
                      #   beside src/ rather than inside tests/ because it is not
                      #   part of the shipped application
 web/                 # SvelteKit frontend
-deploy/              # Ansible role + install script
-docker/              # Docker Compose stack
+docker/              # Docker Compose stack and images
+host/                # Provisioning and istota-stack for the dedicated VM
+ansible/             # Optional management role for an estate-managed VM
 scripts/             # Setup and runner scripts
 schema.sql           # Database schema
 pyproject.toml       # Project metadata and dependencies
@@ -147,7 +148,7 @@ Three extras compose others rather than naming packages: `local` (a lean single-
 
 ## Documentation
 
-The site is [Docusaurus](https://docusaurus.io/), in `docs-site/`. The markdown itself stays at the repository root in `docs/` — hundreds of references across the tree name those paths (`docs/features/whatsapp.md` in the Ansible defaults, in docker-compose comments, in `.claude/rules/`, in source docstrings), so the site points at `../docs` rather than the files moving.
+The site is [Docusaurus](https://docusaurus.io/), in `docs-site/`. The markdown itself stays at the repository root in `docs/` — hundreds of references across the tree name those paths (`docs/features/whatsapp.md` in docker-compose comments, in `.claude/rules/`, in source docstrings), so the site points at `../docs` rather than the files moving.
 
 ```bash
 npm --prefix docs-site ci

@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
 # Boot the shipped image over an older release's config.toml and database.
 #
-# New code against an old config.toml is how ISSUE-263 reached production: the
-# auto-update cron `git reset --hard`s to main without running Ansible, and a
-# Docker rebuild over a retained volume used to keep the config the entrypoint
-# wrote on that volume's *first* boot (ISSUE-368 made that render on every boot,
-# which narrows the Docker case to the window before the container restarts, but
-# does not close it). Every other tier in this spec renders a fresh config, and a
-# fresh config is current by definition — so none of them can see this.
+# New code against an old config.toml is how ISSUE-263 reached production, and
+# an update keeps the operator's config.toml as it is. Every other tier renders a
+# fresh config, and a fresh config is current by definition — so none of them
+# can see this.
 #
-#   scripts/test-upgrade.sh                                   # near anchor, code shape
-#   scripts/test-upgrade.sh --from-floor --shape volume       # far anchor, before a release
-#   scripts/test-upgrade.sh --shape both
-#   scripts/test-upgrade.sh --from v0.38.0 --shape volume     # reproduce a specific report
-#   scripts/test-upgrade.sh --platform amd64 --shape both     # before a release
+#   scripts/test-upgrade.sh                                   # from the floor, before a release
+#   scripts/test-upgrade.sh --shape volume                    # the same, named
+#   scripts/test-upgrade.sh --from v0.38.0                    # reproduce a specific report
+#   scripts/test-upgrade.sh --platform amd64                  # before a release
 #   scripts/test-upgrade.sh --refresh                         # ignore the cached capture
-#   scripts/test-upgrade.sh --shape both -- -x -k drift       # pytest args after `--`
+#   scripts/test-upgrade.sh -- -x -k drift                    # pytest args after `--`
 #
-# Two anchors, because one is not enough. The near anchor is the merge-base with
-# the default branch — about three days at the current release cadence, which on
-# its own is close to a no-op as a regression detector, but it is the span the
-# auto-update cron actually crosses and it is cheap. The far anchor is the tag in
-# `scripts/upgrade-floor`, roughly a month back, and that file *is* the statement
-# of how far back an upgrade is supported.
+# The anchor is the tag in `scripts/upgrade-floor`, roughly a month back, and
+# that file *is* the statement of how far back an upgrade is supported. There
+# was a second, near shape (`code`, from the merge-base) for the span the
+# bare-metal auto-update cron crossed; it went with that cron.
 #
 # This is a thin driver. Every assertion lives in tests/image/test_upgrade.py so
 # that a failure names the property that broke rather than an exit code, and so
@@ -41,7 +35,7 @@ cd "$(dirname "$0")/.."
 
 from_ref=""
 use_floor=0
-shape="code"
+shape="volume"
 platform=""
 refresh=0
 
@@ -111,8 +105,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$shape" in
-    code|volume|both) ;;
-    *) echo "--shape must be one of: code, volume, both (got '$shape')" >&2; exit 2 ;;
+    volume) ;;
+    *) echo "--shape must be: volume (got '$shape')" >&2; exit 2 ;;
 esac
 
 if [ -n "$from_ref" ] && [ "$use_floor" -eq 1 ]; then
@@ -168,27 +162,12 @@ if [ "$use_floor" -eq 1 ]; then
     fi
 fi
 
-if [ "$shape" = "both" ]; then
-    shapes="code,volume"
-else
-    shapes="$shape"
-fi
-
-# The banner has to be per-shape, because without an explicit --from each shape
-# uses its *own* default anchor: code from the merge-base, volume from the
-# floor. A single "anchor: …" line was wrong for exactly the run most worth
-# reading it on — `--shape both`, where it named the near anchor while the
-# volume half was quietly using the floor.
+shapes="$shape"
 echo "[upgrade] shapes:   ${shapes}"
 if [ -n "$from_ref" ]; then
-    echo "[upgrade] anchor:   ${from_ref} (both shapes)"
+    echo "[upgrade] anchor:   ${from_ref}"
 else
-    case "$shapes" in
-        *code*)   echo "[upgrade] anchor:   code   <- merge-base with the default branch" ;;
-    esac
-    case "$shapes" in
-        *volume*) echo "[upgrade] anchor:   volume <- $(read_floor_ref) (scripts/upgrade-floor)" ;;
-    esac
+    echo "[upgrade] anchor:   $(read_floor_ref) (scripts/upgrade-floor)"
 fi
 if [ -n "$platform" ]; then
     echo "[upgrade] platform: ${platform} (an emulated build is minutes, not seconds)"
@@ -214,12 +193,12 @@ export ISTOTA_UPGRADE_RECEIPT="$receipt"
 # a shape that was not selected, a near anchor that is HEAD — and a bare count
 # of skips is not something anyone can act on.
 #
-# Not `exec`, because this driver has a post-condition. Every shape can skip,
-# and a session where they all did exits 0 having asserted nothing about an
-# upgrade. That is the silent non-execution `scripts/test-linux.sh` grew
-# `ISTOTA_LINUX_TIER=1` for, and it matters more here, where one shape skipping
-# is routine. The tier writes a line to $ISTOTA_UPGRADE_RECEIPT for each shape
-# it actually carried through; an empty receipt means no upgrade was performed.
+# Not `exec`, because this driver has a post-condition. The shape can skip,
+# and a session where it did exits 0 having asserted nothing about an upgrade.
+# That is the silent non-execution `scripts/test-linux.sh` grew
+# `ISTOTA_LINUX_TIER=1` for. The tier writes a line to $ISTOTA_UPGRADE_RECEIPT
+# for each shape it actually carried through; an empty receipt means no upgrade
+# was performed.
 set +e
 if [ -n "$platform" ]; then
     uv run pytest -m image -n0 --no-header -rs --platform "$platform" \

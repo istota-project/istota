@@ -7,7 +7,6 @@ from string import Template
 
 import pytest
 import yaml
-from jinja2 import Environment
 
 from istota import db, doctor, user_profiles
 from istota.webui import auth as web_auth
@@ -15,14 +14,13 @@ from istota.config import Config, WebConfig
 from istota.setup_wizard import ContainerAnswers, render_container_config
 from testbed import profiles
 from testbed.stack import lean_config
-from tests.test_ansible_config_template import render as render_ansible
 
 REPO = Path(__file__).resolve().parent.parent
 # Email sign-in is a typed code (ISSUE-574), so set-password is the one route
 # left that carries a credential in its query string.
 TOKEN_PATHS = ("/istota/auth/set-password",)
-NGINX = ("docker/nginx/istota.conf.template", "deploy/ansible/templates/istota.conf.j2")
-LAUNCHERS = ("docker/docker-compose.yml", "deploy/ansible/templates/istota-web.service.j2")
+NGINX = ("docker/nginx/istota.conf.template",)
+LAUNCHERS = ("docker/docker-compose.yml",)
 
 
 @pytest.mark.parametrize("nc_url", ["", "http://nextcloud:80"])
@@ -50,18 +48,9 @@ def test_lean_profiles_keep_nextcloud_auth(profile):
     assert all(r.status == doctor.SKIP for r in doctor.check_web_auth(config, False)[1:])
 
 
-@pytest.mark.parametrize("auth", [["nextcloud"], ["email"], ["nextcloud", "email"]])
-def test_ansible_auth(auth):
-    assert tomllib.loads(render_ansible(istota_web_auth=auth))["web"]["auth"] == auth
-
-
 def nginx_render(path):
     text = (REPO / path).read_text()
-    if path.endswith(".j2"):
-        text = Environment().from_string(text).render(istota_web_enabled=True, istota_web_port=8766)
-    else:
-        text = Template(text).safe_substitute(DOMAIN="bot.example.com", WEB_PORT="8766", WEBHOOKS_PORT="8765", NGINX_CLIENT_MAX_BODY_SIZE="512m")
-    return text
+    return Template(text).safe_substitute(DOMAIN="bot.example.com", WEB_PORT="8766", WEBHOOKS_PORT="8765", NGINX_CLIENT_MAX_BODY_SIZE="512m")
 
 
 def assert_nginx_suppression(text):
@@ -73,9 +62,8 @@ def assert_nginx_suppression(text):
         assert "proxy_pass http://" in block
         for header in ("Host $http_host", "X-Real-IP $remote_addr", "X-Forwarded-For $proxy_add_x_forwarded_for"):
             assert f"proxy_set_header {header};" in block
-        # The compose nginx forwards the scheme its ingress mode set
-        # (`$forwarded_proto`); the Ansible template is always the edge.
-        assert re.search(r"proxy_set_header X-Forwarded-Proto \$(scheme|forwarded_proto);", block)
+        # The compose nginx forwards the scheme its ingress mode set.
+        assert "proxy_set_header X-Forwarded-Proto $forwarded_proto;" in block
 
 
 @pytest.mark.parametrize("path", NGINX)
@@ -97,10 +85,7 @@ def test_nginx_negative_control(path, token_path):
 
 def launcher_command(path):
     text = (REPO / path).read_text()
-    if path.endswith(".yml"):
-        return yaml.safe_load(text)["services"]["web"]["entrypoint"][-1].split("/app/.venv/bin/uvicorn", 1)[1]
-    text = Environment().from_string(text).render(istota_web_port=8766)
-    return next(line for line in text.splitlines() if line.startswith("ExecStart="))
+    return yaml.safe_load(text)["services"]["web"]["entrypoint"][-1].split("/app/.venv/bin/uvicorn", 1)[1]
 
 
 def assert_launcher_suppression(command):

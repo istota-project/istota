@@ -701,8 +701,7 @@ class BriefingSharedBlock:
 # windows, so morning and evening briefings each read a fresh copy; a consuming
 # briefing reads them via a ``shared_block`` source with a freshness window,
 # so a stale/not-yet-generated block degrades to an omitted section
-# (harmless). Kept in step with the Ansible defaults
-# (``istota_briefing_shared_blocks`` in ``deploy/ansible/defaults/main.yml``).
+# (harmless).
 DEFAULT_SHARED_BLOCKS: list[dict] = [
     {
         "name": "world-headlines",
@@ -2124,7 +2123,6 @@ class ExperimentalConfig:
 
 @dataclass
 class Config:
-    namespace: str = "istota"  # Install namespace (drives /etc/{namespace}/, /srv/app/{namespace}/, etc.)
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
     # DEPRECATED (ISSUE-418): these were the *claude_code* brain's defaults
@@ -2801,12 +2799,10 @@ def load_admin_users(path: str | None = None) -> set[str]:
 
     Args:
         path: Override file path. If None, checks ISTOTA_ADMINS_FILE env var,
-              then falls back to /etc/istota/admins. The default path is
-              wrong for renamed-namespace installs (e.g. /etc/mybot/admins);
-              such deploys must set ISTOTA_ADMINS_FILE in every entry-point
-              systemd unit. A WARNING is logged when the resolved path is
-              missing so silent fail-closed admin in the web UI is visible
-              in the journal.
+              then falls back to /etc/istota/admins. The stack sets
+              ISTOTA_ADMINS_FILE to the config directory's `admins`. A
+              WARNING is logged when the resolved path is missing so silent
+              fail-closed admin in the web UI is visible in the log.
     """
     explicit_path = path is not None
     env_var_set = "ISTOTA_ADMINS_FILE" in os.environ
@@ -3817,14 +3813,9 @@ def _migrate_whatsapp_flat(data: dict) -> None:
 def normalize_legacy_document(data: dict) -> None:
     """Every rewrite :func:`load_config` applies before the dataclass walk.
 
-    One named step rather than a call buried in the loader, because two kinds
-    of caller have to agree on it. The loader is the first. The second is the
-    drift guard over the Ansible generator
-    (``tests/test_ansible_config_template.py``),
-    which answers "does the loader read every key this file renders" by driving
-    ``apply_section`` itself — so a rewrite the loader does and it does not
-    reads to it as a rendered key nothing consumes, which is the opposite of
-    what it is.
+    One named step rather than a call buried in the loader, so a second caller
+    driving ``apply_section`` itself applies the same rewrites rather than
+    reading a rewritten key as one nothing consumes.
 
     Mutates ``data`` in place, like the walk it feeds. A caller that needs the
     document afterwards copies it first.

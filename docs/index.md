@@ -50,7 +50,7 @@ Location, health, financial, calendar, email, and conversation records form an u
 
 Self-hosting does not make connected services disappear. A hosted model provider receives the prompts and tool results sent to it, and every service you connect receives the traffic needed to use it. Istota also supports a local OpenAI-compatible model endpoint. Those connections are operator choices rather than requirements of an Istota account or control plane.
 
-The supported bare-metal deployment confines tasks with bubblewrap, credential isolation, scoped files, an outbound network proxy, and optional confirmation gates. The standalone install and shipped Docker stack run tasks unsandboxed. Read the [security model](deployment/security.md) before exposing an instance or giving it sensitive resources.
+A server install confines tasks with bubblewrap, credential isolation, scoped files, an outbound network proxy, and optional confirmation gates. The standalone install runs tasks unsandboxed. Read the [security model](deployment/security.md) before exposing an instance or giving it sensitive resources.
 
 ## Nextcloud is optional
 
@@ -66,8 +66,8 @@ This view shares the humanist premise of [Common Task](https://commontask.org/):
 
 ## Choose an installation
 
-- [Bare-metal server](getting-started/quickstart-bare-metal.md): the recommended persistent, multi-user deployment on Debian or Ubuntu. It connects to an existing Nextcloud and supports bubblewrap and cgroups.
-- [Docker server](getting-started/quickstart-docker.md): a self-contained stack with Nextcloud, PostgreSQL, Redis, nginx, and the Istota web app. Agent tasks are unsandboxed in the shipped Compose configuration.
+- [Server](getting-started/quickstart-server.md): the persistent, multi-user deployment. The Docker stack runs on a Debian 13 machine of its own, built from a signed release, with bubblewrap and per-task cgroups. Nextcloud is optional.
+- [Docker stack by hand](getting-started/quickstart-docker.md): the same stack, set up with `docker compose` directly.
 - [Local standalone](getting-started/local-install.md): a trusted single-user installation with a local workspace, loopback-only web app, and no required Nextcloud or login screen. It is unsandboxed by design.
 
 ## Explore the documentation

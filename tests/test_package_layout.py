@@ -68,7 +68,6 @@ ROOT_ALLOWLIST = frozenset({
     "context",
     "cron_loader",
     "db",
-    "devbox_proxy",  # entry-point stub for units rendered before the devbox/ move
     "doctor",
     "events",
     "executor",
@@ -82,7 +81,6 @@ ROOT_ALLOWLIST = frozenset({
     "logging_setup",
     "module_loader",
     "modules",
-    "ocr_leaf",  # spawn-path stub: a scheduler started before the move spawns this path
     "scheduler",
     "scheduler_deferred",
     "serve",
@@ -93,12 +91,9 @@ ROOT_ALLOWLIST = frozenset({
     "status_writer",
     "storage",
     "tasks_file_poller",
-    "tool_server",  # spawn-path stub, as ocr_leaf
     "updater",
     "user_briefings",  # config.load_config, so every process (see "geo")
     "user_profiles",
-    "web_app",  # entry-point stub for units rendered before the webui/ move
-    "webhook_receiver",  # entry-point stub, as web_app
 })
 
 #: Packages that existed before the reorganisation; the `__init__` rule is not theirs.

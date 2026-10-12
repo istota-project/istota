@@ -1,6 +1,6 @@
 # Local single-user install
 
-Istota has three deployment shapes. The recommended persistent, multi-user shape is the [bare-metal server](quickstart-bare-metal.md), which connects to an existing Nextcloud and isolates each user's tasks with bubblewrap. The [Docker server](quickstart-docker.md) bundles its own Nextcloud but runs agent tasks unsandboxed. This page covers the **local, single-user install** for your own mac or Linux machine: no Nextcloud, no server, no sandbox, and no login.
+Istota runs in two ways. The persistent, multi-user one is a [server](quickstart-server.md): the Docker stack on a machine of its own, with each user's tasks isolated by bubblewrap and Nextcloud optional. This page covers the **local, single-user install** for your own mac or Linux machine: no Nextcloud, no server, no sandbox, and no login.
 
 The workspace is a plain local folder (default `~/.istota`). The web UI runs on loopback with authentication bypassed. It is always single-user and always trusted.
 
@@ -165,4 +165,4 @@ See the [configuration reference](../configuration/reference.md) for every optio
 - **Storage vocabulary follows the backend.** The bot describes storage based on whether a Nextcloud server backs it, keyed on `[nextcloud] url` presence (not the standalone flag). With no URL — the local shape — the prompt and skill docs talk about "your workspace" (a local folder) instead of a Nextcloud mount, and tell the model it also has ordinary access to the rest of the machine's filesystem. Set a `[nextcloud] url` and the vocabulary switches back to Nextcloud/rclone.
 
 
-Room identity migration during `istota update` requires an offline workspace. Stop `istota serve` with Ctrl-C first, and stop any separate web or webhook processes you started. The updater refuses a running scheduler before changing the checkout and invokes the newly installed `istota init --relocate-rooms`. Restart `istota serve` after success. If migration refuses or reports partial work, follow the [refusal and retry procedure](../deployment/ansible.md#room-identity-migration); retry the offline command before restarting.
+Room identity migration during `istota update` requires an offline workspace. Stop `istota serve` with Ctrl-C first, and stop any separate web or webhook processes you started. The updater refuses a running scheduler before changing the checkout and invokes the newly installed `istota init --relocate-rooms`. Restart `istota serve` after success. If migration refuses or reports partial work, follow the [refusal and retry procedure](../deployment/docker.md#room-identities-offline-maintenance-required); retry the offline command before restarting.

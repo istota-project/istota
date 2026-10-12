@@ -92,13 +92,3 @@ def test_user_without_ingest_token_skipped(db_path):
         wr.reload_config()
 
     assert wr._token_map == {"bob-tok": "bob"}
-
-
-def test_the_old_module_path_serves_the_same_app():
-    """Units rendered before the `webui/` move start uvicorn on the old path,
-    and the auto-update cron restarts them without re-rendering."""
-    pytest.importorskip("fastapi")
-    import istota.webhook_receiver as stub  # move-modules: keep
-    from istota.webui import webhook_receiver
-
-    assert stub.app is webhook_receiver.app

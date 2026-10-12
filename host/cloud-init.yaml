@@ -9,6 +9,7 @@
 #
 #   istota-stack update <tag>     # builds the images from the verified tag
 #   istota-stack setup            # the wizard: config.toml, secrets, host.env
+#   istota-stack check-image || istota-stack update <tag>   # rebuild if the config needs Claude Code
 #   /srv/app/istota/src/host/provision.sh   # picks up host.env
 #   systemctl start istota-stack
 #
@@ -27,7 +28,7 @@ write_files:
       #!/bin/bash
       set -euo pipefail
       # Fill in: where to clone from, and the release tag to provision from.
-      REPO_URL="https://gitlab.com/cynium/istota.git"
+      REPO_URL="https://github.com/istota-project/istota.git"
       TAG="vX.Y.Z"
 
       SRC=/srv/app/istota/src

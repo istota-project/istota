@@ -1,8 +1,6 @@
 # Docker deployment
 
-:::warning[Experimental]
-The Docker deployment is functional but unstable. For production, use [Ansible](ansible.md) or [bare metal install](../getting-started/quickstart-bare-metal.md).
-:::
+This page covers the Docker stack in `docker/`, which is the only way Istota runs on a server. Install it on a machine of its own with the [server quickstart](../getting-started/quickstart-server.md); there `istota-stack` runs these compose commands for you (`istota-stack compose <...>`, and `istota` for the CLI). The plain `docker compose` commands below are what it runs, and what you type on a machine you set up by hand.
 
 ## Stack overview
 
@@ -14,7 +12,8 @@ The Docker deployment is functional but unstable. For production, use [Ansible](
 | `web` | SvelteKit + FastAPI web UI |
 | `nginx` | Reverse proxy (single entry port) |
 | `browser` (profile) | Chrome + VNC container for web browsing |
-| `webhooks` (`location` or `sms` profile) | GPS and SMS webhook receiver |
+| `whatsapp-baileys` (profile) | The WhatsApp sidecar for a paired session |
+| `signaling` (profile) | Talk's signaling server |
 
 ## Configuration
 
@@ -48,7 +47,7 @@ Edit `/data/config/config.toml` and restart:
 
 ```bash
 docker compose exec daemon istota-drop vi /data/config/config.toml   # or copy it out and back
-docker compose restart daemon web webhooks
+docker compose restart daemon web
 ```
 
 A credential is a file under `docker/secrets/` (0400, owned by uid 10001); replace the file and restart. An existing install keeps the `config.toml` its old entrypoint rendered, unchanged, as its own file; `docker/istota/config-diff.py` in the image compares two configs by key if you want to see what an old render would have changed.
@@ -70,7 +69,7 @@ docker compose run --rm --no-deps --entrypoint /app/.venv/bin/istota daemon -c /
 docker compose up -d daemon web webhooks
 ```
 
-Inspect the migration result before the final command. Exit 1 is a refusal, and exit 2 means partial work needs attention; follow the [refusal and retry procedure](ansible.md#room-identity-migration). The command is safe to rerun while the application services remain stopped. `--scheduler-stopped` recovers the task rows a stopped scheduler left in flight, which would otherwise refuse as `live_tasks` on every rerun; leave it off if anything else is executing a task. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the scheduler entrypoint cannot stop sibling web and webhook containers.
+Inspect the migration result before the final command. Exit 0 is done. Exit 1 is a refusal with nothing changed: `refusal: live_tasks` means a task was still running, so wait and rerun; any other reason needs fixing first, and the line names it. Exit 2 means partial work needs attention: the failure lines say which rooms or users, and each admin gets a bell notice listing them. Start the services again, fix what the lines name, and rerun in a later window. The command is safe to rerun while the application services remain stopped. `--scheduler-stopped` recovers the task rows a stopped scheduler left in flight, which would otherwise refuse as `live_tasks` on every rerun; leave it off if anything else is executing a task. Existing room history, native surface bindings and old links survive the identity change. Ordinary container boot initializes the schema but does not run this offline migration: the scheduler entrypoint cannot stop sibling web and webhook containers.
 
 
 ### An install that ran the bundled Nextcloud
@@ -103,7 +102,7 @@ Having no failover is a valid choice now, which is why the INFO line exists.
 
 ### The repository-layout migration does not apply here
 
-The Ansible role runs `python -m istota.maintenance.repos_relocate` on every deploy, to move developer clones from one shared tree into per-user subtrees. This stack does not, and does not need to: the old environment-rendered config left `repos_dir` empty and never shipped a value, so a Docker deployment made before the per-user split has no clones in the old layout to move. `istota setup` writes `repos_dir = "/data/repos"` when the developer skill is on, which is the per-user layout from the start.
+`python -m istota.maintenance.repos_relocate` moves developer clones from one shared tree into per-user subtrees. The old bare-metal role ran it on every deploy. This stack does not, and does not need to: the old environment-rendered config left `repos_dir` empty and never shipped a value, so a Docker deployment made before the per-user split has no clones in the old layout to move. `istota setup` writes `repos_dir = "/data/repos"` when the developer skill is on, which is the per-user layout from the start.
 
 If you set `repos_dir` by hand on an install predating the per-user split, run the migration yourself once before the clones are used:
 
@@ -116,22 +115,19 @@ It refuses rather than guessing when it cannot tell whose clones are whose, and 
 
 ## Optional profiles
 
-There are six: `browser`, `location`, `sms`, `whatsapp`, `whatsapp-baileys` and `signaling`.
+There are three: `browser`, `whatsapp-baileys` and `signaling`.
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
-docker compose --profile location up -d             # GPS tracking
-docker compose --profile sms up -d                  # SMS webhooks
-docker compose --profile whatsapp up -d             # WhatsApp via Meta's Cloud API
 docker compose --profile whatsapp-baileys up -d     # WhatsApp via a paired session
-docker compose --profile browser --profile location up -d  # Combine as needed
+docker compose --profile browser --profile signaling up -d  # Combine as needed
 ```
 
 Rather than naming them per command, set `COMPOSE_PROFILES` in `.env` — a comma-separated list every `docker compose` in that directory then picks up. `istota setup --vm-dir` writes it from the answers you give it; a hand-copied `.env.example` leaves it empty, which means the core stack only.
 
-The web service serves the webhook receiver's routes too (location pings, SMS and Meta's WhatsApp callbacks), so no profile is needed for them; each route answers only when its feature is enabled in the config. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`. Nginx is the public endpoint for `/webhooks/`; the receiver port is exposed only inside the Compose network. Enabling several profiles still runs one receiver.
+The web service serves the webhook receiver's routes too (location pings, SMS and Meta's WhatsApp callbacks), so no profile is needed for them; each route answers only when its feature is enabled in the config. Set the matching `[location]`, `[sms]` or `[whatsapp]` `enabled = true` in `config.toml`. Nginx is the public endpoint for `/webhooks/`.
 
-**The two WhatsApp profiles are alternatives, not a pair.** The surface has two adapters and they need opposite halves of the stack: Meta's Cloud API receives over a signed HTTP callback, so it wants `whatsapp` and the receiver; a paired WhatsApp Web session receives over a Unix socket, so it wants `whatsapp-baileys` and the Node sidecar, and no receiver at all. A profile cannot read the config, so pick the one matching `[whatsapp] provider`. Selecting both costs a receiver whose handlers answer 404, which is inert rather than harmful.
+**Only the Baileys adapter needs a profile.** Meta's Cloud API receives over a signed HTTP callback, which the web service already serves; a paired WhatsApp Web session receives over a Unix socket from the Node sidecar, which `whatsapp-baileys` starts. A profile cannot read the config, so turn it on only when `[whatsapp] provider = "baileys"`.
 
 Pairing a Baileys session is not reachable from inside this stack — `istota whatsapp pair` starts a sidecar of its own and the istota image ships neither the program nor its dependencies. Pair on a host with a checkout and node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as.
 
@@ -265,7 +261,7 @@ In full Nextcloud integration the workspace is not a volume: it is the VM's rclo
 
 Each user has a separate profile under `/data/browser-profile/users/`. Logins and site storage survive task completion, session closure, process reaping and container restarts. They are never shared between users. Later tasks for the same user inherit that user's authenticated access without another vault fetch. Cloudflare clearance warms up separately for each user. Profiles are not automatically deleted.
 
-Both compose files pass these settings to the browser service:
+The compose file passes these settings to the browser service:
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -277,17 +273,15 @@ Both compose files pass these settings to the browser service:
 
 The container retains its 3 GiB memory limit. Setting `BROWSER_MAX_INSTANCES=1` reduces process memory while keeping separate profiles; switching users can require a cold start. A full process pool evicts only an instance with no live sessions, otherwise it returns a capacity error with a retry delay. Session limits are separate: opening a session evicts the requesting user's oldest first, and can evict another user's oldest at the global cap when the requester has none. Browser requests still execute serially.
 
-The Ansible equivalents are `istota_browser_max_instances`, `istota_browser_instance_idle_s`, `istota_browser_max_sessions`, `istota_browser_max_total_sessions` and `istota_browser_disk_cache_bytes`. Ansible retains its existing per-user session default of `3`. The role writes these to `browser.env`, which its compose template loads.
-
 Use `istota-skill browse state` to inspect the requesting user's profile size and cookie domains, never cookie values. Domains are `null` when its browser is stopped or disconnected; state inspection does not start Chrome. Close that user's sessions before `browse forget --origin https://example.com` or `browse forget --all` to clear cookies and origin storage. Origin clearing includes cookies shared through a parent domain and can log out sibling sites. `browse forget --all --profile` removes the complete profile only after verified browser shutdown, and resets history, permissions and caches too.
 
 The noVNC console is for operators only. Reach `/instances.html` on the existing console address over the deployment's VPN or management network, choose the user, then enter the deployment's VNC password when configured. Each view is routed to that user's display; a login completed there belongs only to that user. Routing tokens are addresses, not credentials. The index exposes live user IDs to anyone who can reach the console port, so keep the existing bind and firewall restrictions. Do not give users console links or publish this port to the internet.
 
-**Upgrade:** Rebuild and recreate the browser container when updating the skill. For Ansible installations, run the full play. On first boot the old shared profile is parked under `legacy-profile/` in the same volume; no user inherits it. Each user signs in again unless an operator deliberately recovers the old profile. TLS certificates and existing per-user profiles stay in place. A parking collision needs operator attention and does not overwrite either copy. Until the image is updated, non-credential calls warn with `shared_profile` and credential fills refuse. After upgrading, verify `/health` advertises `per_user_profiles: true`. Direct API clients must send `X-Istota-User` on scoped requests; IDs must be single path components, ASCII, without control characters or surrounding whitespace.
+**Upgrade:** Rebuild and recreate the browser container when updating the skill (`istota-stack update` does both). On first boot the old shared profile is parked under `legacy-profile/` in the same volume; no user inherits it. Each user signs in again unless an operator deliberately recovers the old profile. TLS certificates and existing per-user profiles stay in place. A parking collision needs operator attention and does not overwrite either copy. Until the image is updated, non-credential calls warn with `shared_profile` and credential fills refuse. After upgrading, verify `/health` advertises `per_user_profiles: true`. Direct API clients must send `X-Istota-User` on scoped requests; IDs must be single path components, ASCII, without control characters or surrounding whitespace.
 
 ## Security differences
 
-- **The network allowlist is the default.** `istota setup` leaves `[security.network] enabled` at its default, on, as the Ansible shape has it, so each task gets `--unshare-net` and the CONNECT proxy's `host:port` allowlist. A config the old entrypoint rendered says `enabled = false`, and keeps saying it until you change it
+- **The network allowlist is the default.** `istota setup` leaves `[security.network] enabled` at its default, on, so each task gets `--unshare-net` and the CONNECT proxy's `host:port` allowlist. A config the old entrypoint rendered says `enabled = false`, and keeps saying it until you change it
 - **The filesystem sandbox runs here**, under the run contract the `daemon` service carries. See below
 - **Skill proxy**: enabled by default and works inside the container. It is what keeps credentials out of the model's environment
 - **All extras installed**: every optional dependency included in the image
@@ -309,7 +303,7 @@ The `daemon` service in `docker-compose.yml` carries the grant bubblewrap needs 
     cgroup: private
 ```
 
-`seccomp-istota.json` is Docker's default profile plus the six calls bwrap needs to build a namespace (`clone`, `clone3`, `mount`, `pivot_root`, `umount2`, `unshare`), without the default's `CAP_SYS_ADMIN` rule, so `bpf`, `keyctl`, `userfaultfd`, `perf_event_open` and the rest of the default denylist stay refused for every task. `apparmor-istota` is Docker's `docker-default` plus `mount` and `pivot_root`; it keeps `docker-default`'s refusal of writes to `/proc/sys` and `/proc/sysrq-trigger`, which `systempaths=unconfined` would otherwise leave open to a root `docker exec`. On a host with AppArmor, load it before the stack starts:
+`seccomp-istota.json` is Docker's default profile plus the six calls bwrap needs to build a namespace (`clone`, `clone3`, `mount`, `pivot_root`, `umount2`, `unshare`), without the default's `CAP_SYS_ADMIN` rule, so `bpf`, `keyctl`, `userfaultfd`, `perf_event_open` and the rest of the default denylist stay refused for every task. `apparmor-istota` is Docker's `docker-default` plus `mount` (with no bind or move out of `/proc` or `/sys` and no `sysfs` mount) and `pivot_root`; it keeps `docker-default`'s refusal of writes to `/proc/sys` and `/proc/sysrq-trigger`, which `systempaths=unconfined` would otherwise leave open to a root `docker exec`. On a host with AppArmor, load it before the stack starts:
 
 ```bash
 sudo apparmor_parser -r -W docker/istota/apparmor-istota
@@ -317,15 +311,15 @@ sudo apparmor_parser -r -W docker/istota/apparmor-istota
 
 A host without AppArmor, Docker Desktop among them, ignores the option.
 
-The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec daemon istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
+The container starts in a short root phase that delegates its own cgroup to the daemon, so each task gets `memory.max`, `pids.max` and `cpu.max` of its own, gives up `CAP_SYS_ADMIN` straight after the remount that needs it, and then drops to uid 10001 with every capability set empty. `docker compose exec` does not inherit that drop, so run CLI commands through it: `docker compose exec daemon istota-drop istota doctor`. If the sandbox cannot be built (a profile missing, a compose file without these lines), the container exits at boot and its log names the lines to add, rather than running tasks unconfined.
 
 These settings are meant for a host that runs nothing else, such as a VM dedicated to the install: `systempaths=unconfined` would let a uid-0 process in the container reach host sysctls if AppArmor were not loaded, and nothing in the container runs as uid 0 after the root phase.
 
-### Nothing acts on the browser container's unhealthy verdict
+### Acting on the browser container's unhealthy verdict
 
-The browser container's healthcheck is thorough. It probes the liveness endpoint's deep tier, which asks whether the Chrome process is alive, whether Chrome's DevTools endpoint answers, and — since ISSUE-384 — whether the API process can still drive the browser it is reporting on. What this stack does not have is anything that reads the resulting `unhealthy` and does something about it. `restart: unless-stopped` reacts to a process exiting, not to a failing healthcheck, so a container that reports itself wedged stays wedged and stays running.
+The browser container's healthcheck probes the liveness endpoint's deep tier, which asks whether the Chrome process is alive, whether Chrome's DevTools endpoint answers, and (since ISSUE-384) whether the API process can still drive the browser it is reporting on. `restart: unless-stopped` reacts to a process exiting, not to a failing healthcheck, so compose alone leaves a wedged container running.
 
-The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` every minute, restarts after a debounce, and pages if the restarts start looping. There is no equivalent here, and adding one to a compose file is not straightforward — the point of the debounce and the crash-loop guard is that they are judgement, not a restart policy. So this stack states the gap rather than half-closing it. The verdict is still worth reading by hand (`docker compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`) when browsing stops working.
+On a machine set up by `host/provision.sh`, a watchdog timer (`istota-browser-watchdog.timer`, enabled when the `browser` profile is on) reads the verdict every minute, restarts the container after a debounce, stops and alerts if the restarts start looping, and restarts it once a day. On a machine you set up by hand nothing acts on it; read the verdict yourself (`docker compose ps`, or `/health` on port 9223, which reports the CDP heartbeat in `cdp_healthy` and `cdp_consecutive_failures`) when browsing stops working.
 
 ## Credentials
 
@@ -335,7 +329,7 @@ The stack has no settings of its own for Nextcloud: there is no bundled one to c
 
 ## Upload limits
 
-nginx is given a generous `NGINX_CLIENT_MAX_BODY_SIZE` (default `512M`), so the binding limit on a chat attachment is the application's own `[web.chat] max_attachment_mb` — 25 MB unless you raise it in `config.toml`. This is the opposite arrangement to the Ansible deployment, which derives the nginx ceiling from the application setting so the two cannot drift; there is no equivalent variable here.
+nginx is given a generous `NGINX_CLIENT_MAX_BODY_SIZE` (default `512M`), so the binding limit on a chat attachment is the application's own `[web.chat] max_attachment_mb` — 25 MB unless you raise it in `config.toml`. A proxy in front of the stack needs a ceiling at least as large.
 
 The web service also runs uvicorn without `--timeout-graceful-shutdown`, so a `docker compose restart` with a browser tab holding the chat room stream open waits out the stop timeout before the container is killed.
 

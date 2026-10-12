@@ -142,12 +142,12 @@ If SSE is unavailable (a buffering proxy, say), the client falls back to polling
 
 The surface is always enabled when the web UI is on. Tune limits and streaming cadence under `[web.chat]`:
 
-`max_attachment_mb` has one non-obvious property: on an Ansible deployment it is **also** where nginx's `client_max_body_size` comes from, and the role ships 100 rather than the application default of 25. Set them apart and nginx refuses the upload with its own HTML error page, which the browser client cannot parse into a message. Docker has no such variable — nginx is given a generous ceiling there and the application's own 25 MB is the binding limit, so raise it in `config.toml` by hand.
+`max_attachment_mb` is the binding limit: the stack's nginx is given a generous ceiling (`NGINX_CLIENT_MAX_BODY_SIZE`, 512M), so raise the application's own 25 MB in `config.toml`. A proxy in front with a lower `client_max_body_size` refuses the upload with its own HTML error page, which the browser client cannot parse into a message.
 
 ```toml
 [web.chat]
 max_prompt_chars = 32000
-max_attachment_mb = 25          # application default; the Ansible role sets 100
+max_attachment_mb = 25          # application default
 # attachment_extensions defaults to images (incl. heic), documents, text and audio
 rate_limit_messages = 30
 rate_limit_window_seconds = 300
