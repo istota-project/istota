@@ -171,6 +171,9 @@ if verb == "shell":
         sys.exit(0)
     stack = command[1:]
     if stack == ["exec", "cat", "/data/.secret_key"]:
+        if state.get("key_rc"):
+            print("service daemon is not running", file=sys.stderr)
+            sys.exit(state["key_rc"])
         out(state.get("key", ""))
         sys.exit(0)
     if stack[:3] == ["exec", "istota", "doctor"]:
@@ -619,6 +622,60 @@ class TestCreate:
         assert "istota auth add alice --email" in result.stdout
 
 
+class TestTheDeployedTagIsKept:
+    """`create` is given a release to bootstrap from; `update` moves the VM on
+    from it. A later `create` or `restore` installs what was last deployed,
+    not the bootstrap tag: an older image refuses a newer database's schema
+    and the daemon never starts."""
+
+    @pytest.fixture
+    def updated(self, mac):
+        assert _create(mac).returncode == 0
+        result = mac.run("update", "v1.3.0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        mac.calls_path.unlink()
+        return mac
+
+    def test_an_update_is_recorded(self, updated):
+        state = (updated.home / ".config" / "istota-stack" / "istota.env").read_text()
+        assert "DEPLOYED_TAG=v1.3.0\n" in state
+        assert "\nTAG=v1.2.0\n" in state
+
+    def test_a_bare_create_on_the_vm_leaves_the_deployed_tag_alone(self, updated):
+        result = updated.run("create")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] == ["update"] for c in updated.stack_calls())
+
+    def test_a_bare_create_of_a_new_vm_installs_the_deployed_tag(self, updated):
+        updated.set(instance=None, vm={})
+        result = updated.run("create")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "--param=ISTOTA_TAG=v1.2.0" in _limactl_create(updated)
+        assert [c for c in updated.stack_calls() if c[:1] == ["update"]] == [["update", "v1.3.0"]]
+
+    def test_restore_installs_the_deployed_tag(self, updated):
+        _back_up(updated)
+        result = updated.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [c for c in updated.stack_calls() if c[:1] == ["update"]] == [["update", "v1.3.0"]]
+
+    def test_an_unsigned_update_is_restored_unsigned(self, mac):
+        assert _create(mac).returncode == 0
+        assert mac.run("update", "--unsigned", "latest").returncode == 0
+        _back_up(mac)
+        mac.calls_path.unlink()
+        result = mac.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [c for c in mac.stack_calls() if c[:1] == ["update"]] == [["update", "--unsigned", "latest"]]
+
+    def test_a_tag_given_to_create_is_still_installed(self, updated):
+        result = updated.run("create", "--tag", "v1.4.0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["update", "v1.4.0"] in updated.stack_calls()
+        state = (updated.home / ".config" / "istota-stack" / "istota.env").read_text()
+        assert "DEPLOYED_TAG=v1.4.0\n" in state
+
+
 class TestTheScriptsRefresh:
     """After a verified update the Mac scripts are the ones from the VM's
     checkout, written beside the old ones and renamed over them."""
@@ -743,6 +800,38 @@ class TestDestroy:
         assert result.returncode == 78, result.stderr
         assert "cannot be decrypted without this key" in result.stderr
         assert not any(c[:1] == ["delete"] for c in made.calls("limactl"))
+
+    def test_a_keychain_key_that_is_not_this_vms_is_refused(self, made):
+        made.set(keychain={"istota.local/secret-key-istota": "ab" * 32})
+        result = made.run("destroy", stdin="istota\n")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "cannot be decrypted without this key" in result.stderr
+        assert not any(c[:1] == ["delete"] for c in made.calls("limactl"))
+        assert KEY not in result.stdout + result.stderr
+        assert "ab" * 32 not in result.stdout + result.stderr
+        for call in made.all_calls():
+            assert not any(KEY in arg or "ab" * 32 in arg for arg in call["argv"]), call
+
+    def test_force_deletes_with_a_key_that_is_not_this_vms(self, made):
+        made.set(keychain={"istota.local/secret-key-istota": "ab" * 32})
+        result = made.run("destroy", "--force", stdin="istota\n")
+        assert result.returncode == 0, result.stderr
+        assert ["delete", "--force", "istota"] in made.calls("limactl")
+
+    def test_a_vm_key_that_cannot_be_read_is_refused(self, made):
+        """A running VM whose stack is down: nothing says the Keychain's key
+        is this VM's, so the delete waits for the stack or --force."""
+        made.set(key_rc=1)
+        result = made.run("destroy", stdin="istota\n")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not any(c[:1] == ["delete"] for c in made.calls("limactl"))
+
+    def test_a_stopped_vm_is_checked_for_the_item_alone(self, made):
+        made.set(instance={"name": "istota", "status": "Stopped"})
+        result = made.run("destroy", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["delete", "--force", "istota"] in made.calls("limactl")
+        assert not any(c[:1] == ["shell"] for c in made.calls("limactl"))
 
     def test_force_deletes_without_a_key_copy(self, made):
         made.set(keychain={})
@@ -896,6 +985,46 @@ class TestRestore:
         calls = made.stack_calls()
         check = calls.index(["check-image"])
         assert calls[check + 1] == ["update", "v1.2.0"]
+
+    def test_a_keychain_key_that_is_not_the_old_vms_is_refused_first(self, made):
+        """The folder's snapshots are the running VM's; a Keychain key that is
+        not its key cannot decrypt them."""
+        made.set(keychain={"istota.local/secret-key-istota": "ab" * 32})
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
+        assert KEY not in result.stdout + result.stderr
+
+    def test_a_stopped_old_vm_is_not_compared(self, made):
+        made.set(instance={"name": "istota", "status": "Stopped"})
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["delete", "--force", "istota"] in made.calls("limactl")
+
+    @pytest.mark.parametrize("args", [
+        ("--port", "80"),
+        ("--memory", "lots"),
+        ("--repo", "/nowhere/at/all"),
+        ("--tag", "bad tag"),
+    ])
+    def test_create_options_are_checked_before_the_old_vm_goes(self, made, args):
+        result = made.run("restore", *args, stdin="istota\n")
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
+
+    def test_a_release_without_its_signing_key_is_refused_before_the_old_vm_goes(self, mac):
+        assert mac.run("create", "--repo", str(REPO)).returncode == 0
+        _back_up(mac)
+        mac.calls_path.unlink()
+        result = mac.run("restore", "--tag", "v1.3.0", stdin="istota\n")
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in mac.calls("limactl"))
+
+    def test_a_missing_template_is_refused_before_the_old_vm_goes(self, made):
+        result = made.run("restore", stdin="istota\n", ISTOTA_LIMA_TEMPLATE="/nowhere/istota.yaml")
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert "template" in result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
 
     def test_it_says_what_the_backups_do_not_hold(self, made):
         result = made.run("restore", stdin="istota\n")
@@ -1071,6 +1200,17 @@ class TestImportStandalone:
         assert rows == [("only in the wal", json.dumps(["/mnt/shared/Users/alice/inbox/a.txt"]))]
         assert (data / ".secret_key").read_text() == KEY
         assert (vm / "secrets" / "anthropic_api_key").read_text() == "sk-test-only"
+
+    def test_no_plain_copy_is_left_in_tmpdir(self, mac, standalone):
+        """The staging directory holds plain copies of the databases, the
+        config and the transcripts; it goes on every path, success included."""
+        assert _import(mac).returncode == 0
+        assert list(mac.root.glob("istota-standalone.*")) == []
+
+    def test_no_plain_copy_is_left_in_tmpdir_after_a_dry_run(self, mac, standalone):
+        assert _create(mac, "--no-setup").returncode == 0
+        assert _import(mac, "--dry-run").returncode == 0
+        assert list(mac.root.glob("istota-standalone.*")) == []
 
     def test_a_running_standalone_install_is_refused_first(self, mac, standalone):
         mac.set(lock_holder="4242")

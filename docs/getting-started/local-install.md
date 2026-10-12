@@ -135,7 +135,7 @@ The VM is paused while the Mac sleeps, and Lima's guest agent resets the VM's cl
 Three things together restore a lost VM, and two of them are on the Mac already:
 
 - **The database snapshots**, which the stack writes into `~/Istota/Backups/db/snapshots/` on its normal backup schedule.
-- **The config copies** in `~/Istota/Backups/config/<date>/`: `config.toml` and the admins file, copied with each snapshot, and the stack's `.env` and `host.env` (as `stack.env` and `host.env`), copied on every `update`, `setup` and `apply`. None of these files holds a credential.
+- **The config copies** in `~/Istota/Backups/config/<date>/`: `config.toml` and the admins file, copied with each snapshot, and the stack's `.env` and `host.env` (as `stack.env` and `host.env`), copied on every `update`, `setup` and `apply` once the stack has a config. None of these files holds a credential.
 - **The master key**, in your login Keychain as a generic password, service `istota.local`, account `secret-key-istota`. The snapshots cannot be decrypted without it, and it is never in the folder, so a copy of the folder alone does not open the stored credentials.
 
 `create` writes the key through `security -i`, which reads its command on stdin, so the key never appears on a command line where `ps` could show it. It reads the item back and stops if it does not match. If the Keychain already holds a different key for the instance, `create` stops rather than replace it, because that key decrypts an earlier VM's snapshots: rename the old item in Keychain Access first. The login keychain is a file on the Mac, which iCloud Keychain does not sync.
@@ -147,7 +147,7 @@ istota-stack restore                       # the newest good snapshot
 istota-stack restore --date 2026-10-01     # a given day
 ```
 
-`restore` checks the folder's marker, the backups and the Keychain item before it touches anything. Then it deletes the existing VM, after you type its name, creates a new one without the setup questions, and in it writes the key from the Keychain (on stdin), the config files, the `.env` and `host.env` copies in effect on the restored config's date, and the databases. Then it starts the stack. `--force` restores a snapshot that looks empty. It takes `create`'s options too (`--tag`, `--signing-key`, `--port`, ...), and without them uses the ones `create` recorded.
+`restore` checks the folder's marker, the backups, the Keychain item, `create`'s options and, while the old VM runs, that the Keychain's key is that VM's own, before it touches anything. Then it deletes the existing VM, after you type its name, creates a new one without the setup questions, and in it writes the key from the Keychain (on stdin), the config files, the `.env` and `host.env` copies in effect on the restored config's date, and the databases. Then it starts the stack. `--force` restores a snapshot that looks empty. It takes `create`'s options too (`--tag`, `--signing-key`, `--port`, ...), and without them uses the ones `create` recorded and installs the tag the VM last ran, which every `create` and `update` records.
 
 `secrets/` is never copied into the folder, so after a restore the stack's own credentials (the model key, mail and Nextcloud passwords) are empty. Write them again as files, one per credential (the names are in [Credentials](../deployment/docker.md#credentials)), with `put-files`, which takes JSON on stdin:
 
@@ -158,7 +158,7 @@ istota-stack down && istota-stack up
 
 Credentials you stored through the web UI or `istota secret` are in the database and come back with it.
 
-`istota-stack destroy` deletes the VM after you type its name. It refuses when the Keychain has no copy of the master key, since the snapshots in your folder cannot be decrypted without it; `--force` deletes regardless. It leaves the folder and the Keychain item, and says so.
+`istota-stack destroy` deletes the VM after you type its name. It refuses when the Keychain has no copy of the master key, or, while the VM runs, when the copy is not the VM's own key, since the snapshots in your folder cannot be decrypted without it; `--force` deletes regardless. It leaves the folder and the Keychain item, and says so.
 
 ## Moving from the standalone install
 

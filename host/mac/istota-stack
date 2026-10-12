@@ -43,7 +43,10 @@
 #
 # What `create` was given is kept in ~/.config/istota-stack/<instance>.env,
 # so a re-run needs no arguments and `open` and `status` know the port and
-# folder. Not ~/.config/istota/: that is the standalone install's directory
+# folder. So is the tag the VM last deployed (DEPLOYED_TAG, DEPLOYED_UNSIGNED),
+# read back from the VM after every `create` and `update`: a new VM made by a
+# later `create` or `restore` installs that, not the release it bootstraps
+# from, since an older image refuses a newer database. Not ~/.config/istota/: that is the standalone install's directory
 # (config.toml, istota.env with its master key, install.json), and with the
 # default instance the state file there was its istota.env.
 #
@@ -305,6 +308,7 @@ is_state_file() {
         /^[[:space:]]*$/ { next }
         $1 == "WORKSPACE" { workspace = 1; next }
         $1 == "PORT" || $1 == "TAG" || $1 == "REPO" || $1 == "SIGNING_KEY" { next }
+        $1 == "DEPLOYED_TAG" || $1 == "DEPLOYED_UNSIGNED" { next }
         { other = 1 }
         END { exit !(workspace && !other) }
     ' "$1"
@@ -335,6 +339,31 @@ state_write() {
         shift
     done
     mv "$tmp" "$STATE_FILE"
+}
+
+# KEY=VALUE pairs into the state, every other key kept as it was.
+state_set() {
+    local file line pair keep=()
+    file="$(state_source)"
+    if [ -n "$file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -n "$line" ] || continue
+            for pair in "$@"; do
+                [ "${line%%=*}" != "${pair%%=*}" ] || continue 2
+            done
+            keep+=("$line")
+        done < "$file"
+    fi
+    state_write ${keep[@]+"${keep[@]}"} "$@"
+}
+
+# What the VM's probe says is deployed, into the state. A probe that names no
+# tag leaves the recorded one.
+record_deployed() {
+    local tag
+    tag="$(probe_value "$1" tag)"
+    [ -n "$tag" ] || return 0
+    state_set "DEPLOYED_TAG=${tag}" "DEPLOYED_UNSIGNED=$(probe_value "$1" unsigned)"
 }
 
 workspace_or_default() {
@@ -412,6 +441,19 @@ keychain_value() {
     security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null
 }
 
+# Whether the Keychain's copy is the running VM's own master key: 0 it is, 1
+# it is not, 2 the VM's key could not be read (its stack is down). Both values
+# stay in this shell's memory; the comparison is a builtin, so neither is on
+# an argv or printed.
+keychain_is_vms_key() {
+    local vm_key stored
+    vm_key="$(vm_stack exec cat /data/.secret_key </dev/null)" || return 2
+    vm_key="$(printf '%s' "$vm_key" | tr -d '\r\n')"
+    [ -n "$vm_key" ] || return 2
+    stored="$(keychain_value || true)"
+    [ "$stored" = "$vm_key" ] || return 1
+}
+
 # The form a master key may take on its way in or out of the Keychain: it goes
 # into a `security -i` command line, so nothing that line would split or quote.
 valid_key() {
@@ -486,56 +528,89 @@ enrolment() {
 
 # --- verbs -------------------------------------------------------------------
 
-cmd_create() {
-    local folder="" port="" cpus="" memory="" tag="" repo="" key="${RELEASE_SIGNING_KEY:-}" adopt="" setup=1
+# create's options, parsed with the recorded state as defaults and checked,
+# into the CREATE_* globals: everything about them that can be refused without
+# the VM, so `restore` asks it before the old VM goes.
+CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_TAG="" CREATE_REPO=""
+CREATE_KEY="" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE="" CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN=""
+
+create_settings() {
+    CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_TAG="" CREATE_REPO=""
+    CREATE_KEY="${RELEASE_SIGNING_KEY:-}" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE=""
+    CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 case "$1" in
-                    --workspace) folder="$2" ;;
-                    --port) port="$2" ;;
-                    --cpus) cpus="$2" ;;
-                    --memory) memory="$2" ;;
-                    --tag) tag="$2" ;;
-                    --repo) repo="$2" ;;
-                    --signing-key) key="$2" ;;
+                    --workspace) CREATE_FOLDER="$2" ;;
+                    --port) CREATE_PORT="$2" ;;
+                    --cpus) CREATE_CPUS="$2" ;;
+                    --memory) CREATE_MEMORY="$2" ;;
+                    --tag) CREATE_TAG="$2"; CREATE_TAG_GIVEN=1; CREATE_SOURCE_GIVEN=1 ;;
+                    --repo) CREATE_REPO="$2"; CREATE_SOURCE_GIVEN=1 ;;
+                    --signing-key) CREATE_KEY="$2" ;;
                 esac
                 shift 2 ;;
-            --adopt) adopt=1; shift ;;
-            --no-setup) setup=""; shift ;;
+            --adopt) CREATE_ADOPT=1; shift ;;
+            --no-setup) CREATE_SETUP=""; shift ;;
             *) usage_error "create takes no '$1'" ;;
         esac
     done
 
     # A re-run takes what the first run was given.
-    [ -n "$folder" ] || folder="$(workspace_or_default)"
-    [ -n "$port" ] || port="$(port_or_default)"
-    if [ -z "$tag" ] && [ -z "$repo" ]; then
-        tag="$(state_get TAG)"
-        repo="$(state_get REPO)"
+    [ -n "$CREATE_FOLDER" ] || CREATE_FOLDER="$(workspace_or_default)"
+    [ -n "$CREATE_PORT" ] || CREATE_PORT="$(port_or_default)"
+    if [ -z "$CREATE_SOURCE_GIVEN" ]; then
+        CREATE_TAG="$(state_get TAG)"
+        CREATE_REPO="$(state_get REPO)"
     fi
-    [ -n "$key" ] || key="$(state_get SIGNING_KEY)"
-    if ! valid_port "$port" || [ "$port" -lt 1024 ]; then
-        usage_error "--port takes a port from 1024 to 65535, not '${port}'"
+    [ -n "$CREATE_KEY" ] || CREATE_KEY="$(state_get SIGNING_KEY)"
+    if ! valid_port "$CREATE_PORT" || [ "$CREATE_PORT" -lt 1024 ]; then
+        usage_error "--port takes a port from 1024 to 65535, not '${CREATE_PORT}'"
     fi
-    case "$cpus" in ""|[1-9]|[1-9][0-9]) ;; *) usage_error "--cpus takes a number of CPUs, not '${cpus}'" ;; esac
-    memory="${memory%GiB}"
-    case "$memory" in ""|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--memory takes whole GiB, not '${memory}'" ;; esac
-    case "$key" in *$'\n'*) usage_error "the signing key is one line of an SSH public key" ;; esac
+    case "$CREATE_CPUS" in ""|[1-9]|[1-9][0-9]) ;; *) usage_error "--cpus takes a number of CPUs, not '${CREATE_CPUS}'" ;; esac
+    CREATE_MEMORY="${CREATE_MEMORY%GiB}"
+    case "$CREATE_MEMORY" in ""|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--memory takes whole GiB, not '${CREATE_MEMORY}'" ;; esac
+    case "$CREATE_KEY" in *$'\n'*) usage_error "the signing key is one line of an SSH public key" ;; esac
 
-    local source
-    if [ -n "$repo" ]; then
-        source=checkout
-        [ -z "$tag" ] || check_tag_name "$tag"
-        [ -f "${repo}/host/lima/istota.yaml" ] || usage_error "${repo} is not an istota checkout"
-        repo="$(cd "$repo" && pwd -P)"
-    elif [ -n "$tag" ]; then
-        source=release
-        check_tag_name "$tag"
+    if [ -n "$CREATE_REPO" ]; then
+        CREATE_SOURCE=checkout
+        [ -z "$CREATE_TAG" ] || check_tag_name "$CREATE_TAG"
+        [ -f "${CREATE_REPO}/host/lima/istota.yaml" ] || usage_error "${CREATE_REPO} is not an istota checkout"
+        CREATE_REPO="$(cd "$CREATE_REPO" && pwd -P)"
+    elif [ -n "$CREATE_TAG" ]; then
+        CREATE_SOURCE=release
+        check_tag_name "$CREATE_TAG"
     else
         usage_error "give --tag and --signing-key (a release), or --repo (a checkout)"
     fi
+}
+
+create_template() {
+    if [ "$CREATE_SOURCE" = checkout ]; then
+        printf '%s\n' "${CREATE_REPO}/host/lima/istota.yaml"
+    else
+        template_path
+    fi
+}
+
+# What making a new VM needs beyond the options' form: a release's signing
+# key and the template.
+require_new_vm_inputs() {
+    if [ "$CREATE_SOURCE" = release ] && [ -z "$CREATE_KEY" ]; then
+        usage_error "a release needs the key its tag is signed by: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)"
+    fi
+    local template
+    template="$(create_template)"
+    [ -f "$template" ] || fail 1 "no Lima template at ${template}; run install.sh --local again."
+}
+
+cmd_create() {
+    create_settings "$@"
+    local folder="$CREATE_FOLDER" port="$CREATE_PORT" cpus="$CREATE_CPUS" memory="$CREATE_MEMORY"
+    local tag="$CREATE_TAG" repo="$CREATE_REPO" key="$CREATE_KEY" adopt="$CREATE_ADOPT"
+    local setup="$CREATE_SETUP" source="$CREATE_SOURCE"
 
     require_mac
     folder="$(resolve_dir "$folder")"
@@ -545,23 +620,16 @@ cmd_create() {
     local status
     status="$(instance_status)"
     if [ -z "$status" ]; then
-        if [ "$source" = release ] && [ -z "$key" ]; then
-            usage_error "a release needs the key its tag is signed by: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)"
-        fi
+        require_new_vm_inputs
         require_port_free "$port"
     fi
     prepare_folder "$folder" "$adopt"
     # The signing key is public; kept so a re-run or a restore can make the VM again.
-    state_write "WORKSPACE=${folder}" "PORT=${port}" "TAG=${tag}" "REPO=${repo}" "SIGNING_KEY=${key}"
+    state_set "WORKSPACE=${folder}" "PORT=${port}" "TAG=${tag}" "REPO=${repo}" "SIGNING_KEY=${key}"
 
     if [ -z "$status" ]; then
         local template expression args
-        if [ "$source" = checkout ]; then
-            template="${repo}/host/lima/istota.yaml"
-        else
-            template="$(template_path)"
-        fi
-        [ -f "$template" ] || fail 1 "no Lima template at ${template}; run install.sh --local again."
+        template="$(create_template)"
         expression=".portForwards[0].guestPort = ${port} | .portForwards[0].hostPort = ${port}"
         args=(create --tty=false "--name=${INSTANCE}")
         [ -z "$cpus" ] || args+=(--cpus "$cpus")
@@ -585,18 +653,28 @@ cmd_create() {
     run_step "write host.env" "istota-stack host-env ..." \
         vm_stack host-env STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}"
 
-    local probe deployed update=(update)
+    # What to install: a tag given now; else, on a new VM, the tag this Mac
+    # last saw deployed; else the one the VM bootstraps from. A VM with a tag
+    # deployed keeps it unless --tag names another: `update` moves it on.
+    local probe deployed recorded="" target update=(update)
     probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
     deployed="$(probe_value "$probe" tag)"
-    if [ "$source" = checkout ]; then
-        update+=(--unsigned "${tag:-latest}")
+    [ -n "$CREATE_SOURCE_GIVEN" ] || recorded="$(state_get DEPLOYED_TAG)"
+    if [ -n "$recorded" ]; then
+        if [ "$source" = checkout ] || [ -n "$(state_get DEPLOYED_UNSIGNED)" ]; then update+=(--unsigned); fi
+        target="$recorded"
+    elif [ "$source" = checkout ]; then
+        update+=(--unsigned)
+        target="${tag:-latest}"
     else
-        update+=("$tag")
+        target="$tag"
     fi
-    if [ -z "$deployed" ] || { [ -n "$tag" ] && [ "$deployed" != "$tag" ]; }; then
-        run_step "build ${tag:-latest}" "istota-stack ${update[*]}" vm_stack "${update[@]}" </dev/null
+    update+=("$target")
+    if [ -z "$deployed" ] || { [ -n "$CREATE_TAG_GIVEN" ] && [ "$deployed" != "$tag" ]; }; then
+        run_step "build ${target}" "istota-stack ${update[*]}" vm_stack "${update[@]}" </dev/null
         probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
     fi
+    record_deployed "$probe"
 
     if [ -z "$setup" ]; then
         run_step "provision the VM" "${VM_SRC}/host/provision.sh" vm "${VM_SRC}/host/provision.sh" </dev/null
@@ -762,9 +840,14 @@ cmd_host_port() {
 }
 
 cmd_update() {
-    local rc=0
+    local rc=0 probe
     vm_stack update "$@" || rc=$?
     [ "$rc" -eq 0 ] || exit "$rc"
+    if probe="$(vm sh -c "$VM_PROBE" </dev/null)"; then
+        record_deployed "$probe"
+    else
+        log "WARNING: could not read the deployed tag back from the VM; until a create or update records it, a new VM made from this Mac installs the tag recorded before this update"
+    fi
     refresh_scripts
 }
 
@@ -775,11 +858,21 @@ cmd_destroy() {
         --force) force=1 ;;
         *) usage_error ;;
     esac
-    [ -n "$(instance_status)" ] || fail 1 "there is no Lima instance ${INSTANCE}."
-    local folder answer=""
+    local status folder rc=0
+    status="$(instance_status)"
+    [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}."
     folder="$(workspace_or_default)"
-    if ! keychain_has_item && [ -z "$force" ]; then
-        fail "$EX_CONFIG" "the login Keychain holds no copy of ${INSTANCE}'s master key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): the snapshots in ${folder} cannot be decrypted without this key. \`istota-stack create\` copies it while the VM runs; --force deletes the VM regardless."
+    if [ -z "$force" ]; then
+        keychain_has_item \
+            || fail "$EX_CONFIG" "the login Keychain holds no copy of ${INSTANCE}'s master key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): the snapshots in ${folder} cannot be decrypted without this key. \`istota-stack create\` copies it while the VM runs; --force deletes the VM regardless."
+        # Stopped, the VM's key cannot be read; the item's presence is all there is.
+        if [ "$status" = Running ]; then
+            keychain_is_vms_key || rc=$?
+            case "$rc" in
+                1) fail "$EX_CONFIG" "the login Keychain's master key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}) is not ${INSTANCE}'s, from an earlier VM: the snapshots in ${folder} cannot be decrypted without this key. Rename that item in Keychain Access and run \`istota-stack create\`, which copies this VM's key; --force deletes the VM regardless." ;;
+                2) fail "$EX_CONFIG" "could not read ${INSTANCE}'s master key to check that the login Keychain's copy is it. Start the stack (\`istota-stack up\`) and run this again; --force deletes the VM regardless." ;;
+            esac
+        fi
     fi
     delete_instance
     log "deleted ${INSTANCE}. Left in place: the workspace ${folder} and the master key in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})."
@@ -836,9 +929,10 @@ cmd_restore() {
         ""|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
         *) usage_error "--date takes YYYY-MM-DD, not '${date}'" ;;
     esac
+    [ -n "$folder" ] || folder="$(workspace_or_default)"
+    create_settings ${create_args[@]+"${create_args[@]}"} --workspace "$folder" --no-setup
 
     require_mac
-    [ -n "$folder" ] || folder="$(workspace_or_default)"
     folder="$(resolve_dir "$folder")"
     refuse_location "$folder"
     [ -f "${folder}/${MARKER}" ] \
@@ -850,9 +944,21 @@ cmd_restore() {
     key="$(keychain_value || true)"
     valid_key "$key" \
         || fail "$EX_CONFIG" "the Keychain item ${KEYCHAIN_SERVICE} / ${KEYCHAIN_ACCOUNT} does not hold a usable master key. Nothing was changed."
+    require_new_vm_inputs
     require_limactl
 
-    if [ -n "$(instance_status)" ]; then
+    local status rc=0
+    status="$(instance_status)"
+    # The folder's snapshots are the running VM's: a Keychain key that is not
+    # its key would restore credentials nothing can decrypt.
+    if [ "$status" = Running ]; then
+        keychain_is_vms_key || rc=$?
+        case "$rc" in
+            1) fail "$EX_CONFIG" "the login Keychain's master key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}) is not the running ${INSTANCE}'s, whose snapshots are in ${folder}: restored with it, every stored credential would be unreadable. Nothing was changed. If the Keychain's key is the right one, \`istota-stack destroy --force\` first." ;;
+            2) fail "$EX_CONFIG" "could not read the running ${INSTANCE}'s master key to check that the login Keychain's copy is it. Nothing was changed. Start its stack (\`istota-stack up\`) and run this again, or \`istota-stack stop\` the VM to restore without the check." ;;
+        esac
+    fi
+    if [ -n "$status" ]; then
         log "a restore makes a new VM; ${INSTANCE} goes first, with anything it holds that is newer than the backup"
         delete_instance
     fi
@@ -911,6 +1017,10 @@ cmd_with_path() {
 # The standalone install's scheduler lock (scheduler.DAEMON_LOCK_PATH), held
 # open by `istota serve` while it runs.
 STANDALONE_LOCK=/tmp/istota-scheduler-daemon.lock
+# The import's staging on the Mac: plain copies of the databases, the config
+# and the transcripts. Global, since the EXIT trap that removes it runs after
+# the function has returned and its locals are gone.
+IMPORT_SCRATCH=""
 
 # The master key istota.env gives `istota serve`: the first line for the name,
 # which is the one serve puts in its environment.
@@ -1059,10 +1169,10 @@ cmd_import_standalone() {
     require_limactl
     [ -z "$dry" ] || require_running
 
-    local scratch staging staged port rc=0
-    scratch="$(mktemp -d "${TMPDIR:-/tmp}/istota-standalone.XXXXXX")"
-    trap 'rm -rf "${scratch:-}"' EXIT
-    staging="${scratch}/standalone"
+    local staging staged port rc=0
+    IMPORT_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/istota-standalone.XXXXXX")"
+    trap 'rm -rf "${IMPORT_SCRATCH:-}"' EXIT
+    staging="${IMPORT_SCRATCH}/standalone"
     mkdir -m 0700 "$staging"
     stage_standalone "$from" "$config" "$staging"
 
