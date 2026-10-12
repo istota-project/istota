@@ -250,3 +250,204 @@ def test_caller_owned_ensure_and_delete_rollback(install):
         assert [row.name for row in user_briefings.list_briefings(install[1], "alice", conn=conn)] == ["new"]
         conn.rollback()
     assert [row.name for row in user_briefings.list_briefings(install[1])] == ["morning"]
+
+
+def test_content_defaults_preview_and_round_trip(install):
+    schedule(install)
+    definition = [{"name": "morning", "blocks": [{"title": "Calendar", "sources": [{"kind": "calendar"}]}]}]
+    context, operations = preview(install, definition, dry_run=True)
+    result = engine.execute_plan(operations, context)
+    assert result.exit_code == 2 and not result.restart_required
+    assert not module_path(install).exists()
+    context, operations = preview(install, definition)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    with bdb.connect(module_path(install)) as conn:
+        block, = bdb.list_blocks(conn, "morning")
+        assert (block.title, block.directive, block.render_mode, block.options) == ("Calendar", "", "synthesis", {})
+        source, = block.sources
+        assert (source.kind, source.config, source.enabled) == ("calendar", {}, True)
+    context, operations = preview(install, definition)
+    assert engine.execute_plan(operations, context).exit_code == 0
+
+
+@pytest.fixture
+def content(install):
+    schedule(install)
+    path = module_path(install)
+    bdb.init_db(path)
+    with bdb.connect(path) as conn:
+        first = bdb.add_block(conn, briefing_name="morning", title="First", position=4,
+                              directive="Old", options={"old": True})
+        bdb.add_source(conn, block_id=first, kind="calendar", config={"old": True}, position=5)
+        bdb.add_source(conn, block_id=first, kind="markets", position=8)
+        bdb.add_block(conn, briefing_name="morning", title="Tail", position=9)
+        bdb.insert_archive(conn, briefing_name="morning", subject="Archive", body_md="Saved")
+        conn.commit()
+        return bdb.list_blocks(conn, "morning")
+
+
+def test_positional_prefix_preserves_ids_tails_and_replaces_mappings(install, content):
+    definition = [{"name": "morning", "blocks": [{"title": "Changed", "directive": "", "options": {},
+                    "sources": [{"config": {}, "enabled": False}]}]}]
+    context, operations = preview(install, definition)
+    assert len(context.warnings) == 2
+    assert len(operations) == 1 and operations[0].section == "briefing_content"
+    assert engine.execute_plan(operations, context).exit_code == 2
+    with bdb.connect(module_path(install)) as conn:
+        first, tail = bdb.list_blocks(conn, "morning")
+        assert (first.id, tail.id) == (content[0].id, content[1].id)
+        assert (first.title, first.directive, first.options) == ("Changed", "", {})
+        assert [source.id for source in first.sources] == [source.id for source in content[0].sources]
+        assert first.sources[0].config == {} and not first.sources[0].enabled
+        assert first.sources[1] == content[0].sources[1]
+        assert tail == content[1]
+        assert bdb.count_archive(conn) == 1
+    context, operations = preview(install, definition)
+    assert engine.execute_plan(operations, context).exit_code == 0
+    assert len(context.warnings) == 2
+
+
+def test_kind_change_append_and_prune_keep_order_and_archives(install, content):
+    definition = [{"name": "morning", "blocks": [{"sources": [{"kind": "notes", "config": {"path": "notes.md"}}]},
+                    {"title": "Second"}, {"title": "Third", "sources": [{"kind": "todos"}]}]}]
+    context, operations = preview(install, definition, prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    with bdb.connect(module_path(install)) as conn:
+        blocks = bdb.list_blocks(conn, "morning")
+        assert [block.title for block in blocks] == ["First", "Second", "Third"]
+        assert [block.id for block in blocks[:2]] == [block.id for block in content]
+        source, = blocks[0].sources
+        assert (source.kind, source.config) == ("notes", {"path": "notes.md"})
+        assert blocks[2].sources[0].kind == "todos"
+        assert bdb.count_archive(conn) == 1
+    context, operations = preview(install, definition, prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 0
+
+
+@pytest.mark.parametrize("blocks,prune,counts,warnings", [
+    (None, True, (2, 2), 0), ([], False, (2, 2), 1), ([], True, (0, 0), 0),
+    ([{"sources": []}], False, (2, 2), 2), ([{"sources": []}], True, (1, 0), 0),
+    ([{"title": "First"}], True, (1, 2), 0),
+])
+def test_absent_empty_and_pruned_arrays(install, content, blocks, prune, counts, warnings):
+    definition = {"name": "morning"}
+    if blocks is not None:
+        definition["blocks"] = blocks
+    context, operations = preview(install, [definition], prune=prune)
+    assert len(context.warnings) == warnings
+    assert engine.execute_plan(operations, context).exit_code in (0, 2)
+    with bdb.connect(module_path(install)) as conn:
+        rows = bdb.list_blocks(conn, "morning")
+        assert (len(rows), sum(len(block.sources) for block in rows)) == counts
+        assert bdb.count_archive(conn) == 1
+
+
+def test_nullable_directive_is_semantic_noop_and_snapshot_has_defaults(install, content):
+    from istota.settings_plan.briefings import snapshot_blocks
+
+    with bdb.connect(module_path(install)) as conn:
+        before = snapshot_blocks(conn, "morning", "alice")
+        assert before[1] == {"title": "Tail", "directive": "", "render_mode": "synthesis", "options": {}, "sources": []}
+    context, operations = preview(install, [{"name": "morning", "blocks": before}], prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 0
+    with bdb.connect(module_path(install)) as conn:
+        assert bdb.list_blocks(conn, "morning") == content
+
+
+@pytest.mark.parametrize("blocks", [[{}], [{"title": "   "}], [{"title": "New", "sources": [{}]}]])
+def test_missing_required_content_fields_refuse_before_schedule_write(install, blocks):
+    with pytest.raises(engine.ExecutionError, match="validation_error"):
+        preview(install, [{"name": "new", "cron": "0 7 * * *", "output": "email", "blocks": blocks}])
+    assert user_briefings.list_briefings(install[1]) == []
+    assert not module_path(install).exists()
+
+
+@pytest.mark.parametrize("column,value", [("options", "broken"), ("options", "[]"), ("render_mode", "unknown")])
+def test_invalid_current_content_is_not_replaced_with_empty(install, content, column, value):
+    with bdb.connect(module_path(install)) as conn:
+        conn.execute(f"UPDATE briefing_blocks SET {column} = ? WHERE id = ?", (value, content[0].id))
+        conn.commit()
+    with pytest.raises(engine.ExecutionError, match="briefing_store_invalid"):
+        preview(install, [{"name": "morning", "blocks": []}], prune=True)
+
+
+def test_content_transaction_rolls_back_update_and_tail_delete(install, content):
+    with bdb.connect(module_path(install)) as conn:
+        conn.execute("CREATE TRIGGER refuse_delete BEFORE DELETE ON briefing_blocks BEGIN SELECT RAISE(ABORT, 'failure'); END")
+        conn.commit()
+    context, operations = preview(install, [{"name": "morning", "blocks": [{"title": "Changed"}]}], prune=True)
+    result = engine.execute_plan(operations, context)
+    assert result.exit_code == 1 and not result.changed
+    with bdb.connect(module_path(install)) as conn:
+        assert bdb.list_blocks(conn, "morning") == content
+
+
+def test_content_concurrent_edit_refused_archive_change_allowed(install, content):
+    definition = [{"name": "morning", "blocks": [{"title": "Planned"}]}]
+    context, operations = preview(install, definition)
+    with bdb.connect(module_path(install)) as conn:
+        bdb.update_source(conn, content[0].sources[0].id, enabled=False)
+        conn.commit()
+    result = engine.execute_plan(operations, context)
+    assert result.errors == [{"code": "state_changed", "path": ["users", "alice", "briefing_content"]}]
+    context, operations = preview(install, definition)
+    with bdb.connect(module_path(install)) as conn:
+        bdb.insert_archive(conn, briefing_name="morning", subject="New archive", body_md="Saved")
+        conn.commit()
+    assert engine.execute_plan(operations, context).exit_code == 2
+
+
+def test_content_report_redacts_structured_credentials(install):
+    schedule(install)
+    definition = [{"name": "morning", "blocks": [{"title": "Browse", "sources": [
+        {"kind": "browse", "config": {"headers": {"Authorization": "private-example"}}}]}]}]
+    context, operations = preview(install, definition, dry_run=True)
+    from istota.settings_plan.report import result_document
+    report = result_document(engine.execute_plan(operations, context))
+    assert "private-example" not in json.dumps(report)
+
+
+def test_missing_content_empty_array_does_not_create_database(install):
+    schedule(install)
+    context, operations = preview(install, [{"name": "morning", "blocks": []}], prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 0
+    assert not module_path(install).exists()
+
+
+def test_content_upsert_and_orphan_prune_share_transaction(install, content):
+    with bdb.connect(module_path(install)) as conn:
+        bdb.add_block(conn, briefing_name="orphan", title="Orphan")
+        conn.execute("CREATE TRIGGER refuse_delete BEFORE DELETE ON briefing_blocks "
+                     "WHEN OLD.briefing_name = 'orphan' BEGIN SELECT RAISE(ABORT, 'failure'); END")
+        conn.commit()
+    context, operations = preview(install, [{"name": "morning", "blocks": [{"title": "Changed"}]}], prune=True)
+    result = engine.execute_plan(operations, context)
+    assert result.exit_code == 1 and not result.changed
+    with bdb.connect(module_path(install)) as conn:
+        assert bdb.list_blocks(conn, "morning") == content
+        assert bdb.list_briefing_names(conn) == ["morning", "orphan"]
+
+
+def test_cli_creates_schedule_and_content_then_reapplies_unchanged(install, tmp_path, monkeypatch, capsys):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"users": {"alice": {"briefings": [
+        {"name": "morning", "cron": "0 7 * * *", "output": "email", "blocks": [
+            {"title": "Calendar", "sources": [{"kind": "calendar"}]}]},
+    ]}}}))
+    for flags, expected in [(["--dry-run"], 2), ([], 2), ([], 0)]:
+        monkeypatch.setattr("sys.argv", ["istota", "-c", str(install[0]), "apply", "-f", str(plan), "--format", "json", *flags])
+        code = 0
+        try:
+            cli.main()
+        except SystemExit as exc:
+            code = exc.code
+        assert code == expected
+        report = json.loads(capsys.readouterr().out)
+        assert report["restart_required"] is (expected == 2)
+        if flags:
+            assert user_briefings.list_briefings(install[1]) == []
+            assert not module_path(install).exists()
+    assert user_briefings.get_briefing(install[1], "alice", "morning") is not None
+    with bdb.connect(module_path(install)) as conn:
+        block, = bdb.list_blocks(conn, "morning")
+        assert block.sources[0].kind == "calendar"

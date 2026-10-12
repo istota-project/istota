@@ -1,4 +1,4 @@
-"""Framework schedules and separate, definition-only module pruning."""
+"""Framework schedules and ordered content in separate store transactions."""
 
 from contextlib import closing, contextmanager
 from copy import deepcopy
@@ -8,7 +8,9 @@ from croniter import croniter
 
 from istota import db, user_briefings
 from istota.briefings import db as bdb
+from istota.briefings.models import BriefingBlock, BlockSource, parse_json_dict
 from istota.config import BriefingConfig
+from istota.config_editor.secrets import redact_document
 from istota.lib.sqlite_util import connect_read_only
 from istota.settings_plan.engine import ExecutionError, Operation, Unit, state_digest
 from istota.settings_plan.profiles import validate_destination
@@ -69,10 +71,6 @@ def plan_schedules(plan, user, context, options):
     config = context.config
     path = ["users", user, "briefings"]
     declarations = plan.users[user].sections["briefings"]
-    # The content adapter will own supplied arrays; until it is installed, refuse them.
-    for index, declaration in enumerate(declarations):
-        if "blocks" in declaration:
-            raise ExecutionError("unsupported_section", [*path, index, "blocks"])
     desired = {}
     operations = []
     try:
@@ -89,7 +87,7 @@ def plan_schedules(plan, user, context, options):
                     name: getattr(defaults, name) for name in SCHEDULE_FIELDS if name != "enabled"}
                 if previous is None:
                     merged["enabled"] = True
-                merged.update(deepcopy(declaration))
+                merged.update({name: deepcopy(value) for name, value in declaration.items() if name != "blocks"})
                 _validate_schedule(conn, config, user, merged, [*path, index])
                 desired[identity] = merged
                 if previous == merged:
@@ -105,8 +103,7 @@ def plan_schedules(plan, user, context, options):
         for identity in sorted(existing.keys() - desired.keys()):
             operations.append(Operation("briefings", identity, "delete", user=user,
                                         expected_state=expected, restart_required=True))
-        # Include orphan definitions so retrying a partially committed prune converges.
-        _plan_definition_deletes(config, user, set(desired), context)
+    plan_blocks(plan, user, context, options)
     if not operations:
         return
 
@@ -135,11 +132,11 @@ def plan_schedules(plan, user, context, options):
                               lambda conn: _schedule_digest(conn, user), write, expected_state=expected))
 
 
-def _definition_delete_state(conn, retained):
+def _content_state(conn, selected=None):
     # Read raw configuration columns so malformed JSON cannot disappear through a decoder.
     definitions = {}
     for name in bdb.list_briefing_names(conn):
-        if name in retained:
+        if selected is not None and name not in selected:
             continue
         blocks = conn.execute(
             "SELECT id, position, title, directive, render_mode, options FROM briefing_blocks "
@@ -153,30 +150,115 @@ def _definition_delete_state(conn, retained):
     return definitions
 
 
-def _plan_definition_deletes(config, user, retained, context):
-    database = config.module_db_path(user, "briefings")
-    path = ["users", user, "briefing_content"]
+BLOCK_FIELDS = ("title", "directive", "render_mode", "options")
+SOURCE_FIELDS = ("kind", "config", "enabled")
+
+
+def snapshot_blocks(conn, name, user):
+    """Read complete ordered definitions; refuse malformed stored JSON."""
+    result = []
     try:
-        database.stat()
-    except FileNotFoundError:
+        for row in _content_state(conn, {name}).get(name, []):
+            block = {field: row["block"][field] for field in BLOCK_FIELDS}
+            block["directive"] = "" if block["directive"] is None else block["directive"]
+            block["options"] = parse_json_dict(block["options"], strict=True)
+            block["sources"] = []
+            for source in row["sources"]:
+                if source["enabled"] not in (0, 1):
+                    raise ValueError("invalid enabled flag")
+                block["sources"].append({"kind": source["kind"], "enabled": bool(source["enabled"]),
+                                         "config": parse_json_dict(source["config"], strict=True)})
+            result.append(block)
+        _validate_blocks(result, user, ["users", user, "briefings", name, "blocks"])
+    except (ValueError, SchemaError, ExecutionError):
+        raise ExecutionError("briefing_store_invalid", ["users", user, "briefing_content"]) from None
+    return result
+
+
+def _validate_blocks(blocks, user, path):
+    # Schema owns field types and the domain's source/render-mode sets.
+    validate_user_plan(user, {"briefings": [{"name": "definition", "blocks": blocks}]})
+    for index, block in enumerate(blocks):
+        if not block["title"].strip():
+            raise ExecutionError("validation_error", [*path, index, "title"])
+        for slot, source in enumerate(block["sources"]):
+            if not source["kind"]:
+                raise ExecutionError("validation_error", [*path, index, "sources", slot, "kind"])
+
+
+def _merge_prefix(previous, declarations, defaults, path, context, prune, *, blocks=False):
+    merged = []
+    for index, declaration in enumerate(declarations):
+        item = deepcopy(previous[index] if index < len(previous) else defaults)
+        for field, value in declaration.items():
+            if blocks and field == "sources":
+                source = BlockSource(0, 0, 0, "")
+                source_defaults = {name: getattr(source, name) for name in SOURCE_FIELDS}
+                item[field] = _merge_prefix(item[field], value, source_defaults,
+                                            [*path, index, field], context, prune)
+            else:
+                item[field] = deepcopy(value)
+        merged.append(item)
+    if not prune and len(previous) > len(declarations):
+        merged.extend(deepcopy(previous[len(declarations):]))
+        context.warnings.append("Preserved briefing array tail at " + ".".join(map(str, path)))
+    return merged
+
+
+def plan_blocks(plan, user, context, options):
+    declarations = plan.users[user].sections["briefings"]
+    selected = {item["name"] for item in declarations if "blocks" in item}
+    if not selected and not options.prune:
         return
-    except OSError:
-        raise ExecutionError("briefing_store_unavailable", path) from None
+    database = context.config.module_db_path(user, "briefings")
+    path = ["users", user, "briefing_content"]
+    before, existing = {}, {}
+    # Prune includes orphan definitions left by a partially committed schedule prune.
+    scope = None if options.prune else selected
     try:
-        with closing(connect_read_only(database)) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("BEGIN")
-            before = _definition_delete_state(conn, retained)
+        try:
+            database.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            with closing(connect_read_only(database)) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN")
+                before = _content_state(conn, scope)
+                existing = {name: snapshot_blocks(conn, name, user) for name in before}
     except (sqlite3.Error, OSError):
         raise ExecutionError("briefing_store_unavailable", path) from None
-    if not before:
-        return
     expected = state_digest(before)
-    operations = [Operation("briefing_content", name, "delete", user=user, expected_state=expected)
-                  for name in sorted(before)]
+    desired, operations = {}, []
+    for index, declaration in enumerate(declarations):
+        if "blocks" not in declaration:
+            continue
+        name = declaration["name"]
+        block = BriefingBlock(0, name, 0, "", directive="")
+        defaults = {field: getattr(block, field) for field in (*BLOCK_FIELDS, "sources")}
+        block_path = ["users", user, "briefings", index, "blocks"]
+        merged = _merge_prefix(existing.get(name, []), declaration["blocks"], defaults,
+                               block_path, context, options.prune, blocks=True)
+        try:
+            _validate_blocks(merged, user, block_path)
+        except SchemaError:
+            raise ExecutionError("validation_error", block_path) from None
+        desired[name] = merged
+        if merged != existing.get(name, []):
+            operations.append(Operation("briefing_content", name, "update" if name in existing else "create", user=user,
+                                        changes=[{"path": ["blocks"], "before": redact_document(existing.get(name, [])),
+                                                  "after": redact_document(merged)}], expected_state=expected))
+    if options.prune:
+        retained = {item["name"] for item in declarations}
+        for name in sorted(existing.keys() - retained):
+            operations.append(Operation("briefing_content", name, "delete", user=user, expected_state=expected))
+    if not operations:
+        return
 
     @contextmanager
     def transaction():
+        if not database.exists():
+            bdb.init_db(database)
         with bdb.connect(database) as conn:
             conn.execute("BEGIN IMMEDIATE")
             yield conn
@@ -184,8 +266,44 @@ def _plan_definition_deletes(config, user, retained, context):
 
     def write(conn, operations):
         for operation in operations:
-            bdb.delete_briefing_definitions(conn, operation.identity)
+            if operation.action == "delete":
+                bdb.delete_briefing_definitions(conn, operation.identity)
+            else:
+                apply_blocks(conn, operation.identity, desired[operation.identity])
 
     context.units.append(Unit("briefing_content", user, operations, transaction,
-                              lambda conn: state_digest(_definition_delete_state(conn, retained)), write,
+                              lambda conn: state_digest(_content_state(conn, scope)), write,
                               expected_state=expected))
+
+
+def apply_blocks(conn, name, definitions):
+    """Reconcile positions through module helpers, retaining ordinary-update IDs."""
+    previous = bdb.list_blocks(conn, name)
+    for index, definition in enumerate(definitions):
+        fields = {field: definition[field] for field in BLOCK_FIELDS}
+        if index < len(previous):
+            block = previous[index]
+            block_id, sources = block.id, block.sources
+            previous_fields = {field: getattr(block, field) for field in BLOCK_FIELDS}
+            previous_fields["directive"] = block.directive or ""
+            changes = {field: value for field, value in fields.items() if value != previous_fields[field]}
+            bdb.update_block(conn, block_id, **changes)
+        else:
+            block_id = bdb.add_block(conn, briefing_name=name, **fields)
+            sources = []
+        for slot, source in enumerate(definition["sources"]):
+            if slot < len(sources):
+                current = sources[slot]
+                if current.kind != source["kind"]:
+                    bdb.delete_source(conn, current.id)
+                    bdb.add_source(conn, block_id=block_id, position=current.position, **source)
+                else:
+                    changes = {field: source[field] for field in ("config", "enabled")
+                               if getattr(current, field) != source[field]}
+                    bdb.update_source(conn, current.id, **changes)
+            else:
+                bdb.add_source(conn, block_id=block_id, **source)
+        for source in sources[len(definition["sources"]):]:
+            bdb.delete_source(conn, source.id)
+    for block in previous[len(definitions):]:
+        bdb.delete_block(conn, block.id)

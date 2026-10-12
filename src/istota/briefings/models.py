@@ -147,8 +147,13 @@ class BriefingItem:
     published_at: str | None = None
 
 
-def parse_json_dict(raw: Any) -> dict:
-    """Coerce a DB JSON column into a dict; ``{}`` on empty/invalid."""
+def parse_json_dict(raw: Any, *, strict: bool = False) -> dict:
+    """Decode a DB JSON object; strict callers refuse empty/invalid values."""
+    if strict:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(parsed, dict):
+            raise ValueError("expected JSON object")
+        return parsed
     if not raw:
         return {}
     if isinstance(raw, dict):

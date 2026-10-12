@@ -179,13 +179,15 @@ def test_cli_check_accepts_toml_definitions_and_leaves_config_untouched(monkeypa
     assert sorted(path.name for path in tmp_path.iterdir()) == ["config.toml"]
 
 
-def test_execution_still_refuses_unimplemented_sections_before_writing(tmp_path):
+def test_execution_refuses_malformed_user_sections_before_writing(tmp_path):
     target = tmp_path / "config.toml"
     out, err = [], []
-    code = apply.run("-", target, dry_run=False, out=out.append, err=err.append,
-                     stdin=io.StringIO('{"config": {}, "users": {"alice": {"resources": []}}}'))
+    code = apply.run("-", target, dry_run=False, out=out.append, err=err.append, output_format="json",
+                     stdin=io.StringIO('{"config": {}, "users": {"alice": {"resources": {}}}}'))
     assert code == 1 and not target.exists()
-    assert "[users]" in "".join(err)
+    report = json.loads(out[0])
+    assert report["errors"] == [{"code": "validation_error", "path": ["users", "alice", "resources"]}]
+    assert not report["changed"]
 
 
 def test_config_only_run_refuses_null_config(tmp_path):
