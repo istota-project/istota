@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- On an install with Nextcloud whose workspace is not the Nextcloud mount, a file posted in Talk is fetched into the room's folder, `Channels/<room>/media/<message id>/`, once per message, and removed after `[talk] attachment_retention_days` (default 30). Files over `[talk] attachment_max_mb` (default 50) are skipped. `nextcloud talk share-file` uploads a copy of the workspace file into the bot's `Talk/` folder before posting it, and the `files` verbs, `share create` and `share link` refuse there because the file is not in Nextcloud. This shape is not offered by setup yet.
+
 - Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
 
 - Browse My Drive and Shared with me in Workspace, open files in Google Drive, and load more files as needed. Connection errors link to Settings so you can restore access.

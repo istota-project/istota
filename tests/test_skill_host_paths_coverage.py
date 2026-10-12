@@ -135,7 +135,9 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
     ("nextcloud", "files.favorite", "path"): Entry(REMOTE, note="Nextcloud path"),
     ("nextcloud", "files.upload", "remote"): Entry(REMOTE, note="Nextcloud path"),
     ("nextcloud", "files.download", "remote"): Entry(REMOTE, note="Nextcloud path"),
-    ("nextcloud", "talk.share-file", "path"): Entry(REMOTE, note="Nextcloud path"),
+    ("nextcloud", "talk.share-file", "path"): Entry(
+        REMOTE, note="workspace path; on a local workspace the handler resolves it as EGRESS",
+    ),
 
     # -- Not a path at all: the help-text heuristic matched something else ----
     ("memory_search", "index.file", "source_type"): Entry(
