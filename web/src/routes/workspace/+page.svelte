@@ -100,7 +100,7 @@
   let listingLoading = $state(false);
   let listingError = $state('');
   let showHidden = $state(loadSetting<boolean>('workspace.showHidden', false) === true);
-  let fileInput: HTMLInputElement;
+  let fileInput = $state<HTMLInputElement>();
   let folderOpen = $state(false);
   let folderName = $state('');
   let folderPath = $state('');
@@ -392,16 +392,16 @@
         {/if}
         {#if place.id === 'home' && listing && !listingLoading && !listingError}
           <Button variant="secondary" size="sm" onclick={openFolderDialog}>New folder</Button>
-          <Button size="sm" onclick={() => fileInput.click()}>Upload</Button>
+          <Button size="sm" onclick={() => fileInput?.click()}>Upload</Button>
           <input
             bind:this={fileInput}
             type="file"
             multiple
             hidden
             aria-label="Upload files"
-            onchange={() => {
-              enqueue(Array.from(fileInput.files || []));
-              fileInput.value = '';
+            onchange={(event) => {
+              enqueue(Array.from(event.currentTarget.files || []));
+              event.currentTarget.value = '';
             }}
           />
         {/if}

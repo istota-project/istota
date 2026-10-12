@@ -544,3 +544,25 @@ it('opens and pins a linked single file using its exact server path', async () =
   await fireEvent.click(screen.getByRole('button', { name: 'Pin report.txt' }));
   expect(api.putWorkspacePin).toHaveBeenCalledWith(expect.objectContaining({ ref }));
 });
+
+it('describes group access as depending on the shared room', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      {
+        ...home,
+        id: 'group:team',
+        kind: 'group',
+        label: 'Team',
+        reach: {
+          ...home.reach,
+          shared_member: 'conditional',
+          note: 'Only when every reader belongs to this group.',
+        },
+      },
+    ],
+    notes: [],
+  });
+  render(Workspace);
+  await screen.findByText('Depends on room');
+  expect(screen.getByText('Only when every reader belongs to this group.')).toBeTruthy();
+});

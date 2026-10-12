@@ -5197,7 +5197,7 @@ export function search(
 }
 
 // Workspace places and safe, one-directory listings.
-export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none';
+export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none' | 'conditional';
 export interface WorkspacePlace {
   id: string;
   kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud';

@@ -4718,7 +4718,11 @@ const workspacePlaces: WorkspacePlace[] = [
     label: 'Team',
     browsable: true,
     view_root: '/Groups/team',
-    reach: workspaceReach,
+    reach: {
+      ...workspaceReach,
+      shared_member: 'conditional',
+      note: 'Group files are available in a shared room only when every reader belongs to this group, with no guests or other bots. A room linked to a group can use only that group.',
+    },
   },
   {
     id: 'drive',

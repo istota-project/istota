@@ -63,6 +63,14 @@ def place_reach(
         note = None
         if place.kind == "room":
             note = "A room folder is reachable only from that room's own tasks."
+        elif place.kind == "group":
+            if modes[1] != "none":
+                modes[1] = "conditional"
+            note = (
+                "Group files are available in a shared room only when every reader belongs to "
+                "this group, with no guests or other bots. A room linked to a group can use "
+                "only that group."
+            )
         elif place.kind == "home":
             note = "Personal memory is not loaded into the prompt in shared rooms."
         result[place.id] = Reach(*modes, note=note)

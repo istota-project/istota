@@ -92,7 +92,7 @@ def test_places_and_reach_through_live_membership(config, conn):
     assert not by_id["talk"].browsable and by_id["talk"].view_root is None
     assert len(by_id[f"room:{room.token}"].label) == 120
     reach = place_reach(config, conn, "alice", places)
-    for place_id, mode in (("home", "rw"), (f"linked:{rw_id}", "rw"), (cfg_id, "ro"), ("group:team", "rw"), ("talk", "ro")):
+    for place_id, mode in (("home", "rw"), (f"linked:{rw_id}", "rw"), (cfg_id, "ro"), ("talk", "ro")):
         assert (reach[place_id].private, reach[place_id].shared_member, reach[place_id].restricted) == (mode, mode, "none")
     r = reach[f"room:{room.token}"]
     assert (r.private, r.shared_member, r.restricted) == ("rw", "rw", "rw")
@@ -191,3 +191,23 @@ def test_no_workspace_and_nextcloud_skill(config, conn):
     assert place_reach(config, conn, "alice", places)["nextcloud"].private == "skill"
     config.disabled_skills = ["nextcloud"]
     assert place_reach(config, conn, "alice", places)["nextcloud"].private == "none"
+
+
+def test_shared_group_reach_depends_on_every_room_reader(config, conn):
+    from istota.rooms.scopes import task_group_ids
+    from istota.workspace.places import list_places
+    from istota.workspace.reach import place_reach
+
+    db.create_group(conn, "team", kind="group", display_name="Team", created_by="alice")
+    db.add_group_member(conn, "team", "alice", added_by="alice")
+    room = db.create_web_chat_room(conn, "alice", "Project")
+    db.add_room_member(conn, room.token, "bob")
+    task_id = db.create_task(conn, user_id="alice", prompt="Read the group files", source_type="web", conversation_token=room.token)
+    task = db.get_task(conn, task_id)
+    assert task_group_ids(conn, task) == []
+    reach = place_reach(config, conn, "alice", list_places(config, conn, "alice"))["group:team"]
+    assert reach.shared_member == "conditional"
+    assert "every reader" in reach.note
+    db.add_group_member(conn, "team", "bob", added_by="alice")
+    assert task_group_ids(conn, task) == ["team"]
+    assert place_reach(config, conn, "alice", list_places(config, conn, "alice"))["group:team"].shared_member == "conditional"
