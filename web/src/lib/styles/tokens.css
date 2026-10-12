@@ -287,8 +287,9 @@
      unlike the two caps around it, because it bounds a form's line length
      rather than a screen, and a form should widen with its text. */
   --setup-max: 36rem;
-  /* The label column of an `inline` Field, so a form of them lines up. */
-  --field-label-width: 12rem;
+  /* The label column of an `inline` Field, so a form of them lines up. Sized
+     for a typical label; a longer one wraps inside it rather than widening it. */
+  --field-label-width: 9rem;
 
   /* Chat row metrics: the message row's horizontal padding, the avatar column
 	   it opens with, the avatar inside that column, and the gap from that column to

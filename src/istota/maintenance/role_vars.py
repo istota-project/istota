@@ -101,6 +101,9 @@ HOST_ENV_VARS = {
     "ACME_SERVER": "istota_acme_server",
     "RCLONE_REMOTE": "istota_rclone_remote",
     "ZRAM_ENABLED": "istota_zram_enabled",
+    "HOST_LOOPBACK_BLOCK": "istota_host_loopback_block",
+    "HOST_GATEWAY_ADDR": "istota_host_gateway_addr",
+    "HOST_LOOPBACK_ALLOW": "istota_host_loopback_allow",
 }
 
 #: The old role's per-user keys that become `istota user ensure` flags.
@@ -193,7 +196,9 @@ def _rclone_conf(old: dict, config: dict, remote: str, obscure: Callable[[str], 
     if not (url and username and password):
         notes.append("istota_rclone_conf: not written; pass --rclone-conf with the VM's file")
         return ""
-    return render_webdav_remote(remote, url, username, password)
+    return render_webdav_remote(
+        remote, url, username, password, dav_prefix=str(nextcloud.get("dav_prefix") or ""),
+    )
 
 
 def _user(entry: dict, mode: str, user: str, notes: list[str]) -> dict:
@@ -272,8 +277,10 @@ def _host_vars(host_env: dict[str, str], stack_env: dict[str, str], notes: list[
             extra[key] = value
         elif key == "LISTEN_PORT":
             out[variable] = int(value) if value.isdigit() else value
-        elif key == "ZRAM_ENABLED":
+        elif key in ("ZRAM_ENABLED", "HOST_LOOPBACK_BLOCK"):
             out[variable] = value == "1"
+        elif key == "HOST_LOOPBACK_ALLOW":
+            out[variable] = [int(p) if p.isdigit() else p for p in value.split()]
         else:
             out[variable] = value
     if extra:

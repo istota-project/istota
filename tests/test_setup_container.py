@@ -1078,6 +1078,18 @@ class TestTheNextcloudMount:
         assert host_env["STORAGE"] == "nextcloud"
         assert host_env["RCLONE_REMOTE"] == "nextcloud"
 
+    def test_the_mount_is_rooted_at_the_dav_prefix(self, tmp_path):
+        """The daemon's DAV calls add `dav_prefix`, so the mount has to serve the
+        same folder: rooted at the account, a file written through it is at
+        `/Users/...` while every DAV read asks `/<prefix>/Users/...`."""
+        args = self._nextcloud(tmp_path, nextcloud_dav_prefix="Shared Files")
+        assert setup_wizard.run_setup(args, out=lambda *_: None) == 0
+
+        lines = (tmp_path / "vm" / "rclone.conf").read_text().splitlines()
+        assert lines[0] == "[nextcloud-root]"
+        assert lines[-3:] == ["[nextcloud]", "type = alias", "remote = nextcloud-root:Shared Files"]
+        assert self._host_env(tmp_path / "vm")["RCLONE_REMOTE"] == "nextcloud"
+
     def test_a_rerun_without_the_password_obscures_the_kept_one(self, tmp_path, monkeypatch):
         setup_wizard.run_setup(self._nextcloud(tmp_path), out=lambda *_: None)
         monkeypatch.delenv("ISTOTA_NEXTCLOUD_APP_PASSWORD")

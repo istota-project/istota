@@ -45,11 +45,17 @@ describe('the field doc', () => {
     expect(await screen.findByText('Where mail is read from.')).toBeInTheDocument();
   });
 
-  it('puts Reset to default on the control row', () => {
+  it('puts Reset on the control row', () => {
     const { container } = mount(configField({ in_file: true }));
-    const reset = screen.getByRole('button', { name: 'Reset to default' });
+    const reset = screen.getByRole('button', { name: 'Reset' });
     expect(reset.closest('.field-row.inline-meta')).toBe(container.querySelector('.field-row'));
     expect(container.querySelector('.field-row .field.inline')).not.toBeNull();
+  });
+
+  it('puts the default mark inside the control, not in the row beside it', () => {
+    mount(configField({ in_file: false, default: 'd' }));
+    const mark = screen.getByRole('img', { name: 'Not in config.toml; the default applies' });
+    expect(mark.closest('.adorned')?.querySelector('input')).not.toBeNull();
   });
 });
 
@@ -148,7 +154,7 @@ describe('a control per editor kind', () => {
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe(
       '[aliases]\nfast = "haiku"\n',
     );
-    await fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
     expect(onOp).toHaveBeenLastCalledWith({ op: 'unset', path: ['models', 'aliases'] }, [
       'models',
       'aliases',
@@ -168,24 +174,58 @@ describe('a control per editor kind', () => {
 describe('defaults and reset', () => {
   it('reset to default emits unset', async () => {
     const { onOp } = mount(configField({ value: 'x', default: '', in_file: true }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
     expect(onOp).toHaveBeenLastCalledWith({ op: 'unset', path: ['email', 'imap_host'] }, [
       'email',
       'imap_host',
     ]);
   });
 
-  it('a key not in the file says the default applies and offers no reset', () => {
+  it('a key not in the file is empty with the default as placeholder, and marked', () => {
     mount(configField({ value: 'd', default: 'd', in_file: false }));
-    expect(screen.getByText('Not in config.toml; the default applies.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Reset to default' })).toBeNull();
+    const input = screen.getByLabelText('imap_host') as HTMLInputElement;
+    expect(input.value).toBe('');
+    expect(input.placeholder).toBe('d');
+    expect(
+      screen.getByRole('img', { name: 'Not in config.toml; the default applies' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
   });
 
-  it('a pending reset shows the default and can be undone', async () => {
+  it('keeps the mark while a key not in the file is changed', () => {
+    const field = configField({ value: 'd', default: 'd', in_file: false });
+    mount(field, { op: { op: 'set', path: field.path, value: 'x' } });
+    expect((screen.getByLabelText('imap_host') as HTMLInputElement).value).toBe('x');
+    expect(
+      screen.getByRole('img', { name: 'Not in config.toml yet; this change adds it' }),
+    ).toBeInTheDocument();
+  });
+
+  it('a key in the file has no mark', () => {
+    mount(configField({ value: 'x', default: 'd', in_file: true }));
+    expect(screen.queryByRole('img')).toBeNull();
+  });
+
+  it('emptying a changed default field drops the change', async () => {
+    const field = configField({ value: 'd', default: 'd', in_file: false });
+    const { onOp } = mount(field, { op: { op: 'set', path: field.path, value: 'x' } });
+    await fireEvent.input(screen.getByLabelText('imap_host'), { target: { value: '' } });
+    expect(onOp).toHaveBeenLastCalledWith(null, field.path);
+  });
+
+  it('emptying a field in the file resets it', async () => {
+    const field = configField({ value: 'x', default: 'd', in_file: true });
+    const { onOp } = mount(field);
+    await fireEvent.input(screen.getByLabelText('imap_host'), { target: { value: '' } });
+    expect(onOp).toHaveBeenLastCalledWith({ op: 'unset', path: field.path }, field.path);
+  });
+
+  it('a pending reset shows the default as placeholder and can be undone', async () => {
     const field = configField({ value: 'x', default: 'd', in_file: true });
     const { onOp } = mount(field, { op: { op: 'unset', path: field.path } });
-    expect(screen.getByText('Will reset to the default: d')).toBeInTheDocument();
-    expect((screen.getByLabelText('imap_host') as HTMLInputElement).value).toBe('d');
+    const input = screen.getByLabelText('imap_host') as HTMLInputElement;
+    expect(input.value).toBe('');
+    expect(input.placeholder).toBe('d');
     await fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
     expect(onOp).toHaveBeenLastCalledWith(null, field.path);
   });
@@ -232,7 +272,7 @@ describe('read-only fields', () => {
     });
     expect(screen.getByText('imap.example.org')).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Reset to default' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reset' })).toBeNull();
   });
 });
 

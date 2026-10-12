@@ -539,8 +539,9 @@ def image_bind_roots(
         if own is not None:
             roots.append(own)
         # A task its room restricts has no `{mount}/Talk` bind; its own
-        # attachments were copied into its temp dir instead.
-        if not restricted:
+        # attachments were copied into its temp dir instead. A local workspace
+        # has no `Talk/` folder: attachments land under `Channels/<token>/`.
+        if not restricted and config.storage_is_nextcloud:
             roots.append(mount / "Talk")
         if task.conversation_token:
             roots.append(mount / "Channels" / task.conversation_token)

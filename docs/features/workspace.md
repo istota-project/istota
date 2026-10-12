@@ -8,7 +8,7 @@ My files is your own workspace folder. Linked folders, room folders and group fo
 
 The folder toolbar shows the selected place's access for a task in a private room: Read-write, Read-only, Via skill or No access. These badges describe task access; they do not mean that the web page can edit the files. Open “How Istota reaches your files” to see the selected place's access in a private room, on your own turn in a shared room, and on a guest's turn or a task nobody asked for. The disclosure also explains where files are stored and whether sandboxing limits task access.
 
-Personal memory is not loaded into shared-room prompts, even when your own turn can read your files. A room folder is available to tasks in that room only. Group folders show “Depends on room” for shared-room turns: every reader must belong to the group, with no guests or other bots present. A room linked to a group can use only that group. Connections such as Google Drive are reached through a skill during a task. Talk attachments show their reach but cannot be browsed here.
+Personal memory is not loaded into shared-room prompts, even when your own turn can read your files. A room folder is available to tasks in that room only. Group folders show “Depends on room” for shared-room turns: every reader must belong to the group, with no guests or other bots present. A room linked to a group can use only that group. Connections such as Google Drive are reached through a skill during a task. On a workspace that is the Nextcloud mount, Talk attachments show their reach but cannot be browsed here. On a local workspace, files posted in Talk are in the room's own folder.
 
 ## Browsing
 

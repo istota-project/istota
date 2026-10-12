@@ -203,21 +203,34 @@
       grid-template-rows: minmax(var(--control-height-lg), auto);
       column-gap: var(--space-3);
       row-gap: var(--space-1);
-      align-items: center;
+      /* Top, not centre: a label that wraps or carries a badge grows the row,
+         and centring would push the control down out of line with anything
+         beside the field (the config editor's Undo and Reset). */
+      align-items: start;
     }
 
     .field.inline > :global(*) {
       grid-column: 2;
     }
 
+    /* A config key has no spaces to break at, so a long one breaks anywhere
+       rather than pushing the control column out of line. The control's
+       height as a floor centres a one-line label on the control. */
     .field.inline > .field-label {
       grid-column: 1;
       grid-row: 1;
+      min-height: var(--control-height-lg);
+      flex-wrap: wrap;
+      overflow-wrap: anywhere;
       color: var(--text-muted);
     }
 
+    /* Centred in the control-height band the top-aligned row gives it. */
     .field.inline :global(input[type='checkbox']) {
       justify-self: start;
+      margin: calc((var(--control-height-lg) - 1em) / 2) 0 0;
+      width: 1em;
+      height: 1em;
     }
   }
 

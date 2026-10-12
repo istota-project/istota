@@ -53,6 +53,24 @@ async def test_places_and_normalized_listing(client):
     assert not data["truncated"] and data["skipped_names"] == 0
 
 
+async def test_local_workspace_has_no_talk_attachments_place(client, config):
+    """ISSUE-725: a local workspace keeps Talk attachments in each room's
+    `Channels/<token>/media/`, so there is no `Talk/` folder to offer."""
+    config.nextcloud.url = "https://cloud.example.com"
+    response = await client.get("/workspace/places")
+    assert "talk" not in [p["id"] for p in response.json()["places"]]
+
+
+async def test_nextcloud_workspace_has_the_talk_attachments_place(client, config):
+    config.nextcloud.url = "https://cloud.example.com"
+    config.workspace_mount_path = config.workspace_path
+    response = await client.get("/workspace/places")
+    talk = [p for p in response.json()["places"] if p["id"] == "talk"]
+    assert len(talk) == 1 and talk[0]["browsable"] is False
+    response = await client.get("/workspace/list", params={"place": "talk", "path": ""})
+    assert response.status_code == 404
+
+
 @pytest.mark.parametrize("place,path", [("unknown", ""), ("talk", ""), ("home", "../bob"), ("home", "notes/../"), ("home", "bad\0name")])
 async def test_refused_list(client, place, path):
     response = await client.get("/workspace/list", params={"place": place, "path": path})
