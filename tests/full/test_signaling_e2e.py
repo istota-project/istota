@@ -241,7 +241,7 @@ class TestTheEventStreamIsWhatDelivers:
         deadline = time.monotonic() + EVENT_WINDOW
         rows: list[dict] = []
         while time.monotonic() < deadline and not rows:
-            rows = stack.probe.tasks(conversation_token=token)
+            rows = stack.probe.tasks(talk_token=token)
             if not rows:
                 time.sleep(0.5)
         delivered = time.monotonic() - started
@@ -255,7 +255,7 @@ class TestTheEventStreamIsWhatDelivers:
         )
 
         task = stack.probe.wait_for_task(
-            status="completed", conversation_token=token, timeout=180
+            status="completed", talk_token=token, timeout=180
         )
         assert task["status"] == "completed", stack.diagnostics(task)
         assert task["source_type"] == "talk", stack.diagnostics(task)
@@ -313,7 +313,8 @@ class TestTheEventStreamIsWhatDelivers:
 
         time.sleep(EVENT_WINDOW)
         early = stack.probe.rows_above(
-            "tasks", stack.mark, conversation_token=unwatched
+            "tasks", stack.mark,
+            conversation_token=stack.probe.talk_room(unwatched),
         )
         if _bot_row(nextcloud, unwatched).get("sessionIds"):
             pytest.skip(
@@ -329,7 +330,7 @@ class TestTheEventStreamIsWhatDelivers:
 
         task = stack.probe.wait_for_task(
             status="completed",
-            conversation_token=unwatched,
+            talk_token=unwatched,
             timeout=RECONCILE_WINDOW,
         )
         assert task["status"] == "completed", stack.diagnostics(task)

@@ -98,6 +98,26 @@ def _decoded(row: dict, *columns: str) -> dict:
                 pass
     return out
 
+#: A Talk token's room, as one SQL expression whose `?`s all take the token
+#: (`_talk_room_params`). `db.resolve_room_token(conn, "talk", t) or
+#: db._canonical_room_token(conn, t, cross_surface=False)`, the pair
+#: `transport/talk/inbound.py` resolves with: the room bound to the token,
+#: else a live room is itself, an alias to a live room is that room, and
+#: anything else (a tombstone, an unknown token) is the token as given.
+_TALK_ROOM_SQL = (
+    "COALESCE("
+    "(SELECT room_token FROM room_bindings "
+    "WHERE surface = 'talk' AND surface_ref = ?), "
+    "CASE WHEN EXISTS (SELECT 1 FROM rooms WHERE token = ?) THEN ? "
+    "ELSE COALESCE((SELECT r.token FROM room_token_migration m "
+    "JOIN rooms r ON r.token = m.new_token WHERE m.old_token = ?), ?) END)"
+)
+
+
+def _talk_room_params(token: str) -> list[str]:
+    return [token] * _TALK_ROOM_SQL.count("?")
+
+
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -229,6 +249,7 @@ class Probe:
         status: str | None = None,
         source_type: str | None = None,
         conversation_token: str | None = None,
+        talk_token: str | None = None,
         id_above: int | None = None,
     ) -> list[dict]:
         """Rows from `tasks`, narrowed by whichever filters are given.
@@ -245,6 +266,14 @@ class Probe:
         only thing that discriminates it from the pollers' own work. It is as
         selective as `task_id` for that case, because a room this test created
         is a room nothing else has ever posted in.
+
+        `talk_token` is the same filter for a room a scenario knows only by its
+        Talk token. A Talk task stores the minted room id (`rm_…`), not the
+        token, so the token is resolved as `talk_room` does, on every call and
+        inside the same statement: the binding appears when the poller first
+        sees the room, which is after a waiting scenario's first poll, and one
+        statement is one snapshot, so a one-shot negative read cannot resolve
+        before a binding commits and read the tasks after it.
 
         `id_above` is for the case with neither — inbound *email*, where the
         daemon makes the task and there is no room token to discriminate on.
@@ -265,11 +294,28 @@ class Probe:
             if value is not None:
                 clauses.append(f"{column} = ?")
                 params.append(value)
+        if talk_token is not None:
+            clauses.append(f"conversation_token = {_TALK_ROOM_SQL}")
+            params.extend(_talk_room_params(talk_token))
         if id_above is not None:
             clauses.append("id > ?")
             params.append(id_above)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.query(f"SELECT * FROM tasks{where} ORDER BY id", params)
+
+    def talk_room(self, token: str) -> str:
+        """The room a Talk token names, as the Talk poller resolves it.
+
+        `resolve_room_token(conn, "talk", token) or
+        _canonical_room_token(conn, token, cross_surface=False)`, the pair
+        `transport/talk/inbound.py` uses: the room bound to the token, else
+        the token canonicalised. A token nothing has bound yet comes back as
+        given, so a filter on it matches nothing rather than the wrong room.
+        `tasks.conversation_token`, `rooms.token` and `messages.room_token`
+        all hold this, not the Talk token (ISSUE-706).
+        """
+        rows = self.query(f"SELECT {_TALK_ROOM_SQL} AS room", _talk_room_params(token))
+        return rows[0]["room"] if rows else token
 
     # -- the watermark ----------------------------------------------------
 
