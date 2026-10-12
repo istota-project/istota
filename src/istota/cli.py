@@ -391,6 +391,88 @@ def cmd_apply(args):
     )
 
 
+def _config_request_config(args):
+    config = load_config(Path(args.config) if args.config else None)
+    if config.config_path is None:
+        raise SystemExit("istota config-request: no config.toml was found")
+    return config
+
+
+def cmd_config_request_take(args) -> int:
+    """Claim the oldest pending config change and write the host's files.
+
+    Prints the request id, or nothing when there is nothing to take, and
+    exits 0 either way; the host loops until it prints nothing. A request that
+    cannot be turned into files is recorded `refused` and prints nothing.
+    """
+    import hashlib
+    import tomllib
+
+    from istota.config_editor import handoff, requests
+
+    config = _config_request_config(args)
+    raw = Path(config.config_path).read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        current = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        current = {}
+    admins = sorted(config.admin_users)
+    with db.get_db(config.db_path) as conn:
+        taken = requests.take(conn, digest, current_admins=admins)
+    if taken is None:
+        return 0
+    try:
+        plan, files, claude_code = handoff.build(taken, current)
+        handoff.write(Path(args.out), plan, files, claude_code)
+    except (handoff.HandoffError, OSError) as exc:
+        reason = str(exc) if isinstance(exc, handoff.HandoffError) else (
+            f"the host's files could not be written: {exc.strerror or type(exc).__name__}"
+        )
+        with db.get_db(config.db_path) as conn:
+            requests.finish(conn, taken.id, "refused", reason, current_admins=admins)
+        print(f"istota config-request: request {taken.id} refused: {reason}", file=sys.stderr)
+        return 0
+    print(taken.id)
+    return 0
+
+
+def cmd_config_request_finish(args) -> int:
+    """Record the host's outcome, with its output redacted, and notify the admins."""
+    from istota.config_editor import handoff, requests
+
+    config = _config_request_config(args)
+    output_path = Path(args.output_file)
+    try:
+        output = output_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        output = ""
+    output = handoff.redact_output(output, output_path.parent)
+    try:
+        with db.get_db(config.db_path) as conn:
+            requests.finish(
+                conn, args.id, args.status, output, current_admins=sorted(config.admin_users),
+            )
+    except requests.RequestStateError as exc:
+        print(f"istota config-request: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_config_request_mark(args) -> int:
+    """`taken` -> `building`, while the host builds the image the change needs."""
+    from istota.config_editor import requests
+
+    config = _config_request_config(args)
+    try:
+        with db.get_db(config.db_path) as conn:
+            requests.mark(conn, args.id, args.status)
+    except requests.RequestStateError as exc:
+        print(f"istota config-request: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_migrate(args):
     """Reached only when a global option came first; `main` peels the usual form."""
     print(
@@ -4789,6 +4871,36 @@ def main():
         help="Before replacing config.toml, keep it as config.toml.bak.<UTC time>, and the newest N of those",
     )
 
+    # config-request: the host applier's half of the web config editor
+    config_request_parser = subparsers.add_parser(
+        "config-request",
+        help="Take, mark and finish a web config change request (run by istota-stack config-apply)",
+    )
+    config_request_subparsers = config_request_parser.add_subparsers(
+        dest="config_request_action", required=True,
+    )
+    config_request_take = config_request_subparsers.add_parser(
+        "take",
+        help="Claim the oldest pending request and write plan.json, files.json and claude-code; print its id",
+    )
+    config_request_take.add_argument("--out", required=True, help="Directory to write the three files into")
+    config_request_finish = config_request_subparsers.add_parser(
+        "finish", help="Record the host's outcome for a taken request",
+    )
+    config_request_finish.add_argument("--id", type=int, required=True, help="Request id")
+    config_request_finish.add_argument(
+        "--status", required=True, choices=["applied", "unchanged", "refused", "failed"],
+    )
+    config_request_finish.add_argument(
+        "--output-file", required=True,
+        help="The host's output; lines holding a credential value from the files beside it are removed",
+    )
+    config_request_mark = config_request_subparsers.add_parser(
+        "mark", help="Mark a taken request as building an image",
+    )
+    config_request_mark.add_argument("--id", type=int, required=True, help="Request id")
+    config_request_mark.add_argument("--status", required=True, choices=["building"])
+
     # migrate
     migrate_parser = subparsers.add_parser("migrate", help="One-time migrations between deployment shapes")
     migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_action", required=True)
@@ -5860,6 +5972,15 @@ def main():
             "list": cmd_experimental_list,
         }
         experimental_commands[args.experimental_action](args)
+    elif args.command == "config-request":
+        config_request_commands = {
+            "take": cmd_config_request_take,
+            "finish": cmd_config_request_finish,
+            "mark": cmd_config_request_mark,
+        }
+        rc = config_request_commands[args.config_request_action](args)
+        if rc:
+            sys.exit(rc)
     else:
         # A handler that returns a non-zero code means it. Most return None, so
         # this is a no-op for them — but without it a handler's `return 1` is

@@ -2344,3 +2344,31 @@ CREATE TABLE IF NOT EXISTS recovery_fill_authorizations (
     used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_recovery_fill_task ON recovery_fill_authorizations(task_id, name);
+
+-- Config editor: one admin's change to config.toml, the deployment credentials
+-- or config/admins, waiting for the host applier (`istota config-request`).
+-- The document is stored with a sentinel at every secret leaf; new credential
+-- values exist only sealed with the master key, and are nulled when the host
+-- takes the row. At most one row is open (the partial unique index).
+CREATE TABLE IF NOT EXISTS config_change_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL CHECK (status IN
+        ('pending','taken','building','applied','unchanged','refused','failed','cancelled')),
+    admin_id TEXT NOT NULL,
+    base_digest TEXT NOT NULL,
+    document_toml TEXT NOT NULL,
+    secrets_sealed TEXT,
+    admins_json TEXT,
+    admins_before_json TEXT,
+    changed_sections_json TEXT NOT NULL,
+    secret_names_json TEXT NOT NULL,
+    diff_text TEXT NOT NULL,
+    output_text TEXT,
+    created_at TEXT NOT NULL,
+    taken_at TEXT,
+    finished_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_config_change_requests_open
+    ON config_change_requests((1)) WHERE status IN ('pending','taken','building');
+CREATE INDEX IF NOT EXISTS idx_config_change_requests_created
+    ON config_change_requests(created_at);

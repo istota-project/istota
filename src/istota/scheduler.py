@@ -9765,11 +9765,13 @@ def build_interval_gates(
         run_all(config)
 
     def _credential_maintenance(now: float) -> None:
+        from istota.config_editor import requests as config_requests
         from istota.credentials import audit, store
         from istota.webui.auth import prune_step_ups
         with db.get_db(config.db_path) as conn:
             store.prune_history(conn, older_than_days=config.security.credential_history_days)
             audit.prune(conn, older_than_days=config.security.credential_audit_days)
+            config_requests.prune(conn)
         prune_step_ups(config.db_path)
 
     def _operator_persona(now: float) -> None:
