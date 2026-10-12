@@ -2,6 +2,7 @@
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { AppShell, ShellHeader, Sidebar, SidebarToggle } from '$lib/components/ui';
+  import { HeaderSave } from '$lib/components/settings';
   import {
     Activity,
     Monitor,
@@ -55,6 +56,9 @@
           label="Admin"
           onclick={() => (sidebarOpen = !sidebarOpen)}
         />
+      {/snippet}
+      {#snippet tools()}
+        <HeaderSave />
       {/snippet}
     </ShellHeader>
   {/snippet}

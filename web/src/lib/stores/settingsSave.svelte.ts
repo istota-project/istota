@@ -18,6 +18,9 @@ export interface SettingsSaveState {
    * registration order.
    */
   label?: string;
+  dirtyLabel?: string;
+  disabled?: boolean;
+  discard?: () => void;
 }
 
 /** The whole app bar's view of the page: what to show, and what to run. */
@@ -26,6 +29,9 @@ export interface AggregateSave {
   saving: boolean;
   save: () => Promise<void>;
   label?: string;
+  dirtyLabel?: string;
+  disabled?: boolean;
+  discard?: () => void;
 }
 
 const registry = writable<Map<symbol, SettingsSaveState>>(new Map());
@@ -47,6 +53,15 @@ export const settingsSave: Readable<AggregateSave | null> = derived(registry, (m
     dirty: parts.some((p) => p.dirty),
     saving: parts.some((p) => p.saving),
     label: parts.find((p) => p.label)?.label,
+    dirtyLabel: parts.find((p) => p.dirtyLabel)?.dirtyLabel,
+    disabled: parts.some((p) => p.disabled),
+    discard: parts.every((p) => p.discard)
+      ? () => {
+          for (const part of parts) {
+            if (part.dirty) part.discard?.();
+          }
+        }
+      : undefined,
     save: async () => {
       // Sequential, so a failure surfaces against its own card rather than
       // racing three error banners onto the page at once. Each contributor
