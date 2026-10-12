@@ -74,7 +74,7 @@ const config: Config = {
     navbar: {
       title: 'Istota',
       items: [
-        {type: 'doc', docId: 'getting-started/quickstart-docker', label: 'Getting started', position: 'left'},
+        {type: 'doc', docId: 'getting-started/quickstart-server', label: 'Getting started', position: 'left'},
         {type: 'doc', docId: 'architecture/overview', label: 'Architecture', position: 'left'},
         {type: 'doc', docId: 'features/skills', label: 'Features', position: 'left'},
         {to: '/messaging', label: 'Messaging', position: 'left'},

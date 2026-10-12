@@ -54,7 +54,7 @@ See the [full reference](reference.md) for all available settings.
 
 ## Per-user config
 
-Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by the matching `istota … ensure` CLI commands or the web UI. The `[users.NAME]` block in the main config is also accepted (the docker entrypoint relies on it); DB rows win at config-load time. The retired `config/users/{user_id}.toml` mechanism is gone. See [per-user configuration](per-user.md).
+Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_configs`, `secrets`) populated by the matching `istota … ensure` CLI commands or the web UI. The `[users.NAME]` block in the main config is also accepted (`istota setup` writes one for the first admin, which seeds that user's profile on first boot); DB rows win at config-load time. The retired `config/users/{user_id}.toml` mechanism is gone. See [per-user configuration](per-user.md).
 
 ## Credentials
 
@@ -72,7 +72,7 @@ Override path via `ISTOTA_ADMINS_FILE` env var.
 
 By default CalDAV settings are derived from Nextcloud credentials: `{url}/remote.php/dav` with the same username and app password. Nothing to configure in the common case.
 
-An explicit `[caldav]` section overrides that derivation, which is what a standalone install without Nextcloud uses to reach an external CalDAV server:
+An explicit `[caldav]` section overrides that derivation, which is what an install without Nextcloud uses to reach an external CalDAV server:
 
 ```toml
 [caldav]

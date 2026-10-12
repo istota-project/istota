@@ -105,6 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images, runs the setup wizard and starts the stack. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
 
+- **The standalone single-user install is deprecated.** Istota has one deployment, the Docker stack on a machine of its own, and the documentation now describes only that, with a Lima VM for running it on a Mac. Existing standalone installs keep working and updating until a Mac desktop app replaces them; `istota serve` stays as the development loop on a Mac checkout.
+
 - **The Docker stack's scheduler service is called `daemon`.** Its container is `istota-daemon-1` and its image `istota:<tag>`, in place of `istota-istota-1` and `istota-istota:<tag>`; the browser, devbox and WhatsApp sidecar images keep their names.
 
   **Upgrade note:** `istota-stack update` removes the old container on its own. By hand, run `docker compose up -d --remove-orphans` once after building, and use `daemon` wherever a command named the `istota` service (`docker compose exec daemon istota-drop istota doctor`). The `istota_data` volume is unchanged.

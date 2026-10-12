@@ -15,13 +15,13 @@
 
 Istota (ee-stoh-tah, Polish for *being* or *entity*) is a self-hosted personal AI operating system that puts a loyal and opinionated octopus-shaped agent at the center of your digital life.
 
-It runs on your own server (or laptop) and unifies your calendar, email, files, location, health, finances, feeds, conversations, and memory — or whatever subset of these you choose — across a single command layer.
+It runs on a server or VM of your own and unifies your calendar, email, files, location, health, finances, feeds, conversations, and memory — or whatever subset of these you choose — across a single command layer.
 
 Istota can reconstruct a day from appointments, places, and purchases; prepare you for a meeting from mail, documents, and past decisions; or turn unread feeds and newsletters into a briefing delivered every morning.
 
 It has a curated skillset, durable tasks, schedules, persistent memory, human approvals, and secure defaults. A full web app gives chat, health, location, money, feeds, briefings, notifications, and administration proper interfaces of their own. Talk to the agent there, over email, WhatsApp, SMS, or in Nextcloud Talk.
 
-Istota works with Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI or with any OpenAI-compatible endpoint, including OpenRouter and local model servers. It can run as a private single-user app on your own machine or as a multi-user service backed by Nextcloud.
+Istota works with Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI or with any OpenAI-compatible endpoint, including OpenRouter and local model servers. It serves one person or several from the same install, with or without Nextcloud.
 
 Multi-user is native. One Istota server can host several separate personal agents, each with its own memory, files, credentials, module data, rooms, and task queues. Shared rooms and files are explicit; using the same server does not collapse several people's lives into one agent profile.
 
@@ -164,7 +164,7 @@ Istota does not hand the model a pile of unrelated integrations. A task receives
 
 Every user has a workspace for notes, configuration, inbox files, memories, scripts, and generated exports. That workspace can be an ordinary local directory or a Nextcloud-backed file tree.
 
-Nextcloud is a first-class integration, not a requirement. On a server deployment, Istota can use Nextcloud for files, calendars, contacts, OAuth login, notifications, and Talk while acting as an ordinary user over standard protocols. The standalone install uses a local directory, binds the web app to loopback, and needs neither Nextcloud nor a login screen.
+Nextcloud is a first-class integration, not a requirement. When connected, Istota can use Nextcloud for files, calendars, contacts, OAuth login, notifications, and Talk while acting as an ordinary user over standard protocols. Without it, the workspace is a local directory on the stack's state volume and people sign in with email.
 
 Data stays in formats that can be inspected and moved without Istota: SQLite, Markdown, TOML, JSON, CSV, and Beancount. Module data is stored per user. Online database backups, restore tooling, migration checks, and `istota doctor` cover the operational side of keeping that data on your own server.
 
@@ -190,7 +190,7 @@ The rails are enforced in code rather than left as instructions in the prompt. I
 
 - **Resource limits.** Linux cgroups can cap memory, processes, and CPU for each task. Development builds run in a separate per-user dev container rather than through a Docker socket exposed to the task.
 
-These controls depend on the deployment shape. Bubblewrap on Linux is the supported sandbox. The local standalone install is intentionally unsandboxed and should be treated as a trusted single-user process. The shipped Docker stack also runs agent tasks without bubblewrap because it does not grant the container privileges that nested sandboxing needs. Read the [security documentation](https://istota.cynium.com/docs/deployment/security/) before exposing an instance or giving it sensitive resources.
+The stack's daemon container carries the narrow grant bubblewrap needs (a seccomp and an AppArmor profile, no capabilities after a short root phase), and refuses to start if the sandbox cannot be built rather than running tasks unconfined. That grant is why the stack runs on a machine of its own. Read the [security documentation](https://istota.cynium.com/docs/deployment/security/) before exposing an instance or giving it sensitive resources.
 
 ## How a request runs
 
@@ -230,49 +230,28 @@ WhatsApp and SMS carry the answer rather than the conversation: the exchange sta
 
 ## Install
 
-Istota has two deployment shapes.
+Istota has one deployment: the Docker stack of the scheduler, web app and nginx, on a Debian 13 machine dedicated to it, with every task in a bubblewrap sandbox with its own cgroup. Nextcloud is optional; without it, storage is local.
 
-| Shape | Intended use | Nextcloud | Task sandbox |
-| --- | --- | --- | --- |
-| **Server** | A persistent, multi-user installation: the Docker stack of the Istota scheduler, web app and nginx, on a Debian 13 machine dedicated to it | Optional: local storage, or an existing Nextcloud | Bubblewrap and per-task cgroups, under the shipped Compose run contract |
-| **Standalone** | A trusted single-user installation on your own machine | Not required | Unsandboxed by design |
-
-### Server
-
-Run as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It verifies the release tag against the signing key, provisions the machine, builds the images there, runs the setup wizard and starts the stack. `istota-stack` manages it afterwards.
+Run the installer as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It verifies the release tag against the signing key, provisions the machine, builds the images there, runs the setup wizard and starts the stack. `istota-stack` manages it afterwards.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
   | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-### Local standalone
+On a Mac, the same stack runs in a Lima VM from the template in `host/lima/`. Read an installer before piping it into a shell. For prerequisites, setup choices, the Mac and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
 
-This installs a single-user instance with a local workspace and no authentication screen. `istota serve` starts the scheduler and web app together at `http://localhost:8766/istota`.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --standalone
-```
-
-You can also install the Python application directly and run the setup wizard:
-
-```bash
-uv tool install 'istota[local]'
-istota setup
-istota serve
-```
-
-Read an installer before piping it into a shell. For prerequisites, setup choices, and updates, use the [server quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/), or [standalone guide](https://istota.cynium.com/docs/getting-started/local-install/).
+The older standalone single-user install is deprecated. Existing installs keep working; see the [standalone page](https://istota.cynium.com/docs/getting-started/local-install/).
 
 ## Configuration
 
 Opinionated defaults do not make the system fixed. Configuration starts in TOML and can be overlaid with per-user records from the database. Users can manage their own resources, briefing settings, module settings, secrets, and preferences through the CLI or web app, subject to administrator policy.
 
-Common entry points:
+Common entry points, run on the machine:
 
 ```bash
-istota setup                         # interactive standalone setup
-istota serve                         # scheduler + web UI in one process
+istota-stack setup                   # the setup wizard, inside the image
+istota-stack apply plan.toml         # write config.toml from a plan
 istota doctor                        # check runtime and service dependencies
 istota task "Summarize my unread feeds" -u alice -x
 istota secret --help                 # provision and inspect credentials
@@ -303,7 +282,7 @@ scripts/qtest npm --prefix web run test
 npm --prefix web run format:check
 ```
 
-The default Python suite omits tests that need live services, Linux sandboxing, built images, Docker Compose, the full testbed, or a deployment host. Read the [testing guide](https://istota.cynium.com/docs/development/testing/) before working on those paths.
+On a Mac checkout, `uv run istota serve` runs the scheduler and the web app in one unsandboxed process on loopback, for the edit-run loop. The default Python suite omits tests that need live services, Linux sandboxing, built images, Docker Compose, the full testbed, or a deployment host. Read the [testing guide](https://istota.cynium.com/docs/development/testing/) before working on those paths.
 
 ## Documentation
 

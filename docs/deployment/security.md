@@ -4,13 +4,13 @@ Istota isolates Claude Code invocations through layered security: clean environm
 
 ## Supported deployment
 
-Linux with [bubblewrap](https://github.com/containers/bubblewrap) is the only supported deployment configuration. The filesystem sandbox is the boundary between users and between Claude and the host — without it, env-var scoping in the prompt is the only thing keeping one user's tasks from reading another user's data, and that boundary depends on the model following instructions.
+There is one deployment: the Docker stack on a Linux machine dedicated to it, with every task in a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The filesystem sandbox is the boundary between users and between Claude and the host — without it, env-var scoping in the prompt is the only thing keeping one user's tasks from reading another user's data, and that boundary depends on the model following instructions.
 
-macOS and any Linux without bwrap, or where bwrap can't create user namespaces, are **development configurations only**. They will run, but they provide no isolation guarantees and are not suitable for multi-user deployments. The scheduler logs a `SECURITY UNSUPPORTED CONFIGURATION` warning at startup when it detects either condition with more than one user configured.
+A container cannot build a bubblewrap namespace under Docker's defaults, and `CAP_SYS_ADMIN` is not what it is missing: the default seccomp profile blocks `unshare`, and `docker-default`'s AppArmor profile denies `mount`. The stack's `daemon` service carries a narrow grant instead: a seccomp profile that is Docker's default plus the six calls bwrap needs, an AppArmor profile that is `docker-default` plus `mount` and `pivot_root`, `systempaths=unconfined`, and no capabilities once a short root phase is over. That grant is acceptable only on a host that runs nothing else, which is why the machine is dedicated. [Running tasks sandboxed](docker.md#running-tasks-sandboxed) has the details. On Linux, a daemon whose sandbox cannot be built refuses to start rather than run tasks unconfined.
 
-A container is the common case of the second, and `CAP_SYS_ADMIN` is not what it is missing: Docker's default seccomp profile blocks the `unshare` call, and granting the capability instead gets past that and then fails at `pivot_root`. What a container needs is `seccomp:unconfined` together with `systempaths=unconfined`, and that pair buys the sandbox by giving up much of the container's own boundary — the syscall filter goes, and container root gets a writable `/proc/sys` whose `kernel` entries are not namespaced. Which way that trade falls depends on how many people share the deployment; see [Docker deployment](docker.md).
+macOS has no bubblewrap. `istota serve` on a Mac checkout, and the deprecated standalone install, run tasks unsandboxed; they are development and single-user trusted configurations, not deployments. The scheduler logs a `SECURITY UNSUPPORTED CONFIGURATION` warning at startup when it runs that way with more than one user configured.
 
-If you disable the sandbox or run on an unsupported platform, you accept that:
+If you run without the sandbox, you accept that:
 
 - A prompt injection in one user's task may exfiltrate any other user's data on the same host.
 - Claude has access to the full filesystem visible to the istota service account, not just the per-user subtree.
@@ -97,7 +97,7 @@ A member's turn in a room more than one person reads runs with that member's ful
 
 Other participants' messages in a shared room's history reach the model inside an untrusted-content fence, since a co-member's message could otherwise try to steer a turn that runs at full reach. Confirmations still gate side effects.
 
-**On a deployment with no bubblewrap sandbox none of the filesystem half applies.** On macOS and the standalone install, what a guest's turn loses is removed from the prompt, the skill list, the proxy's allowlist and the environment, but the task's own tools can still read and write the host's files on disk, including `CRON.md`, whose jobs run as the host. `istota doctor` reports a warning (`security.room_scope_confinement`) on that shape. If guests should not be able to reach a host's files, run a [server install](../getting-started/quickstart-server.md), where the stack's sandbox applies.
+**Without the bubblewrap sandbox none of the filesystem half applies.** Under `istota serve` on macOS and on the deprecated standalone install, what a guest's turn loses is removed from the prompt, the skill list, the proxy's allowlist and the environment, but the task's own tools can still read and write the host's files on disk, including `CRON.md`, whose jobs run as the host. `istota doctor` reports a warning (`security.room_scope_confinement`) on that shape. If guests should not be able to reach a host's files, run [the stack](../getting-started/quickstart-server.md), where the sandbox applies.
 
 ## Credential proxy
 
@@ -120,7 +120,7 @@ The proxy's Unix socket path includes the host process PID — `istota-proxy-{pi
 
 ### Who may connect
 
-The socket is mode 0600, which keeps out other OS users. It keeps out no other task, because every task runs as the daemon's uid. Under bubblewrap only a task's own socket is bound into its namespace, but on every shape without the sandbox (macOS, a container whose bwrap probe fails, a Linux host with no bwrap) all tasks share one uid and one `/tmp`, and the path above is predictable. The standalone install runs with the proxy off, so none of this applies there.
+The socket is mode 0600, which keeps out other OS users. It keeps out no other task, because every task runs as the daemon's uid. Under bubblewrap only a task's own socket is bound into its namespace, but without the sandbox (macOS) all tasks share one uid and one `/tmp`, and the path above is predictable. The standalone install runs with the proxy off, so none of this applies there.
 
 So the proxy asks the kernel which process connected (`SO_PEERCRED` on Linux, `LOCAL_PEERPID` on macOS) and serves it only if it descends from a process its own task registered: the brain's child, reported when it is spawned, or a skill CLI the proxy itself is running. Each registered process is pinned to its start time, so a pid the kernel later hands to another process carries nothing over. Anything else gets `reason: peer_not_in_task` and a `proxy_rejected ... reason=peer` warning in the log, before the request is parsed. A process whose parent exited and left it reparented to init (a backgrounded command that outlived its shell) is refused too.
 

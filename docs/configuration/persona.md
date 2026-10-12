@@ -26,7 +26,7 @@ Controlled by `emissaries_enabled` (default `true`). Skipped for briefings.
 
 There is one persona per installation, owned by the operator and used for every task, in every room and for every user. Users cannot replace it.
 
-The operator's copy is `PERSONA.md` at the bot's file root, beside `Users/` and `Channels/` (the Nextcloud mount, `/mnt/shared` on Docker, the workspace folder on a standalone install). Edit it there. Its upstream is the shipped `config/persona.md` in the repository, and `istota init` and a scheduler pass every five minutes keep the two in step the way Debian treats a config file:
+The operator's copy is `PERSONA.md` at the bot's file root, beside `Users/` and `Channels/` (`/mnt/shared`, the Nextcloud mount, with Nextcloud integration; `/data/workspace` with local storage; the workspace folder for `istota serve` on a Mac). Edit it there. Its upstream is the shipped `config/persona.md` in the repository, and `istota init` and a scheduler pass every five minutes keep the two in step the way Debian treats a config file:
 
 - **No file at the root**: the shipped persona is written there.
 - **Unedited copy**: a copy that matches any version ever shipped is replaced by each new shipped version, so you get updates without doing anything. Line endings and surrounding whitespace do not count as edits.

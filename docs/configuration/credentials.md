@@ -38,9 +38,9 @@ The SMS and WhatsApp rows are the exception to the credential-proxy sentence int
 
 ### Provisioning global credentials
 
-**Server (the Docker stack)**: `istota setup` writes each credential it asks for to a file under `secrets/` (`/srv/app/istota/secrets/` on a server, 0400, owned by uid 10001), which compose mounts and the container exports as the matching `ISTOTA_*` variable, keeping it out of `config.toml`. Replace a file and restart to change it. The entrypoint generates the master key on first start and keeps it at `/data/.secret_key`.
+**The stack**: `istota setup` writes each credential it asks for to a file under `/srv/app/istota/secrets/` (0400, owned by uid 10001), which compose mounts and the container exports as the matching `ISTOTA_*` variable, keeping it out of `config.toml`. Replace a file and restart to change it. The entrypoint generates the master key on first start and keeps it at `/data/.secret_key`.
 
-**Manual**: Edit `config.toml` directly, or set the `ISTOTA_*` env vars in the process environment.
+**A Mac development checkout**: edit `config.toml` directly, or set the `ISTOTA_*` env vars in `istota.env` beside it, which `istota serve` reads.
 
 ## Per-user credentials (user's accounts)
 

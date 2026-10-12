@@ -21,7 +21,7 @@ Both adapters handle private text messages, photographs, voice notes and audio f
 | Reply window | none | 24 hours from the user's last message |
 | Templates | not applicable | one approved utility template, under paid mode |
 | Receives over | a Unix socket from its own Node sidecar | a signed HTTPS callback at `/webhooks/whatsapp` |
-| Extra process | the sidecar (its own image or systemd unit) | the shared webhook receiver |
+| Extra process | the sidecar (the `whatsapp-baileys` container) | none; the `web` service serves the callback |
 | Sanctioned | no | yes |
 
 Set it in `[whatsapp] provider`. A deployment runs one adapter at a time and there is no failover between them.
@@ -55,7 +55,7 @@ A paired session can be replaced from the running deployment. No SSH, no `system
 Open Admin, Connections. The WhatsApp card says where the link stands and carries one control:
 
 - **The session is unlinked.** One click, no typed confirmation. There is nothing working to lose, and this is the case the flow exists for.
-- **The session is working, unsettled, or not readable from the web process.** No re-pair button on the card. A separate control below it asks you to type a phrase first, because the same sequence disconnects a link that may be fine. On the deployment shape where the web app and the scheduler are separate units the web process cannot read the live link at all, so this is the control you get there — including for a first-ever pairing, which from outside is indistinguishable from a working session.
+- **The session is working, unsettled, or not readable from the web process.** No re-pair button on the card. A separate control below it asks you to type a phrase first, because the same sequence disconnects a link that may be fine. Where the web app and the scheduler are separate processes, as the stack's `web` and `daemon` containers are, the web process cannot read the live link at all, so this is the control you get there — including for a first-ever pairing, which from outside is indistinguishable from a working session.
 
 What happens next takes a minute or so. The request is written to the database, and the scheduler picks it up on its next poll. It waits for a connected sidecar, asks that sidecar to stop, and moves the session directory aside only after the link drop its own request caused — which is the evidence that nothing else is writing the directory. The sidecar restarts, finds no credential, and WhatsApp offers a code. The card draws it, redrawing about every twenty seconds as WhatsApp rotates it. Scan it from the phone's Linked Devices screen and the card goes green. An admin notification records who re-paired and when.
 

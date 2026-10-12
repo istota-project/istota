@@ -168,7 +168,7 @@ Your own scheduled jobs (`CRON.md`) and briefings that post into a shared room y
 
 Other participants' messages in the conversation history are shown to the model as content from someone else, not as instructions, so a co-member cannot use the transcript to steer your turn.
 
-On a deployment with no bubblewrap sandbox (the shipped Docker stack, macOS, the standalone install), what a guest's turn loses is removed from the prompt, the skill list and the environment, but the task's own tools can still read and write the host's files on disk, including `CRON.md`, whose jobs run as the host. `istota doctor` warns about this. See [security](../deployment/security.md).
+Where there is no bubblewrap sandbox (`istota serve` on macOS, the deprecated standalone install), what a guest's turn loses is removed from the prompt, the skill list and the environment, but the task's own tools can still read and write the host's files on disk, including `CRON.md`, whose jobs run as the host. `istota doctor` warns about this. See [security](../deployment/security.md).
 
 ## What the bot is told
 

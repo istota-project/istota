@@ -1,8 +1,12 @@
-# Local single-user install
+# Standalone install (deprecated)
 
-Istota runs in two ways. The persistent, multi-user one is a [server](quickstart-server.md): the Docker stack on a machine of its own, with each user's tasks isolated by bubblewrap and Nextcloud optional. This page covers the **local, single-user install** for your own mac or Linux machine: no Nextcloud, no server, no sandbox, and no login.
+:::warning[Deprecated]
+The standalone install is not a supported way to run Istota. Istota has one deployment: the Docker stack on a machine of its own, which on a Mac is a Lima VM. See the [quickstart](quickstart-server.md). This page stays for installs that already exist. They keep working and `istota update` still updates them, until a Mac desktop app that wraps the VM replaces this install and migrates its data. Don't start a new install this way.
+:::
 
-The workspace is a plain local folder (default `~/.istota`). The web UI runs on loopback with authentication bypassed. It is always single-user and always trusted.
+The standalone install runs Istota on your own Mac or Linux machine as one process: no Nextcloud, no sandbox and no login. The workspace is a plain local folder (default `~/.istota`), and the web UI runs on loopback with authentication bypassed. It is always single-user and always trusted.
+
+`istota serve` itself stays after this install is gone: it is the development loop on a Mac checkout. See [development setup](../development/setup.md).
 
 ## Trust model — read this first
 
@@ -12,7 +16,7 @@ There is no bubblewrap isolation, no skill proxy, and no network proxy. The agen
 
 Only give a local instance content and instructions you trust. The content-trust guardrails (`untrusted_input` companion on the ingest skills, `sensitive_actions`) stay in place, but they are about content provenance, not process isolation.
 
-If you need isolation between untrusted content and your host, use the server deployment (Linux + bubblewrap), not the local install. See [Security](../deployment/security.md) for how the sandboxed shape confines the agent.
+If you need isolation between untrusted content and your host, run the stack instead. See [Security](../deployment/security.md) for how it confines the agent.
 
 ## Requirements
 
@@ -108,7 +112,7 @@ Pulls the latest code from the checkout `install.sh` recorded in `~/.config/isto
 By default `update` follows the **stable** channel — the latest tagged release. To ride the development branch instead (newer, less tested), run `istota update --channel main`; switch back with `istota update --channel stable`. The choice is remembered, so you set it once. (An install made before this option existed keeps tracking `main` until you pick a channel.)
 
 :::note[Standalone only]
-`update` applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. A server (Nextcloud/auth) deployment is updated separately and `update` declines to run there.
+`update` applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. The stack is updated with `istota-stack update`, and `istota update` declines to run there.
 :::
 
 ## What works, what's off
@@ -148,7 +152,7 @@ ISTOTA_CALDAV_PASSWORD=app-specific-password
 
 Not in `config.toml`. That file's generated header says secrets live in the sibling env file and never there, and the environment override is what makes that true without an exception — which is why `config.toml` is left at the usual permissions and only `istota.env` is `0600`.
 
-Set both or neither. The URL, the username and the password each fall back to `[nextcloud]` on their own rather than as a group, so half a block is a mixture rather than an override that is simply off. On this shape there is no Nextcloud to fall back to, so a URL with no password just leaves calendar unable to authenticate — `setup` refuses that pairing, which is why it can only arise from a hand edit. On a server deployment the same half-block is worse: it names a foreign host and then hands that host the Nextcloud app password.
+Set both or neither. The URL, the username and the password each fall back to `[nextcloud]` on their own rather than as a group, so half a block is a mixture rather than an override that is simply off. On this shape there is no Nextcloud to fall back to, so a URL with no password just leaves calendar unable to authenticate — `setup` refuses that pairing, which is why it can only arise from a hand edit. On the stack the same half-block is worse: it names a foreign host and then hands that host the Nextcloud app password.
 
 **Email.** Set `[email] enabled = true` with your IMAP host, user and SMTP host in `config.toml`, and the passwords in `istota.env` (`ISTOTA_EMAIL_IMAP_PASSWORD`, `ISTOTA_EMAIL_SMTP_PASSWORD`). `setup --email` collects these interactively; it asks for the SMTP host separately, defaulting to the IMAP one, and reads the password without echoing it.
 
@@ -158,7 +162,7 @@ See the [configuration reference](../configuration/reference.md) for every optio
 
 ## Notes
 
-- **Loopback only.** No-auth mode refuses to start on a non-loopback bind — you cannot accidentally expose an unauthenticated instance on the network. Use the server deployment if you need remote access.
+- **Loopback only.** No-auth mode refuses to start on a non-loopback bind — you cannot accidentally expose an unauthenticated instance on the network. Run the stack if you need remote access.
 - **One instance.** `serve` holds a lock; a second `serve` reports "already running" and exits.
 - **Backups.** `setup` writes `[scheduler] db_backup_dir` as `Backups/db/snapshots` under the workspace and creates it at `0700`. The mount-liveness check does not apply because `setup` writes `workspace_path` and leaves `nextcloud_mount_path` unset.
 - **Everything in one folder.** The database, module databases, and workspace all live under the workspace directory — back it up or move it as a unit.

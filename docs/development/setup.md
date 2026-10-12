@@ -51,13 +51,27 @@ cp .private-data-local.example .private-data-local   # gitignored; add your own 
 
 See [Secret scanning](secret-scanning.md).
 
-## Initialize
+## The edit-run loop on a Mac
+
+A Mac checkout runs Istota as one unsandboxed process on loopback, which is what `istota serve` is for. It is a development loop, not a deployment: there is no bubblewrap on macOS, so nothing confines a task, and the web app skips sign-in.
+
+```bash
+uv run istota setup              # writes ~/.config/istota/config.toml and istota.env, workspace ~/.istota
+uv run istota serve              # scheduler + web app at http://127.0.0.1:8766/istota
+npm --prefix web run dev         # optional: the Vite dev server, proxying the API to :8766
+```
+
+`serve` serves `web/build` when it exists, so `npm --prefix web run build` is the other way to see frontend changes. `setup` here is the same wizard the deprecated [standalone install](../getting-started/local-install.md) uses; that page lists what it writes and what is off in this shape.
+
+To run what operators run, sandbox included, use the Lima VM from the [quickstart](../getting-started/quickstart-server.md#on-a-mac). `scripts/test-vm.sh` drives the same template for the `vm` test tier.
+
+## Initialize by hand
 
 ```bash
 uv run istota init               # Create database from schema.sql
 ```
 
-Create `config/config.toml` from `config/config.example.toml` and fill in your Nextcloud credentials.
+Create `config/config.toml` from `config/config.example.toml` and fill in what your test setup needs.
 
 ## Run
 
@@ -100,7 +114,7 @@ uv run istota list [-s STATUS] [-u USER]              # List tasks
 uv run istota show <task-id>                          # Task details
 ```
 
-`istota setup` and `istota update` also exist, but they belong to the standalone single-user install rather than a dev checkout — see [local install](../getting-started/local-install.md). The full command surface is in the [CLI reference](../reference/cli.md).
+`istota update` belongs to the deprecated [standalone install](../getting-started/local-install.md) and does nothing for a dev checkout. The full command surface is in the [CLI reference](../reference/cli.md).
 
 ## Project layout
 
@@ -130,10 +144,11 @@ These are not Python packages -- they're system-level tools used at runtime:
 | Tool | Purpose | Required |
 |---|---|---|
 | `claude` CLI | Claude Code execution engine | yes |
-| `rclone` | Nextcloud file access (mount or CLI mode) | yes |
-| `bwrap` (bubblewrap) | Filesystem sandbox (Linux only) | recommended |
+| `rclone` | Nextcloud file access, when testing against a Nextcloud | optional |
+| `bwrap` (bubblewrap) | Filesystem sandbox (Linux only; the image has it) | optional on a dev host |
 | `tesseract` | OCR engine: the `transcribe` skill, and the automatic pass over every image attachment | optional |
-| Docker | Browser container, Docker deployment | optional |
+| Docker | The image, smoke and full test tiers | optional |
+| Lima | The `vm` test tier, and the stack on a Mac | optional |
 | Node.js | SvelteKit frontend build | optional (web UI only) |
 
 ## Dependencies

@@ -25,8 +25,8 @@ Selections within a page appear in its URL and survive a reload or a shared link
 ## Prerequisites
 
 - A Nextcloud instance for Nextcloud login, or operator-created email identities for email login
-- An nginx reverse proxy (or equivalent) fronting the istota web service
-- Node.js 20+ for building the SvelteKit frontend
+
+The stack's image builds the frontend and its nginx fronts the web service, so nothing else is needed.
 
 No extra Nextcloud apps are required — istota uses NC's built-in OAuth 2.0 provider.
 
@@ -135,55 +135,19 @@ Optional overrides (defaults derive from `oauth2_provider`):
 
 | Setting | Description |
 |---|---|
-| `oauth2_token_endpoint` | Server-to-server token URL. In Docker this often points at the internal NC service URL while `oauth2_provider` points at the host-mapped URL. |
-| `oauth2_userinfo_endpoint` | Server-to-server userinfo URL. Same Docker pattern. |
+| `oauth2_token_endpoint` | Server-to-server token URL. Set it when the stack reaches Nextcloud at a different address from the one browsers use (the wizard's Nextcloud URL and public URL). |
+| `oauth2_userinfo_endpoint` | Server-to-server userinfo URL. Same case. |
 | `oauth2_redirect_uri` | Explicit redirect URI override; otherwise derived from request host + scheme. |
 
-On a server the two secrets are files under `/srv/app/istota/secrets/` (`istota_web_oauth2_client_secret`, `istota_web_session_secret_key`), which the stack exports as those environment variables, keeping them out of the config file.
+The two secrets are files under `/srv/app/istota/secrets/` (`istota_web_oauth2_client_secret`, `istota_web_session_secret_key`), which the stack exports as those environment variables, keeping them out of the config file.
 
-### 3. Build the frontend
+### 3. Restart
 
-```bash
-uv sync --extra web
-cd web && npm install && npm run build
-```
+Restart the stack (`istota-stack down && istota-stack up`). The web app is the stack's `web` service, built into the image with the frontend, and its logs are `istota-stack compose logs -f web`.
 
-The image build does this, so a server needs no step here.
+The stack's nginx is the only listener, and it already routes `/istota/` and keeps the set-password and sign-in-link paths out of its access log. A reverse proxy of your own in front of it (`proxied` ingress) forwards the whole hostname, and needs the same access-log exclusion for `/istota/auth/set-password`, or no query strings in its logs. See [Ingress and TLS](../deployment/docker.md#ingress-and-tls).
 
-### 4. Reverse proxy
-
-The web app listens on `127.0.0.1:{port}` and should not be exposed directly. Put it behind nginx (or your preferred reverse proxy).
-
-The stack's nginx is already configured. For your own proxy, the general location is below. Email login also requires the exact token location so query strings never enter access logs:
-
-```nginx
-location = /istota/auth/set-password {
-    access_log off;
-    proxy_pass http://127.0.0.1:8766;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-
-location /istota/ {
-    proxy_pass http://127.0.0.1:8766/istota/;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
-TLS is required — session cookies are set with `secure=true` and the registered redirect URI must use HTTPS. Use Let's Encrypt or your preferred certificate provider.
-
-### 5. Run
-
-```bash
-uvicorn istota.webui.app:app --no-access-log --host 127.0.0.1 --port 8766
-```
-
-On a server this is the stack's `web` service; its logs are `istota-stack compose logs -f web`.
+TLS is required — session cookies are set with `secure=true` and the registered redirect URI must use HTTPS. `direct` ingress gets a certificate from certbot; `proxied` takes it from your proxy.
 
 ## How Nextcloud authentication works
 
@@ -240,7 +204,7 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 
 **Location**: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover clusters, create/edit/delete, visit stats). Requires GPS tracking to be enabled.
 
-**Settings**: a sidebar of five sections — Account (identity, profile picture, sign-in), Preferences (appearance, email senders, disabled skills and modules, offline data), Delivery (default destination, relay questions, alert and log routes), Credentials and Connections (Nextcloud, Google Workspace, Garmin, Karakeep, ntfy) — plus the per-module settings pages. Connections is where service credentials are entered — write-only, bullet-masked fields backed by the encrypted secrets store. Credentials lists every credential a task can use, with its bound hosts and the grant that decides which rooms and scheduled tasks may use it, edited from each row's menu. The [credential vault](../configuration/credentials.md#credential-vault) card sits on that section too, and is the one surface a user sets one up from: it lists the `.kdbx` files in their own vault folder, takes a filename rather than a path, generates the passphrase, and names the shared credentials istota holds from the file.
+**Settings**: a sidebar of five sections — Account (identity, profile picture, sign-in), Preferences (appearance, email senders, disabled skills and modules, offline data), Delivery (default destination, relay questions, alert and log routes), Credentials and Connections (Nextcloud, Google Workspace, Garmin, Karakeep, ntfy) — plus the per-module settings pages. Connections is where service credentials are entered — write-only, bullet-masked fields backed by the encrypted secrets store. Credentials lists every credential a task can use, with its bound hosts and the grant that decides which rooms and scheduled tasks may use it, edited from each row's menu. The [credential vault](../configuration/credentials.md#import-and-export) card sits on that section too, and is the one surface a user sets one up from: it lists the `.kdbx` files in their own vault folder, takes a filename rather than a path, generates the passphrase, and names the shared credentials istota holds from the file.
 
 ## API routes
 

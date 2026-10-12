@@ -4,7 +4,7 @@ Overland GPS webhook receiver for location tracking with place detection and vis
 
 ## Architecture
 
-The webhook receiver (`webui/webhook_receiver.py`) runs as a separate FastAPI service ingesting location pings from the [Overland](https://overland.p3k.app/) iOS/Android app. It detects transitions between named places and logs visits.
+The webhook receiver (`webui/webhook_receiver.py`) ingests location pings from the [Overland](https://overland.p3k.app/) iOS/Android app. It detects transitions between named places and logs visits. On the stack its routes are served by the `web` service, behind the stack's nginx (`webui/stack_app.py`); `istota serve` includes them the same way.
 
 ```
 Overland app -> POST /webhooks/location?token=... -> webui/webhook_receiver.py -> SQLite
@@ -17,8 +17,9 @@ Enable in config:
 ```toml
 [location]
 enabled = true
-webhooks_port = 8765
 ```
+
+`istota setup` writes this when you turn GPS location on.
 
 Per-user ingest tokens are stored as connected services in the encrypted `secrets` table. Provision via the web settings UI at `/istota/location/settings` or CLI:
 
@@ -28,25 +29,13 @@ istota secret ensure --user alice --service overland --key ingest_token --value 
 
 The settings page can also mint one for you (`POST /api/settings/secrets/overland/ingest_token/generate`), which returns the token and the assembled webhook URL. That response is the only time either is readable — afterwards the secret is write-only like every other one, and it is the only endpoint in the app that returns a secret in a response body. Generating again rotates: the previous token stops working immediately, on every device using it, which is also how you revoke a lost phone.
 
-Minting refuses in three cases, and every check runs before the write, so a refusal never rotates a token that was working: the location module is off for that user (409), `[site] hostname` is unset (409), or `ISTOTA_SECRET_KEY` is missing (503). The hostname check exists because the assembled URL would otherwise be a relative path, which the phone's decoder rejects as not being `https://` — the device would then blame the code rather than the configuration. In practice only a standalone install reaches it, since under Nextcloud auth a blank hostname already fails the origin check.
+Minting refuses in three cases, and every check runs before the write, so a refusal never rotates a token that was working: the location module is off for that user (409), `[site] hostname` is unset (409), or `ISTOTA_SECRET_KEY` is missing (503). The hostname check exists because the assembled URL would otherwise be a relative path, which the phone's decoder rejects as not being `https://` — the device would then blame the code rather than the configuration. In practice only `istota serve` on a Mac reaches it, since under Nextcloud auth a blank hostname already fails the origin check.
 
 Having minted one, the page renders it as a QR code the native iOS app scans (Settings → Location → **This device** → Scan), and prints the full webhook URL beside it for the third-party Overland app, which has no scanner. The payload is a small JSON envelope — `{v, endpoint, token}`, version 1 — carrying the endpoint and the token, deliberately not the webhook URL itself: a bare `https://` code is offered for opening by every generic scanner, including the iOS Camera app, which would put the token in Safari's address bar and history in exchange for a 405. The query string is stripped from the endpoint, so the token appears in the payload exactly once; the tracker sends it as a bearer header. The decoder rejects rather than repairs — wrong version, non-`https` endpoint, or anything over its size caps is refused whole rather than partially honoured. Leaving the settings page loses the code, because there is nowhere to read the token back from; the next device needs a new one.
 
-The receiver holds the token map in memory and runs in a different process from the web app, so a write through the web UI leaves a stamped sentinel (`.location_ingest_reload`, beside `istota.db`) that the receiver stats on each ingest request and reloads from. Before that existed, a freshly provisioned token was refused until the receiver restarted. Stamping is best-effort: if it fails, the token still works after the next restart. **The CLI path above does not stamp it** — `istota secret ensure` writes the secret and nothing else, so a token provisioned that way applies on the receiver's next restart or SIGHUP.
+The receiver holds the token map in memory, loaded when it starts, so a write through the web UI leaves a stamped sentinel (`.location_ingest_reload`, beside `istota.db`) that the receiver stats on each ingest request and reloads from. Before that existed, a freshly provisioned token was refused until the receiver restarted. Stamping is best-effort: if it fails, the token still works after the next restart. **The CLI path above does not stamp it** — `istota secret ensure` writes the secret and nothing else, so a token provisioned that way applies on the receiver's next restart or SIGHUP.
 
-Install the location extras:
-
-```bash
-uv sync --extra location
-```
-
-Run the receiver:
-
-```bash
-uvicorn istota.webui.webhook_receiver:app --port 8765
-```
-
-On a local install there is no separate receiver process: `istota serve` includes the ingest router into the web app, so the endpoint is `/webhooks/location` on the **web** port and `webhooks_port` is unused. The receiver loads with the web app, and a SIGHUP to the web process reloads both. The sentinel above is still what applies a token generated in the browser without either.
+There is no separate receiver process to run. With `[location] enabled = true` the web app includes the ingest router, so the endpoint is `/webhooks/location` on the web app's own address and `webhooks_port` is unused. The image carries the location extras. The receiver loads with the web app, and a SIGHUP to the web process reloads both. The sentinel above is still what applies a token generated in the browser without either.
 
 ## Tracking on the device
 
@@ -144,24 +133,11 @@ scripts/import_garmin_tracks.py --user alice --days-back 7
 
 The webhook receiver must be reachable from the Overland app on your phone. Two approaches:
 
-**Reverse proxy (recommended)**: expose the webhook endpoint through nginx or another reverse proxy with TLS. The stack's nginx already routes `/webhooks/` to the web service; for a proxy of your own, the location is:
+**Public hostname (recommended)**: the stack's nginx already routes `/webhooks/` to the web service, so in `direct` ingress, or `proxied` behind a reverse proxy that forwards the whole hostname, there is nothing more to configure. Point Overland at `https://{your-hostname}/webhooks/location` with your ingest token.
 
-```nginx
-location /webhooks/ {
-    proxy_pass http://127.0.0.1:8765/webhooks/;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    client_max_body_size 10m;
-}
-```
+**VPN (alternative)**: if you don't want to expose the endpoint publicly, give the stack a hostname that resolves only inside a WireGuard or Tailscale network, and connect your phone to it. This keeps the endpoint off the public internet but requires the VPN to be active for location tracking to work. QR provisioning still needs an `https://` endpoint and `[site] hostname`; with plain HTTP, the URL has to be typed into stock Overland by hand.
 
-This is the same reverse proxy you'd use for the web UI — if you're already running nginx for istota, location webhooks are included. Point Overland at `https://{your-hostname}/webhooks/location` with your ingest token.
-
-**VPN (alternative)**: if you don't want to expose the endpoint publicly, connect your phone to your server's network via WireGuard or Tailscale. Point Overland at the server's internal IP and webhook port directly (e.g., `http://10.0.0.5:8765/webhooks/location`). This keeps the endpoint off the public internet but requires the VPN to be active for location tracking to work. It is a stock-Overland arrangement only: the URL has to be typed in by hand, since QR provisioning refuses a plain-`http` endpoint and minting refuses to run at all without `[site] hostname`.
-
-A reverse proxy is strongly recommended since it also covers the web UI and any other istota services. The endpoint is authenticated per-user by the ingest token, supplied either as a `?token=` query parameter (what Overland sends) or as an `Authorization: Bearer` header (what the native tracker sends). A missing token is a 401 and an unknown one a 403. Public exposure is safe as long as TLS is enabled and tokens are kept secret.
+A public hostname with TLS is the simpler arrangement, since it also covers the web UI. The endpoint is authenticated per-user by the ingest token, supplied either as a `?token=` query parameter (what Overland sends) or as an `Authorization: Bearer` header (what the native tracker sends). A missing token is a 401 and an unknown one a 403. Public exposure is safe as long as TLS is enabled and tokens are kept secret.
 
 ## Web interface
 
