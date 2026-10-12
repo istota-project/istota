@@ -1,69 +1,66 @@
 #!/bin/bash
-# Istota installer dispatcher
+# Istota installer
 #
-# Run interactively (from a terminal) it asks which install mode you want:
-#
-#   Server      Multi-user deployment on a Debian/Ubuntu server, backed by
-#               Nextcloud (files, Talk chat, CalDAV, web login) with per-user
-#               bubblewrap isolation. Installs system-wide via Ansible and
-#               needs root. This is the full Istota.
+#   Server      One istota install on a Debian 13 machine of its own (a VM, a
+#               VPS or a bare-metal box): the Docker stack, with per-user
+#               bubblewrap isolation, set up by host/provision.sh and run by
+#               istota-stack. Needs root.
 #
 #   Standalone  Single-user install on your own machine (macOS or Linux). No
 #               server, no Nextcloud, no login, no sandbox. You chat through
 #               the local web UI and the REPL; everything runs as your user in
-#               one process (istota serve). Lighter and quick to start, but
-#               unsandboxed — only give it content and instructions you trust.
+#               one process (istota serve). Deprecated, and kept until the
+#               desktop install replaces it. Only give it content you trust.
 #
-# Server, interactive (curl-pipe): pick from the menu, or force it with --bare
-#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash
+# Server (as root, on the machine that will run it):
+#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
+#       | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 #
-# Standalone, interactive (run WITHOUT sudo — it installs into your user):
+# Standalone (WITHOUT sudo; it installs into your user):
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --standalone
 #
-# Server via Docker — brings up the full-stack compose file:
-#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --docker
-#
 # Usage:
-#   install.sh [--bare | --docker | --standalone] [other flags...]
-#     --bare          Server install, native via Ansible (needs root)
-#     --docker        Server install, Docker path (clones, then prints the setup steps)
-#     --standalone    Local single-user install (uv tool install + istota setup)
-#     --help          Show this help
+#   install.sh [--server | --standalone] [other flags...]
+#     --server             Server install (needs root, Debian 13)
+#       --tag TAG          the signed release tag to install (or ISTOTA_RELEASE_TAG)
+#       --signing-key KEY  the release signing key, one line of an SSH public key
+#                          (or RELEASE_SIGNING_KEY; read from host.env once it has one)
+#     --standalone         Local single-user install (uv tool install + istota setup)
+#     --help               Show this help
 #   With no mode flag on a terminal you are asked to choose; with no mode flag
-#   and no terminal, the historical default (--bare) is used.
+#   and no terminal, --server is used.
 #
-# All other flags pass through to the chosen subscript:
-#   bare metal: --headless, --update, --dry-run, --settings PATH
-#   standalone: any `istota setup` flag (--yes, --force, --workspace, --port, …)
+# The server path does what host/cloud-init.yaml does, then the steps after it:
+# clones the repository into /srv/app/istota/src, verifies the release tag's
+# signature against the key before running anything from it, runs
+# host/provision.sh, then `istota-stack update <tag>` (builds the images),
+# `istota-stack setup` (the wizard), provision.sh again for host.env, and
+# `systemctl enable --now istota-stack`. Without a terminal it stops after the
+# build and prints the rest.
 #
-# The bare-metal path runs an interactive wizard (skip with --headless). The
-# docker path's wizard is `istota setup`, run inside the image; this prints the
-# steps. Standalone always runs `istota setup`.
-#
-# Standalone with a non-Anthropic (native) brain: `istota setup` prompts for the
-# API base URL, model id, and key interactively, or take them non-interactively:
+# Standalone forwards every other flag to `istota setup` (--yes, --force,
+# --workspace, --port, ...). With a non-Anthropic (native) brain:
 #   ... --standalone --brain native --native-model <id> --native-api-key <key>
-#   ... --standalone --brain native --native-model <id>   # or export the key:
-#       ISTOTA_BRAIN_NATIVE_API_KEY=<key>
 # The key is written to ~/.config/istota/istota.env, never to config.toml.
 #
-# Environment overrides (curl-pipe path):
+# Environment overrides:
 #   ISTOTA_REPO_URL     Repo to clone (default: https://github.com/istota-project/istota.git)
-#   ISTOTA_REPO_BRANCH  Branch / tag to clone (default: main)
-#   ISTOTA_CLONE_DIR    Where to clone the repo. Defaults to /tmp/istota-install
-#                       for bare metal and standalone (the Ansible deploy lands
-#                       in /srv/app/istota, and standalone installs a wheel via
-#                       uv, so the clone is throwaway) and ~/istota for docker
-#                       (so you can come back for `docker compose` ops).
+#   ISTOTA_REPO_BRANCH  Branch or tag the standalone clone takes (default: main)
+#   ISTOTA_CLONE_DIR    Where standalone clones the repo (default:
+#                       ${XDG_DATA_HOME:-~/.local/share}/istota/src)
 
 set -euo pipefail
 
 REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
-# CLONE_DIR default is mode-dependent; bare metal uses a temp clone (the
-# Ansible deploy lands in /srv/app/istota anyway), docker uses a stable
-# user-visible path so the user can come back for `docker compose` ops.
 CLONE_DIR="${ISTOTA_CLONE_DIR:-}"
+RELEASE_TAG="${ISTOTA_RELEASE_TAG:-}"
+SIGNING_KEY="${RELEASE_SIGNING_KEY:-}"
+
+STACK=/srv/app/istota
+SRC="${STACK}/src"
+ALLOWED_SIGNERS="${STACK}/allowed_signers"
+HOST_ENV="${STACK}/host.env"
 
 _BOLD="\033[1m"; _BLUE="\033[1;34m"; _GREEN="\033[1;32m"
 _YELLOW="\033[1;33m"; _RED="\033[1;31m"; _DIM="\033[2m"; _RESET="\033[0m"
@@ -72,30 +69,37 @@ ok()      { echo -e "${_GREEN}  ✓${_RESET} $*"; }
 warn()    { echo -e "${_YELLOW}  !${_RESET} $*"; }
 error()   { echo -e "${_RED}ERROR:${_RESET} $*" >&2; }
 die()     { error "$@"; exit 1; }
+refuse_tag() { error "REFUSE: $*"; exit 65; }
 section() { echo; echo -e "${_BOLD}━━━ $* ━━━${_RESET}"; echo; }
 
 show_help() {
     sed -n '2,/^$/s/^# \?//p' "$0"
 }
 
-# Parse only the flags this dispatcher cares about; everything else forwards.
-# MODE_EXPLICIT tracks whether the user chose a mode via a flag — if not, and
-# we're interactive, we prompt for one before dispatching.
-MODE="bare"
+# Parse only the flags this script cares about; everything else forwards to
+# `istota setup` on the standalone path.
+MODE="server"
 MODE_EXPLICIT=false
 FORWARD_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --docker)     MODE="docker";     MODE_EXPLICIT=true; shift ;;
-        --bare)       MODE="bare";       MODE_EXPLICIT=true; shift ;;
+        --server)     MODE="server";     MODE_EXPLICIT=true; shift ;;
         --standalone) MODE="standalone"; MODE_EXPLICIT=true; shift ;;
+        --tag)
+            [ $# -ge 2 ] || die "--tag needs a value"
+            RELEASE_TAG="$2"; shift 2 ;;
+        --signing-key)
+            [ $# -ge 2 ] || die "--signing-key needs a value"
+            SIGNING_KEY="$2"; shift 2 ;;
+        --bare|--docker)
+            die "$1 is gone: a server is one Debian 13 machine running the stack.
+  Use --server --tag <release> --signing-key '<key>' (see --help)." ;;
         --help|-h) show_help; exit 0 ;;
         *) FORWARD_ARGS+=("$1"); shift ;;
     esac
 done
 
-# Find the repo root. If install.sh is sitting next to deploy/ and docker/,
-# we're in a clone. Otherwise we were curl-piped and need to clone.
+# A standalone install from a checkout uses that checkout rather than cloning.
 script_path="${BASH_SOURCE[0]:-}"
 if [ -n "$script_path" ] && [ -f "$script_path" ]; then
     SCRIPT_DIR="$(cd "$(dirname "$script_path")" && pwd)"
@@ -103,36 +107,15 @@ else
     SCRIPT_DIR=""
 fi
 
-_default_clone_dir() {
-    # Docker default lands at $HOME/istota so the user can come back for
-    # `docker compose` ops. When invoked via `sudo bash`, sudo's default
-    # `env_reset` strips HOME, leaving root's home — which surprises users
-    # following the curl-pipe install instructions. Fall back to the
-    # invoking user's home when SUDO_USER is set, then HOME, then /root.
-    local home_dir=""
-    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-        home_dir="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
-    fi
-    if [ -z "$home_dir" ]; then
-        home_dir="${HOME:-/root}"
-    fi
-    echo "${home_dir}/istota"
-}
-
 repo_root_or_empty() {
     local d="$1"
-    if [ -n "$d" ] && [ -d "$d/deploy" ] && [ -d "$d/docker" ] && [ -f "$d/deploy/install.sh" ]; then
+    if [ -n "$d" ] && [ -f "$d/pyproject.toml" ] && [ -d "$d/src/istota" ]; then
         echo "$d"
     fi
 }
 
 REPO_ROOT="$(repo_root_or_empty "$SCRIPT_DIR")"
 
-# When curl-piped, stdin is the pipe carrying the script, not a TTY — so any
-# wizard `read` calls in the subscripts will fail. Reattach stdin to /dev/tty
-# if we have one, so `[ -t 0 ]` checks pass downstream. Best-effort: if
-# /dev/tty isn't available (true non-interactive run), leave stdin alone and
-# let the subscript decide whether it can proceed.
 reattach_tty_if_needed() {
     # Already interactive — nothing to do.
     [ -t 0 ] && return 0
@@ -170,63 +153,143 @@ ensure_repo() {
     ok "Repo ready at $REPO_ROOT"
 }
 
-run_bare() {
-    # If git isn't installed and we're not root, we can't apt-get it. Bail
-    # early with a clear message rather than failing midway through clone.
-    if [ -z "$REPO_ROOT" ] && ! command -v git >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
-        die "git is required but not installed. Install git, or re-run with sudo:
-  curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash"
-    fi
+# --- Server ------------------------------------------------------------------
 
-    : "${CLONE_DIR:=/tmp/istota-install}"
-    ensure_repo
-    reattach_tty_if_needed
-    local target="$REPO_ROOT/deploy/install.sh"
-    [ -f "$target" ] || die "deploy/install.sh not found at $target"
+# Copied from host/istota-stack, which is authoritative: nothing from the
+# checkout may run before its tag is verified, so this cannot source it.
+# tests/test_host_units.py holds the copy byte for byte equal to the original.
+# --- release tags ------------------------------------------------------------
 
-    if [ "$(id -u)" -ne 0 ]; then
-        if command -v sudo >/dev/null 2>&1; then
-            info "Bare-metal install requires root — re-executing deploy/install.sh under sudo"
-            exec sudo -E bash "$target" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
-        else
-            die "Bare-metal install requires root. Re-run as root or install sudo."
-        fi
-    fi
-
-    exec bash "$target" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
+# git against the checkout, reading no configuration but this.
+verified_git() {
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$SRC" \
+        -c gpg.format=ssh \
+        -c "gpg.ssh.allowedSignersFile=${ALLOWED_SIGNERS}" \
+        -c gpg.openpgp.program=false \
+        -c gpg.x509.program=false \
+        "$@"
 }
 
-run_docker() {
-    if ! command -v docker >/dev/null 2>&1; then
-        die "docker not found. Install Docker first: https://docs.docker.com/engine/install/"
+check_tag_name() {
+    case "$1" in
+        ""|-*|*[!A-Za-z0-9._-]*|*..*) refuse_tag "'$1' is not a release tag name." ;;
+    esac
+}
+
+# Print the object id of a release tag that passes every check, or refuse.
+verify_release_tag() {
+    local tag="$1" object kind named
+    check_tag_name "$tag"
+    if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
+        refuse_tag "${tag} is not a tag in the checkout. Only a signed release tag is deployed, never a branch or a commit."
     fi
-    if ! docker compose version >/dev/null 2>&1; then
-        die "'docker compose' plugin not available. Install docker-compose-plugin."
+    kind="$(verified_git cat-file -t "$object")"
+    if [ "$kind" != "tag" ]; then
+        refuse_tag "${tag} is a lightweight tag; a release tag is annotated and signed."
+    fi
+    named="$(verified_git cat-file tag "$object" | awk '/^tag / { print $2; exit } /^$/ { exit }')"
+    if [ "$named" != "$tag" ]; then
+        refuse_tag "the ref ${tag} points at a tag object named '${named}'."
+    fi
+    if ! verified_git cat-file tag "$object" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+        refuse_tag "${tag} carries no SSH signature."
+    fi
+    if [ ! -s "$ALLOWED_SIGNERS" ]; then
+        refuse_tag "${ALLOWED_SIGNERS} is missing or empty; provision.sh writes it from RELEASE_SIGNING_KEY."
+    fi
+    if ! verified_git verify-tag "$object" >/dev/null 2>&1; then
+        refuse_tag "${tag} is not signed by the key in ${ALLOWED_SIGNERS}."
+    fi
+    echo "$object"
+}
+
+host_env_key() {
+    [ -f "$HOST_ENV" ] || return 0
+    sed -n 's/^RELEASE_SIGNING_KEY=//p' "$HOST_ENV" | tail -n 1
+}
+
+run_server() {
+    [ "$(id -u)" -eq 0 ] || die "The server install needs root. Re-run under sudo."
+    if [ ! -r /etc/debian_version ] || ! command -v apt-get >/dev/null 2>&1; then
+        die "The server install is for Debian 13."
+    fi
+    [ -n "$RELEASE_TAG" ] || die "Name the release to install: --tag vX.Y.Z (or ISTOTA_RELEASE_TAG)."
+
+    # The key every tag is verified against. host.env holds it once written;
+    # a different key on the command line is refused rather than swapped in.
+    local recorded
+    recorded="$(host_env_key)"
+    if [ -n "$recorded" ]; then
+        if [ -n "$SIGNING_KEY" ] && [ "$SIGNING_KEY" != "$recorded" ]; then
+            die "${HOST_ENV} already names a different RELEASE_SIGNING_KEY; edit it there if the key changed."
+        fi
+        SIGNING_KEY="$recorded"
+    fi
+    [ -n "$SIGNING_KEY" ] \
+        || die "Give the release signing key: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)."
+    case "$SIGNING_KEY" in
+        *$'\n'*) die "The signing key is one line of an SSH public key." ;;
+    esac
+
+    section "Server install: ${RELEASE_TAG}"
+    install -d -m 0755 "$STACK"
+    if [ -z "$recorded" ]; then
+        printf 'RELEASE_SIGNING_KEY=%s\n' "$SIGNING_KEY" >> "$HOST_ENV"
+        chmod 0644 "$HOST_ENV"
     fi
 
-    : "${CLONE_DIR:=$(_default_clone_dir)}"
-    ensure_repo
-    # istota's config is written once, inside the image, by `istota setup`, as
-    # the daemon's uid 10001. With --vm-dir it also updates the stack's .env
-    # (keeping every line it does not own) and writes one file per credential
-    # under secrets/. The VM provisioning automates these steps.
-    ok "Repository at $REPO_ROOT"
-    cat <<EOF
+    info "Installing git"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
 
-Next, in $REPO_ROOT/docker:
+    # The file provision.sh writes from host.env, in the same form.
+    printf 'releases namespaces="git" %s\n' "$SIGNING_KEY" > "$ALLOWED_SIGNERS"
+    chmod 0644 "$ALLOWED_SIGNERS"
+    if [ -d "${SRC}/.git" ]; then
+        info "Fetching tags into ${SRC}"
+        verified_git fetch --quiet --tags origin || die "fetching tags into ${SRC} failed."
+    else
+        info "Cloning ${REPO_URL} into ${SRC}"
+        git clone --quiet --no-checkout "$REPO_URL" "$SRC"
+    fi
+    local object
+    object="$(verify_release_tag "$RELEASE_TAG")"
+    verified_git checkout --quiet --detach "${object}^{commit}"
+    ok "${RELEASE_TAG} is signed by the release key"
 
-  1. cp .env.example .env
-  2. docker compose build istota
-  3. Let the image's uid 10001 write .env, host.env and secrets/. Compose refuses
-     to run a service whose secret file is missing, so each starts empty:
-       touch host.env && sudo chown 10001:10001 .env host.env
-       sudo install -d -o 10001 -g 10001 -m 0700 secrets
-       for n in \$(docker compose config --format json | python3 -c 'import json,sys; print(*json.load(sys.stdin)["secrets"])'); do
-           sudo install -o 10001 -g 10001 -m 0400 /dev/null "secrets/\$n"; done
-  4. docker compose run --rm --no-deps -v "\$PWD:/vm" --entrypoint istota-drop istota istota setup --vm-dir /vm
-  5. docker compose up -d
+    section "Provisioning the host"
+    ISTOTA_REPO_URL="$REPO_URL" "${SRC}/host/provision.sh"
+
+    section "Building ${RELEASE_TAG}"
+    istota-stack update "$RELEASE_TAG"
+
+    reattach_tty_if_needed
+    if [ ! -t 0 ]; then
+        cat <<EOF
+
+No terminal for the setup wizard. On the machine, as root:
+
+  istota-stack setup
+  ${SRC}/host/provision.sh
+  systemctl enable --now istota-stack
 
 EOF
+        exit 0
+    fi
+
+    section "Setup"
+    istota-stack setup
+    "${SRC}/host/provision.sh"
+    systemctl enable --now istota-stack
+
+    section "Done"
+    ok "istota ${RELEASE_TAG} is running"
+    echo
+    echo -e "  ${_BOLD}Check it:${_RESET}  istota doctor"
+    echo -e "  ${_BOLD}Update:${_RESET}    istota-stack update <tag>"
+    echo
+    # stdin may now be the terminal; exit rather than read on from it.
+    exit 0
 }
 
 # --- Standalone (local single-user) helpers --------------------------------
@@ -387,7 +450,7 @@ run_standalone() {
     echo -e "  ${_BOLD}Start it:${_RESET}  istota serve"
     echo -e "             ${_DIM}then open the printed http://127.0.0.1:<port>/istota URL (no login)${_RESET}"
     echo -e "  ${_BOLD}REPL:${_RESET}      istota repl"
-    echo -e "  ${_BOLD}Docs:${_RESET}      docs/LOCAL_INSTALL.md"
+    echo -e "  ${_BOLD}Docs:${_RESET}      docs/getting-started/local-install.md"
     echo
     echo -e "  ${_DIM}Standalone runs unsandboxed as your user — only give it content you trust.${_RESET}"
     echo
@@ -399,8 +462,7 @@ run_standalone() {
 # --- Interactive mode selection --------------------------------------------
 
 # When no mode flag was given and we have a terminal, ask which install shape
-# the user wants. Sets $MODE. With no terminal, leaves the historical default
-# (--bare) untouched so non-interactive `curl | sudo bash` still works.
+# the user wants. Sets $MODE. With no terminal, leaves the default (server).
 #
 # IMPORTANT: we must NOT `exec < /dev/tty` here. Under `curl | bash`, the shell
 # is still reading the rest of this script (the dispatch `case` below) from the
@@ -414,7 +476,7 @@ prompt_install_mode() {
     elif [ -e /dev/tty ] && (exec < /dev/tty) 2>/dev/null; then
         tty_src="/dev/tty"                                     # curl-pipe: prompt on the terminal
     else
-        return 0                                               # no terminal — keep the default
+        return 0                                               # no terminal: keep the default
     fi
 
     local root_note=""
@@ -426,26 +488,21 @@ prompt_install_mode() {
     echo -e "${_BOLD}How do you want to install Istota?${_RESET}"
     echo
     echo -e "  ${_BOLD}1) Server${_RESET} ${_DIM}(default)${_RESET}"
-    echo "     Multi-user deployment on a Debian/Ubuntu server. Backed by"
-    echo "     Nextcloud (files, Talk chat, CalDAV, web login) with per-user"
-    echo "     bubblewrap isolation. Installs system-wide via Ansible and needs"
-    echo "     root. This is the full Istota."
+    echo "     One install on a Debian 13 machine of its own, multi-user, with"
+    echo "     per-user bubblewrap isolation. Needs root, --tag and --signing-key."
     echo
     echo -e "  ${_BOLD}2) Standalone${_RESET}${root_note}"
     echo "     Single-user install on your own machine (macOS or Linux). No"
     echo "     server, no Nextcloud, no login, no sandbox. You chat through the"
     echo "     local web UI and the REPL; everything runs as you in one process."
-    echo "     Lighter and quick to start, but unsandboxed — only give it"
-    echo "     content and instructions you trust."
-    echo
-    echo -e "  ${_DIM}Tip: the Server path can also run as Docker — re-run with --docker.${_RESET}"
+    echo "     Unsandboxed: only give it content and instructions you trust."
     echo
     local choice=""
     read -rp "  Choose [1/2, default 1]: " choice < "$tty_src" || true
     case "$choice" in
         2|s|S|standalone|Standalone) MODE="standalone" ;;
-        ""|1|server|Server)          MODE="bare" ;;
-        *) warn "Unrecognized choice '$choice' — defaulting to Server."; MODE="bare" ;;
+        ""|1|server|Server)          MODE="server" ;;
+        *) warn "Unrecognized choice '$choice'; defaulting to Server."; MODE="server" ;;
     esac
 }
 
@@ -454,8 +511,7 @@ if [ "$MODE_EXPLICIT" = false ]; then
 fi
 
 case "$MODE" in
-    bare)       run_bare ;;
-    docker)     run_docker ;;
+    server)     run_server ;;
     standalone) run_standalone ;;
     *)          die "Unknown mode: $MODE" ;;
 esac

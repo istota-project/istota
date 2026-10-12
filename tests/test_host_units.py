@@ -726,6 +726,35 @@ class TestBootstrapFiles:
         assert 'checkout --quiet --detach "${object}^{commit}"' in script
         assert script.index("verify_release_tag \"$TAG\"") < script.index("host/provision.sh")
 
+    def test_the_root_installer_verifies_the_tag_with_istota_stacks_own_code(self):
+        """`install.sh --server` is the same bootstrap run by hand, so it
+        carries the same copy, held the same way, and runs nothing from the
+        checkout before the tag is verified."""
+        stack = (HOST / "istota-stack").read_text()
+        start = stack.index("# --- release tags ---")
+        end = stack.index("# --- builds and images ---")
+        section = stack[start:end].rstrip() + "\n"
+        script = (REPO / "install.sh").read_text()
+        run_server = script[script.index("run_server() {"):]
+
+        assert section in script
+        verify = run_server.index('object="$(verify_release_tag "$RELEASE_TAG")"')
+        checkout = run_server.index('checkout --quiet --detach "${object}^{commit}"')
+        assert verify < checkout < run_server.index("host/provision.sh")
+        assert run_server.index("host/provision.sh") < run_server.index("istota-stack update")
+
+    def test_the_root_installer_has_no_bare_metal_or_docker_arm(self):
+        """The old --bare arm ran the deleted deploy/install.sh; --docker printed
+        hand steps the stack replaced. Both are refused by name now."""
+        for flag in ("--bare", "--docker"):
+            result = subprocess.run(
+                ["bash", str(REPO / "install.sh"), flag],
+                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+            )
+            assert result.returncode == 1, (flag, result.stdout, result.stderr)
+            assert "--server" in result.stderr
+        assert "deploy/install.sh" not in (REPO / "install.sh").read_text()
+
     def test_the_lima_template_provisions_from_the_checkout(self):
         doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
         # The image alone: `template:debian-13` adds a mount of the whole Mac home
