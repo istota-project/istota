@@ -928,7 +928,7 @@ class TestApiMe:
         if mode == "nextcloud":
             # The mounted shape as load_config builds it: the mount is the workspace.
             config.nextcloud.url = "https://cloud.example.com"
-            config.nextcloud_mount_path = config.workspace_path
+            config.workspace_mount_path = config.workspace_path
         elif mode != "local":
             config.workspace_path = None
         if mode in {"drive", "gmail"}:

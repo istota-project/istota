@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 from dataclasses import dataclass
@@ -77,6 +78,26 @@ case "$args" in
       : > "$vm/setup-done"
     fi
     exit "${STUB_SETUP_RC:-0}" ;;
+  *" migrate restore-workspace"*)
+    cat > "$STUB_CALLS.stdin"
+    vm=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ] && [ "${a%:/vm}" != "$a" ]; then vm="${a%:/vm}"; fi
+      prev="$a"
+    done
+    if [ -n "$vm" ] && [ -n "${STUB_RESTORED_STACK_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_STACK_ENV" > "$vm/stack.env"; fi
+    if [ -n "$vm" ] && [ -n "${STUB_RESTORED_HOST_ENV:-}" ]; then printf '%s' "$STUB_RESTORED_HOST_ENV" > "$vm/host.env"; fi
+    exit "${STUB_RESTORE_RC:-0}" ;;
+  *" migrate import-standalone"*)
+    cat > "$STUB_CALLS.stdin"
+    vm=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ] && [ "${a%:/vm}" != "$a" ]; then vm="${a%:/vm}"; fi
+      prev="$a"
+    done
+    if [ -n "$vm" ] && [ -n "${STUB_IMPORTED_ENV:-}" ]; then printf '%s' "$STUB_IMPORTED_ENV" > "$vm/.env"; fi
+    if [ -n "$vm" ] && [ -n "${STUB_IMPORTED_HOST_ENV:-}" ]; then printf '%s' "$STUB_IMPORTED_HOST_ENV" > "$vm/host.env"; fi
+    exit "${STUB_IMPORT_RC:-0}" ;;
   *" config --services "*)
     if [ -n "${STUB_SERVICES:-}" ]; then printf '%b' "$STUB_SERVICES"; else printf 'daemon\nweb\nnginx\n'; fi
     case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
@@ -958,6 +979,274 @@ class TestImportBareMetal:
         assert fx.docker_calls() == []
 
 
+class TestRestore:
+    """The local VM's recovery, VM half: the master key on stdin, the config and
+    the databases from the workspace's backups, in a one-shot container with the
+    stack down (`istota migrate restore-workspace`)."""
+
+    KEY = "5e" * 32
+
+    def _restore(self, fx: Fixture, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(SCRIPT), "restore", *args], capture_output=True, text=True,
+            input=self.KEY + "\n", env={**fx.env, **extra_env}, timeout=60,
+        )
+
+    def test_it_refuses_while_the_stack_is_up(self, fx):
+        result = self._restore(fx)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "running" in result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_the_key_reaches_the_one_shot_on_stdin_alone(self, fx):
+        result = self._restore(fx, "--date", "2026-10-10", STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        run = next(call for call in calls if "restore-workspace" in call)
+        assert re.search(
+            r"run --rm --no-deps -T --entrypoint istota-drop -v \S+/\.restore\.\w+:/vm "
+            r"daemon istota migrate restore-workspace --vm-dir /vm --date 2026-10-10$", run), run
+        assert Path(f"{fx.calls}.stdin").read_text() == self.KEY + "\n"
+        assert not any(self.KEY in call for call in calls)
+        assert (fx.stack / "config").is_dir()
+
+    def test_its_exit_status_comes_back(self, fx):
+        result = self._restore(fx, STUB_STACK_DOWN="1", STUB_RESTORE_RC="1")
+        assert result.returncode == 1, result.stdout + result.stderr
+
+    def test_without_an_image_nothing_runs(self, fx):
+        (fx.stack / ".env").write_text("COMPOSE_PROFILES=\n")
+        result = self._restore(fx, STUB_STACK_DOWN="1")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls())
+
+    def test_the_stack_files_go_back_with_this_vms_tag(self, fx):
+        """The backed-up .env names the old VM's tag, whose images this VM never
+        built; every other line is the old install's."""
+        result = self._restore(
+            fx, STUB_STACK_DOWN="1",
+            STUB_RESTORED_STACK_ENV="COMPOSE_PROFILES=browser\nNGINX_PUBLISH=127.0.0.1:8181:80\n"
+                                    "ISTOTA_TAG=v-old\nISTOTA_PREVIOUS_TAG=v-older\n",
+            STUB_RESTORED_HOST_ENV="STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_ALLOW=11434\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        env = fx.env_text()
+        assert "COMPOSE_PROFILES=browser\n" in env
+        assert "NGINX_PUBLISH=127.0.0.1:8181:80\n" in env
+        assert "ISTOTA_TAG=v0\n" in env and "v-old" not in env and "v-older" not in env
+        host = (fx.stack / "host.env").read_text()
+        assert host == "STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_ALLOW=11434\n"
+        assert not list(fx.stack.glob(".restore.*")), "the staging directory was left behind"
+
+    def test_without_stack_files_the_vms_own_stay(self, fx):
+        env_before = fx.env_text()
+        host_before = (fx.stack / "host.env").read_text()
+        result = self._restore(fx, STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.env_text() == env_before
+        assert (fx.stack / "host.env").read_text() == host_before
+
+    def test_a_refused_restore_puts_nothing_in_place(self, fx):
+        result = self._restore(
+            fx, STUB_STACK_DOWN="1", STUB_RESTORE_RC="1",
+            STUB_RESTORED_STACK_ENV="COMPOSE_PROFILES=browser\n")
+        assert result.returncode == 1
+        assert "COMPOSE_PROFILES=browser" not in fx.env_text()
+
+    def test_a_profile_the_restored_env_turns_on_is_built(self, fx):
+        result = self._restore(
+            fx, STUB_STACK_DOWN="1", STUB_RESTORED_STACK_ENV="COMPOSE_PROFILES=browser\n",
+            STUB_SERVICES="daemon\\nweb\\nnginx\\nbrowser\\n", STUB_MISSING_IMAGES="istota-browser:v0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        builds = [call for call in fx.docker_calls() if " build " in f"{call} "]
+        assert builds and builds[-1].endswith(" build browser"), builds
+
+
+class TestImportStandalone:
+    """A standalone install the Mac staged, its istota.env on stdin, in a
+    one-shot container with the stack down (`istota migrate import-standalone`);
+    the .env and host.env it stages go in place as setup's do."""
+
+    ENV = "ISTOTA_SECRET_KEY=" + "6a" * 32 + "\n"
+
+    def _import(self, fx: Fixture, source: Path, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(SCRIPT), "import-standalone", str(source), "--hostname", "localhost:8080", *args],
+            capture_output=True, text=True, input=self.ENV, env={**fx.env, **extra_env}, timeout=60,
+        )
+
+    @pytest.fixture
+    def source(self, tmp_path) -> Path:
+        staged = tmp_path / "standalone"
+        staged.mkdir()
+        return staged
+
+    def test_it_refuses_while_the_stack_is_up(self, fx, source):
+        result = self._import(fx, source)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "running" in result.stderr
+        assert not any(" run " in f"{call} " for call in fx.docker_calls()), fx.docker_calls()
+
+    def test_the_env_file_reaches_the_one_shot_on_stdin_alone(self, fx, source):
+        result = self._import(fx, source, STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        run = next(call for call in calls if "import-standalone" in call)
+        assert re.search(
+            rf"run --rm --no-deps -T --entrypoint istota-drop -v {source}:/import:ro "
+            rf"-v \S+/\.setup\.\w+:/vm -v {fx.stack}/secrets:/vm/secrets "
+            r"daemon istota migrate import-standalone --source /import --vm-dir /vm "
+            r"--hostname localhost:8080$", run), run
+        assert Path(f"{fx.calls}.stdin").read_text() == self.ENV
+        assert not any("6a" * 32 in call for call in calls)
+
+    def test_the_staged_stack_files_go_in_place_with_this_vms_tag(self, fx, source):
+        result = self._import(
+            fx, source, STUB_STACK_DOWN="1",
+            STUB_IMPORTED_ENV="COMPOSE_PROFILES=\nNGINX_PUBLISH=127.0.0.1:8080:80\nISTOTA_TAG=v0\n",
+            STUB_IMPORTED_HOST_ENV="STORAGE=host-folder\nINGRESS=local\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        env = fx.env_text()
+        assert "NGINX_PUBLISH=127.0.0.1:8080:80\n" in env and "ISTOTA_TAG=v0\n" in env
+        assert (fx.stack / "host.env").read_text() == "STORAGE=host-folder\nINGRESS=local\n"
+        assert not list(fx.stack.glob(".setup.*")), "the staging directory was left behind"
+
+    def test_a_refused_import_puts_nothing_in_place(self, fx, source):
+        env_before = fx.env_text()
+        result = self._import(
+            fx, source, STUB_STACK_DOWN="1", STUB_IMPORT_RC="1",
+            STUB_IMPORTED_ENV="COMPOSE_PROFILES=browser\n")
+        assert result.returncode == 1
+        assert fx.env_text() == env_before
+
+    def test_a_dry_run_puts_nothing_in_place(self, fx, source):
+        env_before = fx.env_text()
+        result = self._import(
+            fx, source, "--dry-run", STUB_STACK_DOWN="1", STUB_IMPORTED_ENV="COMPOSE_PROFILES=browser\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert fx.env_text() == env_before
+
+    def test_a_missing_staging_directory_is_refused(self, fx, tmp_path):
+        result = self._import(fx, tmp_path / "nowhere", STUB_STACK_DOWN="1")
+        assert result.returncode == 1
+        assert fx.docker_calls() == []
+
+
+def _utc_today() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+@pytest.fixture
+def mounted(fx) -> Fixture:
+    """A host-folder VM whose folder is mounted and marked."""
+    bindir = Path(fx.env["PATH"].split(":")[0])
+    (bindir / "mountpoint").write_text('#!/bin/bash\n[ -z "${STUB_NOT_MOUNTED:-}" ]\n')
+    (bindir / "mountpoint").chmod(0o755)
+    (fx.stack / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\n")
+    mount = Path(fx.env["ISTOTA_MOUNT_DIR"])
+    mount.mkdir()
+    (mount / ".istota-workspace").write_text("")
+    return fx
+
+
+class TestTheStackFilesAreCopiedOut:
+    """`.env` and `host.env` are the VM's, outside anything db_backup reads, so
+    istota-stack copies them into the workspace's `Backups/config/<date>/` on
+    every verb that changes them: update, setup, apply. Only where the
+    workspace is a mount, as db_backup's own copy."""
+
+    def _copied(self, fx: Fixture) -> Path:
+        return Path(fx.env["ISTOTA_MOUNT_DIR"]) / "Backups" / "config" / _utc_today()
+
+    def test_apply_copies_both_private(self, mounted, tmp_path):
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = mounted.run("apply", str(plan))
+        assert result.returncode == 0, result.stdout + result.stderr
+        day = self._copied(mounted)
+        assert (day / "stack.env").read_text() == mounted.env_text()
+        assert (day / "host.env").read_text() == (mounted.stack / "host.env").read_text()
+        assert stat.S_IMODE(day.stat().st_mode) == 0o700
+        for name in ("stack.env", "host.env"):
+            assert stat.S_IMODE((day / name).stat().st_mode) == 0o600, name
+
+    def test_update_copies_them_with_the_new_tag(self, mounted):
+        mounted.commit("v1")
+        mounted.tag("v1", key=mounted.release_key)
+        result = mounted.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in (self._copied(mounted) / "stack.env").read_text()
+
+    def test_a_vm_with_no_config_keeps_the_days_set(self, mounted):
+        """The Mac's restore runs `create --no-setup`, whose update runs on a
+        new VM with no config: its tag-only `.env` and bare `host.env` must
+        not replace the set the old VM copied in that day, which the restore
+        is about to read."""
+        (mounted.stack / "config" / "config.toml").unlink()
+        day = self._copied(mounted)
+        day.mkdir(parents=True)
+        old_stack_env = "COMPOSE_PROFILES=browser\nNGINX_PUBLISH=127.0.0.1:8080\nISTOTA_TAG=v0\n"
+        old_host_env = "STORAGE=host-folder\nHOST_LOOPBACK_ALLOW=11434\nCLAUDE_CODE_VERSION=2.1.296\n"
+        (day / "stack.env").write_text(old_stack_env)
+        (day / "host.env").write_text(old_host_env)
+        mounted.commit("v1")
+        mounted.tag("v1", key=mounted.release_key)
+        result = mounted.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in mounted.env_text()
+        assert (day / "stack.env").read_text() == old_stack_env
+        assert (day / "host.env").read_text() == old_host_env
+
+    def test_a_dry_run_apply_copies_them_too(self, mounted, tmp_path):
+        """Nothing in either file changes under apply; the copy is what keeps
+        the newest set within the snapshots' retention."""
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        assert mounted.run("apply", str(plan), "--dry-run").returncode == 0
+        assert (self._copied(mounted) / "stack.env").is_file()
+
+    @pytest.mark.parametrize("change", ["not-mounted", "local", "no-marker"])
+    def test_nothing_is_copied_off_a_mount(self, mounted, tmp_path, change):
+        env = {}
+        if change == "not-mounted":
+            env["STUB_NOT_MOUNTED"] = "1"
+        elif change == "local":
+            (mounted.stack / "host.env").write_text("STORAGE=local\n")
+        else:
+            (Path(mounted.env["ISTOTA_MOUNT_DIR"]) / ".istota-workspace").unlink()
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = mounted.run("apply", str(plan), **env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (Path(mounted.env["ISTOTA_MOUNT_DIR"]) / "Backups").exists()
+
+    def test_a_link_in_the_path_is_not_followed_and_fails_nothing(self, mounted, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (Path(mounted.env["ISTOTA_MOUNT_DIR"]) / "Backups").symlink_to(elsewhere)
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = mounted.run("apply", str(plan))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert list(elsewhere.iterdir()) == []
+        assert "WARNING" in result.stdout + result.stderr
+
+    def test_setup_web_copies_them(self, web, tmp_path):
+        bindir = Path(web.env["PATH"].split(":")[0])
+        (bindir / "mountpoint").write_text("#!/bin/bash\nexit 0\n")
+        (bindir / "mountpoint").chmod(0o755)
+        mount = Path(web.env["ISTOTA_MOUNT_DIR"])
+        mount.mkdir()
+        (mount / ".istota-workspace").write_text("")
+        result = web.run("setup", "--web", **_finished(
+            STUB_STAGED_HOST_ENV="STORAGE=host-folder\nINGRESS=local\n"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        day = mount / "Backups" / "config" / _utc_today()
+        assert (day / "host.env").read_text() == "STORAGE=host-folder\nINGRESS=local\n"
+        assert (day / "stack.env").read_text() == web.env_text()
+
+
 class TestExec:
     def test_every_exec_goes_through_the_drop(self, fx):
         result = fx.run("exec", "istota", "doctor")
@@ -1010,6 +1299,40 @@ class TestTheMount:
         result = _source(fx, 'docker() { echo "mount=${ISTOTA_MOUNT_DIR}"; }; compose ps')
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == f"mount={fx.root / 'mount'}"
+
+    @pytest.mark.parametrize("storage,mount,fstype,marker", [
+        ("host-folder", "/srv/mount/host-folder", "virtiofs", "1"),
+        ("nextcloud", "/srv/mount/nextcloud/content", "fuse.rclone", ""),
+        ("local", "/srv/mount/nextcloud/content", "", ""),
+    ])
+    def test_storage_decides_what_the_containers_are_told_about_the_mount(
+        self, fx, storage, mount, fstype, marker,
+    ):
+        """What host.env's STORAGE means for the workspace bind: the directory
+        on the VM, the filesystem type the entrypoint requires there, and
+        whether the folder must carry `.istota-workspace`."""
+        (fx.stack / "host.env").write_text(f"STORAGE={storage}\nINGRESS=local\n")
+        env = {k: v for k, v in fx.env.items() if k != "ISTOTA_MOUNT_DIR"}
+        result = subprocess.run(
+            ["bash", "-c", f'source "{SCRIPT}"; docker() {{ echo "mount=${{ISTOTA_MOUNT_DIR}} '
+             'fstype=${ISTOTA_WORKSPACE_FSTYPE-unset} marker=${ISTOTA_WORKSPACE_MARKER_REQUIRED-unset}"; }; '
+             "compose ps"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"mount={mount} fstype={fstype} marker={marker}"
+
+    def test_the_daemon_and_web_receive_both_from_compose(self):
+        import yaml
+
+        from istota.lib import workspace_marker
+
+        services = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())["services"]
+        for name in ("daemon", "web"):
+            environment = services[name]["environment"]
+            assert environment["ISTOTA_WORKSPACE_FSTYPE"] == "${ISTOTA_WORKSPACE_FSTYPE:-}", name
+            assert environment[workspace_marker.REQUIRED_ENV] == (
+                "${" + workspace_marker.REQUIRED_ENV + ":-}"), name
 
 
 class TestRootNeverReadsWhatUid10001Can:
@@ -1415,6 +1738,76 @@ class TestTheWrapperPassesStdin:
         assert seen.read_text() == "the-value"
 
 
+class TestHostEnv:
+    """`istota-stack host-env`: how the Mac CLI writes the local VM's host.env
+    keys (STORAGE, INGRESS, the loopback block) and edits the allow list."""
+
+    def test_it_sets_keys_and_keeps_every_other_line(self, fx):
+        (fx.stack / "host.env").write_text("# operator's note\nINGRESS=direct\nCLAUDE_CODE_VERSION=2.1.296\n")
+        result = fx.run("host-env", "INGRESS=local", "HOST_LOOPBACK_ALLOW=1234 11434")
+        assert result.returncode == 0, result.stderr
+        assert (fx.stack / "host.env").read_text() == (
+            "# operator's note\nINGRESS=local\nCLAUDE_CODE_VERSION=2.1.296\nHOST_LOOPBACK_ALLOW=1234 11434\n")
+
+    def test_it_prints_one_value(self, fx):
+        result = fx.run("host-env", "CLAUDE_CODE_VERSION")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "2.1.296\n"
+
+    @pytest.mark.parametrize("arg", ["lower=1", "=1", "A-B=1", "lower"])
+    def test_a_key_not_in_host_envs_shape_is_refused(self, fx, arg):
+        before = (fx.stack / "host.env").read_text()
+        result = fx.run("host-env", arg)
+        assert result.returncode != 0
+        assert (fx.stack / "host.env").read_text() == before
+
+    def test_a_mix_of_reads_and_writes_is_a_usage_error(self, fx):
+        assert fx.run("host-env", "INGRESS=local", "STORAGE").returncode == 64
+
+
+class TestStaging:
+    """`stage` and `unstage`: the Mac CLI's file arguments land in a fresh
+    0700 directory under staging/, and only such a directory is removed."""
+
+    def test_stage_moves_the_path_into_a_fresh_private_directory(self, fx, tmp_path):
+        incoming = tmp_path / "incoming"
+        incoming.mkdir()
+        (incoming / "plan.toml").write_text("[config]\n")
+        result = fx.run("stage", str(incoming / "plan.toml"))
+        assert result.returncode == 0, result.stderr
+        staged = Path(result.stdout.strip())
+        assert staged.name == "plan.toml"
+        assert staged.parent.parent == fx.stack / "staging"
+        assert staged.read_text() == "[config]\n"
+        assert staged.parent.stat().st_mode & 0o777 == 0o700
+        assert not (incoming / "plan.toml").exists()
+
+    def test_a_link_is_not_staged(self, fx, tmp_path):
+        link = tmp_path / "plan.toml"
+        link.symlink_to("/etc/hosts")
+        result = fx.run("stage", str(link))
+        assert result.returncode != 0
+        assert not (fx.stack / "staging").exists() or not any((fx.stack / "staging").iterdir())
+
+    def test_unstage_removes_the_staged_directory(self, fx, tmp_path):
+        source = tmp_path / "export"
+        source.mkdir()
+        staged = Path(fx.run("stage", "--daemon", str(source)).stdout.strip())
+        assert staged.is_dir()
+        result = fx.run("unstage", str(staged))
+        assert result.returncode == 0, result.stderr
+        assert not staged.parent.exists()
+        assert (fx.stack / "staging").is_dir()
+
+    @pytest.mark.parametrize("path", ["{stack}/config/config.toml", "{stack}/staging/x/../../config/x", "/tmp/x"])
+    def test_unstage_removes_nothing_outside_staging(self, fx, path):
+        (fx.stack / "staging" / "x").mkdir(parents=True)
+        result = fx.run("unstage", path.format(stack=fx.stack))
+        assert result.returncode != 0
+        assert (fx.stack / "config" / "config.toml").exists()
+        assert (fx.stack / "staging" / "x").is_dir()
+
+
 class TestTheStackLock:
     """Every verb that writes takes one lock, `flock` on `.stack.lock`, so a
     config-apply cannot interleave with an update, a setup, a put-files or an
@@ -1452,18 +1845,24 @@ class TestTheStackLock:
         assert result.returncode == 0, result.stdout + result.stderr
         assert any(call.endswith("up -d --remove-orphans") for call in fx.docker_calls())
 
-    @pytest.mark.parametrize("verb", ["update", "rollback", "setup", "apply", "import-bare-metal",
-                                      "retire-bare-metal", "put-files", "localize-workspace", "up", "down"])
-    def test_every_writing_verb_is_locked(self, fx, verb):
+    @pytest.mark.parametrize("args", [
+        ("update",), ("rollback",), ("setup",), ("apply",), ("import-bare-metal",),
+        ("restore",), ("import-standalone",), ("retire-bare-metal",), ("put-files",),
+        ("localize-workspace",), ("up",), ("down",), ("host-env", "STORAGE=local"),
+    ])
+    def test_every_writing_verb_is_locked(self, fx, args):
+        before = (fx.stack / "host.env").read_text()
         held = HeldLock(self._lock(fx), "update")
         try:
-            result = fx.run(verb, ISTOTA_STACK_LOCK_WAIT="0")
+            result = fx.run(*args, ISTOTA_STACK_LOCK_WAIT="0")
         finally:
             held.release()
-        assert result.returncode == 1, (verb, result.stdout, result.stderr)
-        assert "istota-stack update" in result.stderr, verb
+        assert result.returncode == 1, (args, result.stdout, result.stderr)
+        assert "istota-stack update" in result.stderr, args
+        assert (fx.stack / "host.env").read_text() == before, args
 
-    @pytest.mark.parametrize("args", [("exec", "istota", "doctor"), ("compose", "ps"), ("check-image",)])
+    @pytest.mark.parametrize("args", [("exec", "istota", "doctor"), ("compose", "ps"), ("check-image",),
+                                      ("host-env", "INGRESS")])
     def test_a_verb_that_writes_nothing_takes_no_lock(self, fx, args):
         held = HeldLock(self._lock(fx), "update")
         try:
@@ -1471,6 +1870,44 @@ class TestTheStackLock:
         finally:
             held.release()
         assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_staging_takes_no_lock(self, fx, tmp_path):
+        """stage and unstage make and remove a directory of their own; the verb
+        the staged path is handed to takes the lock."""
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        held = HeldLock(self._lock(fx), "update")
+        try:
+            staged = fx.run("stage", str(plan), ISTOTA_STACK_LOCK_WAIT="0")
+            assert staged.returncode == 0, staged.stdout + staged.stderr
+            removed = fx.run("unstage", staged.stdout.strip(), ISTOTA_STACK_LOCK_WAIT="0")
+        finally:
+            held.release()
+        assert removed.returncode == 0, removed.stdout + removed.stderr
+
+    def test_a_restore_releases_the_lock_before_provisioning(self, fx):
+        """restore runs provision.sh as a child, which may start
+        istota-stack.service, whose `up` would wait on the lock restore holds."""
+        script = fx.stack / "src" / "host" / "provision.sh"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--digest" ]; then echo new; exit 0; fi\n'
+            "python3 -c 'import fcntl, sys\n"
+            "f = open(sys.argv[1], \"a\")\n"
+            "try:\n"
+            "    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "    print(\"lock free\")\n"
+            "except BlockingIOError:\n"
+            "    print(\"lock held\")' \"$ISTOTA_STACK_DIR/.stack.lock\" >> \"$STUB_CALLS\"\n"
+        )
+        script.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "restore"], capture_output=True, text=True,
+            input=TestRestore.KEY + "\n", env={**fx.env, "STUB_STACK_DOWN": "1"}, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "lock free" in fx.docker_calls(), fx.docker_calls()
 
     def test_an_update_releases_the_lock_before_provisioning(self, fx):
         """provision.sh, exec'd last, runs `istota-stack up` (and may restart

@@ -466,7 +466,7 @@ def _make_config(case: Case, world: dict[str, Path]) -> Config:
         db_path=world["db_dir"] / "istota.db",
         temp_dir=world["base"] / "temp",
         workspace_path=world["mount"] if case.mount else None,
-        nextcloud_mount_path=world["mount"] if case.mount else None,
+        workspace_mount_path=world["mount"] if case.mount else None,
         nextcloud=NextcloudConfig(url="https://cloud.example.com" if case.mount else ""),
         skills_dir=world["config"] / "skills",
         module_data_dir=module_data_dir,

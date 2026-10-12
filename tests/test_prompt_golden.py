@@ -631,7 +631,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
 
     db.init_db(tmp_path / "framework.db")
 
-    # `Config.storage_is_nextcloud` is a URL *and* `nextcloud_mount_path`, which
+    # `Config.storage_is_nextcloud` is a URL *and* `workspace_mount_path`, which
     # is what `istota setup` writes for full integration; the Nextcloud-free
     # install has neither.
     nextcloud_backed = case.backend == "nextcloud"
@@ -643,7 +643,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         skills_dir=skills_dir,
         bundled_skills_dir=bundled,
         workspace_path=mount,
-        nextcloud_mount_path=mount if nextcloud_backed else None,
+        workspace_mount_path=mount if nextcloud_backed else None,
         nextcloud=NextcloudConfig(
             url=url,
             username="istota",

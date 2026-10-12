@@ -14,7 +14,7 @@ class TestStorageIdentity:
     def test_nextcloud_backed_when_url_and_mount_set(self):
         cfg = Config(
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            nextcloud_mount_path=Path("/srv/mount/nc"),
+            workspace_mount_path=Path("/srv/mount/nc"),
         )
         assert cfg.storage_is_nextcloud is True
         assert cfg.storage_backend == "nextcloud"
@@ -32,7 +32,7 @@ class TestStorageIdentity:
         none_auth = Config(
             web=WebConfig(auth="none"),
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            nextcloud_mount_path=Path("/srv/mount/nc"),
+            workspace_mount_path=Path("/srv/mount/nc"),
         )
         assert none_auth.storage_backend == "nextcloud"
 
@@ -155,7 +155,7 @@ class TestPromptStorageFramingNextcloud:
             tmp_path,
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             workspace_path=tmp_path / "mnt",
-            nextcloud_mount_path=tmp_path / "mnt",
+            workspace_mount_path=tmp_path / "mnt",
         )
         assert config.storage_backend == "nextcloud"
         return build_prompt(_task(), [], config).system

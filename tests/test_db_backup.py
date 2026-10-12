@@ -9,6 +9,7 @@ from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
 
 from istota import db
 from istota.maintenance import db_backup
@@ -42,7 +43,7 @@ def _config(
         email=EmailConfig(),
         scheduler=SchedulerConfig(**sched),
         workspace_path=mount,
-        nextcloud_mount_path=mount if mount_configured else None,
+        workspace_mount_path=mount if mount_configured else None,
         module_data_dir=tmp_path / "local",
         users={"alice": UserConfig()},
     )
@@ -336,6 +337,159 @@ class TestBackupPermissions:
         assert stat.S_IMODE(snap.stat().st_mode) == 0o600
 
 
+class TestTheHostFolderMarker:
+    """A host folder shared into the local VM that went away still reads as a
+    mount of the same type; only `.istota-workspace` says it is the workspace
+    (row L1). A snapshot into the empty stand-in would be lost with it."""
+
+    @pytest.fixture(autouse=True)
+    def _host_folder(self, monkeypatch):
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+
+    def test_a_mount_without_its_marker_is_not_written(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+        assert not (tmp_path / "mount" / "Backups").exists()
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_a_mount_with_its_marker_is_written(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+        (tmp_path / "mount" / ".istota-workspace").write_text("")
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", "1")
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+
+class TestAMountNothingVouchesFor:
+    """config.toml names a workspace mount and the stack passes no type for it
+    (host.env STORAGE=local while the config is still a host folder's). A bind
+    of a plain host directory is a mount point too, so `ismount` reads it as
+    the workspace; the snapshots would land in a directory nobody vouched for,
+    as the daemon's workspace did on the vm tier's VM."""
+
+    @pytest.fixture(autouse=True)
+    def _nothing_declared(self, monkeypatch):
+        monkeypatch.delenv("ISTOTA_WORKSPACE_FSTYPE", raising=False)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+
+    def test_no_snapshot_and_no_config_copy_is_written(self, tmp_path, monkeypatch):
+        (tmp_path / "admins").write_text("alice\n")
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+        (tmp_path / "mount" / ".istota-workspace").write_text("")
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+        assert not (tmp_path / "mount" / "Backups").exists()
+
+    def test_a_declared_type_is_written(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        cfg = _config(tmp_path, db_backup_dir="")
+        db.init_db(cfg.db_path)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+    def test_full_integration_needs_no_declaration(self, tmp_path):
+        cfg = _config(tmp_path, db_backup_dir="", nextcloud_url="https://cloud.example.com")
+        db.init_db(cfg.db_path)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+
+class TestTheConfigCopy:
+    """`config.toml` and `admins` beside the snapshots, for a restore that has
+    lost the VM: the snapshots alone cannot rebuild a stack (the local VM's
+    recovery). Only where the workspace is a mount, which is off the VM."""
+
+    @pytest.fixture
+    def config_files(self, tmp_path, monkeypatch):
+        directory = tmp_path / "config"
+        directory.mkdir()
+        (directory / "config.toml").write_text('bot_name = "Zed"\n')
+        (directory / "admins").write_text("alice\n")
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(directory / "admins"))
+        monkeypatch.setenv("ISTOTA_WORKSPACE_FSTYPE", "virtiofs")
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        return directory
+
+    def _cfg(self, tmp_path, config_files, **kw):
+        cfg = _config(tmp_path, db_backup_dir="", **kw)
+        cfg.config_path = config_files / "config.toml"
+        db.init_db(cfg.db_path)
+        return cfg
+
+    def test_both_files_are_copied_private_beside_the_snapshots(
+        self, tmp_path, config_files, monkeypatch,
+    ):
+        cfg = self._cfg(tmp_path, config_files)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        dated = tmp_path / "mount" / "Backups" / "config" / FIXED_DAY
+        assert (dated / "config.toml").read_text() == 'bot_name = "Zed"\n'
+        assert (dated / "admins").read_text() == "alice\n"
+        assert stat.S_IMODE(dated.stat().st_mode) == 0o700
+        for name in ("config.toml", "admins"):
+            assert stat.S_IMODE((dated / name).stat().st_mode) == 0o600, name
+
+    def test_nothing_is_copied_without_a_workspace_mount(self, tmp_path, config_files):
+        cfg = self._cfg(tmp_path, config_files, mount_configured=False)
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        assert not (tmp_path / "mount" / "Backups" / "config").exists()
+
+    def test_nothing_is_copied_into_an_unmounted_store(self, tmp_path, config_files, monkeypatch):
+        cfg = self._cfg(tmp_path, config_files)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        assert not (tmp_path / "mount" / "Backups").exists()
+
+    def test_the_copies_keep_the_snapshots_retention(self, tmp_path, config_files, monkeypatch):
+        cfg = self._cfg(tmp_path, config_files, db_backup_retention=2)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        start = _date.fromisoformat(FIXED_DAY)
+
+        for offset in range(4):
+            db_backup.backup_databases(cfg, today=(start + timedelta(days=offset)).isoformat())
+
+        kept = sorted(p.name for p in (tmp_path / "mount" / "Backups" / "config").iterdir())
+        assert kept == [(start + timedelta(days=offset)).isoformat() for offset in (2, 3)]
+
+    def test_the_newest_stack_env_copy_outlives_the_retention(self, tmp_path, config_files, monkeypatch):
+        """`istota-stack` copies .env and host.env in only on update, setup and
+        apply, so the newest set may be older than every day kept; a restore
+        needs it all the same."""
+        cfg = self._cfg(tmp_path, config_files, db_backup_retention=2)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        start = _date.fromisoformat(FIXED_DAY)
+        root = tmp_path / "mount" / "Backups" / "config"
+        for offset, env in ((0, "old"), (1, "new")):
+            day = root / (start + timedelta(days=offset)).isoformat()
+            day.mkdir(parents=True)
+            (day / "stack.env").write_text(f"COMPOSE_PROFILES={env}\n")
+            (day / "host.env").write_text("STORAGE=host-folder\n")
+
+        for offset in range(2, 6):
+            db_backup.backup_databases(cfg, today=(start + timedelta(days=offset)).isoformat())
+
+        kept = sorted(p.name for p in root.iterdir())
+        assert kept == [(start + timedelta(days=offset)).isoformat() for offset in (1, 4, 5)]
+
+
 class TestMountLiveness:
     """A destination under the Nextcloud mount must not be written when the mount
     is down — otherwise the 'backup' lands on local disk under a stale mountpoint
@@ -430,7 +584,7 @@ class TestMountLiveness:
         assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
 
     def _symlinked_mount(self, tmp_path):
-        """Config whose nextcloud_mount_path is a symlink to the real mount."""
+        """Config whose workspace_mount_path is a symlink to the real mount."""
         real_mount = tmp_path / "real-mount"
         (real_mount / "Backups").mkdir(parents=True)
         link_mount = tmp_path / "linked-mount"
@@ -441,7 +595,7 @@ class TestMountLiveness:
             nextcloud_url=self.NC,
         )
         cfg.workspace_path = link_mount
-        cfg.nextcloud_mount_path = link_mount
+        cfg.workspace_mount_path = link_mount
         db.init_db(cfg.db_path)
         return cfg, real_mount
 
@@ -562,7 +716,7 @@ class TestStandaloneInstallIsNotGated:
     def test_adding_a_nextcloud_url_does_not_arm_the_gate(self, tmp_path, monkeypatch):
         cfg = self._standalone(tmp_path, nextcloud_url="https://cloud.example.com")
         assert cfg.nextcloud_enabled
-        assert cfg.nextcloud_mount_path is None
+        assert cfg.workspace_mount_path is None
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
 

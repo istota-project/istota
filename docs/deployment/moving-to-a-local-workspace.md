@@ -9,7 +9,7 @@ An install in full Nextcloud integration keeps its workspace in the bot's Nextcl
 1. Checks that `config.toml` can be moved: it is in full integration, and `istota apply` did not write it (see [A VM the management role manages](#a-vm-the-management-role-manages)). Then checks that `/data/workspace` is empty, or that you passed `--resume`. A refusal here stops nothing.
 2. Stops `daemon`, `web` and `whatsapp-baileys`, the services that write the workspace. `nginx` and `signaling` keep running.
 3. Copies `Users/`, `Channels/`, `Groups/` and `PERSONA.md` from `/mnt/shared` to `/data/workspace`, in a one-shot container running as the daemon's user. Nothing else at the top of the bot's Nextcloud files belongs to the workspace: the bot's `Talk/` folder, folders users shared with the bot and `Backups/` stay where they are. Database snapshots are made again on the new volume.
-4. Rewrites `config.toml`: `workspace_path = "/data/workspace"`, no `nextcloud_mount_path`, and `auto_share_bot_dir = false`. `dav_prefix` stays, since the `nextcloud` skill still uses it for the bot's own Nextcloud files. The previous file is kept as `config/config.toml.pre-localize`.
+4. Rewrites `config.toml`: `workspace_path = "/data/workspace"`, no `workspace_mount_path` (nor its old name, `nextcloud_mount_path`), and `auto_share_bot_dir = false`. `dav_prefix` stays, since the `nextcloud` skill still uses it for the bot's own Nextcloud files. The previous file is kept as `config/config.toml.pre-localize`.
 5. Writes `MOVED.md` into each user's bot folder in Nextcloud. It tells them their files now live in the web UI and that the folder is a frozen copy. This is the only change made to the Nextcloud files, and it happens only once the config no longer names the mount. A user who already has a `MOVED.md` there keeps theirs and gets no note; the verb names them. A failure here is a warning and the move goes on.
 6. Sets `STORAGE=local` in `host.env` and runs `provision.sh`, which stops and disables `mount-nextcloud.service`.
 7. Starts the stack, then rebuilds the memory search index on the new paths and removes the entries that still name `/mnt/shared`.
@@ -66,7 +66,7 @@ When the Ansible management role manages the VM, `istota apply` writes `config.t
 
    `--copy-only` writes no `MOVED.md`, since the config has not moved yet and the play turns the mount off afterwards. Tell your users that their bot folder in Nextcloud is now a frozen copy.
 
-2. In the role's variables, set `istota_storage: local`, leave `nextcloud_mount_path` out of `istota_config`, and set `workspace_path = "/data/workspace"` and `[nextcloud] auto_share_bot_dir = false` there. Run the play. If the stack is still down afterwards, run `istota-stack up`.
+2. In the role's variables, set `istota_storage: local`, leave `workspace_mount_path` out of `istota_config`, and set `workspace_path = "/data/workspace"` and `[nextcloud] auto_share_bot_dir = false` there. Run the play. If the stack is still down afterwards, run `istota-stack up`.
 3. Once the stack is up, rebuild the memory search index:
 
    ```bash

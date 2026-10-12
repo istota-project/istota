@@ -26,6 +26,8 @@
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9), localize-without-config (istota-stack localize-workspace)
+#   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
+#              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18)
 #
 # Run scripts/test-vm.sh first: the controls reuse its VM and images. No arrays:
@@ -142,6 +144,24 @@ control localize-without-config \
 control no-storage-refusal \
     "row 9: an entrypoint without the mount refusal" \
     "$VM/test_nextcloud.py::TestNothingIsWrittenIntoAnUnmountedStore::test_with_the_mount_stopped_the_daemon_does_not_start"
+
+control no-workspace-marker \
+    "row L1: an entrypoint without the host folder's marker refusal" \
+    "$VM/test_host_folder.py::TestAFolderThatWentAwayIsNotWritten::test_without_its_marker_the_daemon_does_not_start"
+
+H="$VM/test_host_folder.py::TestTheMacLoopbackIsClosedToContainers"
+control host-loopback-unblocked \
+    "row L2: HOST_LOOPBACK_BLOCK=0, the egress unit re-run" \
+    "$H::test_the_daemon_reaches_the_allowed_port_only" \
+    "$H::test_the_browser_reaches_the_allowed_port_only"
+M="$VM/test_host_folder.py::TestOnlyTheFolderCrossesFromTheMac"
+control default-mounts-in-template \
+    "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \
+    "$M::test_the_vm_mounts_the_read_only_checkout_and_the_folder_alone" \
+    "$M::test_the_vm_reads_nothing_of_the_mac_outside_the_folder"
+control mac-shim-without-drop \
+    "row L4: the Mac CLI's exec sent to compose exec daemon, past istota-drop" \
+    "$VM/test_host_folder.py::TestTheMacCliExecsAsTheDaemon::test_the_mac_cli_execs_as_10001_with_no_capabilities"
 
 P="$VM/test_proxied.py"
 control no-allow-list \

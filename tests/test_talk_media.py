@@ -94,7 +94,7 @@ def test_the_cleanup_pass_sweeps_a_local_workspace_and_not_the_mount(tmp_path):
         db.init_db(db_path)
         config = Config(
             db_path=db_path, temp_dir=tmp_path / "temp", workspace_path=workspace,
-            nextcloud_mount_path=workspace if mounted else None,
+            workspace_mount_path=workspace if mounted else None,
             nextcloud=NextcloudConfig(url="https://cloud.test", username="istota"),
             talk=TalkConfig(attachment_retention_days=30),
         )

@@ -101,6 +101,9 @@ HOST_ENV_VARS = {
     "ACME_SERVER": "istota_acme_server",
     "RCLONE_REMOTE": "istota_rclone_remote",
     "ZRAM_ENABLED": "istota_zram_enabled",
+    "HOST_LOOPBACK_BLOCK": "istota_host_loopback_block",
+    "HOST_GATEWAY_ADDR": "istota_host_gateway_addr",
+    "HOST_LOOPBACK_ALLOW": "istota_host_loopback_allow",
 }
 
 #: The old role's per-user keys that become `istota user ensure` flags.
@@ -274,8 +277,10 @@ def _host_vars(host_env: dict[str, str], stack_env: dict[str, str], notes: list[
             extra[key] = value
         elif key == "LISTEN_PORT":
             out[variable] = int(value) if value.isdigit() else value
-        elif key == "ZRAM_ENABLED":
+        elif key in ("ZRAM_ENABLED", "HOST_LOOPBACK_BLOCK"):
             out[variable] = value == "1"
+        elif key == "HOST_LOOPBACK_ALLOW":
+            out[variable] = [int(p) if p.isdigit() else p for p in value.split()]
         else:
             out[variable] = value
     if extra:

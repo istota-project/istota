@@ -8,8 +8,8 @@ import pytest
 
 from istota.maintenance import workspace_paths as wp
 
-PREFIXES = [("/srv/mount/nextcloud/content", "/mnt/shared"), ("/srv/app/zorg/tmp", "/data/tmp")]
-OLD_HOME = "/srv/app/zorg"
+PREFIXES = [("/srv/mount/nextcloud/content", "/mnt/shared"), ("/srv/app/oldbot/tmp", "/data/tmp")]
+OLD_HOME = "/srv/app/oldbot"
 
 
 def _rules():
@@ -19,8 +19,8 @@ def _rules():
 class TestRewritingText:
     def test_the_old_venvs_binaries_become_bare_commands(self):
         text = (
-            'command = "/srv/app/zorg/istota/.venv/bin/python /srv/mount/nextcloud/content/Users/a/x.py"\n'
-            'command = "/srv/app/zorg/.venv/bin/istota-skill location import"\n'
+            'command = "/srv/app/oldbot/istota/.venv/bin/python /srv/mount/nextcloud/content/Users/a/x.py"\n'
+            'command = "/srv/app/oldbot/.venv/bin/istota-skill location import"\n'
         )
         new, count = wp.rewrite_text(text, _rules())
         assert new == (
@@ -30,94 +30,94 @@ class TestRewritingText:
         assert count == 3
 
     def test_a_prefix_matches_only_at_a_path_boundary(self):
-        new, count = wp.rewrite_text("/srv/app/zorg/tmpfiles and /srv/app/zorg/tmp/a", _rules())
-        assert new == "/srv/app/zorg/tmpfiles and /data/tmp/a"
+        new, count = wp.rewrite_text("/srv/app/oldbot/tmpfiles and /srv/app/oldbot/tmp/a", _rules())
+        assert new == "/srv/app/oldbot/tmpfiles and /data/tmp/a"
         assert count == 1
 
     def test_a_path_in_backticks_and_at_line_end(self):
-        new, _ = wp.rewrite_text("ls `/srv/app/zorg/tmp`\nRUNDIR=/srv/app/zorg/tmp\n", _rules())
+        new, _ = wp.rewrite_text("ls `/srv/app/oldbot/tmp`\nRUNDIR=/srv/app/oldbot/tmp\n", _rules())
         assert new == "ls `/data/tmp`\nRUNDIR=/data/tmp\n"
 
 
 @pytest.fixture
 def workspace(tmp_path):
-    base = tmp_path / "Users" / "alice" / "zorg"
+    base = tmp_path / "Users" / "alice" / "oldbot"
     (base / "config").mkdir(parents=True)
     (base / "scripts" / "prompts").mkdir(parents=True)
     (base / "config" / "CRON.md").write_text(
-        'command = "/srv/app/zorg/istota/.venv/bin/python /srv/mount/nextcloud/content/Users/alice/zorg/scripts/a.py"\n'
+        'command = "/srv/app/oldbot/istota/.venv/bin/python /srv/mount/nextcloud/content/Users/alice/oldbot/scripts/a.py"\n'
     )
-    (base / "scripts" / "prompts" / "digest.txt").write_text("RUNDIR=/srv/app/zorg/tmp/alice/news\n")
+    (base / "scripts" / "prompts" / "digest.txt").write_text("RUNDIR=/srv/app/oldbot/tmp/alice/news\n")
     (base / "scripts" / "notes.txt").write_text("nothing here\n")
-    (base / "scripts" / "image.png").write_bytes(b"/srv/app/zorg/tmp")
+    (base / "scripts" / "image.png").write_bytes(b"/srv/app/oldbot/tmp")
     return tmp_path
 
 
 class TestRunningOverAWorkspace:
     def test_it_rewrites_and_keeps_a_copy_of_each_changed_file(self, workspace):
-        base = workspace / "Users" / "alice" / "zorg"
-        result = wp.run(workspace, "zorg", PREFIXES, OLD_HOME)
+        base = workspace / "Users" / "alice" / "oldbot"
+        result = wp.run(workspace, "oldbot", PREFIXES, OLD_HOME)
         assert sorted(p.name for p, _ in result.changed) == ["CRON.md", "digest.txt"]
         assert (base / "config" / "CRON.md").read_text() == (
-            'command = "python /mnt/shared/Users/alice/zorg/scripts/a.py"\n'
+            'command = "python /mnt/shared/Users/alice/oldbot/scripts/a.py"\n'
         )
-        assert "/srv/app/zorg" in (base / "config" / "CRON.md.pre-migration").read_text()
+        assert "/srv/app/oldbot" in (base / "config" / "CRON.md.pre-migration").read_text()
         assert not (base / "scripts" / "notes.txt.pre-migration").exists()
-        assert (base / "scripts" / "image.png").read_bytes() == b"/srv/app/zorg/tmp"
+        assert (base / "scripts" / "image.png").read_bytes() == b"/srv/app/oldbot/tmp"
 
     def test_a_dry_run_writes_nothing(self, workspace):
-        cron = workspace / "Users" / "alice" / "zorg" / "config" / "CRON.md"
+        cron = workspace / "Users" / "alice" / "oldbot" / "config" / "CRON.md"
         before = cron.read_text()
-        result = wp.run(workspace, "zorg", PREFIXES, OLD_HOME, dry_run=True)
+        result = wp.run(workspace, "oldbot", PREFIXES, OLD_HOME, dry_run=True)
         assert len(result.changed) == 2
         assert cron.read_text() == before
         assert not cron.with_name("CRON.md.pre-migration").exists()
 
     def test_a_second_run_keeps_the_first_copy(self, workspace):
-        cron = workspace / "Users" / "alice" / "zorg" / "config" / "CRON.md"
+        cron = workspace / "Users" / "alice" / "oldbot" / "config" / "CRON.md"
         original = cron.read_text()
-        wp.run(workspace, "zorg", PREFIXES, OLD_HOME)
-        assert wp.run(workspace, "zorg", PREFIXES, OLD_HOME).changed == []
+        wp.run(workspace, "oldbot", PREFIXES, OLD_HOME)
+        assert wp.run(workspace, "oldbot", PREFIXES, OLD_HOME).changed == []
         assert cron.with_name("CRON.md.pre-migration").read_text() == original
 
     def test_an_unmapped_old_home_path_is_reported_not_guessed(self, workspace):
-        prompt = workspace / "Users" / "alice" / "zorg" / "scripts" / "prompts" / "check.txt"
-        prompt.write_text("Never modify a file under /srv/app/zorg/istota.\n")
-        result = wp.run(workspace, "zorg", PREFIXES, OLD_HOME)
-        assert prompt.read_text() == "Never modify a file under /srv/app/zorg/istota.\n"
+        prompt = workspace / "Users" / "alice" / "oldbot" / "scripts" / "prompts" / "check.txt"
+        prompt.write_text("Never modify a file under /srv/app/oldbot/istota.\n")
+        result = wp.run(workspace, "oldbot", PREFIXES, OLD_HOME)
+        assert prompt.read_text() == "Never modify a file under /srv/app/oldbot/istota.\n"
         assert [(p.name, n) for p, n, _ in result.leftovers] == [("check.txt", 1)]
 
     def test_exports_are_history_and_left_alone(self, workspace):
-        export = workspace / "Users" / "alice" / "zorg" / "exports" / "conversations" / "a.md"
+        export = workspace / "Users" / "alice" / "oldbot" / "exports" / "conversations" / "a.md"
         export.parent.mkdir(parents=True)
-        export.write_text("ran /srv/app/zorg/tmp/alice/x\n")
-        result = wp.run(workspace, "zorg", PREFIXES, OLD_HOME)
-        assert export.read_text() == "ran /srv/app/zorg/tmp/alice/x\n"
+        export.write_text("ran /srv/app/oldbot/tmp/alice/x\n")
+        result = wp.run(workspace, "oldbot", PREFIXES, OLD_HOME)
+        assert export.read_text() == "ran /srv/app/oldbot/tmp/alice/x\n"
         assert all("exports" not in p.relative_to(workspace).parts for p, _ in result.changed)
 
     def test_a_planted_link_is_not_followed(self, workspace, tmp_path):
         outside = tmp_path / "outside.md"
-        outside.write_text("/srv/app/zorg/tmp/x\n")
-        os.symlink(outside, workspace / "Users" / "alice" / "zorg" / "config" / "LINK.md")
-        os.symlink(tmp_path, workspace / "Users" / "alice" / "zorg" / "loop")
-        wp.run(workspace, "zorg", PREFIXES, OLD_HOME)
-        assert outside.read_text() == "/srv/app/zorg/tmp/x\n"
+        outside.write_text("/srv/app/oldbot/tmp/x\n")
+        os.symlink(outside, workspace / "Users" / "alice" / "oldbot" / "config" / "LINK.md")
+        os.symlink(tmp_path, workspace / "Users" / "alice" / "oldbot" / "loop")
+        wp.run(workspace, "oldbot", PREFIXES, OLD_HOME)
+        assert outside.read_text() == "/srv/app/oldbot/tmp/x\n"
 
 
 class TestTheCommand:
     def test_the_map_comes_from_the_command_line_without_a_record(self, workspace, tmp_path, monkeypatch, capsys):
         config = tmp_path / "config.toml"
         config.write_text(
-            f'bot_name = "Zorg"\nworkspace_path = "{workspace}"\nnextcloud_mount_path = "{workspace}"\n'
+            f'bot_name = "Oldbot"\nworkspace_path = "{workspace}"\nworkspace_mount_path = "{workspace}"\n'
             f'db_path = "{tmp_path / "istota.db"}"\n'
         )
         rc = wp.main([
             "-c", str(config), "--old-home", OLD_HOME,
-            "--map", "/srv/mount/nextcloud/content=/mnt/shared", "--map", "/srv/app/zorg/tmp=/data/tmp",
+            "--map", "/srv/mount/nextcloud/content=/mnt/shared", "--map", "/srv/app/oldbot/tmp=/data/tmp",
         ])
         assert rc == 0
         assert "workspace paths: rewrote 2 file(s)" in capsys.readouterr().out
-        cron = workspace / "Users" / "alice" / "zorg" / "config" / "CRON.md"
+        cron = workspace / "Users" / "alice" / "oldbot" / "config" / "CRON.md"
         assert "/mnt/shared" in cron.read_text()
 
     def test_nothing_to_map_is_a_refusal(self, tmp_path):

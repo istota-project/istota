@@ -16,7 +16,7 @@ runs in order with the stack's writers stopped:
   before it stops anything.
 - `localize_config` (`istota workspace localize-config`): the wizard's
   `config.toml` with `workspace_path` set to the local tree,
-  `nextcloud_mount_path` removed and `auto_share_bot_dir` off, the previous
+  `workspace_mount_path` (or its old name) removed and `auto_share_bot_dir` off, the previous
   file kept as `config.toml.pre-localize`. A config `istota apply` wrote is
   refused: the plan owns it and would undo the edit.
 - `write_notes` (`istota workspace moved-note`): `MOVED.md` in each user's bot
@@ -501,7 +501,7 @@ def localized_config_text(text: str, workspace: str) -> str | None:
     if any(APPLY_HEADER_MARK in line for line in head):
         raise LocalizeRefused(
             "config.toml was written by `istota apply`; the plan owns it. Move by changing the plan: "
-            f"workspace_path = \"{workspace}\", no nextcloud_mount_path, "
+            f"workspace_path = \"{workspace}\", no workspace_mount_path, "
             "[nextcloud] auto_share_bot_dir = false, and STORAGE local"
         )
     try:
@@ -511,13 +511,16 @@ def localized_config_text(text: str, workspace: str) -> str | None:
     nextcloud = document.get("nextcloud")
     if not isinstance(nextcloud, dict) or not nextcloud.get("url"):
         raise LocalizeRefused("config.toml has no [nextcloud] url: there is no mount to move from")
-    if "nextcloud_mount_path" not in document:
+    # Either spelling: nextcloud_mount_path is workspace_mount_path's old name.
+    mount_keys = [key for key in ("workspace_mount_path", "nextcloud_mount_path") if key in document]
+    if not mount_keys:
         if document.get("workspace_path") == workspace:
             return None
         raise LocalizeRefused(
-            "config.toml has no nextcloud_mount_path: the workspace is not the mount"
+            "config.toml has no workspace_mount_path: the workspace is not the mount"
         )
-    document.pop("nextcloud_mount_path")
+    for key in mount_keys:
+        document.pop(key)
     document["workspace_path"] = workspace
     nextcloud["auto_share_bot_dir"] = False
     comments = []

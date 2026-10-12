@@ -87,7 +87,7 @@ class TestConfigDefaults:
     def test_has_workspace_false_by_default(self):
         cfg = Config()
         assert cfg.workspace_path is None
-        assert cfg.nextcloud_mount_path is None
+        assert cfg.workspace_mount_path is None
         assert cfg.has_workspace is False
 
     def test_default_bot_name(self):
@@ -478,10 +478,10 @@ class TestConfigLoading:
         with caplog.at_level(logging.WARNING, logger="istota.config"):
             cfg = load_config(p)
         mount = Path("/srv/mount/nextcloud/content")
-        assert cfg.nextcloud_mount_path == mount
+        assert cfg.workspace_mount_path == mount
         assert cfg.workspace_path == mount
         assert any(
-            "nextcloud_mount_path now means the FUSE mountpoint only"
+            "nextcloud_mount_path now means the mountpoint only"
             in record.getMessage()
             for record in caplog.records
         )
@@ -494,12 +494,78 @@ class TestConfigLoading:
         with caplog.at_level(logging.WARNING, logger="istota.config"):
             cfg = load_config(p)
         assert cfg.workspace_path == Path("/srv/app/istota/workspace")
-        assert cfg.nextcloud_mount_path is None
+        assert cfg.workspace_mount_path is None
         assert any(
-            "nextcloud_mount_path now means the FUSE mountpoint only"
+            "nextcloud_mount_path now means the mountpoint only"
             in record.getMessage()
             for record in caplog.records
         )
+
+    def test_workspace_mount_path_is_a_mount_without_a_nextcloud_url(
+        self, tmp_path, caplog,
+    ):
+        # The host-folder shape: a real mount and no Nextcloud. Only the old
+        # spelling gets the pre-split reading, which would drop the mount here.
+        p = tmp_path / "config.toml"
+        p.write_text('workspace_mount_path = "/mnt/shared"\n')
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
+        assert cfg.workspace_mount_path == Path("/mnt/shared")
+        assert cfg.workspace_path == Path("/mnt/shared")
+        assert cfg.storage_is_nextcloud is False
+        assert not any("nextcloud_mount_path" in r.getMessage() for r in caplog.records)
+
+    def test_old_mount_key_is_read_as_the_new_one(self, tmp_path, caplog):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'workspace_path = "/mnt/shared"\n'
+            'nextcloud_mount_path = "/mnt/shared"\n'
+        )
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
+        assert cfg.workspace_mount_path == Path("/mnt/shared")
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("renamed to workspace_mount_path" in m for m in messages)
+        assert not any("unrecognised" in m for m in messages)
+
+    def test_the_rename_is_a_warning_and_a_redundant_old_key_is_retired(self, tmp_path):
+        """The config editor offers to unset a retired key. Unsetting the only
+        mount path would turn a Nextcloud mount into a local workspace, so the
+        bare rename is a warning; beside the new key the old one is redundant."""
+        from istota.config_mapper import collect_problems
+
+        p = tmp_path / "config.toml"
+        kinds = {}
+        for name, text in (
+            ("alone", 'workspace_path = "/mnt/shared"\nnextcloud_mount_path = "/mnt/shared"\n'),
+            ("both", 'workspace_path = "/mnt/shared"\nworkspace_mount_path = "/mnt/shared"\n'
+                     'nextcloud_mount_path = "/mnt/shared"\n'),
+        ):
+            p.write_text(text)
+            with collect_problems() as problems:
+                load_config(p)
+            kinds[name] = [q["kind"] for q in problems if q["path"] == ("nextcloud_mount_path",)]
+        assert kinds == {"alone": ["warning"], "both": ["retired"]}
+
+    def test_both_mount_keys_with_the_same_path_load(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'workspace_path = "/mnt/shared"\n'
+            'workspace_mount_path = "/mnt/shared"\n'
+            'nextcloud_mount_path = "/mnt/shared/"\n'
+        )
+        cfg = load_config(p)
+        assert cfg.workspace_mount_path == Path("/mnt/shared")
+
+    def test_both_mount_keys_with_different_paths_are_refused(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'workspace_path = "/mnt/shared"\n'
+            'workspace_mount_path = "/mnt/shared"\n'
+            'nextcloud_mount_path = "/srv/mount/nextcloud/content"\n'
+        )
+        with pytest.raises(ValueError, match="workspace_mount_path.*nextcloud_mount_path"):
+            load_config(p)
 
     def test_nextcloud_url_without_a_workspace_is_refused(self, tmp_path):
         p = tmp_path / "config.toml"
@@ -516,9 +582,9 @@ class TestConfigLoading:
         with caplog.at_level(logging.WARNING, logger="istota.config"):
             cfg = load_config(p)
         assert cfg.workspace_path == Path("/srv/app/istota/workspace")
-        assert cfg.nextcloud_mount_path == Path("/mnt/nextcloud")
+        assert cfg.workspace_mount_path == Path("/mnt/nextcloud")
         assert not any(
-            "nextcloud_mount_path now means the FUSE mountpoint only"
+            "nextcloud_mount_path now means the mountpoint only"
             in record.getMessage()
             for record in caplog.records
         )
@@ -535,10 +601,10 @@ class TestConfigLoading:
 
         mounted = Config(
             workspace_path=workspace,
-            nextcloud_mount_path=workspace,
+            workspace_mount_path=workspace,
             module_data_dir=workspace / "modules",
         )
-        with pytest.raises(ValueError, match="under nextcloud_mount_path"):
+        with pytest.raises(ValueError, match="under workspace_mount_path"):
             mounted.module_db_root()
 
     def test_load_skills_dir(self, tmp_path):
@@ -887,16 +953,16 @@ class TestConfigMethods:
         cfg = Config(workspace_path=Path("/mnt/nc"))
         assert cfg.has_workspace is True
 
-    def test_workspace_path_derives_from_nextcloud_mount_path(self):
+    def test_workspace_path_derives_from_workspace_mount_path(self):
         mount = Path("/mnt/nc")
-        cfg = Config(nextcloud_mount_path=mount)
+        cfg = Config(workspace_mount_path=mount)
         assert cfg.workspace_path == mount
 
     def test_explicit_workspace_path_wins(self):
         workspace = Path("/srv/app/istota/workspace")
         cfg = Config(
             workspace_path=workspace,
-            nextcloud_mount_path=Path("/mnt/nc"),
+            workspace_mount_path=Path("/mnt/nc"),
         )
         assert cfg.workspace_path == workspace
 

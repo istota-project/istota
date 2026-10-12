@@ -366,7 +366,7 @@ class TestTheEnablingConditions:
         nc = NextcloudConfig(url="https://cloud.example", username="bot")
         local = Config(nextcloud=nc, workspace_path=tmp_path)
         mounted = Config(
-            nextcloud=nc, workspace_path=tmp_path, nextcloud_mount_path=tmp_path,
+            nextcloud=nc, workspace_path=tmp_path, workspace_mount_path=tmp_path,
         )
         assert gate.enabled(Config(workspace_path=tmp_path)) is False
         assert gate.enabled(local) is False
@@ -787,7 +787,7 @@ class TestTheOneShotRunner:
         config.users = {"alice": UserConfig(vault_path="vault.kdbx")}
         config.workspace_path = Path("/srv/files")
         config.nextcloud = NextcloudConfig(url="https://cloud.example", username="bot")
-        config.nextcloud_mount_path = Path("/srv/files")
+        config.workspace_mount_path = Path("/srv/files")
         _run_interval_gates_once(_recorded_table(config, order), config)
         assert order == EXPECTED_ONE_SHOT
 

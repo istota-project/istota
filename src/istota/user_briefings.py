@@ -384,11 +384,11 @@ def _workspace_is_live(config: "Any", mount: Path, user_id: str, bot_dir: str) -
     runs earlier in the same boot and will happily create the workspace on the
     underlying disk, so even the directory's existence is not enough on its own.
 
-    ``ismount`` is the cheap discriminator when ``nextcloud_mount_path`` names
+    ``ismount`` is the cheap discriminator when ``workspace_mount_path`` names
     a mount. A workspace with no mount field is an ordinary directory.
     """
     try:
-        configured_mount = getattr(config, "nextcloud_mount_path", None)
+        configured_mount = getattr(config, "workspace_mount_path", None)
         if configured_mount is not None and not os.path.ismount(configured_mount):
             return False
         from .storage import get_user_config_path

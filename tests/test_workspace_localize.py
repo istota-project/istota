@@ -320,7 +320,7 @@ WIZARD_CONFIG = """\
 
 bot_name = "Istota"
 workspace_path = "/mnt/shared"
-nextcloud_mount_path = "/mnt/shared"
+workspace_mount_path = "/mnt/shared"
 
 [nextcloud]
 url = "https://cloud.example.test"
@@ -334,6 +334,15 @@ enabled = true
 
 
 class TestLocalizeConfig:
+    def test_the_old_name_of_the_mount_key_is_dropped_too(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(WIZARD_CONFIG.replace("workspace_mount_path", "nextcloud_mount_path"))
+        assert wl.localize_config(path, "/data/workspace") is True
+        document = tomllib.loads(path.read_text())
+        assert document["workspace_path"] == "/data/workspace"
+        assert "nextcloud_mount_path" not in document
+        assert "workspace_mount_path" not in document
+
     def test_the_wizards_config_is_pointed_at_the_local_tree(self, tmp_path):
         path = tmp_path / "config.toml"
         path.write_text(WIZARD_CONFIG)
@@ -341,7 +350,7 @@ class TestLocalizeConfig:
         assert wl.localize_config(path, "/data/workspace") is True
         document = tomllib.loads(path.read_text())
         assert document["workspace_path"] == "/data/workspace"
-        assert "nextcloud_mount_path" not in document
+        assert "workspace_mount_path" not in document
         assert document["nextcloud"]["auto_share_bot_dir"] is False
         assert document["nextcloud"]["dav_prefix"] == "Shared Files"
         assert document["talk"] == {"enabled": True}
@@ -496,7 +505,10 @@ class TestTheCli:
         assert result.returncode == 0, result.stdout + result.stderr
         document = tomllib.loads(install.read_text())
         assert document["workspace_path"] == str(dest)
+        # The fixture spells the mount by its old name, as an install set up
+        # before the rename does.
         assert "nextcloud_mount_path" not in document
+        assert "workspace_mount_path" not in document
         assert (install.parent / "config.toml.pre-localize").exists()
 
         result = self._istota(install, "workspace", "moved-note", "--from", str(mount))

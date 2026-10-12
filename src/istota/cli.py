@@ -3955,7 +3955,7 @@ def cmd_workspace_localize(args) -> int:
     if not args.scheduler_stopped and not args.dry_run and not args.check:
         return refuse("pass --scheduler-stopped once daemon, web and whatsapp-baileys are stopped")
     if not config.storage_is_nextcloud:
-        return refuse("this config is not mount mode (no [nextcloud] url and nextcloud_mount_path)")
+        return refuse("this config is not mount mode (no [nextcloud] url and workspace_mount_path)")
     if config.workspace_path is None or os.path.realpath(source) != os.path.realpath(config.workspace_path):
         return refuse(f"--from {source} is not the configured workspace {config.workspace_path}")
     try:
@@ -4029,7 +4029,7 @@ def cmd_workspace_localize_config(args) -> int:
         print(f"istota workspace localize-config: REFUSE: {exc}; nothing was written.", file=sys.stderr)
         return wl.EXIT_REFUSED
     if changed:
-        print(f"{target}: workspace_path = {args.workspace!r}, nextcloud_mount_path removed, "
+        print(f"{target}: workspace_path = {args.workspace!r}, workspace_mount_path removed, "
               f"auto_share_bot_dir = false; the previous file is {target}{wl.PRE_LOCALIZE_SUFFIX}")
     else:
         print(f"{target}: already a local workspace; unchanged")
@@ -4921,6 +4921,14 @@ def main():
         from istota.maintenance import workspace_paths
 
         sys.exit(workspace_paths.main(argv[2:]))
+    if argv[:2] == ["migrate", "import-standalone"]:
+        from istota.maintenance import standalone_import
+
+        sys.exit(standalone_import.main(argv[2:]))
+    if argv[:2] == ["migrate", "restore-workspace"]:
+        from istota.maintenance import workspace_restore
+
+        sys.exit(workspace_restore.main(argv[2:]))
     if argv[:2] == ["migrate", "role-vars"]:
         from istota.maintenance import role_vars
 
@@ -5034,6 +5042,10 @@ def main():
     migrate_subparsers.add_parser(
         "workspace-paths",
         help="Rewrite a migrated install's old host paths in users' bot directories; see --help",
+    )
+    migrate_subparsers.add_parser(
+        "restore-workspace",
+        help="Restore the key (stdin), config and databases from the workspace's backups onto a new stack; see --help",
     )
     migrate_subparsers.add_parser(
         "role-vars",
@@ -5160,6 +5172,11 @@ def main():
     setup_parser.add_argument(
         "--tls-cert-source", choices=["acme", "files", "self-signed", "none"],
         help="Certificate source: acme or files for direct ingress; self-signed, files or none for proxied",
+    )
+    setup_parser.add_argument(
+        "--storage", choices=["local", "host-folder"],
+        help="Workspace: the state volume, or a folder the host shares in at /mnt/shared "
+        "(the local VM; kept on a re-run). A Nextcloud is --nextcloud-url (container)",
     )
     setup_parser.add_argument("--nextcloud-url", help="Existing Nextcloud, as the stack reaches it")
     setup_parser.add_argument("--nextcloud-public-url", help="The same Nextcloud, as browsers reach it")

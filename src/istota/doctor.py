@@ -68,6 +68,10 @@ from urllib.parse import urlsplit, urlunsplit
 from istota.lib import du
 from istota.lib import mountinfo
 from istota.lib import sqlite_util
+from istota.lib.workspace_marker import (
+    FSTYPE_ENV, MARKER_NAME, RCLONE_FSTYPE, expected_fstype, marker_present,
+    marker_required, undeclared_mount,
+)
 from istota.sandbox import cgroup as task_cgroup
 from istota.sandbox.user_scope import is_within, paths_overlap
 
@@ -848,29 +852,63 @@ def check_writable_dirs(config: "Config", probe: bool) -> list[CheckResult]:
 
 
 def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
-    """A configured Nextcloud mount is actually mounted.
+    """A configured workspace mount is actually mounted.
 
-    An rclone mount that dropped leaves a plain empty directory behind, which
-    every path check above happily reports as fine while every read returns
-    nothing. ``ismount`` is the only cheap way to tell the two apart.
+    A mount that dropped (an rclone mount, or a host folder shared into a VM)
+    leaves a plain empty directory behind, which every path check above
+    happily reports as fine while every read returns nothing. ``ismount`` is
+    the only cheap way to tell the two apart.
 
-    ``nextcloud_mount_path`` is set only when the workspace uses a real mount.
+    ``workspace_mount_path`` is set only when the workspace uses a real mount.
+
+    A host folder shared into the local VM that went away is still a mount of
+    the same type (Lima recreates a missing one empty), so where the host says
+    the folder carries ``.istota-workspace`` the marker is checked too (row L1).
+
+    A bind of a plain host directory is a mount point too, so a mount whose
+    type nothing declares fails before ``ismount`` is asked (the entrypoint's
+    rule, from ``lib/workspace_marker``).
     """
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_mount_path
     if mount is None:
         return CheckResult(
-            "runtime.mount_liveness", SKIP, "no nextcloud_mount_path configured"
+            "runtime.mount_liveness", SKIP, "no workspace_mount_path configured"
         )
     path = Path(mount)
+    if undeclared_mount(mount, config.storage_is_nextcloud):
+        return CheckResult(
+            "runtime.mount_liveness",
+            FAIL,
+            f"{path} is configured as the workspace mount and nothing says what is "
+            f"mounted there ({FSTYPE_ENV} is empty)",
+            remedy=(
+                "host.env and config.toml disagree: a config that names a workspace "
+                "mount under STORAGE=local. Run `istota-stack setup --storage host-folder` "
+                "or `--storage local` so the two agree, then restart the stack."
+            ),
+        )
     if os.path.ismount(path):
+        if marker_required() and not marker_present(path):
+            return CheckResult(
+                "runtime.mount_liveness",
+                FAIL,
+                f"{path} is mounted but has no {MARKER_NAME}: the shared folder is not "
+                "the one this install was set up with",
+                remedy=(
+                    "The folder on the host was renamed, moved, deleted or is on a volume "
+                    "that is not connected, and an empty directory stands in for it. Put "
+                    "it back where it was, then restart the stack."
+                ),
+            )
         return CheckResult("runtime.mount_liveness", OK, f"{path} is a mount point")
     return CheckResult(
         "runtime.mount_liveness",
         FAIL,
         f"{path} is configured as the workspace mount but is not a mount point",
         remedy=(
-            "Check the rclone mount unit; a dropped mount leaves an empty directory "
-            "that reads as an empty workspace."
+            "Check whatever mounts the workspace (the rclone unit for Nextcloud); "
+            "a dropped mount leaves an empty directory that reads as an empty "
+            "workspace."
         ),
     )
 
@@ -916,9 +954,9 @@ def check_workspace_xattr(config: "Config", probe: bool) -> CheckResult:
     blocks those calls.
     """
     name = "runtime.workspace_xattr"
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_mount_path
     if mount is None:
-        return CheckResult(name, SKIP, "no nextcloud_mount_path configured")
+        return CheckResult(name, SKIP, "no workspace_mount_path configured")
     if not probe:
         return CheckResult(name, SKIP, "probe disabled (the check reads the mount)")
     if not hasattr(os, "listxattr"):
@@ -962,15 +1000,16 @@ _MOUNTINFO_PROC_ROOT = Path("/proc")
 def check_workspace_mode(config: "Config", probe: bool) -> CheckResult:
     """The config's storage mode agrees with the mount the workspace is on.
 
-    ``nextcloud_mount_path`` set means the workspace is the bot's Nextcloud
-    files through the rclone mount; unset means it is local. A hand-written
-    config can say one while the disk says the other, and the two cases cost
-    different things: a workspace on the mount with the key unset runs with
-    the mount checks off and local vocabulary (FAIL, as the entrypoint
-    refuses it), while the key set on something other than ``fuse.rclone`` is
-    what the full and upgrade test tiers run on purpose (WARN, or OK under
-    the entrypoint's testbed concession). Reads ``mountinfo`` only, never the
-    mount itself, so no probe gate.
+    ``workspace_mount_path`` set means the workspace is a mount of the type the
+    host declares (``ISTOTA_WORKSPACE_FSTYPE``, or ``fuse.rclone`` for the
+    bot's Nextcloud files when nothing says; ``lib/workspace_marker``); unset
+    means it is local. A hand-written config can say one while the disk says
+    the other, and the two cases cost different things: a workspace on such a
+    mount with the key unset runs with the mount checks off (FAIL, as the
+    entrypoint refuses it), while the key set on another type is what the full
+    and upgrade test tiers run on purpose (WARN, or OK under the entrypoint's
+    testbed concession). Reads ``mountinfo`` only, never the mount itself, so
+    no probe gate.
     """
     name = "runtime.workspace_mode"
     if config.workspace_path is None:
@@ -981,46 +1020,56 @@ def check_workspace_mode(config: "Config", probe: bool) -> CheckResult:
     workspace = os.path.normpath(str(config.workspace_path))
     mount = mountinfo.covering_mount(workspace, text)
     mountpoint, fstype = (mount.point, mount.fstype) if mount else ("/", "unknown")
-    mount_key = config.nextcloud_mount_path
+    mount_key = config.workspace_mount_path
     if mount_key is None:
-        if fstype == "fuse.rclone":
+        declared = os.environ.get(FSTYPE_ENV, "").strip()
+        if fstype == RCLONE_FSTYPE or (declared and fstype == declared):
             return CheckResult(
                 name, FAIL,
-                f"the workspace {workspace} is on the rclone mount {mountpoint}, "
-                "but nextcloud_mount_path is not set, so it runs as a local "
+                f"the workspace {workspace} is on the {fstype} mount {mountpoint}, "
+                "but workspace_mount_path is not set, so it runs as a local "
                 "workspace with the mount checks off",
                 remedy=(
-                    f'Set nextcloud_mount_path = "{mountpoint}" in config.toml, '
+                    f'Set workspace_mount_path = "{mountpoint}" in config.toml, '
                     "or move the workspace off the mount."
                 ),
             )
         return CheckResult(name, OK, f"local workspace at {workspace} ({fstype})")
-    if not config.nextcloud_enabled:
+    expected = expected_fstype(config.nextcloud_enabled)
+    if not expected:
         return CheckResult(
             name, WARN,
-            f"nextcloud_mount_path is set ({mount_key}) but [nextcloud] url is "
-            "not: the mount checks run, and the workspace is described as local",
+            f"workspace_mount_path is set ({mount_key}) but neither [nextcloud] "
+            f"url nor {FSTYPE_ENV} says what is mounted there",
             remedy=(
-                "Remove nextcloud_mount_path if the workspace is local, or set "
-                "[nextcloud] url if it is the bot's Nextcloud files."
+                "Remove workspace_mount_path if the workspace is local, set "
+                "[nextcloud] url if it is the bot's Nextcloud files, or run "
+                "`istota-stack setup --storage host-folder` for a host folder."
             ),
         )
-    if fstype == "fuse.rclone":
-        return CheckResult(name, OK, f"the workspace {workspace} is the rclone mount {mountpoint}")
+    if fstype == expected:
+        return CheckResult(name, OK, f"the workspace {workspace} is the {expected} mount {mountpoint}")
     concession = os.environ.get("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE") == "1"
     if concession and mountpoint == workspace:
         return CheckResult(
             name, OK,
             f"the workspace {workspace} is a {fstype} mount of its own (test tier concession)",
         )
+    if config.nextcloud_enabled:
+        remedy = (
+            "Start mount-nextcloud.service on the VM, or remove "
+            "workspace_mount_path if the workspace is meant to be local."
+        )
+    else:
+        remedy = (
+            "Check what shares the folder into the VM, or remove "
+            "workspace_mount_path if the workspace is meant to be local."
+        )
     return CheckResult(
         name, WARN,
-        f"nextcloud_mount_path is set but the workspace {workspace} is on "
-        f"{mountpoint} ({fstype}), not the rclone mount (fuse.rclone)",
-        remedy=(
-            "Start mount-nextcloud.service on the VM, or remove "
-            "nextcloud_mount_path if the workspace is meant to be local."
-        ),
+        f"workspace_mount_path is set but the workspace {workspace} is on "
+        f"{mountpoint} ({fstype}), not the expected mount ({expected})",
+        remedy=remedy,
     )
 
 
@@ -1050,9 +1099,10 @@ def check_backups_off_volume(config: "Config", probe: bool) -> CheckResult:
     `/data/workspace` share `istota_data`, so refusing would stop every
     backup on every local install. A snapshot there still protects against a
     corrupted database file; it does not protect against losing the volume,
-    and this check is where that is said. Under the Nextcloud mount the
-    workspace is the off-host target, so sharing a device with it is the point
-    and only the database's device is compared.
+    and this check is where that is said. Under a workspace mount (the
+    Nextcloud mount, or a host folder shared into the VM) the workspace is the
+    off-host target, so sharing a device with it is the point and only the
+    database's device is compared.
     """
     from istota.maintenance.db_backup import backup_destination
 
@@ -1071,7 +1121,7 @@ def check_backups_off_volume(config: "Config", probe: bool) -> CheckResult:
         shared.append(f"the database ({config.db_path.parent})")
     if (
         config.workspace_path is not None
-        and not config.storage_is_nextcloud
+        and config.workspace_mount_path is None
         and _device_of(config.workspace_path) == dest_dev
     ):
         shared.append(f"the workspace ({config.workspace_path})")

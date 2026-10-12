@@ -81,8 +81,8 @@ class TestAMountedVmMovesToALocalWorkspace:
     def test_the_config_names_the_local_workspace(self, vm, moved):
         workspace = vm.out(
             "python3 -c 'import tomllib; c = tomllib.load(open(\"/srv/app/istota/config/config.toml\", \"rb\")); "
-            "print(c.get(\"workspace_path\"), c.get(\"nextcloud_mount_path\"))'")
-        assert workspace == "/data/workspace None", workspace
+            "print(c.get(\"workspace_path\"), c.get(\"workspace_mount_path\"), c.get(\"nextcloud_mount_path\"))'")
+        assert workspace == "/data/workspace None None", workspace
         assert vm.ok(f"test -f {lima.STACK}/config/config.toml.pre-localize")
         assert lima.env_value(vm, f"{lima.STACK}/host.env", "STORAGE") == "local"
 

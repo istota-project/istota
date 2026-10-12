@@ -1413,7 +1413,7 @@ class TestNativeFsRoots:
 
     def test_talk_is_read_only(self, sandbox_config, make_sandbox_task):
         sandbox_config.nextcloud.url = "https://cloud.example.com"
-        sandbox_config.nextcloud_mount_path = sandbox_config.workspace_path
+        sandbox_config.workspace_mount_path = sandbox_config.workspace_path
         (sandbox_config.workspace_path / "Talk").mkdir()
         task = make_sandbox_task()
         read, write, _ = self._roots(sandbox_config, task, False)

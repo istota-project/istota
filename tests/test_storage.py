@@ -295,7 +295,7 @@ class TestMountOperations:
         assert "Nextcloud" not in local
         mounted = Config(
             workspace_path=tmp_path / "mount",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_mount_path=tmp_path / "mount",
             nextcloud=NextcloudConfig(url="https://cloud.example.test"),
         )
         assert "share any of your own Nextcloud folders" in workspace_readme_example(mounted)
@@ -629,7 +629,7 @@ class TestShareFolderWithUser:
         mount.mkdir()
         return Config(
             workspace_path=mount,
-            nextcloud_mount_path=mount,
+            workspace_mount_path=mount,
             nextcloud=NextcloudConfig(
                 url="https://nc.example.com",
                 username="istota",

@@ -50,7 +50,7 @@ def test_local_sweep_is_resumable_and_reads_legacy_memory(migrated):
 
 
 def test_a_local_workspace_beside_nextcloud_takes_the_rename_merge(migrated):
-    """A URL with no `nextcloud_mount_path` is a local workspace: the DAV
+    """A URL with no `workspace_mount_path` is a local workspace: the DAV
     branch would move the frozen Nextcloud copy and leave this one in place."""
     config, old, new = migrated
     config.nextcloud.url = "https://cloud.example.com"
@@ -104,6 +104,16 @@ def test_missing_mount_refuses_so_the_deploy_retries(migrated):
     config.workspace_path = config.workspace_path / "absent"
     assert room_relocate.reconcile_mount(config) == 1
     assert not config.workspace_path.exists()
+
+
+def test_an_unmounted_workspace_mount_refuses_without_nextcloud(migrated, capsys):
+    # A host folder shared into a VM is a workspace mount with no Nextcloud URL.
+    config, old, new = migrated
+    original = put(config, f"Channels/{old}/CHANNEL.md", "notes")
+    config.workspace_mount_path = config.workspace_path
+    assert room_relocate.reconcile_mount(config) == 1
+    assert "refusal: workspace mount unavailable" in capsys.readouterr().err
+    assert original.read_text() == "notes"
 
 
 def test_task_guard_refuses_before_mount_changes(migrated):
@@ -466,7 +476,7 @@ def dav_server(migrated):
     config, old, new = migrated
     config.nextcloud.url = "https://cloud.example.com"
     config.nextcloud.username = "bot"
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     server = FakeDav()
     with patch(
         "istota.maintenance.room_mount_reconcile.os.path.ismount", return_value=True

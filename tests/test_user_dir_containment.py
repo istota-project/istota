@@ -419,7 +419,7 @@ class TestTheImageAttachmentRoots:
 
     def test_a_nextcloud_workspace_names_the_talk_root(self, config):
         config.nextcloud.url = "https://cloud.example.com"
-        config.nextcloud_mount_path = config.workspace_path
+        config.workspace_mount_path = config.workspace_path
         task = _task("alice")
         roots = image_bind_roots(config, task, _user_temp(config, task))
         assert (config.workspace_path / "Talk").resolve() in roots

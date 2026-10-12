@@ -63,7 +63,7 @@ async def test_local_workspace_has_no_talk_attachments_place(client, config):
 
 async def test_nextcloud_workspace_has_the_talk_attachments_place(client, config):
     config.nextcloud.url = "https://cloud.example.com"
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     response = await client.get("/workspace/places")
     talk = [p for p in response.json()["places"] if p["id"] == "talk"]
     assert len(talk) == 1 and talk[0]["browsable"] is False
@@ -177,7 +177,7 @@ def test_workspace_upload_config_and_nginx_cap(tmp_path):
 async def test_nextcloud_dropped_mount(client, config, monkeypatch, caplog, error, operation):
     import os
     config.nextcloud.url = "https://cloud.example.com"
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     root = config.workspace_root("alice")
     real_open = os.open
 
@@ -204,7 +204,7 @@ async def test_nextcloud_share_markers_and_recipient_urls(client, config):
     from tests.test_nextcloud_http import _ocs_response
 
     config.nextcloud.url = "https://cloud.example.com/"
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     config.nextcloud.dav_prefix = "Shared Files"
@@ -241,7 +241,7 @@ async def test_nextcloud_share_failure_is_a_note(client, config, caplog):
     from unittest.mock import patch
     from httpx import ReadTimeout
     config.nextcloud.url = "https://cloud.example.com"
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     config.nextcloud.username = "istota"
     config.nextcloud.app_password = "example-password"
     with patch("istota.nextcloud._http.httpx.get", side_effect=ReadTimeout("sensitive-name")) as get:

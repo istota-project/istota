@@ -167,6 +167,8 @@ src/istota/
 │   ├── db_relocate.py    # One-time migrator: per-user module DBs from the mount → local disk, DELETE→WAL
 │   ├── db_backup.py      # Timed online-backup snapshot of local DBs to dated dirs on the mount; retention, row-count collapse guard, 0700/0600 → maintenance.md
 │   ├── db_restore.py     # Restore a cold snapshot back to local disk (newest good, or `--date`); refuses an empty snapshot without `--force` → maintenance.md
+│   ├── workspace_restore.py  # `istota migrate restore-workspace`: master key (stdin), config copy and databases from the workspace's backups onto a new stack → maintenance.md
+│   ├── standalone_import.py  # `istota migrate import-standalone`: a standalone install (staged by the Mac, istota.env on stdin) onto the local VM's stack → maintenance.md
 │   ├── repos_relocate.py # One-shot migrator: `developer.repos_dir` → per-user subtrees
 │   ├── workspace_paths.py # A migrated install's old host paths in users' bot directories, rewritten with backups → maintenance.md
 │   ├── workspace_localize.py # Moving a mounted workspace to local disk: the copy, the config edit, the index cleanup → maintenance.md
@@ -198,6 +200,7 @@ src/istota/
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
 │   ├── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
 │   ├── mountinfo.py      # Which mount covers a path: the entrypoint's rclone preflight and the cgroup root check → leaf-modules.md
+│   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Block/source briefings module — DB, source resolvers, generation, reader/settings routes, migration
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
@@ -327,7 +330,7 @@ scripts/test-vm.sh               # the stack on a VM provisioned by host/provisi
 
 `image`, `smoke`, `full`, `testbed` and `vm` require `-n0`: their fixtures are session-scoped and build one tagged image or drive one VM. Before a release, add `-m full -n0`, `-m image -n0 --platform amd64` and `scripts/test-upgrade.sh --from-floor --shape volume`. Three tiers carry a negative control that must go red (`scripts/test-image-negative-control.sh`, `scripts/test-vm-negative-control.sh`, and the same broken image handed to the upgrade tier via `ISTOTA_IMAGE_TAG`); `scripts/test-stack-negative-control.sh` does the same for `istota-stack`'s release checks and its `setup --web` tests.
 
-**The `vm` tier is the dedicated-VM half (the one-deployment-shape spec, Stage 7).** It boots a Lima VM from `host/lima/istota.yaml`, lets `provision.sh` set it up, deploys a signed snapshot of the checkout through `istota-stack update`, and switches the stack between the local, proxied, direct and full-Nextcloud modes with `istota-stack setup`, `apply` and `provision.sh`, as an operator would. It witnesses the parity rows only a real VM can hold (7, 9, 10, 11, 15, 18, 19, 20, and the halves of 12 and 17 Docker Desktop cannot see). It needs `limactl` rather than Docker on the host, keeps its VM (`istota-vm-1`) between sessions, and costs tens of minutes on a first run. `tests/vm/conftest.py` and `tests/vm/lima.py` say how. **On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail** — run the control and write down what it turned red.
+**The `vm` tier is the dedicated-VM half (the one-deployment-shape spec, Stage 7).** It boots a Lima VM from `host/lima/istota.yaml`, lets `provision.sh` set it up, deploys a signed snapshot of the checkout through `istota-stack update`, and switches the stack between the local, proxied, direct and full-Nextcloud modes with `istota-stack setup`, `apply` and `provision.sh`, as an operator would. It witnesses the parity rows only a real VM can hold (7, 9, 10, 11, 15, 18, 19, 20, and the halves of 12 and 17 Docker Desktop cannot see), and in its host-folder mode the local VM's rows L1 to L4 (`tests/vm/test_host_folder.py`: the workspace marker, the Mac loopback block, what crosses from the Mac, the Mac CLI's uid). It needs `limactl` rather than Docker on the host, keeps its VM (`istota-vm-1`) between sessions, and costs tens of minutes on a first run. `tests/vm/conftest.py` and `tests/vm/lima.py` say how. **On a tier asserting against an artifact, reading the test tells you almost nothing about whether it can fail** — run the control and write down what it turned red.
 
 **All seven tiers need Docker or a VM — the Linux tier unless it runs natively, the vm tier through Lima — so a sandboxed task cannot run any of them; check `ISTOTA_SANDBOXED` before you plan around one.** No Docker socket is bound into a sandbox, and a task's own sandbox passes `--unshare-user --disable-userns`, which shuts the nested-namespace route too. **When a change touches the sandbox, the network proxy, the skill proxy, a migration or the image, say so in the merge request, name the tier that covers it, and ask for the run before merge.** Report the default suite as what it is: it patches `_bwrap_available` and checks argv, so it has never executed the sandbox path you changed.
 
@@ -345,7 +348,7 @@ Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_c
 
 ## Deployment
 
-One shape: the Docker stack (`docker/`) on a machine dedicated to it, set up by `host/provision.sh` and updated with `istota-stack update`; the optional `ansible/` role manages such a machine from an estate. A bare-metal install moves over with `istota-stack import-bare-metal`. See `.claude/rules/deployment.md`.
+One shape: the Docker stack (`docker/`) on a machine dedicated to it, set up by `host/provision.sh` and updated with `istota-stack update`; the optional `ansible/` role manages such a machine from an estate. On an Apple silicon Mac that machine is a Lima VM (`install.sh --local`): `host/mac/istota-stack` creates and controls it and forwards every other verb into it, `~/Istota` is the workspace (`STORAGE=host-folder`), the master key is copied into the login Keychain, and `restore` rebuilds a lost VM from the two. A bare-metal install moves over with `istota-stack import-bare-metal`, a standalone one with the Mac's `istota-stack import-standalone`. See `.claude/rules/deployment.md`.
 
 ## Task Status
 

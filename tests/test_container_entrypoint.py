@@ -48,7 +48,7 @@ NEXTCLOUD_CONFIG = """\
 db_path = "{db}"
 temp_dir = "{tmp}"
 workspace_path = "{ws}"
-nextcloud_mount_path = "{ws}"
+workspace_mount_path = "{ws}"
 
 [nextcloud]
 url = "https://cloud.example.test"
@@ -265,7 +265,7 @@ FULL_INTEGRATION_CONFIG = """\
 db_path = "{db}"
 temp_dir = "{tmp}"
 workspace_path = "{ws}"
-nextcloud_mount_path = "{ws}"
+workspace_mount_path = "{ws}"
 
 [nextcloud]
 url = "https://cloud.example.test"
@@ -276,15 +276,15 @@ enabled = false
 """
 
 # Nextcloud for Talk and the skill, with the workspace on local disk: the URL
-# and no `nextcloud_mount_path`.
+# and no `workspace_mount_path`.
 LOCAL_WORKSPACE_NEXTCLOUD_CONFIG = FULL_INTEGRATION_CONFIG.replace(
-    'nextcloud_mount_path = "{ws}"\n', "")
+    'workspace_mount_path = "{ws}"\n', "")
 
 BUNDLED_NEXTCLOUD_CONFIG = """\
 db_path = "{db}"
 temp_dir = "{tmp}"
 workspace_path = "{ws}"
-nextcloud_mount_path = "{ws}"
+workspace_mount_path = "{ws}"
 
 [nextcloud]
 url = "http://nextcloud"
@@ -389,8 +389,138 @@ class TestTheExternalStoreMustBeMounted:
         assert result.returncode == 78, result.stdout + result.stderr
 
 
+HOST_FOLDER_CONFIG = """\
+db_path = "{db}"
+temp_dir = "{tmp}"
+workspace_path = "{ws}"
+workspace_mount_path = "{ws}"
+
+[talk]
+enabled = false
+"""
+
+#: What `istota-stack` passes for STORAGE=host-folder.
+HOST_FOLDER_ENV = {"ISTOTA_WORKSPACE_FSTYPE": "virtiofs", "ISTOTA_WORKSPACE_MARKER_REQUIRED": "1"}
+
+
+class TestTheHostFolderIsTheWorkspace:
+    """The local VM's workspace is a Mac folder shared in with virtiofs.
+
+    The unit half of row L1; the vm tier's `tests/vm/test_host_folder.py` is
+    its witness.
+
+    A folder renamed, deleted or on an unplugged volume leaves an empty
+    directory of the same type in its place (Lima recreates a missing one at
+    start), so the marker at its root is what tells the two apart.
+    """
+
+    def _volume(self, tmp_path, *, marker: bool = True, fstype: str | None = "virtiofs",
+                config: str = HOST_FOLDER_CONFIG) -> Volume:
+        volume = Volume(tmp_path, config)
+        volume.workspace.mkdir()
+        if marker:
+            (volume.workspace / ".istota-workspace").write_text("")
+        volume.mount_table(fstype)
+        return volume
+
+    def test_the_folder_with_its_marker_passes(self, tmp_path):
+        volume = self._volume(tmp_path)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c.startswith("scheduler --daemon") for c in volume.calls())
+
+    def test_a_folder_without_its_marker_is_refused_by_name(self, tmp_path):
+        volume = self._volume(tmp_path, marker=False)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert str(volume.workspace) in result.stderr
+        assert ".istota-workspace" in result.stderr
+        assert volume.calls() == []
+        assert not (volume.root / ".secret_key").exists()
+
+    def test_a_directory_named_like_the_marker_is_not_the_marker(self, tmp_path):
+        volume = self._volume(tmp_path, marker=False)
+        (volume.workspace / ".istota-workspace").mkdir()
+
+        assert volume.run(**HOST_FOLDER_ENV).returncode == 78
+
+    def test_a_workspace_on_another_filesystem_type_is_refused(self, tmp_path):
+        volume = self._volume(tmp_path, fstype="ext4")
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "virtiofs" in result.stderr
+        assert str(volume.workspace) in result.stderr
+
+    def test_a_workspace_with_no_mount_of_its_own_is_refused(self, tmp_path):
+        volume = self._volume(tmp_path, fstype=None)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "overlay" in result.stderr
+
+    def test_a_config_that_does_not_use_the_folder_is_refused(self, tmp_path):
+        """host.env says the workspace is the shared folder and the config
+        writes to the state volume: the user's folder would go unused."""
+        volume = self._volume(tmp_path, config=LOCAL_CONFIG)
+
+        result = volume.run(**HOST_FOLDER_ENV)
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "workspace_mount_path" in result.stderr
+        assert "--storage host-folder" in result.stderr
+
+    def test_a_mount_nothing_vouches_for_is_refused_by_name(self, tmp_path):
+        """The vm tier's stray workspace: config.toml still named the folder's
+        mount and host.env said STORAGE=local, so istota-stack passed no type.
+        /mnt/shared was then a plain directory on the VM, the daemon wrote a
+        workspace into it, and the rclone mount later refused that directory."""
+        volume = self._volume(tmp_path, marker=False, fstype="ext4")
+
+        result = volume.run()
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert str(volume.workspace) in result.stderr
+        assert "ISTOTA_WORKSPACE_FSTYPE" in result.stderr
+        assert volume.calls() == []
+        assert not (volume.root / ".secret_key").exists()
+
+    def test_a_marker_does_not_vouch_for_an_undeclared_mount(self, tmp_path):
+        volume = self._volume(tmp_path, fstype="virtiofs")
+
+        assert volume.run().returncode == 78
+
+    def test_a_mount_whose_type_is_declared_needs_no_marker(self, tmp_path):
+        """A developer's own mount: declaring its type is what vouches for it."""
+        volume = self._volume(tmp_path, marker=False, fstype="ext4")
+
+        assert volume.run(ISTOTA_WORKSPACE_FSTYPE="ext4").returncode == 0
+
+    def test_the_rclone_refusal_is_unchanged_with_the_type_passed(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("ext4")
+
+        result = volume.run(ISTOTA_WORKSPACE_FSTYPE="fuse.rclone")
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "fuse.rclone" in result.stderr
+        assert "mount-nextcloud" in result.stderr
+
+    def test_the_rclone_mount_needs_no_marker(self, tmp_path):
+        volume = Volume(tmp_path, FULL_INTEGRATION_CONFIG)
+        volume.mount_table("fuse.rclone")
+
+        assert volume.run(ISTOTA_WORKSPACE_FSTYPE="fuse.rclone").returncode == 0
+
+
 class TestALocalWorkspaceBesideNextcloud:
-    """A URL without `nextcloud_mount_path` is a local workspace, and only a
+    """A URL without `workspace_mount_path` is a local workspace, and only a
     workspace that is in fact the rclone mount is refused for saying so."""
 
     @pytest.mark.parametrize("fstype", [None, "ext4"], ids=["no-mount", "own-mount"])
@@ -410,7 +540,7 @@ class TestALocalWorkspaceBesideNextcloud:
         result = volume.run()
 
         assert result.returncode == 78, result.stdout + result.stderr
-        assert "nextcloud_mount_path" in result.stderr
+        assert "workspace_mount_path" in result.stderr
         assert str(volume.workspace) in result.stderr
         assert volume.calls() == []
 
@@ -421,6 +551,16 @@ class TestALocalWorkspaceBesideNextcloud:
         result = volume.run(ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE="1")
 
         assert result.returncode == 78, result.stdout + result.stderr
+
+    def test_a_declared_type_asks_nothing_of_a_config_with_no_mount(self, tmp_path):
+        """host.env still saying STORAGE=nextcloud beside a local workspace: the
+        type istota-stack passes is a mount's, and this config names none."""
+        volume = Volume(tmp_path, LOCAL_WORKSPACE_NEXTCLOUD_CONFIG)
+        volume.mount_table("ext4")
+
+        result = volume.run(ISTOTA_WORKSPACE_FSTYPE="fuse.rclone")
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 class TestThePublicName:

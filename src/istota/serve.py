@@ -57,6 +57,27 @@ class ServeError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def parse_env_text(text: str) -> dict[str, str]:
+    """``KEY=VALUE`` lines as ``load_env_file`` reads them: an ``export``
+    prefix, ``#`` comments, quotes stripped, and the first line for a name
+    wins, since that is the one ``load_env_file`` puts in the environment.
+    The standalone import reads ``istota.env`` through this too."""
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            values.setdefault(key, value.strip().strip('"').strip("'"))
+    return values
+
+
 def load_env_file(path: Path) -> int:
     """Read ``KEY=VALUE`` lines from ``path`` into ``os.environ``.
 
@@ -67,25 +88,17 @@ def load_env_file(path: Path) -> int:
     """
     if not path.is_file():
         return 0
-    count = 0
     try:
-        for raw in path.read_text().splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):].strip()
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if not key or key in os.environ:
-                continue
-            os.environ[key] = value
-            count += 1
+        values = parse_env_text(path.read_text())
     except OSError as exc:  # pragma: no cover - defensive
         logger.warning("Could not read env file %s: %s", path, exc)
+        return 0
+    count = 0
+    for key, value in values.items():
+        if key in os.environ:
+            continue
+        os.environ[key] = value
+        count += 1
     return count
 
 

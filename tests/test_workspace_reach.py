@@ -45,7 +45,7 @@ def resources():
 ])
 def test_mount_gates_and_order(config, withheld, reasons):
     config.nextcloud.url = "https://cloud.example.com"
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     mounts = plan.user_data_mounts(config, user_id="alice", conversation_token="room-a",
                                   user_resources=resources(), withheld_scopes=withheld,
                                   group_ids=["team", "team"])
@@ -97,7 +97,7 @@ def test_places_and_reach_through_live_membership(config, conn):
     cfg_id = "linked:cfg:" + hashlib.sha256(b"linked/ro").hexdigest()[:12]
     # The Talk attachments place exists only on the Nextcloud mount (ISSUE-725).
     config.nextcloud.url = "https://cloud.example.com"
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     places = list_places(config, conn, "alice")
     by_id = {p.id: p for p in places}
     assert set(by_id) == {"home", "talk", f"linked:{rw_id}", cfg_id, f"room:{room.token}", "group:team", "nextcloud"}
@@ -161,7 +161,7 @@ def test_notes_use_daemon_verdict_and_only_nextcloud_host(config, monkeypatch):
     monkeypatch.setattr(executor, "_bwrap_checked", False)
     config.nextcloud.url = "https://alice:secret@cloud.example.com/private"
     assert deployment_notes(config)[-1] == "Files are stored in a local folder."
-    config.nextcloud_mount_path = config.workspace_path
+    config.workspace_mount_path = config.workspace_path
     assert deployment_notes(config) == ["Files are stored in your Nextcloud at cloud.example.com."]
 
 

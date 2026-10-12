@@ -895,6 +895,10 @@ def finish(a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path, v
 
     from . import auth  # noqa: PLC0415
 
+    # The web form offers no host folder, so its "local" on a VM whose
+    # workspace is the Mac's folder keeps that folder, as the terminal does.
+    if not a.nextcloud_url and setup_wizard.current_storage(vm_dir) == "host-folder":
+        a.host_folder = True
     try:
         setup_wizard.write_container_setup(
             a, data_dir=data_dir, vm_dir=vm_dir, out=lambda line: logger.info("setup: %s", line.strip()),

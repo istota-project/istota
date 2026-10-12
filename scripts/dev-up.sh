@@ -53,7 +53,7 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
 bot_name = "Istota-dev"
 db_path = "$DB_PATH"
 temp_dir = "$TEMP_DIR"
-nextcloud_mount_path = "$PWD/$WORKSPACE_DIR"
+workspace_mount_path = "$PWD/$WORKSPACE_DIR"
 
 [experimental]
 features = ["module_health"]

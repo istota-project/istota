@@ -165,7 +165,7 @@ MODES = {
     "nextcloud-browser": dict(ingress="local", hostname="localhost:8080",
                               nextcloud_url="https://cloud.example.com", profiles=("browser", "signaling")),
     # Talk with the workspace on the state volume: the role sets
-    # `istota_storage: local` and leaves `nextcloud_mount_path` out of the plan.
+    # `istota_storage: local` and leaves `workspace_mount_path` out of the plan.
     "nextcloud-local-workspace": dict(ingress="local", hostname="localhost:8080",
                                       nextcloud_url="https://cloud.example.com", workspace="local"),
 }

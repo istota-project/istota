@@ -19,7 +19,7 @@ import pytest
 import yaml
 
 from istota import apply, setup_wizard
-from istota.config import load_config
+from istota.config import SchedulerConfig, load_config
 from istota.lib import rclone_conf
 from istota.setup_wizard import (
     SECRET_NAMES,
@@ -103,7 +103,10 @@ class TestEveryAnswerReachesItsKey:
         assert config.bot_name == "Zed"
         assert str(config.db_path) == "/data/db/istota.db"
         assert str(config.workspace_path) == "/mnt/shared"
-        assert str(config.nextcloud_mount_path) == "/mnt/shared"
+        assert str(config.workspace_mount_path) == "/mnt/shared"
+        written = tomllib.loads(render_container_config(a, inline_credentials=False))
+        assert written["workspace_mount_path"] == "/mnt/shared"
+        assert "nextcloud_mount_path" not in written
         assert config.security.sandbox_enabled is True
         assert config.security.skill_proxy_enabled is True
 
@@ -255,7 +258,7 @@ def _args(tmp_path: Path, **kw):
         imap_host=None, imap_user=None, smtp_host=None, bot_email=None,
         caldav_url=None, caldav_username=None, location=False, developer=False,
         profile=None, no_money=False, no_health=False, no_feeds=False,
-        no_briefings=False,
+        no_briefings=False, storage=None,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -449,7 +452,85 @@ class TestTheLocalWorkspace:
 
         assert config.storage_backend == "local"
         assert str(config.workspace_path) == "/data/workspace"
-        assert config.nextcloud_mount_path is None
+        assert config.workspace_mount_path is None
+
+
+class TestTheHostFolder:
+    """`--storage host-folder`: the local VM's workspace is a folder on the Mac,
+    shared in and bound at /mnt/shared. A mount, so the liveness check and the
+    backup's guard cover it; not Nextcloud, so the vocabulary is "workspace"."""
+
+    def test_it_writes_the_mount_as_the_workspace_and_no_nextcloud(self, tmp_path, monkeypatch):
+        a = _full_answers(nextcloud_url="", oauth_client_id="", host_folder=True)
+        text = render_container_config(a, inline_credentials=True)
+        config = _load(tmp_path, text, monkeypatch)
+
+        assert str(config.workspace_path) == "/mnt/shared"
+        assert str(config.workspace_mount_path) == "/mnt/shared"
+        assert config.nextcloud.url == ""
+        assert config.storage_is_nextcloud is False
+        assert config.storage_backend == "local"
+        assert "nextcloud" not in tomllib.loads(text)
+
+    def test_the_host_env_says_host_folder(self):
+        a = _full_answers(nextcloud_url="", oauth_client_id="", host_folder=True)
+        assert _env(render_host_env(a))["STORAGE"] == "host-folder"
+
+    def test_the_flag_selects_it(self):
+        args = SimpleNamespace(yes=True, user="alice", storage="host-folder")
+        a = setup_wizard.collect_container_answers(
+            args, input_fn=input, out=lambda *_: None, getpass_fn=None,
+        )
+        assert a.host_folder is True
+        assert a.uses_nextcloud is False
+
+    def test_it_is_refused_beside_a_nextcloud(self):
+        args = SimpleNamespace(yes=True, user="alice", storage="host-folder",
+                               nextcloud_url="https://cloud.example.test")
+        with pytest.raises(setup_wizard.SetupError, match="host-folder"):
+            setup_wizard.collect_container_answers(
+                args, input_fn=input, out=lambda *_: None, getpass_fn=None,
+            )
+
+    def test_a_rerun_without_the_flag_keeps_the_folder(self, tmp_path, monkeypatch):
+        """A plain `istota-stack setup --force` on the local VM must not move the
+        workspace off the user's folder onto the state volume."""
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        assert setup_wizard.run_setup(_args(tmp_path, storage="host-folder"), out=lambda *_: None) == 0
+        assert setup_wizard.run_setup(_args(tmp_path, force=True), out=lambda *_: None) == 0
+
+        assert _env((tmp_path / "vm" / "host.env").read_text())["STORAGE"] == "host-folder"
+        written = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        assert written["workspace_mount_path"] == "/mnt/shared"
+
+    def test_local_storage_asked_for_explicitly_leaves_the_folder(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        setup_wizard.run_setup(_args(tmp_path, storage="host-folder"), out=lambda *_: None)
+        setup_wizard.run_setup(_args(tmp_path, force=True, storage="local"), out=lambda *_: None)
+
+        assert _env((tmp_path / "vm" / "host.env").read_text())["STORAGE"] == "local"
+
+
+class TestMissedJobsUnderLocalIngress:
+    """Local ingress is the local VM, which pauses while the Mac sleeps. A job
+    or briefing missed by up to twelve hours runs once on wake, an older one
+    is skipped (Stage 1 measured both); a server keeps the dataclass default."""
+
+    def test_local_ingress_catches_up_for_twelve_hours(self, tmp_path, monkeypatch):
+        a = _full_answers(ingress="local", hostname="localhost:8080", nextcloud_url="",
+                          oauth_client_id="", host_folder=True)
+        config = _load(tmp_path, render_container_config(a, inline_credentials=True), monkeypatch)
+        assert config.scheduler.cron_max_staleness_minutes == 720
+
+    @pytest.mark.parametrize("ingress", ["direct", "proxied"])
+    def test_a_server_keeps_the_default(self, tmp_path, monkeypatch, ingress):
+        a = _full_answers(ingress=ingress)
+        text = render_container_config(a, inline_credentials=True)
+        assert "scheduler" not in tomllib.loads(text)
+        default = SchedulerConfig().cron_max_staleness_minutes
+        assert _load(tmp_path, text, monkeypatch).scheduler.cron_max_staleness_minutes == default
 
 
 class TestTheWorkspaceChoice:
@@ -476,7 +557,7 @@ class TestTheWorkspaceChoice:
         assert config.storage_is_nextcloud is False
         assert config.storage_backend == "local"
         assert str(config.workspace_path) == "/data/workspace"
-        assert config.nextcloud_mount_path is None
+        assert config.workspace_mount_path is None
         assert config.talk.enabled is True
         assert render_host_env(a).count("STORAGE=local") == 1
 
@@ -484,7 +565,7 @@ class TestTheWorkspaceChoice:
         doc, host_env = self._run(tmp_path, nextcloud_url="http://nextcloud")
 
         assert doc["workspace_path"] == "/mnt/shared"
-        assert doc["nextcloud_mount_path"] == "/mnt/shared"
+        assert doc["workspace_mount_path"] == "/mnt/shared"
         assert doc["nextcloud"]["auto_share_bot_dir"] is True
         assert host_env["STORAGE"] == "nextcloud"
 
@@ -495,7 +576,7 @@ class TestTheWorkspaceChoice:
         )
 
         assert doc["workspace_path"] == "/data/workspace"
-        assert "nextcloud_mount_path" not in doc
+        assert "workspace_mount_path" not in doc and "nextcloud_mount_path" not in doc
         assert doc["nextcloud"]["url"] == "http://nextcloud"
         assert doc["nextcloud"]["dav_prefix"] == ""
         assert doc["nextcloud"]["auto_share_bot_dir"] is False

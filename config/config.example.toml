@@ -74,20 +74,23 @@ db_path = "data/istota.db"
 # SIGBUSes the process on the rclone FUSE mount, so they'd be stuck on the
 # slower DELETE journal mode (no reader/writer concurrency). User-facing files
 # (health uploads, money ledgers, feeds exports) stay on the mount; only the
-# .db relocates here. A path under nextcloud_mount_path is refused at runtime.
+# .db relocates here. A path under workspace_mount_path is refused at runtime.
 module_data_dir = "data/modules"
 
 # =============================================================================
 # File Access Configuration
 # =============================================================================
-# Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
+# Root of the bot's on-disk file tree. Defaults to workspace_mount_path.
 # Required when [nextcloud] url is set, whether or not it is the mount.
 workspace_path = "/srv/mount/nextcloud/content"
 
-# The FUSE mountpoint of the bot's Nextcloud files (mount-nextcloud.service),
-# when the workspace is one. Set, with a URL, means the workspace is the mount;
-# unset means it is local, and Talk and the nextcloud skill still work.
-# nextcloud_mount_path = "/srv/mount/nextcloud/content"
+# The mountpoint the workspace lives on, when it is one: the rclone mount of the
+# bot's Nextcloud files (mount-nextcloud.service), or a host folder shared into
+# a VM. Doctor and the backup guard check it is still mounted. With a Nextcloud
+# URL, set means the workspace is the mount; unset means it is local, and Talk
+# and the nextcloud skill still work. Read under its old name,
+# nextcloud_mount_path; both names with different paths is an error.
+# workspace_mount_path = "/srv/mount/nextcloud/content"
 
 # Path to skills directory (individual skill files loaded selectively)
 skills_dir = "config/skills"
@@ -567,7 +570,7 @@ features = []
 [nextcloud]
 # Nextcloud server URL: Talk, the nextcloud skill, OCS and DAV. A URL needs
 # workspace_path. Whether the workspace is the bot's Nextcloud files is
-# nextcloud_mount_path's question, not this one: with the mount path set the
+# workspace_mount_path's question, not this one: with the mount path set the
 # bot describes files as Nextcloud, without it as a plain local workspace.
 url = "https://nextcloud.example.com"
 # Bot's Nextcloud username
@@ -1226,7 +1229,7 @@ main_loop_read_timeout_ms = 2000
 db_backup_enabled = true
 db_backup_interval = 86400          # seconds between snapshots (daily)
 # db_backup_dir = ""                # empty = {workspace_path}/Backups/db/snapshots
-# A destination at or under nextcloud_mount_path is skipped while that mount is
+# A destination at or under workspace_mount_path is skipped while that mount is
 # down, however it is spelled. A stale mountpoint would take the copies to local
 # disk and lose them when the mount returns. A destination outside the mount is
 # trusted as-is; nothing here can check it.

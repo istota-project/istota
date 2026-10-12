@@ -176,7 +176,7 @@ def main(argv: list[str]) -> int:
     if not prefixes and not old_home:
         print("no import record with a prefix map, and no --map: nothing to rewrite", file=sys.stderr)
         return 1
-    root = Path(config.nextcloud_mount_path or config.workspace_path)
+    root = Path(config.workspace_mount_path or config.workspace_path)
     result = run(root, config.bot_dir_name, prefixes, old_home, dry_run=args.dry_run)
     report(result, root, dry_run=args.dry_run)
     return 0

@@ -17,6 +17,12 @@
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
+#   istota-stack restore [--date YYYY-MM-DD] [--force]
+#                               the master key (on stdin), the config and the databases
+#                               from the workspace's backups, onto a stack never set up
+#   istota-stack import-standalone <dir> --hostname HOST [--dry-run]
+#                               a standalone install the Mac staged in <dir>, its istota.env
+#                               on stdin, onto a stack never set up
 #   istota-stack retire-bare-metal --namespace NS [--dry-run]
 #                               remove what the old Ansible role installed, once the stack runs
 #   istota-stack localize-workspace [--copy-only] [--resume] [--dry-run] [--no-note] [--accept-skipped]
@@ -28,6 +34,12 @@
 #   istota-stack up | down      start or stop the stack (istota-stack.service)
 #   istota-stack exec <cmd...>  run a command in the daemon container as uid 10001
 #   istota-stack compose <...>  docker compose, with this stack's files and settings
+#   istota-stack host-env KEY | KEY=VALUE...
+#                               print one host.env value, or set some, keeping every other line
+#   istota-stack stage [--daemon] <path>
+#                               move a file or directory into a fresh root-only directory
+#                               under staging/ and print its new path (--daemon: uid 10001's)
+#   istota-stack unstage <path> remove what `stage` made
 #
 # --- end usage ---
 #
@@ -46,9 +58,11 @@
 #   .stack.lock       held by every verb that writes; names the verb holding it
 #   certs/ letsencrypt/ acme/   nginx's certificate sources and the ACME webroot
 #
-# The rclone mount, in full Nextcloud integration, is outside it at
-# /srv/mount/nextcloud/content (ISTOTA_MOUNT_DIR, for the tests), the path the
-# bare-metal installs use; mount-nextcloud.service names it too.
+# The workspace mount is outside it: in full Nextcloud integration the rclone
+# mount at /srv/mount/nextcloud/content, the path the bare-metal installs use
+# (mount-nextcloud.service names it too); on the local VM the Mac folder Lima
+# shares in at /srv/mount/host-folder. host.env's STORAGE picks which, and
+# ISTOTA_MOUNT_DIR overrides it for the tests.
 #
 # The compose file is the checkout's own (src/docker/docker-compose.yml), so the
 # compose file, the seccomp and AppArmor profiles and the images always come
@@ -77,7 +91,6 @@ set -euo pipefail
 umask 022
 
 STACK="${ISTOTA_STACK_DIR:-/srv/app/istota}"
-MOUNT_DIR="${ISTOTA_MOUNT_DIR:-/srv/mount/nextcloud/content}"
 SRC="${STACK}/src"
 ALLOWED_SIGNERS="${STACK}/allowed_signers"
 ENV_FILE="${STACK}/.env"
@@ -91,6 +104,9 @@ DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
 # root's alone, so everything it prints comes from a file uid 10001 cannot write.
 SETUP_DIR="${STACK}/.setup"
 LEGACY_DEVBOX_COMPOSE="${CONFIG_DIR}/compose.devbox.yml"
+# Where the Mac CLI's file arguments (`apply <plan>`, `import-bare-metal <dir>`)
+# are handed over: one fresh directory per call, removed after it.
+STAGING_DIR="${STACK}/staging"
 ISTOTA_UID=10001
 PROJECT=istota
 # The daemon, web and webhooks image. Releases before the service was renamed
@@ -122,6 +138,20 @@ env_get() {
     [ -f "$file" ] || return 0
     awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); v = $0 } END { if (v != "") print v }' "$file"
 }
+
+# The workspace mount's directory on this VM, by host.env's STORAGE: the
+# rclone mount's for nextcloud (and for local, which mounts nothing there), the
+# folder Lima shares in for host-folder. provision.sh installs istota-stack and
+# cannot source it, so each carries this; tests/test_host_units.py holds the
+# two equal.
+mount_dir_for_storage() {
+    case "$1" in
+        host-folder) echo /srv/mount/host-folder ;;
+        *) echo /srv/mount/nextcloud/content ;;
+    esac
+}
+
+MOUNT_DIR="${ISTOTA_MOUNT_DIR:-$(mount_dir_for_storage "$(env_get "$HOST_ENV" STORAGE)")}"
 
 # Set KEY=VALUE pairs in .env, keeping every other line, through a rename so a
 # reader never sees half a file.
@@ -228,6 +258,14 @@ compose() {
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
     local pin
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
+    # What the entrypoint requires at /mnt/shared: the filesystem type, and for
+    # a host folder its .istota-workspace marker (an empty stand-in for a folder
+    # that went away is a virtiofs mount too).
+    local fstype="" marker=""
+    case "$(env_get "$HOST_ENV" STORAGE)" in
+        nextcloud) fstype=fuse.rclone ;;
+        host-folder) fstype=virtiofs; marker=1 ;;
+    esac
     (
         # Only a pin that is set: compose passes an empty variable as an empty
         # build arg, which overrides the Dockerfile's default and fails the build.
@@ -236,6 +274,8 @@ compose() {
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
         ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
         ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
+        ISTOTA_WORKSPACE_FSTYPE="$fstype" \
+        ISTOTA_WORKSPACE_MARKER_REQUIRED="$marker" \
         ISTOTA_HOST_ENV="$HOST_ENV" \
         CERTS_DIR="$certs" \
         ACME_WEBROOT="${STACK}/acme" \
@@ -587,6 +627,7 @@ cmd_update() {
     else
         log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
     fi
+    copy_stack_env_out
     cleanup_update
     # A successful update may exec provision.sh, which does not run EXIT traps.
     trap - EXIT
@@ -748,8 +789,15 @@ install_setup_staging() {
 # What either setup needs before the wizard runs: the directories, every secret
 # file compose declares, and an upgraded Docker install's config copied out.
 prepare_setup() {
-    install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "$CONFIG_DIR"
-    install -d -m 0755 "$MOUNT_DIR" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+    local owner=()
+    # Root on the VM; the tests run as themselves.
+    if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
+    install -d -m 0750 ${owner[@]+"${owner[@]}"} "$CONFIG_DIR"
+    install -d -m 0755 "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/acme"
+    # A host folder is the user's own on the Mac, and a mode set here reaches it.
+    local host_folder=""
+    [ "$(env_get "$HOST_ENV" STORAGE)" != "host-folder" ] || host_folder=1
+    [ -n "$host_folder" ] || install -d -m 0755 "$MOUNT_DIR"
     ensure_secret_files
     copy_out_config
 }
@@ -801,6 +849,7 @@ cmd_setup() {
         log "${lacking}: run \`istota-stack update ${tag}\`."
     fi
     render_devbox_compose "$tag"
+    copy_stack_env_out
     log "written. Re-run provision.sh to pick up host.env, then \`systemctl enable --now istota-stack\`."
 }
 
@@ -1035,6 +1084,7 @@ cmd_setup_web() {
     env_set "ISTOTA_TAG=${tag}"
     render_devbox_compose "$tag"
     build_what_setup_needs "$tag"
+    copy_stack_env_out
     # Both steps below start `istota-stack up`: provision.sh directly, and the
     # unit's ExecStart in a process systemd starts. That `up` opens the lock
     # afresh, so either would wait on the one this process holds. The setup
@@ -1090,6 +1140,7 @@ cmd_apply() {
     install -m 0400 "$plan" "${staging}/${name}"
     if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
     apply_plan_file "${staging}/${name}" "$@" || rc=$?
+    copy_stack_env_out
     if [ "$rc" -eq 2 ]; then
         case " $* " in
             *" --dry-run "*) ;;
@@ -1116,6 +1167,177 @@ cmd_import_bare_metal() {
     ISTOTA_CONFIG_READ_ONLY=false oneshot \
         -v "${source}:/import:ro" -v "${SECRETS_DIR}:/secrets" \
         "$(main_service)" istota migrate import-bare-metal --source /import "$@"
+}
+
+# `istota migrate restore-workspace` in a one-shot container: the master key
+# from stdin into /data/.secret_key, config.toml and admins from the
+# workspace's Backups/config/, the databases from its snapshots. The local
+# VM's recovery (the Mac's `istota-stack restore`, after `create --no-setup`).
+# The module refuses whatever it would replace that differs; the stack has to
+# be down, as for import-bare-metal, since the daemon's lock is in a /tmp the
+# one-shot does not share.
+#
+# The module hands back the stack's .env and host.env copies (stack.env,
+# host.env, copied in by copy_stack_env_out) in a staging directory, as setup's
+# wizard does; they go in place here, except .env's tag lines, which name the
+# old VM's images and stay this VM's. Then what the restored config and
+# profiles need is built and the host provisioned; the caller starts the stack.
+cmd_restore() {
+    local running owner=() tag rc=0 key saved=()
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was restored."
+    if [ -n "$running" ]; then
+        die "the stack is running. Stop it first (\`systemctl stop istota-stack\`); a restore replaces its database."
+    fi
+    # Compose would make a missing bind source root's.
+    if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
+    install -d -m 0750 ${owner[@]+"${owner[@]}"} "$CONFIG_DIR"
+    trap 'rm -rf "${staging:-}"' EXIT
+    staging="$(mktemp -d "${STACK}/.restore.XXXXXX")"
+    if [ "$(id -u)" -eq 0 ]; then chown "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/vm" \
+        "$(main_service)" istota migrate restore-workspace --vm-dir /vm "$@" || rc=$?
+    # 1 is a refusal with nothing written; 2 is partial, with the config in place.
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || exit "$rc"
+    # Nothing running as 10001 may change staging while root reads it.
+    if [ "$(id -u)" -eq 0 ]; then chown root:root "$staging"; fi
+    chmod 0700 "$staging"
+
+    if [ -e "${staging}/stack.env" ] || [ -L "${staging}/stack.env" ]; then
+        for key in ISTOTA_TAG ISTOTA_TAG_UNSIGNED ISTOTA_PREVIOUS_TAG ISTOTA_PREVIOUS_TAG_UNSIGNED; do
+            saved+=("${key}=$(env_get "$ENV_FILE" "$key")")
+        done
+        install_staged "${staging}/stack.env" "$ENV_FILE"
+        env_set "${saved[@]}"
+        log "restored .env from the workspace, keeping this VM's tag (${tag})"
+    fi
+    if [ -e "${staging}/host.env" ] || [ -L "${staging}/host.env" ]; then
+        install_staged "${staging}/host.env" "$HOST_ENV"
+        log "restored host.env from the workspace"
+    fi
+    render_devbox_compose "$tag"
+    build_what_setup_needs "$tag"
+    if provision_outdated; then
+        log "host.env changed what this host provisions; running ${SRC}/host/provision.sh"
+        # provision.sh may start istota-stack.service, whose `up` would wait
+        # on the lock this process holds.
+        release_stack_lock
+        "${SRC}/host/provision.sh" \
+            || die "provision.sh failed. The restore is in place: fix it, run ${SRC}/host/provision.sh, then \`systemctl enable --now istota-stack\`."
+    fi
+    # Exit rather than return: provision.sh may have replaced this script's file.
+    exit "$rc"
+}
+
+# `istota migrate import-standalone` in a one-shot container: a standalone
+# install the Mac's istota-stack staged in <dir> (read-only at /import), its
+# istota.env on stdin, onto a stack made with `create --no-setup`. The module
+# writes config.toml, admins, the master key and the secrets files, restores
+# the databases, and stages .env and host.env as setup's wizard does; they go
+# in place here, then what the config needs is built and the host provisioned,
+# as after setup. The caller starts the stack. Down, as for restore: the
+# import replaces the database and the master key.
+cmd_import_standalone() {
+    [ "$#" -ge 1 ] || { usage >&2; exit 64; }
+    local source="$1" tag running rc=0 dry=""
+    shift
+    case " $* " in *" --dry-run "*) dry=1 ;; esac
+    [ -d "$source" ] || die "no staged standalone install at ${source}"
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was imported."
+    if [ -n "$running" ]; then
+        die "the stack is running. Stop it first (\`systemctl stop istota-stack\`); the import replaces its database and master key."
+    fi
+    prepare_setup
+    trap 'rm -rf "${staging:-}"' EXIT
+    new_staging
+    if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot \
+        -v "${source}:/import:ro" -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
+        "$(main_service)" istota migrate import-standalone --source /import --vm-dir /vm "$@" || rc=$?
+    # 1 is a refusal with nothing written; 2 a partial, which a re-run resumes.
+    [ "$rc" -eq 0 ] || exit "$rc"
+    [ -z "$dry" ] || exit 0
+    # Nothing running as 10001 may change staging while root reads it.
+    if [ "$(id -u)" -eq 0 ]; then chown root:root "$staging"; fi
+    chmod 0700 "$staging"
+    install_setup_staging "$staging"
+    env_set "ISTOTA_TAG=${tag}"
+    render_devbox_compose "$tag"
+    build_what_setup_needs "$tag"
+    copy_stack_env_out
+    if provision_outdated; then
+        log "host.env changed what this host provisions; running ${SRC}/host/provision.sh"
+        # As in restore: provision.sh may start the unit, whose `up` takes the lock.
+        release_stack_lock
+        "${SRC}/host/provision.sh" \
+            || die "provision.sh failed. The import is in place: fix it, run ${SRC}/host/provision.sh, then \`systemctl enable --now istota-stack\`."
+    fi
+    # Exit rather than return: provision.sh may have replaced this script's file.
+    exit 0
+}
+
+# The stack's .env and host.env into the workspace's Backups/config/<UTC
+# date>/, beside the config.toml and admins db_backup copies there, so a lost
+# VM's restore can put them back. Neither holds a credential, which
+# tests/test_workspace_restore.py holds against what setup writes. Only where
+# the workspace is a mount, db_backup's rule: the rclone mount, or a host folder
+# with its marker. Run as uid 10001, whose the workspace is, through directory
+# fds that follow no link. Best-effort: a failure is a warning, never the
+# calling verb's. Called by update, setup and apply. Nothing is copied before
+# setup has written config.toml: the Mac's restore runs update on a new VM,
+# whose bare .env and host.env would replace the day's set it is about to read.
+COPY_STACK_ENV_PY='
+import os, sys
+root, date, pairs = sys.argv[1], sys.argv[2], sys.argv[3:]
+dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+fd = os.open(root, dir_flags)
+try:
+    for part in ("Backups", "config", date):
+        try:
+            os.mkdir(part, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        inner = os.open(part, dir_flags, dir_fd=fd)
+        os.close(fd)
+        fd = inner
+    for pair in pairs:
+        name, source = pair.split("=", 1)
+        try:
+            src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            continue
+        with os.fdopen(src, "rb") as fh:
+            data = fh.read(1 << 20)
+        tmp = f".{name}.{os.getpid()}"
+        out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        with os.fdopen(out, "wb") as fh:
+            fh.write(data)
+            os.fchmod(fh.fileno(), 0o600)
+        os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+finally:
+    os.close(fd)
+'
+
+copy_stack_env_out() {
+    local storage day drop=()
+    storage="$(env_get "$HOST_ENV" STORAGE)"
+    case "$storage" in host-folder|nextcloud) ;; *) return 0 ;; esac
+    [ -f "${CONFIG_DIR}/config.toml" ] || return 0
+    mountpoint -q "$MOUNT_DIR" 2>/dev/null || return 0
+    if [ "$storage" = host-folder ] \
+            && { [ -L "${MOUNT_DIR}/.istota-workspace" ] || [ ! -f "${MOUNT_DIR}/.istota-workspace" ]; }; then
+        return 0
+    fi
+    day="$(date -u +%F)"
+    if [ "$(id -u)" -eq 0 ]; then
+        drop=(setpriv "--reuid=${ISTOTA_UID}" "--regid=${ISTOTA_UID}" --clear-groups --no-new-privs)
+    fi
+    ${drop[@]+"${drop[@]}"} python3 -I -c "$COPY_STACK_ENV_PY" "$MOUNT_DIR" "$day" \
+            "stack.env=${ENV_FILE}" "host.env=${HOST_ENV}" 2>&1 \
+        || log "WARNING: could not copy .env and host.env into ${MOUNT_DIR}/Backups/config/${day}; a restore from this workspace would not have them."
 }
 
 # After a config change: re-render the devbox services, since [devbox] users may
@@ -1169,7 +1391,7 @@ cmd_localize_workspace() {
         || die "host.env does not say STORAGE=nextcloud: the workspace is not the rclone mount, so there is nothing to move."
     if [ -z "$copy_only" ] && [ -z "$dry_run" ]; then
         oneshot "$(main_service)" istota workspace localize-config --check --workspace "$LOCAL_WORKSPACE" \
-            || die "config.toml cannot be moved here (above); nothing was stopped. A config written by \`istota apply\` moves by its plan: run \`istota-stack localize-workspace --copy-only\`, then set istota_storage: local, workspace_path = \"${LOCAL_WORKSPACE}\", no nextcloud_mount_path and auto_share_bot_dir = false in the plan, and apply it."
+            || die "config.toml cannot be moved here (above); nothing was stopped. A config written by \`istota apply\` moves by its plan: run \`istota-stack localize-workspace --copy-only\`, then set istota_storage: local, workspace_path = \"${LOCAL_WORKSPACE}\", no workspace_mount_path and auto_share_bot_dir = false in the plan, and apply it."
     fi
     if [ -z "$dry_run" ]; then
         oneshot "$(main_service)" istota workspace localize --check \
@@ -1208,7 +1430,7 @@ cmd_localize_workspace() {
         *) die "the copy exited ${rc}; config.toml is unchanged and the stack is down. Re-run with --resume, or \`istota-stack up\` to return to the mount." ;;
     esac
     if [ -n "$copy_only" ]; then
-        log "copied, and the stack is down. Change the plan (istota_storage: local, workspace_path = \"${LOCAL_WORKSPACE}\", no nextcloud_mount_path, auto_share_bot_dir = false) and apply it, then run \`istota-stack exec istota workspace reindex --forget-root ${CONTAINER_MOUNT}\`."
+        log "copied, and the stack is down. Change the plan (istota_storage: local, workspace_path = \"${LOCAL_WORKSPACE}\", no workspace_mount_path, auto_share_bot_dir = false) and apply it, then run \`istota-stack exec istota workspace reindex --forget-root ${CONTAINER_MOUNT}\`."
         return 0
     fi
     ISTOTA_CONFIG_READ_ONLY=false oneshot "$(main_service)" istota workspace localize-config --workspace "$LOCAL_WORKSPACE" \
@@ -1396,6 +1618,60 @@ cmd_put_files() {
     "${drop[@]}" python3 -I -c "$PUT_FILES_PY" "$SECRETS_DIR" "$CONFIG_DIR" "$dry_run"
 }
 
+# host.env is root's and read by provision.sh and the units; the Mac CLI
+# writes the local VM's keys through this. Keys are host.env's own shape,
+# upper case; nothing here restarts anything.
+cmd_host_env() {
+    [ "$#" -ge 1 ] || { usage >&2; exit 64; }
+    local pair key
+    if [ "$#" -eq 1 ] && [[ "$1" != *=* ]]; then
+        case "$1" in ""|*[!A-Z0-9_]*) die "'$1' is not a host.env key" ;; esac
+        env_get "$HOST_ENV" "$1"
+        return 0
+    fi
+    for pair in "$@"; do
+        key="${pair%%=*}"
+        [[ "$pair" == *=* ]] || { usage >&2; exit 64; }
+        case "$key" in ""|*[!A-Z0-9_]*) die "'${key}' is not a host.env key" ;; esac
+    done
+    file_set "$HOST_ENV" "$@"
+}
+
+# Move a path the Mac CLI copied into the VM into a fresh directory under
+# staging/, 0700, so the verb it is for reads it from a place no other account
+# can change. A plan stays root's (apply copies it on for 10001); an export is
+# 10001's, which is what import-bare-metal's one-shot container reads it as.
+cmd_stage() {
+    local daemon=""
+    if [ "${1:-}" = --daemon ]; then daemon=1; shift; fi
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    local source="$1" name dir
+    if [ -L "$source" ] || [ ! -e "$source" ]; then
+        die "nothing to stage at ${source}"
+    fi
+    name="$(basename "$source")"
+    install -d -m 0700 "$STAGING_DIR"
+    dir="$(mktemp -d "${STAGING_DIR}/XXXXXXXX")"
+    mv -- "$source" "${dir}/${name}"
+    if [ "$(id -u)" -eq 0 ]; then
+        if [ -n "$daemon" ]; then
+            chown -hR "${ISTOTA_UID}:${ISTOTA_UID}" "$dir"
+        else
+            chown -hR 0:0 "${dir}/${name}"
+        fi
+    fi
+    echo "${dir}/${name}"
+}
+
+# Remove the directory `stage` made for a path, and nothing outside staging/.
+cmd_unstage() {
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    local dir
+    dir="$(dirname "$1")"
+    case "/${dir}/" in */../*|*/./*) die "${1} is not a staged path" ;; esac
+    [ "$(dirname "$dir")" = "$STAGING_DIR" ] || die "${1} is not under ${STAGING_DIR}"
+    rm -rf -- "$dir"
+}
 # --- config-apply: the web config editor's requests ---------------------------
 
 # Where a request's files are staged: tmpfs, so a host that dies mid-apply
@@ -1711,8 +1987,16 @@ main() {
                 *" --web "*) take_stack_lock "setup --web" --try || refuse_busy_setup_web ;;
                 *) take_stack_lock setup ;;
             esac ;;
-        update|rollback|apply|import-bare-metal|retire-bare-metal|put-files|localize-workspace|up|down)
+        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|up|down)
             take_stack_lock "$command" ;;
+        # Setting a key writes host.env, which setup and restore write too;
+        # reading one is a read. stage and unstage take none: each makes or
+        # removes a directory of its own, which only the verb it is handed
+        # to reads, and that verb takes the lock.
+        host-env)
+            case " $* " in
+                *=*) take_stack_lock host-env ;;
+            esac ;;
     esac
     case "$command" in
         update) cmd_update "$@" ;;
@@ -1721,6 +2005,8 @@ main() {
         setup-code) cmd_setup_code "$@" ;;
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
+        restore) cmd_restore "$@" ;;
+        import-standalone) cmd_import_standalone "$@" ;;
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
         localize-workspace) cmd_localize_workspace "$@" ;;
         put-files) cmd_put_files "$@" ;;
@@ -1731,6 +2017,9 @@ main() {
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;
+        host-env) cmd_host_env "$@" ;;
+        stage) cmd_stage "$@" ;;
+        unstage) cmd_unstage "$@" ;;
         -h|--help|help) usage ;;
         *) usage >&2; exit 64 ;;
     esac

@@ -38,7 +38,7 @@ def main() -> int:
     if path is None:
         print(
             "legacy_db_path returned None: the captured config has no "
-            "nextcloud_mount_path, so there is no legacy location to seed",
+            "workspace mount path, so there is no legacy location to seed",
             file=sys.stderr,
         )
         return 1

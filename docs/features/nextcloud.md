@@ -14,7 +14,7 @@ Reading and writing ordinary files is **not** part of this skill. The `files` sk
 
 ## Where the workspace lives
 
-With Nextcloud configured, the workspace is either the bot's Nextcloud files through the VM's rclone mount, or a local directory on the VM. `istota setup` asks which (`--workspace mount|local`, default `mount`); `nextcloud_mount_path` in `config.toml` records the answer, set for the mount and absent for local. See [Storage](../deployment/docker.md#storage).
+With Nextcloud configured, the workspace is either the bot's Nextcloud files through the VM's rclone mount, or a local directory on the VM. `istota setup` asks which (`--workspace mount|local`, default `mount`); `workspace_mount_path` in `config.toml` records the answer, set for the mount and absent for local. See [Storage](../deployment/docker.md#storage).
 
 Talk, the user, group and capability verbs, share listing and avatars work in both. On a local workspace, `talk share-file` uploads a copy of the file into the bot's `Talk/` folder before posting it, so a later edit to the workspace file does not reach the posted one. The `files` verbs, `share create` and `share link` act on the same path in the bot's Nextcloud tree, which is not the workspace there, so they refuse and point to `talk share-file` and the web UI. `dav_prefix` and `auto_share_bot_dir` below only matter with the mount.
 

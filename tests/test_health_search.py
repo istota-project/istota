@@ -11,9 +11,9 @@ from istota.health import db
 
 @pytest.fixture
 def config(tmp_path):
-    cfg = Config(db_path=tmp_path / "framework.db", nextcloud_mount_path=tmp_path / "mount",
+    cfg = Config(db_path=tmp_path / "framework.db", workspace_mount_path=tmp_path / "mount",
                  users={"alice": UserConfig(), "bob": UserConfig()})
-    cfg.nextcloud_mount_path.mkdir()
+    cfg.workspace_mount_path.mkdir()
     return cfg
 
 

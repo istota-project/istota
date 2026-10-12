@@ -783,6 +783,7 @@ class TestRoomIdentityUpgrade:
         config = tomllib.loads(config_file.read_text())
         config["workspace_path"] = "/mnt/shared"
         config.pop("nextcloud_mount_path", None)
+        config.pop("workspace_mount_path", None)
         config["nextcloud"]["url"] = ""
         config_file.write_text(toml_write.dumps(config))
         db_dir = tmp_path / "db"

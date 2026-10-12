@@ -99,6 +99,17 @@ class TestTheUpdateControls:
             assert old != new, name
 
 
+class TestTheMacShimControl:
+    def test_it_applies_once_to_the_mac_cli(self):
+        """Row L4's control edits a copy of the Mac CLI; a forward line that
+        no longer matches would fail the control minutes into a VM session."""
+        from tests.vm import lima
+
+        old, new = lima.MAC_SHIM_CONTROL
+        assert lima.MAC_CLI.read_text().count(old) == 1
+        assert old in new and old != new
+
+
 class TestTheLimaTemplate:
     def test_the_probe_does_not_rely_on_roots_path(self):
         """Lima runs the probe as the user, whose PATH has no /usr/local/sbin, so
@@ -107,3 +118,100 @@ class TestTheLimaTemplate:
         probe = template.split("probes:", 1)[1].split("portForwards:", 1)[0]
         assert "/usr/local/sbin/istota-stack" in probe
         assert "command -v istota-stack" not in probe
+
+    def test_row_l3s_control_finds_the_base_it_extends(self):
+        """`default-mounts-in-template` adds a base by editing this line of a
+        copy; a template that no longer has it would fail the control minutes
+        into a VM session."""
+        template = (REPO / "host" / "lima" / "istota.yaml").read_text()
+        assert template.count("base:\n  - template:_images/debian-13\n") == 1
+        assert "base:\n  - template:_images/debian-13\n" in (VM_DIR / "lima.py").read_text().replace('\\n', "\n")
+
+
+class TestLeavingTheHostFolderMode:
+    """host.env and config.toml leave the host-folder mode together.
+
+    `unshare_host_folder` once set STORAGE=local and restarted the VM with the
+    config still naming /mnt/shared as its workspace mount. istota-stack then
+    passed no workspace type, /mnt/shared was the rclone mount's empty mount
+    point, the daemon wrote a workspace into it, and the nextcloud mode's
+    rclone mount refused that directory for the rest of the session.
+    """
+
+    CONFIG = {
+        "bot_name": "Istota",
+        "workspace_path": "/mnt/shared",
+        "workspace_mount_path": "/mnt/shared",
+        "brain": {"kind": "native"},
+    }
+
+    def _unshare(self):
+        import base64
+        import json
+        import subprocess
+
+        from tests.vm import lima
+
+        events: list[tuple[str, object]] = []
+        config = self.CONFIG
+
+        class Recording(lima.Vm):
+            def run(self, script, *, timeout=600, check=True, env=None):
+                stdout = ""
+                if "systemctl stop istota-stack.service" in script:
+                    events.append(("stop", None))
+                elif "tomllib" in script:
+                    stdout = json.dumps(config)
+                elif "base64 -d" in script:
+                    encoded = script.split("<<'EOF'\n", 1)[1].split("\nEOF", 1)[0]
+                    events.append(("plan", json.loads(base64.b64decode(encoded))))
+                elif "istota-stack apply" in script:
+                    events.append(("apply", None))
+                elif '"STORAGE": "local"' in script:
+                    events.append(("storage-local", None))
+                elif "host/provision.sh" in script:
+                    events.append(("provision", None))
+                return subprocess.CompletedProcess([], 0, stdout, "")
+
+            def info(self):
+                return {"config": {"mounts": [
+                    {"location": "/repo", "mountPoint": lima.REPO_MOUNT, "writable": False},
+                    {"location": "/folder", "mountPoint": lima.HOST_FOLDER_MOUNT, "writable": True},
+                ]}}
+
+            def set_mounts(self, mounts):
+                events.append(("mounts", [m["mountPoint"] for m in mounts]))
+
+        release = lima.Release(repo=Path("/repo"), tag="vmtier-x", signing_key="key")
+        lima.unshare_host_folder(Recording("istota-vm-test"), release)
+        return events
+
+    def test_the_config_stops_naming_the_folder(self):
+        plans = [value for kind, value in self._unshare() if kind == "plan"]
+        assert len(plans) == 1, plans
+        written = plans[0]["config"]
+        assert "workspace_mount_path" not in written
+        assert written["workspace_path"] == "/data/workspace"
+        assert written["brain"] == {"kind": "native"}
+
+    def test_the_config_changes_before_anything_can_start_the_stack(self):
+        order = [kind for kind, _ in self._unshare() if kind != "plan"]
+        assert order == ["stop", "apply", "storage-local", "provision", "mounts"], order
+
+
+class TestTheEntrypointControls:
+    """The vm tier's entrypoint controls `sed` one line of the deployed
+    entrypoint; a line that no longer matches fails the build in the VM, minutes
+    in, and a pattern matching twice removes more than the one refusal."""
+
+    @staticmethod
+    def _pattern(dockerfile: Path) -> str:
+        match = re.search(r"sed -i 's/\^(.*?)\$/", dockerfile.read_text())
+        assert match, dockerfile.name
+        return match.group(1).replace("\\.", ".")
+
+    def test_each_matches_exactly_one_line_of_the_entrypoint(self):
+        entrypoint = (REPO / "docker" / "istota" / "entrypoint.sh").read_text().splitlines()
+        for name in ("Dockerfile.no-storage-refusal", "Dockerfile.no-workspace-marker"):
+            line = self._pattern(REPO / "docker" / "test" / name)
+            assert entrypoint.count(line) == 1, (name, line)

@@ -45,26 +45,29 @@ fi
 
 # --- Preflight: a config this stack must not run ---
 #
-# Before anything is written. Three refusals, each naming the fix:
+# Before anything is written. Five refusals, each naming the fix:
 #   - it names the compose Nextcloud (`http://nextcloud`), which the shipped
 #     compose file no longer runs, and no such host resolves;
-#   - full Nextcloud integration (`nextcloud_mount_path` set), and the
-#     workspace is not the VM's rclone mount: a daemon writing into an
-#     unmounted /mnt/shared writes into the container, and those files never
-#     reach Nextcloud (parity row 9). Turned around: a URL and a workspace on
-#     the rclone mount without `nextcloud_mount_path`, which would run as a
-#     local workspace with the mount checks off;
+#   - the workspace mount is not the one the host provides: a daemon writing into an
+#     unmounted /mnt/shared writes into the container, and those files never reach
+#     Nextcloud (parity row 9) or the Mac. ISTOTA_WORKSPACE_FSTYPE names the type
+#     (fuse.rclone when unset under Nextcloud); a mount with neither is refused;
+#   - a host folder (ISTOTA_WORKSPACE_MARKER_REQUIRED) without .istota-workspace, or a
+#     config not using it: an empty stand-in for a folder that went away (L1);
+#   - a URL and a workspace on the rclone mount without workspace_mount_path, which
+#     would run as a local workspace with the mount checks off;
 #   - behind TLS, `[site] hostname` is not the stack's DOMAIN, which is a login
 #     that fails its origin check.
-# ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE is the full test tier's concession: its
-# Nextcloud shares a Docker volume with this container rather than an rclone
-# mount, so a mount point of any type passes. Nothing an operator runs sets it.
+# ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE is the full test tier's concession: its Nextcloud is
+# a shared Docker volume, so a mount point of any type passes. No operator sets it.
 python3 - "$CONFIG_FILE" <<'PY' || exit 78
 import os, socket, sys
 from pathlib import Path
 from urllib.parse import urlsplit
 from istota.config import load_config
 from istota.lib.mountinfo import covering_mount
+from istota.lib.workspace_marker import (
+    FSTYPE_ENV, MARKER_NAME, expected_fstype, marker_present, marker_required, undeclared_mount)
 
 config = load_config(Path(sys.argv[1]))
 refusals = []
@@ -77,23 +80,43 @@ if url and urlsplit(url).hostname == "nextcloud":
             f"config.toml names the bundled Nextcloud ({url}), which this compose file no longer runs. "
             "Move it, unchanged, into a compose project of its own and point [nextcloud] url at it, or "
             "switch to local storage; see docs/deployment/moving-the-bundled-nextcloud.md.")
-if config.nextcloud_enabled and config.workspace_path is not None:
-    workspace = os.path.normpath(str(config.workspace_path))
+mount_path = config.workspace_mount_path
+expected = expected_fstype(config.storage_is_nextcloud) if mount_path is not None else ""
+workspace = config.workspace_path if config.storage_is_nextcloud else mount_path
+if marker_required() and mount_path is None:
+    refusals.append(
+        "this host shares a folder in as the workspace and config.toml has no workspace_mount_path, so "
+        "the folder would go unused. Run `istota-stack setup --storage host-folder`.")
+elif undeclared_mount(mount_path, config.storage_is_nextcloud):
+    refusals.append(
+        f"config.toml names {mount_path} as the workspace mount (workspace_mount_path), and this stack "
+        f"does not say what is mounted there: {FSTYPE_ENV} is empty, as istota-stack leaves it under "
+        "STORAGE=local. Make host.env and config.toml agree with `istota-stack setup --storage "
+        "host-folder` or `--storage local`; nothing is written into a directory nothing vouches for.")
+elif config.workspace_path is not None and (expected or config.nextcloud_enabled):
+    workspace = os.path.normpath(str(workspace or config.workspace_path))
     with open(os.environ.get("ISTOTA_MOUNTINFO", "/proc/self/mountinfo")) as mounts:
         mount = covering_mount(workspace, mounts.read())
     mountpoint, fstype = (mount.point, mount.fstype) if mount else ("/", "unknown")
     concession = os.environ.get("ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE") == "1"
-    if config.storage_is_nextcloud:
-        if not (fstype == "fuse.rclone" or (concession and mountpoint == workspace)):
+    where = f"the workspace {workspace} is on {mountpoint} ({fstype}), not"
+    if not expected:
+        if fstype == "fuse.rclone":
             refusals.append(
-                f"the workspace {workspace} is on {mountpoint} ({fstype}), not the VM's rclone mount "
-                "(fuse.rclone). Start mount-nextcloud.service on the VM before the stack; nothing is "
-                "written into an unmounted store.")
-    elif fstype == "fuse.rclone":
+                f"the workspace {workspace} is on the rclone mount {mountpoint}, but workspace_mount_path is not "
+                "set, so it would run as a local workspace with the mount checks off. Set workspace_mount_path "
+                f"= \"{mountpoint}\" in config.toml, or move the workspace off the mount.")
+    elif not (fstype == expected or (concession and mountpoint == workspace)):
         refusals.append(
-            f"the workspace {workspace} is on the rclone mount {mountpoint}, but nextcloud_mount_path "
-            "is not set, so it would run as a local workspace with the mount checks off. Set "
-            f"nextcloud_mount_path = \"{mountpoint}\" in config.toml, or move the workspace off the mount.")
+            f"{where} the VM's rclone mount (fuse.rclone). Start mount-nextcloud.service on the VM "
+            "before the stack; nothing is written into an unmounted store." if expected == "fuse.rclone"
+            else f"{where} the folder this host shares in ({expected}). Check the VM mounted it; "
+            "nothing is written into an unmounted store.")
+    elif marker_required() and not marker_present(config.workspace_mount_path):
+        refusals.append(
+            f"the workspace {workspace} has no {MARKER_NAME}: it is an empty stand-in for the folder "
+            "this install was set up with, which was renamed, moved, deleted or is on a volume that "
+            "is not connected. Put the folder back; nothing is written into the stand-in.")
 ingress, domain = os.environ.get("INGRESS", ""), os.environ.get("DOMAIN", "")
 if ingress in ("direct", "proxied") and config.site.hostname != domain:
     refusals.append(

@@ -1,6 +1,6 @@
 # Running the stack
 
-Istota has one deployment: the Docker stack in `docker/`, on a Debian 13 machine dedicated to it, set up by `host/provision.sh` and managed with `istota-stack`. The [quickstart](../getting-started/quickstart-server.md) installs it, on a server or in a Lima VM on a Mac. This page covers running it afterwards.
+Istota has one deployment: the Docker stack in `docker/`, on a Debian 13 machine dedicated to it, set up by `host/provision.sh` and managed with `istota-stack`. The [quickstart](../getting-started/quickstart-server.md) installs it on a server, and the [local install](../getting-started/local-install.md) in a Lima VM on a Mac. This page covers running it afterwards; [Local VM](#local-vm) below says what differs on a Mac.
 
 Every command here runs as root on that machine. `istota-stack compose <...>` is `docker compose` with the stack's own files, paths and settings, and `istota <...>` runs the CLI in the daemon container as uid 10001. Don't run a bare `docker compose` in `src/docker/`: it misses the paths and the log driver `istota-stack` passes, and a `docker compose exec` starts as root with the container's capabilities.
 
@@ -42,7 +42,7 @@ The page asks one topic per screen: the assistant's name, your name, email and t
 After the page finishes, `istota-stack` installs `.env` and `host.env`, builds what the answers need and the images lack (the browser image, or Claude Code for a subscription), runs `provision.sh` again when the host settings changed, and starts `istota-stack.service`. The first start takes a few minutes when something has to be built.
 
 - `istota-stack setup-code` prints the address, code and fingerprint again while a setup is running.
-- `--local` serves plain HTTP on `127.0.0.1:8080` with no certificate, for a Lima VM on a Mac or your own SSH tunnel.
+- `--local` serves plain HTTP on `127.0.0.1:8080` with no certificate, for the [local VM](#local-vm) or your own SSH tunnel.
 - `ISTOTA_SETUP_PUBLISH=0.0.0.0:8443` moves the page off port 443 when something else holds it.
 - The first browser to use the code gets the only session. To start over, stop the running setup (Ctrl-C, or `sudo systemctl stop istota-setup`) and run `istota-stack setup --web` again, which mints a new code.
 - A setup that does not finish installs nothing on the host; if Finish failed partway, the run names any config or secret files it left so you can remove them. After an hour with no request the page stops, and so does the run. Fifty wrong codes stop it too.
@@ -242,21 +242,24 @@ What each devbox gets, and nothing else:
 
 ## Storage
 
-Two questions decide the storage: whether istota uses a Nextcloud (`[nextcloud] url`), and, if it does, where the workspace lives (`nextcloud_mount_path`). `istota setup` writes both from your answers:
+Two questions decide the storage: whether istota uses a Nextcloud (`[nextcloud] url`), and where the workspace lives (`workspace_mount_path`, when it is a mount). `STORAGE` in `host.env` says which mount, if any, the machine provides. `istota setup` writes all three from your answers:
 
 | Mode | `config.toml` | Workspace | `host.env` |
 |---|---|---|---|
 | Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume | `STORAGE=local` |
-| Nextcloud, local workspace | `url` names your Nextcloud, no `nextcloud_mount_path` | `/data/workspace` on the state volume | `STORAGE=local` |
-| Full Nextcloud integration | `url` names your Nextcloud, `nextcloud_mount_path = "/mnt/shared"` | the VM's rclone mount of the bot's files, bound at `/mnt/shared` | `STORAGE=nextcloud` |
+| Nextcloud, local workspace | `url` names your Nextcloud, no `workspace_mount_path` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Full Nextcloud integration | `url` names your Nextcloud, `workspace_mount_path = "/mnt/shared"` | the VM's rclone mount of the bot's files, bound at `/mnt/shared` | `STORAGE=nextcloud` |
+| Host folder (the [local VM](#local-vm)) | no `[nextcloud] url`; `workspace_mount_path = "/mnt/shared"` | a Mac folder Lima shares into the VM at `/srv/mount/host-folder`, bound at `/mnt/shared` | `STORAGE=host-folder` |
+
+An older config may name the mount `nextcloud_mount_path`, the key's old name; it is read as `workspace_mount_path`.
 
 When you connect a Nextcloud, setup asks where the workspace should live: `mount` (the default) or `local`. A scripted run takes `--workspace mount|local` and defaults to `mount` when it is given `--nextcloud-url`. The browser setup asks the same on its Nextcloud screen, with the mount chosen until you pick "On this server". With either answer the bot is a regular user on your Nextcloud: Talk, the `nextcloud` skill's user, group, Talk and share-listing verbs, and avatars all work.
 
 With a local workspace, `provision.sh` installs no rclone and no mount unit, and setup writes no `dav_prefix` and turns `auto_share_bot_dir` off, since nothing of the workspace is in Nextcloud. Users reach their files in the web UI, not in Nextcloud. A file posted in Talk is fetched into the room's folder, `Channels/<room>/media/`, and `nextcloud talk share-file` uploads a copy before posting it. The skill's `files` verbs, `share create` and `share link` refuse, because the file they name is not in Nextcloud. Back up the `istota_data` volume, which now holds the workspace too (see [Backing up a local install](#backing-up-a-local-install)).
 
-In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `nextcloud_mount_path` as `/mnt/shared`, and the mount's `rclone.conf` (one WebDAV remote named `nextcloud`, the app password obscured as `rclone obscure` does it) with `RCLONE_REMOTE=nextcloud` in `host.env`, so the mount needs no hand-written config.
+In full integration the bot is a regular user on a Nextcloud you run, and it sees what users share with it. The VM mounts that account's files with rclone at `/srv/mount/nextcloud/content` (`mount-nextcloud.service`), and compose binds the mount into `daemon` and `web` at `/mnt/shared` with `rslave` propagation, so a remount shows through without restarting them. `istota setup` writes `workspace_path` and `workspace_mount_path` as `/mnt/shared`, and the mount's `rclone.conf` (one WebDAV remote named `nextcloud`, the app password obscured as `rclone obscure` does it) with `RCLONE_REMOTE=nextcloud` in `host.env`, so the mount needs no hand-written config.
 
-The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
+The entrypoint refuses to start the daemon when full integration is configured and `/mnt/shared` is not a mount of type `fuse.rclone`, so the daemon never writes into an unmounted path; compose's restart policy retries until the mount is up. A host folder must be a `virtiofs` mount with a `.istota-workspace` file at its root. A `workspace_mount_path` with no Nextcloud URL and no type that `STORAGE` declares is refused too, so a config for one mode does not start on a machine provisioned for another. `istota doctor`'s `runtime.mount_liveness` is the runtime check after that. Docker Desktop refuses `rslave` on a macOS path, which is one reason a Mac runs the stack in a Lima VM rather than in Docker Desktop.
 
 To move an install in full integration to a local workspace, see [Moving to a local workspace](moving-to-a-local-workspace.md).
 
@@ -305,7 +308,26 @@ To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `
 | `istota_data` | Istota's `/data`: the databases (`/data/db`), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a bind of the VM's config directory, not part of the volume. **This is the one to back up.** |
 | `browser_profile` | Persistent Chrome profiles per user, including their logins; also the console TLS certificate and parked legacy profile |
 
-In full Nextcloud integration the workspace is not a volume: it is the VM's rclone mount, bound at `/mnt/shared`.
+In full Nextcloud integration and on the local VM the workspace is not a volume: it is the VM's rclone mount or the Mac folder, bound at `/mnt/shared`.
+
+## Local VM
+
+On a Mac the stack runs in a Lima VM that the Mac's own `istota-stack` creates and controls; the [local install](../getting-started/local-install.md) page covers installing and running it. Inside the VM it is this stack, with three host settings that `create` writes into `host.env`:
+
+| `host.env` | Value | Effect |
+|---|---|---|
+| `STORAGE` | `host-folder` | the workspace is the Mac folder at `/srv/mount/host-folder`; `provision.sh` makes `istota-stack.service` require that mount, and never creates, chmods or chowns the folder |
+| `INGRESS` | `local` | nginx on the VM's loopback, which Lima forwards to the Mac's `localhost:<port>` |
+| `HOST_LOOPBACK_BLOCK`, `HOST_GATEWAY_ADDR`, `HOST_LOOPBACK_ALLOW` | `1`, `192.168.5.2`, empty | containers cannot reach the Mac's loopback except DNS and the ports listed ([Security](security.md#the-local-vm)) |
+
+Every command on this page works from the Mac: `istota-stack <verb>` there runs the VM's `istota-stack <verb>` as root, and `istota` runs the CLI in the daemon container. `apply` and `import-bare-metal` take a path on the Mac. Paths such as `/srv/app/istota/config/config.toml` are in the VM; `istota-stack shell` opens a shell there.
+
+What differs from a server:
+
+- **First run.** The Mac's `istota-stack create` runs the terminal setup with storage, ingress and hostname set. `istota-stack setup --web --local` after `create --no-setup` is the browser route; it keeps the host folder as the workspace. Either way setup writes `[scheduler] cron_max_staleness_minutes = 720` for local ingress, so work missed while the Mac slept runs once after wake.
+- **Releases.** The VM verifies the tag as a server does. After each `update` the Mac's `istota-stack` copies itself, the `istota` shim and the Lima template out of the VM's verified checkout.
+- **Backups.** The database snapshots and the config copies land in the Mac folder, and `istota-stack update`, `setup` and `apply` copy `.env` and `host.env` there too (`Backups/config/<date>/`). The master key goes to the Mac's login Keychain. `istota-stack restore` on the Mac rebuilds a lost VM from the two; in the VM, `istota-stack restore` is the half that runs `istota migrate restore-workspace` with the key on stdin, onto a stack that was never set up.
+- **The folder's marker.** The daemon will not start without `.istota-workspace` at the folder's root, and `istota doctor`'s `runtime.mount_liveness` fails without it on a running stack. A folder that is renamed or on an unplugged volume reads as an empty `virtiofs` mount, and the marker is how the stack tells.
 
 ### Backing up a local install
 

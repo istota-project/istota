@@ -467,7 +467,7 @@ def make_config(tmp_path):
             "temp_dir": tmp_path / "temp",
             "skills_dir": skills_dir,
             "workspace_path": mount_path,
-            "nextcloud_mount_path": mount_path,
+            "workspace_mount_path": mount_path,
         }
         defaults.update(overrides)
         return Config(**defaults)

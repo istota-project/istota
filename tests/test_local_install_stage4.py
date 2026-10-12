@@ -146,7 +146,7 @@ class TestWorkspaceLocalFolder:
         called = MagicMock(return_value=True)
         monkeypatch.setattr(storage, "share_folder_with_user", called)
         cfg = _local_config(tmp_path, nc_url="https://cloud.example.com")
-        cfg.nextcloud_mount_path = cfg.workspace_path
+        cfg.workspace_mount_path = cfg.workspace_path
         storage.ensure_user_directories_v2(cfg, "alice")
         called.assert_called_once()
 

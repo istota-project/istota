@@ -8,7 +8,7 @@ There is one deployment: the Docker stack on a Linux machine dedicated to it, wi
 
 A container cannot build a bubblewrap namespace under Docker's defaults, and `CAP_SYS_ADMIN` is not what it is missing: the default seccomp profile blocks `unshare`, and `docker-default`'s AppArmor profile denies `mount`. The stack's `daemon` service carries a narrow grant instead: a seccomp profile that is Docker's default plus the six calls bwrap needs, an AppArmor profile that is `docker-default` plus `mount` and `pivot_root`, `systempaths=unconfined`, and no capabilities once a short root phase is over. That grant is acceptable only on a host that runs nothing else, which is why the machine is dedicated. [Running tasks sandboxed](docker.md#running-tasks-sandboxed) has the details. On Linux, a daemon whose sandbox cannot be built refuses to start rather than run tasks unconfined.
 
-macOS has no bubblewrap. `istota serve` on a Mac checkout, and the deprecated standalone install, run tasks unsandboxed; they are development and single-user trusted configurations, not deployments. The scheduler logs a `SECURITY UNSUPPORTED CONFIGURATION` warning at startup when it runs that way with more than one user configured.
+macOS has no bubblewrap. On a Mac the stack runs in the [local VM](../getting-started/local-install.md), a Lima VM with the same sandbox as a server; [The local VM](#the-local-vm) below covers what its boundary does and does not protect. `istota serve` on a Mac checkout, and the deprecated standalone install, run tasks unsandboxed; they are development and single-user trusted configurations, not deployments. The scheduler logs a `SECURITY UNSUPPORTED CONFIGURATION` warning at startup when it runs that way with more than one user configured.
 
 If you run without the sandbox, you accept that:
 
@@ -63,7 +63,7 @@ A web export, recovery reveal, backup recipient change, history restore or purge
 
 `ISTOTA_SECRET_KEY` opens the encrypted database. Losing it loses every stored credential unless you have an independent export. Keep a copy outside the storage and backups that hold the database.
 
-The stack keeps it at `/data/.secret_key` unless a secret file supplies the key. A standalone installation uses `istota.env` beside its configuration. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
+The stack keeps it at `/data/.secret_key` unless a secret file supplies the key. The local VM copies it into the Mac's login Keychain, apart from the snapshots in the workspace folder (see [The local VM](#the-local-vm)). A standalone installation uses `istota.env` beside its configuration. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
 
 An age credential backup is an independent recovery path: decrypt it with the private age key you keep elsewhere, then open its KeePass file with the enclosed password. It needs no server secret key. `security.key_separation` checks file locations, and reports when scheduled credential backups are off.
 
@@ -212,6 +212,27 @@ Additional hosts added automatically:
 The forge wrapper sets `GH_TELEMETRY=0` and `DO_NOT_TRACK=1`, so no telemetry host needs allowlisting and no command spends a rejected CONNECT on one. GitHub Enterprise Server needs no extra entry: its API is a path on the same host (`<host>/api/v3`), already added as the git remote.
 
 TLS is end-to-end by default. With the optional [HTTP credential broker](../configuration/credentials.md#http-credential-broker), only hosts bound to a credential in the task snapshot are intercepted for header substitution. Other connections remain raw TLS.
+
+## The local VM
+
+The [local install](../getting-started/local-install.md) runs the stack in a Lima VM on a Mac, with a folder in the user's home (`~/Istota` by default) as the workspace. Inside the VM everything on this page applies unchanged. What the VM adds is a boundary between the stack and the Mac, and that boundary has a direction.
+
+**It protects the Mac from the VM, not the VM from the Mac.** Any process running as the Mac user can run `limactl shell istota sudo ...`, which is root in the VM. Such a process can read the database, the config and the secrets files, or write a `CRON.md` into the workspace folder, and the folder gives it nothing it did not already have. Treat a compromise of the Mac account as a compromise of the install.
+
+**From the VM, the folder is the only Mac path.** The Lima template mounts the workspace folder, writable, and in developer mode a checkout, read-only; it is built on Lima's bare Debian image, which does not pull in Lima's default mount of the whole home folder. A default-suite test holds the template's mount list, and the `vm` tier's row L3 witnesses it with a control that adds the home mount back. A symbolic link in the folder is resolved by the VM's kernel in the VM's own filesystem, so a link to `/Users/<you>/.ssh` or to `../outside` leads to nothing, and a link to `/etc/hostname` reads the VM's own file. A compromised daemon or container can write into the folder and nowhere else on the Mac.
+
+**Inside the VM, every uid owns the folder.** Apple's virtiofs server reports every entry as owned by whichever process in the VM asks, and the VM's kernel enforces mode bits against that answer. So any process in the VM can read and write any file in the folder, whatever mode the Mac gave it, and a `chown` from the VM changes nothing on the Mac: every file the VM writes is owned by the Mac user there. Separation inside the folder comes from the sandbox alone. A task's namespace binds only its own `Users/<id>/` subtree, as on a server; outside a task there is none, which on a server is also true of the daemon's view of its workspace.
+
+**Files the VM writes carry no quarantine flag.** macOS marks a file downloaded by a browser with `com.apple.quarantine`, and Gatekeeper checks a marked program or app bundle before it first runs. Files written into the folder from the VM arrive without the flag, so a program the bot downloaded is not checked when you open it, as with a file a sync client writes. This is accepted and not mitigated: setting the flag would need a process watching the folder on the Mac, which the CLI install does not have. Open a program from the folder only if you would run it from any other download.
+
+**Containers cannot reach the Mac's loopback.** Lima's user-mode network forwards the Mac's address as the VM sees it, `192.168.5.2`, to the Mac's `127.0.0.1`, so without a rule every container could reach whatever listens on the Mac's loopback: development databases, admin consoles, local model servers. `create` writes `HOST_LOOPBACK_BLOCK=1` and `HOST_GATEWAY_ADDR=192.168.5.2` into `host.env`, and the VM's egress unit (`host/istota-devbox-egress.sh`, which already owns the stack's `DOCKER-USER` rules) drops forwarded traffic from every container to that address. Two exceptions are returned ahead of the drop:
+
+- DNS, UDP and TCP port 53. Lima serves DNS at the gateway address itself, and a default-bridge container (a `docker build` step, for one) resolves through it. Compose services use Docker's own resolver, which asks from the VM's namespace, outside the rule.
+- The TCP ports in `HOST_LOOPBACK_ALLOW`, which `istota-stack allow-host-port` and `deny-host-port` edit, for a native brain pointed at a model server on the Mac.
+
+A devbox gets neither exception. The rules fail closed: an allow-list entry that is not a port allows nothing, and a switch value other than `0` or `1` blocks. The VM itself is not filtered, nor is a container on the host network, and no service in the compose file uses it. The `vm` tier's row L2 witnesses the block from the daemon and browser containers, with a control that turns it off. No `doctor` check reports whether the block is in force, since the daemon cannot see `DOCKER-USER`.
+
+**The master key leaves the VM once, for the Keychain.** `create` reads `/data/.secret_key` and stores it in the login Keychain (service `istota.local`, account `secret-key-<instance>`) through `security -i`, which reads its command on stdin, so the key is on no command line another local user could see with `ps`. It reads the item back and compares. The snapshots and config copies in the workspace folder hold no key and no credential (`secrets/` is never copied there), so the folder, and a Time Machine backup of it, cannot decrypt the stored credentials alone. The Keychain item is in the file-based login keychain, which iCloud Keychain does not sync.
 
 ## Deferred DB operations
 

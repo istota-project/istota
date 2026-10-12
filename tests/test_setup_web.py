@@ -1056,7 +1056,18 @@ class TestFinish:
         assert not (dirs.vm_dir / "rclone.conf").exists()
         config = (dirs.data_dir / "config" / "config.toml").read_text()
         assert "https://cloud.example.com" in config
-        assert "nextcloud_mount_path" not in config
+        assert "mount_path" not in config
+
+    def test_a_host_folder_vm_keeps_its_folder(self, unlocked, dirs):
+        _app, client = unlocked
+        (dirs.vm_dir / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\n")
+        _draft(client, **READY)
+        assert _finish(client).status_code == 200
+
+        host_env = (dirs.vm_dir / "host.env").read_text()
+        assert setup_wizard._host_env_value(host_env, "STORAGE") == "host-folder"
+        config = (dirs.data_dir / "config" / "config.toml").read_text()
+        assert 'workspace_mount_path = "/mnt/shared"' in config
 
     def test_the_first_admin_can_sign_in(self, unlocked, dirs):
         _app, client = unlocked

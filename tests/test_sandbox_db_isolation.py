@@ -53,7 +53,7 @@ def iso_config(tmp_path):
         module_data_dir=data / "modules",
         temp_dir=tmp_path / "temp",
         workspace_path=mount,
-        nextcloud_mount_path=mount,
+        workspace_mount_path=mount,
         skills_dir=tmp_path / "skills",
         security=SecurityConfig(sandbox_enabled=True),
     )
@@ -1038,7 +1038,7 @@ class TestModuleDbRoot:
             db_path=tmp_path / "data" / "istota.db",
             module_data_dir=mount / "modules",
             workspace_path=mount,
-            nextcloud_mount_path=mount,
+            workspace_mount_path=mount,
         )
         with pytest.raises(ValueError, match="local disk"):
             config.module_db_root()
