@@ -193,7 +193,9 @@ def _rclone_conf(old: dict, config: dict, remote: str, obscure: Callable[[str], 
     if not (url and username and password):
         notes.append("istota_rclone_conf: not written; pass --rclone-conf with the VM's file")
         return ""
-    return render_webdav_remote(remote, url, username, password)
+    return render_webdav_remote(
+        remote, url, username, password, dav_prefix=str(nextcloud.get("dav_prefix") or ""),
+    )
 
 
 def _user(entry: dict, mode: str, user: str, notes: list[str]) -> dict:

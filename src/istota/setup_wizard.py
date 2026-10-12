@@ -2358,7 +2358,10 @@ def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out
     except (OSError, UnicodeDecodeError):
         existing = None
     try:
-        text = webdav_remote_for(existing, RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, password)
+        text = webdav_remote_for(
+            existing, RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, password,
+            dav_prefix=a.nextcloud_dav_prefix,
+        )
     except ValueError as exc:
         raise SetupError(f"The Nextcloud answers cannot go into rclone.conf: {exc}.") from None
     _write_private(path, text)

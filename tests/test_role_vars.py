@@ -170,6 +170,14 @@ def test_rclone_conf_is_rendered_from_the_old_variables_and_the_live_remote():
     )
 
 
+def test_rclone_conf_is_rooted_at_the_configs_dav_prefix():
+    config = tomllib.loads(CONFIG_TOML)
+    config["nextcloud"]["dav_prefix"] = "Shared Files"
+    conf = _convert(config=config).vars["istota_rclone_conf"]
+    assert conf.startswith("[nextcloud-root]\n")
+    assert conf.endswith("[nextcloud]\ntype = alias\nremote = nextcloud-root:Shared Files\n")
+
+
 def test_a_given_rclone_conf_wins():
     conf = "[nextcloud]\ntype = webdav\npass = live\n"
     assert _convert(rclone_conf=conf).vars["istota_rclone_conf"] == conf

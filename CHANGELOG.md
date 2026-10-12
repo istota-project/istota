@@ -244,6 +244,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a VM whose Nextcloud workspace is a folder in the bot's files (`dav_prefix`), the `rclone.conf` that `istota setup` and the management role write now mounts that folder rather than the whole account. Before, files written through the mount landed beside the folder every Nextcloud call reads, including the `MOVED.md` notes `istota-stack localize-workspace` leaves. Re-run `istota-stack setup --force`, or the role, to rewrite it.
+
 - Workspace no longer lists a Talk attachments location on a local workspace, where no `Talk/` folder exists. Files posted in Talk are under each room's own location there.
 
 - Admin Configuration showed two warnings for the retired vault sync interval. It now shows only the retirement warning. Review changes and Discard now sit in the app bar, in the same place as the other settings pages' Save button.

@@ -37,6 +37,40 @@ class TestTheRemote:
             "pass = OBS\n"
         )
 
+    def test_a_dav_prefix_roots_the_remote_at_that_folder(self):
+        """The mount is the workspace, and `dav_prefix` names where the workspace
+        sits in the bot's files, so the remote the mount serves starts there.
+        An alias over the account root, rather than a longer URL, keeps the
+        WebDAV remote at `/dav/files/<user>/`, where Nextcloud's chunked
+        uploads are looked up."""
+        text = render_webdav_remote(
+            "nextcloud", "https://cloud.example.test", "zed-bot", "OBS", dav_prefix="/Shared Files/",
+        )
+        assert text == (
+            "[nextcloud-root]\n"
+            "type = webdav\n"
+            "url = https://cloud.example.test/remote.php/dav/files/zed-bot/\n"
+            "vendor = nextcloud\n"
+            "user = zed-bot\n"
+            "pass = OBS\n"
+            "\n"
+            "[nextcloud]\n"
+            "type = alias\n"
+            "remote = nextcloud-root:Shared Files\n"
+        )
+
+    @pytest.mark.parametrize("prefix", ["", "/", "//"])
+    def test_no_prefix_renders_the_file_it_always_did(self, prefix):
+        """`provision.sh --digest` hashes the file (#720): an install without a
+        prefix must not read as changed."""
+        assert render_webdav_remote(
+            "nextcloud", "https://cloud.example.test/", "zed-bot", "OBS", dav_prefix=prefix,
+        ) == render_webdav_remote("nextcloud", "https://cloud.example.test/", "zed-bot", "OBS")
+
+    def test_a_line_break_in_the_prefix_is_refused(self):
+        with pytest.raises(ValueError):
+            render_webdav_remote("nextcloud", "https://c.test", "zed-bot", "OBS", dav_prefix="a\n[evil]")
+
     @pytest.mark.parametrize("field", range(4))
     def test_a_line_break_in_any_value_is_refused(self, field):
         values = ["nextcloud", "https://cloud.example.test", "zed-bot", "OBS"]
@@ -78,6 +112,13 @@ class TestKeepingTheExistingRemote:
     def test_nothing_usable_renders_afresh(self, existing):
         text = webdav_remote_for(existing, *self.ANSWERS)
         assert reveal(text.splitlines()[-1].removeprefix("pass = ")) == "nc-app-pass"
+
+    def test_a_prefixed_file_is_kept_and_a_changed_prefix_renders_afresh(self):
+        existing = webdav_remote_for(None, *self.ANSWERS, dav_prefix="Shared Files")
+        assert webdav_remote_for(existing, *self.ANSWERS, dav_prefix="Shared Files") == existing
+        moved = webdav_remote_for(existing, *self.ANSWERS, dav_prefix="Other")
+        assert moved.endswith("remote = nextcloud-root:Other\n")
+        assert webdav_remote_for(existing, *self.ANSWERS) != existing
 
     def test_an_edited_file_with_the_same_password_is_rewritten(self):
         existing = self._existing().replace("vendor = nextcloud\n", "vendor = nextcloud\nheaders = X-Y,z\n")
