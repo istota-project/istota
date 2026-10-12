@@ -79,6 +79,11 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+async function openSection(label: string) {
+  const sidebar = await screen.findByRole('complementary');
+  await fireEvent.click(await within(sidebar).findByRole('button', { name: new RegExp(label) }));
+}
+
 async function openActions(name: string) {
   const trigger = await screen.findByRole('button', { name: `Actions for ${name}` });
   await fireEvent.keyDown(trigger, { key: 'Enter' });
@@ -108,6 +113,7 @@ it('reserves the folder button height while the listing loads', async () => {
 
 it('keeps the standard sidebar uncluttered and shows access beside the folder path', async () => {
   const { container } = render(Workspace);
+  await openSection('Rooms');
   await screen.findByRole('link', { name: 'Project room' });
   const sidebar = screen.getByRole('complementary');
   expect(sidebar.style.getPropertyValue('--sidebar-width')).toBe('220px');
@@ -127,6 +133,7 @@ it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () 
   });
   const { container } = render(Workspace);
   const sidebar = await screen.findByRole('complementary');
+  await openSection('Rooms');
   await within(sidebar).findByRole('link', { name: '<b>Project room</b>' });
   expect(container.querySelector('b')).toBeNull();
   const breadcrumbs = screen.getByRole('navigation', { name: 'Folder path' });
@@ -205,6 +212,7 @@ it('keeps a failed folder retryable and ignores a late result after navigation',
     }),
   );
   render(Workspace);
+  await openSection('Rooms');
   await fireEvent.click(await screen.findByRole('link', { name: 'Project room' }));
   await screen.findByRole('link', { name: 'notes & drafts' });
   resolve({
@@ -318,6 +326,7 @@ it('shows folder conflicts in the dialog and hides writes for other places', asy
   await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
   await screen.findByText('A file or folder already exists.');
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  await openSection('Rooms');
   await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
   expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
@@ -503,7 +512,8 @@ it('pins a file from its row and removes it from the Pinned section', async () =
   await openActions('plan #1.md');
   const unpin = await screen.findByRole('menuitem', { name: 'Unpin' });
   await fireEvent.keyDown(unpin, { key: 'Escape' });
-  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   await fireEvent.click(within(pinned).getByRole('button', { name: 'plan #1.md' }));
   expect(openFile).toHaveBeenCalledWith('/Users/alice/notes/plan #1.md');
   await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin plan #1.md' }));
@@ -527,8 +537,8 @@ it('keeps unavailable pins removable and reports failed mutations', async () => 
   });
   api.deleteWorkspacePin.mockRejectedValueOnce(new Error('Try again.'));
   render(Workspace);
-  await screen.findByText('Unavailable');
-  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   expect(within(pinned).queryByRole('button', { name: 'Gone' })).toBeNull();
   await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin Gone' }));
   await screen.findByText('Try again.');
@@ -569,7 +579,8 @@ it('pins a Drive item with its provider metadata', async () => {
     mime_type: item.mime_type,
     web_url: item.web_url,
   });
-  const pinned = screen.getByRole('region', { name: 'Pinned files' });
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  await fireEvent.click(within(pinned).getByRole('button', { name: /Pinned/ }));
   const link = within(pinned).getByRole('link', { name: '<b>Budget</b>' });
   expect(link.querySelector('b')).toBeNull();
   expect(link).toHaveAttribute('rel', 'noopener noreferrer');
@@ -653,6 +664,7 @@ function editorBox(): HTMLTextAreaElement {
 it('lists the configuration files with their sizes and keeps a refused one read-only', async () => {
   render(Workspace);
   const section = await screen.findByRole('region', { name: 'Configuration' });
+  await fireEvent.click(within(section).getByRole('button', { name: /Configuration/ }));
   await within(section).findByText('USER.md');
   expect(within(section).getByText('2 KB')).toBeTruthy();
   expect(within(section).getAllByText('Not created yet').length).toBe(2);
@@ -666,6 +678,7 @@ it('edits CRON.md with the loaded revision and says when the jobs change', async
   api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'rev-0', exists: false });
   api.saveWorkspaceConfigFile.mockResolvedValue({ revision: 'rev-1', applies: 'next_sync' });
   render(Workspace);
+  await openSection('Configuration');
   await fireEvent.click(await screen.findByRole('button', { name: 'Edit CRON.md' }));
   await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md'));
   await waitFor(() => editorBox());
@@ -690,6 +703,7 @@ it('keeps the text on a conflict and on validator errors, and lists the errors',
     new actualApi.TextFileInvalidError(['TOML error: expected a value']),
   );
   render(Workspace);
+  await openSection('Configuration');
   await fireEvent.click(await screen.findByRole('button', { name: 'Edit HEARTBEAT.md' }));
   await waitFor(() => expect(editorBox().value).toBe('old\n'));
   await fireEvent.input(editorBox(), { target: { value: 'broken' } });
@@ -712,7 +726,9 @@ it('keeps the text on a conflict and on validator errors, and lists the errors',
 it('reports a failed configuration list without hiding the places', async () => {
   api.getWorkspaceConfigFiles.mockRejectedValue(new Error('network'));
   render(Workspace);
+  await openSection('Configuration');
   await screen.findByText('Could not load your configuration files.');
+  await openSection('Rooms');
   expect(screen.getByRole('link', { name: 'Project room' })).toBeTruthy();
 });
 
@@ -791,6 +807,7 @@ it('clears selection when filtering and never exposes deletion in shared places'
   });
   expect(screen.queryByRole('button', { name: 'a.txt' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
+  await openSection('Rooms');
   await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
   await screen.findByRole('button', { name: 'a.txt' });
   expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull();
@@ -869,4 +886,69 @@ it('explains personal Nextcloud browsing without claiming tasks have no file acc
   expect(screen.queryByText('Private room')).toBeNull();
   expect(screen.queryByText('Files are stored in your Nextcloud at cloud.example.com.')).toBeNull();
   expect(screen.getByText('How Istota reaches your files')).toBeTruthy();
+});
+
+it('puts My files immediately after Pinned and opens only My files by default', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      home,
+      room,
+      { ...home, id: 'linked:1', kind: 'linked', label: 'Shared folder' },
+      { ...home, id: 'group:team', kind: 'group', label: 'Team folder' },
+      { ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null },
+    ],
+    notes: [],
+  });
+  api.getWorkspacePins.mockResolvedValue({
+    pins: [
+      {
+        id: 1,
+        provider: 'workspace',
+        ref: '/Users/alice/plan.md',
+        name: 'Pinned plan',
+        available: true,
+        is_dir: false,
+      },
+    ],
+  });
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await within(sidebar).findByRole('link', { name: 'My files' });
+  const headings = Array.from(sidebar.querySelectorAll('.cat-label-text')).map(
+    (el) => el.textContent,
+  );
+  expect(headings).toEqual([
+    'Pinned',
+    'My files',
+    'Configuration',
+    'Skill instructions',
+    'Linked folders',
+    'Rooms',
+    'Groups',
+    'Connections',
+  ]);
+  for (const hidden of [
+    'Pinned plan',
+    'USER.md',
+    'Shared folder',
+    'Project room',
+    'Team folder',
+    'Nextcloud',
+  ]) {
+    expect(within(sidebar).queryByText(hidden)).toBeNull();
+  }
+  for (const [group, item] of [
+    ['Pinned', 'Pinned plan'],
+    ['Configuration', 'USER.md'],
+    ['Skill instructions', 'notes'],
+    ['Linked folders', 'Shared folder'],
+    ['Rooms', 'Project room'],
+    ['Groups', 'Team folder'],
+    ['Connections', 'Nextcloud'],
+  ]) {
+    await fireEvent.click(within(sidebar).getByRole('button', { name: new RegExp(group) }));
+    expect(within(sidebar).getByText(item)).toBeTruthy();
+  }
+  await fireEvent.click(within(sidebar).getByRole('button', { name: /My files/ }));
+  expect(within(sidebar).queryByRole('link', { name: 'My files' })).toBeNull();
 });

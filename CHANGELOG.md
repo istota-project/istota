@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workspace puts My files directly below Pinned. My files starts expanded; Pinned and the other sections start collapsed. Filename rows use the same side margins as locations in the Location sidebar.
+
 - Browse your connected Nextcloud files under Workspace → Connections. Open folders in Workspace and files in Nextcloud; if the connection expires, Workspace links you back to Connections to sign in again. The access note explains that browsing uses your personal account while tasks use the bot’s account and their workspace permissions.
 
 - `istota-stack localize-workspace` moves an install whose workspace is the Nextcloud mount onto the VM's own disk, with Talk and the `nextcloud` skill still connected. It stops the stack, copies the files, points the config at the local copy, turns the mount off and starts the stack again; the Nextcloud copy is left as it was, apart from a `MOVED.md` in each user's bot folder, so going back is a config change. Run it with `--dry-run` first to see what it would skip.

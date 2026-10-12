@@ -399,13 +399,24 @@
           {href}
           onNavigate={navigate}
         />
+        <PlaceList
+          places={places.filter((place) => place.kind === 'home')}
+          selected={selected?.place || ''}
+          {href}
+          onNavigate={navigate}
+        />
         <ConfigFileList
           files={configFiles}
           error={configError}
           onEdit={editConfigFile}
           onRetry={loadConfigFiles}
         />
-        <PlaceList {places} selected={selected?.place || ''} {href} onNavigate={navigate} />
+        <PlaceList
+          places={places.filter((place) => place.kind !== 'home')}
+          selected={selected?.place || ''}
+          {href}
+          onNavigate={navigate}
+        />
       </Sidebar>
     {/if}
   {/snippet}
