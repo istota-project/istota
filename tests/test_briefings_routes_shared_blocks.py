@@ -130,7 +130,12 @@ class TestValidation:
 
 
 class TestRunNow:
-    def test_run_executes_generation(self, client, monkeypatch):
+    def test_run_queues_for_the_daemon_and_generates_nothing_here(
+        self, client, monkeypatch,
+    ):
+        # ISSUE-700: the web container is not on the browser's network and
+        # its brain breaker is not the daemon's, so it must not generate.
+        import istota.briefings.shared_blocks as shared_blocks
         import istota.scheduler as sched
 
         client.put(
@@ -138,21 +143,43 @@ class TestRunNow:
             json={"name": "mk", "cron": "0 6 * * *",
                   "sources": [{"kind": "markets", "config": {}}]},
         )
-        called = {}
 
-        def _fake_gen(config, block):
-            called["name"] = block.name
-            with db.get_db(config.db_path) as conn:
-                db.shared_kv_set(
-                    conn, "briefing_shared_blocks", block.name,
-                    json.dumps({"text": "fresh", "trusted": False}), "__system__",
-                )
+        def _boom(*a, **k):
+            raise AssertionError("generated in the web process")
 
-        monkeypatch.setattr(sched, "_generate_shared_block", _fake_gen)
+        monkeypatch.setattr(sched, "_generate_shared_block", _boom)
+        monkeypatch.setattr(shared_blocks, "run_shared_block", _boom)
         resp = client.post("/istota/api/briefings/shared-blocks/mk/run")
-        assert resp.status_code == 200
-        assert called["name"] == "mk"
-        assert resp.json()["block_status"]["has_content"] is True
+        assert resp.status_code == 202
+        asked = resp.json()["id"]
+        assert client.post("/istota/api/briefings/shared-blocks/mk/run").json()["id"] == asked
+
+        listed = client.get("/istota/api/briefings/shared-blocks").json()
+        status = listed["shared_blocks"][0]["status"]
+        assert status["run_pending"]["id"] == asked
+        assert status["run_answered"] is None
+
+    def test_the_daemon_s_answer_reaches_the_listing(self, client, monkeypatch):
+        import istota.briefings.shared_blocks as shared_blocks
+        from istota import scheduler
+
+        client.put(
+            "/istota/api/briefings/shared-blocks",
+            json={"name": "mk", "cron": "0 6 * * *", "render_mode": "structured",
+                  "sources": [{"kind": "markets", "config": {}}]},
+        )
+        monkeypatch.setattr(
+            shared_blocks, "run_shared_block",
+            lambda block, config, now=None: {"text": "fresh", "trusted": False},
+        )
+        asked = client.post("/istota/api/briefings/shared-blocks/mk/run").json()["id"]
+        scheduler.check_shared_block_requests(client.app.state.istota_config)
+
+        status = client.get("/istota/api/briefings/shared-blocks").json()["shared_blocks"][0]["status"]
+        assert status["run_pending"] is None
+        assert status["run_answered"]["id"] == asked
+        assert status["run_answered"]["outcome"] == "regenerated"
+        assert status["has_content"] is True
 
     def test_run_missing_404(self, client):
         assert client.post("/istota/api/briefings/shared-blocks/nope/run").status_code == 404

@@ -164,19 +164,15 @@ def _run_shared(args, config) -> int:
         if row is None:
             print(f"Error: no shared block named {args.name!r}", file=sys.stderr)
             return 1
-        from istota.config import BriefingSharedBlock
-        block = BriefingSharedBlock(
-            name=row.name, cron=row.cron, title=row.title,
-            directive=row.directive, render_mode=row.render_mode,
-            enabled=row.enabled, trusted=row.trusted, sources=row.sources,
-        )
-        _generate_shared_block(config, block)
+        from istota.config import shared_block_from_row
+        from istota.briefings.shared_block_runs import REGENERATED
+        outcome = _generate_shared_block(config, shared_block_from_row(row))
         with db.get_db(config.db_path) as conn:
             val = db.shared_kv_get(conn, "briefing_shared_blocks", row.name)
-        if val:
+        if outcome == REGENERATED and val:
             print(f"ran {row.name}: {len(val['value'])} bytes, updated {val['updated_at']}")
         else:
-            print(f"ran {row.name}: no content written (kept prior / empty gather)")
+            print(f"ran {row.name}: {outcome}, no content written")
         return 0
 
     # ensure

@@ -6037,6 +6037,20 @@ def _apply_user_briefings(config: "Config") -> None:
             user_config.briefings.append(bc)
 
 
+def shared_block_from_row(r) -> BriefingSharedBlock:
+    """A ``shared_block_configs`` row as the definition generation runs."""
+    return BriefingSharedBlock(
+        name=r.name,
+        cron=r.cron,
+        title=r.title or "",
+        directive=r.directive if r.directive else None,
+        render_mode=r.render_mode or "synthesis",
+        enabled=bool(r.enabled),
+        trusted=bool(r.trusted),
+        sources=list(r.sources or []),
+    )
+
+
 def _apply_shared_blocks(config: "Config") -> None:
     """Overlay ``shared_block_configs`` rows onto ``config.briefing_shared_blocks``.
 
@@ -6063,28 +6077,16 @@ def _apply_shared_blocks(config: "Config") -> None:
     if not rows:
         return
 
-    def _from_row(r) -> BriefingSharedBlock:
-        return BriefingSharedBlock(
-            name=r.name,
-            cron=r.cron,
-            title=r.title or "",
-            directive=r.directive if r.directive else None,
-            render_mode=r.render_mode or "synthesis",
-            enabled=bool(r.enabled),
-            trusted=bool(r.trusted),
-            sources=list(r.sources or []),
-        )
-
     db_by_name = {r.name: r for r in rows}
     merged: list[BriefingSharedBlock] = []
     seen: set[str] = set()
     for block in config.briefing_shared_blocks:
         if block.name in db_by_name:
-            merged.append(_from_row(db_by_name[block.name]))
+            merged.append(shared_block_from_row(db_by_name[block.name]))
         else:
             merged.append(block)
         seen.add(block.name)
     for r in rows:
         if r.name not in seen:
-            merged.append(_from_row(r))
+            merged.append(shared_block_from_row(r))
     config.briefing_shared_blocks = merged

@@ -5648,13 +5648,14 @@ def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str
     return [b.name for b in due]
 
 
-def _generate_shared_block(config: Config, block) -> None:
+def _generate_shared_block(config: Config, block) -> str:
     """Gather + synthesize one shared block and write it to shared_kv.
 
     A ``None`` result (no usable sources / all-empty gather / failed Brain call)
     skips the write and leaves the prior value intact — a transient upstream
     outage degrades to last-known-good rather than blanking the section. Runs on
-    a short-lived worker thread; never raises into the caller.
+    a short-lived worker thread; never raises into the caller. Returns what the
+    run came to, one of ``shared_block_runs``' outcomes, for a Run now answer.
 
     ISSUE-181: a ``synthesis`` block needs the primary brain, so when it's
     degraded (breaker open) we skip the whole gather+synthesize — the expensive
@@ -5664,6 +5665,7 @@ def _generate_shared_block(config: Config, block) -> None:
     (verbatim source concatenation), so they still generate when degraded.
     """
     from istota.brain import primary_brain_unavailable
+    from istota.briefings import shared_block_runs as runs
     from istota.briefings.shared_blocks import SYSTEM_IDENTITY, run_shared_block
     from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
 
@@ -5675,18 +5677,18 @@ def _generate_shared_block(config: Config, block) -> None:
                 "(keeping prior content)",
                 block.name,
             )
-            return
+            return runs.BRAIN_UNAVAILABLE
 
     try:
         result = run_shared_block(block, config)
     except Exception as e:  # noqa: BLE001
         logger.error("shared block %s generation failed: %s", block.name, e)
-        return
+        return runs.FAILED
     if result is None:
         logger.warning(
             "shared block %s: nothing generated, keeping prior content", block.name,
         )
-        return
+        return runs.KEPT_PRIOR
     try:
         with db.get_db(config.db_path) as conn:
             db.shared_kv_set(
@@ -5696,6 +5698,59 @@ def _generate_shared_block(config: Config, block) -> None:
         logger.info("shared block %s regenerated", block.name)
     except Exception as e:  # noqa: BLE001
         logger.error("shared block %s write failed: %s", block.name, e)
+        return runs.FAILED
+    return runs.REGENERATED
+
+
+def check_shared_block_requests(config: Config) -> None:
+    """Answer the Run now presses the settings page left (ISSUE-700).
+
+    Here rather than in the web process because the daemon is the one on the
+    browser's network and the one whose brain breaker decides.
+    """
+    from istota.briefings import shared_block_runs as runs
+    from istota.config import shared_block_from_row
+
+    answered: set[str] = set()
+    while True:
+        request = runs.next_request(config)
+        # A request seen twice is one whose answer could not be written;
+        # leave it for the next tick rather than spinning on it.
+        if request is None or request["id"] in answered:
+            return
+        answered.add(request["id"])
+        name = request.get("name", "")
+        with db.get_db(config.db_path) as conn:
+            row = db.get_shared_block_config(conn, name)
+        if row is None:
+            outcome = runs.NOT_FOUND
+        else:
+            try:
+                outcome = _generate_shared_block(config, shared_block_from_row(row))
+            except Exception:  # noqa: BLE001 - the next request must still be answered
+                logger.error("shared block %s run-now failed", name, exc_info=True)
+                outcome = runs.FAILED
+        runs.record_answered(config, request, outcome)
+
+
+def poll_shared_block_requests(config: Config, inflight: dict) -> None:
+    """The `shared-block-request` gate: one read on the dispatch loop, a thread
+    only when there is a request. Never raises."""
+    from istota.briefings import shared_block_runs as runs
+
+    try:
+        pending = runs.requests_pending(config)
+    except sqlite3.OperationalError as exc:
+        logger.debug("shared_block_request_poll_skipped reason=%s", exc)
+        return
+    except Exception:  # noqa: BLE001 - a raise here takes the dispatch loop
+        logger.warning("shared_block_request_poll_failed", exc_info=True)
+        return
+    if pending:
+        _spawn_background_check(
+            "shared-block-request", lambda: check_shared_block_requests(config),
+            inflight, overlap_expected=True,
+        )
 
 
 def _parse_shared_kv_target(target: str) -> tuple[str, str]:
@@ -9603,6 +9658,9 @@ def build_interval_gates(
     def _browser_instances(now: float) -> None:
         check_browser_instances(config)
 
+    def _shared_block_request(now: float) -> None:
+        poll_shared_block_requests(config, keeper)
+
     def _worktree_reap(now: float) -> None:
         check_worktree_reap(config)
 
@@ -9721,6 +9779,14 @@ def build_interval_gates(
             on_error="Error checking shared blocks: %s",
             one_shot=True,
             one_shot_on_error="Error checking shared blocks: %s",
+        ),
+        # Run now from the briefings settings page. One shared_kv read a tick
+        # on the loop, like `doctor-request`; the generation goes to a thread.
+        IntervalGate(
+            name="shared-block-request",
+            run=_shared_block_request,
+            fixed_interval=1,
+            on_error="Error polling shared-block run requests: %s",
         ),
         IntervalGate(
             name="briefing-triggers",
