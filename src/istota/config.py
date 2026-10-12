@@ -1,5 +1,6 @@
 """Configuration loading for istota."""
 
+import copy
 import logging
 import math
 import os
@@ -4195,6 +4196,54 @@ _CONFIG_HOOKS: dict[str, Hook] = {
 }
 
 
+def _map_document(data: dict, config: Config) -> list[str]:
+    """The mechanical half of the load, into ``config``; the unknown keys.
+
+    Every field whose TOML key is its own name and whose only requirement is
+    its declared type. See `istota.config_mapper` for why this is a walk over
+    the dataclasses rather than a line per key -- three classes of defect came
+    out of the second copy of the schema this replaces. Sections carrying real
+    judgement are named in `_HANDWRITTEN` and parsed by hand in `load_config`;
+    the walk neither maps nor reports those.
+    """
+    # Before the walk, not after: this rewrites a pre-adapter `[whatsapp]` into
+    # the nested shape the dataclasses now declare, so what the walk sees is an
+    # ordinary section and the unknown-key report stays honest about it.
+    normalize_legacy_document(data)
+
+    unknown: list[str] = []
+    apply_section(
+        config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
+        skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
+    )
+    _migrate_workspace_fields(data, config)
+    if config.workspace_path is None:
+        config.workspace_path = config.nextcloud_mount_path
+    _apply_renamed_keys(data, config)
+    # After the walk, so a `[brain.claude_code] model` in the same file wins
+    # over the top-level key it replaces, and before anything reads a brain
+    # block: `_validate_alias_overrides` in `load_config` resolves names
+    # through the brain.
+    _apply_legacy_brain_defaults(data, config)
+    return unknown
+
+
+def config_from_document(data: dict) -> Config:
+    """A ``Config`` from a TOML document, through the mapping `load_config` uses.
+
+    Only that mapping: no file, no environment overrides, no admins file, no
+    database overlays and no process-wide side effects (the alias table). For
+    a caller that has to act on exactly what a document says before it is
+    written, as the first-run setup's connection checks do; an exported
+    `ISTOTA_BRAIN_NATIVE_API_KEY` must not stand in for the key being tested.
+    """
+    config = Config()
+    # The mapping rewrites legacy sections in place; the caller's document is
+    # still the one it means to write.
+    _map_document(copy.deepcopy(data), config)
+    return config
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file."""
     if config_path is None:
@@ -4235,33 +4284,7 @@ def load_config(config_path: Path | None = None) -> Config:
 
     config = Config()
     config.config_path = config_path
-
-    # The mechanical half of the load: every field whose TOML key is its own
-    # name and whose only requirement is its declared type. See
-    # `istota.config_mapper` for why this is a walk over the dataclasses rather
-    # than a line per key -- three classes of defect came out of the second copy
-    # of the schema this replaces.
-    #
-    # Sections carrying real judgement are named in `_HANDWRITTEN` and parsed by
-    # hand below; the walk neither maps nor reports those.
-    # Before the walk, not after: this rewrites a pre-adapter `[whatsapp]` into
-    # the nested shape the dataclasses now declare, so what the walk sees is an
-    # ordinary section and the unknown-key report stays honest about it.
-    normalize_legacy_document(data)
-
-    unknown: list[str] = []
-    apply_section(
-        config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
-        skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
-    )
-    _migrate_workspace_fields(data, config)
-    if config.workspace_path is None:
-        config.workspace_path = config.nextcloud_mount_path
-    _apply_renamed_keys(data, config)
-    # After the walk, so a `[brain.claude_code] model` in the same file wins
-    # over the top-level key it replaces, and before anything reads a brain
-    # block: `_validate_alias_overrides` below resolves names through the brain.
-    _apply_legacy_brain_defaults(data, config)
+    unknown = _map_document(data, config)
     report_unknown(unknown, config_path)
 
     if "users" in data:

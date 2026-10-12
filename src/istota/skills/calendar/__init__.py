@@ -47,10 +47,10 @@ def _require_caldav():
         raise ImportError("caldav not installed. Install with: uv sync --extra calendar")
 
 
-def get_caldav_client(url: str, username: str, password: str):
-    """Create a CalDAV client."""
+def get_caldav_client(url: str, username: str, password: str, *, timeout: int | None = None):
+    """Create a CalDAV client. ``timeout`` (seconds) bounds each request."""
     _require_caldav()
-    return caldav.DAVClient(url=url, username=username, password=password)
+    return caldav.DAVClient(url=url, username=username, password=password, timeout=timeout)
 
 
 def list_calendars(client: caldav.DAVClient) -> list[tuple[str, str]]:
