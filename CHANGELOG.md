@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The daily database backup also keeps a copy of the config.** Where the workspace is a mounted store, `config.toml` and the admins list are copied, private, into `Backups/config/<date>/` beside the database snapshots and kept for as many days, so a lost VM can be rebuilt from the store. Credentials files and the master key are never copied there.
 
+- **Istota can be set up in the browser.** `istota-stack setup --web` prints an address with a one-use setup code and runs a page of short screens: your name and email, a password, an Anthropic or OpenRouter API key or a Claude subscription, the web address, and optionally Nextcloud, email and a calendar, each of which can be tested before you save it. When you finish it writes the configuration, builds what your answers need, starts the stack and sends you to the sign-in page with your email filled in. A new cloud VM started from `host/cloud-init.yaml` opens it on its own and shows the address on the provider's console; `istota-stack setup-code` prints it again, and the terminal wizard is still there with `istota-stack setup`.
+
+- Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
+
+- Browse My Drive and Shared with me in Workspace, open files in Google Drive, and load more files as needed. Connection errors link to Settings so you can restore access.
+
+- My files in Workspace now shows Nextcloud shares and opens files in your Nextcloud when they are shared with you. A disconnected Nextcloud folder reports that it is unreachable when browsing or uploading.
+
+- Upload files and create folders under My files in Workspace. Uploads show progress, preserve existing files by numbering repeated names, and keep errors beside the affected file.
+
+- Files in your room folders, group folders and linked folders, including individual linked files, now open in Workspace and chat. Access follows your current memberships, including when a membership is removed.
+
+- Workspace shows your file locations and how tasks can reach them. Browse folders, open files in the shared viewer, and use each row’s menu to pin, download or open a file in its provider. File previews and room-note editors keep a consistent size, with full-height text areas and PDF pagination at the bottom.
+
+- The workspace API lists your file locations, their task access, and folder contents. Room membership is checked on every request, and symbolic links are shown without being followed.
+
 - **The Ansible management role can update the version on its own.** Running the play with `--tags istota_update` performs only the version update and waits for the stack to be healthy, leaving the config, secrets and users alone. `-e istota_update_force=true` runs the update even when the VM is already current, as running `istota-stack update` on the VM does.
 
 - **`istota migrate role-vars` moves an estate from the old Ansible role to the management role.** It reads the old role's decrypted variables and the migrated VM's own files, writes the new role's variables to a private file and prints only names. A credential the new stack has no secrets file for stops it before anything is written.
@@ -107,6 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
 
+- **Setup now writes the Nextcloud mount's configuration.** Choosing Nextcloud in either setup writes the rclone config and the remote's name for the file mount, so the stack starts without a hand-written file; a `setup --force` re-run replaces an `rclone.conf` written by hand with one for the remote named `nextcloud`. The browser container is now offered as on by default; a scripted `--yes` setup still leaves it off unless you ask for it.
+
 - **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
 
 - **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.
@@ -200,6 +218,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- User IDs now match regardless of case in Talk, Nextcloud sign-in, email plus-addresses and task submission, while keeping their original spelling. Creating an ID that differs only by case from an existing user is refused, so the two cannot share files on a case-insensitive filesystem.
 
 - **The browser's watchdog and health-check thresholds can be set on the stack again.** `BROWSE_WATCHDOG_DEADLINE_S`, `BROWSE_WATCHDOG_POLL_S`, `BROWSER_CDP_FAILURE_THRESHOLD`, `BROWSER_CDP_FAILURE_WINDOW_S`, `BROWSER_WEDGE_RECOVERY_THRESHOLD` and `BROWSER_WEDGE_RECOVERY_WINDOW_S` were read by the browser image but set only by the retired bare-metal role, so the stack had no way to change them. The compose file now passes them through from the stack's `.env` with the same defaults, and the Docker deployment guide lists them.
 
@@ -317,6 +337,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ledger writes, workspace file copies and old-layout memory migrations no longer fail with an input/output error on a Nextcloud workspace mount that rejects extended-attribute calls (#694). The containerized stack's mount answers those calls with an error for every file, and each of these copies asked for the file's extended attributes, so a ledger backup failed before the write it protects. They now copy the contents and permissions only, and `istota doctor` warns when the mount behaves this way, since `cp -a` and `cp -p` out of the workspace still fail there.
 
 ### Security
+
+- **A model provider's error message no longer carries your API key into the logs.** When a provider quoted the key back in an error, that text reached the log and the error shown to you; the key is now removed first.
 
 - **The container's AppArmor profile no longer lets a root shell in the container re-expose kernel settings by bind-mounting them.** It now refuses bind and move mounts out of `/proc` and `/sys` and any new `sysfs` mount, which the task sandbox never needs. Reload the profile on the host after updating (`istota-stack update` does it).
 

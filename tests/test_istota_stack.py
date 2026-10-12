@@ -20,6 +20,7 @@ skipped, and verification against the user's own git configuration instead of
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -41,9 +42,35 @@ pytestmark = pytest.mark.skipif(
 DOCKER_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
 args=" $* "
+for ref in ${STUB_MISSING_IMAGES:-}; do
+  case "$args" in *" image inspect $ref "*) exit 1 ;; esac
+done
 case "$args" in
+  *" setup --web "*)
+    # The setup server: snapshot what root handed it, run STUB_DURING while it
+    # "serves", then write what a finished (or a failed) run leaves behind.
+    vm=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ] && [ "${a%:/vm}" != "$a" ]; then vm="${a%:/vm}"; fi
+      prev="$a"
+    done
+    echo "read-only=${ISTOTA_CONFIG_READ_ONLY:-unset}" >> "$STUB_CALLS"
+    rm -rf "$STUB_CALLS.staging" "$STUB_CALLS.setup-dir"
+    cp -Rp "$vm" "$STUB_CALLS.staging"
+    cp -Rp "$ISTOTA_STACK_DIR/.setup" "$STUB_CALLS.setup-dir"
+    if [ -n "${STUB_DURING:-}" ]; then
+      bash -c "$STUB_DURING" > "$STUB_CALLS.during" 2>&1
+      echo "rc=$?" >> "$STUB_CALLS.during"
+    fi
+    if [ -n "${STUB_CONFIG:-}" ]; then printf '%s' "$STUB_CONFIG" > "$ISTOTA_CONFIG_DIR/config.toml"; fi
+    if [ -n "${STUB_SETUP_DONE:-}" ]; then
+      printf '%s' "${STUB_STAGED_ENV:-}" > "$vm/.env"
+      printf '%s' "${STUB_STAGED_HOST_ENV:-}" > "$vm/host.env"
+      : > "$vm/setup-done"
+    fi
+    exit "${STUB_SETUP_RC:-0}" ;;
   *" config --services "*)
-    printf 'daemon\nweb\nnginx\n'
+    if [ -n "${STUB_SERVICES:-}" ]; then printf '%b' "$STUB_SERVICES"; else printf 'daemon\nweb\nnginx\n'; fi
     case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
   *" build "*) exit "${STUB_BUILD_RC:-0}" ;;
   *" devbox compose-file"*)
@@ -966,6 +993,52 @@ class TestRootNeverReadsWhatUid10001Can:
         assert dest.read_text() == "COMPOSE_PROFILES=\nISTOTA_TAG=v0\n"
         assert (dest.stat().st_mode & 0o777) == 0o644
 
+    @staticmethod
+    def _staging(tmp_path: Path) -> Path:
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / ".env").write_text("COMPOSE_PROFILES=\nISTOTA_TAG=v0\n")
+        (staging / "host.env").write_text("STORAGE=nextcloud\nRCLONE_REMOTE=nextcloud\n")
+        return staging
+
+    def test_setup_installs_a_staged_rclone_conf_private(self, fx, tmp_path):
+        staging = self._staging(tmp_path)
+        conf = "[nextcloud]\ntype = webdav\npass = obscured\n"
+        (staging / "rclone.conf").write_text(conf)
+
+        result = _source(fx, f'install_setup_staging "{staging}"')
+
+        assert result.returncode == 0, result.stderr
+        installed = fx.stack / "rclone.conf"
+        assert installed.read_text() == conf
+        assert (installed.stat().st_mode & 0o777) == 0o600
+        assert "RCLONE_REMOTE=nextcloud" in (fx.stack / "host.env").read_text()
+
+    def test_setup_without_a_staged_rclone_conf_leaves_the_existing_one(self, fx, tmp_path):
+        staging = self._staging(tmp_path)
+        (fx.stack / "rclone.conf").write_text("[mine]\n")
+
+        result = _source(fx, f'install_setup_staging "{staging}"')
+
+        assert result.returncode == 0, result.stderr
+        assert (fx.stack / "rclone.conf").read_text() == "[mine]\n"
+
+    def test_a_staged_rclone_conf_that_is_a_link_is_not_followed(self, fx, tmp_path):
+        secret = tmp_path / "shadow"
+        secret.write_text("root:secret-hash:\n")
+        staging = self._staging(tmp_path)
+        (staging / "rclone.conf").symlink_to(secret)
+
+        result = _source(fx, f'install_setup_staging "{staging}"')
+
+        assert result.returncode != 0
+        assert not (fx.stack / "rclone.conf").exists()
+
+    def test_cmd_setup_installs_through_the_same_function(self):
+        text = SCRIPT.read_text()
+        setup = text.split("\ncmd_setup() {", 1)[1].split("\n}\n", 1)[0]
+        assert 'install_setup_staging "$staging"' in setup
+
 
 class TestAProfileThatFailsToLoadChangesNothing:
     """`.env` names a tag only once that tag's AppArmor profile is loaded.
@@ -1249,3 +1322,341 @@ class TestStaging:
         assert result.returncode != 0
         assert (fx.stack / "config" / "config.toml").exists()
         assert (fx.stack / "staging" / "x").is_dir()
+
+
+NATIVE_CONFIG = '[brain]\nkind = "native"\n'
+STAGED_ENV = "COMPOSE_PROFILES=browser\nISTOTA_SECRETS_DIR=./secrets\n"
+STAGED_HOST_ENV = "STORAGE=local\nINGRESS=local\nRCLONE_REMOTE=\n"
+CODE = re.compile(r"[0-9A-HJKMNP-TV-Z]{5}(?:-[0-9A-HJKMNP-TV-Z]{5}){3}")
+
+
+def _finished(**env: str) -> dict:
+    """What a setup server that reached Finish leaves: the config, the staged
+    env files and the marker."""
+    return {"STUB_SETUP_DONE": "1", "STUB_CONFIG": NATIVE_CONFIG,
+            "STUB_STAGED_ENV": STAGED_ENV, "STUB_STAGED_HOST_ENV": STAGED_HOST_ENV, **env}
+
+
+@pytest.fixture
+def web(fx) -> Fixture:
+    """A VM after `update`, before any config. Ownership is root's to change,
+    so `install -o` and `chown` are stubs that drop or record it; `ip` answers
+    the route lookup; `systemctl` records."""
+    bindir = Path(fx.env["PATH"].split(":")[0])
+    real_install = shutil.which("install")
+    (bindir / "install").write_text(
+        "#!/bin/bash\nargs=()\n"
+        'while [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac; done\n'
+        f'exec {real_install} "${{args[@]}}"\n'
+    )
+    (bindir / "chown").write_text('#!/bin/bash\necho "chown $*" >> "$STUB_CALLS"\n')
+    (bindir / "systemctl").write_text('#!/bin/bash\necho "systemctl $*" >> "$STUB_CALLS"\n')
+    (bindir / "ip").write_text(
+        "#!/bin/bash\n"
+        'case "$*" in\n'
+        '  "-4 route get "*) [ -n "${STUB_IP4:-}" ] || exit 2; echo "1.1.1.1 via 10.0.0.1 dev eth0 src $STUB_IP4 uid 0" ;;\n'
+        '  "-6 route get "*) [ -n "${STUB_IP6:-}" ] || exit 2; echo "2606:4700:4700::1111 from :: via fe80::1 dev eth0 src $STUB_IP6 metric 1024" ;;\n'
+        "esac\n"
+    )
+    for name in ("install", "chown", "systemctl", "ip"):
+        (bindir / name).chmod(0o755)
+    (fx.stack / "config" / "config.toml").unlink()
+    fx.env["STUB_IP4"] = "203.0.113.5"
+    return fx
+
+
+def _staged(fx: Fixture) -> Path:
+    return Path(f"{fx.calls}.staging")
+
+
+def _setup_call(fx: Fixture) -> str:
+    return next(call for call in fx.docker_calls() if " setup --web " in f"{call} ")
+
+
+def _x509(cert: Path, *args: str) -> str:
+    return subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", *args],
+                          capture_output=True, text=True, check=True).stdout
+
+
+needs_openssl = pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+
+
+@needs_openssl
+class TestSetupWebRefuses:
+    def test_a_config_in_place_is_refused_before_anything(self, web):
+        (web.stack / "config" / "config.toml").write_text(NATIVE_CONFIG)
+        result = web.run("setup", "--web")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "already set up" in result.stderr
+        assert "istota-stack setup --force" in result.stderr
+        assert web.docker_calls() == []
+        assert not (web.stack / ".setup").exists()
+
+    def test_force_does_not_go_with_web(self, web):
+        result = web.run("setup", "--web", "--force")
+        assert result.returncode == 64
+        assert web.docker_calls() == []
+
+    def test_a_second_run_is_refused_while_the_first_serves(self, web):
+        result = web.run("setup", "--web", **_finished(STUB_DURING=f'bash "{SCRIPT}" setup --web'))
+        assert result.returncode == 0, result.stdout + result.stderr
+        during = Path(f"{web.calls}.during").read_text()
+        assert "a setup is already running" in during and during.endswith("rc=1\n"), during
+        # The refused run left the first one's files alone: it went on to finish.
+        assert "systemctl enable --now istota-stack" in web.docker_calls()
+        assert len([c for c in web.docker_calls() if " setup --web " in f"{c} "]) == 1
+
+    def test_up_without_a_config_names_both_ways_in(self, web):
+        result = web.run("up")
+        assert result.returncode == 1
+        assert "istota-stack setup --web" in result.stderr
+        assert "systemctl start istota-setup" in result.stderr
+
+
+@needs_openssl
+class TestSetupWebMints:
+    """Root mints the code and the certificate in its own .setup/, prints from
+    there, and hands uid 10001 read-only copies in staging."""
+
+    def test_the_code_and_certificate_are_root_s_and_the_copies_read_only(self, web):
+        result = web.run("setup", "--web", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+
+        setup_dir = Path(f"{web.calls}.setup-dir")
+        assert setup_dir.stat().st_mode & 0o777 == 0o700
+        for name in ("code", "cert.pem", "key.pem", "instructions"):
+            assert (setup_dir / name).stat().st_mode & 0o777 == 0o600, name
+        code = (setup_dir / "code").read_text().strip()
+        assert CODE.fullmatch(code), code
+
+        staged = _staged(web)
+        for name in ("setup-code", "cert.pem", "key.pem"):
+            assert (staged / name).stat().st_mode & 0o777 == 0o400, name
+        assert (staged / "setup-code").read_text().strip() == code
+        assert (staged / "cert.pem").read_bytes() == (setup_dir / "cert.pem").read_bytes()
+        calls = web.docker_calls()
+        staging = re.search(r" -v (\S+):/vm ", _setup_call(web)).group(1)
+        assert calls.index(f"chown -R 10001:10001 {staging}") < calls.index(_setup_call(web))
+        assert calls.index(_setup_call(web)) < calls.index(f"chown root:root {staging}")
+
+    def test_the_instructions_carry_the_address_code_and_fingerprint(self, web):
+        result = web.run("setup", "--web", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        setup_dir = Path(f"{web.calls}.setup-dir")
+        code = (setup_dir / "code").read_text().strip()
+        cert = setup_dir / "cert.pem"
+        fingerprint = _x509(cert, "-fingerprint", "-sha256").split("=", 1)[1].strip()
+        instructions = (setup_dir / "instructions").read_text()
+
+        assert f"  https://203.0.113.5/istota/setup#code={code}\n" in instructions
+        assert f"  {fingerprint}\n" in instructions
+        assert f"Setup code (if you open the page some other way): {code}" in instructions
+        assert instructions in result.stdout
+        assert "CN=istota-setup" in _x509(cert, "-subject").replace(" ", "")
+        assert "IP Address:203.0.113.5" in _x509(cert, "-ext", "subjectAltName")
+
+    def test_a_domain_in_host_env_is_offered_and_named_in_the_certificate(self, web):
+        (web.stack / "host.env").write_text("INGRESS=local\nDOMAIN=istota.example.com\n")
+        assert web.run("setup", "--web", **_finished()).returncode == 0
+        setup_dir = Path(f"{web.calls}.setup-dir")
+        code = (setup_dir / "code").read_text().strip()
+        assert f"https://istota.example.com/istota/setup#code={code}" in (setup_dir / "instructions").read_text()
+        assert "DNS:istota.example.com" in _x509(setup_dir / "cert.pem", "-ext", "subjectAltName")
+
+    def test_an_ipv6_only_machine_gets_a_bracketed_address(self, web):
+        result = web.run("setup", "--web", **_finished(STUB_IP4="", STUB_IP6="2001:db8::5"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "https://[2001:db8::5]/istota/setup#code=" in result.stdout
+        # An IPv4 publish would not answer the address it printed.
+        assert " -p [::]:443:8443 " in _setup_call(web)
+
+    def test_it_publishes_443_to_the_server_with_the_config_open(self, web):
+        assert web.run("setup", "--web", **_finished()).returncode == 0
+        call = _setup_call(web)
+        assert re.search(
+            r"run --rm --no-deps -T --entrypoint istota-drop -p 0\.0\.0\.0:443:8443 "
+            rf"-v \S+/\.setup\.\w+:/vm -v {re.escape(str(web.stack))}/secrets:/vm/secrets "
+            r"daemon istota setup --web --vm-dir /vm$", call), call
+        assert "read-only=false" in web.docker_calls()
+
+    def test_the_publish_address_can_be_moved(self, web):
+        result = web.run("setup", "--web", **_finished(ISTOTA_SETUP_PUBLISH="0.0.0.0:8443"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert " -p 0.0.0.0:8443:8443 " in _setup_call(web)
+        assert "https://203.0.113.5:8443/istota/setup#code=" in result.stdout
+
+    def test_a_malformed_publish_address_is_refused(self, web):
+        result = web.run("setup", "--web", ISTOTA_SETUP_PUBLISH="443")
+        assert result.returncode == 1
+        assert "ISTOTA_SETUP_PUBLISH" in result.stderr
+        assert web.docker_calls() == []
+
+
+class TestSetupWebLocal:
+    def test_local_is_plain_http_on_loopback_with_no_certificate(self, web):
+        result = web.run("setup", "--web", "--local", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        call = _setup_call(web)
+        assert " -p 127.0.0.1:8080:8080 " in call
+        assert call.endswith("daemon istota setup --web --vm-dir /vm --local")
+        staged = _staged(web)
+        assert (staged / "setup-code").exists()
+        assert not (staged / "cert.pem").exists() and not (staged / "key.pem").exists()
+        code = (staged / "setup-code").read_text().strip()
+        assert f"  http://localhost:8080/istota/setup#code={code}\n" in result.stdout
+        assert "fingerprint" not in result.stdout
+
+
+@needs_openssl
+class TestSetupWebUnfinished:
+    """Without setup-done nothing reaches the host: the server may have stopped
+    anywhere, and only the marker says the first admin exists."""
+
+    def test_a_failed_run_changes_neither_env_file_and_cleans_up(self, web):
+        env_before = web.env_text()
+        host_before = (web.stack / "host.env").read_text()
+        result = web.run("setup", "--web", STUB_SETUP_RC="1", STUB_CONFIG=NATIVE_CONFIG,
+                         STUB_STAGED_ENV="COMPOSE_PROFILES=evil\n")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert web.env_text() == env_before
+        assert (web.stack / "host.env").read_text() == host_before
+        assert not (web.stack / ".setup").exists()
+        assert list(web.stack.glob(".setup.*")) == []
+        assert not any(call.startswith("systemctl") for call in web.docker_calls())
+        assert "setup did not finish; nothing was installed on the host" in result.stdout
+        assert f"{web.stack}/config/config.toml" in result.stdout
+        assert "ISTOTA_SETUP_PUBLISH" in result.stdout
+
+    def test_a_clean_exit_without_the_marker_is_still_a_failure(self, web):
+        env_before = web.env_text()
+        result = web.run("setup", "--web", STUB_SETUP_RC="0")
+        assert result.returncode == 1
+        assert web.env_text() == env_before
+
+    def test_a_timeout_says_so_and_keeps_its_code(self, web):
+        result = web.run("setup", "--web", STUB_SETUP_RC="3")
+        assert result.returncode == 3
+        assert "timed out" in result.stdout
+        assert not (web.stack / ".setup").exists()
+
+    def test_a_lockout_says_to_run_again_and_keeps_its_code(self, web):
+        result = web.run("setup", "--web", STUB_SETUP_RC="4")
+        assert result.returncode == 4
+        assert "too many wrong setup codes" in result.stdout
+        assert "istota-stack setup --web" in result.stdout
+        assert not (web.stack / ".setup").exists()
+
+    def test_a_secret_written_before_the_failure_is_named(self, web):
+        secret = web.stack / "secrets" / "istota_brain_native_api_key"
+        result = web.run("setup", "--web", STUB_SETUP_RC="1",
+                         STUB_DURING=f'sleep 1; echo key > "{secret}"')
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert f"{secret} before it stopped" in result.stdout
+
+
+@needs_openssl
+class TestSetupWebFinished:
+    def test_the_staged_files_are_installed_and_the_stack_started(self, web):
+        result = web.run("setup", "--web", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert web.env_text() == STAGED_ENV + "ISTOTA_TAG=v0\n"
+        assert (web.stack / "host.env").read_text() == STAGED_HOST_ENV
+        calls = web.docker_calls()
+        assert calls.index("systemctl enable --now istota-stack") > calls.index(_setup_call(web))
+        assert not (web.stack / ".setup").exists()
+        assert list(web.stack.glob(".setup.*")) == []
+
+    def test_a_linked_marker_is_not_a_finished_setup(self, web, tmp_path):
+        """setup-done is uid 10001's; a link is not the file the server writes."""
+        elsewhere = tmp_path / "marker"
+        elsewhere.touch()
+        result = web.run("setup", "--web", STUB_CONFIG=NATIVE_CONFIG, STUB_DURING=(
+            f'ln -s "{elsewhere}" "$(ls -d "{web.stack}"/.setup.*)/setup-done"'))
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "rc=0" in Path(f"{web.calls}.during").read_text()
+        assert not any(call.startswith("systemctl") for call in web.docker_calls())
+
+    def test_an_image_the_new_profile_needs_is_built_alone(self, web):
+        result = web.run("setup", "--web", **_finished(
+            STUB_SERVICES="daemon\\nweb\\nnginx\\nbrowser\\n", STUB_MISSING_IMAGES="istota-browser:v0"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = web.docker_calls()
+        builds = [call for call in calls if " build " in f"{call} "]
+        assert len(builds) == 1 and builds[0].endswith(" build browser"), builds
+        assert calls.index(builds[0]) < calls.index("systemctl enable --now istota-stack")
+
+    def test_claude_code_rebuilds_every_image(self, web):
+        result = web.run("setup", "--web", **_finished(
+            STUB_CONFIG='[brain]\nkind = "claude_code"\n',
+            STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0",
+            STUB_SERVICES="daemon\\nweb\\nnginx\\nbrowser\\n", STUB_MISSING_IMAGES="istota-browser:v0"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        builds = [call for call in web.docker_calls() if " build " in f"{call} "]
+        assert len(builds) == 1 and builds[0].endswith(" build daemon browser"), builds
+
+    def test_nothing_missing_builds_nothing(self, web):
+        assert web.run("setup", "--web", **_finished()).returncode == 0
+        assert not [call for call in web.docker_calls() if " build " in f"{call} "]
+
+    def test_a_failed_build_stops_before_the_start(self, web):
+        result = web.run("setup", "--web", **_finished(
+            STUB_SERVICES="daemon\\nbrowser\\n", STUB_MISSING_IMAGES="istota-browser:v0", STUB_BUILD_RC="1"))
+        assert result.returncode == 1
+        assert "config is in place" in result.stderr
+        assert not any(call.startswith("systemctl") for call in web.docker_calls())
+        assert not (web.stack / ".setup").exists()
+
+    @pytest.fixture
+    def with_provision(self, web):
+        script = web.src / "host" / "provision.sh"
+        script.parent.mkdir()
+        script.write_text(PROVISION_STUB)
+        script.chmod(0o755)
+        return web
+
+    def test_changed_host_inputs_are_provisioned_before_the_start(self, with_provision):
+        fx = with_provision
+        (fx.stack / ".provisioned").write_text("digest-of-the-update\n")
+        result = fx.run("setup", "--web", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert calls.index("provision ran") < calls.index("systemctl enable --now istota-stack")
+
+    def test_unchanged_host_inputs_are_not_provisioned_again(self, with_provision):
+        fx = with_provision
+        (fx.stack / ".provisioned").write_text(f"digest-{fx.head()}\n")
+        result = fx.run("setup", "--web", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "provision ran" not in fx.docker_calls()
+        assert "systemctl enable --now istota-stack" in fx.docker_calls()
+
+    def test_a_failed_provision_does_not_start_the_stack(self, with_provision):
+        fx = with_provision
+        result = fx.run("setup", "--web", **_finished(STUB_PROVISION_RC="1"))
+        assert result.returncode == 1
+        assert "provision.sh failed" in result.stderr
+        assert not any(call.startswith("systemctl") for call in fx.docker_calls())
+
+
+@needs_openssl
+class TestSetupCode:
+    def test_with_no_setup_it_says_so(self, web):
+        result = web.run("setup-code")
+        assert result.returncode == 1
+        assert "no setup in progress" in result.stderr
+
+    def test_files_a_dead_run_left_are_not_a_setup_in_progress(self, web):
+        setup_dir = web.stack / ".setup"
+        setup_dir.mkdir()
+        (setup_dir / "lock").touch()
+        (setup_dir / "instructions").write_text("stale\n")
+        result = web.run("setup-code")
+        assert result.returncode == 1
+        assert "no setup in progress" in result.stderr
+
+    def test_during_a_setup_it_prints_the_instructions(self, web):
+        result = web.run("setup", "--web", **_finished(STUB_DURING=f'bash "{SCRIPT}" setup-code'))
+        assert result.returncode == 0, result.stdout + result.stderr
+        during = Path(f"{web.calls}.during").read_text()
+        instructions = Path(f"{web.calls}.setup-dir", "instructions").read_text()
+        assert during == instructions + "rc=0\n"

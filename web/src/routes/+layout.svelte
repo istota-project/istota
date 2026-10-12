@@ -29,6 +29,13 @@
 
   let { children } = $props();
 
+  // The first-run setup page renders bare: its server has no `/api/me`, no
+  // notifications and no probe to answer, so nothing below asks it anything,
+  // the way `+error.svelte` sits outside the shell. Decided once, at load:
+  // setup never navigates into the app client-side (Sign in is a full load).
+  const setupRoute =
+    page.url.pathname === `${base}/setup` || page.url.pathname.startsWith(`${base}/setup/`);
+
   let user: User | null = $state(null);
   let searchOpen = $state(false);
   let loading = $state(true);
@@ -84,7 +91,9 @@
   // `AppShell`, and the interface listeners must outlive any one page. The
   // requests each page makes are what keep it current; this only adds the
   // window events and the probe schedule.
-  onMount(() => startConnectivity());
+  onMount(() => {
+    if (!setupRoute) return startConnectivity();
+  });
 
   // Ask for the origin's storage to be exempt from eviction, once.
   //
@@ -99,6 +108,7 @@
   // to move into native storage. Logged rather than surfaced, because there is
   // nothing the user could do about it and nothing here fails if it is no.
   onMount(() => {
+    if (setupRoute) return;
     if (typeof navigator === 'undefined' || typeof navigator.storage?.persist !== 'function') {
       return;
     }
@@ -134,7 +144,7 @@
   // Fire-and-forget: a registration that fails leaves the app exactly as it is
   // without one, which is what every other surface already runs.
   onMount(() => {
-    if (!shellAtLeast('0.10.0')) return;
+    if (setupRoute || !shellAtLeast('0.10.0')) return;
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     navigator.serviceWorker
       // Kit bundles the worker as a classic script for the build and serves it
@@ -331,6 +341,7 @@
 
   onMount(() => {
     console.log(`[istota] web ui ${__APP_VERSION__} (built ${__APP_BUILT_AT__})`);
+    if (setupRoute) return;
     // Seeded before the load rather than after it. The load awaits `getMe()`
     // and then a first open of IndexedDB, which can spend three seconds, and a
     // connection that returned inside that window would otherwise be read as
@@ -390,7 +401,9 @@
   <title>{pageTitle}</title>
 </svelte:head>
 
-{#if loading}
+{#if setupRoute}
+  {@render children()}
+{:else if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
   <div class="center-msg error">{error}</div>
@@ -403,6 +416,9 @@
     </a>
     <div class="nav-links">
       <a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
+      {#if user.features.workspace}
+        <a href="{base}/workspace" class:active={isActive('/workspace')}>Workspace</a>
+      {/if}
       {#if user.features.briefings}
         <a href="{base}/briefings" class:active={isActive('/briefings')}>Briefings</a>
       {/if}
@@ -475,6 +491,18 @@
                 >
               {/snippet}
             </DropdownMenu.Item>
+            {#if user.features.workspace}
+              <DropdownMenu.Item>
+                {#snippet child({ props })}
+                  <a
+                    href="{base}/workspace"
+                    class="app-nav-menu-link"
+                    class:active={isActive('/workspace')}
+                    {...props}>Workspace</a
+                  >
+                {/snippet}
+              </DropdownMenu.Item>
+            {/if}
             {#if user.features.briefings}
               <DropdownMenu.Item>
                 {#snippet child({ props })}
@@ -566,6 +594,7 @@
     class="app-content"
     class:app-content-fill={isActive('/') ||
       isActive('/chat') ||
+      isActive('/workspace') ||
       isActive('/location') ||
       isActive('/feeds') ||
       isActive('/money') ||

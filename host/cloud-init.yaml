@@ -5,9 +5,16 @@
 #
 # What it does: clones the repository, verifies the release tag's signature
 # against the key below before running anything from it, checks the tag out,
-# and runs host/provision.sh from that checkout. Then, on the machine:
+# runs host/provision.sh from that checkout, builds the images from the tag
+# (`istota-stack update <tag>`), and starts the setup in a browser
+# (`systemctl start istota-setup`). The address to open and the setup code are
+# printed to the console, which a VPS provider's web console shows; on the
+# machine, `sudo istota-stack setup-code` prints them again. Setup installs the
+# config, builds what it needs, provisions again and starts the stack.
 #
-#   istota-stack update <tag>     # builds the images from the verified tag
+# To set up in the terminal instead, stop the unit (`systemctl stop
+# istota-setup`) and run:
+#
 #   istota-stack setup            # the wizard: config.toml, secrets, host.env
 #   istota-stack check-image || istota-stack update <tag>   # rebuild if the config needs Claude Code
 #   /srv/app/istota/src/host/provision.sh   # picks up host.env
@@ -93,6 +100,15 @@ write_files:
       object="$(verify_release_tag "$TAG")"
       verified_git checkout --quiet --detach "${object}^{commit}"
       ISTOTA_REPO_URL="$REPO_URL" "${SRC}/host/provision.sh"
+
+      /usr/local/sbin/istota-stack update "$TAG"
+      systemctl start istota-setup.service
+      # The unit mints the code and the certificate first; print its
+      # instructions once they exist. cloud-init's output reaches the console.
+      for _ in $(seq 1 60); do
+          if /usr/local/sbin/istota-stack setup-code 2>/dev/null; then break; fi
+          sleep 5
+      done
 
 runcmd:
   - [bash, /root/istota-bootstrap.sh]

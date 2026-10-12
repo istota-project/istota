@@ -177,6 +177,7 @@ def _role_vars(mode: dict) -> dict:
         istota_ingress=mode["ingress"],
         istota_domain=mode["hostname"],
         istota_storage="nextcloud" if mode.get("nextcloud_url") else "local",
+        istota_rclone_remote=setup_wizard.RCLONE_REMOTE if mode.get("nextcloud_url") else "",
         istota_compose_profiles=list(mode.get("profiles", ())),
     )
     for answer, var in (("tls_cert_source", "istota_tls_cert_source"),

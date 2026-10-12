@@ -52,7 +52,6 @@ from PIL import Image
 
 from istota import db
 from istota.webui import avatars
-from istota.webui.avatars import AvatarError
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
 
 ORIGIN = {"origin": "https://example.com"}
@@ -475,7 +474,7 @@ class TestUploadBounds:
         green. This is the property that check exists for, asserted where it
         is visible: nothing is pulled off the stream.
         """
-        import istota.webui.app as mod
+        from istota.webui.request_guards import BodyError, read_bounded_body
 
         pulled = []
 
@@ -486,14 +485,14 @@ class TestUploadBounds:
                 pulled.append(1)
                 yield b"x"
 
-        with pytest.raises(AvatarError) as excinfo:
-            await mod._read_bounded_body(_Req(), 16)
+        with pytest.raises(BodyError) as excinfo:
+            await read_bounded_body(_Req(), 16)
         assert excinfo.value.status == 413
         assert pulled == []
 
     async def test_the_stream_stops_at_the_cap_and_reads_no_further(self):
         """A declared length is a claim; the running total is the enforcement."""
-        import istota.webui.app as mod
+        from istota.webui.request_guards import BodyError, read_bounded_body
 
         pulled = []
 
@@ -505,8 +504,8 @@ class TestUploadBounds:
                     pulled.append(i)
                     yield b"0123456789"
 
-        with pytest.raises(AvatarError) as excinfo:
-            await mod._read_bounded_body(_Req(), 16)
+        with pytest.raises(BodyError) as excinfo:
+            await read_bounded_body(_Req(), 16)
         assert excinfo.value.status == 413
         # Refused on the second chunk; the remaining eight are never read.
         assert len(pulled) < 10
@@ -562,7 +561,7 @@ class TestUploadBounds:
         `Request.stream()` raises `ClientDisconnect`, which the route does not
         catch, so an aborted upload logged a traceback per attempt.
         """
-        import istota.webui.app as mod
+        from istota.webui.request_guards import BodyError, read_bounded_body
         from starlette.requests import ClientDisconnect
 
         class _Req:
@@ -572,8 +571,8 @@ class TestUploadBounds:
                 yield b"0123"
                 raise ClientDisconnect()
 
-        with pytest.raises(AvatarError) as excinfo:
-            await mod._read_bounded_body(_Req(), 4096)
+        with pytest.raises(BodyError) as excinfo:
+            await read_bounded_body(_Req(), 4096)
         assert excinfo.value.status == 400
 
     async def test_a_multipart_body_with_no_file_part_is_refused(self, alice):

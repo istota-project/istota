@@ -62,14 +62,14 @@ describe('workspace file viewer through the host', () => {
       opener.remove();
     },
   );
-  it('uses a compact reading shell with header download and a wider source view', async () => {
+  it('keeps a full-height fixed-width shell across rendered and source views', async () => {
     preview.mockResolvedValue(text('note.md', '# Short note'));
     open('/note.md');
     await screen.findByRole('heading', { name: 'Short note' });
     const dialog = screen.getByRole('dialog', { name: 'note.md' });
     expect(dialog).toHaveClass('ui-viewer-content');
-    expect(dialog.style.getPropertyValue('--modal-height')).toBe('auto');
-    expect(dialog.style.getPropertyValue('--modal-width')).toBe('720px');
+    expect(dialog.style.getPropertyValue('--modal-height')).toBe('100dvh');
+    expect(dialog.style.getPropertyValue('--modal-width')).toBe('960px');
     const download = screen.getByRole('link', { name: 'Download' });
     expect(download.closest('.ui-viewer-header')).not.toBeNull();
     expect(download).toHaveAttribute('href', chatFileUrl('/note.md'));
@@ -84,8 +84,9 @@ describe('workspace file viewer through the host', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
     expect(dialog.style.getPropertyValue('--modal-width')).toBe('960px');
     expect(body.scrollTop).toBe(80);
+    expect(dialog.style.getPropertyValue('--modal-height')).toBe('100dvh');
     await fireEvent.click(screen.getByRole('button', { name: 'Rendered' }));
-    expect(dialog.style.getPropertyValue('--modal-width')).toBe('720px');
+    expect(dialog.style.getPropertyValue('--modal-width')).toBe('960px');
   });
   it('renders plain text safely', async () => {
     preview.mockResolvedValue(text());

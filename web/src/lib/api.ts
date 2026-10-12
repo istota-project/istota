@@ -168,6 +168,7 @@ export interface User {
     money: boolean;
     health: boolean;
     briefings: boolean;
+    workspace?: boolean;
     google_workspace: boolean;
     google_workspace_enabled: boolean;
     admin: boolean;
@@ -5193,4 +5194,330 @@ export function search(
   if (options.limit !== undefined) params.set('limit', String(options.limit));
   if (options.offset !== undefined) params.set('offset', String(options.offset));
   return apiFetch(`/search?${params}`, { signal: options.signal });
+}
+
+// ---- First-run setup (`webui/setup_app.py`) ----
+//
+// The setup server runs before any config exists and serves only these
+// routes. Its errors are `{error: <code>, message, fields?, step?}`, and a 401
+// means "locked" rather than "signed out", so these do not go through
+// `apiFetch`: that would read the code as the message, send a 401 to the login
+// page, and report into a connectivity store the setup page never starts.
+
+/** `configured` is the normal web app's answer: there is nothing to set up. */
+export type SetupPhase = 'locked' | 'open' | 'finishing' | 'configured';
+
+export interface SetupState {
+  phase: SetupPhase;
+  /** Plain HTTP on this machine (`--local`) rather than the TLS setup port. */
+  local?: boolean;
+  /** The `Host` the browser used, for the web address screen. */
+  host?: string;
+  /** The module toggles this image can offer; `field` is the answer's name. */
+  modules_available?: { field: string; module: string }[];
+  memory_total_mib?: number;
+  defaults?: {
+    bot_name: string;
+    storage: string;
+    profiles: string[];
+    /** Each API-key service's address and default model. */
+    models?: SetupModelDefaults;
+  };
+}
+
+export interface SetupModelService {
+  base_url: string;
+  model: string;
+}
+export interface SetupModelDefaults {
+  anthropic: SetupModelService;
+  openrouter: SetupModelService;
+}
+
+/** A credential the server holds: never its value, only whether it is set. */
+export interface SetupCredential {
+  set: boolean;
+}
+export type SetupDraftValue = string | number | boolean | string[] | SetupCredential;
+export type SetupDraft = Record<string, SetupDraftValue>;
+/** A `PUT` merges. `null` drops an answer, but keeps a stored credential. */
+export type SetupDraftPatch = Record<string, string | number | boolean | string[] | null>;
+
+export interface SetupFieldError {
+  /** An answer field, or `""` for an error about the form as a whole. */
+  field: string;
+  message: string;
+  /** On a refused Finish: the screen that asks this field. */
+  step?: string;
+}
+
+export type SetupCheckKind = 'model' | 'nextcloud' | 'email' | 'caldav' | 'address';
+export interface SetupCheckLine {
+  key: string;
+  ok: boolean;
+  warning: boolean;
+  message: string;
+}
+export interface SetupCheckResult {
+  ok: boolean;
+  /** Passed, with something the user should read. */
+  warning: boolean;
+  message: string;
+  /** The Nextcloud check's per-step results. */
+  lines?: SetupCheckLine[];
+  /** The Nextcloud check: whether Talk is installed there. */
+  talk_available?: boolean;
+}
+export interface SetupValidation {
+  ok: boolean;
+  fields: SetupFieldError[];
+}
+export interface SetupFinished {
+  login_url: string;
+  email: string;
+}
+
+const SETUP_UNREACHABLE = "Can't reach the setup service.";
+
+/**
+ * A refused or failed setup request. `status` 0 is no answer at all. `code` is
+ * the server's `error`; `fields` go under their inputs and `message` in the
+ * screen's banner.
+ */
+export class SetupApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly fields: SetupFieldError[];
+  readonly step: string | null;
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    fields: SetupFieldError[] = [],
+    step: string | null = null,
+  ) {
+    super(message);
+    this.name = 'SetupApiError';
+    this.status = status;
+    this.code = code;
+    this.fields = fields;
+    this.step = step;
+  }
+}
+
+function setupFieldErrors(raw: unknown): SetupFieldError[] {
+  if (!Array.isArray(raw)) return [];
+  const fields: SetupFieldError[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const { field, message, step } = item as Record<string, unknown>;
+    if (typeof field !== 'string' || typeof message !== 'string') continue;
+    fields.push(typeof step === 'string' ? { field, message, step } : { field, message });
+  }
+  return fields;
+}
+
+async function setupFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/setup${path}`, {
+      method,
+      credentials: 'same-origin',
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new SetupApiError(0, 'unreachable', SETUP_UNREACHABLE);
+  }
+  let payload: unknown = null;
+  try {
+    payload = await resp.json();
+  } catch {
+    payload = null;
+  }
+  if (!resp.ok || payload === null) {
+    const raw = (payload ?? {}) as Record<string, unknown>;
+    const message =
+      typeof raw.message === 'string' && raw.message.trim()
+        ? raw.message
+        : `The setup service answered ${resp.status}.`;
+    throw new SetupApiError(
+      resp.status,
+      typeof raw.error === 'string' ? raw.error : 'failed',
+      message,
+      setupFieldErrors(raw.fields),
+      typeof raw.step === 'string' ? raw.step : null,
+    );
+  }
+  return payload as T;
+}
+
+export function getSetupState(): Promise<SetupState> {
+  return setupFetch('/state');
+}
+
+export async function unlockSetup(code: string): Promise<void> {
+  await setupFetch('/unlock', 'POST', { code });
+}
+
+export function getSetupDraft(): Promise<{ draft: SetupDraft }> {
+  return setupFetch('/draft');
+}
+
+export function putSetupDraft(patch: SetupDraftPatch): Promise<{ draft: SetupDraft }> {
+  return setupFetch('/draft', 'PUT', patch);
+}
+
+/** The saved draft's errors on one screen's fields. */
+export function validateSetupStep(step: string): Promise<SetupValidation> {
+  return setupFetch('/validate', 'POST', { step });
+}
+
+/** OpenRouter's model ids, for suggestions only; `[]` when there are none. */
+export async function getSetupModels(): Promise<string[]> {
+  const { models } = await setupFetch<{ models: string[] }>('/models');
+  return Array.isArray(models) ? models.filter((m) => typeof m === 'string') : [];
+}
+
+/** A live test of what the saved draft would write; it takes no body. */
+export function checkSetupConnection(kind: SetupCheckKind): Promise<SetupCheckResult> {
+  return setupFetch(`/check/${kind}`, 'POST');
+}
+
+export function finishSetup(): Promise<SetupFinished> {
+  return setupFetch('/finish', 'POST');
+}
+
+// Workspace places and safe, one-directory listings.
+export type WorkspaceAccess = 'rw' | 'ro' | 'skill' | 'none' | 'conditional';
+export interface WorkspacePlace {
+  id: string;
+  kind: 'home' | 'linked' | 'room' | 'group' | 'talk' | 'drive' | 'nextcloud';
+  label: string;
+  browsable: boolean;
+  view_root: string | null;
+  reach: {
+    private: WorkspaceAccess;
+    shared_member: WorkspaceAccess;
+    restricted: WorkspaceAccess;
+    note: string | null;
+  };
+}
+export interface WorkspaceEntry {
+  view_path?: string;
+  name: string;
+  kind: 'dir' | 'file' | 'link' | 'other';
+  size: number | null;
+  modified: number;
+  hidden: boolean;
+  share?: { kind: 'user' | 'group' | 'link'; count: number } | null;
+  nextcloud_url?: string | null;
+}
+export interface WorkspaceListing {
+  notes?: string[];
+  place: string;
+  path: string;
+  entries: WorkspaceEntry[];
+  truncated: boolean;
+  skipped_names: number;
+}
+export function getWorkspacePlaces(): Promise<{ places: WorkspacePlace[]; notes: string[] }> {
+  return apiFetch('/workspace/places');
+}
+export function getWorkspaceListing(place: string, path = ''): Promise<WorkspaceListing> {
+  return apiFetch(`/workspace/list?${new URLSearchParams({ place, path })}`);
+}
+
+export interface DriveItem {
+  id: string;
+  name: string;
+  mime_type: string;
+  modified: string | null;
+  size: number | null;
+  web_url: string | null;
+  is_folder: boolean;
+}
+export interface DriveListing {
+  items: DriveItem[];
+  next_page_token: string | null;
+}
+export function getWorkspaceDriveListing(
+  folder = 'root',
+  pageToken?: string,
+): Promise<DriveListing> {
+  return apiFetch(
+    `/workspace/drive/list?${new URLSearchParams({ folder, ...(pageToken ? { page_token: pageToken } : {}) })}`,
+  );
+}
+
+export function createWorkspaceFolder(path: string, name: string): Promise<{ path: string }> {
+  return apiFetch('/workspace/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ place: 'home', path, name }),
+  });
+}
+
+export function uploadWorkspaceFile(
+  path: string,
+  file: File,
+  onProgress: (percent: number) => void,
+): Promise<{ name: string; path: string; size: number }> {
+  const form = new FormData();
+  form.append('place', 'home');
+  form.append('path', path);
+  form.append('file', file);
+  // XHR exposes upload progress; fetch does not.
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${base}/api/workspace/upload`);
+    xhr.timeout = 120_000;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => reject(new UploadUnreachableError());
+    xhr.ontimeout = () => reject(new Error('Upload timed out.'));
+    xhr.onload = async () => {
+      if (xhr.status === 401) {
+        reject(new AuthError());
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(
+          new Error(
+            await errorMessage(new Response(xhr.responseText, { status: xhr.status || 500 })),
+          ),
+        );
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText));
+      } catch {
+        reject(new Error('Could not read the upload response.'));
+      }
+    };
+    xhr.send(form);
+  });
+}
+
+export interface WorkspacePinInput {
+  provider: 'workspace' | 'drive';
+  ref: string;
+  name: string;
+  mime_type: string | null;
+  web_url: string | null;
+}
+export interface WorkspacePin extends WorkspacePinInput {
+  id: number;
+  available: boolean;
+  is_dir: boolean;
+}
+export function getWorkspacePins(): Promise<{ pins: WorkspacePin[] }> {
+  return apiFetch('/workspace/pins');
+}
+export function putWorkspacePin(pin: WorkspacePinInput): Promise<{ pin: WorkspacePin }> {
+  return apiFetch('/workspace/pins', { method: 'PUT', body: JSON.stringify(pin) });
+}
+export function deleteWorkspacePin(id: number): Promise<{ status: string }> {
+  return apiFetch(`/workspace/pins/${id}`, { method: 'DELETE' });
 }

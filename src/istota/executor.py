@@ -6833,6 +6833,7 @@ def build_prompt(
     withheld_scopes: "frozenset[str] | set[str] | None" = None,
     group_memory: str | None = None,
     channel_memory_shared: bool = False,
+    skip_memory: bool = False,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -6982,6 +6983,18 @@ The following information has been remembered about this user:
 {user_memory}
 
 """
+
+    pins_section = ""
+    if not skip_memory and "memory" not in (withheld_scopes or ()) and not _ambient_memory_off(config, task, conn):
+        import sqlite3
+        from istota.workspace.pins import pins_prompt_block
+
+        try:
+            with db.get_db_if_present(config.db_path, conn) as pins_conn:
+                if pins_conn is not None:
+                    pins_section = pins_prompt_block(db.list_pins(pins_conn, task.user_id))
+        except sqlite3.Error:
+            logger.warning("Could not load pinned files for task %s", task.id, exc_info=True)
 
     # Build knowledge facts section
     knowledge_facts_section = ""
@@ -7454,6 +7467,7 @@ You have access to:
 
     user_blocks = [
         memory_section,
+        pins_section,
         knowledge_facts_section,
         group_memory_section,
         channel_memory_section,
@@ -7849,17 +7863,11 @@ def execute_task(
         logger.error("Task %s: %s", task.id, exc)
         return False, str(exc), None, None
 
-    # Build resources: merge config-defined resources with dynamic DB resources
+    # Keep the caller's task resource snapshot and append configured resources.
+    from .workspace.places import user_resources_for
+
     user_config = config.get_user(task.user_id)
-    all_resources = list(user_resources)  # start with passed resources (e.g. shared_file from DB)
-    if user_config:
-        for rc in user_config.resources:
-            all_resources.append(db.UserResource(
-                id=0, user_id=task.user_id,
-                resource_type=rc.type, resource_path=rc.path,
-                display_name=rc.name or None, permissions=rc.permissions,
-            ))
-    user_resources = all_resources
+    user_resources = user_resources_for(config, conn, task.user_id, resources=user_resources)
 
     # Briefing tasks defer their prompt build to here (ISSUE-143): building a
     # briefing prompt does slow network I/O (news, yfinance, FinViz, IMAP).
@@ -8432,6 +8440,7 @@ def execute_task(
         knowledge_facts=knowledge_facts_text,
         group_memory=group_memory,
         channel_memory_shared=_channel_shared,
+        skip_memory=_skip_memory,
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),

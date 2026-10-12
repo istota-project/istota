@@ -42,6 +42,7 @@
 #   scripts/test-image-negative-control.sh run-contract
 #   scripts/test-image-negative-control.sh secrets
 #   scripts/test-image-negative-control.sh rendered-config
+#   scripts/test-image-negative-control.sh web-setup
 #   scripts/test-image-negative-control.sh devbox
 #
 # The second form runs only the third half, the daemon container's run
@@ -58,7 +59,9 @@
 # `docker inspect` then shows (tests/image/test_secrets_contract.py). The
 # fourth runs the upgrade case that boots the new entrypoint over a config an
 # old release rendered, against an image whose entrypoint appends to that file.
-# The fifth runs only the devbox half, for a change that touches nothing else.
+# The fifth runs the first-run setup server against an image that takes any
+# setup code. The sixth runs only the devbox half, for a change that touches
+# nothing else.
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -80,6 +83,11 @@ fi
 only_rendered_config=""
 if [ "$platform" = "rendered-config" ]; then
     only_rendered_config=1
+    platform=""
+fi
+only_web_setup=""
+if [ "$platform" = "web-setup" ]; then
+    only_web_setup=1
     platform=""
 fi
 only_devbox=""
@@ -354,6 +362,51 @@ rendered_config_half() {
     echo "[control] OK: rendered-config turned the rewrite witness red and the daemon still started."
 }
 
+# --------------------------------------------------------------------------
+# The first-run setup server's code check. The control image's server takes
+# any code, so the wrong-code witness must go red; the Finish witness must stay
+# green, which tells that red from a server that never came up.
+
+WEB_SETUP_TESTS="tests/image/test_web_setup.py"
+
+web_setup_half() {
+    web_setup_base="$(uv run python -c '
+import sys
+sys.path.insert(0, ".")
+from tests.image.conftest import _tag_for, ISTOTA_DOCKERFILE
+print(_tag_for(ISTOTA_DOCKERFILE, "", "istota"))
+')"
+    if ! docker image inspect "$web_setup_base" >/dev/null 2>&1; then
+        echo "[control] not built yet — run \`uv run pytest -m image -n0 ${WEB_SETUP_TESTS}\` first." >&2
+        exit 2
+    fi
+    echo
+    echo "[control] web-setup: a setup server that takes any code (base ${web_setup_base})"
+    web_setup_tag="istota-test/setup-any-code:${web_setup_base##*:}"
+    docker build -q -f docker/test/Dockerfile.setup-any-code \
+        --build-arg "BASE=$web_setup_base" -t "$web_setup_tag" docker/test >/dev/null
+    web_setup_out="$(mktemp)"
+    set +e
+    ISTOTA_IMAGE_TAG="$web_setup_tag" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly "$WEB_SETUP_TESTS" 2>&1 | tee "$web_setup_out"
+    set -e
+    web_setup_node="${WEB_SETUP_TESTS}::TestTheSetupCode::test_a_wrong_code_is_refused"
+    web_setup_finish="${WEB_SETUP_TESTS}::TestFinish::test_finish_answers_and_the_server_exits_0"
+    if ! grep -Fq "FAILED ${web_setup_node}" "$web_setup_out"; then
+        rm -f "$web_setup_out"
+        echo "[control] FAILED: web-setup did not turn ${web_setup_node} red."
+        exit 1
+    fi
+    if grep -Fq "FAILED ${web_setup_finish}" "$web_setup_out" || grep -Fq "ERROR ${web_setup_finish}" "$web_setup_out"; then
+        rm -f "$web_setup_out"
+        echo "[control] FAILED: web-setup broke the server rather than the code check;"
+        echo "[control]   ${web_setup_finish} should still pass."
+        exit 1
+    fi
+    rm -f "$web_setup_out"
+    echo "[control] OK: web-setup turned the wrong-code witness red and Finish still ran."
+}
+
 if [ -n "$only_run_contract" ]; then
     run_contract_half
     exit 0
@@ -364,6 +417,10 @@ if [ -n "$only_rendered_config" ]; then
 fi
 if [ -n "$only_secrets" ]; then
     secrets_half
+    exit 0
+fi
+if [ -n "$only_web_setup" ]; then
+    web_setup_half
     exit 0
 fi
 
@@ -725,4 +782,5 @@ if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     run_contract_half
     secrets_half
     rendered_config_half
+    web_setup_half
 fi

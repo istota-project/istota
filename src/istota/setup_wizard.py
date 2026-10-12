@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from istota.lib import toml_write
+from istota.lib.rclone_conf import obscure as rclone_obscure
+from istota.lib.rclone_conf import render_webdav_remote
 
 logger = logging.getLogger("istota.setup")
 
@@ -37,6 +39,10 @@ DEFAULT_WORKSPACE = "~/.istota"
 DEFAULT_PORT = 8766
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "istota" / "config.toml"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+#: The same model as `DEFAULT_ANTHROPIC_MODEL`, by OpenRouter's name for it.
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
 
 
 @dataclass
@@ -802,7 +808,7 @@ def _collect_native(a: Answers, args, *, interactive, input_fn, getpass_fn, out)
     key = getattr(args, "native_api_key", None) or os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY", "")
     if interactive:
         base = base or _ask(input_fn, "API base URL", DEFAULT_ANTHROPIC_BASE_URL)
-        model = model or _ask(input_fn, "Model id", "claude-sonnet-4-6")
+        model = model or _ask(input_fn, "Model id", DEFAULT_ANTHROPIC_MODEL)
         if not key:
             # Read as a secret (no echo) and re-prompt on empty — a stray newline
             # from the pasted model id must not silently leave the key blank.
@@ -1032,6 +1038,11 @@ def setup_shape(args) -> str:
 def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None) -> int:
     """Run the setup wizard. Returns a process exit code (0 = success)."""
     import shutil as _shutil
+
+    if getattr(args, "web", False) or getattr(args, "local", False):
+        from .webui import setup_app  # noqa: PLC0415 - FastAPI only for the web setup
+
+        return setup_app.serve(args, out=out)
 
     if setup_shape(args) == "container":
         return run_container_setup(
@@ -1688,6 +1699,11 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
     }
 
 
+#: The remote's name in the ``rclone.conf`` setup stages, and ``host.env``'s
+#: ``RCLONE_REMOTE``, which the VM's mount unit reads.
+RCLONE_REMOTE = "nextcloud"
+
+
 def host_env_values(a: ContainerAnswers) -> dict[str, str]:
     """The ``host.env`` keys: what the VM's provisioning reads, and what the nginx
     and daemon containers read for the ingress mode."""
@@ -1699,6 +1715,7 @@ def host_env_values(a: ContainerAnswers) -> dict[str, str]:
         "UPSTREAM_PROXY": a.upstream_proxy,
         "LISTEN_ADDR": a.listen_addr,
         "LISTEN_PORT": str(a.listen_port or ""),
+        "RCLONE_REMOTE": RCLONE_REMOTE if a.uses_nextcloud else "",
     }
 
 
@@ -1749,6 +1766,13 @@ def _host_env_value(text: str, key: str) -> str:
     return value
 
 
+def current_storage(vm_dir: Path | None) -> str:
+    """host.env's STORAGE as it stands before a setup run, or ``""``."""
+    if vm_dir is None or not (vm_dir / "host.env").is_file():
+        return ""
+    return _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "STORAGE")
+
+
 def render_stack_env(a: ContainerAnswers, existing: str = "") -> str:
     """The compose ``.env`` after this run."""
     return merge_env_text(existing, stack_env_values(a), _STACK_ENV_HEADER)
@@ -1784,6 +1808,258 @@ def _ask_choice(input_fn, prompt: str, choices: tuple[str, ...], default: str, *
     return default
 
 
+@dataclass(frozen=True)
+class FieldError:
+    """One refusal of a set of answers, on the field it is about."""
+
+    #: A ``ContainerAnswers`` attribute name, or ``""`` for the whole form.
+    field: str
+    message: str
+
+
+class PayloadError(SetupError):
+    """A web payload that cannot become answers: an unknown key, a wrong type,
+    a choice with no value it can mean.
+
+    ``answers`` is what the rest of the payload made, with each refused key
+    taken as unasked, so a caller can still validate the fields that were
+    fine. None when the payload was not an object at all.
+    """
+
+    def __init__(self, errors: list[FieldError], answers: "ContainerAnswers | None" = None):
+        super().__init__(errors[0].message)
+        self.errors = errors
+        self.answers = answers
+
+
+_BRAIN_KINDS = ("claude_code", "native")
+
+
+def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
+    """Every refusal of ``a``, in the order the terminal wizard asks.
+
+    The one rule set for both front ends: the terminal raises the first error
+    as a ``SetupError`` and the web setup shows them all, so the wording here
+    is the terminal's. A rule added to only one front end is how two of them
+    drift apart.
+    """
+    errors: list[FieldError] = []
+
+    def refuse(field_name: str, message: str) -> None:
+        errors.append(FieldError(field_name, message))
+
+    if not a.user_id:
+        refuse("user_id", "A user id is required for the first admin (--user).")
+    if not _is_valid_timezone(a.timezone):
+        refuse("timezone", f"'{a.timezone}' is not a valid IANA timezone.")
+    if a.ingress not in INGRESS_HOPS:
+        refuse("ingress", f"Unknown ingress {a.ingress!r}; use direct, proxied or local.")
+    if a.ingress == "proxied":
+        if not a.upstream_proxy:
+            refuse(
+                "upstream_proxy",
+                "Proxied ingress needs the upstream proxy's address (--upstream-proxy): "
+                "the listener must refuse every other source, or a client can forge "
+                "X-Forwarded-For past the login throttle.",
+            )
+        if not a.listen_addr or a.listen_addr in ("0.0.0.0", "::"):
+            refuse("listen_addr", "Proxied ingress listens on one private address, never 0.0.0.0.")
+        if not 1 <= a.listen_port <= 65535:
+            refuse("listen_port", f"The listen port must be between 1 and 65535, not {a.listen_port}.")
+        if a.tls_cert_source not in ("", *PROXIED_TLS_SOURCES):
+            refuse(
+                "tls_cert_source",
+                "Proxied ingress takes a self-signed certificate, files or none, never ACME.",
+            )
+    if a.ingress == "direct" and a.tls_cert_source == "self-signed":
+        refuse(
+            "tls_cert_source",
+            "A self-signed certificate is only for proxied ingress, behind a reverse proxy "
+            "that pins it; a public client cannot.",
+        )
+    if a.brain_kind not in _BRAIN_KINDS:
+        refuse("brain_kind", f"Unknown model backend {a.brain_kind!r}; use claude_code or native.")
+    if a.brain_kind == "native":
+        needs = (
+            "The native brain needs a model (--native-model) and an API key "
+            "(ISTOTA_BRAIN_NATIVE_API_KEY)."
+        )
+        if not a.native_model:
+            refuse("native_model", needs)
+        if not a.native_api_key:
+            refuse("native_api_key", needs)
+    # The terminal leaves [caldav] out rather than ask again; the web asks.
+    if a.caldav_url and not a.uses_nextcloud and not a.caldav_password:
+        refuse("caldav_password", "A calendar needs its password.")
+    unknown = [p for p in a.profiles if p not in CONTAINER_PROFILES]
+    if unknown:
+        refuse("profiles", f"Unknown profile(s) {unknown}; known: {list(CONTAINER_PROFILES)}")
+    if "signaling" in a.profiles and not (a.uses_nextcloud and a.talk_enabled):
+        refuse("profiles", "The signaling profile needs Nextcloud Talk.")
+    return errors
+
+
+def _refuse_on(a: ContainerAnswers, *fields: str) -> None:
+    """Raise the validator's first error on ``fields``, so the terminal refuses
+    at the question that caused it rather than after every other one."""
+    for error in validate_container_answers(a):
+        if not fields or error.field in fields:
+            raise SetupError(error.message)
+
+
+#: Storage choices on the web setup, as `host.env`'s STORAGE names them.
+STORAGE_CHOICES = ("local", "nextcloud")
+#: The compose profiles the web setup offers; the rest are operator features.
+WEB_SETUP_PROFILES = ("browser",)
+
+#: Every key the web setup may send, with its JSON type: the questions it asks,
+#: plus the storage choice, which no single answers field holds. Everything
+#: else takes the value a `--yes` run gives it.
+WEB_SETUP_FIELDS: dict[str, type] = {
+    "bot_name": str,
+    "user_id": str,
+    "display_name": str,
+    "timezone": str,
+    "user_email": str,
+    "hostname": str,
+    "ingress": str,
+    "upstream_proxy": str,
+    "listen_addr": str,
+    "listen_port": int,
+    "tls_cert_source": str,
+    "storage": str,
+    "nextcloud_url": str,
+    "nextcloud_public_url": str,
+    "nextcloud_username": str,
+    "nextcloud_app_password": str,
+    "talk_enabled": bool,
+    "brain_kind": str,
+    "native_base_url": str,
+    "native_model": str,
+    "native_api_key": str,
+    "claude_code_oauth_token": str,
+    "email_enabled": bool,
+    "imap_host": str,
+    "imap_user": str,
+    "imap_password": str,
+    "smtp_host": str,
+    "bot_email": str,
+    "caldav_url": str,
+    "caldav_username": str,
+    "caldav_password": str,
+    **{field_name: bool for field_name, _module, _question in _OPT_OUT_MODULES},
+    "profiles": list,
+}
+
+
+def _payload_type_ok(value, expected: type) -> bool:
+    if expected is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected is list:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    return isinstance(value, expected)
+
+
+def answers_from_payload(payload: dict) -> ContainerAnswers:
+    """The web setup's answers as ``ContainerAnswers``.
+
+    Only ``WEB_SETUP_FIELDS`` are accepted, and an unknown key or a value of
+    the wrong type raises ``PayloadError`` rather than being dropped. A key
+    left out, or sent as ``null``, is an unasked question and takes what a
+    ``--yes`` run of ``collect_container_answers`` gives it, so the two front
+    ends agree on what unasked means. Validation is
+    ``validate_container_answers``'s, not this function's.
+    """
+    if not isinstance(payload, dict):
+        raise PayloadError([FieldError("", "The setup answers must be a JSON object.")])
+    errors: list[FieldError] = []
+    values = {}
+    for key, value in payload.items():
+        expected = WEB_SETUP_FIELDS.get(key)
+        if expected is None:
+            errors.append(FieldError("", f"Unknown setup field {key!r}."))
+        elif value is None:
+            continue
+        elif not _payload_type_ok(value, expected):
+            errors.append(FieldError(key, f"{key} must be a {expected.__name__}."))
+        else:
+            values[key] = value
+
+    def text(key: str) -> str:
+        return str(values.get(key, "")).strip()
+
+    a = ContainerAnswers()
+    a.bot_name = text("bot_name") or "Istota"
+    a.user_id = text("user_id")
+    a.display_name = text("display_name") or a.user_id
+    a.timezone = text("timezone") or "UTC"
+    a.user_email = text("user_email")
+
+    a.hostname = text("hostname") or "localhost"
+    default_ingress = "local" if a.hostname.split(":")[0] in ("localhost", "127.0.0.1") else "direct"
+    a.ingress = text("ingress") or default_ingress
+    if a.ingress == "proxied":
+        a.upstream_proxy = text("upstream_proxy")
+        a.listen_addr = text("listen_addr")
+        a.listen_port = values.get("listen_port") or 8080
+        source = text("tls_cert_source")
+        a.tls_cert_source = "" if source == "none" else source
+    elif a.ingress == "direct":
+        a.tls_cert_source = text("tls_cert_source") or "acme"
+
+    storage = text("storage") or "local"
+    if storage not in STORAGE_CHOICES:
+        errors.append(FieldError("storage", f"Unknown storage {storage!r}; use local or nextcloud."))
+    elif storage == "nextcloud":
+        a.nextcloud_url = text("nextcloud_url").rstrip("/")
+        if not a.nextcloud_url:
+            errors.append(FieldError("nextcloud_url", "Enter your Nextcloud's address."))
+        a.nextcloud_public_url = (text("nextcloud_public_url") or a.nextcloud_url).rstrip("/")
+        a.nextcloud_username = text("nextcloud_username") or "istota"
+        a.nextcloud_app_password = text("nextcloud_app_password")
+        a.talk_enabled = values.get("talk_enabled", True)
+
+    a.brain_kind = text("brain_kind") or "claude_code"
+    if a.brain_kind == "native":
+        a.native_base_url = text("native_base_url") or DEFAULT_ANTHROPIC_BASE_URL
+        a.native_model = text("native_model")
+        a.native_api_key = text("native_api_key")
+    else:
+        a.claude_code_oauth_token = text("claude_code_oauth_token")
+
+    a.email_enabled = values.get("email_enabled", False)
+    if a.email_enabled:
+        a.imap_host = text("imap_host")
+        a.imap_user = text("imap_user")
+        a.smtp_host = text("smtp_host") or a.imap_host
+        a.bot_email = text("bot_email") or a.imap_user
+        a.imap_password = text("imap_password")
+
+    if not a.uses_nextcloud:
+        a.caldav_url = text("caldav_url")
+        if a.caldav_url:
+            a.caldav_username = text("caldav_username")
+            a.caldav_password = text("caldav_password")
+
+    from .modules import module_available  # noqa: PLC0415 - keep the import graph lean
+
+    # A module whose extra is missing is neither offered nor recorded: the
+    # terminal wizard's rule in `_collect_modules`.
+    for field_name, module, _question in _OPT_OUT_MODULES:
+        if field_name in values and module_available(module):
+            setattr(a, field_name, values[field_name])
+
+    profiles = list(values.get("profiles", []))
+    offered = [p for p in profiles if p not in WEB_SETUP_PROFILES]
+    if offered:
+        errors.append(FieldError("profiles", f"The web setup does not offer {offered}."))
+    a.profiles = tuple(profiles)
+
+    if errors:
+        raise PayloadError(errors, a)
+    return a
+
+
 def collect_container_answers(
     args, *, input_fn, out, getpass_fn, current_storage: str = "",
 ) -> ContainerAnswers:
@@ -1791,7 +2067,8 @@ def collect_container_answers(
 
     Non-interactively, credentials come from the environment under the names
     the daemon reads them by (``ISTOTA_NEXTCLOUD_APP_PASSWORD``,
-    ``ANTHROPIC_API_KEY``, ...), never from argv.
+    ``ANTHROPIC_API_KEY``, ...), never from argv. Every refusal is
+    ``validate_container_answers``'s, raised at the question it is about.
 
     ``current_storage`` is host.env's STORAGE before this run. A host folder
     is kept when ``--storage`` is not given, so a re-run does not move the
@@ -1820,8 +2097,7 @@ def collect_container_answers(
     a.bot_name = text("bot_name", "Bot name", "Istota") or "Istota"
 
     a.user_id = text("user", "First admin's user id (their login name)", "")
-    if not a.user_id:
-        raise SetupError("A user id is required for the first admin (--user).")
+    _refuse_on(a, "user_id")
     a.display_name = text("display_name", "Display name", a.user_id) or a.user_id
     tz = text("timezone", "Timezone (IANA, e.g. Europe/Berlin)", "UTC")
     if not _is_valid_timezone(tz):
@@ -1839,24 +2115,18 @@ def collect_container_answers(
         out("  reverse proxy on a private network), local (loopback, a laptop VM).")
         ingress = _ask_choice(input_fn, "Ingress", tuple(INGRESS_HOPS), default_ingress, out=out)
     a.ingress = ingress or default_ingress
-    if a.ingress not in INGRESS_HOPS:
-        raise SetupError(f"Unknown ingress {a.ingress!r}; use direct, proxied or local.")
+    _refuse_on(a, "ingress")
     if a.ingress == "proxied":
         a.upstream_proxy = text(
             "upstream_proxy", "Upstream proxy address(es) or CIDR(s), comma-separated", "",
         )
-        if not a.upstream_proxy:
-            raise SetupError(
-                "Proxied ingress needs the upstream proxy's address (--upstream-proxy): "
-                "the listener must refuse every other source, or a client can forge "
-                "X-Forwarded-For past the login throttle."
-            )
+        _refuse_on(a, "upstream_proxy")
         a.listen_addr = text("listen_addr", "Address to listen on (the VM's private interface)", "")
-        if not a.listen_addr or a.listen_addr in ("0.0.0.0", "::"):
-            raise SetupError("Proxied ingress listens on one private address, never 0.0.0.0.")
+        _refuse_on(a, "listen_addr")
         a.listen_port = int(flag("listen_port") or (
             _ask_port(input_fn, "Port to listen on", 8080, out=out) if interactive else 8080
         ))
+        _refuse_on(a, "listen_port")
         if interactive:
             out("  The hop from the proxy to this VM: self-signed encrypts it with a")
             out("  certificate made here, which you pin in the proxy (provision.sh prints")
@@ -1871,18 +2141,13 @@ def collect_container_answers(
             )
         if source == "none":
             source = ""
-        if source not in (None, "", *PROXIED_TLS_SOURCES):
-            raise SetupError("Proxied ingress takes a self-signed certificate, files or none, never ACME.")
         a.tls_cert_source = source or ""
+        _refuse_on(a, "tls_cert_source")
     if a.ingress == "direct":
-        if flag("tls_cert_source") == "self-signed":
-            raise SetupError(
-                "A self-signed certificate is only for proxied ingress, behind a reverse proxy "
-                "that pins it; a public client cannot."
-            )
         a.tls_cert_source = _ask_choice(
             input_fn, "Certificates from", ("acme", "files"), "acme", out=out,
         ) if flag("tls_cert_source") is None and interactive else (flag("tls_cert_source") or "acme")
+        _refuse_on(a, "tls_cert_source")
 
     # Where the workspace is: a folder the host shares in, a Nextcloud, or the
     # state volume.
@@ -1947,13 +2212,9 @@ def collect_container_answers(
     a.brain_kind = kind or "claude_code"
     if a.brain_kind == "native":
         a.native_base_url = text("native_base_url", "API base URL", DEFAULT_ANTHROPIC_BASE_URL)
-        a.native_model = text("native_model", "Model id", "claude-sonnet-4-6" if interactive else "")
+        a.native_model = text("native_model", "Model id", DEFAULT_ANTHROPIC_MODEL if interactive else "")
         a.native_api_key = secret("istota_brain_native_api_key", "API key")
-        if not a.native_model or not a.native_api_key:
-            raise SetupError(
-                "The native brain needs a model (--native-model) and an API key "
-                "(ISTOTA_BRAIN_NATIVE_API_KEY)."
-            )
+        _refuse_on(a, "brain_kind", "native_model", "native_api_key")
     else:
         a.claude_code_oauth_token = secret("claude_code_oauth_token", "Claude Code OAuth token")
         if not a.claude_code_oauth_token:
@@ -2005,7 +2266,7 @@ def collect_container_answers(
     # Compose profiles.
     profiles = list(flag("profile", []) or [])
     if not profiles and interactive:
-        if _ask_yes_no(input_fn, "Run the browser container?", False, out=out):
+        if _ask_yes_no(input_fn, "Run the browser container?", True, out=out):
             profiles.append("browser")
         if a.uses_nextcloud and a.talk_enabled and _ask_yes_no(
             input_fn, "Run the Talk signaling server?", False, out=out,
@@ -2013,12 +2274,8 @@ def collect_container_answers(
             profiles.append("signaling")
         if _ask_yes_no(input_fn, "Run the WhatsApp (Baileys) sidecar?", False, out=out):
             profiles.append("whatsapp-baileys")
-    unknown = [p for p in profiles if p not in CONTAINER_PROFILES]
-    if unknown:
-        raise SetupError(f"Unknown profile(s) {unknown}; known: {list(CONTAINER_PROFILES)}")
-    if "signaling" in profiles and not (a.uses_nextcloud and a.talk_enabled):
-        raise SetupError("The signaling profile needs Nextcloud Talk.")
     a.profiles = tuple(profiles)
+    _refuse_on(a)
     return a
 
 
@@ -2098,12 +2355,47 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
             out("Setup aborted; the existing config is untouched.")
             return 1
 
-    current_storage = ""
-    if vm_dir is not None and (vm_dir / "host.env").is_file():
-        current_storage = _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "STORAGE")
     a = collect_container_answers(
-        args, input_fn=input_fn, out=out, getpass_fn=getpass_fn, current_storage=current_storage,
+        args, input_fn=input_fn, out=out, getpass_fn=getpass_fn,
+        current_storage=current_storage(vm_dir),
     )
+    write_container_setup(a, data_dir=data_dir, vm_dir=vm_dir, out=out)
+
+    out("")
+    out("Setup complete.")
+    out(f"  Config:  {config_path} (yours to edit; nothing regenerates it)")
+    out(f"  Admins:  {config_path.parent / 'admins'}")
+    if vm_dir is not None:
+        out(f"  Stack:   {vm_dir / '.env'}, {vm_dir / 'host.env'}, {secrets_dir}/")
+    out(f"  First admin: {a.user_id}")
+    return 0
+
+
+def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out) -> None:
+    """``rclone.conf`` for the VM's Nextcloud mount, staged for ``istota-stack``
+    to install. The password is this run's answer, else the one a previous run
+    left in the secrets file, which the loop above kept."""
+    password = a.nextcloud_app_password or _read_secret_file(secrets_dir / "istota_nextcloud_app_password")
+    if not password:
+        out("  No Nextcloud app password, so no rclone.conf was written; the mount needs one.")
+        return
+    try:
+        text = render_webdav_remote(RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, rclone_obscure(password))
+    except ValueError as exc:
+        raise SetupError(f"The Nextcloud answers cannot go into rclone.conf: {exc}.") from None
+    _write_private(vm_dir / "rclone.conf", text)
+
+
+def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out) -> None:
+    """Write everything a set of answers decides, for either front end.
+
+    ``config.toml``, ``admins`` and the master key under ``data_dir``; with a
+    ``vm_dir``, the credential files and the staged ``.env`` and ``host.env``,
+    plus ``rclone.conf`` when the answers use Nextcloud.
+    Validation is the caller's: this writes what it is given.
+    """
+    config_path = data_dir / "config" / "config.toml"
+    secrets_dir = vm_dir / "secrets" if vm_dir is not None else None
     _carry_forward_session_secret(a, config_path, secrets_dir)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2127,17 +2419,10 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
             path = vm_dir / name
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
             path.write_text(render(a, existing), encoding="utf-8")
+        if a.uses_nextcloud:
+            _stage_rclone_conf(a, vm_dir, secrets_dir, out)
     elif a.brain_kind != "native" and (a.claude_code_oauth_token or a.anthropic_api_key):
         out(
             "  The Claude credential has no config key; without --vm-dir it was not "
             "written. Put it in the stack's secrets/ directory."
         )
-
-    out("")
-    out("Setup complete.")
-    out(f"  Config:  {config_path} (yours to edit; nothing regenerates it)")
-    out(f"  Admins:  {config_path.parent / 'admins'}")
-    if vm_dir is not None:
-        out(f"  Stack:   {vm_dir / '.env'}, {vm_dir / 'host.env'}, {secrets_dir}/")
-    out(f"  First admin: {a.user_id}")
-    return 0

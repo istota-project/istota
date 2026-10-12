@@ -11,6 +11,7 @@
   let rendering = $state(false);
   let surface = $state<HTMLDivElement>();
   let width = $state(0);
+  let controlsHeight = $state(0);
 
   $effect(() => {
     const requested = url;
@@ -123,33 +124,64 @@
   });
 </script>
 
-{#if error}
-  <p role="alert">{error}</p>
-{:else}
-  {#if document}
-    <div class="pdf-controls">
-      <Button ariaLabel="Previous page" disabled={pageNumber === 1} onclick={() => pageNumber--}
-        >Previous</Button
-      >
-      <span>Page {pageNumber} of {document.numPages}</span>
-      <Button
-        ariaLabel="Next page"
-        disabled={pageNumber === document.numPages}
-        onclick={() => pageNumber++}>Next</Button
-      >
+<div class="pdf-preview" style:--pdf-controls-height={`${controlsHeight}px`}>
+  {#if error}
+    <p role="alert">{error}</p>
+  {:else}
+    <div class="pdf-scroll">
+      {#if !document || rendering}<p class="muted" role="status">Loading PDF…</p>{/if}
+      <div class="pdf-page" bind:this={surface} bind:clientWidth={width}></div>
     </div>
+    {#if document}
+      <nav class="pdf-controls" aria-label="PDF pages" bind:clientHeight={controlsHeight}>
+        <Button
+          variant="ghost"
+          ariaLabel="Previous page"
+          disabled={pageNumber === 1}
+          onclick={() => pageNumber--}>Previous</Button
+        >
+        <span aria-live="polite">Page {pageNumber} of {document.numPages}</span>
+        <Button
+          variant="ghost"
+          ariaLabel="Next page"
+          disabled={pageNumber === document.numPages}
+          onclick={() => pageNumber++}>Next</Button
+        >
+      </nav>
+    {/if}
   {/if}
-  {#if !document || rendering}<p class="muted" role="status">Loading PDF…</p>{/if}
-  <div class="pdf-page" bind:this={surface} bind:clientWidth={width}></div>
-{/if}
+</div>
 
 <style>
+  .pdf-preview {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+  .pdf-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-bottom: calc(var(--pdf-controls-height) + var(--space-4));
+  }
   .pdf-controls {
+    position: absolute;
+    bottom: var(--space-2);
+    left: 50%;
+    transform: translateX(-50%);
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
     gap: var(--space-2);
-    margin-bottom: var(--space-3);
+    max-width: calc(100% - var(--space-4));
+    padding: var(--space-1);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-card);
+    background: var(--surface-card);
+    box-shadow: var(--shadow-md);
+    white-space: nowrap;
+    font-size: var(--text-sm);
   }
   .pdf-page {
     width: 100%;

@@ -3,6 +3,7 @@
 import base64
 import json
 from collections import OrderedDict
+from html import escape
 import re
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock
@@ -115,6 +116,52 @@ async def test_email_login_groups_password_and_code_as_alternatives(client):
     assert code and 'action="/istota/auth/sign-in-code/request"' in code[1]
     assert 'href="/istota/auth/reset"' in password[1]
     assert csrf(page) != csrf(page, "/istota/auth/sign-in-code/request")
+
+
+def email_values(page) -> list[str]:
+    """The `value` of both email inputs, the password form's and the code form's."""
+    return re.findall(r'<input id="(?:login|code)-email" type="email" name="email" value="([^"]*)"', page.text)
+
+
+async def test_login_page_fills_in_the_email_first_run_setup_hands_it(client):
+    # The first-run setup's last screen sends the browser here with the email.
+    page = await client.get("/istota/login", params={"email": "ada@example.com"})
+    assert page.status_code == 200
+    assert email_values(page) == ["ada@example.com", "ada@example.com"]
+
+
+async def test_login_page_without_an_email_leaves_the_fields_empty(client):
+    assert email_values(await client.get("/istota/login")) == ["", ""]
+
+
+async def test_login_page_escapes_the_email_it_is_handed(client):
+    hostile = 'ada@example.com"><script>alert(1)</script>'
+    page = await client.get("/istota/login", params={"email": hostile})
+    assert "<script>alert(1)</script>" not in page.text
+    assert email_values(page) == [escape(hostile, quote=True)] * 2
+
+
+async def test_login_page_ignores_an_email_no_address_could_be(client):
+    page = await client.get("/istota/login", params={"email": "a" * 321})
+    assert email_values(page) == ["", ""]
+
+
+async def test_setup_state_says_configured_without_a_session(client):
+    # The setup page is in the same bundle; served by the normal app, it asks
+    # here and shows "already set up" with a Sign in button.
+    response = await client.get("/istota/api/setup/state")
+    assert response.status_code == 200
+    assert response.json() == {"phase": "configured"}
+
+
+@pytest.mark.parametrize(("method", "path"), [
+    ("post", "/istota/api/setup/unlock"),
+    ("get", "/istota/api/setup/draft"),
+    ("post", "/istota/api/setup/finish"),
+])
+async def test_no_other_setup_route_is_served(client, method, path):
+    response = await getattr(client, method)(path)
+    assert response.status_code in (404, 405)
 
 
 async def test_email_login_uses_live_profile_and_rotates_session(client, configured):

@@ -143,3 +143,16 @@ def safe_filename(
     if not dot or not fb_stem:
         fb_stem, fb_ext = fallback, ""
     return fb_stem + (suffix or (f".{fb_ext}" if fb_ext else ""))
+
+
+def numbered_name(stem: str, ext: str, n: int) -> str:
+    """Keep the collision marker intact within the email filename budget."""
+    if n == 1:
+        return stem + ext
+    marker = f" ({n}){ext}"
+    base = stem
+    while len(base + marker) > DEFAULT_MAX_STEM or len(
+        (base + marker).encode("utf-8")
+    ) > MAX_NAME_BYTES - 16:
+        base = base[:-1]
+    return f"{base.rstrip(' .')}{marker}"
