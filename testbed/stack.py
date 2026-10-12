@@ -670,7 +670,6 @@ LEAN_BASE_CONFIG: dict = {
     "workspace_path": "/data/workspace",
     "temp_dir": "/data/tmp",
     "security": {"sandbox_enabled": True, "skill_proxy_enabled": True},
-    "logging": {"output": "both", "file": "/data/logs/istota.log"},
     "brain": {"kind": "claude_code"},
     "talk": {"enabled": False},
     "email": {"enabled": False},
