@@ -384,6 +384,8 @@ class TestGroupBTheRuntime:
             "gws --version",
             "git --version",
             "tesseract --version",
+            "pdftotext -v",
+            "pdftoppm -v",
         ],
     )
     def test_the_tool_is_present_and_runs(self, istota_image, command):

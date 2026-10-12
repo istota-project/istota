@@ -581,6 +581,33 @@ class TestBwrap:
         assert r.status == status
 
 
+class TestPdfTools:
+    """#696: the image shipped without poppler-utils and health PDF uploads
+    fell back to vision mode with nothing saying why."""
+
+    def test_missing_poppler_warns(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        r = run_checks(make_config(), only=("runtime.pdf_tools",))[0]
+        assert r.status == WARN
+        assert "pdftotext" in r.detail and "pdftoppm" in r.detail
+        assert r.remedy == "Install poppler-utils."
+        assert r.scope == IMAGE
+
+    def test_names_only_what_is_missing(self, make_config, monkeypatch):
+        monkeypatch.setattr(
+            doctor.shutil, "which", lambda name: "/usr/bin/pdftotext" if name == "pdftotext" else None
+        )
+        r = run_checks(make_config(), only=("runtime.pdf_tools",))[0]
+        assert r.status == WARN
+        assert "pdftoppm" in r.detail
+        assert "pdftotext," not in r.detail
+
+    def test_both_present_is_ok(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: f"/usr/bin/{name}")
+        r = run_checks(make_config(), only=("runtime.pdf_tools",))[0]
+        assert r.status == OK
+
+
 class TestModelCli:
     def test_skips_under_the_native_brain(self, make_config):
         from istota.config import BrainConfig

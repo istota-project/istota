@@ -3,7 +3,7 @@
 Same overall shape as :mod:`istota.health.ocr` but tailored to vaccine
 lists rather than lab panels:
 
-* PDF — try ``pdftotext`` / ``pypdf`` first (most MyChart-style exports
+* PDF — try ``pdftotext`` first (most MyChart-style exports
   are text-native); fall through to a vision-mode brain call when the
   text path produces nothing usable.
 * Image — vision-mode brain call (Tesseract is too unreliable on the
@@ -37,6 +37,12 @@ _TEXT_NATIVE_MIN_CHARS = 60
 
 def _pdftotext(path: Path) -> str | None:
     if not shutil.which("pdftotext"):
+        # Not silent: without poppler every PDF drops to the slower vision
+        # path, and nothing else on this route would say why.
+        logger.warning(
+            "health_pdftotext_missing path=%s: install poppler-utils; "
+            "falling back to vision-mode extraction", path,
+        )
         return None
     try:
         out = subprocess.run(
@@ -46,24 +52,6 @@ def _pdftotext(path: Path) -> str | None:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     return out.stdout or None
-
-
-def _pypdf_extract(path: Path) -> str | None:
-    try:
-        from pypdf import PdfReader  # noqa: PLC0415
-    except ImportError:
-        return None
-    try:
-        reader = PdfReader(str(path))
-        chunks = []
-        for page in reader.pages:
-            try:
-                chunks.append(page.extract_text() or "")
-            except Exception:  # noqa: BLE001
-                continue
-        return "\n".join(chunks) or None
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _build_refs_block(refs: list[ImmunizationRef]) -> str:
@@ -231,7 +219,7 @@ def extract_from_file(
     mode = "vision"
     mime_low = (mime or "").lower()
     if mime_low == "application/pdf" or source_path.suffix.lower() == ".pdf":
-        text = _pdftotext(source_path) or _pypdf_extract(source_path) or ""
+        text = _pdftotext(source_path) or ""
         if len(text.strip()) >= _TEXT_NATIVE_MIN_CHARS:
             mode = "text"
 

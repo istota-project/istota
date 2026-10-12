@@ -180,6 +180,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A card refund could mark an invoice paid when their amounts matched. Invoice auto-matching now requires the credit to land in the invoice entity’s configured bank account, and reports when no synced credit reaches an invoicing bank account.
 
 - In web chat, a message's task number, model and duration no longer cover the first line of a follow-up message. They now appear at the right end of the action row under the message, and that row's star is the only one. A starred message is marked at rest by an amber bar along its left edge (#691).
+- Health PDF uploads on the containerized stack read the PDF's text again (#696). The image had no `pdftotext`, so every lab report, visit summary and vaccine record PDF went to the slower path where the model reads the file itself. The image now includes it, `istota doctor` warns when it is missing, and the log says so when a PDF falls back for that reason.
 
 - Search now lists its sources and enabled modules before you type a query. The source dropdown fits its selected label instead of reserving extra width.
 
