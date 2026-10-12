@@ -657,6 +657,27 @@ class TestAnUpdateOnItsOwn:
                                                        istota_update_mode=task["name"] == "Follow main" and "latest" or "release",
                                                        istota_release="v1"))
 
+    OLD_USAGE = "istota-stack: the VM's command ...\n  istota-stack update --unsigned latest\n"
+
+    def test_an_istota_stack_without_latest_tag_does_not_fail_the_play(self):
+        """A VM provisioned before `latest-tag` existed answers it with usage
+        and 64; the update that follows installs the istota-stack that has it."""
+        task = _tasks()[_index("What main's tip would install")]
+        env = jinja2.Environment(undefined=jinja2.ChainableUndefined)
+        failed = env.compile_expression(str(task["failed_when"]))
+        assert not failed(_istota_latest={"rc": 64, "stdout": "", "stderr": self.OLD_USAGE})
+        assert failed(_istota_latest={"rc": 64, "stdout": "", "stderr": "usage ... latest-tag ..."})
+        assert failed(_istota_latest={"rc": 1, "stdout": "", "stderr": "could not read main"})
+        assert not failed(_istota_latest={"rc": 0, "stdout": "main-0123456789ab", "stderr": ""})
+
+    def test_an_unknown_tip_follows_main(self):
+        follow = _tasks()[_index("Follow main")]
+        old = {"rc": 64, "stdout": "", "stderr": self.OLD_USAGE}
+        assert _when_holds(follow, self._context(_istota_latest=old))
+        report = _tasks()[_index("Report the update --check would make")]
+        assert _when_holds(report, self._context(ansible_check_mode=True, _istota_latest=old,
+                                                 _istota_target=""))
+
     def test_check_mode_reports_a_forced_update(self):
         report = _tasks()[_index("Report the update --check would make")]
         assert "istota_update_force" in _when(report)

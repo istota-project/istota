@@ -203,12 +203,15 @@
 # latest mode: an update rebuilds even when main has not moved, so the name
 # main's tip would install is compared with the deployed one first. Under
 # --check on a VM provision.sh has not reached yet, there is no istota-stack.
+# An istota-stack from before latest-tag answers it with usage and 64: the tip
+# is then unknown and main is followed, and that update installs one that has it.
 - name: What main's tip would install
   tags: [istota_update]
   ansible.builtin.command:
     argv: ["{{ istota_stack_command }}", latest-tag]
   register: _istota_latest
   changed_when: false
+  failed_when: _istota_latest.rc != 0 and not ((_istota_latest.rc | default(0)) == 64 and 'latest-tag' not in (_istota_latest.stderr | default('')))
   check_mode: false
   when:
     - istota_update_mode == 'latest'
@@ -217,14 +220,16 @@
 - name: Report the update --check would make
   tags: [istota_update]
   ansible.builtin.debug:
-    msg: "would run istota-stack update {{ _istota_target }} (deployed: {{ _istota_current_tag.stdout | default('none', true) }})"
+    msg: "would run istota-stack update {{ _istota_target | default('--unsigned latest', true) }} (deployed: {{ _istota_current_tag.stdout | default('none', true) }})"
   changed_when: true
   vars: &istota_target_vars
     _istota_target: "{{ (_istota_latest.stdout | default('')) if istota_update_mode == 'latest' else istota_release }}"
   when:
     - ansible_check_mode
-    - _istota_target | length > 0
-    - _istota_target != _istota_current_tag.stdout or istota_update_force | bool
+    - >-
+      ((_istota_latest.rc | default(0)) == 64 and 'latest-tag' not in (_istota_latest.stderr | default('')))
+      or (_istota_target | length > 0
+          and (_istota_target != _istota_current_tag.stdout or istota_update_force | bool))
 
 - name: Update to the release
   tags: [istota_update]
@@ -245,8 +250,10 @@
   when:
     - not ansible_check_mode
     - istota_update_mode == 'latest'
-    - _istota_latest.stdout | default('') | length > 0
-    - _istota_latest.stdout | default('') != _istota_current_tag.stdout or istota_update_force | bool
+    - >-
+      ((_istota_latest.rc | default(0)) == 64 and 'latest-tag' not in (_istota_latest.stderr | default('')))
+      or (_istota_latest.stdout | default('') | length > 0
+          and (_istota_latest.stdout != _istota_current_tag.stdout or istota_update_force | bool))
 
 # The release's own host/ files (istota-stack, the units, the AppArmor profile).
 - name: Provision from the new release
