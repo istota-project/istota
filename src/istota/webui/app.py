@@ -5016,9 +5016,9 @@ async def admin_log_stream(
 
 @api_router.get("/admin/browsers")
 async def admin_browser_instances(_: dict = Depends(_require_admin)):
-    from .admin_browsers import snapshot
+    from .admin_browsers import current
 
-    return JSONResponse(await snapshot(_config.browser), headers={"Cache-Control": "no-store"})
+    return JSONResponse(await current(_config), headers={"Cache-Control": "no-store"})
 
 
 @api_router.get("/admin/config")

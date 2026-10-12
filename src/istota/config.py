@@ -4554,6 +4554,8 @@ def load_config(config_path: Path | None = None) -> Config:
     if _native_key:
         config.brain.native.api_key = _native_key
 
+    _apply_default_log_file(config, data)
+
     # Phase 6: overlay profile fields from the user_profiles table.
     # DB rows replace the matching scalar fields on TOML-loaded UserConfig
     # entries; briefings stay TOML-owned. Users that exist only
@@ -5689,6 +5691,22 @@ def _validate_claude_code_brain(config: "Config") -> None:
             _defaults.subscription_usage_timeout_seconds,
         )
         cc.subscription_usage_timeout_seconds = _defaults.subscription_usage_timeout_seconds
+
+
+def _apply_default_log_file(config: "Config", data: dict) -> None:
+    """The image's default app log, where the config names no `[logging] file`.
+
+    A default rather than an override: the image sets `ISTOTA_DEFAULT_LOG_FILE`,
+    and a config that writes `file` at all, `file = ""` included, keeps its own
+    choice. `console` becomes `both` so `docker logs` still carries everything.
+    """
+    default = os.environ.get("ISTOTA_DEFAULT_LOG_FILE", "").strip()
+    section = data.get("logging")
+    if not default or (isinstance(section, dict) and "file" in section):
+        return
+    config.logging.file = default
+    if config.logging.output == "console":
+        config.logging.output = "both"
 
 
 def _apply_user_profiles(config: "Config") -> None:

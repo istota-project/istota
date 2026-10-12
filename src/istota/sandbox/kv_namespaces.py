@@ -11,7 +11,8 @@ invite never landed (ISSUE-408) — and
 `_avatar_import`, what the scheduler's Nextcloud profile-picture import tick
 wrote down for `doctor`'s socket-free `web.avatar_import` check to read, and
 `_doctor`, the daemon's recorded doctor runs and the Health pane's pending run
-request, and
+request, and `_browser`, the daemon's snapshot of the browser pool for the
+admin Browsers page, and
 `_session_log_sweep`, the same shape for the native-brain transcript sweep —
 what the scheduler's cleanup tick reclaimed, so `runtime.session_log_dir` can
 say whether the size ceiling rather than `retention_days` is the retention in

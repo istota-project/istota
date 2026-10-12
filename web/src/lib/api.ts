@@ -840,6 +840,8 @@ export interface AdminBrowsers {
   status: 'ok' | 'disabled' | 'unavailable';
   console_configured: boolean;
   instances: { user: string; slot: number; idle_seconds: number; url: string }[];
+  /** When the scheduler read the pool; absent when the web process asked it directly. */
+  as_of?: string;
 }
 
 export async function getAdminBrowsers(): Promise<AdminBrowsers> {

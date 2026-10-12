@@ -179,6 +179,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The admin Browsers page lists the live browsers on the Docker stack instead of saying the browser service is unavailable. Only the daemon can reach the browser there, so it reads the browser pool every 15 seconds and the page shows that list with the time it was read.
+
+- The admin Logs pane shows the application log on the Docker stack. The image now writes it to `/data/logs/istota.log`, on the volume the daemon and web containers share, whenever `config.toml` names no `[logging] file`, and keeps writing to `docker logs` as well. Existing stacks pick this up on update with no config change; set `file = ""` under `[logging]` to keep console-only logging.
+
 - The admin Health pane shows the daemon's own checks. On the Docker stack it ran them in the web container, which has none of the daemon's sandbox settings, so it reported the sandbox, credential isolation and devbox checks failing on a stack whose tasks were sandboxed. Re-run and deep checks now ask the daemon, which answers on its next tick, and the page says when each result was taken.
 
 - On the containerized stack, Google Workspace commands run again and developer tasks can commit again (#695). The image shipped without the `gws` and `gitleaks` binaries, so every Google Workspace call failed with a traceback and the pre-commit secret scan refused every unattended commit. Both are now in the image at pinned, checksum-verified versions, `istota doctor` reports either one missing where it is needed, and a missing `gws` gives a clear error instead of a crash.

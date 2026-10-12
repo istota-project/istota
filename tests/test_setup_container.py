@@ -8,6 +8,7 @@ rather than the text, because the loader is the reader that matters.
 
 from __future__ import annotations
 
+import re
 import stat
 import tomllib
 from pathlib import Path
@@ -431,6 +432,44 @@ class TestTheLocalWorkspace:
         assert config.storage_backend == "local"
         assert str(config.workspace_path) == "/data/workspace"
         assert config.nextcloud_mount_path is None
+
+
+def _image_default_log_file() -> str:
+    dockerfile = (REPO / "docker" / "istota" / "Dockerfile").read_text()
+    match = re.search(r"^ENV ISTOTA_DEFAULT_LOG_FILE=(\S+)$", dockerfile, re.M)
+    assert match, "the image declares no ISTOTA_DEFAULT_LOG_FILE"
+    return match.group(1)
+
+
+class TestTheAppLog:
+    """ISSUE-703: the image's default app log is where the web container reads it."""
+
+    def test_a_setup_config_loads_with_the_image_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_DEFAULT_LOG_FILE", _image_default_log_file())
+        config = _load(tmp_path, render_container_config(_full_answers(), inline_credentials=True), monkeypatch)
+
+        assert config.logging.output == "both"
+        assert config.logging.file == _image_default_log_file()
+
+    def test_the_file_is_on_the_volume_daemon_and_web_both_mount(self):
+        log = Path(_image_default_log_file())
+        services = yaml.safe_load(COMPOSE.read_text())["services"]
+
+        for name in ("daemon", "web"):
+            mounts = [v for v in services[name]["volumes"] if isinstance(v, str)]
+            assert f"istota_data:{setup_wizard.CONTAINER_DATA_DIR}" in mounts, name
+        assert log.is_relative_to(setup_wizard.CONTAINER_DATA_DIR)
+
+    def test_the_file_is_outside_every_directory_a_task_or_a_sweep_reaches(self):
+        log = Path(_image_default_log_file())
+        for root in (
+            setup_wizard.CONTAINER_TEMP_DIR,
+            setup_wizard.CONTAINER_LOCAL_WORKSPACE,
+            setup_wizard.CONTAINER_REPOS_DIR,
+            # The session transcripts' root, which their sweep prunes.
+            str(Path(setup_wizard.CONTAINER_DB_PATH).parent),
+        ):
+            assert not log.is_relative_to(root), root
 
 
 def _env(text: str) -> dict[str, str]:

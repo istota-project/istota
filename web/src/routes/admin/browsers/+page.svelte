@@ -55,8 +55,9 @@
   {:else if report}
     <NoticeBanner title="Browsers start on demand" bind:collapsed={aboutCollapsed}>
       <p>
-        Browse with a retained session to make a browser available here. This page refreshes every
-        ten seconds without starting browsers or keeping idle browsers alive.
+        Browse with a retained session to make a browser available here. The scheduler reads the
+        browser pool every 15 seconds and this page refreshes every ten, without starting browsers
+        or keeping idle browsers alive.
       </p>
       <p>VNC opens in a new tab and uses the deployment’s VNC authentication and network access.</p>
     </NoticeBanner>
@@ -94,6 +95,9 @@
           </table>
         </div>
       </section>
+    {/if}
+    {#if report.as_of}
+      <p class="caption">As of {new Date(report.as_of).toLocaleTimeString()}</p>
     {/if}
   {/if}
 </div>
