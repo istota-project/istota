@@ -14,6 +14,7 @@ afterEach(() => {
 it('keeps a bad code open and starts again when the request is dead', async () => {
   vi.mocked(startStepUp).mockResolvedValue({
     request_id: 'request-1',
+    method: 'email' as const,
     email_hint: 'a•••@example.com',
     expires_at: 'later',
   });
@@ -45,4 +46,57 @@ it('keeps a bad code open and starts again when the request is dead', async () =
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
   await waitFor(() => expect(done).toHaveBeenCalled());
   expect(submit).toHaveBeenLastCalledWith({ request_id: 'request-1', code: '654321' });
+});
+
+it('asks for the password, says why, and claims no code was sent', async () => {
+  vi.mocked(startStepUp).mockResolvedValue({
+    method: 'password',
+    request_id: 'request-2',
+    expires_at: 'later',
+  });
+  const submit = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error('That password was not accepted. Try again.'), { reason: 'bad' }),
+    )
+    .mockResolvedValue(undefined);
+  const done = vi.fn();
+  render(StepUpDialog, {
+    action: 'admin_config_change',
+    onConfirm: submit,
+    onComplete: done,
+    onCancel: vi.fn(),
+  });
+  await screen.findByText(/Mail isn't set up on this install, so confirm with your password/);
+  expect(screen.queryByText(/code/i)).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Send new code' })).toBeNull();
+  const field = screen.getByLabelText('Account password') as HTMLInputElement;
+  expect(field.type).toBe('password');
+  expect(field.autocomplete).toBe('current-password');
+  await fireEvent.input(field, { target: { value: 'not it' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  await screen.findByText('That password was not accepted. Try again.');
+  expect(startStepUp).toHaveBeenCalledTimes(1);
+  expect(field.value).toBe('');
+  await fireEvent.input(field, { target: { value: 'the passphrase' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  await waitFor(() => expect(done).toHaveBeenCalled());
+  expect(submit).toHaveBeenLastCalledWith({ request_id: 'request-2', password: 'the passphrase' });
+});
+
+it('offers a retry when starting the confirmation fails', async () => {
+  vi.mocked(startStepUp)
+    .mockRejectedValueOnce(new Error('Istota could not be reached.'))
+    .mockResolvedValue({ method: 'password', request_id: 'request-3', expires_at: 'later' });
+  render(StepUpDialog, {
+    action: 'export',
+    onConfirm: vi.fn(),
+    onCancel: vi.fn(),
+  });
+  await screen.findByText('Istota could not be reached.');
+  await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  expect(await screen.findByLabelText('Account password')).toBeInTheDocument();
+  expect(startStepUp).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  expect(screen.queryByText('Istota could not be reached.')).toBeNull();
 });

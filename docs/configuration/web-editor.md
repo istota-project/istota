@@ -17,7 +17,7 @@ The applier exists only on the dedicated VM, set up by `host/provision.sh`. Anyw
 
 ## What it guards
 
-- Every submit needs a confirmation code sent to the admin's sign-in email address. An admin with no live email identity cannot submit or preview.
+- Every submit needs a confirmation: a code sent to the admin's sign-in email address, or, on an install with no mail set up, the admin's account password. An admin with no live email identity cannot submit or preview, and one with no password on an install without mail needs a password link (`istota auth reset <user> --print-link`, which works only where `[web] auth` includes `email`) or mail set up.
 - Settings that can lock admins out or change the security posture (`web.auth`, the OAuth client, `security.sandbox_enabled`, `security.skill_proxy_enabled`, `brain.kind`, any change to the admin list, and a few more) need a typed confirmation.
 - `[web] auth` must keep `email`, and the admin list must not be empty, must keep the acting admin, and may name only users with a live sign-in identity. Give a user an identity on the Users page first.
 - A value the loader would discard blocks the change, including one already in the file. The page shows it against its key so it can be fixed in the same change.

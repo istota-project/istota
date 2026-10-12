@@ -45,6 +45,7 @@ NEWEST_COLUMNS = [
     ("messages", "reply_to_message_id"),
     ("rooms", "model_namespace"),
     ("web_chat_rooms", "listed"),
+    ("web_auth_step_ups", "method"),
 ]
 
 

@@ -444,19 +444,27 @@ def prune_attempts(db_path: Path, older_than_seconds: int) -> int:
         return conn.execute("DELETE FROM web_auth_attempts WHERE at <= ?", (_timestamp(-older_than_seconds),)).rowcount
 
 
+def _login_budget_spent(conn: sqlite3.Connection, policy: Policy, email: str, ip: str | None) -> bool:
+    if _attempts(conn, "email", email, policy.throttle_window_seconds) >= policy.throttle_max_email:
+        return True
+    return ip is not None and _attempts(conn, "ip", ip, policy.throttle_window_seconds) >= policy.throttle_max_ip
+
+
+def _record_login_attempt(conn: sqlite3.Connection, policy: Policy, email: str, ip: str | None) -> None:
+    conn.execute("DELETE FROM web_auth_attempts WHERE kind IN ('email', 'ip') AND at <= ?", (_timestamp(-policy.throttle_window_seconds),))
+    now = _timestamp()
+    conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('email', ?, ?)", (email, now))
+    if ip is not None:
+        conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('ip', ?, ?)", (ip, now))
+
+
 def check_and_record(db_path: Path, policy: Policy, *, email: str, ip: str | None) -> bool:
     email = normalize_email(email)
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        if _attempts(conn, "email", email, policy.throttle_window_seconds) >= policy.throttle_max_email:
+        if _login_budget_spent(conn, policy, email, ip):
             return False
-        if ip is not None and _attempts(conn, "ip", ip, policy.throttle_window_seconds) >= policy.throttle_max_ip:
-            return False
-        conn.execute("DELETE FROM web_auth_attempts WHERE kind IN ('email', 'ip') AND at <= ?", (_timestamp(-policy.throttle_window_seconds),))
-        now = _timestamp()
-        conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('email', ?, ?)", (email, now))
-        if ip is not None:
-            conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('ip', ?, ?)", (ip, now))
+        _record_login_attempt(conn, policy, email, ip)
         return True
 
 
@@ -668,12 +676,27 @@ STEP_UP_ACTIONS = (
 )
 
 
+def _open_step_up(conn: sqlite3.Connection, policy: Policy, identity: Identity, action: str, session_key: str,
+                  request_id: str, method: str, code_hash: str) -> None:
+    # One live request per user and action, whichever method issued it.
+    conn.execute("UPDATE web_auth_step_ups SET used_at=? WHERE user_id=? AND action=? AND used_at IS NULL",
+                 (_timestamp(), identity.user_id, action))
+    conn.execute("INSERT INTO web_auth_step_ups (request_id, user_id, action, session_hash, code_hash, method, "
+                 "credential_epoch, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 (request_id, identity.user_id, action, _digest(session_key), code_hash, method,
+                  identity.credential_epoch, _timestamp(policy.step_up_ttl_seconds)))
+
+
+def _check_step_up_request(policy: Policy, action: str, session_key: str) -> None:
+    if action not in STEP_UP_ACTIONS or not session_key or policy.step_up_ttl_seconds <= 0:
+        raise ValueError("invalid step-up request")
+
+
 def start_step_up(db_path, policy, user_id: str, action: str, session_key: str,
                   *, request_id: str | None = None) -> tuple[str, str] | None:
     # The HTTP caller reserves an id before replying; minting and mail budget
     # work happen in its BackgroundTask, identically on sent and refused mail.
-    if action not in STEP_UP_ACTIONS or not session_key or policy.step_up_ttl_seconds <= 0:
-        raise ValueError("invalid step-up request")
+    _check_step_up_request(policy, action, session_key)
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         identity = _get_identity(conn, user_id)
@@ -684,13 +707,77 @@ def start_step_up(db_path, policy, user_id: str, action: str, session_key: str,
             return None
         request_id = request_id or secrets.token_urlsafe(18)
         code = f"{secrets.randbelow(10**6):06d}"
-        conn.execute("UPDATE web_auth_step_ups SET used_at=? WHERE user_id=? AND action=? AND used_at IS NULL",
-                     (_timestamp(), user_id, action))
-        conn.execute("INSERT INTO web_auth_step_ups (request_id, user_id, action, session_hash, code_hash, credential_epoch, expires_at) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                     (request_id, user_id, action, _digest(session_key), _code_digest(request_id, code),
-                      identity.credential_epoch, _timestamp(policy.step_up_ttl_seconds)))
+        _open_step_up(conn, policy, identity, action, session_key, request_id, "email",
+                      _code_digest(request_id, code))
         return request_id, code
+
+
+def start_password_step_up(db_path, policy, user_id: str, action: str, session_key: str) -> tuple[str, str] | None:
+    """``(request_id, expires_at)`` for a step-up redeemed with the account password.
+
+    For an install that cannot mail a code. ``None`` when the identity cannot
+    use one: missing, disabled, without a profile, or with no password set.
+    Spends no mail budget, so a live request for the same session and action
+    is handed back rather than a row written per call.
+    """
+    _check_step_up_request(policy, action, session_key)
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        identity = _get_identity(conn, user_id)
+        if (identity is None or identity.disabled or not identity.password_hash
+                or not _has_profile(conn, user_id)):
+            return None
+        live = conn.execute(
+            "SELECT request_id, expires_at FROM web_auth_step_ups WHERE user_id=? AND action=? "
+            "AND session_hash=? AND method='password' AND credential_epoch=? AND used_at IS NULL "
+            "AND expires_at>? AND attempts<? ORDER BY id DESC LIMIT 1",
+            (user_id, action, _digest(session_key), identity.credential_epoch, _timestamp(),
+             SIGN_IN_CODE_ATTEMPTS)).fetchone()
+        if live is not None:
+            return live["request_id"], live["expires_at"]
+        request_id = secrets.token_urlsafe(18)
+        # No code exists, so the column holds nothing a code could match.
+        _open_step_up(conn, policy, identity, action, session_key, request_id, "password", "")
+        row = conn.execute("SELECT expires_at FROM web_auth_step_ups WHERE request_id=?", (request_id,)).fetchone()
+        return request_id, row["expires_at"]
+
+
+_LIVE_STEP_UP = ("request_id=? AND user_id=? AND action=? AND session_hash=? AND method=? "
+                 "AND used_at IS NULL AND expires_at>? AND attempts<?")
+
+
+def _live_step_up(conn: sqlite3.Connection, request_id: str, user_id: str, action: str,
+                  session_key: str, method: str) -> sqlite3.Row | None:
+    return conn.execute(f"SELECT * FROM web_auth_step_ups WHERE {_LIVE_STEP_UP}",
+                        (request_id, user_id, action, _digest(session_key), method, _timestamp(),
+                         SIGN_IN_CODE_ATTEMPTS)).fetchone()
+
+
+def _step_up_failure(conn: sqlite3.Connection, row: sqlite3.Row, identity: Identity, failures: int) -> str:
+    """Spend one wrong code or password: on the request and on the daily per-address count."""
+    now = _timestamp()
+    spent = row["attempts"] + 1 >= SIGN_IN_CODE_ATTEMPTS
+    conn.execute("UPDATE web_auth_step_ups SET attempts=attempts+1, used_at=? WHERE id=?",
+                 (now if spent else None, row["id"]))
+    conn.execute("DELETE FROM web_auth_attempts WHERE kind='step_up_code' AND at<=?", (_timestamp(-86400),))
+    conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('step_up_code', ?, ?)", (identity.email, now))
+    if failures + 1 == SIGN_IN_CODE_DAILY_FAILURES:
+        from istota.credentials import audit
+        from istota.notifications.resolvers import task_alert
+        what = "passwords" if row["method"] == "password" else "confirmation codes"
+        audit.record(conn, identity.user_id, action="step_up_locked", actor=f"web:{identity.user_id}")
+        task_alert.write(conn, identity.user_id, dedup_key="step-up-locked", title=f"Too many incorrect {what}",
+                         body=f"Someone may be guessing your {what}. Sign out everywhere in Settings → Account.")
+        spent = True
+    return "dead" if spent else "bad"
+
+
+def _step_up_identity(conn: sqlite3.Connection, row: sqlite3.Row | None, user_id: str) -> Identity | None:
+    identity = _get_identity(conn, user_id)
+    if (row is None or identity is None or identity.disabled or not _has_profile(conn, user_id)
+            or row["credential_epoch"] != identity.credential_epoch):
+        return None
+    return identity
 
 
 def redeem_step_up(db_path, request_id: str, user_id: str, action: str, session_key: str, code: str) -> str:
@@ -699,35 +786,63 @@ def redeem_step_up(db_path, request_id: str, user_id: str, action: str, session_
         return "dead"
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT * FROM web_auth_step_ups WHERE request_id=? AND user_id=? AND action=? "
-                           "AND session_hash=? AND used_at IS NULL AND expires_at>? AND attempts<?",
-                           (request_id, user_id, action, _digest(session_key), _timestamp(), SIGN_IN_CODE_ATTEMPTS)).fetchone()
-        identity = _get_identity(conn, user_id)
-        if (row is None or identity is None or identity.disabled or not _has_profile(conn, user_id)
-                or row["credential_epoch"] != identity.credential_epoch):
+        row = _live_step_up(conn, request_id, user_id, action, session_key, "email")
+        identity = _step_up_identity(conn, row, user_id)
+        if identity is None:
             return "dead"
         failures = _attempts(conn, "step_up_code", identity.email, 86400)
         if failures >= SIGN_IN_CODE_DAILY_FAILURES:
             return "dead"
         typed = re.sub(r"[\s-]", "", code)
         matched = typed.isascii() and typed.isdigit() and hmac.compare_digest(row["code_hash"], _code_digest(request_id, typed))
-        now = _timestamp()
         if matched:
-            conn.execute("UPDATE web_auth_step_ups SET used_at=? WHERE id=?", (now, row["id"]))
+            conn.execute("UPDATE web_auth_step_ups SET used_at=? WHERE id=?", (_timestamp(), row["id"]))
             return "ok"
-        spent = row["attempts"] + 1 >= SIGN_IN_CODE_ATTEMPTS
-        conn.execute("UPDATE web_auth_step_ups SET attempts=attempts+1, used_at=? WHERE id=?",
-                     (now if spent else None, row["id"]))
-        conn.execute("DELETE FROM web_auth_attempts WHERE kind='step_up_code' AND at<=?", (_timestamp(-86400),))
-        conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('step_up_code', ?, ?)", (identity.email, now))
-        if failures + 1 == SIGN_IN_CODE_DAILY_FAILURES:
-            from istota.credentials import audit
-            from istota.notifications.resolvers import task_alert
-            audit.record(conn, user_id, action="step_up_locked", actor=f"web:{user_id}")
-            task_alert.write(conn, user_id, dedup_key="step-up-locked", title="Too many incorrect confirmation codes",
-                             body="Someone may be guessing your confirmation codes. Sign out everywhere in Settings → Account.")
-            spent = True
-        return "dead" if spent else "bad"
+        return _step_up_failure(conn, row, identity, failures)
+
+
+def redeem_password_step_up(db_path, policy: Policy, request_id: str, user_id: str, action: str,
+                            session_key: str, password: str, *, ip: str | None) -> str:
+    """``ok``, ``bad``, ``dead`` or ``throttled`` for a password-method request.
+
+    Refused while the login form's own budget is spent, and a wrong password
+    is recorded against that budget, so this cannot guess faster than signing
+    in can. A right one costs nothing there: confirming is not signing in, and
+    a run of edits must not lock the user out. A wrong one is also spent on the
+    request and the daily count, as a wrong code is. The KDF runs outside the
+    write lock (the caller's in-process admission bounds concurrent ones), and
+    the request, identity and every cap are read again under it.
+    """
+    if (not isinstance(request_id, str) or len(request_id) > 64
+            or not isinstance(password, str) or not password or not session_key):
+        return "dead"
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _live_step_up(conn, request_id, user_id, action, session_key, "password")
+        identity = _step_up_identity(conn, row, user_id)
+        if identity is None or not identity.password_hash:
+            return "dead"
+        if _attempts(conn, "step_up_code", identity.email, 86400) >= SIGN_IN_CODE_DAILY_FAILURES:
+            # Retire it, or starting again would hand back this same row.
+            conn.execute("UPDATE web_auth_step_ups SET used_at=? WHERE id=?", (_timestamp(), row["id"]))
+            return "dead"
+        if _login_budget_spent(conn, policy, identity.email, ip):
+            return "throttled"
+    ok, _ = verify_password(password, identity.password_hash)
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _live_step_up(conn, request_id, user_id, action, session_key, "password")
+        current = _step_up_identity(conn, row, user_id)
+        if current is None or current.password_hash != identity.password_hash:
+            return "dead"
+        failures = _attempts(conn, "step_up_code", current.email, 86400)
+        if failures >= SIGN_IN_CODE_DAILY_FAILURES:
+            return "dead"
+        if ok:
+            conn.execute("UPDATE web_auth_step_ups SET used_at=? WHERE id=?", (_timestamp(), row["id"]))
+            return "ok"
+        _record_login_attempt(conn, policy, current.email, ip)
+        return _step_up_failure(conn, row, current, failures)
 
 
 def prune_step_ups(db_path) -> int:

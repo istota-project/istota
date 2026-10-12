@@ -109,8 +109,8 @@
       });
       onSubmitted(id);
     } catch (e) {
-      // A refused code stays in the code dialog, which reads `reason`.
-      if (e instanceof ConfigChangeError && e.field === 'code') throw e;
+      // A refused code or password stays in the step-up dialog, which reads `reason`.
+      if (e instanceof ConfigChangeError && (e.field === 'code' || e.field === 'password')) throw e;
       stage = 'review';
       showRefusal(e);
     }

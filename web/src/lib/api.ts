@@ -661,9 +661,9 @@ export interface ConfigRequest {
  *
  * `error` is the route's code (`config_changed`, `request_open`,
  * `confirm_required`, …) and `extra` carries what comes with it: `digest`,
- * `id`, `keys`, `resources`, `problems`, `errors`. A refused step-up code has
- * no `error`; it has `field: 'code'` and a `reason`, which is what
- * `StepUpDialog` reads. `status` 0 is a request that never reached the server.
+ * `id`, `keys`, `resources`, `problems`, `errors`. A refused step-up proof has
+ * no `error`; it has `field` (`'code'` or `'password'`) and a `reason`, which
+ * is what `StepUpDialog` reads. `status` 0 is a request that never reached the server.
  */
 export class ConfigChangeError extends Error {
   readonly status: number;
@@ -5186,10 +5186,14 @@ export type StepUpAction =
   | 'history_restore'
   | 'history_purge'
   | 'admin_config_change';
-export interface StepUpProof {
-  request_id: string;
-  code: string;
-}
+/** How the server confirms a sensitive action: a mailed code, or the
+ *  account password where the install cannot mail one. The server decides. */
+export type StepUpMethod = 'email' | 'password';
+export type StepUpProof =
+  { request_id: string; code: string } | { request_id: string; password: string };
+export type StepUpStart =
+  | { method: 'email'; request_id: string; expires_at: string; email_hint: string }
+  | { method: 'password'; request_id: string; expires_at: string };
 export interface CredentialHistory {
   id: number;
   name: string;
@@ -5207,10 +5211,7 @@ export interface CredentialActivityRow {
   detail: Record<string, string | number | boolean | null> | null;
 }
 
-export function startStepUp(
-  action: StepUpAction,
-  name?: string,
-): Promise<{ request_id: string; expires_at: string; email_hint: string }> {
+export function startStepUp(action: StepUpAction, name?: string): Promise<StepUpStart> {
   return credentialWrite('', 'POST', { action, name }, '/settings/step-up');
 }
 export function showRecoveryCodes(
