@@ -176,7 +176,6 @@ MOVES: list[tuple[str, str, str]] = [
     ("webui", "istota.avatars", "istota.webui.avatars"),
     ("webui", "istota.webhook_receiver", "istota.webui.webhook_receiver"),
     ("misc", "istota.db_backup", "istota.maintenance.db_backup"),
-    ("misc", "istota.db_backup_relocate", "istota.maintenance.db_backup_relocate"),
     ("misc", "istota.db_restore", "istota.maintenance.db_restore"),
     ("misc", "istota.db_relocate", "istota.maintenance.db_relocate"),
     ("misc", "istota.db_health", "istota.maintenance.db_health"),

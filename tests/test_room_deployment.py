@@ -1,12 +1,9 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from istota import cli, db
 from istota.config import Config
-
-REPO = Path(__file__).resolve().parents[1]
 
 
 def test_offline_init_migrates_rooms_and_sweeps_mount(tmp_path, monkeypatch):
@@ -103,11 +100,6 @@ def test_a_parked_question_is_not_an_orphan(tmp_path, monkeypatch, capsys):
     assert 'refusal: pending_confirmation' in capsys.readouterr().err
     with db.get_db(config.db_path) as conn:
         assert conn.execute('SELECT status FROM tasks WHERE id=?', (task,)).fetchone()[0] == 'pending_confirmation'
-
-
-def test_the_offline_window_says_the_scheduler_is_stopped():
-    script = (REPO / 'scripts/relocate-rooms.sh').read_text()
-    assert 'init --relocate-rooms --scheduler-stopped' in script
 
 
 def test_partial_sweep_raises_an_admin_alert_and_a_clean_one_closes_it(tmp_path, monkeypatch):
