@@ -90,7 +90,7 @@ SETUP_STEPS: dict[str, tuple[str, ...]] = {
     "model": ("brain_kind", "native_base_url", "native_model", "native_api_key", "claude_code_oauth_token"),
     "address": ("hostname", "ingress", "upstream_proxy", "listen_addr", "listen_port", "tls_cert_source"),
     "nextcloud": (
-        "storage", "nextcloud_url", "nextcloud_public_url", "nextcloud_username",
+        "storage", "workspace", "nextcloud_url", "nextcloud_public_url", "nextcloud_username",
         "nextcloud_app_password", "talk_enabled", "user_id",
     ),
     "connections": (
@@ -365,6 +365,7 @@ _WEB_MESSAGES: dict[str, str] = {
     "listen_port": "Enter a port number.",
     "tls_cert_source": "Behind a proxy, choose a self-signed certificate, your own certificate files, or none.",
     "storage": "Choose where Istota keeps its files.",
+    "workspace": "Choose whether Istota keeps its files in Nextcloud or on this server.",
     "nextcloud_url": "Enter your Nextcloud's address.",
     "nextcloud_public_url": "Enter the address you open Nextcloud at.",
     "talk_enabled": "Choose whether to chat with Istota in Nextcloud Talk.",
