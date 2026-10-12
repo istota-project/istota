@@ -11,10 +11,13 @@
     Field,
     Input,
     FileDropZone,
+    HeaderNav,
   } from '$lib/components/ui';
   import {
     getWorkspacePlaces,
     getWorkspaceListing,
+    getWorkspaceDriveListing,
+    type DriveListing,
     createWorkspaceFolder,
     uploadWorkspaceFile,
     type WorkspacePlace,
@@ -35,6 +38,10 @@
   let selected = $state<Selection | null>(null);
   let place = $derived(places.find((item) => item.id === selected?.place));
   let listing = $state<WorkspaceListing | null>(null);
+  let driveListing = $state<DriveListing | null>(null);
+  let moreLoading = $state(false);
+  let moreError = $state('');
+  let driveRoot = $derived(selected?.path.split('/')[0] === 'shared' ? 'shared' : 'root');
   let listingLoading = $state(false);
   let listingError = $state('');
   let showHidden = $state(loadSetting<boolean>('workspace.showHidden', false) === true);
@@ -141,19 +148,66 @@
     sidebarOpen = false;
     selection.push({ place, path });
   }
+  function driveFolder(path: string) {
+    return path.split('/').filter(Boolean).at(-1)?.split(':')[0] || 'root';
+  }
+  function breadcrumbLabel(part: string) {
+    if (place?.kind !== 'drive') return part;
+    if (part === 'shared') return 'Shared with me';
+    const colon = part.indexOf(':');
+    if (colon < 0) return 'Folder';
+    try {
+      return decodeURIComponent(part.slice(colon + 1));
+    } catch {
+      return 'Folder';
+    }
+  }
+  function needsConnection(message: string) {
+    return message === 'drive_not_granted' || message.includes('Reconnect in Settings.');
+  }
+  async function loadMore() {
+    if (moreLoading || !driveListing?.next_page_token || !selected) return;
+    const request = generation;
+    const folder = driveFolder(selected.path);
+    moreLoading = true;
+    moreError = '';
+    try {
+      const result = await getWorkspaceDriveListing(folder, driveListing.next_page_token);
+      if (request !== generation) return;
+      const seen = new Set(driveListing.items.map((item) => item.id));
+      driveListing = {
+        ...result,
+        items: [...driveListing.items, ...result.items.filter((item) => !seen.has(item.id))],
+      };
+    } catch (e) {
+      if (request === generation)
+        moreError = e instanceof Error ? e.message : 'Could not load more files.';
+    } finally {
+      if (request === generation) moreLoading = false;
+    }
+  }
   async function loadFolder(value: Selection) {
     const request = ++generation;
     selected = value;
     listing = null;
+    driveListing = null;
+    moreLoading = false;
+    moreError = '';
     listingError = '';
     listingLoading = false;
     if (!places.find((item) => item.id === value.place)?.browsable) return;
     listingLoading = true;
     try {
-      const result = await getWorkspaceListing(value.place, value.path);
-      if (request !== generation) return;
-      listing = result;
-      selected = { place: result.place, path: result.path };
+      if (value.place === 'drive') {
+        const result = await getWorkspaceDriveListing(driveFolder(value.path));
+        if (request !== generation) return;
+        driveListing = result;
+      } else {
+        const result = await getWorkspaceListing(value.place, value.path);
+        if (request !== generation) return;
+        listing = result;
+        selected = { place: result.place, path: result.path };
+      }
     } catch (e) {
       if (request === generation)
         listingError =
@@ -242,13 +296,27 @@
               <span class="muted" aria-hidden="true">/</span><a
                 href={href(place.id, parts.slice(0, i + 1).join('/'))}
                 onclick={(event) => navigate(event, place!.id, parts.slice(0, i + 1).join('/'))}
-                aria-current={i === parts.length - 1 ? 'page' : undefined}>{part}</a
+                aria-current={i === parts.length - 1 ? 'page' : undefined}
+                >{breadcrumbLabel(part)}</a
               >
             </li>
           {/each}
         </ol>
       </nav>
       <div class="folder-actions">
+        {#if place.kind === 'drive'}
+          <HeaderNav
+            ariaLabel="Drive location"
+            items={[
+              { label: 'My Drive', href: href('drive'), active: driveRoot === 'root' },
+              {
+                label: 'Shared with me',
+                href: href('drive', 'shared'),
+                active: driveRoot === 'shared',
+              },
+            ]}
+          />
+        {/if}
         {#if place.id === 'home' && listing && !listingLoading && !listingError}
           <Button variant="secondary" size="sm" onclick={openFolderDialog}>New folder</Button>
           <Button size="sm" onclick={() => fileInput.click()}>Upload</Button>
@@ -264,7 +332,7 @@
             }}
           />
         {/if}
-        {#if place.browsable}
+        {#if place.browsable && place.kind !== 'drive'}
           <label class="hidden-toggle"
             ><input
               type="checkbox"
@@ -330,9 +398,41 @@
         <div class="center-msg">Loading folder…</div>
       {:else if listingError}
         <div class="center-msg error">
-          <p>{listingError}</p>
-          <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
+          {#if place.kind === 'drive' && needsConnection(listingError)}
+            <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
+            <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
+          {:else}
+            <p>{listingError}</p>
+            <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
+          {/if}
         </div>
+      {:else if driveListing}
+        <FileTable
+          {place}
+          driveItems={driveListing.items}
+          drivePath={selected?.path || ''}
+          showHidden={true}
+          {href}
+          onNavigate={navigate}
+        />
+        {#if driveListing.next_page_token}
+          <div class="drive-pagination">
+            {#if moreError}<p class="form-error" role="alert">
+                {moreError === 'drive_not_granted' ? 'Drive access is off' : moreError}
+              </p>{/if}
+            {#if needsConnection(moreError)}
+              <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
+            {:else}
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={moreLoading}
+                loadingLabel="Loading…"
+                onclick={loadMore}>Load more</Button
+              >
+            {/if}
+          </div>
+        {/if}
       {:else if listing}
         <FileTable {listing} {place} {showHidden} {href} onNavigate={navigate} />
       {/if}
@@ -373,6 +473,10 @@
 </Modal>
 
 <style>
+  .drive-pagination {
+    padding: var(--space-3);
+    text-align: center;
+  }
   .folder-actions,
   .upload-heading {
     display: flex;

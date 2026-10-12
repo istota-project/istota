@@ -292,3 +292,137 @@ it('shows share state and a separate Nextcloud action while preserving the viewe
   await fireEvent.click(screen.getByRole('button', { name: 'plan.md' }));
   expect(openFile).toHaveBeenCalledWith('/Users/alice/plan.md');
 });
+
+const drivePlace: WorkspacePlace = {
+  ...home,
+  id: 'drive',
+  kind: 'drive',
+  label: 'Google Drive',
+  view_root: null,
+  reach: { private: 'skill', shared_member: 'skill', restricted: 'none', note: null },
+};
+const driveItem = (id: string, name: string, is_folder = false) => ({
+  id,
+  name,
+  is_folder,
+  mime_type: is_folder ? 'application/vnd.google-apps.folder' : 'application/pdf',
+  size: null,
+  modified: null,
+  web_url: `https://drive.google.com/file/d/${id}/view`,
+});
+function withDrive() {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, drivePlace], notes: [] });
+  __history.reset('/istota/workspace?place=drive');
+}
+
+it('browses Drive roots and folders, preserves readable breadcrumbs, and opens safe links', async () => {
+  withDrive();
+  api.getWorkspaceDriveListing.mockImplementation(async (folder) => ({
+    items:
+      folder === 'root'
+        ? [driveItem('folder_12345', '<b>Plans / drafts</b>', true)]
+        : [driveItem('file_123456', 'Budget.pdf')],
+    next_page_token: null,
+  }));
+  const { container } = render(Workspace);
+  const folder = await screen.findByRole('link', { name: '<b>Plans / drafts</b>' });
+  expect(folder.querySelector('b')).toBeNull();
+  await fireEvent.click(folder);
+  const file = await screen.findByRole('link', { name: 'Budget.pdf' });
+  expect(file).toHaveAttribute('target', '_blank');
+  expect(file).toHaveAttribute('rel', 'noopener noreferrer');
+  expect(api.getWorkspaceDriveListing).toHaveBeenLastCalledWith('folder_12345');
+  expect(
+    within(screen.getByRole('navigation', { name: 'Folder path' })).getByText(
+      '<b>Plans / drafts</b>',
+    ),
+  ).toBeTruthy();
+  expect(container.querySelector('time')).toBeNull();
+  expect(screen.queryByText('Show hidden')).toBeNull();
+  const saved = location.pathname + location.search;
+  cleanup();
+  __history.reset(saved);
+  render(Workspace);
+  await screen.findByRole('link', { name: 'Budget.pdf' });
+  expect(
+    within(screen.getByRole('navigation', { name: 'Folder path' })).getByText(
+      '<b>Plans / drafts</b>',
+    ),
+  ).toBeTruthy();
+  __history.reset(screen.getByRole('link', { name: 'Shared with me' }).getAttribute('href')!);
+  await waitFor(() => expect(api.getWorkspaceDriveListing).toHaveBeenLastCalledWith('shared'));
+  expect(openFile).not.toHaveBeenCalled();
+});
+
+it('only pages Drive on demand and discards pages after navigation', async () => {
+  withDrive();
+  let finish!: (value: unknown) => void;
+  api.getWorkspaceDriveListing.mockResolvedValueOnce({
+    items: [driveItem('file_123456', 'First.pdf')],
+    next_page_token: 'next',
+  });
+  api.getWorkspaceDriveListing.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+  api.getWorkspaceDriveListing.mockResolvedValue({
+    items: [driveItem('shared_12345', 'Shared.pdf')],
+    next_page_token: null,
+  });
+  render(Workspace);
+  await screen.findByRole('link', { name: 'First.pdf' });
+  expect(api.getWorkspaceDriveListing).toHaveBeenCalledTimes(1);
+  await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+  expect(api.getWorkspaceDriveListing).toHaveBeenLastCalledWith('root', 'next');
+  __history.reset(screen.getByRole('link', { name: 'Shared with me' }).getAttribute('href')!);
+  await screen.findByRole('link', { name: 'Shared.pdf' });
+  finish({ items: [driveItem('late_123456', 'Late.pdf')], next_page_token: 'next' });
+  await waitFor(() => expect(screen.queryByText('Late.pdf')).toBeNull());
+  expect(screen.queryByText('First.pdf')).toBeNull();
+});
+
+it('shows the Connections path when Drive access is off', async () => {
+  withDrive();
+  api.getWorkspaceDriveListing.mockRejectedValue(new Error('drive_not_granted'));
+  render(Workspace);
+  await screen.findByText('Drive access is off');
+  expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
+    'href',
+    '/settings/connections',
+  );
+});
+
+it('retries a failed next page in place and avoids duplicate rows', async () => {
+  withDrive();
+  api.getWorkspaceDriveListing.mockResolvedValueOnce({
+    items: [driveItem('file_123456', 'First.pdf')],
+    next_page_token: 'same',
+  });
+  api.getWorkspaceDriveListing.mockRejectedValueOnce(
+    new Error('Could not load Google Drive. Try again.'),
+  );
+  api.getWorkspaceDriveListing.mockResolvedValueOnce({
+    items: [driveItem('file_123456', 'First.pdf'), driveItem('next_123456', 'Next.pdf')],
+    next_page_token: 'same',
+  });
+  render(Workspace);
+  await screen.findByRole('link', { name: 'First.pdf' });
+  await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+  await screen.findByRole('alert');
+  expect(screen.getByRole('link', { name: 'First.pdf' })).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+  await screen.findByRole('link', { name: 'Next.pdf' });
+  expect(screen.getAllByRole('link', { name: 'First.pdf' })).toHaveLength(1);
+  expect(api.getWorkspaceDriveListing).toHaveBeenCalledTimes(3);
+  expect(api.getWorkspaceDriveListing).toHaveBeenLastCalledWith('root', 'same');
+});
+
+it('links to Connections when Google rejects a stored credential', async () => {
+  withDrive();
+  api.getWorkspaceDriveListing.mockRejectedValue(
+    new Error('Google rejected the stored credential. Reconnect in Settings.'),
+  );
+  render(Workspace);
+  await screen.findByText('Google rejected the stored credential. Reconnect in Settings.');
+  expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
+    'href',
+    '/settings/connections',
+  );
+});

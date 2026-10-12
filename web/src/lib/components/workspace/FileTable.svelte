@@ -1,26 +1,51 @@
 <script lang="ts">
   import { ExternalLink, File, Folder, Link, Minus, Users } from '@lucide/svelte';
-  import type { WorkspaceListing, WorkspacePlace } from '$lib/api';
+  import type { DriveItem, WorkspaceListing, WorkspacePlace } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
-    listing,
+    listing = null,
+    driveItems = [],
+    drivePath = '',
     place,
     showHidden,
     href,
     onNavigate,
   }: {
-    listing: WorkspaceListing;
+    listing?: WorkspaceListing | null;
+    driveItems?: DriveItem[];
+    drivePath?: string;
     place: WorkspacePlace;
     showHidden: boolean;
     href: (place: string, path?: string) => string;
     onNavigate: (event: MouseEvent, place: string, path?: string) => void;
   } = $props();
-  let entries = $derived(listing.entries.filter((entry) => showHidden || !entry.hidden));
-  function entryPath(name: string) {
-    return [listing.path, name].filter(Boolean).join('/');
-  }
+  let entries = $derived(
+    place.kind === 'drive'
+      ? driveItems.map((item) => ({
+          key: item.id,
+          name: item.name,
+          kind: item.is_folder ? 'dir' : 'file',
+          size: item.size,
+          modified: item.modified,
+          path: [drivePath, `${item.id}:${encodeURIComponent(item.name)}`]
+            .filter(Boolean)
+            .join('/'),
+          web_url: item.web_url,
+          share: null,
+          nextcloud_url: null,
+        }))
+      : (listing?.entries || [])
+          .filter((entry) => showHidden || !entry.hidden)
+          .map((entry) => ({
+            ...entry,
+            key: entry.name,
+            modified: new Date(entry.modified * 1000).toISOString(),
+            path: [listing?.path, entry.name].filter(Boolean).join('/'),
+            web_url: null,
+          })),
+  );
 </script>
 
 {#if entries.length}
@@ -34,8 +59,8 @@
       ></thead
     >
     <tbody>
-      {#each entries as entry (entry.name)}
-        {@const iso = new Date(entry.modified * 1000).toISOString()}
+      {#each entries as entry (entry.key)}
+        {@const iso = entry.modified}
         <tr>
           <td>
             <div class="entry-name">
@@ -49,14 +74,15 @@
               <div class="entry-label">
                 {#if entry.kind === 'dir'}
                   <a
-                    href={href(place.id, entryPath(entry.name))}
-                    onclick={(event) => onNavigate(event, place.id, entryPath(entry.name))}
-                    >{entry.name}</a
+                    href={href(place.id, entry.path)}
+                    onclick={(event) => onNavigate(event, place.id, entry.path)}>{entry.name}</a
                   >
+                {:else if entry.kind === 'file' && entry.web_url}
+                  <a href={entry.web_url} target="_blank" rel="noopener noreferrer">{entry.name}</a>
                 {:else if entry.kind === 'file' && place.view_root}
                   <button
                     type="button"
-                    onclick={() => viewer.openFile(`${place.view_root}/${entryPath(entry.name)}`)}
+                    onclick={() => viewer.openFile(`${place.view_root}/${entry.path}`)}
                     >{entry.name}</button
                   >
                 {:else}
@@ -88,7 +114,8 @@
           </td>
           <td class="size muted">{entry.size === null ? '—' : formatBytes(entry.size)}</td>
           <td class="modified muted"
-            ><time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time></td
+            >{#if iso}<time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time
+              >{:else}—{/if}</td
           >
         </tr>
       {/each}
@@ -96,10 +123,10 @@
   </table>
 {:else}
   <div class="center-msg">
-    {listing.entries.length ? 'No visible files in this folder.' : 'This folder is empty.'}
+    {listing?.entries.length ? 'No visible files in this folder.' : 'This folder is empty.'}
   </div>
 {/if}
-{#if listing.truncated || listing.skipped_names || listing.notes?.length}
+{#if listing && (listing.truncated || listing.skipped_names || listing.notes?.length)}
   <div class="listing-notes muted" role="status">
     {#each listing.notes ?? [] as note}<p>{note}</p>{/each}
     {#if listing.truncated}<p>Showing the first 2,000 entries.</p>{/if}

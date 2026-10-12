@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Browse My Drive and Shared with me in Workspace, open files in Google Drive, and load more files as needed. Connection errors link to Settings so you can restore access.
+
 - My files in Workspace now shows Nextcloud shares and opens files in your Nextcloud when they are shared with you. A disconnected Nextcloud folder reports that it is unreachable when browsing or uploading.
 
 - Upload files and create folders under My files in Workspace. Uploads show progress, preserve existing files by numbering repeated names, and keep errors beside the affected file.

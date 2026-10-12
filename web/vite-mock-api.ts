@@ -4723,7 +4723,7 @@ const workspacePlaces: WorkspacePlace[] = [
     id: 'drive',
     kind: 'drive',
     label: 'Google Drive',
-    browsable: false,
+    browsable: true,
     view_root: null,
     reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
   },
@@ -4779,6 +4779,38 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
   Archive: [workspaceEntry('note.txt')],
 };
 const workspaceHandler: MockHandler = ({ url, method, body }) => {
+  const driveUrl = new URL(url, 'http://localhost');
+  if (driveUrl.pathname === '/istota/api/workspace/drive/list' && method === 'GET') {
+    const folder = driveUrl.searchParams.get('folder') || 'root';
+    const item = (id: string, name: string, is_folder = false) => ({
+      id,
+      name,
+      is_folder,
+      mime_type: is_folder ? 'application/vnd.google-apps.folder' : 'application/pdf',
+      size: is_folder ? null : 24576,
+      modified: '2026-01-02T12:00:00Z',
+      web_url: `https://drive.google.com/${is_folder ? 'drive/folders' : 'file/d'}/${id}`,
+    });
+    const more = driveUrl.searchParams.has('page_token');
+    return {
+      items:
+        folder === 'root'
+          ? more
+            ? [item('drive_notes_1', 'Meeting notes.pdf')]
+            : [
+                item('drive_folder_1', 'Project documents', true),
+                item('drive_report_1', 'Quarterly report.pdf'),
+              ]
+          : folder === 'shared'
+            ? [
+                item('drive_shared_1', 'Shared budget.pdf'),
+                item('drive_shared_folder', 'Shared plans', true),
+              ]
+            : [item('drive_plan_1', 'Project plan.pdf')],
+      next_page_token: folder === 'root' && !more ? 'page-2' : null,
+    };
+  }
+
   const [path, query] = url.split('?');
   if (
     method === 'POST' &&

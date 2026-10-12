@@ -13,6 +13,9 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from istota import db
+from istota.credentials.google_scopes import levels_from_scopes
+from istota.credentials.google_tokens import access_token_for
+from istota.google import drive
 from istota.nextcloud import OcsError, shares
 from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir
@@ -222,3 +225,30 @@ async def api_workspace_folder(
         return await asyncio.to_thread(write)
     except (ListingError, OSError) as exc:
         return _filesystem_error(config, exc, "home", write=True)
+
+
+@router.get("/drive/list")
+async def api_workspace_drive_list(
+    request: Request, folder: str = "root", page_token: str | None = None,
+    user: dict = Depends(require_auth),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+
+    def query():
+        drive.validate_folder(folder)
+        with db.get_db(config.db_path) as conn:
+            scopes = db.get_google_scopes(conn, user["username"])
+            if not config.google_workspace.enabled or levels_from_scopes(scopes or []).get("drive") not in {"readonly", "full"}:
+                raise drive.DriveError(409, "drive_not_granted")
+            token = access_token_for(conn, config, user["username"])
+        if token is None:
+            raise drive.DriveError(502, drive.RECONNECT_MESSAGE)
+        items, next_page = drive.list_folder(token, folder, page_token)
+        return {"items": [asdict(item) for item in items], "next_page_token": next_page}
+
+    try:
+        return await asyncio.to_thread(query)
+    except drive.DriveError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)

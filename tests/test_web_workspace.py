@@ -239,3 +239,57 @@ async def test_local_listing_does_not_fetch_share_state(client):
         response = await client.get("/workspace/list", params={"place": "home"})
     assert response.status_code == 200
     shares.assert_not_called()
+
+
+async def test_drive_not_granted(client, config):
+    config.google_workspace.enabled = True
+    response = await client.get("/workspace/drive/list")
+    assert response.status_code == 409
+    assert response.json() == {"error": "drive_not_granted"}
+
+
+@pytest.mark.parametrize("grant", ["off", "readonly", "full"])
+async def test_drive_route_uses_stored_grant_and_user(client, config, monkeypatch, grant):
+    import httpx
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    config.google_workspace.enabled = True
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    scopes = "[]" if grant == "off" else '["https://www.googleapis.com/auth/drive' + ('.readonly' if grant == 'readonly' else '') + '"]'
+    with db.get_db(config.db_path) as conn:
+        db.upsert_google_token(conn, "alice", "alice-token", "refresh", future, scopes)
+        db.upsert_google_token(conn, "bob", "bob-token", "refresh", future, '["https://www.googleapis.com/auth/drive"]')
+    requests = []
+    def handle(request):
+        requests.append(request)
+        assert request.headers["authorization"] == "Bearer alice-token"
+        return httpx.Response(200, json={"files": [{"id": "file_123456", "name": "Plan", "mimeType": "application/pdf"}], "nextPageToken": "next"})
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
+    response = await client.get("/workspace/drive/list", params={"folder": "shared"})
+    if grant == "off":
+        assert response.status_code == 409 and not requests
+    else:
+        assert response.status_code == 200 and len(requests) == 1
+        assert response.json()["next_page_token"] == "next"
+        assert response.json()["items"][0]["name"] == "Plan"
+    requests.clear()
+    assert (await client.get("/workspace/drive/list", params={"folder": "bad'id"})).status_code == 400
+    assert not requests
+
+
+async def test_drive_auth_required(client, app):
+    app.dependency_overrides.clear()
+    assert (await client.get("/workspace/drive/list")).status_code == 401
+
+
+async def test_drive_failed_refresh_returns_reconnect(client, config, monkeypatch):
+    import httpx
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    config.google_workspace.enabled = True
+    with db.get_db(config.db_path) as conn:
+        db.upsert_google_token(conn, "alice", "old-token", "refresh", "expired", '["https://www.googleapis.com/auth/drive.readonly"]')
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: httpx.Response(401, json={"error": "invalid_grant"}))
+    response = await client.get("/workspace/drive/list")
+    assert response.status_code == 502
+    assert response.json() == {"error": "Google rejected the stored credential. Reconnect in Settings."}

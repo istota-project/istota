@@ -5235,6 +5235,28 @@ export function getWorkspaceListing(place: string, path = ''): Promise<Workspace
   return apiFetch(`/workspace/list?${new URLSearchParams({ place, path })}`);
 }
 
+export interface DriveItem {
+  id: string;
+  name: string;
+  mime_type: string;
+  modified: string | null;
+  size: number | null;
+  web_url: string | null;
+  is_folder: boolean;
+}
+export interface DriveListing {
+  items: DriveItem[];
+  next_page_token: string | null;
+}
+export function getWorkspaceDriveListing(
+  folder = 'root',
+  pageToken?: string,
+): Promise<DriveListing> {
+  return apiFetch(
+    `/workspace/drive/list?${new URLSearchParams({ folder, ...(pageToken ? { page_token: pageToken } : {}) })}`,
+  );
+}
+
 export function createWorkspaceFolder(path: string, name: string): Promise<{ path: string }> {
   return apiFetch('/workspace/folders', {
     method: 'POST',
