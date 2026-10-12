@@ -929,6 +929,7 @@ class TestApiMe:
             config.workspace_path = None
         if mode == "nextcloud":
             config.nextcloud.url = "https://cloud.example.com"
+            config.nextcloud_mount_path = Path("/srv/mount/nextcloud/content")
         if mode in {"drive", "gmail"}:
             config.google_workspace.enabled = True
             scope = f"https://www.googleapis.com/auth/{mode}.readonly"
