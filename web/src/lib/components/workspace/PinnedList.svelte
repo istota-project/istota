@@ -37,7 +37,7 @@
   <CategoryGroup label="Pinned">
     {#each pins as pin (pin.id)}
       {@const folder = folderTarget(pin)}
-      <div class="pin-row">
+      <div class="list-row pin-row">
         {#snippet content()}
           {#if pin.provider === 'drive'}<Cloud size={14} />{:else if pin.is_dir}<Folder
               size={14}
@@ -81,11 +81,6 @@
 </section>
 
 <style>
-  .pin-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-  }
   .pin-row .view-btn,
   .unavailable {
     flex: 1;
@@ -95,9 +90,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1) var(--space-2);
     color: var(--text-dim);
-    font-size: var(--text-sm);
+    font-size: var(--text-base);
   }
   .pin-label {
     overflow: hidden;

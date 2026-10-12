@@ -10,6 +10,8 @@ const openFile = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/fileViewer/store.svelte', () => ({ viewer: { openFile } }));
 await fillApiDouble(api);
+const actualApi = await vi.importActual<typeof import('$lib/api')>('$lib/api');
+api.chatFileUrl.mockImplementation(actualApi.chatFileUrl);
 
 const home: WorkspacePlace = {
   id: 'home',
@@ -28,7 +30,7 @@ const room: WorkspacePlace = {
   ...home,
   id: 'room:sample',
   kind: 'room',
-  label: '<b>Project room</b>',
+  label: 'Project room',
   view_root: '/Channels/sample',
 };
 const entry = (name: string, kind = 'file', hidden = false) => ({
@@ -67,15 +69,36 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it('renders place badges and untrusted labels as text, with reach behind a disclosure', async () => {
+async function openActions(name: string) {
+  const trigger = await screen.findByRole('button', { name: `Actions for ${name}` });
+  await fireEvent.keyDown(trigger, { key: 'Enter' });
+}
+
+it('keeps the standard sidebar uncluttered and shows access beside the folder path', async () => {
   const { container } = render(Workspace);
-  const link = await screen.findByRole('link', { name: '<b>Project room</b> Read-write' });
-  expect(link.querySelector('b')).toBeNull();
+  await screen.findByRole('link', { name: 'Project room' });
+  const sidebar = screen.getByRole('complementary');
+  expect(sidebar.style.getPropertyValue('--sidebar-width')).toBe('220px');
+  expect(sidebar.querySelector('.badge')).toBeNull();
+  expect(container.querySelector('.folder-toolbar')).toHaveTextContent('Read-write');
   await screen.findByRole('link', { name: 'notes & drafts' });
   expect(container.querySelector('details')).not.toHaveAttribute('open');
   expect(screen.getByText('Files are stored in a local folder.')).toBeTruthy();
   expect(screen.getByText('Guest turn or unasked task')).toBeTruthy();
   expect(screen.getByText('No access')).toBeTruthy();
+});
+
+it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ ...room, label: '<b>Project room</b>' }],
+    notes: [],
+  });
+  const { container } = render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await within(sidebar).findByRole('link', { name: '<b>Project room</b>' });
+  expect(container.querySelector('b')).toBeNull();
+  const breadcrumbs = screen.getByRole('navigation', { name: 'Folder path' });
+  expect(within(breadcrumbs).getByRole('link', { name: '<b>Project room</b>' })).toBeTruthy();
 });
 
 it('navigates encoded folders and breadcrumbs through history, and opens home files in the viewer', async () => {
@@ -150,9 +173,7 @@ it('keeps a failed folder retryable and ignores a late result after navigation',
     }),
   );
   render(Workspace);
-  await fireEvent.click(
-    await screen.findByRole('link', { name: '<b>Project room</b> Read-write' }),
-  );
+  await fireEvent.click(await screen.findByRole('link', { name: 'Project room' }));
   await screen.findByRole('link', { name: 'notes & drafts' });
   resolve({
     place: 'home',
@@ -265,7 +286,7 @@ it('shows folder conflicts in the dialog and hides writes for other places', asy
   await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
   await screen.findByText('A file or folder already exists.');
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-  await fireEvent.click(screen.getByRole('link', { name: '<b>Project room</b> Read-write' }));
+  await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
   expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
 });
@@ -286,12 +307,14 @@ it('shows share state and a separate Nextcloud action while preserving the viewe
     notes: ['Nextcloud share state is unavailable.'],
   });
   render(Workspace);
-  const link = await screen.findByRole('link', { name: 'Open plan.md in Nextcloud' });
+  await openActions('plan.md');
+  const link = await screen.findByRole('menuitem', { name: 'Open in Nextcloud' });
   expect(link).toHaveAttribute('href', 'https://cloud.example.com/apps/files/files?dir=%2FShared');
   expect(link).toHaveAttribute('target', '_blank');
   expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   expect(screen.getByText('Shared · 2')).toBeTruthy();
   expect(screen.getByText('Nextcloud share state is unavailable.')).toBeTruthy();
+  await fireEvent.keyDown(link, { key: 'Escape' });
   await fireEvent.click(screen.getByRole('button', { name: 'plan.md' }));
   expect(openFile).toHaveBeenCalledWith('/Users/alice/plan.md');
 });
@@ -436,7 +459,8 @@ it('pins a file from its row and removes it from the Pinned section', async () =
     pin: { ...body, id: 1, available: true, is_dir: false },
   }));
   render(Workspace);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Pin plan #1.md' }));
+  await openActions('plan #1.md');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
   expect(api.putWorkspacePin).toHaveBeenCalledWith({
     provider: 'workspace',
     ref: '/Users/alice/notes/plan #1.md',
@@ -444,16 +468,16 @@ it('pins a file from its row and removes it from the Pinned section', async () =
     mime_type: null,
     web_url: null,
   });
-  expect(screen.getByRole('button', { name: 'Unpin plan #1.md' })).toHaveAttribute(
-    'aria-pressed',
-    'true',
-  );
+  await openActions('plan #1.md');
+  const unpin = await screen.findByRole('menuitem', { name: 'Unpin' });
+  await fireEvent.keyDown(unpin, { key: 'Escape' });
   const pinned = screen.getByRole('region', { name: 'Pinned files' });
   await fireEvent.click(within(pinned).getByRole('button', { name: 'plan #1.md' }));
   expect(openFile).toHaveBeenCalledWith('/Users/alice/notes/plan #1.md');
   await fireEvent.click(within(pinned).getByRole('button', { name: 'Remove pin plan #1.md' }));
   expect(api.deleteWorkspacePin).toHaveBeenCalledWith(1);
-  await screen.findByRole('button', { name: 'Pin plan #1.md' });
+  await openActions('plan #1.md');
+  await screen.findByRole('menuitem', { name: 'Pin' });
 });
 
 it('keeps unavailable pins removable and reports failed mutations', async () => {
@@ -501,7 +525,11 @@ it('pins a Drive item with its provider metadata', async () => {
     pin: { ...body, id: 3, available: true, is_dir: false },
   }));
   render(Workspace);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Pin <b>Budget</b>' }));
+  await openActions('<b>Budget</b>');
+  const providerLink = await screen.findByRole('menuitem', { name: 'Open in Google Drive' });
+  expect(providerLink).toHaveAttribute('href', item.web_url);
+  expect(providerLink).toHaveAttribute('target', '_blank');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
   expect(api.putWorkspacePin).toHaveBeenCalledWith({
     provider: 'drive',
     ref: item.id,
@@ -541,7 +569,8 @@ it('opens and pins a linked single file using its exact server path', async () =
   render(Workspace);
   await fireEvent.click(await screen.findByRole('button', { name: 'report.txt' }));
   expect(openFile).toHaveBeenCalledWith(ref);
-  await fireEvent.click(screen.getByRole('button', { name: 'Pin report.txt' }));
+  await openActions('report.txt');
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Pin' }));
   expect(api.putWorkspacePin).toHaveBeenCalledWith(expect.objectContaining({ ref }));
 });
 
@@ -565,4 +594,20 @@ it('describes group access as depending on the shared room', async () => {
   render(Workspace);
   await screen.findByText('Depends on room');
   expect(screen.getByText('Only when every reader belongs to this group.')).toBeTruthy();
+});
+
+it('offers file downloads and keeps non-regular entries without actions', async () => {
+  render(Workspace);
+  await openActions('notes & drafts');
+  expect(screen.queryByRole('menuitem', { name: 'Download' })).toBeNull();
+  await fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Pin' }), { key: 'Escape' });
+  expect(screen.queryByRole('button', { name: 'Actions for outside' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Actions for socket' })).toBeNull();
+  await fireEvent.click(screen.getByRole('link', { name: 'notes & drafts' }));
+  await openActions('plan #1.md');
+  const download = await screen.findByRole('menuitem', { name: 'Download' });
+  expect(download).toHaveAttribute('download', 'plan #1.md');
+  expect(download.getAttribute('href')).toContain(
+    encodeURIComponent('/Users/alice/notes & drafts/plan #1.md'),
+  );
 });

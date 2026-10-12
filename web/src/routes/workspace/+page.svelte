@@ -32,6 +32,7 @@
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
+  import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';
   import PinnedList from '$lib/components/workspace/PinnedList.svelte';
   import FileTable from '$lib/components/workspace/FileTable.svelte';
 
@@ -314,12 +315,7 @@
   {/snippet}
   {#snippet sidebar()}
     {#if places.length || pins.length}
-      <Sidebar
-        title="Places"
-        open={sidebarOpen}
-        onClose={() => (sidebarOpen = false)}
-        width="260px"
-      >
+      <Sidebar title="Places" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
         <PinnedList
           {pins}
           {places}
@@ -377,6 +373,7 @@
         </ol>
       </nav>
       <div class="folder-actions">
+        <ReachBadge access={place.reach.private} />
         {#if place.kind === 'drive'}
           <HeaderNav
             ariaLabel="Drive location"

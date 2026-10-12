@@ -4703,7 +4703,7 @@ const workspacePlaces: WorkspacePlace[] = [
   {
     id: 'room:markup',
     kind: 'room',
-    label: '<b>Planning & notes</b>',
+    label: 'Planning & notes',
     browsable: true,
     view_root: '/Channels/markup',
     reach: {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ExternalLink, File, Folder, Link, Minus, Users, Pin, PinOff } from '@lucide/svelte';
+  import { File, Folder, Link, Minus, Users } from '@lucide/svelte';
   import type {
     DriveItem,
     WorkspaceListing,
@@ -7,7 +7,8 @@
     WorkspacePin,
     WorkspacePinInput,
   } from '$lib/api';
-  import { IconButton } from '$lib/components/ui';
+  import { KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { chatFileUrl } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -67,6 +68,38 @@
             web_url: null,
           })),
   );
+  function menuItems(entry: (typeof entries)[number]): KebabItem[] {
+    if (entry.kind !== 'file' && entry.kind !== 'dir') return [];
+    const items: KebabItem[] = [];
+    if (onTogglePin && entry.ref) {
+      const provider = place.kind === 'drive' ? 'drive' : 'workspace';
+      const pinned = pins.some((pin) => pin.provider === provider && pin.ref === entry.ref);
+      items.push({
+        label: pinned ? 'Unpin' : 'Pin',
+        disabled: pinsBusy,
+        onSelect: () =>
+          onTogglePin!({
+            provider,
+            ref: entry.ref!,
+            name: entry.name,
+            mime_type: entry.mime_type,
+            web_url: entry.web_url,
+          }),
+      });
+    }
+    if (place.kind !== 'drive' && entry.kind === 'file' && entry.ref) {
+      items.push({ label: 'Download', href: chatFileUrl(entry.ref), download: entry.name });
+    }
+    const providerUrl = entry.nextcloud_url || entry.web_url;
+    if (providerUrl) {
+      items.push({
+        label: entry.nextcloud_url ? 'Open in Nextcloud' : 'Open in Google Drive',
+        href: providerUrl,
+        target: '_blank',
+      });
+    }
+    return items;
+  }
 </script>
 
 {#if entries.length}
@@ -76,12 +109,13 @@
         ><th scope="col">Name</th><th scope="col" class="size">Size</th><th
           scope="col"
           class="modified">Modified</th
-        ><th scope="col" class="pin-column"><span class="sr-only">Pin</span></th></tr
+        ><th scope="col" class="actions-column"><span class="sr-only">Actions</span></th></tr
       ></thead
     >
     <tbody>
       {#each entries as entry (entry.key)}
         {@const iso = entry.modified}
+        {@const actions = menuItems(entry)}
         <tr>
           <td>
             <div class="entry-name">
@@ -114,17 +148,6 @@
                       : ''}
                   </span>
                 {/if}
-                {#if entry.nextcloud_url && (entry.kind === 'file' || entry.kind === 'dir')}
-                  <a
-                    class="nextcloud-link"
-                    href={entry.nextcloud_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label={`Open ${entry.name} in Nextcloud`}
-                  >
-                    Open in Nextcloud <ExternalLink size={12} aria-hidden="true" />
-                  </a>
-                {/if}
                 {#if entry.kind === 'link'}<span class="caption">Symbolic link · not followed</span
                   >{:else if entry.kind === 'other'}<span class="caption">Not a regular file</span
                   >{/if}
@@ -136,31 +159,9 @@
             >{#if iso}<time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time
               >{:else}—{/if}</td
           >
-          <td class="pin-column">
-            {#if onTogglePin && entry.ref && (entry.kind === 'file' || entry.kind === 'dir')}
-              {@const provider = place.kind === 'drive' ? 'drive' : 'workspace'}
-              {@const pinned = pins.some(
-                (pin) => pin.provider === provider && pin.ref === entry.ref,
-              )}
-              <IconButton
-                size="sm"
-                class="workspace-pin-action"
-                label={`${pinned ? 'Unpin' : 'Pin'} ${entry.name}`}
-                title={pinned ? 'Unpin' : 'Pin'}
-                active={pinned}
-                pressed={pinned}
-                disabled={pinsBusy}
-                onclick={() =>
-                  onTogglePin!({
-                    provider,
-                    ref: entry.ref!,
-                    name: entry.name,
-                    mime_type: entry.mime_type,
-                    web_url: entry.web_url,
-                  })}
-              >
-                {#if pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
-              </IconButton>
+          <td class="actions-column">
+            {#if actions.length}
+              <KebabMenu items={actions} ariaLabel={`Actions for ${entry.name}`} />
             {/if}
           </td>
         </tr>
@@ -184,16 +185,10 @@
 {/if}
 
 <style>
-  .pin-column {
+  .actions-column {
     width: 3rem;
     text-align: center;
     padding-inline: var(--space-1);
-  }
-  @media (pointer: coarse) {
-    .pin-column :global(.workspace-pin-action) {
-      min-width: var(--touch-min);
-      min-height: var(--touch-min);
-    }
   }
 
   table {
@@ -257,16 +252,12 @@
   .entry-label button:hover {
     text-decoration: underline;
   }
-  .share-marker,
-  .entry-label .nextcloud-link {
+  .share-marker {
     display: flex;
     align-items: center;
     gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--text-muted);
-  }
-  .entry-label .nextcloud-link {
-    color: var(--accent);
   }
   tbody tr:hover {
     background: var(--surface-card);

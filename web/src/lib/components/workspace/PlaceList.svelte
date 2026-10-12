@@ -2,7 +2,6 @@
   import { CategoryGroup } from '$lib/components/ui';
   import { Folder, House, MessageSquare, Users, Cloud, Paperclip } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
-  import ReachBadge from './ReachBadge.svelte';
   let {
     places,
     selected,
@@ -37,7 +36,6 @@
         >
           {#if place.kind === 'talk'}<Paperclip size={14} />{:else}<group.icon size={14} />{/if}
           <span class="view-name" title={place.label}>{place.label}</span>
-          <ReachBadge access={place.reach.private} />
         </a>
       {/each}
     </CategoryGroup>

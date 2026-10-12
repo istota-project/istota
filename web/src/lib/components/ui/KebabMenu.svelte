@@ -10,6 +10,8 @@
     // open-in-new-tab and the status-bar URL preview. A menu item that only
     // navigates should use this rather than an onSelect + goto().
     href?: string;
+    target?: '_blank';
+    download?: string;
     // Optional interception of a link; its normal menu selection still closes.
     onClick?: (event: MouseEvent) => void;
     // An href the server answers rather than a page (a `/chat/r/...` deep
@@ -47,6 +49,9 @@
               <a
                 {...props}
                 href={item.href}
+                target={item.target}
+                rel={item.target === '_blank' ? 'noopener noreferrer' : undefined}
+                download={item.download}
                 data-sveltekit-reload={item.reload ? '' : undefined}
                 onclick={(event) => {
                   if (typeof props.onclick === 'function') props.onclick(event);

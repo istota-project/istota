@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Files in your room folders, group folders and linked folders, including individual linked files, now open in Workspace and chat. Access follows your current memberships, including when a membership is removed.
 
-- Workspace shows your file locations and how tasks can reach them. Browse folders, open files under My files in the existing viewer, and check how access changes in shared rooms.
+- Workspace shows your file locations and how tasks can reach them. Browse folders, open files in the shared viewer, and use each row’s menu to pin, download or open a file in its provider. File previews and room-note editors keep a consistent size, with full-height text areas and PDF pagination at the bottom.
 
 - The workspace API lists your file locations, their task access, and folder contents. Room membership is checked on every request, and symbolic links are shown without being followed.
 
