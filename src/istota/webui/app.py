@@ -2362,15 +2362,14 @@ def _write_admin_profile(config, admin: dict, user_id: str, updates: dict) -> tu
 
     Returns the GET body and the fields whose value changed. A refusal raises,
     and every check runs before the first write, so a refused PATCH writes
-    nothing. The notification row commits with the change it reports and is
-    pushed after the commit.
+    nothing. The notification row and its hand-off to the daemon commit with
+    the change they report; the daemon sends the push (ISSUE-702).
     """
     from istota.notifications.resolvers import admin_profile_change
-    from istota.notifications.store import deliver_pending
+    from istota.notifications.store import hand_to_daemon
 
     admin_id = admin["username"]
     whatsapp = updates.pop(_ADMIN_WHATSAPP_FIELD, None)
-    pending = None
     with _db.get_db(config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         stored = user_profiles.get_profile(config.db_path, user_id, conn=conn)
@@ -2414,12 +2413,10 @@ def _write_admin_profile(config, admin: dict, user_id: str, updates: dict) -> tu
 
         contact = admin_profile_change.contact_fields(changed)
         if contact and user_id != admin_id:
-            pending = admin_profile_change.write(
+            hand_to_daemon(conn, [admin_profile_change.write(
                 conn, user_id, admin_name=_admin_display_name(admin), fields=contact,
-            )
+            )])
         detail = _admin_user_detail(conn, config, user_id)
-    if pending is not None:
-        deliver_pending(config, [pending])
     return _with_options(config, detail), changed
 
 
@@ -2515,9 +2512,8 @@ def _write_admin_identity(
     fields that changed.
     """
     from istota.notifications.resolvers import admin_profile_change
-    from istota.notifications.store import deliver_pending
+    from istota.notifications.store import hand_to_daemon
 
-    pending = None
     skipped = None
     with _db.get_db(config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -2553,12 +2549,10 @@ def _write_admin_identity(
                 )
                 fields.append("email_addresses")
         if fields and user_id != admin["username"]:
-            pending = admin_profile_change.write(
+            hand_to_daemon(conn, [admin_profile_change.write(
                 conn, user_id, admin_name=_admin_display_name(admin), fields=fields,
-            )
+            )])
         detail = _admin_user_detail(conn, config, user_id)
-    if pending is not None:
-        deliver_pending(config, [pending])
     return _with_options(config, detail), outcome, skipped, fields
 
 

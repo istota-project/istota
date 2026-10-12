@@ -70,7 +70,7 @@ def body_for(admin_name: str, fields: list[str]) -> str:
 
 
 def write(conn: "sqlite3.Connection", user_id: str, *, admin_name: str, fields: list[str]):
-    """Write the row on the caller's connection; deliver with `deliver_pending` after commit."""
+    """Write the row on the caller's connection; the web routes hand it to the daemon."""
     from istota.notifications.store import write_notification
 
     changed = contact_fields(fields)

@@ -510,6 +510,140 @@ def mark_delivered(
         logger.warning("mark_delivered failed (%r)", notification_ids, exc_info=True)
 
 
+#: The `shared_kv` namespace a producer outside the daemon leaves its deliveries
+#: in. Reserved (leading underscore), so no task reaches it through `kv`.
+HANDOFF_NAMESPACE = "_notification_delivery"
+_HANDOFF_PREFIX = "request:"
+# Taken per pass; the gate runs every tick, so a longer queue drains over a few.
+_HANDOFF_BATCH = 50
+
+
+def hand_to_daemon(
+    conn: sqlite3.Connection, results: Iterable[RaiseResult | None]
+) -> None:
+    """Leave the delivery of ``results`` to the daemon, in the caller's transaction.
+
+    For a producer that is not the daemon: the web process holds no WhatsApp
+    bridge, so its own send over a Baileys route is refused definitely and
+    leaves a `failed` ledger row under `notification:<id>`, which refuses every
+    later send under that key (ISSUE-702). Written on the caller's connection,
+    so a producer that rolls back leaves no request behind, and nothing here
+    opens a second connection under the caller's write lock.
+
+    The push text and the delivery flags travel, since a producer may push less
+    than the row holds (`_common.pushing_only`, #638); the daemon reads the user
+    and the title off the row, so a request cannot reroute one. Never raises.
+    """
+    try:
+        for result in results or []:
+            if result is None or not result.deliver:
+                continue
+            value = json.dumps({
+                "text": result.text,
+                "purpose": result.purpose,
+                "room_free": bool(result.room_free),
+                "skip_surfaces": list(result.skip_surfaces),
+            })
+            db.shared_kv_set(
+                conn, HANDOFF_NAMESPACE,
+                _HANDOFF_PREFIX + str(int(result.notification_id)), value, "producer",
+            )
+    except Exception:
+        logger.warning("hand_to_daemon failed", exc_info=True)
+
+
+def handoffs_pending(config: "Config") -> bool:
+    """Whether a hand-off waits. One indexed read, for the dispatch loop.
+
+    Raises `sqlite3.OperationalError` on a held lock, which the gate treats as
+    "try next tick"; every other failure is False.
+    """
+    from pathlib import Path
+
+    if not Path(config.db_path).exists():
+        return False
+    with db.get_db(config.db_path, busy_timeout_ms=_STALE_SWEEP_BUSY_TIMEOUT_MS) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM shared_kv WHERE namespace = ? LIMIT 1",
+            (HANDOFF_NAMESPACE,),
+        ).fetchone()
+    return row is not None
+
+
+def _take_handoffs(config: "Config") -> list[RaiseResult]:
+    """Remove up to a batch of requests and return what to send for them.
+
+    Taken before the send, in one write transaction, so two passes never send
+    one request twice and a request whose send keeps failing cannot repeat on
+    every tick. A daemon stopped between the take and the send loses whatever
+    of the batch it had not sent; the bell rows stand, as they do for any push
+    that reached nobody.
+    """
+    taken: list[RaiseResult] = []
+    with db.get_db(config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        requests = conn.execute(
+            "SELECT key, value FROM shared_kv WHERE namespace = ? "
+            "ORDER BY updated_at, key LIMIT ?",
+            (HANDOFF_NAMESPACE, _HANDOFF_BATCH),
+        ).fetchall()
+        for request in requests:
+            db.shared_kv_delete(conn, HANDOFF_NAMESPACE, request["key"])
+            try:
+                notification_id = int(request["key"][len(_HANDOFF_PREFIX):])
+                flags = json.loads(request["value"])
+                if not isinstance(flags, dict):
+                    raise ValueError("not an object")
+                text = flags.get("text")
+                skip_surfaces = tuple(str(s) for s in flags.get("skip_surfaces") or ())
+            except (TypeError, ValueError):
+                logger.warning("dropping a malformed notification hand-off %r", request["key"])
+                continue
+            row = conn.execute(
+                "SELECT user_id, title, body FROM notifications WHERE id = ?",
+                (notification_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            purpose = flags.get("purpose")
+            if purpose not in sources.DELIVERY_PURPOSES:
+                purpose = sources.DEFAULT_PURPOSE
+            if not isinstance(text, str):
+                text = _delivery_text(row["title"], row["body"] or "")
+            taken.append(RaiseResult(
+                notification_id=notification_id,
+                user_id=row["user_id"],
+                deliver=True,
+                text=text,
+                title=row["title"],
+                purpose=purpose,
+                room_free=bool(flags.get("room_free")),
+                skip_surfaces=skip_surfaces,
+            ))
+    return taken
+
+
+def deliver_handed_off(config: "Config") -> None:
+    """Send what producers outside the daemon handed over. Daemon side; never raises.
+
+    :func:`deliver_pending` does the send, so a row closed in the meantime is
+    skipped and `last_delivered_at` is stamped only on a send that reached
+    somebody, exactly as for a producer in the daemon.
+    """
+    from pathlib import Path
+
+    try:
+        if not Path(config.db_path).exists():
+            return
+        while True:
+            taken = _take_handoffs(config)
+            if not taken:
+                return
+            deliver_pending(config, taken)
+    except Exception:
+        logger.warning("deliver_handed_off failed", exc_info=True)
+
+
 def raise_notification(config: "Config", user_id: str, **kwargs) -> int | None:
     """Write and deliver in one call, on a connection of this function's own.
 
@@ -1101,6 +1235,7 @@ def _sweep_stale(
 
 __all__ = [
     "CLOSED_STATES",
+    "HANDOFF_NAMESPACE",
     "LIVENESS_SCAN_MAX",
     "NOTIFICATION_ALERT_MAX_AGE_DAYS",
     "NOTIFICATION_RETENTION_DAYS",
@@ -1111,8 +1246,11 @@ __all__ = [
     "STATE_RESOLVED",
     "STATE_STALE",
     "counts",
+    "deliver_handed_off",
     "deliver_pending",
     "dismiss",
+    "hand_to_daemon",
+    "handoffs_pending",
     "list_open",
     "mark_delivered",
     "mark_seen",

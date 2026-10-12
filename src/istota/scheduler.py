@@ -5734,6 +5734,31 @@ def check_shared_block_requests(config: Config) -> None:
         runs.record_answered(config, request, outcome)
 
 
+def poll_notification_handoffs(config: Config, inflight: dict) -> None:
+    """The `notification-handoff` gate: one read on the dispatch loop, a thread
+    only when the web process left a delivery here (ISSUE-702). Never raises.
+
+    The daemon sends because it holds what a send needs and the web process
+    does not, the WhatsApp bridge first among them.
+    """
+    from istota.notifications import store as notification_store
+
+    try:
+        pending = notification_store.handoffs_pending(config)
+    except sqlite3.OperationalError as exc:
+        logger.debug("notification_handoff_poll_skipped reason=%s", exc)
+        return
+    except Exception:  # noqa: BLE001 - a raise here takes the dispatch loop
+        logger.warning("notification_handoff_poll_failed", exc_info=True)
+        return
+    if pending:
+        _spawn_background_check(
+            "notification-handoff",
+            lambda: notification_store.deliver_handed_off(config),
+            inflight, overlap_expected=True,
+        )
+
+
 def poll_shared_block_requests(config: Config, inflight: dict) -> None:
     """The `shared-block-request` gate: one read on the dispatch loop, a thread
     only when there is a request. Never raises."""
@@ -9662,6 +9687,9 @@ def build_interval_gates(
     def _shared_block_request(now: float) -> None:
         poll_shared_block_requests(config, keeper)
 
+    def _notification_handoff(now: float) -> None:
+        poll_notification_handoffs(config, keeper)
+
     def _worktree_reap(now: float) -> None:
         check_worktree_reap(config)
 
@@ -9788,6 +9816,13 @@ def build_interval_gates(
             run=_shared_block_request,
             fixed_interval=1,
             on_error="Error polling shared-block run requests: %s",
+        ),
+        # Notification pushes the web process left for the daemon to send.
+        IntervalGate(
+            name="notification-handoff",
+            run=_notification_handoff,
+            fixed_interval=1,
+            on_error="Error polling notification hand-offs: %s",
         ),
         IntervalGate(
             name="briefing-triggers",
