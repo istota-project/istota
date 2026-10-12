@@ -23,6 +23,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
+import { createRawSnippet } from 'svelte';
+// The stub itself, as the other route tests import it: `$app/state`'s own type
+// will not take an arbitrary URL.
+import { page } from '../../vitest-stubs/app-state.svelte';
 import type { User } from '$lib/api';
 
 const SHELL_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) IstotaApp/0.10.0';
@@ -61,10 +65,11 @@ const writeUser = vi.fn<(userId: string | null, user: User) => Promise<void>>();
 const rememberLastUserId = vi.fn();
 const forgetLastUserId = vi.fn();
 const seedUserId = vi.fn<() => string | null>();
+const startConnectivity = vi.fn(() => () => {});
 
 vi.mock('$lib/stores/connectivity', async (importOriginal) => {
   const actual = await importOriginal<typeof import('$lib/stores/connectivity')>();
-  return { ...actual, online, startConnectivity: () => () => {} };
+  return { ...actual, online, startConnectivity: () => startConnectivity() };
 });
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => {
@@ -117,6 +122,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  page.url = new URL('http://localhost/');
 });
 
 describe('the root layout with no connection', () => {
@@ -374,4 +380,39 @@ it('populates search from the signed-in user’s enabled modules before any quer
     'Health',
     'Location',
   ]);
+});
+
+describe('the setup route', () => {
+  // The first-run setup page is served by a server with no `/api/me`, no
+  // notifications and no connectivity probe to answer, so the layout must
+  // render it bare and ask nothing first (web first-run setup, stage 6).
+  const setupChild = createRawSnippet(() => ({ render: () => '<p>setup page</p>' }));
+
+  it.each(['/setup', '/setup/', '/setup/?step=model'])(
+    'renders %s bare, with no identity request and no shell',
+    async (path) => {
+      page.url = new URL(`http://localhost${path}`);
+      getMe.mockResolvedValue(person());
+
+      render(Layout, { children: setupChild });
+
+      expect(await screen.findByText('setup page')).toBeInTheDocument();
+      expect(screen.queryByText('Loading…')).toBeNull();
+      expect(screen.queryByRole('navigation')).toBeNull();
+      expect(screen.queryByText('Alice')).toBeNull();
+      expect(getMe).not.toHaveBeenCalled();
+      expect(startConnectivity).not.toHaveBeenCalled();
+      expect(startNotificationPoll).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still gates a route that merely starts with the same letters', async () => {
+    page.url = new URL('http://localhost/setupx/');
+    getMe.mockResolvedValue(person());
+
+    render(Layout, { children: setupChild });
+
+    expect(await screen.findByText('Alice')).toBeInTheDocument();
+    expect(getMe).toHaveBeenCalled();
+  });
 });

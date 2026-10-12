@@ -5194,3 +5194,172 @@ export function search(
   if (options.offset !== undefined) params.set('offset', String(options.offset));
   return apiFetch(`/search?${params}`, { signal: options.signal });
 }
+
+// ---- First-run setup (`webui/setup_app.py`) ----
+//
+// The setup server runs before any config exists and serves only these
+// routes. Its errors are `{error: <code>, message, fields?, step?}`, and a 401
+// means "locked" rather than "signed out", so these do not go through
+// `apiFetch`: that would read the code as the message, send a 401 to the login
+// page, and report into a connectivity store the setup page never starts.
+
+/** `configured` is the normal web app's answer: there is nothing to set up. */
+export type SetupPhase = 'locked' | 'open' | 'finishing' | 'configured';
+
+export interface SetupState {
+  phase: SetupPhase;
+  /** Plain HTTP on this machine (`--local`) rather than the TLS setup port. */
+  local?: boolean;
+  /** The `Host` the browser used, for the web address screen. */
+  host?: string;
+  /** The module toggles this image can offer; `field` is the answer's name. */
+  modules_available?: { field: string; module: string }[];
+  memory_total_mib?: number;
+  defaults?: { bot_name: string; storage: string; profiles: string[] };
+}
+
+/** A credential the server holds: never its value, only whether it is set. */
+export interface SetupCredential {
+  set: boolean;
+}
+export type SetupDraftValue = string | number | boolean | string[] | SetupCredential;
+export type SetupDraft = Record<string, SetupDraftValue>;
+/** A `PUT` merges. `null` drops an answer, but keeps a stored credential. */
+export type SetupDraftPatch = Record<string, string | number | boolean | string[] | null>;
+
+export interface SetupFieldError {
+  /** An answer field, or `""` for an error about the form as a whole. */
+  field: string;
+  message: string;
+  /** On a refused Finish: the screen that asks this field. */
+  step?: string;
+}
+
+export type SetupCheckKind = 'model' | 'nextcloud' | 'email' | 'caldav' | 'address';
+export interface SetupCheckLine {
+  key: string;
+  ok: boolean;
+  warning: boolean;
+  message: string;
+}
+export interface SetupCheckResult {
+  ok: boolean;
+  /** Passed, with something the user should read. */
+  warning: boolean;
+  message: string;
+  /** The Nextcloud check's per-step results. */
+  lines?: SetupCheckLine[];
+}
+export interface SetupValidation {
+  ok: boolean;
+  fields: SetupFieldError[];
+}
+export interface SetupFinished {
+  login_url: string;
+  email: string;
+}
+
+const SETUP_UNREACHABLE = "Can't reach the setup service.";
+
+/**
+ * A refused or failed setup request. `status` 0 is no answer at all. `code` is
+ * the server's `error`; `fields` go under their inputs and `message` in the
+ * screen's banner.
+ */
+export class SetupApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly fields: SetupFieldError[];
+  readonly step: string | null;
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    fields: SetupFieldError[] = [],
+    step: string | null = null,
+  ) {
+    super(message);
+    this.name = 'SetupApiError';
+    this.status = status;
+    this.code = code;
+    this.fields = fields;
+    this.step = step;
+  }
+}
+
+function setupFieldErrors(raw: unknown): SetupFieldError[] {
+  if (!Array.isArray(raw)) return [];
+  const fields: SetupFieldError[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const { field, message, step } = item as Record<string, unknown>;
+    if (typeof field !== 'string' || typeof message !== 'string') continue;
+    fields.push(typeof step === 'string' ? { field, message, step } : { field, message });
+  }
+  return fields;
+}
+
+async function setupFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/api/setup${path}`, {
+      method,
+      credentials: 'same-origin',
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new SetupApiError(0, 'unreachable', SETUP_UNREACHABLE);
+  }
+  let payload: unknown = null;
+  try {
+    payload = await resp.json();
+  } catch {
+    payload = null;
+  }
+  if (!resp.ok || payload === null) {
+    const raw = (payload ?? {}) as Record<string, unknown>;
+    const message =
+      typeof raw.message === 'string' && raw.message.trim()
+        ? raw.message
+        : `The setup service answered ${resp.status}.`;
+    throw new SetupApiError(
+      resp.status,
+      typeof raw.error === 'string' ? raw.error : 'failed',
+      message,
+      setupFieldErrors(raw.fields),
+      typeof raw.step === 'string' ? raw.step : null,
+    );
+  }
+  return payload as T;
+}
+
+export function getSetupState(): Promise<SetupState> {
+  return setupFetch('/state');
+}
+
+export async function unlockSetup(code: string): Promise<void> {
+  await setupFetch('/unlock', 'POST', { code });
+}
+
+export function getSetupDraft(): Promise<{ draft: SetupDraft }> {
+  return setupFetch('/draft');
+}
+
+export function putSetupDraft(patch: SetupDraftPatch): Promise<{ draft: SetupDraft }> {
+  return setupFetch('/draft', 'PUT', patch);
+}
+
+/** The saved draft's errors on one screen's fields. */
+export function validateSetupStep(step: string): Promise<SetupValidation> {
+  return setupFetch('/validate', 'POST', { step });
+}
+
+/** A live test of what the saved draft would write; it takes no body. */
+export function checkSetupConnection(kind: SetupCheckKind): Promise<SetupCheckResult> {
+  return setupFetch(`/check/${kind}`, 'POST');
+}
+
+export function finishSetup(): Promise<SetupFinished> {
+  return setupFetch('/finish', 'POST');
+}
