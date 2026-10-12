@@ -6992,11 +6992,15 @@ The following information has been remembered about this user:
 
     pins_section = ""
     if not skip_memory and "memory" not in (withheld_scopes or ()) and not _ambient_memory_off(config, task, conn):
+        import sqlite3
         from istota.workspace.pins import pins_prompt_block
 
-        with db.get_db_if_present(config.db_path, conn) as pins_conn:
-            if pins_conn is not None:
-                pins_section = pins_prompt_block(db.list_pins(pins_conn, task.user_id))
+        try:
+            with db.get_db_if_present(config.db_path, conn) as pins_conn:
+                if pins_conn is not None:
+                    pins_section = pins_prompt_block(db.list_pins(pins_conn, task.user_id))
+        except sqlite3.Error:
+            logger.warning("Could not load pinned files for task %s", task.id, exc_info=True)
 
     # Build knowledge facts section
     knowledge_facts_section = ""
