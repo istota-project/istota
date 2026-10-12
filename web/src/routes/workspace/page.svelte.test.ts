@@ -539,7 +539,7 @@ it('opens and pins a linked single file using its exact server path', async () =
     },
   });
   render(Workspace);
-  await fireEvent.click(await screen.findByRole('button', { name: 'report.txt', exact: true }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'report.txt' }));
   expect(openFile).toHaveBeenCalledWith(ref);
   await fireEvent.click(screen.getByRole('button', { name: 'Pin report.txt' }));
   expect(api.putWorkspacePin).toHaveBeenCalledWith(expect.objectContaining({ ref }));
