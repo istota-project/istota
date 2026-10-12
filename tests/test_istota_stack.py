@@ -971,6 +971,9 @@ class TestRootNeverReadsWhatUid10001Can:
         staging = self._staging(tmp_path)
         conf = "[nextcloud]\ntype = webdav\npass = obscured\n"
         (staging / "rclone.conf").write_text(conf)
+        chown = tmp_path / "bin" / "chown"
+        chown.write_text('#!/bin/bash\necho "chown $*" >> "$STUB_CALLS"\n')
+        chown.chmod(0o755)
 
         result = _source(fx, f'install_setup_staging "{staging}"')
 
@@ -979,6 +982,9 @@ class TestRootNeverReadsWhatUid10001Can:
         assert installed.read_text() == conf
         assert (installed.stat().st_mode & 0o777) == 0o600
         assert "RCLONE_REMOTE=nextcloud" in (fx.stack / "host.env").read_text()
+        # Handed back to the mount's user: provision.sh, which would also do
+        # it, does not run when a re-run kept the same bytes (#720).
+        assert f"chown 10001:10001 {installed}" in fx.calls.read_text().splitlines()
 
     def test_setup_without_a_staged_rclone_conf_leaves_the_existing_one(self, fx, tmp_path):
         staging = self._staging(tmp_path)
@@ -988,6 +994,17 @@ class TestRootNeverReadsWhatUid10001Can:
 
         assert result.returncode == 0, result.stderr
         assert (fx.stack / "rclone.conf").read_text() == "[mine]\n"
+
+    def test_new_staging_carries_the_installed_rclone_conf(self, fx):
+        """The wizard keeps an rclone.conf that says the same thing, so a
+        re-run leaves `provision.sh --digest` unchanged (#720); it can only
+        compare against the installed file if staging holds a copy."""
+        (fx.stack / "rclone.conf").write_text("[nextcloud]\npass = obscured\n")
+
+        result = _source(fx, 'new_staging; cat "${staging}/rclone.conf"; rm -rf "$staging"')
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "[nextcloud]\npass = obscured\n"
 
     def test_a_staged_rclone_conf_that_is_a_link_is_not_followed(self, fx, tmp_path):
         secret = tmp_path / "shadow"

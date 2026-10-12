@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from istota.lib import toml_write
-from istota.lib.rclone_conf import obscure as rclone_obscure
-from istota.lib.rclone_conf import render_webdav_remote
+from istota.lib.rclone_conf import webdav_remote_for
 
 logger = logging.getLogger("istota.setup")
 
@@ -2309,16 +2308,25 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
 def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out) -> None:
     """``rclone.conf`` for the VM's Nextcloud mount, staged for ``istota-stack``
     to install. The password is this run's answer, else the one a previous run
-    left in the secrets file, which the loop above kept."""
+    left in the secrets file, which the loop above kept.
+
+    ``istota-stack`` copies the installed file into the staging directory, and
+    one that already says the same thing is kept byte for byte: the obscured
+    password is salted, and ``provision.sh --digest`` hashes the file (#720)."""
     password = a.nextcloud_app_password or _read_secret_file(secrets_dir / "istota_nextcloud_app_password")
     if not password:
         out("  No Nextcloud app password, so no rclone.conf was written; the mount needs one.")
         return
+    path = vm_dir / "rclone.conf"
     try:
-        text = render_webdav_remote(RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, rclone_obscure(password))
+        existing = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        existing = None
+    try:
+        text = webdav_remote_for(existing, RCLONE_REMOTE, a.nextcloud_url, a.nextcloud_username, password)
     except ValueError as exc:
         raise SetupError(f"The Nextcloud answers cannot go into rclone.conf: {exc}.") from None
-    _write_private(vm_dir / "rclone.conf", text)
+    _write_private(path, text)
 
 
 def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out) -> None:
