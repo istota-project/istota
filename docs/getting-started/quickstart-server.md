@@ -57,7 +57,7 @@ The optional containers (`browser`, `whatsapp-baileys`, `signaling`) are Compose
 
 ## On a Mac
 
-`host/lima/istota.yaml` is a [Lima](https://lima-vm.io/) template for a VM dedicated to one install: Debian 13 under Apple's virtualization framework, with 4 CPUs, 6 GiB of memory and a 40 GiB disk. It mounts an istota checkout from the Mac read-only and runs `host/provision.sh` from it on first boot, so the VM is set up exactly as a server would be. Lima forwards the VM's port 8080 to the Mac's loopback, and the browser container's amd64 image runs under Rosetta. From a checkout of the repository on the Mac:
+`host/lima/istota.yaml` is a [Lima](https://lima-vm.io/) template for a VM dedicated to one install: Debian 13 under Apple's virtualization framework, with 4 CPUs, 6 GiB of memory and a 40 GiB disk. It mounts an istota checkout from the Mac read-only and runs `host/provision.sh` from it on first boot, so the VM is set up exactly as a server would be. Lima forwards the VM's port 8080 to the Mac's loopback, and the browser container builds natively for arm64. From a checkout of the repository on the Mac:
 
 ```bash
 limactl create --name istota --param ISTOTA_REPO="$PWD" host/lima/istota.yaml

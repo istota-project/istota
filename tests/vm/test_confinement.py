@@ -124,7 +124,7 @@ class TestTheDaemonCannotSeeTheMachine:
     def test_the_vm_mounts_no_mac_path_but_the_read_only_checkout(self, stack):
         mounts = {fields[0]: fields[1] for fields in (line.split() for line in stack.out(
             "findmnt -rn -t virtiofs,9p,fuse.sshfs -o TARGET,OPTIONS || true").splitlines())}
-        # Apple's Rosetta runtime, which Lima shares for the amd64 browser image;
+        # Apple's Rosetta runtime, which Lima shares for a forced amd64 image;
         # it holds the translator, not anything of the Mac user's.
         mounts.pop("/mnt/lima-rosetta", None)
         assert sorted(mounts) == [lima.REPO_MOUNT], f"row 7: Mac paths mounted in the VM: {mounts}"

@@ -101,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
+
 - **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.
 
 - **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images, runs the setup wizard and starts the stack. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
