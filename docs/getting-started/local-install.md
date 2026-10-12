@@ -193,7 +193,7 @@ The local VM's boundary protects your Mac from the VM, not the VM from your Mac.
 
 ## Developing on a checkout
 
-From a checkout of the repository, `host/mac/istota-stack create --repo "$PWD"` makes a VM that mounts the checkout read-only and provisions from it at every boot, and installs `update --unsigned latest` (or the `--tag` you give). Run from a checkout, the script does not refresh any installed copy. The `vm` test tier uses its own instance, `istota-vm-1`, so the two never meet; [testing](../development/testing.md) covers it.
+From a checkout of the repository, `host/mac/istota-stack create --repo "$PWD"` makes a VM that mounts the checkout read-only and provisions from it at every boot, and installs `update --unsigned latest` (or the `--tag` you give). Run from a checkout, the script does not refresh any installed copy. The `vm` test tier uses its own instance, `istota-vm-1`, so the two never meet; [testing](../development/testing.md) covers it. To try a whole deployment by hand next to an install you already run, see [a full deployment on a Mac](../development/setup.md#a-full-deployment-on-a-mac).
 
 ## Removing it
 
