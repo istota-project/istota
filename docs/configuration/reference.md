@@ -14,8 +14,7 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default. That file — and nothing else in the config directory — is bind-mounted read-only into the sandbox, since the CLI opens it there |
 | `db_path` | `"data/istota.db"` | SQLite database path |
 | `module_data_dir` | derived | Root for per-user module DBs; defaults to `{db_path.parent}/modules` |
-| `rclone_remote` | `"nextcloud"` | rclone remote name |
-| `workspace_path` | `nextcloud_mount_path` | On-disk root of the bot's file tree |
+| `workspace_path` | `nextcloud_mount_path` | On-disk root of the bot's file tree. Required when `[nextcloud] url` is set |
 | `nextcloud_mount_path` | not set | FUSE mountpoint, when the workspace is mounted |
 | `skills_dir` | `"config/skills"` | Operator skill overrides directory |
 | `disabled_skills` | `[]` | Instance-wide skills to exclude |

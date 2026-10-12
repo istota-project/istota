@@ -535,7 +535,7 @@ class TestBindRoots:
         # Copied, not degraded: a PNG stays a PNG.
         assert prep.images[0].media_type == "image/png"
 
-    def test_the_rclone_temp_dir_shape_is_copied_in(self, tmp_path, ocr_calls):
+    def test_a_file_loose_in_the_temp_dir_is_not_a_daemon_location(self, tmp_path, ocr_calls):
         temp = tmp_path / "temp"
         temp.mkdir()
         src = _png(temp / "shot.png")
@@ -545,7 +545,7 @@ class TestBindRoots:
             bind_roots=[tmp_path / "bound"], temp_dir=temp,
         )
 
-        assert prep.images[0].path.is_relative_to((tmp_path / "usertmp").resolve())
+        assert prep.images == []
 
     @pytest.mark.parametrize("subdir", ["whatsapp-media", "attachments_ab12cd"])
     def test_the_daemons_temp_fallback_copies_are_copied_in(

@@ -47,6 +47,7 @@ email_addresses = ["alice@example.test"]
 NEXTCLOUD_CONFIG = """\
 db_path = "{db}"
 temp_dir = "{tmp}"
+workspace_path = "{ws}"
 
 [nextcloud]
 url = "https://cloud.example.test"
@@ -242,6 +243,7 @@ class TestTheBoot:
 class TestTalkRooms:
     def test_a_configured_nextcloud_provisions_the_first_admins_rooms(self, tmp_path):
         volume = Volume(tmp_path, NEXTCLOUD_CONFIG)
+        volume.mount_table("fuse.rclone")
 
         assert volume.run().returncode == 0
 
@@ -249,6 +251,7 @@ class TestTalkRooms:
 
     def test_a_failed_provisioning_does_not_stop_the_daemon(self, tmp_path):
         volume = Volume(tmp_path, NEXTCLOUD_CONFIG, rooms_rc=1)
+        volume.mount_table("fuse.rclone")
 
         result = volume.run()
 

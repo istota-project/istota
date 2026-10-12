@@ -678,6 +678,7 @@ class TestConfigEnvVarOverrides:
     def _write_minimal_config(self, tmp_path):
         config_file = tmp_path / "config.toml"
         config_file.write_text(
+            'workspace_path = "/srv/workspace"\n'
             '[nextcloud]\nurl = "https://nc.example.com"\nusername = "istota"\n'
             'app_password = "toml-password"\n'
             '[email]\nimap_password = "toml-imap"\nsmtp_password = "toml-smtp"\n'

@@ -1105,62 +1105,36 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
 
     Talk attachments arrive as Nextcloud paths (e.g., "Talk/filename.jpg").
 
-    If using mount:
-        Returns mount paths directly (no download needed).
-    If using rclone:
-        Downloads to temp directory before Claude Code execution.
-
-    Returns list of local paths (or original paths as fallback on error).
+    Returns the workspace paths, falling back to the original path where a
+    file is not found or there is no workspace.
     """
     if not attachments:
         return []
 
     local_paths = []
     for att in attachments:
-        if att.startswith("Talk/"):
-            if config.has_workspace:
-                # Use mount path directly - no download needed
-                mount_path = config.workspace_path / att
-                if mount_path.exists():
-                    local_paths.append(str(mount_path))
-                    logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
-                else:
-                    # File may be in a user's Talk folder (NC stores shared files
-                    # in the sender's data dir). Check NC data dir if available.
-                    nc_data = attachment_source.NC_DATA_ROOT
-                    found = False
-                    if nc_data.is_dir():
-                        filename = att.split("/", 1)[1] if "/" in att else att
-                        for user_dir in nc_data.iterdir():
-                            candidate = user_dir / "files" / "Talk" / filename
-                            if candidate.exists():
-                                local_paths.append(str(candidate))
-                                logger.debug(f"Talk attachment via nc-data: {att} -> {candidate}")
-                                found = True
-                                break
-                    if not found:
-                        logger.warning(f"Talk attachment not found at mount path: {mount_path}")
-                        local_paths.append(att)  # Fall back to original path
+        if att.startswith("Talk/") and config.has_workspace:
+            # Use mount path directly - no download needed
+            mount_path = config.workspace_path / att
+            if mount_path.exists():
+                local_paths.append(str(mount_path))
+                logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
             else:
-                # Download via rclone to temp directory
-                config.temp_dir.mkdir(parents=True, exist_ok=True)
-                remote_path = f"{config.rclone_remote}:{att}"
-                result = subprocess.run(
-                    ["rclone", "copy", remote_path, str(config.temp_dir)],
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode == 0:
-                    # rclone copy preserves filename, so actual file is temp_dir/filename
-                    actual_path = config.temp_dir / Path(att).name
-                    if actual_path.exists():
-                        local_paths.append(str(actual_path))
-                        logger.debug(f"Downloaded Talk attachment: {att} -> {actual_path}")
-                    else:
-                        logger.warning(f"Downloaded file not found: {actual_path}")
-                        local_paths.append(att)  # Fall back to original path
-                else:
-                    logger.warning(f"Failed to download {att}: {result.stderr}")
+                # File may be in a user's Talk folder (NC stores shared files
+                # in the sender's data dir). Check NC data dir if available.
+                nc_data = attachment_source.NC_DATA_ROOT
+                found = False
+                if nc_data.is_dir():
+                    filename = att.split("/", 1)[1] if "/" in att else att
+                    for user_dir in nc_data.iterdir():
+                        candidate = user_dir / "files" / "Talk" / filename
+                        if candidate.exists():
+                            local_paths.append(str(candidate))
+                            logger.debug(f"Talk attachment via nc-data: {att} -> {candidate}")
+                            found = True
+                            break
+                if not found:
+                    logger.warning(f"Talk attachment not found at mount path: {mount_path}")
                     local_paths.append(att)  # Fall back to original path
         else:
             local_paths.append(att)

@@ -1501,9 +1501,9 @@ def cmd_user_init(args):
 
     print(f"Initializing directories for user '{user_id}'...")
     if config.has_workspace:
-        print(f"Mount: {config.workspace_path}")
+        print(f"Workspace: {config.workspace_path}")
     else:
-        print(f"Remote: {config.rclone_remote}")
+        print("Workspace: none configured")
     print(f"Base path: {get_user_base_path(user_id)}")
 
     success = ensure_user_directories_v2(config, user_id)
@@ -1529,9 +1529,9 @@ def cmd_user_status(args):
 
     print(f"User: {user_id}")
     if config.has_workspace:
-        print(f"Mount: {config.workspace_path}")
+        print(f"Workspace: {config.workspace_path}")
     else:
-        print(f"Remote: {config.rclone_remote}")
+        print("Workspace: none configured")
     print(f"Base path: {get_user_base_path(user_id)}")
     print()
 

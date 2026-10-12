@@ -640,8 +640,8 @@ def reindex_skill_overlays(
         read_overlay_bytes,
     )
 
-    # `has_workspace` before the join, not after: `workspace_path` is None on
-    # an rclone-remote deployment and `None / "Users/…"` is a TypeError. This
+    # `has_workspace` before the join, not after: `workspace_path` is None
+    # without a workspace and `None / "Users/…"` is a TypeError. This
     # was survivable while the only caller was a hand-run `memory_search
     # reindex`; it is now on a scheduler cadence, where the raise would be
     # swallowed by the caller's own `except Exception` and reported nowhere.

@@ -142,7 +142,7 @@ def _scripts_dir(config, user_id: str) -> str:
     scripts_nc_path = get_user_scripts_path(user_id, config.bot_dir_name)
     if config.has_workspace and config.workspace_path is not None:
         return str(config.workspace_path / scripts_nc_path.lstrip("/"))
-    return f"{config.rclone_remote}:{scripts_nc_path}"
+    return scripts_nc_path
 
 
 def _workspace_dir(config, user_id: str) -> str:
@@ -151,7 +151,7 @@ def _workspace_dir(config, user_id: str) -> str:
     base = get_user_base_path(user_id)
     if config.has_workspace and config.workspace_path is not None:
         return str(config.workspace_path / base.lstrip("/"))
-    return f"{config.rclone_remote}:{base}"
+    return base
 
 
 def _overlay_dir(config, user_id: str):

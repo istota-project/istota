@@ -157,7 +157,7 @@ def workspace_attachment_paths(
     if not attachments:
         return None
     root = config.workspace_root(user_id)
-    if root is None:  # rclone deployment — no local workspace to serve from
+    if root is None:
         return None
     real_root = os.path.normpath(str(root))
     out: list[str | None] = []

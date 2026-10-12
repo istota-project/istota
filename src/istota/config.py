@@ -2188,7 +2188,6 @@ class Config:
     # Config (tests) has none unless set.
     briefing_shared_blocks: list[BriefingSharedBlock] = field(default_factory=list)
     admin_users: set[str] = field(default_factory=set)  # users with full system access
-    rclone_remote: str = "nextcloud"  # rclone remote name
     workspace_path: Path | None = None  # On-disk root of the bot's file tree
     nextcloud_mount_path: Path | None = None  # FUSE mountpoint, when one exists
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
@@ -2241,8 +2240,8 @@ class Config:
         This selects storage vocabulary, not whether the workspace is mounted.
         Keyed on the presence of a Nextcloud URL — deliberately NOT
         ``is_standalone`` (which folds in web auth, an axis orthogonal to file
-        storage). A URL means the files are Nextcloud whether reached via mount
-        or rclone; no URL means a plain local folder.
+        storage). A URL means the files are Nextcloud, reached through the
+        workspace mount; no URL means a plain local folder.
         """
         return bool(self.nextcloud.url)
 
@@ -4660,6 +4659,7 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)
     _validate_advisor_model(config)
+    _validate_nextcloud_workspace(config)
     _validate_sms(config)
     _validate_whatsapp(config)
     _validate_forge_clis(config)
@@ -4805,6 +4805,20 @@ def sms_config_errors(config: Config) -> list[str]:
     :func:`sms_structural_config_errors`; see :func:`sms_credential_errors`.
     """
     return sms_structural_config_errors(config) + sms_credential_errors(config)
+
+
+def _validate_nextcloud_workspace(config: Config) -> None:
+    """A Nextcloud URL needs a workspace: the files are reached through it.
+
+    There used to be a third shape, a URL with no workspace, where each file
+    operation shelled out to the rclone CLI. Most of the daemon skipped itself
+    there and the image never shipped rclone, so it is refused rather than run.
+    """
+    if config.storage_is_nextcloud and config.workspace_path is None:
+        raise ValueError(
+            "[nextcloud] url is set but no workspace is configured: set "
+            "workspace_path to the mount of the bot's Nextcloud files"
+        )
 
 
 def _validate_sms(config: Config) -> None:

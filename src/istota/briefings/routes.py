@@ -735,8 +735,8 @@ def suggest_paths(
     Bounded, ``.md`` / ``.txt`` only, returned relative to the user's own
     folder (the form the user types). ``q`` filters server-side (a substring of
     the relative path), so a deep or late-in-walk file still surfaces as the
-    user types rather than being clipped by the bound. Empty under rclone (no
-    on-disk root) or a missing workspace.
+    user types rather than being clipped by the bound. Empty without a
+    workspace.
     """
     cfg = _app_config(request)
     root = cfg.workspace_root(user["username"]) if cfg is not None else None

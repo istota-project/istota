@@ -144,16 +144,6 @@ Default Talk rooms (general/logs/alerts) for a user: reuse by remembered token f
 - A run that observed nothing (`_is_orphan` treats an empty participant list as a failed read) carries the previous outcome forward, or one transient Talk error would erase a recorded failure for good. So `record_invite_failed` ("is an invite outstanding", persisted) differs from `invite_failed` ("did this run try and fail", read by the CLI warning and the Ansible `failed_when`).
 - `--adopt` records no failure, since it never contacts Talk.
 
-## lib/rclone_client.py
-
-The rclone API `storage.py` and `skills/files/__init__.py` each had a copy of: `rclone_run` plus the `mkdir` / `path_exists` / `cat` / `rcat` wrappers. `subprocess.run` raises on a missing binary, so a `FileNotFoundError` escaped every helper documented to return `None` or `False`, reachable wherever the no-mount fallback runs without rclone installed; the fix had to land on both sides, so the pair was merged. `setdefault` rather than fixed keywords, so a caller passing `text=False` gets its own value rather than "multiple values for keyword argument".
-
-- **A leaf rather than an import of `storage`** because `skills/files` runs in a skill subprocess and `storage` pulls in the package. `storage.py` keeps the private names as aliases so its callers and tests are unchanged.
-- **Only shared code lives here.** `rclone_list`, `rclone_move`, `rclone_download`, `rclone_upload` and `_rclone_run_or_raise` stay in the skill, which is their only caller.
-- **The pin is a source scan, not a mock.** `istota.storage.subprocess` and `istota.lib.rclone_client.subprocess` are the same module object, so patching `lib.rclone_client.subprocess.run` cannot tell a reintroduced local copy apart. `tests/test_rclone_client.py` patches `lib.rclone_client.rclone_run`, which a local copy never calls, and asserts neither converted module contains `subprocess.run(`.
-
-stdlib-only leaf: `subprocess` and `logging`.
-
 ## lib/sqlite_util.py
 
 One SQLite open, with each caller's pragma set as parameters, replacing many helpers that each issued a subset of the same four pragmas. Three entry points for three caller shapes: `open_db` (a context manager), `connect` (bare, for `money/cli._get_db_conn` and `money/routes._portfolio_conn`, which hand a live connection on, and `room_relocate`'s migration, which passes `create=False` so a wrong path raises rather than becoming an empty database), and `connect_read_only` (`doctor`, `storage.channel_memory_tokens`, `room_mount_reconcile` and `room_relocate`'s `--dry-run` / `--list`).

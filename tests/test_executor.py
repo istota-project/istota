@@ -96,15 +96,6 @@ def _skills_config(tmp_path, *, files_skill=True, mount=False, **kw):
     )
 
 
-@pytest.fixture
-def no_rclone(monkeypatch):
-    """A config with no workspace reaches storage's rclone branch; answer as a
-    host with no rclone rather than spawning one per directory."""
-    from istota.lib import rclone_client
-
-    monkeypatch.setattr(rclone_client, "rclone_run", lambda args, **kwargs: None)
-
-
 def _bare_config(tmp_path):
     db_path = tmp_path / "test.db"
     db.init_db(db_path)
@@ -1932,13 +1923,12 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         # copied and the prompt still names the file the user shared.
         assert seen["argv"][-1] == str(audio)
 
-    @pytest.mark.parametrize("shape", ["nc_data", "sibling_temp"])
     def test_an_attachment_outside_the_roots_is_staged_into_them(
-        self, tmp_path, monkeypatch, shape,
+        self, tmp_path, monkeypatch,
     ):
-        """The two shipped shapes the identity alone does not reach.
+        """The shipped shape the identity alone does not reach.
 
-        Both were transcribable before the path argument was scoped, and a
+        It was transcribable before the path argument was scoped, and a
         refusal here is logged at debug and swallowed — so without the
         staging step this regression would have been invisible in production
         and green in the suite.
@@ -1946,10 +1936,7 @@ class TestTheAudioTheChildIsActuallyHandedIsInReach:
         identity = self._identity(tmp_path)
         seen = self._spawn(monkeypatch)
         monkeypatch.setattr(attachment_source, "NC_DATA_ROOT", tmp_path / "nc-data")
-        if shape == "nc_data":
-            source = tmp_path / "nc-data" / "bob" / "files" / "Talk" / "memo.m4a"
-        else:
-            source = tmp_path / "temp" / "memo.m4a"
+        source = tmp_path / "nc-data" / "bob" / "files" / "Talk" / "memo.m4a"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(b"not really audio")
 
@@ -3768,7 +3755,6 @@ class TestAnUnusableControlDirectoryFailsTheTask:
         assert not mock_run.called
 
 
-@pytest.mark.usefixtures("no_rclone")
 class TestTheControlDirectoryIsGuardedOnEveryShape:
     """`execute_task`'s two guard entries, read from the request it built.
 
@@ -3898,7 +3884,6 @@ class TestTheControlDirectoryIsGuardedOnEveryShape:
         ), f"the result file {req.result_file} was denied: {denied}"
 
 
-@pytest.mark.usefixtures("no_rclone")
 class TestAnOptionalReadNeverCreatesTheDatabase:
     """ISSUE-570: prompt assembly with no database must not make one.
 

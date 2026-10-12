@@ -35,15 +35,12 @@ class TestStorageIdentity:
         nc_auth_local = Config(web=WebConfig(auth="nextcloud"))
         assert nc_auth_local.storage_backend == "local"
 
-    def test_backend_independent_of_mount_vs_rclone(self):
-        # A Nextcloud URL means Nextcloud whether via mount or rclone.
+    def test_a_nextcloud_url_is_the_nextcloud_backend(self):
         mounted = Config(
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
             workspace_path=Path("/srv/mount/nc"),
         )
-        rclone = Config(nextcloud=NextcloudConfig(url="https://cloud.example.com"))
         assert mounted.storage_backend == "nextcloud"
-        assert rclone.storage_backend == "nextcloud"
 
 
 class TestWorkspaceRoot:
@@ -55,8 +52,8 @@ class TestWorkspaceRoot:
         cfg = Config(workspace_path=Path("/srv/mount/nc"))
         assert cfg.workspace_root() == Path("/srv/mount/nc")
 
-    def test_none_under_rclone(self):
-        cfg = Config(nextcloud=NextcloudConfig(url="https://cloud.example.com"))
+    def test_none_without_a_workspace(self):
+        cfg = Config()
         assert cfg.workspace_path is None
         assert cfg.workspace_root("alice") is None
 
@@ -157,19 +154,6 @@ class TestPromptStorageFramingNextcloud:
         assert "managed area" not in prompt
 
 
-class TestPromptStorageFramingRclone:
-    def test_rclone_branch_still_nextcloud(self, tmp_path):
-        config = _base_config(
-            tmp_path,
-            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-        )
-        assert config.storage_backend == "nextcloud"
-        assert config.has_workspace is False
-        prompt = build_prompt(_task(), [], config).system
-        assert "rclone" in prompt
-        assert "Nextcloud" in prompt
-
-
 # ---------------------------------------------------------------------------
 # Stage 3: skill prose (placeholders + neutral vocabulary)
 # ---------------------------------------------------------------------------
@@ -215,7 +199,7 @@ class TestSkillPlaceholderSubstitution:
             skill_index=index, bundled_dir=_BUNDLED_SKILLS_DIR,
         )
         ws = config.workspace_root(user_id)
-        ws_str = str(ws) if ws is not None else f"{config.rclone_remote}:/Users/{user_id}"
+        ws_str = str(ws) if ws is not None else f"/Users/{user_id}"
         return (
             doc.replace("{workspace}", ws_str).replace("{storage}", config.storage_label)
         )
@@ -238,6 +222,7 @@ class TestSkillPlaceholderSubstitution:
         config = _base_config(tmp_path, workspace_path=tmp_path / "ws")
         assert _workspace_dir(config, "alice") == str(tmp_path / "ws" / "Users" / "alice")
 
-    def test_workspace_dir_helper_rclone(self, tmp_path):
-        config = _base_config(tmp_path, nextcloud=NextcloudConfig(url="https://c.example.com"))
-        assert _workspace_dir(config, "alice") == "nextcloud:/Users/alice"
+    def test_workspace_dir_helper_without_a_workspace(self, tmp_path):
+        config = _base_config(tmp_path)
+        assert config.workspace_path is None
+        assert _workspace_dir(config, "alice") == "/Users/alice"
