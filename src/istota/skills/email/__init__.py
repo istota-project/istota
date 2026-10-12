@@ -219,6 +219,19 @@ def _get_mailbox(config: EmailConfig) -> MailBox:
         return MailBoxStartTls(config.imap_host, port=config.imap_port, timeout=timeout)
 
 
+@contextmanager
+def imap_session(config: EmailConfig):
+    """A signed-in IMAP session, logged out on exit.
+
+    The one login: every reader here and the first-run setup's connection
+    check open their session through it, so a check that passes signed in the
+    way the poller will.
+    """
+    with _get_mailbox(config) as mailbox:
+        mailbox.login(config.imap_user, config.imap_password)
+        yield mailbox
+
+
 def _generate_message_id(domain: str) -> str:
     """Generate a unique Message-ID for an email."""
     unique_id = uuid.uuid4().hex
@@ -415,8 +428,7 @@ def list_emails(
 
     fetch_criteria = criteria if criteria is not None else "ALL"
 
-    with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+    with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
         uidvalidity = _folder_uidvalidity(mailbox, folder)
 
@@ -454,8 +466,7 @@ def read_email(
     if config is None:
         raise ValueError("config is required")
 
-    with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+    with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
 
         # Fetch specific email by UID
@@ -529,8 +540,7 @@ def fetch_emails_full(
         raise ValueError("config is required")
 
     fetch_criteria = criteria if criteria is not None else "ALL"
-    with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+    with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
         return [
             _msg_to_email(msg)
@@ -588,8 +598,7 @@ def download_attachments(
 
     downloaded = []
     written = 0
-    with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+    with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
 
         for msg in mailbox.fetch(AND(uid=email_id), mark_seen=False):
@@ -873,8 +882,7 @@ def mark_email(
     if action not in flag_map:
         raise ValueError(f"invalid mark action '{action}' (read|unread|flagged)")
     flag, value = flag_map[action]
-    with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+    with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
         mailbox.flag(email_id, flag, value)
     return True
@@ -980,19 +988,21 @@ def _close_smtp_after_delivery(server) -> None:
             pass
 
 
-def _open_smtp(config: EmailConfig):
+def _open_smtp(config: EmailConfig, *, timeout: float = _SMTP_TIMEOUT_SECONDS):
     """A logged-out but connected SMTP session, TLS already established."""
     # Port 587 typically uses STARTTLS, port 465 uses implicit TLS
     if config.smtp_port == 465:
         context = ssl.create_default_context()
         return smtplib.SMTP_SSL(
             config.smtp_host, config.smtp_port, context=context,
-            timeout=_SMTP_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
-    server = smtplib.SMTP(
-        config.smtp_host, config.smtp_port, timeout=_SMTP_TIMEOUT_SECONDS,
-    )
-    server.starttls()
+    server = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=timeout)
+    try:
+        server.starttls()
+    except BaseException:
+        server.close()
+        raise
     return server
 
 
@@ -1036,8 +1046,7 @@ def _send_smtp(
 def _save_to_sent(msg: EmailMessage, config: EmailConfig) -> None:
     """Save a sent email to the Sent Items folder via IMAP."""
     try:
-        with _get_mailbox(config) as mailbox:
-            mailbox.login(config.imap_user, config.imap_password)
+        with imap_session(config) as mailbox:
             # Append the message to Sent Items folder
             mailbox.append(msg.as_bytes(), "Sent Items", dt=None, flag_set=["\\Seen"])
     except Exception:
@@ -1067,8 +1076,7 @@ def search_emails(
     if not criteria:
         raise ValueError("search query is required")
 
-    with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+    with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
 
         envelopes = []
@@ -1240,8 +1248,7 @@ def delete_email(
         raise ValueError("config is required")
 
     try:
-        with _get_mailbox(config) as mailbox:
-            mailbox.login(config.imap_user, config.imap_password)
+        with imap_session(config) as mailbox:
             mailbox.folder.set(folder)
             _delete_uid_batch(
                 mailbox, [str(email_id)],
@@ -1424,8 +1431,7 @@ def delete_emails_before(
 
     _require_imap_tools()
     deleted = 0
-    with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+    with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
 
         uids = list(mailbox.uids(AND(date_lt=before)))

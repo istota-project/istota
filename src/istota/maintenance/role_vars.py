@@ -33,8 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shutil
-import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -44,6 +42,8 @@ from typing import Callable
 import yaml
 
 from istota import apply as apply_module
+from istota.lib.rclone_conf import obscure as rclone_obscure
+from istota.lib.rclone_conf import render_webdav_remote
 from istota.maintenance.bare_metal_import import Refusal, parse_env_file
 
 EXIT_OK = 0
@@ -193,14 +193,7 @@ def _rclone_conf(old: dict, config: dict, remote: str, obscure: Callable[[str], 
     if not (url and username and password):
         notes.append("istota_rclone_conf: not written; pass --rclone-conf with the VM's file")
         return ""
-    return (
-        f"[{remote}]\n"
-        "type = webdav\n"
-        f"url = {url}/remote.php/dav/files/{username}/\n"
-        "vendor = nextcloud\n"
-        f"user = {username}\n"
-        f"pass = {password}\n"
-    )
+    return render_webdav_remote(remote, url, username, password)
 
 
 def _user(entry: dict, mode: str, user: str, notes: list[str]) -> dict:
@@ -305,18 +298,6 @@ def _host_vars(host_env: dict[str, str], stack_env: dict[str, str], notes: list[
     return out
 
 
-def default_obscure(value: str) -> str:
-    """`rclone obscure`, with the value on stdin rather than argv."""
-    if shutil.which("rclone") is None:
-        raise Refusal("istota_rclone_password_obscured is empty and rclone is not on PATH to obscure it")
-    done = subprocess.run(
-        ["rclone", "obscure", "-"], input=value, capture_output=True, text=True, check=False,
-    )
-    if done.returncode != 0:
-        raise Refusal("rclone obscure failed")
-    return done.stdout.strip()
-
-
 def convert(
     old: dict,
     *,
@@ -324,7 +305,7 @@ def convert(
     host_env: dict[str, str] | None = None,
     stack_env: dict[str, str] | None = None,
     rclone_conf: str | None = None,
-    obscure: Callable[[str], str] = default_obscure,
+    obscure: Callable[[str], str] = rclone_obscure,
 ) -> Conversion:
     """The management role's variables from the old role's. Pure but for `obscure`."""
     notes: list[str] = []

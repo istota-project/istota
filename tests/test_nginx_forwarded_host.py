@@ -98,7 +98,7 @@ class TestTheDirectoryRedirectCarriesNoAuthority:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from istota.webui.app import _CacheHeaderStatics
+        from istota.webui.static_dir import cache_header_statics
 
         root = tmp_path / "build"
         (root / "chat").mkdir(parents=True)
@@ -106,7 +106,7 @@ class TestTheDirectoryRedirectCarriesNoAuthority:
         (root / "index.html").write_text("<html>shell</html>")
 
         app = FastAPI()
-        app.mount("/istota", _CacheHeaderStatics(directory=str(root), html=True))
+        app.mount("/istota", cache_header_statics(root))
         return TestClient(app)
 
     @pytest.mark.parametrize("host", ["localhost:8282", "localhost", "istota.example"])
@@ -143,17 +143,17 @@ class TestRelativeLocation:
     """The rewrite itself, including the two cases it declines."""
 
     def test_an_absolute_url_loses_its_authority(self):
-        from istota.webui.app import _relative_location
+        from istota.webui.static_dir import relative_location as _relative_location
 
         assert _relative_location("http://h:8282/istota/chat/") == "/istota/chat/"
 
     def test_query_and_fragment_survive(self):
-        from istota.webui.app import _relative_location
+        from istota.webui.static_dir import relative_location as _relative_location
 
         assert _relative_location("https://h/p?a=1#f") == "/p?a=1#f"
 
     def test_an_already_relative_location_is_declined(self):
-        from istota.webui.app import _relative_location
+        from istota.webui.static_dir import relative_location as _relative_location
 
         assert _relative_location("/istota/chat/") is None
 
@@ -161,6 +161,6 @@ class TestRelativeLocation:
         """`//evil.example/` is a *reference to another host*, not a path. Its
         first segment would be read as an authority, so a request under a
         doubled slash must keep the absolute form it already had."""
-        from istota.webui.app import _relative_location
+        from istota.webui.static_dir import relative_location as _relative_location
 
         assert _relative_location("http://h//evil.example/x/") is None

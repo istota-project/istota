@@ -24,7 +24,7 @@ from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places
 from istota.workspace.reach import deployment_notes, place_reach
 from istota.workspace import config_files, text_files
-from istota.workspace.writes import make_folder, write_new_file
+from istota.workspace.writes import delete_entry, make_folder, write_new_file
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -334,6 +334,25 @@ async def api_workspace_config_file_save(
     if outcome.status == "too_large":
         payload["max_bytes"] = file.max_bytes
     return JSONResponse(payload, status_code=status)
+@router.delete("/files")
+async def api_workspace_delete(
+    request: Request, place: str, path: str, name: str,
+    user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    parts = [part for part in path.split("/") if part]
+
+    def write():
+        root = _home_root(config, user["username"], place)
+        delete_entry(root, parts, name)
+        return {"status": "ok"}
+
+    try:
+        return await asyncio.to_thread(write)
+    except (ListingError, OSError) as exc:
+        return _filesystem_error(config, exc, "home", write=True)
 
 
 @router.get("/drive/list")

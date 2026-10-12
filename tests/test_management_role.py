@@ -184,6 +184,11 @@ def _role_vars(mode: dict) -> dict:
             "nextcloud" if mode.get("nextcloud_url") and mode.get("workspace", "mount") == "mount"
             else "local"
         ),
+        istota_rclone_remote=(
+            setup_wizard.RCLONE_REMOTE
+            if mode.get("nextcloud_url") and mode.get("workspace", "mount") == "mount"
+            else ""
+        ),
         istota_compose_profiles=list(mode.get("profiles", ())),
     )
     for answer, var in (("tls_cert_source", "istota_tls_cert_source"),

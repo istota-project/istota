@@ -152,6 +152,9 @@ src/istota/
 │   ├── auth.py           # Native email identities, scrypt passwords, one-use links and session epochs
 │   ├── webhook_receiver.py  # FastAPI: Overland GPS, etc.
 │   ├── garmin_routes.py  # Module-agnostic Garmin auth router (/api/garmin/*), shared by Health + Location
+│   ├── setup_app.py      # The first-run setup server (`istota setup --web`): runs with no config, one-use setup code, in-memory draft → install.md
+│   ├── setup_checks.py   # Its connection checks (model, Nextcloud, email, calendar, address) against the config setup would write, plain messages only → install.md
+│   ├── request_guards.py # The origin check and the bounded body reader, shared by `app.py` and `setup_app.py`
 │   ├── shutdown.py       # Whether the web process is stopping, where the three SSE generators can see it → leaf-modules.md
 │   ├── router_stubs.py   # The auth/CSRF stubs and the user-context factory every module router shares → leaf-modules.md
 │   ├── map_basemap.py    # Where the map's background tiles come from → leaf-modules.md
@@ -188,6 +191,7 @@ src/istota/
 │   ├── untrusted.py      # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 │   ├── toml_fence.py     # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
 │   ├── toml_write.py     # The tree's one TOML writer: the wizard, `istota apply` and the testbed → leaf-modules.md
+│   ├── rclone_conf.py    # The VM's rclone remote for a Nextcloud account, and rclone's `obscure` without rclone → leaf-modules.md
 │   ├── llm_json.py       # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md

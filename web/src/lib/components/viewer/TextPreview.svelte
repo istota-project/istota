@@ -79,10 +79,20 @@
     min-height: 0;
     overflow: auto;
   }
+  .fill .markdown {
+    padding: var(--space-2) var(--space-3);
+  }
+  .fill .view-controls {
+    margin-bottom: 0;
+    padding: var(--space-2) var(--space-3);
+  }
   .fill :global(textarea) {
     flex: 1;
     min-height: 0;
     resize: none;
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-radius: 0;
   }
   .view-controls {
     flex-shrink: 0;

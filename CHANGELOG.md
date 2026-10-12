@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `istota setup` asks where the workspace lives when you connect a Nextcloud: `mount`, the bot's Nextcloud files through the VM's rclone mount, or `local`, a directory on the VM shown in the web UI. Talk and the `nextcloud` skill work with both. `local` writes `STORAGE=local`, so `provision.sh` installs no rclone and no mount unit. A scripted run takes `--workspace mount|local`, and defaults to `mount` when it is given `--nextcloud-url`, so existing scripts get what they got before.
 
 - On an install with Nextcloud whose workspace is not the Nextcloud mount, a file posted in Talk is fetched into the room's folder, `Channels/<room>/media/<message id>/`, once per message, and removed after `[talk] attachment_retention_days` (default 30). Files over `[talk] attachment_max_mb` (default 50) are skipped. `nextcloud talk share-file` uploads a copy of the workspace file into the bot's `Talk/` folder before posting it, and the `files` verbs, `share create` and `share link` refuse there because the file is not in Nextcloud.
+- Workspace has file-type icons, saved sorting by name, size or date, a folders-first option, filename filtering and refresh. Select visible files with row checkboxes or select all, then confirm deletion of files and empty folders under My files. Share markers stay beside filenames and use icons on narrow screens.
+
+- **Istota can be set up in the browser.** `istota-stack setup --web` prints an address with a one-use setup code and runs a page of short screens: your name and email, a password, an Anthropic or OpenRouter API key or a Claude subscription, the web address, and optionally Nextcloud, email and a calendar, each of which can be tested before you save it. When you finish it writes the configuration, builds what your answers need, starts the stack and sends you to the sign-in page with your email filled in. A new cloud VM started from `host/cloud-init.yaml` opens it on its own and shows the address on the provider's console; `istota-stack setup-code` prints it again, and the terminal wizard is still there with `istota-stack setup`.
 
 - Pin workspace files, folders and Drive items to keep them close in Workspace. Their references reach your private conversations so Istota knows which files matter, and unavailable pins stay visible until you remove them.
 
@@ -126,12 +129,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **What Istota says about the workspace is accurate on a local one.** The prompt shows every user, admins included, their own `Users/<id>` folder, and says the bot can reach the rest of the machine only on an install with no sandbox. `examples/README.md`, the email attachment line, `!export`, `!memory`, the Talk and web chat guidelines and the `files` and `nextcloud` skills stop saying a file is in Nextcloud when it is not. `istota doctor` adds `backups.off_volume`, which warns when the database snapshots are on the same volume as the database or a local workspace (back up `istota_data` itself, or point `[scheduler] db_backup_dir` at another disk), and `runtime.workspace_disk`, which warns under 10% or 2 GiB free and fails under 2%. Backups keep running in both cases.
+- **Setup now writes the Nextcloud mount's configuration.** Choosing Nextcloud in either setup writes the rclone config and the remote's name for the file mount, so the stack starts without a hand-written file; a `setup --force` re-run replaces an `rclone.conf` written by hand with one for the remote named `nextcloud`. The browser container is now offered as on by default; a scripted `--yes` setup still leaves it off unless you ask for it.
 
 - **The browser container runs natively on arm64.** It used to be an amd64 image only, so on an Apple silicon Mac or an arm64 server it ran under emulation. It now installs Google Chrome for the host's architecture; `BROWSER_PLATFORM=linux/amd64` still forces the amd64 image.
 
 - **The web header's menu is back at desktop widths.** It showed at every width from v0.38.0 through an accident of CSS specificity until a recent release hid it above 800px. It now shows at every width on purpose, beside the inline links; below 800px the inline links and user name still collapse into it.
 
-- **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images, runs the setup wizard and starts the stack. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
+- **`install.sh --server` sets up a dedicated server from a signed release.** Given a release tag and the release signing key, it checks the tag's signature, provisions the machine, builds the images and starts the setup in the browser, with or without a terminal, printing the address, the one-use setup code and the certificate fingerprint as a `host/cloud-init.yaml` bootstrap does. `--terminal-setup` runs the setup wizard in the terminal instead. An option the server install does not know is refused. The `--bare` and `--docker` options are gone and say what to run instead; `--standalone` is unchanged.
 
 - **The standalone single-user install is deprecated.** Istota has one deployment, the Docker stack on a machine of its own, and the documentation now describes only that, with a Lima VM for running it on a Mac. Existing standalone installs keep working and updating until a Mac desktop app replaces them; `istota serve` stays as the development loop on a Mac checkout.
 
@@ -220,6 +224,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- File previews now place their scrollbar at the viewer’s right edge instead of over the document. Text and PDF content keep their padding inside the scrolling area.
+
+- Running `istota-stack setup --force` again with the same Nextcloud answers no longer reprovisions the VM. Setup re-encoded the app password into `rclone.conf` on every run, so the file changed each time even though nothing about the mount had. It now keeps the existing file when it already holds the same address, user and password.
+
+- Repeated stack updates no longer leave unused build cache and untagged build images to fill the VM disk. Updates reclaim these artifacts before building and after successful or failed attempts, while keeping the current and previous deployment images for rollback.
+
+- User IDs now match regardless of case in Talk, Nextcloud sign-in, email plus-addresses and task submission, while keeping their original spelling. Creating an ID that differs only by case from an existing user is refused, so the two cannot share files on a case-insensitive filesystem.
 
 - **The browser's watchdog and health-check thresholds can be set on the stack again.** `BROWSE_WATCHDOG_DEADLINE_S`, `BROWSE_WATCHDOG_POLL_S`, `BROWSER_CDP_FAILURE_THRESHOLD`, `BROWSER_CDP_FAILURE_WINDOW_S`, `BROWSER_WEDGE_RECOVERY_THRESHOLD` and `BROWSER_WEDGE_RECOVERY_WINDOW_S` were read by the browser image but set only by the retired bare-metal role, so the stack had no way to change them. The compose file now passes them through from the stack's `.env` with the same defaults, and the Docker deployment guide lists them.
 
@@ -337,6 +349,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ledger writes, workspace file copies and old-layout memory migrations no longer fail with an input/output error on a Nextcloud workspace mount that rejects extended-attribute calls (#694). The containerized stack's mount answers those calls with an error for every file, and each of these copies asked for the file's extended attributes, so a ledger backup failed before the write it protects. They now copy the contents and permissions only, and `istota doctor` warns when the mount behaves this way, since `cp -a` and `cp -p` out of the workspace still fail there.
 
 ### Security
+
+- **A model provider's error message no longer carries your API key into the logs.** When a provider quoted the key back in an error, that text reached the log and the error shown to you; the key is now removed first.
 
 - **The container's AppArmor profile no longer lets a root shell in the container re-expose kernel settings by bind-mounting them.** It now refuses bind and move mounts out of `/proc` and `/sys` and any new `sysfs` mount, which the task sandbox never needs. Reload the profile on the host after updating (`istota-stack update` does it).
 

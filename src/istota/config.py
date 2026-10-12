@@ -1,5 +1,6 @@
 """Configuration loading for istota."""
 
+import copy
 import logging
 import math
 import os
@@ -2342,9 +2343,16 @@ class Config:
         """
         return self.module_db_root() / user_id / f"{module}.db"
 
+    def resolve_user_id(self, user_id: str) -> str | None:
+        """Resolve to stored spelling, including users added since config load."""
+        from .lib.user_ids import user_id_index
+
+        # Callers may replace or mutate users; a cached index would go stale.
+        return user_id_index(self.users).get(user_id.casefold())
+
     def get_user(self, nc_username: str) -> UserConfig | None:
         """Get user config by Nextcloud username. Returns None if user not configured."""
-        return self.users.get(nc_username)
+        return self.users.get(self.resolve_user_id(nc_username))
 
     def find_user_by_email(self, email_address: str) -> str | None:
         """Find user_id by email address. Returns None if not found."""
@@ -2753,7 +2761,11 @@ class Config:
         """
         if not self.admin_users:
             return True
-        return user_id in self.admin_users
+        return self.is_named_admin(user_id)
+
+    def is_named_admin(self, user_id: str) -> bool:
+        """Explicit admin membership; an empty list grants nothing."""
+        return user_id.casefold() in {admin.casefold() for admin in self.admin_users}
 
     def is_shared_kv_writer(self, user_id: str) -> bool:
         """Authoritative gate for shared_kv writes. Fail-closed.
@@ -2802,10 +2814,10 @@ class Config:
             not self.admin_users
             and len(self.users) <= 1
             and self.is_standalone
-            and user_id == self.local_user_id
+            and user_id.casefold() == self.local_user_id.casefold()
         ):
             return True
-        return bool(self.admin_users) and user_id in self.admin_users
+        return self.is_named_admin(user_id)
 
 
 def load_admin_users(path: str | None = None) -> set[str]:
@@ -4215,6 +4227,66 @@ _CONFIG_HOOKS: dict[str, Hook] = {
 }
 
 
+def _map_document(data: dict, config: Config) -> list[str]:
+    """The mechanical half of the load, into ``config``; the unknown keys.
+
+    Every field whose TOML key is its own name and whose only requirement is
+    its declared type. See `istota.config_mapper` for why this is a walk over
+    the dataclasses rather than a line per key -- three classes of defect came
+    out of the second copy of the schema this replaces. Sections carrying real
+    judgement are named in `_HANDWRITTEN` and parsed by hand in `load_config`;
+    the walk neither maps nor reports those.
+    """
+    # Before the walk, not after: this rewrites a pre-adapter `[whatsapp]` into
+    # the nested shape the dataclasses now declare, so what the walk sees is an
+    # ordinary section and the unknown-key report stays honest about it.
+    normalize_legacy_document(data)
+
+    unknown: list[str] = []
+    apply_section(
+        config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
+        skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
+    )
+    _migrate_workspace_fields(data, config)
+    if config.workspace_path is None:
+        config.workspace_path = config.nextcloud_mount_path
+    _apply_renamed_keys(data, config)
+    # After the walk, so a `[brain.claude_code] model` in the same file wins
+    # over the top-level key it replaces, and before anything reads a brain
+    # block: `_validate_alias_overrides` in `load_config` resolves names
+    # through the brain.
+    _apply_legacy_brain_defaults(data, config)
+    return unknown
+
+
+def config_from_document(data: dict) -> Config:
+    """A ``Config`` from a TOML document, through the mapping `load_config` uses.
+
+    Only that mapping: no file, no environment overrides, no admins file, no
+    database overlays and no process-wide side effects (the alias table). For
+    a caller that has to act on exactly what a document says before it is
+    written, as the first-run setup's connection checks do; an exported
+    `ISTOTA_BRAIN_NATIVE_API_KEY` must not stand in for the key being tested.
+    """
+    config = Config()
+    # The mapping rewrites legacy sections in place; the caller's document is
+    # still the one it means to write.
+    data = copy.deepcopy(data)
+    _map_document(data, config)
+    _map_users(data, config)
+    return config
+
+
+def _map_users(data: dict, config: Config) -> None:
+    """The `[users.<id>]` blocks, which the walk leaves to `_parse_user_data`."""
+    from .lib.user_ids import user_id_index
+
+    users = data.get("users") or {}
+    user_id_index(users)
+    for user_id, user_data in users.items():
+        config.users[user_id] = _parse_user_data(user_data, user_id)
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from TOML file."""
     if config_path is None:
@@ -4255,38 +4327,10 @@ def load_config(config_path: Path | None = None) -> Config:
 
     config = Config()
     config.config_path = config_path
-
-    # The mechanical half of the load: every field whose TOML key is its own
-    # name and whose only requirement is its declared type. See
-    # `istota.config_mapper` for why this is a walk over the dataclasses rather
-    # than a line per key -- three classes of defect came out of the second copy
-    # of the schema this replaces.
-    #
-    # Sections carrying real judgement are named in `_HANDWRITTEN` and parsed by
-    # hand below; the walk neither maps nor reports those.
-    # Before the walk, not after: this rewrites a pre-adapter `[whatsapp]` into
-    # the nested shape the dataclasses now declare, so what the walk sees is an
-    # ordinary section and the unknown-key report stays honest about it.
-    normalize_legacy_document(data)
-
-    unknown: list[str] = []
-    apply_section(
-        config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
-        skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
-    )
-    _migrate_workspace_fields(data, config)
-    if config.workspace_path is None:
-        config.workspace_path = config.nextcloud_mount_path
-    _apply_renamed_keys(data, config)
-    # After the walk, so a `[brain.claude_code] model` in the same file wins
-    # over the top-level key it replaces, and before anything reads a brain
-    # block: `_validate_alias_overrides` below resolves names through the brain.
-    _apply_legacy_brain_defaults(data, config)
+    unknown = _map_document(data, config)
     report_unknown(unknown, config_path)
 
-    if "users" in data:
-        for nc_username, user_data in data["users"].items():
-            config.users[nc_username] = _parse_user_data(user_data, nc_username)
+    _map_users(data, config)
 
     if "email" in data:
         # The one genuinely cross-field parse in the file, and the reason it
@@ -4679,6 +4723,8 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_forge_clis(config)
     _validate_forge_urls(config)
 
+    from .lib.user_ids import user_id_index
+    user_id_index(config.users)
     return config
 
 
@@ -5783,6 +5829,9 @@ def _merge_profile_rows(config: "Config", rows: dict) -> None:
     from . import user_profiles as _up  # avoid import cycles at module load
 
     current = config.users
+    from .lib.user_ids import user_id_index
+    # Validate the whole snapshot before changing any existing profile.
+    user_id_index([*current, *rows])
     added: dict[str, UserConfig] = {}
     for user_id, profile in rows.items():
         existing = current.get(user_id)

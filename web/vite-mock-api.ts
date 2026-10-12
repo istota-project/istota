@@ -4661,6 +4661,205 @@ const searchHandler: MockHandler = ({ url }) => {
   };
 };
 
+// First-run setup (`webui/setup_app.py`). One session for the life of the dev
+// server, like the real one: any code unlocks once, a second unlock is the
+// real 403, and a restart starts over. `VITE_MOCK_SETUP_PHASE=configured`
+// answers as the normal web app does once a config exists.
+const MOCK_SETUP_CREDENTIALS = new Set([
+  'nextcloud_app_password',
+  'native_api_key',
+  'claude_code_oauth_token',
+  'imap_password',
+  'caldav_password',
+  'password',
+]);
+const mockSetup = {
+  unlocked: false,
+  finished: false,
+  draft: {} as Record<string, unknown>,
+};
+
+function mockSetupDraft() {
+  const shown: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(mockSetup.draft)) {
+    shown[key] = MOCK_SETUP_CREDENTIALS.has(key) ? { set: Boolean(value) } : value;
+  }
+  return { draft: shown };
+}
+
+function mockSetupErrors(step: string): { field: string; message: string }[] {
+  const d = mockSetup.draft;
+  const errors: { field: string; message: string }[] = [];
+  const text = (key: string) => (typeof d[key] === 'string' ? (d[key] as string).trim() : '');
+  if (step === 'welcome' || step === 'review') {
+    if (!text('display_name')) errors.push({ field: 'display_name', message: 'Enter your name.' });
+    if (!text('user_email').includes('@'))
+      errors.push({ field: 'user_email', message: "That doesn't look like an email address." });
+  }
+  if (
+    (step === 'address' || step === 'review') &&
+    (d.ingress === 'direct' || d.ingress === 'proxied') &&
+    ['', 'localhost', 'localhost:8080'].includes(text('hostname'))
+  )
+    errors.push({
+      field: 'hostname',
+      message: 'Enter the web address people will use, like istota.example.com.',
+    });
+  if ((step === 'nextcloud' || step === 'review') && d.storage === 'nextcloud') {
+    if (!text('nextcloud_url'))
+      errors.push({ field: 'nextcloud_url', message: "Enter your Nextcloud's address." });
+    if (!text('user_id'))
+      errors.push({ field: 'user_id', message: 'Enter your own Nextcloud username.' });
+  }
+  if ((step === 'account' || step === 'review') && text('password').length < 12)
+    errors.push({ field: 'password', message: 'Use at least 12 characters.' });
+  if (
+    (step === 'model' || step === 'review') &&
+    d.brain_kind !== 'claude_code' &&
+    !d.native_api_key
+  )
+    errors.push({ field: 'native_api_key', message: 'Enter an API key.' });
+  if (
+    (step === 'model' || step === 'review') &&
+    d.brain_kind === 'claude_code' &&
+    !d.claude_code_oauth_token
+  )
+    errors.push({
+      field: 'claude_code_oauth_token',
+      message: 'Paste the token that `claude setup-token` printed.',
+    });
+  return errors;
+}
+
+const setupHandler: MockHandler = ({ url, method, body }) => {
+  if (!url.startsWith('/istota/api/setup/')) return undefined;
+  const route = url.slice('/istota/api/setup'.length).split('?')[0];
+  if (route === '/state') {
+    if (process.env.VITE_MOCK_SETUP_PHASE === 'configured') return { phase: 'configured' };
+    return {
+      phase: mockSetup.finished ? 'finishing' : mockSetup.unlocked ? 'open' : 'locked',
+      local: true,
+      host: 'localhost:5173',
+      modules_available: [
+        { field: 'feeds_enabled', module: 'feeds' },
+        { field: 'money_enabled', module: 'money' },
+        { field: 'health_enabled', module: 'health' },
+        { field: 'briefings_enabled', module: 'briefings' },
+      ],
+      memory_total_mib: 3900,
+      defaults: {
+        bot_name: 'Istota',
+        storage: 'local',
+        profiles: ['browser'],
+        models: {
+          anthropic: { base_url: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-6' },
+          openrouter: {
+            base_url: 'https://openrouter.ai/api/v1',
+            model: 'anthropic/claude-sonnet-4.6',
+          },
+        },
+      },
+    };
+  }
+  if (route === '/unlock' && method === 'POST') {
+    if (!body?.code || !String(body.code).trim())
+      return { __status: 400, error: 'bad_body', message: 'Enter your setup code.' };
+    if (mockSetup.unlocked)
+      return {
+        __status: 403,
+        error: 'forbidden',
+        message:
+          'That setup code is not valid, or it has already been used. Run `sudo istota-stack setup --web` again for a new one.',
+      };
+    mockSetup.unlocked = true;
+    return { ok: true };
+  }
+  if (!mockSetup.unlocked)
+    return {
+      __status: 401,
+      error: 'no_session',
+      message: 'Setup is locked. Enter your setup code to continue.',
+    };
+  if (route === '/draft' && method === 'GET') return mockSetupDraft();
+  if (route === '/draft' && method === 'PUT') {
+    for (const [key, value] of Object.entries((body ?? {}) as Record<string, unknown>)) {
+      if (value === null) {
+        if (!MOCK_SETUP_CREDENTIALS.has(key)) delete mockSetup.draft[key];
+      } else {
+        mockSetup.draft[key] = value;
+      }
+    }
+    return mockSetupDraft();
+  }
+  if (route === '/models' && method === 'GET')
+    return {
+      models: [
+        'anthropic/claude-haiku-4.5',
+        'anthropic/claude-opus-4.8',
+        'anthropic/claude-sonnet-4.6',
+        'google/gemini-2.5-pro',
+        'openai/gpt-5',
+      ],
+    };
+  if (route === '/validate' && method === 'POST') {
+    const fields = mockSetupErrors(String(body?.step ?? ''));
+    return { ok: fields.length === 0, fields };
+  }
+  const check = route.match(/^\/check\/([a-z]+)$/);
+  if (check && method === 'POST') {
+    if (check[1] === 'nextcloud')
+      return {
+        ok: true,
+        warning: true,
+        message: 'Signed in, with one thing to look at.',
+        lines: [
+          {
+            key: 'server',
+            ok: true,
+            warning: false,
+            message: 'Found a Nextcloud at this address.',
+          },
+          { key: 'signin', ok: true, warning: false, message: 'Signed in as istota.' },
+          {
+            key: 'admin',
+            ok: true,
+            warning: true,
+            message:
+              'This account is an administrator. Istota works better with an ordinary account (step 1).',
+          },
+          { key: 'files', ok: true, warning: false, message: 'The account’s files are reachable.' },
+          { key: 'talk', ok: true, warning: false, message: 'Talk is installed.' },
+          { key: 'user', ok: true, warning: false, message: 'Found your Nextcloud account.' },
+        ],
+        talk_available: true,
+      };
+    if (check[1] === 'address')
+      return {
+        ok: false,
+        warning: true,
+        message:
+          'istota.example.com points at 203.0.113.9, not at this server’s address, localhost. If you changed it recently, it can take a while to take effect.',
+      };
+    return { ok: true, warning: false, message: 'Connected.' };
+  }
+  if (route === '/finish' && method === 'POST') {
+    const errors = mockSetupErrors('review');
+    if (errors.length)
+      return {
+        __status: 400,
+        error: 'invalid',
+        message: 'Some answers need fixing before setup can finish.',
+        step: errors[0].field === 'password' ? 'account' : 'welcome',
+        fields: errors,
+      };
+    mockSetup.finished = true;
+    const email = String(mockSetup.draft.user_email ?? '');
+    mockSetup.draft = {};
+    return { login_url: 'http://localhost:5173/istota/login', email };
+  }
+  return { __status: 404, error: 'not_found', message: 'Not found.' };
+};
+
 // Workspace: home, read-only linked files, shared roots and connection reach.
 const workspaceReach = {
   private: 'rw',
@@ -4770,7 +4969,10 @@ const workspaceTree: Record<string, WorkspaceEntry[]> = {
       share: { kind: 'user', count: 2 },
       nextcloud_url: 'https://cloud.example.com/apps/files/files?dir=%2FShared',
     },
-    workspaceEntry('image.png'),
+    { ...workspaceEntry('image.png'), size: 240_000, modified: Date.now() / 1000 - 3600 },
+    { ...workspaceEntry('demo-video.mp4'), size: 12_000_000, modified: Date.now() / 1000 - 86400 },
+    { ...workspaceEntry('recording.mp3'), size: 3_400_000 },
+    { ...workspaceEntry('backup.zip'), size: 1_800_000 },
     workspaceEntry('note.md'),
     workspaceEntry('outside-link', 'link'),
     workspaceEntry('task-socket', 'other'),
@@ -4978,6 +5180,23 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     if (!upload) workspaceTree[resultPath] = [];
     return upload ? { name, path: resultPath, size: entry.size } : { path: resultPath };
   }
+  if (method === 'DELETE' && path === '/istota/api/workspace/files') {
+    const params = new URLSearchParams(query);
+    const folder = params.get('path') || '';
+    const name = params.get('name') || '';
+    const entries = workspaceTree[folder];
+    const entry = entries?.find((item) => item.name === name);
+    if (params.get('place') !== 'home' || !entry)
+      return { __status: 404, error: 'File or folder not found.' };
+    if (entry.kind !== 'file' && entry.kind !== 'dir')
+      return { __status: 422, error: 'Only regular files and empty folders can be deleted.' };
+    const entryPath = [folder, name].filter(Boolean).join('/');
+    if (entry.kind === 'dir' && workspaceTree[entryPath]?.length)
+      return { __status: 409, error: 'Folder is not empty. Delete its contents first.' };
+    workspaceTree[folder] = entries.filter((item) => item !== entry);
+    if (entry.kind === 'dir') delete workspaceTree[entryPath];
+    return { status: 'ok' };
+  }
   if (method !== 'GET') return undefined;
   if (path === '/istota/api/workspace/places')
     return {
@@ -5008,6 +5227,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
 };
 
 const handlers: MockHandler[] = [
+  setupHandler,
   workspaceHandler,
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
