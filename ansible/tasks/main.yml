@@ -168,7 +168,8 @@
       {%- for name in istota_secret_names -%}
       {%- set _ = secrets.update({name: (istota_secrets[name] | string) if name in istota_secrets else none}) -%}
       {%- endfor -%}
-      {{ {'secrets': secrets, 'admins': _istota_admins_file if istota_admins | length > 0 else none} | to_json }}
+      {{ {'secrets': secrets, 'admins': _istota_admins_file if istota_admins | length > 0 else none,
+          'managed': {'source': 'ansible', 'secrets': istota_secrets | length > 0, 'admins': istota_admins | length > 0}} | to_json }}
   register: _istota_put
   changed_when: _istota_put.rc == 2
   failed_when: _istota_put.rc not in [0, 2] or _istota_put.delta is not defined
@@ -300,7 +301,9 @@
     - name: Write the plan
       ansible.builtin.copy:
         dest: "{{ _istota_plan.path }}"
-        content: "{{ {'config': istota_config} | to_json }}"
+        # [meta] marks the config as the role's, so the web's config editor
+        # leaves it read-only rather than taking an edit this play reverts.
+        content: "{{ {'meta': {'managed': true, 'source': 'ansible'}, 'config': istota_config} | to_json }}"
         mode: "0600"
       changed_when: false
       check_mode: false

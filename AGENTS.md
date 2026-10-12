@@ -62,6 +62,7 @@ src/istota/
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── config_mapper.py      # Maps a parsed TOML document onto the `Config` dataclass tree → leaf-modules.md
 ├── apply.py              # `istota apply -f plan`: config.toml from a plan's [config], exit 0/2/1 → config.md
+├── config_editor/        # The web config editor's core: reference (example docs, credential files, setup paths), secrets (one secret-path predicate, sentinels), edits (a change set previewed: ops or raw, credentials, admins, the lockout checks, the redacted document diff `istota apply` prints too), schema (read-only and risky keys, table paths, editor kinds), check (`istota apply --check` in a child process), requests (the `config_change_requests` table, credentials sealed until the host takes a row), handoff (the files `istota config-request take` writes for the host applier), applier (whether the host applier is there, the trigger file, `managed.json` read fail-closed) → config.md, web-ui.md
 ├── context.py            # Hybrid conversation context selection
 ├── db.py                 # SQLite operations (framework tables)
 ├── executor.py           # Per-task orchestration (memory/skills/sandbox)

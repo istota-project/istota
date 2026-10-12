@@ -3,17 +3,17 @@
 A page that enumerates the *whole* surface — every transport, every secret
 override — is touched by no feature branch, so it goes stale silently and all
 at once: ISSUE-495 found five such pages wrong in the same week, from a
-`transport/` that had grown by two and an `_env_secret_overrides` that had
+`transport/` that had grown by two and a secret override table that had
 grown by twelve. Feature docs shipped with their features; the inventories did
 not.
 
-Both subjects are read as *source text* rather than called, and for the same
-reason in each case. `make_registry` registers behind `if config.x.enabled`,
-so calling it against a default `Config` yields a subset and a guard over the
-result would pass with a transport switched off. `_env_secret_overrides` is a
-local inside `load_config` and cannot be imported at all.
+The transports are read as *source text* rather than called: `make_registry`
+registers behind `if config.x.enabled`, so calling it against a default
+`Config` yields a subset and a guard over the result would pass with a
+transport switched off. The secret overrides are `config.SECRET_ENV_OVERRIDES`,
+imported directly since it was lifted out of `load_config`.
 
-**ISSUE-459 residual, stated rather than implied.** The two source reads go
+**ISSUE-459 residual, stated rather than implied.** The source read goes
 through `tests.support.drift.source_of`, so `scripts/qt` selects these guards
 when the *code* moves. The docs are read off disk as text, which `source_of`
 does not cover, so a docs-only edit does not select them — the full pass before
@@ -100,30 +100,9 @@ def registered_transports() -> list[tuple[str, str]]:
 
 
 def secret_overrides() -> list[tuple[str, str, str]]:
-    """The `(env var, config section, field)` triples of `_env_secret_overrides`.
-
-    A local inside `load_config`, so there is nothing to import.
-    """
-    src = source_of(config_module.load_config)
-    block = re.search(r"_env_secret_overrides = \[(.*?)\n    \]", src, re.S)
-    assert block, "_env_secret_overrides not found — did load_config change shape?"
-    body = block.group(1)
-    triples = re.findall(
-        r"""\(\s*["'](ISTOTA_[A-Z0-9_]+)["'],\s*["']([a-z0-9_.]+)["'],\s*["'](\w+)["']""",
-        body,
-    )
-    assert triples, "_env_secret_overrides parsed empty"
-
-    # Same dangerous direction as the transports above, and the empty-list
-    # assert does not reach it: an entry written in a shape the pattern misses
-    # is dropped, and both doc guards then check a subset while passing. Every
-    # entry names exactly one `ISTOTA_` variable, so counting those is an
-    # independent tally of how many there should be.
-    assert len(triples) == body.count("ISTOTA_"), (
-        f"parsed {len(triples)} of {body.count('ISTOTA_')} entries in "
-        "_env_secret_overrides — one is written in a shape this guard cannot "
-        "see, and would be documented and guarded by nobody"
-    )
+    """The `(env var, config section, field)` triples of `config.SECRET_ENV_OVERRIDES`."""
+    triples = list(config_module.SECRET_ENV_OVERRIDES)
+    assert triples, "SECRET_ENV_OVERRIDES is empty"
     return triples
 
 
@@ -201,7 +180,7 @@ class TestTheSecretOverrideInventory:
         # exists today; the spelling costs nothing and removes the class.
         missing = [var for var, _s, _f in secret_overrides() if f"`{var}`" not in doc]
         assert not missing, (
-            "in _env_secret_overrides, absent from docs/reference/environment-variables.md: "
+            "in SECRET_ENV_OVERRIDES, absent from docs/reference/environment-variables.md: "
             + ", ".join(missing)
         )
 
@@ -236,7 +215,7 @@ class TestTheSecretOverrideInventory:
 class TestThePerUserServiceInventory:
     """Every service in the secrets schema has a row in `credentials.md`.
 
-    The guard above walks `_env_secret_overrides`, which is the *global*
+    The guard above walks `SECRET_ENV_OVERRIDES`, which is the *global*
     credential inventory, so it sees nothing when a **per-user** service is
     added: `vault` went into `CONNECTED_SERVICE_SCHEMA` carrying a passphrase
     and the whole ISSUE-495 apparatus stayed green, because a service is not an

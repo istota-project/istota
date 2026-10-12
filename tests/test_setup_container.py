@@ -12,12 +12,13 @@ import re
 import stat
 import tomllib
 from pathlib import Path
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from istota import setup_wizard
+from istota import apply, setup_wizard
 from istota.config import load_config
 from istota.lib import rclone_conf
 from istota.setup_wizard import (
@@ -288,6 +289,21 @@ class TestTheRun:
         env = (vm / ".env").read_text()
         assert "COMPOSE_PROFILES=" in env and "ISTOTA_SECRETS_DIR=./secrets" in env
         assert "STORAGE=local" in (vm / "host.env").read_text()
+
+    def test_it_marks_every_resource_unmanaged(self, tmp_path):
+        """A fresh setup hands the config, the secrets and the admins to
+        whoever edits next; a management plan claims them back on its run."""
+        import json
+
+        assert setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None) == 0
+
+        marker = tmp_path / "data" / "config" / "managed.json"
+        assert _mode(marker) == 0o600
+        entries = json.loads(marker.read_text())
+        assert set(entries) == {"config", "secrets", "admins"}
+        for entry in entries.values():
+            assert (entry["managed"], entry["source"]) == (False, "setup")
+            assert entry["at"]
 
     def test_an_existing_config_is_refused_without_force(self, tmp_path):
         setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
@@ -1051,9 +1067,11 @@ class TestOneWriterForBothFrontEnds:
     def test_the_same_answers_write_the_same_bytes(
         self, tmp_path, monkeypatch, _no_credentials_in_env, flags, env, payload,
     ):
-        # The session key, the master key and rclone.conf's IV are the generated values.
+        # The session key, the master key and rclone.conf's IV are the generated
+        # values, and managed.json's stamp the clock's.
         monkeypatch.setattr(setup_wizard.secrets, "token_hex", lambda n: "k" * (2 * n))
         monkeypatch.setattr(rclone_conf, "_new_iv", lambda: b"i" * 16)
+        monkeypatch.setattr(apply, "_utc_now", lambda: datetime(2026, 10, 12, tzinfo=timezone.utc))
         for name, value in env.items():
             monkeypatch.setenv(name, value)
         terminal = setup_wizard.collect_container_answers(
@@ -1071,8 +1089,8 @@ class TestOneWriterForBothFrontEnds:
 
         terminal_files = _written(tmp_path / "terminal")
         assert {
-            "data/config/config.toml", "data/config/admins", "data/.secret_key",
-            "vm/.env", "vm/host.env",
+            "data/config/config.toml", "data/config/admins", "data/config/managed.json",
+            "data/.secret_key", "vm/.env", "vm/host.env",
         } | {f"vm/secrets/{name}" for name in SECRET_NAMES} | (
             {"vm/rclone.conf"} if terminal.workspace_is_mount else set()
         ) == set(terminal_files)

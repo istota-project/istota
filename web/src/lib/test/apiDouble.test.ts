@@ -72,6 +72,7 @@ describe('the $lib/api double', () => {
       'ChatMemoryConflictError',
       'ChatMessageBusyError',
       'ChatRoomBusyError',
+      'ConfigChangeError',
       'CredentialWriteError',
       'SetupApiError',
       'TextFileConflictError',

@@ -44,13 +44,22 @@ webhook receiver, every CLI invocation, and every host-side skill CLI
 subprocess the skill proxy spawns per call. A malformed value warns and leaves
 the dataclass default standing, which is the same failure posture the
 hand-written loader had.
+
+**Every warning about the document goes through** :func:`report_problem`, here
+and in :mod:`istota.config`. It logs the line as before and, inside
+:func:`collect_problems`, also records it as a typed problem, so `istota apply`
+and the admin config editor decide on a kind (``discarded``, ``unknown``,
+``retired``, ``warning``) rather than on the wording of a log line.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import logging
 import math
+import re
 from pathlib import Path
 from types import UnionType
 from typing import Any, Callable, Union, get_args, get_origin
@@ -64,6 +73,108 @@ Hook = Callable[[Any, str], Any]
 
 _KEEP = object()
 """Sentinel: leave the field at its dataclass default."""
+
+PROBLEM_KINDS = ("discarded", "unknown", "retired", "warning")
+"""What a reported problem is.
+
+``discarded``: the loader ignored a value, kept a default for it, replaced it,
+or refused to read it. ``unknown``: a key the schema does not declare.
+``retired``: a key that used to mean something, with its migration warning.
+``warning``: anything else the loader says about the document while keeping
+the value as written.
+"""
+
+_collector: contextvars.ContextVar[list[dict] | None] = contextvars.ContextVar(
+    "istota_config_problems", default=None,
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class Value:
+    """A configured value inside a problem message, shown or redacted by path.
+
+    Passed as a ``report_problem`` argument in place of the raw value, so the
+    one predicate deciding redaction is applied where the message is built
+    rather than at each call site.
+    """
+
+    raw: Any
+
+
+@contextlib.contextmanager
+def collect_problems():
+    """Record every problem reported inside the block into the yielded list.
+
+    Each entry is ``{"kind", "path", "message"}``, ``path`` a tuple of strings.
+    A context variable rather than a logging handler, so another thread's load
+    or another thread's warning never lands in this list.
+    """
+    problems: list[dict] = []
+    token = _collector.set(problems)
+    try:
+        yield problems
+    finally:
+        _collector.reset(token)
+
+
+_INDEXED = re.compile(r"(.*?)((?:\[\d+\])+)")
+
+
+def key_path(key: str) -> tuple[str, ...]:
+    """The path of a dotted key the walk built, ``a.b[2]`` as ``("a", "b", "2")``.
+
+    Only for keys made from field names, which hold no dot. A key read out of
+    the document itself is passed to ``report_problem`` as a tuple instead.
+    """
+    path: list[str] = []
+    for segment in key.split("."):
+        match = _INDEXED.fullmatch(segment)
+        if match is None:
+            path.append(segment)
+            continue
+        path.append(match.group(1))
+        path.extend(re.findall(r"\[(\d+)\]", match.group(2)))
+    return tuple(path)
+
+
+def _shown(path: tuple[str, ...], raw: Any) -> str:
+    # Deferred: this module is a leaf on the config-load hot path, and a
+    # problem is the rare case. `is_secret_path` is the one answer to "is this
+    # value a credential", shared with the admin config view.
+    from istota.webui.admin_config_view import is_secret_path
+
+    return "<redacted>" if is_secret_path(path) else repr(raw)
+
+
+def report_problem(
+    kind: str,
+    path: tuple[str, ...] | list[str],
+    message: str,
+    *args: Any,
+    level: int = logging.WARNING,
+    log: bool = True,
+) -> None:
+    """Log one problem with the document, and record it under a collector.
+
+    ``message`` and ``args`` are a logging format and its arguments, so the
+    line logged is the one the call site always logged. A :class:`Value`
+    argument renders as its ``repr``, or as ``<redacted>`` where the path holds
+    a credential. ``log=False`` records without logging, for a line the caller
+    already says once.
+    """
+    if kind not in PROBLEM_KINDS:
+        raise ValueError(f"unknown config problem kind {kind!r}")
+    path = tuple(str(segment) for segment in path)
+    rendered = tuple(_shown(path, arg.raw) if isinstance(arg, Value) else arg for arg in args)
+    if log:
+        logger.log(level, message, *rendered)
+    problems = _collector.get()
+    if problems is not None:
+        problems.append({
+            "kind": kind,
+            "path": path,
+            "message": message % rendered if rendered else message,
+        })
 
 # Strings accepted for a bool-declared field. TOML has real booleans, so a
 # string only arrives when an operator quoted one or a generator emitted an
@@ -82,17 +193,12 @@ def _warn(key: str, raw: Any, expected: str) -> Any:
     message -- except where the field is a credential, which is the one case
     where a type complaint would put a live secret into the rotating app log
     the admin Logs pane reads. A password mistyped as a list is exactly the
-    shape that reaches here. ``is_secret_name`` is the codebase's one answer to
-    "does this field name hold a credential", so it is reused rather than
-    restated; the import is deferred because this module is a leaf on the
-    config-load hot path and a warning is the rare case.
+    shape that reaches here, and :class:`Value` is what redacts it.
     """
-    from istota.webui.admin_config_view import is_secret_name
-
-    shown = "<redacted>" if is_secret_name(key.rsplit(".", 1)[-1]) else repr(raw)
-    logger.warning(
+    report_problem(
+        "discarded", key_path(key),
         "[config] %s=%s is not %s; ignoring the value and keeping the default",
-        key, shown, expected,
+        key, Value(raw), expected,
     )
     return _KEEP
 
@@ -340,6 +446,7 @@ def apply_section(
     unknown: list[str] | None = None,
     skip: frozenset[str] = frozenset(),
     reject: frozenset[str] = frozenset(),
+    _path: tuple[str, ...] | None = None,
 ) -> None:
     """Set every field of ``instance`` that ``data`` names, in place.
 
@@ -353,8 +460,10 @@ def apply_section(
     calling — or one only a hook knows how to build — survives.
     """
     hooks = hooks or {}
+    base = _path if _path is not None else (key_path(prefix) if prefix else ())
     if not isinstance(data, dict):
-        logger.warning(
+        report_problem(
+            "discarded", base,
             "[config] [%s] must be a table, got %s; ignoring the section",
             prefix or "general", type(data).__name__,
         )
@@ -377,7 +486,7 @@ def apply_section(
         if key in reject:
             handled.add(name)
             if name in data and unknown is not None:
-                unknown.append(key)
+                unknown.append(UnknownKey(key, base + (name,)))
             continue
 
         hook = hooks.get(key)
@@ -392,6 +501,7 @@ def apply_section(
                 apply_section(
                     nested, data[name], prefix=key, hooks=hooks,
                     unknown=unknown, skip=skip, reject=reject,
+                    _path=base + (name,),
                 )
             continue
 
@@ -409,7 +519,8 @@ def apply_section(
                 # direction: the field keeps its default and the operator is
                 # told, rather than the walk assigning a raw TOML value to a
                 # field whose type nobody checked.
-                logger.warning(
+                report_problem(
+                    "discarded", base + (name,),
                     "[config] %s has unmapped type %r; ignoring the value",
                     key, str(field.type),
                 )
@@ -426,7 +537,22 @@ def apply_section(
             key = f"{prefix}.{name}" if prefix else name
             if key in skip:
                 continue
-            unknown.append(key)
+            unknown.append(UnknownKey(key, base + (str(name),)))
+
+
+class UnknownKey(str):
+    """An unknown key's dotted spelling, carrying its path as well.
+
+    A ``str`` so every caller reading the list as strings keeps working; the
+    path is what a TOML key holding a dot cannot be split back into.
+    """
+
+    path: tuple[str, ...]
+
+    def __new__(cls, key: str, path: tuple[str, ...]) -> "UnknownKey":
+        self = super().__new__(cls, key)
+        self.path = path
+        return self
 
 
 def report_unknown(unknown: list[str], config_path: Any = None) -> None:
@@ -445,3 +571,11 @@ def report_unknown(unknown: list[str], config_path: Any = None) -> None:
         "A removed setting is expected here; anything else is a typo.",
         len(unknown), config_path or "the config file", ", ".join(sorted(unknown)),
     )
+    # One line for the operator, one recorded problem per key for a caller that
+    # offers to remove each.
+    for key in sorted(unknown):
+        report_problem(
+            "unknown", getattr(key, "path", None) or key_path(key),
+            "[config] %s is not a recognised key and is ignored", str(key),
+            log=False,
+        )

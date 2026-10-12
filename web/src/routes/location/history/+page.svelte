@@ -180,8 +180,9 @@
     const params = page.url.searchParams;
     const s = params.get('start') || params.get('date');
     const e = params.get('end') || params.get('date');
-    startStr = s || today;
-    endStr = e || today;
+    const defaultDate = yesterday();
+    startStr = s || defaultDate;
+    endStr = e || defaultDate;
   }
 
   function updateUrl() {

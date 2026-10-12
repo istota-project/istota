@@ -321,6 +321,9 @@ install -d -m 0755 "$STACK" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/ac
 [ -n "$bare_metal_mount" ] || install -d -m 0755 "$MOUNT_DIR"
 install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/config"
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/secrets"
+# The web config editor's trigger, bound into web at /data/requests; its
+# existence is what makes istota-stack add docker-compose.config-apply.yml.
+install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/requests"
 [ -f "${STACK}/.env" ] || install -m 0644 /dev/null "${STACK}/.env"
 
 # The checkout istota-stack builds from. Cloned from the checkout this script
@@ -357,6 +360,7 @@ mount_unit_changed=""
 for unit in istota-stack.service istota-devbox-egress.service \
         istota-browser-watchdog.service istota-browser-watchdog.timer \
         istota-certbot.service istota-certbot.timer mount-nextcloud.service \
+        istota-config-apply.service istota-config-apply.path istota-config-apply.timer \
         istota-setup.service; do
     if [ "$unit" = mount-nextcloud.service ] && [ -n "$bare_metal_mount" ]; then
         continue
@@ -431,6 +435,11 @@ fi
 # --- Firewall: devbox egress and the proxied listener ------------------------
 systemctl enable istota-devbox-egress.service >/dev/null
 systemctl restart istota-devbox-egress.service
+
+# --- The web config editor's applier -----------------------------------------
+# The path unit runs istota-stack config-apply when the web writes a request;
+# the timer is the backstop. Before setup, config-apply exits at once.
+systemctl enable --now istota-config-apply.path istota-config-apply.timer >/dev/null
 
 # --- Browser watchdog, when the browser profile is on ------------------------
 if grep -Eq '^COMPOSE_PROFILES=.*\bbrowser\b' "${STACK}/.env"; then

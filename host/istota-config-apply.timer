@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply web config editor requests the path unit missed
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=istota-config-apply.service
+
+[Install]
+WantedBy=timers.target

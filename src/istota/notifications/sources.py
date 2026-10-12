@@ -297,6 +297,7 @@ def _register_all() -> None:
             "message_relay",
             "relay_question",
             "admin_profile_change",
+            "admin_config_change",
             "job_failure",
         ):
             try:

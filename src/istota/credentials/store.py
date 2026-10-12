@@ -111,6 +111,21 @@ def _get_fernet():
     return Fernet(_derive_fernet_key(_validated_key()))
 
 
+def seal(text: str) -> str:
+    """`text` encrypted with the master key, as a Fernet token.
+
+    For a value stored outside the ``secrets`` table, such as a config change
+    request's new credentials. Raises `SecretKeyMissingError` without the key.
+    """
+    return _get_fernet().encrypt(text.encode("utf-8")).decode("ascii")
+
+
+def unseal(token: str) -> str:
+    """What `seal` sealed. Raises `cryptography.fernet.InvalidToken` on a token
+    another key sealed or one that was altered."""
+    return _get_fernet().decrypt(token.encode("ascii")).decode("utf-8")
+
+
 def secret_key_available() -> bool:
     """True iff $ISTOTA_SECRET_KEY is present and meets the length floor.
 
