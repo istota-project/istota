@@ -55,6 +55,11 @@ bot_name = "Istota"
 # model = "claude-opus-5-5"
 # effort = "high"
 
+# Advisor model for the anthropic-namespace brains: an ID or alias, resolved
+# like `model` but carrying no effort. Empty = no advisor. It must be a model
+# that can act as an advisor; a cheap tier fails every task it runs on.
+# advisor_model = ""
+
 # Use config/system-prompt.md instead of Claude Code's default system prompt.
 # The custom prompt is minimal, focused on tool usage and working practices.
 # The CLI opens that file from inside the sandbox, so it is bind-mounted there
@@ -235,6 +240,10 @@ features = []
 #                                            #   to force either way (a plain-OpenAI / local
 #                                            #   endpoint that rejects cache_control needs
 #                                            #   `false`).
+# bash_spill_full_output = true              # write Bash output past the per-tool cap to a
+#                                            #   temp file the model can Read, rather than
+#                                            #   dropping the tail.
+# api_key = ""                               # prefer the ISTOTA_BRAIN_NATIVE_API_KEY override
 #
 # Daemon-side WebFetch tool for the native harness. It is the one tool that
 # runs OUTSIDE the sandbox's network namespace, in the daemon's own, so the
@@ -931,6 +940,10 @@ context_truncation = 0
 # Number of recent unfiltered tasks to inject into context (ensures scheduled/briefing
 # messages aren't orphaned when the user replies to them)
 previous_tasks_count = 3
+# Include older messages only if they fall within this many hours (0 = no window)
+# context_recency_hours = 0
+# Always include at least this many recent messages, whatever their age
+# context_min_messages = 10
 # Messages to fetch from Talk API for context (max 200, default 100)
 # Talk API-based context shows all participants' messages, not just bot interactions
 talk_context_limit = 100
@@ -1241,6 +1254,25 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # task_memory_max_mb = 2048         # memory.max per task (0 = unbounded)
 # task_pids_max = 512               # pids.max per task — bounds a fork storm
 # task_cpu_max_percent = 200        # cpu.max as % of one core (200 = two cores; 0 = unset)
+
+# Background sweeps and retention. Every interval is in seconds; 0 turns it off.
+# shared_file_check_interval = 120             # shared-file organization checks
+# heartbeat_check_interval = 60                # HEARTBEAT.md checks
+# db_health_check_interval = 86400             # SQLite quick_check over per-user DBs
+# worktree_reap_interval = 21600               # removes developer worktrees whose work has landed
+# sandbox_cache_sweep_interval = 21600         # bounds the per-user package caches
+# db_backup_retention = 7                      # newest dated snapshot dirs kept (0 = keep all)
+# max_retry_age_minutes = 60                   # don't retry stuck tasks older than this
+# temp_file_retention_days = 7                 # delete temp files older than this (0 = never)
+# location_ping_retention_days = 365           # delete location pings older than this (0 = never)
+# scheduled_job_max_consecutive_failures = 5   # auto-disable a job after this many failures (0 = never)
+# cron_max_staleness_minutes = 60              # skip a job whose missed run is older than this after an outage (0 = run them all)
+
+# Long tasks. A foreground task running past the threshold stops counting
+# against its user's interactive workers, up to the two caps below.
+# long_task_threshold_minutes = 10             # 0 disables
+# user_max_long_workers = 1                    # per-user cap on discounted long tasks
+# max_long_workers = 2                         # instance-wide cap, inside max_foreground_workers
 
 # ============================================================================
 # Default briefings (shared canonical set)
@@ -1572,6 +1604,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # one configured user it needs `istota_developer_repos_migrate_to` and fails the
 # play until it gets one, because a green play there is followed by a daemon
 # restart into a state where the bind names an empty directory.
+#
+# The devbox credential proxy: one socket per user under this directory, which
+# lets the forge CLIs and pushes in a devbox authenticate without holding a token.
+# devbox_proxy_enabled = true
+# devbox_proxy_socket_dir = "/var/run/istota"
+# devbox_proxy_audit_log = ""                       # empty = journal only; a path adds a file
 
 # [developer.container]
 # exec_socket_dir = "/run/istota-exec" # the parent; the socket is {dir}/{user}/exec.sock
