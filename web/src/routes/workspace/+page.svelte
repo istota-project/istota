@@ -399,13 +399,24 @@
           {href}
           onNavigate={navigate}
         />
+        <PlaceList
+          places={places.filter((place) => place.kind === 'home')}
+          selected={selected?.place || ''}
+          {href}
+          onNavigate={navigate}
+        />
         <ConfigFileList
           files={configFiles}
           error={configError}
           onEdit={editConfigFile}
           onRetry={loadConfigFiles}
         />
-        <PlaceList {places} selected={selected?.place || ''} {href} onNavigate={navigate} />
+        <PlaceList
+          places={places.filter((place) => place.kind !== 'home')}
+          selected={selected?.place || ''}
+          {href}
+          onNavigate={navigate}
+        />
       </Sidebar>
     {/if}
   {/snippet}
@@ -454,7 +465,7 @@
         </ol>
       </nav>
       <div class="folder-actions">
-        <ReachBadge access={place.reach.private} />
+        {#if place.kind !== 'nextcloud'}<ReachBadge access={place.reach.private} />{/if}
         {#if place.kind === 'drive'}
           <HeaderNav
             ariaLabel="Drive location"
