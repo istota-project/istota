@@ -44,6 +44,14 @@ istota_users:
   alice: {display-name: Alice, email: [alice@example.com]}
 ```
 
+### Release or latest
+
+`istota_update_mode` picks how the VM is updated. `release` (the default) runs the signed tag in `istota_release`, verified against `istota_release_signing_key`, and updates only when that variable changes. `latest` follows main: each play asks `istota-stack latest-tag` for the name main's tip would install (`main-<12 hex>`, read from origin without fetching) and runs `istota-stack update --unsigned latest` only when it differs from the deployed one. Nothing is verified in `latest` mode, so no key is required and `istota_release` is ignored. Either way the rebuild after a config change uses the way the deployed tag was installed, so an unsigned tag is rebuilt unsigned.
+
+```yaml
+istota_update_mode: latest
+```
+
 ### Writing `istota_config`
 
 `istota_config` is config.toml written as YAML, key for key: a TOML table is a mapping, an array of tables (`[[briefing_shared_blocks]]`) is a list of mappings, and the key names do not change. `defaults/main.yml` carries a commented reference below `istota_config: {}`: every key, at its YAML nesting, with its default and the explanation from `config/config.example.toml`. Credentials are marked with the `istota_secrets` name to set instead. The reference is generated, and `tests/test_config_reference.py` fails when it falls behind the code or the example; regenerate it with `uv run env ISTOTA_UPDATE_CONFIG_REFERENCE=1 pytest tests/test_config_reference.py -n0`. A key left out takes the code's default, and the apply validates the whole plan through the config loader before it writes anything, so an unknown key warns and a bad value is refused.

@@ -16,13 +16,21 @@ istota_cli_command: /usr/local/bin/istota
 istota_uid: 10001
 
 # --- The release -------------------------------------------------------------
-# The signed tag to run. Empty: the role deploys nothing and an install with no
+# release: run the signed tag in istota_release, verified against
+#   istota_release_signing_key.
+# latest: follow main. Each play asks `istota-stack latest-tag` what main's tip
+#   would install and runs `istota-stack update --unsigned latest` when that
+#   differs from the deployed name (main-<12 hex>). Nothing is verified, so no
+#   key is needed, and istota_release is ignored.
+istota_update_mode: release
+# release mode: the signed tag to run. Empty: the role deploys nothing and an install with no
 # tag yet stops before the config step. `istota-stack update` runs only when
 # this differs from ISTOTA_TAG in .env, so an update is a deliberate change to
 # this variable.
 istota_release: ""
 # One line of an SSH public key. Every tag is verified against it (host.env's
-# RELEASE_SIGNING_KEY, written to allowed_signers by provision.sh). Required.
+# RELEASE_SIGNING_KEY, written to allowed_signers by provision.sh). Required in
+# release mode.
 istota_release_signing_key: ""
 
 # --- host.env ----------------------------------------------------------------

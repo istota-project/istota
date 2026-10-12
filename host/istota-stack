@@ -6,6 +6,7 @@
 #                               the same for any tag, signed or not, on request
 #   istota-stack update --unsigned latest
 #                               the tip of main, recorded as main-<commit>
+#   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
 #   istota-stack rollback       back to the previous tag, if its image can run the database
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
 #   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
@@ -379,6 +380,11 @@ load_apparmor() {
     mv "$tmp" "${APPARMOR_DIR}/istota"
 }
 
+# The name a commit of main is installed under: main-<first 12 hex>.
+latest_name() {
+    echo "${LATEST_BRANCH}-$(printf '%s' "$1" | cut -c1-12)"
+}
+
 # --- commands ----------------------------------------------------------------
 
 cmd_update() {
@@ -395,7 +401,7 @@ cmd_update() {
         || die "git fetch failed; nothing was changed."
     if [ "$tag" = latest ]; then
         [ -n "$unsigned" ] || refuse_tag "latest follows ${LATEST_BRANCH}, which is never signed: \`istota-stack update --unsigned latest\`."
-        tag="${LATEST_BRANCH}-$(verified_git rev-parse --verify "refs/remotes/origin/${LATEST_BRANCH}^{commit}" | cut -c1-12)"
+        tag="$(latest_name "$(verified_git rev-parse --verify "refs/remotes/origin/${LATEST_BRANCH}^{commit}")")"
     fi
     if [ -n "$unsigned" ]; then
         object="$(resolve_unsigned_tag "$tag")"
@@ -672,6 +678,19 @@ restart_for_config() {
     compose restart
 }
 
+# Read-only: origin is asked, not fetched, so the checkout and its refs stay as
+# they are. The management role compares this with ISTOTA_TAG, because an
+# update rebuilds even when main has not moved.
+cmd_latest_tag() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
+    local commit
+    commit="$(verified_git ls-remote --exit-code origin "refs/heads/${LATEST_BRANCH}" | cut -f1)" \
+        || die "could not read ${LATEST_BRANCH} from origin."
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "origin answered no commit for ${LATEST_BRANCH}."
+    latest_name "$commit"
+}
+
 cmd_check_image() {
     [ "$#" -eq 0 ] || { usage >&2; exit 64; }
     local tag lacking
@@ -914,6 +933,7 @@ main() {
         retire-bare-metal) cmd_retire_bare_metal "$@" ;;
         put-files) cmd_put_files "$@" ;;
         check-image) cmd_check_image "$@" ;;
+        latest-tag) cmd_latest_tag "$@" ;;
         up) cmd_up ;;
         down) compose down ;;
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
