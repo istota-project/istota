@@ -29,8 +29,9 @@ current file and writing nothing, and `--json` prints its problems as one
 object for the web's config editor. The file is rendered by
 `lib/toml_write.py`, the tree's one TOML writer, and compared with the current
 one as data, so a hand-formatted file with the same values is left alone, its
-comments included. The diff printed is the text diff, with credential values
-replaced.
+comments included. The diff printed is of the two documents with every
+credential value replaced (`config_editor.edits.diff_documents`), rendered the
+same way, so it shows values that change and not formatting.
 
 `[meta] managed` and `source` say who owns the config, recorded in
 `managed.json` beside it for the config editor, which leaves a managed
@@ -40,7 +41,6 @@ is written and the exit code stays 0, so nothing restarts for it.
 
 from __future__ import annotations
 
-import difflib
 import json
 import os
 import re
@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from istota.config_editor.edits import diff_documents
 from istota.lib import toml_write
 
 EXIT_UNCHANGED = 0
@@ -267,23 +268,19 @@ def render_config(document: dict) -> str:
     return CONFIG_HEADER + toml_write.dumps(document)
 
 
+def _parsed_or_empty(text: str) -> dict:
+    """The current file as a document; one that does not parse diffs as empty."""
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return {}
+
+
 def _same_document(current_text: str, document: dict) -> bool:
     try:
         return tomllib.loads(current_text) == document
     except tomllib.TOMLDecodeError:
         return False
-
-
-_ASSIGNMENT = re.compile(r"^(?P<lead>[-+ ]\s*)(?P<key>[A-Za-z0-9_\-\"]+)(?P<eq>\s*=\s*).*$")
-
-
-def _redact(line: str) -> str:
-    from istota.webui.admin_config_view import is_secret_name
-
-    match = _ASSIGNMENT.match(line)
-    if match and is_secret_name(match.group("key").strip('"')):
-        return f"{match.group('lead')}{match.group('key')}{match.group('eq')}<redacted>"
-    return line
 
 
 def write_private(path: Path, text: str | bytes) -> None:
@@ -381,15 +378,10 @@ def plan_config(document: object, config_path: Path, *, backup: int | None = Non
     if _same_document(current, document):
         return SectionPlan("config", changed=False, warnings=warnings)
     new_text = render_config(document)
-    diff = [
-        _redact(line.rstrip("\n"))
-        for line in difflib.unified_diff(
-            current.splitlines(keepends=True),
-            new_text.splitlines(keepends=True),
-            fromfile=f"a/{config_path.name}",
-            tofile=f"b/{config_path.name}",
-        )
-    ]
+    diff = diff_documents(
+        _parsed_or_empty(current), document,
+        fromfile=f"a/{config_path.name}", tofile=f"b/{config_path.name}",
+    )
     return SectionPlan(
         "config", changed=True, diff=diff, warnings=warnings,
         write=lambda: _write_config(config_path, new_text, backup),

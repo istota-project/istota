@@ -2,13 +2,10 @@
 
 Keys and defaults come from the `Config` dataclass tree, so the reference names
 every setting the loader reads and the value it takes when the key is left out.
-The prose comes from `config/config.example.toml`, matched by section and key.
-The example stays the authoritative prose; this is a rendering of it, held to
-it by tests/test_config_reference.py.
-
-The example is read line by line rather than parsed, because most of it is
-commented out. The header and assignment patterns are the field coverage
-guard's, which already handle the prose that looks like an assignment.
+The prose comes from `config/config.example.toml`, matched by section and key
+by `istota.config_editor.reference.read_example`, which the config editor reads
+its per-field docs through too. The example stays the authoritative prose; this
+is a rendering of it, held to it by tests/test_config_reference.py.
 """
 
 from __future__ import annotations
@@ -16,21 +13,20 @@ from __future__ import annotations
 import dataclasses
 import enum
 import json
-import re
 import tomllib
 from pathlib import Path
 
-from istota import config as config_module
-from istota import setup_wizard
 from istota.config import _NOT_CONFIGURATION, Config
-from istota.config_mapper import _nested_dataclass
-from tests.test_config_field_coverage import (
-    _AUDIT_ASSIGN,
-    _DYNAMIC_HEADER,
-    _HEADER,
-    _UNNAMEABLE,
+from istota.config_editor.reference import (
+    Docs,
     _collection_of_dataclasses,
+    credential_files,
+    read_example,
+    setup_paths,
 )
+from istota.config_mapper import _nested_dataclass
+
+__all__ = ["Docs", "credential_files", "read_example", "render", "setup_paths", "splice"]
 
 BEGIN = "# --- istota_config reference: generated, do not edit by hand ---"
 END = "# --- end istota_config reference ---"
@@ -44,104 +40,6 @@ PREAMBLE = [
     "left out takes the default of the release the VM runs, so set only what",
     "differs. A TOML table is a mapping here and [[x]] a list of mappings.",
 ]
-
-def credentials() -> dict[str, str]:
-    """Each credential key's dotted path, to its stack secrets file or "".
-
-    `config.SECRET_ENV_OVERRIDES` is the credentials that reach the config from
-    the environment, which is how a stack secrets file reaches it too.
-    """
-    found: dict[str, str] = {}
-    for env, section, key in config_module.SECRET_ENV_OVERRIDES:
-        name = env.lower()
-        found[f"{section}.{key}"] = name if name in setup_wizard.SECRET_NAMES else ""
-    for name in setup_wizard.SECRET_NAMES:
-        # brain.native.api_key is read two levels deep, outside the table.
-        if name == "istota_brain_native_api_key":
-            found["brain.native.api_key"] = name
-    return found
-
-
-def setup_paths() -> dict[str, str]:
-    """The container layout `istota setup` writes: the top-level absolute paths."""
-    document = setup_wizard.container_config_document(setup_wizard.ContainerAnswers(), inline_credentials=False)
-    return {k: v for k, v in document.items() if isinstance(v, str) and v.startswith("/")}
-
-
-_BANNER = re.compile(r"^[=\-#\s]*$")
-_COMMENT = re.compile(r"^[ \t]*#[ \t]?(.*)$")
-_CONTINUATION = re.compile(r"^[ \t]*#?[ \t]+#[ \t]?(.*)$")
-
-
-@dataclasses.dataclass
-class Docs:
-    keys: dict[tuple[str, str], list[str]] = dataclasses.field(default_factory=dict)
-    examples: dict[tuple[str, str], str] = dataclasses.field(default_factory=dict)
-    sections: dict[str, list[str]] = dataclasses.field(default_factory=dict)
-
-
-def _trim(lines: list[str]) -> list[str]:
-    while lines and lines[0] == "":
-        lines = lines[1:]
-    while lines and lines[-1] == "":
-        lines = lines[:-1]
-    return lines
-
-
-def _split_value(rest: str) -> tuple[str, str]:
-    """`value  # comment` into the value's text and the comment."""
-    for match in re.finditer("#", rest):
-        left = rest[: match.start()].strip()
-        try:
-            tomllib.loads(f"v = {left}")
-        except tomllib.TOMLDecodeError:
-            continue
-        return left, rest[match.end():].strip()
-    return rest.strip(), ""
-
-
-def read_example(text: str) -> Docs:
-    docs = Docs()
-    section = ""
-    pending: list[str] = []
-    last_key: tuple[str, str] | None = None
-    for raw in text.splitlines():
-        line = raw.rstrip()
-        if not line.strip():
-            pending, last_key = [], None
-            continue
-        header = _HEADER.match(line)
-        if header:
-            docs.sections.setdefault(header.group(1), _trim(pending))
-            section, pending, last_key = header.group(1), [], None
-            continue
-        if _DYNAMIC_HEADER.match(line):
-            section, pending, last_key = _UNNAMEABLE, [], None
-            continue
-        assign = _AUDIT_ASSIGN.match(line)
-        if assign:
-            key = (section, assign.group(1))
-            body = re.sub(r"^[ \t]*#?[ \t]*", "", line)
-            value, trailing = _split_value(body.split("=", 1)[1])
-            if key not in docs.keys:
-                docs.keys[key] = _trim(pending) + ([trailing] if trailing else [])
-                docs.examples[key] = value
-            pending, last_key = [], key
-            continue
-        continuation = _CONTINUATION.match(line)
-        if continuation and last_key is not None:
-            docs.keys[last_key].append(continuation.group(1).strip())
-            continue
-        comment = _COMMENT.match(line)
-        if comment:
-            last_key = None
-            text_ = comment.group(1).rstrip()
-            if text_ and _BANNER.match(text_):
-                continue
-            if text_ or pending:
-                pending.append(text_)
-        # Anything else is the body of a multi-line value; it keeps last_key.
-    return docs
 
 
 def _value(value) -> str:
@@ -241,7 +139,7 @@ def _walk(instance, path: str, depth: int, docs: Docs, secrets: dict[str, str], 
 
 def render(example_text: str) -> str:
     """The block, markers included, every line a YAML comment."""
-    body = ["istota_config:"] + _walk(Config(), "", 1, read_example(example_text), credentials(), setup_paths())
+    body = ["istota_config:"] + _walk(Config(), "", 1, read_example(example_text), credential_files(), setup_paths())
     lines = [BEGIN] + _comments(PREAMBLE, "") + ["#"] + [f"# {line}".rstrip() if line else "#" for line in body] + [END]
     return "\n".join(lines) + "\n"
 

@@ -181,6 +181,50 @@ class TestWhatItSays:
         assert "app_password" in out
         assert tomllib.loads(config_path.read_text())["nextcloud"]["app_password"] == secret
 
+    def test_the_diff_is_of_redacted_documents(self, monkeypatch, capsys, tmp_path, config_path):
+        """A header value under `extra_headers` has a harmless name, which the
+        old line-by-line redaction let through. Every secret leaf is replaced
+        before rendering; a changed one shows as changed, an unchanged one not
+        at all."""
+        config_path.write_text(
+            'bot_name = "Before"\n'
+            "[brain.native]\n"
+            'api_key = "old-native-key"\n'
+            "[brain.native.extra_headers]\n"
+            'x-tenant = "old-header-value"\n'
+            'x-region = "kept-header-value"\n'
+        )
+        config = {
+            "bot_name": "After",
+            "brain": {"native": {
+                "api_key": "new-native-key",
+                "extra_headers": {"x-tenant": "new-header-value", "x-region": "kept-header-value"},
+            }},
+        }
+        code, out, err = _invoke(
+            monkeypatch, capsys, config_path, "-f", str(_write_plan(tmp_path / "p.toml", config)), "--dry-run",
+        )
+        assert code == 2, out + err
+        for value in ("old-native-key", "new-native-key", "old-header-value", "new-header-value", "kept-header-value"):
+            assert value not in out + err
+        assert out == (
+            "--- a/config.toml\n"
+            "+++ b/config.toml\n"
+            "@@ -1,8 +1,8 @@\n"
+            '-bot_name = "Before"\n'
+            '+bot_name = "After"\n'
+            " \n"
+            " [brain.native]\n"
+            '-api_key = "<redacted>"\n'
+            '+api_key = "<changed>"\n'
+            " \n"
+            " [brain.native.extra_headers]\n"
+            '-x-tenant = "<redacted>"\n'
+            '+x-tenant = "<changed>"\n'
+            ' x-region = "<redacted>"\n'
+            "Would change: config (--dry-run, nothing written).\n"
+        )
+
     def test_a_plan_without_a_config_section_changes_nothing(self, monkeypatch, capsys, tmp_path, config_path):
         plan = tmp_path / "p.toml"
         plan.write_text(f"[meta]\nversion = {apply.PLAN_VERSION}\n")

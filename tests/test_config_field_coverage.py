@@ -55,13 +55,19 @@ from __future__ import annotations
 
 import dataclasses
 import re
-import typing
 from pathlib import Path
 
 import pytest
 
 from istota import config as config_module
 from istota.config import Config
+from istota.config_editor.reference import (
+    _AUDIT_ASSIGN,
+    _DYNAMIC_HEADER,
+    _HEADER,
+    _UNNAMEABLE,
+    _collection_of_dataclasses,
+)
 from istota.config_mapper import _nested_dataclass
 
 REPO = Path(__file__).resolve().parents[1]
@@ -111,39 +117,6 @@ def walk_fields(instance: object, prefix: str = "") -> list[str]:
     return found
 
 
-def _collection_of_dataclasses(owner: type, field: dataclasses.Field) -> bool:
-    """Whether the field is declared as a dict or list of dataclasses.
-
-    Read off the *declared* type rather than the value, because the default is
-    an empty container that says nothing about what goes in it — the same
-    reasoning, and the same ``get_type_hints`` resolution, as the section
-    guard's copy.
-    """
-    declared = typing.get_type_hints(owner).get(field.name)
-    if typing.get_origin(declared) not in (dict, list):
-        return False
-    return any(dataclasses.is_dataclass(arg) for arg in typing.get_args(declared))
-
-
-#: A section header, live or commented, alone on its line but for a trailing
-#: comment. Same shape as the section guard's, and for the same reason: the
-#: example names `[models.aliases]` mid-prose several times, and a pattern with
-#: no end anchor reads each of those as a header — which here would misfile
-#: every assignment after it.
-_HEADER = re.compile(r"^[ \t]*(?:#[ \t]*)?\[{1,2}([a-z_][a-z0-9_.]*)\]{1,2}[ \t]*(?:#.*)?$")
-
-#: A header whose name is built by Jinja — ``[models.aliases."{{ name }}"]`` in
-#: a template. It is a real section boundary that :data:`_HEADER` cannot name,
-#: so without this the walk keeps the *previous* header current and files every
-#: assignment after it into the wrong section. Harmless where it stands today,
-#: and silently wrong the moment one of those keys collides with a real field of
-#: the section above it.
-_DYNAMIC_HEADER = re.compile(r"^[ \t]*(?:#[ \t]*)?\[{1,2}[^\]\n]*\{[{%]")
-
-#: A section no field path can equal, so a dynamic header ends the block above
-#: it rather than extending it.
-_UNNAMEABLE = "\x00dynamic"
-
 #: An assignment, live or commented out. A commented one counts: the example
 #: documents most of the tree that way, and a line an operator uncomments is a
 #: line they learned about.
@@ -161,20 +134,12 @@ _ASSIGN = re.compile(
     re.VERBOSE,
 )
 
-#: The same assignment with the value *terminated* — end of line, or a trailing
-#: comment. Not used for coverage, because a real multi-line array and a Jinja
-#: expression make it too sharp an instrument to decide what an operator can
-#: learn from. It is the audit in
+#: The terminated form, `_AUDIT_ASSIGN`, lives in `config_editor.reference`
+#: with the header patterns, since the example reader there is built on it. It
+#: is not used for coverage, because a real multi-line array and a Jinja
+#: expression make it too sharp an instrument; it is the audit in
 #: :meth:`TestTheCoveringLinesAreRealAssignments`, which is what makes the
-#: tolerance above a tested boundary instead of an accident: the residual prose
-#: collision (line 290, ``# db_path = "/data/db/istota.db", so the directory``)
-#: has a valid value and then a sentence, so only the terminator sees it.
-_AUDIT_ASSIGN = re.compile(
-    r"""^[ \t]*(?:\#[ \t]*)?([a-z_][a-z0-9_]*)[ \t]*=[ \t]*
-        (?:"[^"]*"|'[^']*'|\[[^\]]*\]|\[|\{[^}]*\}|-?[\d.]+|true|false|\{\{.*?\}\})
-        [ \t]*(?:\#.*)?$""",
-    re.VERBOSE,
-)
+#: tolerance above a tested boundary instead of an accident.
 
 
 def assignments(path: Path) -> dict[str, set[str]]:
