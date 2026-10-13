@@ -17,7 +17,7 @@ compose() { docker compose -f compose.spike.yml "${OVERLAYS[@]/#/-f}" "$@"; }
 
 wait_for_daemon() {
     for _ in $(seq 1 60); do
-        if compose exec -T --user 10001:10001 istota /spike/probes/procstatus.py daemon 2>/dev/null | grep -q '^daemon pid='; then
+        if grep -q '^daemon pid=' <<<"$(compose exec -T --user 10001:10001 istota /spike/probes/procstatus.py daemon 2>/dev/null)"; then
             return 0
         fi
         if [ "$(docker inspect -f '{{.State.Running}}' istota-spike-istota-1 2>/dev/null)" != "true" ]; then
