@@ -8,8 +8,8 @@
 # (it installs istota-stack, which writes them) and the update
 # (allowed_signers), the update before the config (`istota apply` runs in the
 # release's image), the config before the image check (a build reads the
-# config to decide whether Claude Code goes in), the stack up before the
-# ensure loops (they exec into it).
+# config to decide whether Claude Code goes in), the stack healthy before the
+# user settings (they need the database the daemon's entrypoint initializes).
 #
 # Root writes nothing in config/ or secrets/: both are uid 10001's, and
 # `istota-stack put-files` drops to 10001 before it opens a file there.
@@ -34,6 +34,68 @@
       rclone remote for nextcloud storage, and that every key of istota_secrets
       is one of istota_secret_names.
     quiet: true
+
+# The application settings come either as istota_plan (the CLI's plan, a
+# snapshot for instance) or as the legacy variables, never both. Deployment
+# variables sit beside either. Refused here, before anything on the VM changes;
+# the plan itself is validated by the release's own image further down.
+- name: Check the application-settings variables
+  ansible.builtin.assert:
+    that:
+      - istota_plan is mapping and istota_plan_secrets is mapping
+      - >-
+        istota_plan | length == 0
+        or ((istota_config | length) + (istota_users | length) + (istota_user_resources | length)
+            + (istota_user_briefings | length) + (istota_user_secrets | length)) == 0
+      - istota_plan_secrets | length == 0 or istota_plan | length > 0
+      - not (istota_plan_prune_secrets | bool) or istota_plan_prune | bool
+      - not (istota_plan_prune | bool) or istota_plan | length > 0
+    fail_msg: >-
+      Set the application settings either as istota_plan (with
+      istota_plan_secrets) or as istota_config, istota_users,
+      istota_user_resources, istota_user_briefings and istota_user_secrets, not
+      both. istota_plan_secrets needs istota_plan, istota_plan_prune needs
+      istota_plan, and istota_plan_prune_secrets needs istota_plan_prune.
+    quiet: true
+
+# Two role-vars envelopes for `istota apply --input-format role-vars`: the
+# config, which the stack needs before it can start, and everything else,
+# which needs the database it initializes. Each credential goes with its
+# section, so a value with no section to land in reaches apply and is refused.
+- name: Split the application settings
+  ansible.builtin.set_fact:
+    _istota_settings_config: "{{ (_istota_settings_json | from_json)[0] }}"
+    _istota_settings_users: "{{ (_istota_settings_json | from_json)[1] }}"
+  vars:
+    _istota_settings_json: |-
+      {%- set config = {} -%}
+      {%- set users = {} -%}
+      {%- if istota_plan | length > 0 or istota_plan_secrets | length > 0 -%}
+      {%- set plan_rest = {} -%}
+      {%- for key, value in istota_plan.items() if key != 'config' -%}{%- set _ = plan_rest.update({key: value}) -%}{%- endfor -%}
+      {%- set secrets_config = {} -%}
+      {%- for key, value in istota_plan_secrets.items() if key != 'users' -%}{%- set _ = secrets_config.update({key: value}) -%}{%- endfor -%}
+      {%- set secrets_users = {} -%}
+      {%- for key, value in istota_plan_secrets.items() if key != 'config' -%}{%- set _ = secrets_users.update({key: value}) -%}{%- endfor -%}
+      {%- if 'config' in istota_plan or 'config' in istota_plan_secrets -%}
+      {%- set plan_config = {} -%}
+      {%- for key, value in istota_plan.items() if key in ['meta', 'config'] -%}{%- set _ = plan_config.update({key: value}) -%}{%- endfor -%}
+      {%- set _ = config.update({'istota_plan': plan_config}) -%}
+      {%- if 'config' in istota_plan_secrets -%}{%- set _ = config.update({'istota_plan_secrets': secrets_config}) -%}{%- endif -%}
+      {%- endif -%}
+      {%- if (plan_rest.keys() | reject('equalto', 'meta') | list | length) > 0 or 'users' in istota_plan_secrets -%}
+      {%- set _ = users.update({'istota_plan': plan_rest}) -%}
+      {%- if 'users' in istota_plan_secrets -%}{%- set _ = users.update({'istota_plan_secrets': secrets_users}) -%}{%- endif -%}
+      {%- endif -%}
+      {%- else -%}
+      {%- if istota_config | length > 0 -%}{%- set _ = config.update({'istota_config': istota_config}) -%}{%- endif -%}
+      {%- if ((istota_users | length) + (istota_user_resources | length) + (istota_user_briefings | length) + (istota_user_secrets | length)) > 0 -%}
+      {%- set _ = users.update({'istota_users': istota_users, 'istota_user_resources': istota_user_resources,
+            'istota_user_briefings': istota_user_briefings, 'istota_user_secrets': istota_user_secrets}) -%}
+      {%- endif -%}
+      {%- endif -%}
+      {{ [config, users] | to_json }}
+  no_log: true
 
 - name: Check the VM was bootstrapped from a verified release
   tags: [istota_update]
@@ -275,8 +337,13 @@
   check_mode: false
 
 # --- The config --------------------------------------------------------------------
+# `istota-stack apply` prints istota apply's JSON result document on stdout and
+# exits as istota apply does: 0 unchanged, 2 changed (or would be, under
+# --dry-run), 1 refused or partly applied. It restarts a running stack once
+# when the result says a committed change needs it, so nothing here notifies
+# the restart handler. A refusal is reported from the document's error codes.
 
-- name: The config step needs a release
+- name: The settings step needs a release
   ansible.builtin.assert:
     that:
       - ansible_check_mode or (_istota_deployed.stdout_lines | default([''], true) | first) | length > 0
@@ -284,57 +351,64 @@
       No release is deployed: `istota apply` runs in the release's image, so set
       istota_release, or istota_update_mode to latest.
     quiet: true
-  when: istota_config | length > 0
+  when: _istota_settings_config | length > 0 or _istota_settings_users | length > 0
 
 - name: Apply the config
-  when: istota_config | length > 0
+  when: _istota_settings_config | length > 0
   block:
     # A temporary file, created under --check too: the dry run has to read the
-    # plan this play would apply, not the one the last play left.
-    - name: Make the plan file
+    # settings this play would apply, not the ones the last play left.
+    - name: Make the config input file
       ansible.builtin.tempfile:
         suffix: .json
-      register: _istota_plan
+      register: _istota_config_input
       changed_when: false
       check_mode: false
 
-    - name: Write the plan
+    # The envelope can carry credentials, so it is private; istota-stack
+    # refuses a role-vars input that is not.
+    - name: Write the config input
       ansible.builtin.copy:
-        dest: "{{ _istota_plan.path }}"
-        # [meta] marks the config as the role's, so the web's config editor
-        # leaves it read-only rather than taking an edit this play reverts.
-        content: "{{ {'meta': {'managed': true, 'source': 'ansible'}, 'config': istota_config} | to_json }}"
+        dest: "{{ _istota_config_input.path }}"
+        content: "{{ _istota_settings_config | to_json }}"
         mode: "0600"
       changed_when: false
       check_mode: false
       no_log: true
 
-    # Exit 2 is a change; istota-stack restarts a running stack on it itself.
+    # Runs under --check too, with --dry-run, which writes nothing and whose
+    # exit 2 is the drift answer.
     - name: istota-stack apply
       ansible.builtin.command:
-        argv: ["{{ istota_stack_command }}", apply, "{{ _istota_plan.path }}"]
+        argv: "{{ [istota_stack_command, 'apply', _istota_config_input.path, '--input-format', 'role-vars'] + (['--dry-run'] if ansible_check_mode else []) }}"
       register: _istota_applied
       changed_when: _istota_applied.rc == 2
-      failed_when: _istota_applied.rc not in [0, 2] or _istota_applied.delta is not defined
-      when: not ansible_check_mode
-
-    # The drift answer: exit 2 is what this play would change.
-    - name: istota-stack apply --dry-run
-      ansible.builtin.command:
-        argv: ["{{ istota_stack_command }}", apply, "{{ _istota_plan.path }}", --dry-run]
-      register: _istota_drift
-      changed_when: _istota_drift.rc == 2
-      failed_when: _istota_drift.rc not in [0, 2] or _istota_drift.delta is not defined
+      failed_when: _istota_applied.delta is not defined or _istota_applied.rc not in [0, 1, 2]
       check_mode: false
-      when: ansible_check_mode
+
+    - name: Report a refused config apply
+      ansible.builtin.fail:
+        msg: &istota_apply_failure >-
+          {%- set out = _istota_result.stdout | default('') -%}
+          {%- set doc = (out | from_json) if out.startswith('{') else {} -%}
+          {%- if doc.errors is defined -%}
+          istota apply {{ 'partially applied the settings: the operations listed as applied are in place and the rest are not' if doc.partial else 'refused the settings, and nothing was written' }}.
+          Errors: {% for error in doc.errors %}{{ error.code }} at {{ (error.path | join('.')) or 'the plan' }}{{ '; ' if not loop.last }}{% endfor %}.
+          {%- if doc.partial %} Applied: {% for op in doc.operations if op.status == 'applied' %}{{ op.section }} {{ op.user | default('') }} {{ op.identity }}{{ '; ' if not loop.last }}{% endfor %}.{% endif -%}
+          {%- else -%}
+          istota-stack apply exited {{ _istota_result.rc }} without a result document: {{ _istota_result.stderr | default('') }}
+          {%- endif -%}
+      vars:
+        _istota_result: "{{ _istota_applied }}"
+      when: _istota_applied.rc == 1
   always:
-    - name: Remove the plan file
+    - name: Remove the config input file
       ansible.builtin.file:
-        path: "{{ _istota_plan.path }}"
+        path: "{{ _istota_config_input.path }}"
         state: absent
       changed_when: false
       check_mode: false
-      when: _istota_plan.path is defined
+      when: _istota_config_input.path is defined
 
 # --- The image against the config ----------------------------------------------------
 # A build reads config.toml to decide whether Claude Code goes in. On a first
@@ -407,77 +481,73 @@
     - not ansible_check_mode
     - (_istota_deployed.stdout_lines | default([''], true) | first) | length > 0
 
-# --- Users, through the wrapper -------------------------------------------------------
-# No dry run exists for these, so they are skipped under --check.
+# --- The user settings ----------------------------------------------------------------
+# Profiles, folder resources, briefings, scheduled jobs, heartbeats,
+# provisionable credentials and shared briefing definitions, through the same
+# `istota apply` as the config. They need the database the daemon's entrypoint
+# initializes, so they wait for a healthy stack; under --check they are a dry
+# run where a release and a config are there to run it against, and reported
+# as a change where they are not.
 
-- name: Plan the ensure calls
-  ansible.builtin.set_fact:
-    _istota_ensure: "{{ _istota_ensure_json | from_json }}"
-  vars:
-    _istota_ensure_json: |-
-      {%- macro flags(entry) -%}
-      {%- set out = [] -%}
-      {%- for key, value in entry.items() -%}
-      {%- if value is sameas true -%}{%- set _ = out.append('--' ~ key) -%}
-      {%- elif value is sameas false or value is none -%}
-      {%- elif value is iterable and value is not string and value is not mapping -%}
-      {%- for one in value -%}{%- set _ = out.extend(['--' ~ key, one | string]) -%}{%- endfor -%}
-      {%- else -%}{%- set _ = out.extend(['--' ~ key, value | string]) -%}
-      {%- endif -%}
-      {%- endfor -%}
-      {{ out | to_json }}
-      {%- endmacro -%}
-      {%- set calls = [] -%}
-      {%- for user, entry in istota_users.items() -%}
-      {%- set _ = calls.append({'label': 'user ' ~ user, 'argv': ['user', 'ensure', '--name', user] + (flags(entry) | from_json)}) -%}
-      {%- endfor -%}
-      {%- for user, entries in istota_user_resources.items() -%}{%- for entry in entries -%}
-      {%- set _ = calls.append({'label': 'resource ' ~ user ~ ' ' ~ (entry.path | default('')), 'argv': ['resource', 'ensure', '--user', user] + (flags(entry) | from_json)}) -%}
-      {%- endfor -%}{%- endfor -%}
-      {%- for user, entries in istota_user_briefings.items() -%}{%- for entry in entries -%}
-      {%- set _ = calls.append({'label': 'briefing ' ~ user ~ ' ' ~ (entry.name | default('')), 'argv': ['briefing', 'ensure', '--user', user] + (flags(entry) | from_json)}) -%}
-      {%- endfor -%}{%- endfor -%}
-      {{ calls | to_json }}
+- name: Does the VM have a config
+  ansible.builtin.stat:
+    path: "{{ istota_stack_dir }}/config/config.toml"
+  register: _istota_config_present
+  when: _istota_settings_users | length > 0
 
-# The value goes on stdin, never argv: argv is in root's docker CLI command line
-# and in dockerd's exec records. An empty value is skipped, as `secret ensure`
-# refuses one; `istota secret remove` clears a secret.
-- name: Plan the secret ensure calls
-  ansible.builtin.set_fact:
-    _istota_secret_ensure: "{{ _istota_secret_ensure_json | from_json }}"
-  vars:
-    _istota_secret_ensure_json: |-
-      {%- set calls = [] -%}
-      {%- for user, entries in istota_user_secrets.items() -%}{%- for entry in entries -%}
-      {%- if (entry.value | default('') | string) | length > 0 -%}
-      {%- set _ = calls.append({'label': 'secret ' ~ user ~ ' ' ~ entry.service ~ '/' ~ entry.key,
-            'argv': ['secret', 'ensure', '--user', user, '--service', entry.service, '--key', entry.key, '--value-stdin'],
-            'stdin': entry.value | string}) -%}
-      {%- endif -%}
-      {%- endfor -%}{%- endfor -%}
-      {{ calls | to_json }}
-  no_log: true
+- name: Report the user settings --check would apply
+  ansible.builtin.debug:
+    msg: would apply the user settings (no deployed release or no config to dry-run them against)
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - _istota_settings_users | length > 0
+    - >-
+      (_istota_deployed.stdout_lines | default([''], true) | first) | length == 0
+      or not _istota_config_present.stat.exists
 
-- name: istota user, resource and briefing ensure
-  ansible.builtin.command:
-    argv: "{{ [istota_cli_command] + item.argv }}"
-  loop: "{{ _istota_ensure }}"
-  loop_control:
-    label: "{{ item.label }}"
-  register: _istota_ensured
-  changed_when: "'STATE: noop' not in _istota_ensured.stdout"
-  # Both the scheduler and the web app read the user set at config load.
-  notify: Restart the istota stack
-  when: not ansible_check_mode
+- name: Apply the user settings
+  when:
+    - _istota_settings_users | length > 0
+    - (_istota_deployed.stdout_lines | default([''], true) | first) | length > 0
+    - not ansible_check_mode or _istota_config_present.stat.exists
+  block:
+    - name: Make the user settings input file
+      ansible.builtin.tempfile:
+        suffix: .json
+      register: _istota_users_input
+      changed_when: false
+      check_mode: false
 
-- name: istota secret ensure
-  ansible.builtin.command:
-    argv: "{{ [istota_cli_command] + item.argv }}"
-    stdin: "{{ item.stdin }}"
-  loop: "{{ _istota_secret_ensure }}"
-  loop_control:
-    label: "{{ item.label }}"
-  register: _istota_secret_ensured
-  changed_when: "'STATE: noop' not in _istota_secret_ensured.stdout"
-  no_log: true
-  when: not ansible_check_mode
+    - name: Write the user settings input
+      ansible.builtin.copy:
+        dest: "{{ _istota_users_input.path }}"
+        content: "{{ _istota_settings_users | to_json }}"
+        mode: "0600"
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    # The prune flags apply here only: the config is a whole document.
+    - name: istota-stack apply (user settings)
+      ansible.builtin.command:
+        argv: "{{ [istota_stack_command, 'apply', _istota_users_input.path, '--input-format', 'role-vars'] + (['--dry-run'] if ansible_check_mode else []) + (['--prune'] if istota_plan_prune | bool else []) + (['--prune-secrets'] if istota_plan_prune_secrets | bool else []) }}"
+      register: _istota_users_applied
+      changed_when: _istota_users_applied.rc == 2
+      failed_when: _istota_users_applied.delta is not defined or _istota_users_applied.rc not in [0, 1, 2]
+      check_mode: false
+
+    - name: Report a refused user settings apply
+      ansible.builtin.fail:
+        msg: *istota_apply_failure
+      vars:
+        _istota_result: "{{ _istota_users_applied }}"
+      when: _istota_users_applied.rc == 1
+  always:
+    - name: Remove the user settings input file
+      ansible.builtin.file:
+        path: "{{ _istota_users_input.path }}"
+        state: absent
+      changed_when: false
+      check_mode: false
+      when: _istota_users_input.path is defined

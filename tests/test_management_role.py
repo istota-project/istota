@@ -16,11 +16,14 @@ role's YAML on one side and from the code on the other:
   wizard's for the same answers;
 - the `istota-stack` verbs the role calls against the script's own dispatch.
 
-And four rules about the role's own tasks: root writes nothing below
+And five rules about the role's own tasks: root writes nothing below
 `config/` or `secrets/`; every task whose arguments carry a secret has
 `no_log`, and no secret value is on an argv; an exit 2 counts as a change
-only when the command ran; and the provision and image decisions come after
-the inputs they read.
+only when the command ran; the provision and image decisions come after
+the inputs they read; and the application settings reach istota as one
+`istota apply --input-format role-vars` envelope in two parts, the config
+before the image check and the user settings after the stack is healthy,
+each checked through `settings_plan.role_input.convert_role_input` here.
 
 The role itself runs only in the vm tier (`tests/vm/test_management_role.py`).
 """
@@ -72,10 +75,20 @@ def _tasks() -> list[dict]:
 
 
 def _command_argv(task: dict) -> list | None:
+    """A command task's argv: a YAML list, or the literal list a templated
+    argv starts with (`"{{ [istota_stack_command, 'apply', path] + flags }}"`),
+    with each variable in it written back as `{{ name }}`."""
     for module in ("ansible.builtin.command", "command"):
         body = task.get(module)
-        if isinstance(body, dict) and isinstance(body.get("argv"), list):
-            return body["argv"]
+        if not isinstance(body, dict):
+            continue
+        argv = body.get("argv")
+        if isinstance(argv, list):
+            return argv
+        match = re.match(r"^\{\{\s*\[([^\]]*)\]", str(argv or ""))
+        if match:
+            items = [item.strip() for item in match.group(1).split(",")]
+            return [item[1:-1] if item[:1] in "'\"" else f"{{{{ {item} }}}}" for item in items]
     return None
 
 
@@ -293,15 +306,21 @@ class TestTheVerbs:
         assert called >= {"update", "apply"}, called
         assert called <= _stack_verbs(), called - _stack_verbs()
 
-    def test_the_ensure_loops_go_through_the_wrapper(self):
-        """The CLI is reached as uid 10001 through the VM's wrapper, never by a
-        `docker compose exec` of the role's own, which would run as root."""
-        ensure = [t for t in _tasks() if "ensure" in t.get("name", "") and "loop" in t]
-        assert len(ensure) == 2, [t.get("name") for t in ensure]
-        for task in ensure:
-            assert task["ansible.builtin.command"]["argv"].startswith("{{ [istota_cli_command] + "), task["name"]
+    def test_the_settings_go_through_istota_stack_apply_not_ensure_loops(self):
+        """The ensure loops are gone: users, resources, briefings and secrets
+        reach istota through `istota-stack apply`, whose one-shot container
+        drops to uid 10001, and never by a `docker compose exec` of the
+        role's own, which would run as root."""
         for task in _tasks():
+            argv = _command_argv(task) or []
+            assert "ensure" not in [str(arg) for arg in argv], task.get("name")
+            assert "loop" not in task or "ensure" not in task.get("name", ""), task.get("name")
+            assert "istota_cli_command" not in yaml.safe_dump(task), task.get("name")
             assert "docker compose exec" not in yaml.safe_dump(task), task.get("name")
+        applies = [t for t in _tasks() if (argv := _command_argv(t)) and argv[:2] == [STACK_COMMAND, "apply"]]
+        assert [t["name"] for t in applies] == ["istota-stack apply", "istota-stack apply (user settings)"]
+        for task in applies:
+            assert _command_argv(task)[3:5] == ["--input-format", "role-vars"], task["name"]
 
 
 # --- what root writes ---------------------------------------------------------
@@ -373,10 +392,16 @@ class TestTheRoleClaimsWhatItWrites:
         return json.loads(context["_istota_put_files"])
 
     def test_the_plan_claims_the_config(self):
-        task = next(t for t in _tasks() if t.get("name") == "Write the plan")
-        content = task["ansible.builtin.copy"]["content"]
-        plan = json.loads(self._env().from_string(content).render(istota_config={"bot_name": "Zed"}))
-        assert plan == {"meta": {"managed": True, "source": "ansible"}, "config": {"bot_name": "Zed"}}
+        """The envelope goes through `convert_role_input`, which marks the
+        config the role submits as the role's, in either input mode."""
+        from istota.settings_plan.role_input import convert_role_input
+
+        for variables in ({"istota_config": {"bot_name": "Zed"}},
+                          {"istota_plan": {"meta": {"source": "snapshot"}, "config": {"bot_name": "Zed"}}}):
+            config, _ = _settings_parts(variables)
+            plan, _ = convert_role_input(config)
+            assert plan["meta"]["managed"] is True and plan["meta"]["source"] == "ansible"
+            assert plan["config"] == {"bot_name": "Zed"}
 
     def test_put_files_claims_what_the_role_sets(self):
         request = self._put_files({"anthropic_api_key": "sk"}, ["alice"])
@@ -390,7 +415,8 @@ class TestTheRoleClaimsWhatItWrites:
 # --- secrets stay out of output -----------------------------------------------
 
 #: Variables whose value is a credential, or may hold one (a config can).
-_SECRET_VARS = {"istota_secrets", "istota_rclone_conf", "istota_user_secrets", "istota_config"}
+_SECRET_VARS = {"istota_secrets", "istota_rclone_conf", "istota_user_secrets", "istota_config",
+                "istota_plan", "istota_plan_secrets"}
 #: Task keys that are conditions or bookkeeping: a variable named there is
 #: evaluated, never printed.
 _CONDITION_KEYS = {"name", "when", "failed_when", "changed_when", "until", "register",
@@ -442,9 +468,13 @@ class TestSecretsStayOutOfOutput:
                 assert task.get("no_log") is True, f"{task.get('name')} carries {named} without no_log"
 
 
-def _ensure_calls(variables: dict) -> list[dict]:
-    """Every ensure call the role's planning facts produce for `variables`,
-    rendered with the core Jinja filters Ansible's own reduce to here."""
+def _bool(value):
+    return value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "on")
+
+
+def _envs():
+    """A text and a native Jinja environment with the filters the role's
+    settings tasks use, all of which Ansible's own reduce to here."""
     from jinja2.nativetypes import NativeEnvironment
 
     text_env = jinja2.Environment(undefined=jinja2.StrictUndefined)
@@ -452,60 +482,306 @@ def _ensure_calls(variables: dict) -> list[dict]:
     for env in (text_env, native_env):
         env.filters["to_json"] = json.dumps
         env.filters["from_json"] = json.loads
-    calls: list[dict] = []
-    for task in _tasks():
-        module, body = _module(task)
-        if module != "set_fact":
-            continue
-        context = dict(variables)
-        for name, template in (task.get("vars") or {}).items():
-            context[name] = text_env.from_string(template).render(context)
-        for template in body.values():
-            fact = native_env.from_string(template).render(context)
-            for group in (fact.values() if isinstance(fact, dict) else [fact]):
-                calls += [call for call in group if isinstance(call, dict) and "argv" in call]
-    return calls
+        env.filters["bool"] = _bool
+    return text_env, native_env
 
 
-class TestTheEnsurePlan:
+def _role_context(variables: dict) -> dict:
+    from istota.settings_plan.role_input import ROLE_VARIABLES
+
+    defaults = _defaults()
+    names = (*ROLE_VARIABLES, "istota_plan_prune", "istota_plan_prune_secrets")
+    return {name: defaults[name] for name in names} | variables
+
+
+def _settings_parts(variables: dict) -> tuple[dict, dict]:
+    """The two `--input-format role-vars` envelopes the role writes for
+    `variables`: the config part and the user-settings part."""
+    text_env, native_env = _envs()
+    task = _tasks()[_index("Split the application settings")]
+    context = _role_context(variables)
+    for name, template in (task.get("vars") or {}).items():
+        context[name] = text_env.from_string(template).render(context)
+    facts = {name: native_env.from_string(template).render(context)
+             for name, template in task["ansible.builtin.set_fact"].items()}
+    return facts["_istota_settings_config"], facts["_istota_settings_users"]
+
+
+def _apply_argv(name: str, **context) -> list:
+    _, native_env = _envs()
+    task = _tasks()[_index(name)]
+    full = _role_context({}) | {"istota_stack_command": STACK_COMMAND, "ansible_check_mode": False,
+                                "_istota_config_input": {"path": "/tmp/config.json"},
+                                "_istota_users_input": {"path": "/tmp/users.json"}} | context
+    return native_env.from_string(task["ansible.builtin.command"]["argv"]).render(full)
+
+
+class TestTheSettingsInput:
+    """The role's application variables reach istota as `istota apply
+    --input-format role-vars` envelopes, converted by the same Python adapter
+    the CLI uses. The config goes first, alone, because the stack cannot
+    start without it; everything else waits for an initialized database."""
+
     VALUE = "kk-secret-value"
+    HEADER = ["brain", "native", "extra_headers", "x.tenant"]
 
-    def _vars(self) -> dict:
+    def _legacy(self) -> dict:
         return {
+            "istota_config": {"bot_name": "Zed"},
             "istota_users": {"alice": {"display-name": "Alice", "email": ["a@example.com"]}},
-            "istota_user_resources": {}, "istota_user_briefings": {},
             "istota_user_secrets": {"alice": [
                 {"service": "karakeep", "key": "api_key", "value": self.VALUE},
                 {"service": "karakeep", "key": "base_url", "value": ""},
             ]},
         }
 
-    def _secret_calls(self) -> list[dict]:
-        return [c for c in _ensure_calls(self._vars()) if c["argv"][:2] == ["secret", "ensure"]]
+    def _canonical(self) -> dict:
+        return {
+            "istota_plan": {
+                "meta": {"version": 1, "generated_by": "snapshot", "source": "snapshot"},
+                "config": {"bot_name": "Zed", "brain": {"native": {"extra_headers": {"x.tenant": "<unchanged>"}}}},
+                "users": {"alice": {"profile_mode": "update", "profile": {"timezone": "UTC"},
+                                    "secrets": [{"service": "karakeep", "keys": ["api_key"]}]}},
+                "shared_briefing_blocks": [],
+            },
+            "istota_plan_secrets": {
+                "config": [{"path": self.HEADER, "value": "inline-value"}],
+                "users": {"alice": {"karakeep": {"api_key": self.VALUE}}},
+            },
+        }
 
-    def test_a_secret_value_is_never_on_argv(self):
-        """argv is in root's docker CLI cmdline and dockerd's exec records."""
-        calls = self._secret_calls()
-        assert calls
-        for call in calls:
-            assert self.VALUE not in call["argv"] and "--value" not in call["argv"], call["argv"]
+    def test_legacy_variables_split_into_the_config_and_the_user_settings(self):
+        from istota.settings_plan.role_input import convert_role_input
 
-    def test_the_value_goes_on_stdin(self):
-        (call,) = self._secret_calls()
-        assert "--value-stdin" in call["argv"]
-        assert call["stdin"] == self.VALUE
-        task = next(t for t in _tasks() if t.get("name") == "istota secret ensure")
-        assert task["ansible.builtin.command"]["stdin"] == "{{ item.stdin }}"
+        config, users = _settings_parts(self._legacy())
+        assert config == {"istota_config": {"bot_name": "Zed"}}
+        plan, sidecar = convert_role_input(config)
+        assert set(plan) == {"meta", "config"} and sidecar == {}
+        plan, sidecar = convert_role_input(users)
+        assert "config" not in plan
+        assert plan["users"]["alice"]["profile"]["display_name"] == "Alice"
+        assert plan["users"]["alice"]["profile"]["email_addresses"] == ["a@example.com"]
+        # The empty value is skipped, as the ensure loop skipped it.
+        assert plan["users"]["alice"]["secrets"] == [{"service": "karakeep", "keys": ["api_key"]}]
+        assert sidecar == {"users": {"alice": {"karakeep": {"api_key": self.VALUE}}}}
 
-    def test_an_empty_value_is_skipped(self):
-        """As the old role did: ensure refuses an empty value, and `secret
-        remove` is how one is cleared."""
-        assert [c["argv"][c["argv"].index("--key") + 1] for c in self._secret_calls()] == ["api_key"]
+    def test_a_canonical_plan_splits_and_each_secret_follows_its_section(self):
+        from istota.settings_plan.role_input import convert_role_input
 
-    def test_the_user_calls_are_unchanged(self):
-        users = [c for c in _ensure_calls(self._vars()) if c["argv"][:2] == ["user", "ensure"]]
-        assert users == [{"label": "user alice", "argv": [
-            "user", "ensure", "--name", "alice", "--display-name", "Alice", "--email", "a@example.com"]}]
+        variables = self._canonical()
+        plan, secrets = variables["istota_plan"], variables["istota_plan_secrets"]
+        config, users = _settings_parts(variables)
+        assert config == {"istota_plan": {"meta": plan["meta"], "config": plan["config"]},
+                          "istota_plan_secrets": {"config": secrets["config"]}}
+        assert users == {"istota_plan": {k: v for k, v in plan.items() if k != "config"},
+                         "istota_plan_secrets": {"users": secrets["users"]}}
+        converted, sidecar = convert_role_input(config)
+        assert converted["config"] == plan["config"] and converted["meta"]["managed"] is True
+        assert sidecar == {"config": secrets["config"]}
+        converted, sidecar = convert_role_input(users)
+        assert "config" not in converted and converted["users"] == plan["users"]
+        assert converted["shared_briefing_blocks"] == [] and sidecar == {"users": secrets["users"]}
+
+    def test_a_part_with_nothing_to_apply_is_empty(self):
+        assert _settings_parts({}) == ({}, {})
+        only_config = {"istota_plan": {"config": {"bot_name": "Zed"}}}
+        assert _settings_parts(only_config)[1] == {}
+        only_users = {"istota_plan": {"users": {"alice": {"profile": {"timezone": "UTC"}}}}}
+        assert _settings_parts(only_users)[0] == {}
+        assert _settings_parts({"istota_config": {"bot_name": "Zed"}})[1] == {}
+        assert _settings_parts({"istota_users": {"alice": {"display-name": "Alice"}}})[0] == {}
+
+    def test_a_secret_with_no_section_to_land_in_is_refused_not_dropped(self):
+        """A user value with no user settings, or a config value with no
+        config, still reaches apply, which refuses it before writing."""
+        from istota.settings_plan.role_input import convert_role_input
+        from istota.settings_plan.schema import SchemaError
+
+        users_only_secret = {"istota_plan": {"config": {"bot_name": "Zed"}},
+                             "istota_plan_secrets": {"users": {"alice": {"karakeep": {"api_key": self.VALUE}}}}}
+        _, users = _settings_parts(users_only_secret)
+        assert users
+        with pytest.raises(SchemaError):
+            convert_role_input(users)
+        config_only_secret = {"istota_plan": {"users": {"alice": {"profile": {"timezone": "UTC"}}}},
+                              "istota_plan_secrets": {"config": [{"path": self.HEADER, "value": "v"}]}}
+        config, _ = _settings_parts(config_only_secret)
+        assert config
+        with pytest.raises(SchemaError):
+            convert_role_input(config)
+
+    def test_no_secret_value_is_on_an_argv(self):
+        """argv is in root's docker CLI command line and dockerd's exec records."""
+        for name in ("istota-stack apply", "istota-stack apply (user settings)"):
+            for check in (False, True):
+                argv = _apply_argv(name, ansible_check_mode=check, **self._canonical())
+                assert all(isinstance(arg, str) for arg in argv), argv
+                assert not any(self.VALUE in arg or "inline-value" in arg for arg in argv), argv
+
+
+class TestTheApplyCalls:
+    NAMES = ("istota-stack apply", "istota-stack apply (user settings)")
+
+    def test_check_mode_is_a_dry_run(self):
+        for name in self.NAMES:
+            assert "--dry-run" not in _apply_argv(name, ansible_check_mode=False)
+            assert "--dry-run" in _apply_argv(name, ansible_check_mode=True)
+            # The command itself runs under --check; --dry-run keeps it from writing.
+            assert _tasks()[_index(name)].get("check_mode") is False, name
+
+    def test_the_input_is_the_role_vars_envelope(self):
+        assert _apply_argv("istota-stack apply") == [
+            STACK_COMMAND, "apply", "/tmp/config.json", "--input-format", "role-vars"]
+        assert _apply_argv("istota-stack apply (user settings)") == [
+            STACK_COMMAND, "apply", "/tmp/users.json", "--input-format", "role-vars"]
+
+    def test_prune_reaches_only_the_user_settings(self):
+        """The config is a whole document, so prune means nothing to it."""
+        prune = {"istota_plan_prune": True, "istota_plan_prune_secrets": True}
+        assert "--prune" not in _apply_argv("istota-stack apply", **prune)
+        users = _apply_argv("istota-stack apply (user settings)", **prune)
+        assert users[-2:] == ["--prune", "--prune-secrets"]
+        only_prune = _apply_argv("istota-stack apply (user settings)", istota_plan_prune=True)
+        assert only_prune[-1] == "--prune" and "--prune-secrets" not in only_prune
+
+    def test_istota_stack_restarts_and_the_role_does_not_again(self):
+        """`istota-stack apply` restarts the stack once when the result says a
+        committed change needs it; the ensure loops' notify restarted it a
+        second time."""
+        for name in self.NAMES:
+            assert "notify" not in _tasks()[_index(name)], name
+
+    def test_each_input_file_is_private_and_removed_afterwards(self):
+        for block_name, write, remove in (
+                ("Apply the config", "Write the config input", "Remove the config input file"),
+                ("Apply the user settings", "Write the user settings input",
+                 "Remove the user settings input file")):
+            block = next(t for t in _tasks() if t.get("name") == block_name)
+            assert remove in [t.get("name") for t in block.get("always", [])], block_name
+            task = _tasks()[_index(write)]
+            assert task.get("no_log") is True, write
+            assert task["ansible.builtin.copy"]["mode"] == "0600", write
+
+
+def _failure_message(name: str, result: dict) -> str:
+    text_env, native_env = _envs()
+    task = _tasks()[_index(name)]
+    context = dict(result)
+    for key, template in (task.get("vars") or {}).items():
+        context[key] = native_env.from_string(template).render(context)
+    return " ".join(text_env.from_string(task["ansible.builtin.fail"]["msg"]).render(context).split())
+
+
+class TestAFailedApplyIsReportedFromItsResult:
+    """A refused or partial apply is reported from the result document's
+    error codes and operation identities, never by matching words in stdout."""
+
+    NAMES = (("Report a refused config apply", "_istota_applied"),
+             ("Report a refused user settings apply", "_istota_users_applied"))
+
+    def _doc(self, **overrides) -> str:
+        document = {"version": 1, "dry_run": False, "changed": False, "partial": False, "restart_required": False,
+                    "counts": {}, "operations": [], "warnings": [],
+                    "errors": [{"code": "validation_error", "path": ["users", "alice", "profile", 0]}]}
+        return json.dumps(document | overrides)
+
+    def test_a_refusal_names_its_codes_and_paths(self):
+        for name, register in self.NAMES:
+            message = _failure_message(name, {register: {"rc": 1, "stdout": self._doc(), "stderr": ""}})
+            assert "validation_error at users.alice.profile.0" in message, message
+            assert "nothing was written" in message, message
+            assert f"{register}.rc == 1" in _when(_tasks()[_index(name)]), name
+
+    def test_a_partial_apply_names_what_was_applied(self):
+        operations = [
+            {"section": "profile", "user": "alice", "identity": "alice", "action": "update",
+             "status": "applied", "changes": []},
+            {"section": "resources", "user": "bob", "identity": "folder:/data/x", "action": "create",
+             "status": "failed", "changes": []},
+        ]
+        name, register = self.NAMES[1]
+        stdout = self._doc(partial=True, changed=True, operations=operations,
+                           errors=[{"code": "execution_failed", "path": ["users", "bob", "resources"]}])
+        message = _failure_message(name, {register: {"rc": 1, "stdout": stdout, "stderr": ""}})
+        assert "partially applied" in message and "execution_failed at users.bob.resources" in message, message
+        assert "profile alice alice" in message and "folder:/data/x" not in message, message
+
+    def test_no_result_document_reports_the_exit_and_stderr(self):
+        name, register = self.NAMES[0]
+        message = _failure_message(name, {register: {"rc": 1, "stdout": "", "stderr": "update the stack first."}})
+        assert "without a result document" in message and "update the stack first." in message, message
+
+
+def _assert_fails(task_name: str, variables: dict) -> list[str]:
+    """The `that` expressions of an assert task that fail for `variables`."""
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
+    env.filters["bool"] = _bool
+    task = _tasks()[_index(task_name)]
+    context = _render(_defaults() | variables)
+    return [that for that in task["ansible.builtin.assert"]["that"] if not env.compile_expression(that)(**context)]
+
+
+class TestTheSettingsVariablesAreCheckedFirst:
+    """Mixed or contradictory application inputs are refused before the play
+    changes anything on the VM; deployment variables may sit beside either."""
+
+    CHECK = "Check the application-settings variables"
+    PLAN = {"istota_plan": {"users": {"alice": {"profile": {"timezone": "UTC"}}}}}
+
+    def _fails(self, **variables) -> list[str]:
+        return _assert_fails(self.CHECK, variables)
+
+    def test_the_check_runs_before_the_first_change(self):
+        assert _index(self.CHECK) < _index("Stack directories")
+        assert _index("Split the application settings") < _index("Stack directories")
+
+    def test_either_input_alone_passes(self):
+        assert self._fails() == []
+        assert self._fails(istota_users={"alice": {"display-name": "Alice"}}, istota_config={"bot_name": "Z"}) == []
+        assert self._fails(**self.PLAN, istota_plan_secrets={"users": {}}, istota_plan_prune=True,
+                           istota_plan_prune_secrets=True) == []
+
+    def test_deployment_variables_may_sit_beside_the_plan(self):
+        assert self._fails(**self.PLAN, istota_secrets={"anthropic_api_key": "k"}, istota_admins=["alice"],
+                           istota_rclone_conf="[x]") == []
+
+    def test_empty_legacy_variables_do_not_count_as_input(self):
+        assert self._fails(**self.PLAN, istota_config={}, istota_users={}, istota_user_secrets={}) == []
+
+    def test_a_plan_with_any_nonempty_legacy_variable_is_refused(self):
+        for name, value in (("istota_config", {"bot_name": "Z"}), ("istota_users", {"a": {}}),
+                            ("istota_user_resources", {"a": []}), ("istota_user_briefings", {"a": []}),
+                            ("istota_user_secrets", {"a": []})):
+            assert self._fails(**self.PLAN, **{name: value}) != [], name
+
+    def test_plan_secrets_need_the_plan(self):
+        assert self._fails(istota_plan_secrets={"users": {}}) != []
+
+    def test_prune_secrets_needs_prune_and_prune_needs_the_plan(self):
+        assert self._fails(**self.PLAN, istota_plan_prune_secrets=True) != []
+        assert self._fails(istota_users={"a": {}}, istota_plan_prune=True) != []
+
+    def test_the_inputs_must_be_mappings(self):
+        assert self._fails(istota_plan="settings.json") != []
+        assert self._fails(**self.PLAN, istota_plan_secrets=["x"]) != []
+
+
+class TestTheUserSettingsWaitForTheStack:
+    """The user settings need an initialized database, which the daemon's
+    entrypoint makes; the config has to be written before the stack starts."""
+
+    def test_the_config_is_applied_before_the_image_check_and_the_rest_after_health(self):
+        assert _index("istota-stack apply") < _index("Does the image have what the config needs")
+        assert _index("istota-stack apply (user settings)") > _index("Wait for the daemon service to be healthy")
+
+    def test_check_mode_reports_what_it_cannot_dry_run(self):
+        """Under --check on a VM with no deployed release or no config yet,
+        there is nothing to dry-run the user settings against."""
+        report = _tasks()[_index("Report the user settings --check would apply")]
+        assert report.get("changed_when") is True
+        assert "ansible_check_mode" in _when(report)
+        assert _index("Does the VM have a config") < _index("istota-stack apply (user settings)")
 
 
 # --- exit codes ---------------------------------------------------------------
@@ -520,12 +796,12 @@ class TestAnExitTwoIsOnlyAChangeWhenTheCommandRan:
         found = 0
         for task in _tasks():
             failed_when = str(task.get("failed_when", ""))
-            if "[0, 2]" not in failed_when:
+            if "[0, 2]" not in failed_when and "[0, 1, 2]" not in failed_when:
                 continue
             found += 1
             register = task["register"]
             assert f"{register}.delta is not defined" in failed_when, task.get("name")
-        assert found >= 3
+        assert found >= 5
 
 
 # --- order --------------------------------------------------------------------

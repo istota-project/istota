@@ -99,6 +99,19 @@ class TestTheUpdateControls:
             assert old != new, name
 
 
+class TestTheRoleControls:
+    def test_each_mutation_applies_once_to_the_roles_tasks(self):
+        """A role control runs a copy of `ansible/` with one fragment replaced;
+        one that no longer matches would fail the control minutes into a session."""
+        from tests.vm import lima
+
+        tasks = (REPO / "ansible" / "tasks" / "main.yml").read_text()
+        assert lima.ROLE_CONTROLS
+        for name, (old, new) in lima.ROLE_CONTROLS.items():
+            assert tasks.count(old) == 1, name
+            assert old != new, name
+
+
 class TestTheMacShimControl:
     def test_it_applies_once_to_the_mac_cli(self):
         """Row L4's control edits a copy of the Mac CLI; a forward line that

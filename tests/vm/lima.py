@@ -872,6 +872,35 @@ def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
     }
 
 
+#: Negative controls on the role itself: `converge_role` runs a copy of
+#: `ansible/` with one fragment of `tasks/main.yml` replaced while one is applied.
+ROLE_CONTROLS: dict[str, tuple[str, str]] = {
+    # The user settings skipped under --check, as the ensure loops were.
+    "role-user-settings-unchecked": (
+        "    - not ansible_check_mode or _istota_config_present.stat.exists\n",
+        "    - not ansible_check_mode\n",
+    ),
+}
+
+
+def role_dir() -> Path:
+    """`ansible/`, or a copy with the applied role control's fragment replaced."""
+    name = control()
+    if name not in ROLE_CONTROLS:
+        return REPO / "ansible"
+    old, new = ROLE_CONTROLS[name]
+    target = _workdir() / f"ansible-{name}"
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(REPO / "ansible", target)
+    tasks = target / "tasks" / "main.yml"
+    text = tasks.read_text()
+    if text.count(old) != 1:
+        raise VmError(f"the control {name} does not apply to ansible/tasks/main.yml")
+    tasks.write_text(text.replace(old, new))
+    return target
+
+
 def converge_role(vm: Vm, variables: dict, *, check: bool = False, timeout: int = BUILD_TIMEOUT) -> RoleRun:
     """Run `ansible/` against the VM over Lima's ssh config, as root."""
     entry = vm.info() or {}
@@ -888,7 +917,7 @@ def converge_role(vm: Vm, variables: dict, *, check: bool = False, timeout: int 
         "- hosts: istota\n"
         "  become: true\n"
         "  roles:\n"
-        f"    - role: {REPO / 'ansible'}\n"
+        f"    - role: {role_dir()}\n"
     )
     vars_file = workdir / "vars.json"
     vars_file.write_text(json.dumps(variables))

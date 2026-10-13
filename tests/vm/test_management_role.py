@@ -18,17 +18,25 @@ against a stack the role converged. This file holds what is the role's own:
 - turning the browser profile on starts the browser and its watchdog, and
   turning it off stops both (proxied);
 - a changed rclone.conf runs provision.sh and leaves the mount, and so the
-  stack, running (nextcloud).
+  stack, running (nextcloud);
+- settings -> snapshot -> inventory -> apply (proxied): the converged VM's
+  own `istota snapshot`, set as `istota_plan` in place of the legacy
+  variables, is no drift under --check; a timezone changed in it is drift a
+  --check reports and does not write; a converge applies it and restarts the
+  daemon; and the next --check is clean.
 
-The ensure loops have no dry run and are skipped under --check, so a check
-cannot see a user, resource, briefing or secret row the play would change.
+Control (`scripts/test-vm-negative-control.sh`): `role-user-settings-unchecked`
+runs a copy of the role whose user settings are skipped under --check, as the
+ensure loops were (`lima.ROLE_CONTROLS`).
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import shlex
 import uuid
+from dataclasses import dataclass
 
 import pytest
 
@@ -50,6 +58,12 @@ def _describe(run: lima.RoleRun) -> str:
 
 def _config_toml(vm: lima.Vm) -> str:
     return vm.read(f"{lima.STACK}/config/config.toml")
+
+
+def _task_changed(run: lima.RoleRun, name: str) -> bool:
+    """Whether the task named `name` (role prefix aside) reported a change."""
+    blocks = [block for block in run.output.split("TASK [") if block.split("]", 1)[0].endswith(name)]
+    return bool(blocks) and "\nchanged:" in blocks[0]
 
 
 class _RoleChecks:
@@ -74,8 +88,7 @@ class _RoleChecks:
         run = lima.converge_role(stack, drifted, check=True, timeout=1800)
         assert run.returncode == 0, _describe(run)
         assert run.recap.get("changed", 0) >= 1, _describe(run)
-        dry_run = [block for block in run.output.split("TASK [") if block.split("]", 1)[0].endswith("istota-stack apply --dry-run")]
-        assert dry_run and "\nchanged:" in dry_run[0], _describe(run)
+        assert _task_changed(run, "istota-stack apply"), _describe(run)
         assert _config_toml(stack) == before
 
     def test_every_secret_file_is_0400_and_owned_by_10001(self, stack):
@@ -158,7 +171,8 @@ class TestTheRoleInProxiedMode(_RoleChecks):
 
     def test_the_user_secret_reached_the_database_through_stdin(self, stack):
         """The same value through `--value-stdin` and the VM's wrapper is a
-        no-op: the role stored it, and stdin crosses `docker compose exec`."""
+        no-op: the role's settings apply stored it from the private envelope,
+        and stdin crosses `docker compose exec`."""
         _, variables = _last(self.mode)
         entry = variables["istota_user_secrets"][lima.USER][0]
         result = stack.run(
@@ -255,6 +269,98 @@ systemctl enable --now istota-stack.service
         assert restore.returncode == 0, _describe(restore)
         assert not lima.container(stack, "browser"), "the browser still runs after the profile was turned off"
         assert stack.out(f"systemctl is-active {timer}", check=False) != "active"
+
+
+LEGACY_VARIABLES = ("istota_config", "istota_users", "istota_user_resources",
+                    "istota_user_briefings", "istota_user_secrets")
+TIMEZONES = ("Pacific/Auckland", "Europe/Lisbon")
+
+
+@dataclass
+class RoundTrip:
+    timezone_before: str
+    timezone_wanted: str
+    unchanged_check: lima.RoleRun
+    drift_check: lima.RoleRun
+    timezone_after_check: str
+    daemon_after_check: str
+    converge: lima.RoleRun
+    timezone_after_converge: str
+    daemon_after_converge: str
+    clean_check: lima.RoleRun
+    daemon_before: str
+
+
+def _snapshot(vm: lima.Vm) -> dict:
+    return json.loads(lima.stack_exec(vm, "istota snapshot --format json").stdout)
+
+
+def _daemon_started(vm: lima.Vm) -> str:
+    cid = lima.container(vm, "daemon")
+    return f"{cid} {vm.out(f'docker inspect -f {{{{.State.StartedAt}}}} {cid}')}" if cid else ""
+
+
+class TestASnapshotIsTheRolesPlan:
+    """settings -> snapshot -> inventory -> apply, through the role, on the
+    VM the role converged in proxied mode. The inventory swaps the legacy
+    application variables for the VM's own snapshot as `istota_plan`, as an
+    estate would after `istota snapshot --format json`; every deployment
+    variable stays as it was."""
+
+    @pytest.fixture(scope="class")
+    def round_trip(self, proxied_stack):
+        if lima.control() not in ("", "role-user-settings-unchecked"):
+            pytest.skip("another negative control is applied")
+        stack = proxied_stack
+        _, variables = _last("proxied")
+        snapshot = _snapshot(stack)
+        canonical = copy.deepcopy(variables)
+        canonical.update(dict.fromkeys(LEGACY_VARIABLES, {}), istota_plan=snapshot)
+        before = snapshot["users"][lima.USER]["profile"].get("timezone", "")
+        wanted = TIMEZONES[0] if before != TIMEZONES[0] else TIMEZONES[1]
+        drifted = copy.deepcopy(canonical)
+        drifted["istota_plan"]["users"][lima.USER]["profile"]["timezone"] = wanted
+        try:
+            unchanged = lima.converge_role(stack, canonical, check=True, timeout=1800)
+            daemon_before = _daemon_started(stack)
+            drift = lima.converge_role(stack, drifted, check=True, timeout=1800)
+            after_check = _snapshot(stack)["users"][lima.USER]["profile"].get("timezone", "")
+            daemon_after_check = _daemon_started(stack)
+            converge = lima.converge_role(stack, drifted)
+            lima.wait_healthy(stack)
+            after_converge = _snapshot(stack)["users"][lima.USER]["profile"].get("timezone", "")
+            daemon_after_converge = _daemon_started(stack)
+            clean = lima.converge_role(stack, drifted, check=True, timeout=1800)
+        finally:
+            # The snapshot names the timezone it was taken with, so applying it puts that back.
+            restore = lima.converge_role(stack, canonical)
+            assert restore.returncode == 0, _describe(restore)
+            lima.wait_healthy(stack)
+        return RoundTrip(before, wanted, unchanged, drift, after_check, daemon_after_check, converge,
+                         after_converge, daemon_after_converge, clean, daemon_before)
+
+    def test_the_snapshot_as_istota_plan_is_no_drift(self, round_trip):
+        run = round_trip.unchanged_check
+        assert run.returncode == 0 and run.recap.get("failed") == 0, _describe(run)
+        assert run.recap.get("changed") == 0, _describe(run)
+
+    def test_a_check_sees_the_changed_timezone_and_writes_nothing(self, round_trip):
+        run = round_trip.drift_check
+        assert run.returncode == 0 and run.recap.get("failed") == 0, _describe(run)
+        assert _task_changed(run, "istota-stack apply (user settings)"), _describe(run)
+        assert round_trip.timezone_after_check == round_trip.timezone_before
+        assert round_trip.daemon_after_check == round_trip.daemon_before, "a --check restarted the daemon"
+
+    def test_a_converge_applies_it_and_restarts_the_daemon(self, round_trip):
+        run = round_trip.converge
+        assert run.returncode == 0 and run.recap.get("failed") == 0, _describe(run)
+        assert _task_changed(run, "istota-stack apply (user settings)"), _describe(run)
+        assert round_trip.timezone_after_converge == round_trip.timezone_wanted
+        assert round_trip.daemon_after_converge != round_trip.daemon_before, "a profile change did not restart"
+
+    def test_the_next_check_is_clean(self, round_trip):
+        run = round_trip.clean_check
+        assert run.returncode == 0 and run.recap.get("changed") == 0, _describe(run)
 
 
 class TestTheRoleInNextcloudMode(_RoleChecks):
