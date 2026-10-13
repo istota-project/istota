@@ -258,6 +258,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`istota-stack localize-workspace` now gets `MOVED.md` into Nextcloud.** rclone uploads a file a few seconds after it is closed, and the move stopped the mount before then, so the note stayed in the VM's cache and users never saw it. `provision.sh` now waits up to two minutes for rclone to finish uploading before it stops the mount, and names any file still waiting. This applies to every switch away from the Nextcloud mount.
+
 - **Admin → Status no longer counts feed polls as automated tasks.** Module pollers and CRON.md command jobs call no model, but they were counted in "Automated 24h" and in each user's automated figure, where the feed poller alone added hundreds a day per user. They now have their own "Job runs 24h" tile and a "jobs" figure on each user's row, so the automated count shows only scheduled prompts, briefings and other model-driven tasks.
 
 - **The daemon starts again after the update that moved the state to `/srv/app/istota/data`, on a VM with a devbox.** That update made the directory private to the daemon's user, so the container's start-up step could not reach the devbox volumes mounted inside it, and the daemon restarted in a loop. The directory is now searchable by that step, `istota-stack` corrects one that is not, and the step stops with the command to run rather than looping. Updates now run the release's own `istota-stack` once its tag is verified, so a release's changes to the update itself take effect on the update that installs it, and a stack that fails to start still gets the host's scripts provisioned.
