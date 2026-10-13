@@ -66,7 +66,7 @@ See [credentials](credentials.md) for the full inventory, runtime flow, and the 
 
 ## Admin users
 
-Admin user IDs are listed in the admins file: plain text, one per line, `#` comments allowed. On the stack it is `/srv/app/istota/config/admins` on the VM, `/data/config/admins` in the containers, and `istota setup` creates it naming the first admin. Elsewhere it is `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset. An empty or missing file makes every user an admin for task permissions (backward compatibility), while the web admin pages treat it as no admins at all.
+Admin user IDs are listed in the admins file: plain text, one per line, `#` comments allowed. On the stack it is `/srv/app/istota/config/admins` on the VM, `/data/config/admins` in the containers, and `istota setup` creates it naming the first admin. Elsewhere it is `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset. An empty or missing file makes the sole user an admin on a single-user install. With two or more users it makes nobody an admin, and `istota doctor` fails `security.admins` until the file names someone. The web admin pages always treat it as no admins at all.
 
 Override path via `ISTOTA_ADMINS_FILE` env var.
 

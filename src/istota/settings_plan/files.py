@@ -10,7 +10,7 @@ from croniter import croniter
 
 from istota import cron_loader, db, heartbeat, storage
 from istota.brain import KNOWN_BRAIN_KINDS
-from istota.config import load_admin_users
+from istota.config import is_admin_with_stored_users, load_admin_users, stored_user_ids
 from istota.lib import toml_write
 from istota.lib.toml_fence import find_toml_block
 from istota.lib.sqlite_util import connect_read_only
@@ -74,12 +74,23 @@ def snapshot_cron(conn, config, user):
     return sorted(definitions, key=lambda item: item["name"]), text_files.revision(content)
 
 
+def _is_admin(conn, config, user):
+    """``Config.is_admin`` as the daemon answers it, counting the stored users.
+
+    The plan's config is loaded with no DB overlay, so on the stack, where
+    users live in the database, it holds none of them; an empty admins file
+    would then read as "everyone" here and "nobody" in the daemon (#745).
+    """
+    return is_admin_with_stored_users(config, user, stored_user_ids(conn))
+
+
 def _validate_cron(conn, config, user, job, path):
     if not croniter.is_valid(job.cron):
         raise ExecutionError("validation_error", [*path, "cron"])
-    if cron_loader.fj_is_disallowed_command(job, config.is_admin(user)):
+    is_admin = _is_admin(conn, config, user)
+    if cron_loader.fj_is_disallowed_command(job, is_admin):
         raise ExecutionError("validation_error", [*path, "command"])
-    if job.brain and (cron_loader.fj_brain_or_none(job, config.is_admin(user)) is None
+    if job.brain and (cron_loader.fj_brain_or_none(job, is_admin) is None
                       or job.brain not in KNOWN_BRAIN_KINDS or job.brain not in config.brain.room_selectable):
         raise ExecutionError("validation_error", [*path, "brain"])
     if job.publish_shared_kv or job.publish_shared_kv_trusted:
@@ -295,7 +306,7 @@ def _validate_heartbeat_reach(config, user, definition):
                 validate_destination(conn, config, user, "talk:" + token)
             for index, check in enumerate(definition["checks"]):
                 path = [*field_path, "checks", index]
-                if check["type"] in {"shell-command", "url-health"} and not config.is_admin(user):
+                if check["type"] in {"shell-command", "url-health"} and not _is_admin(conn, config, user):
                     raise ExecutionError("validation_error", [*path, "type"])
                 if check["type"] == "file-watch" and owner_path_parts(check["path"], user) is None:
                     raise ExecutionError("validation_error", [*path, "path"])

@@ -19,10 +19,10 @@ Four things gate a run before a single token is spent, and all four are in
 `cmd_run` rather than spread across the engine:
 
 * `developer.enabled`, a non-empty `repos_dir`, and `developer.review.enabled`.
-* `config.is_admin(ISTOTA_USER_ID)`. This **fails open** — `is_admin` returns
-  True when no admins file exists — and that is correct here, because it matches
-  the sandbox bind exactly: on such a deployment every user already gets
-  `repos_dir` bound. The shared-KV gate next door deliberately fails closed; do
+* `config.is_admin(ISTOTA_USER_ID)`. On a single-user config with no admins
+  file this **fails open**, and that is correct here, because it matches the
+  sandbox bind exactly: the same predicate decides the `repos_dir` bind. With
+  two or more users an empty file makes nobody admin (#745). The shared-KV gate next door deliberately fails closed; do
   not collapse the two.
 * `resolve_under_repos`, which is also what `devbox cp-in` and `kv
   set --value-file` use. Containment is necessary and nowhere near sufficient —

@@ -622,9 +622,8 @@ class TestCmdStop:
     async def test_a_targeted_stop_refuses_another_users_task(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
-        # A non-empty admin list not naming alice: an *empty* one reads as
-        # "everyone is admin" (`Config.is_admin`), which would exempt her from
-        # the check this test is about.
+        # A non-empty admin list not naming alice, so the test does not rest on
+        # how `Config.is_admin` reads an empty one.
         config.admin_users = ["carol"]
         with db.get_db(config.db_path) as conn:
             task_id = _task(conn, "Bob's task", user_id="bob", token="room2")
@@ -771,6 +770,7 @@ class TestCmdStatus:
     async def test_excludes_other_users(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
+        config.admin_users = {"alice"}
 
         with db.get_db(config.db_path) as conn:
             _task(conn, "Bob's task", user_id="bob", token=None, status=None)
@@ -783,6 +783,7 @@ class TestCmdStatus:
     async def test_system_stats(self, make_config):
         config = make_config()
         config.users["bob"] = UserConfig()
+        config.admin_users = {"alice"}
 
         with db.get_db(config.db_path) as conn:
             _task(conn, "Running", user_id="bob", token=None)
@@ -2688,10 +2689,10 @@ _RESET_0900 = _snapshot([_window(resets_at="2026-08-22T09:00:00Z", resets_in=360
 class TestCmdUsage:
     """`!usage`: token totals for everyone, the fleet split and the plan for admins.
 
-    Every test sets `config.admin_users` explicitly. The default empty allowlist
-    makes *everyone* an admin by `Config.is_admin`'s documented back-compat rule,
-    so a test that omits it exercises no split at all and would pass against a
-    handler with no gate in it.
+    Every test sets `config.admin_users` explicitly. On a single-user config the
+    default empty allowlist makes *everyone* an admin by `Config.is_admin`'s
+    fallback, so a test that omits it exercises no split at all and would pass
+    against a handler with no gate in it.
 
     `get_snapshot` is patched per test rather than left to the suite-wide autouse
     guard in `tests/conftest.py`: that guard returns a no-credential snapshot,

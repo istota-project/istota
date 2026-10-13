@@ -7375,3 +7375,32 @@ class TestConfigApplier:
     def test_a_request_taken_recently_is_fine(self, make_config, db_path):
         self._row(db_path, "taken", created_ago=7300, taken_ago=60)
         assert self._run(make_config, db_path).status == OK
+
+
+class TestSecurityAdmins:
+    """`security.admins`: an empty admin set on a multi-user config (#745)."""
+
+    def _run(self, config):
+        return _by_name(run_checks(config, only=["security.admins"]))["security.admins"]
+
+    def test_fails_with_two_users_and_no_admins(self, make_config, make_user_config, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", "/data/config/admins")
+        config = make_config(users={"alice": make_user_config(), "bob": make_user_config()})
+        result = self._run(config)
+        assert result.status == FAIL
+        assert "2 users" in result.detail
+        assert "ISTOTA_ADMINS_FILE" in result.remedy
+        assert "/data/config/admins" in result.remedy
+
+    def test_ok_with_one_user_and_no_admins(self, make_config, make_user_config):
+        config = make_config(users={"alice": make_user_config()})
+        assert self._run(config).status == OK
+
+    def test_ok_with_two_users_and_a_named_admin(self, make_config, make_user_config):
+        config = make_config(
+            users={"alice": make_user_config(), "bob": make_user_config()},
+            admin_users={"alice"},
+        )
+        result = self._run(config)
+        assert result.status == OK
+        assert "1 admin" in result.detail

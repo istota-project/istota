@@ -18,13 +18,21 @@ not the same directory, and it never appears in an argument or an answer.
 """
 
 import argparse
+from contextlib import closing
 import json
 import os
 import posixpath
 import sys
 from pathlib import Path
 
-from istota.config import Config, NextcloudConfig, load_admin_users
+from istota.config import (
+    Config,
+    NextcloudConfig,
+    is_admin_with_stored_users,
+    load_admin_users,
+    stored_user_ids,
+)
+from istota.lib.sqlite_util import connect_read_only
 from istota.nextcloud import (
     OcsError,
     PathScopeError,
@@ -73,8 +81,7 @@ def _config_from_env() -> Config:
             dav_prefix=os.environ.get("NC_DAV_PREFIX", ""),
         )
     )
-    # Path scoping consults Config.is_admin, whose "empty file means everyone"
-    # back-compat rule is the same one the sandbox and skill gates use.
+    # Path scoping asks whether the caller is an admin; see `_caller_is_admin`.
     try:
         config.admin_users = load_admin_users()
     except Exception:
@@ -84,6 +91,24 @@ def _config_from_env() -> Config:
 
 def _caller() -> str:
     return os.environ.get("ISTOTA_USER_ID", "")
+
+
+def _caller_is_admin(config: Config, user_id: str) -> bool:
+    """``Config.is_admin`` as the daemon answers it.
+
+    This config carries no users, so an empty admins file would read as
+    "everyone"; the stored users decide it instead, and an unreadable
+    database leaves only a named admin (#745).
+    """
+    stored = None
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if db_path:
+        try:
+            with closing(connect_read_only(db_path)) as conn:
+                stored = stored_user_ids(conn)
+        except Exception:
+            stored = None
+    return is_admin_with_stored_users(config, user_id, stored)
 
 
 def _scoped(config: Config, path: str, *, whole_tree: bool = False) -> str:
@@ -98,7 +123,7 @@ def _scoped(config: Config, path: str, *, whole_tree: bool = False) -> str:
     on whole (a share): it also refuses a directory that contains memory.
     """
     user_id = _caller()
-    scoped = resolve_scoped_path(path, user_id, is_admin=config.is_admin(user_id))
+    scoped = resolve_scoped_path(path, user_id, is_admin=_caller_is_admin(config, user_id))
     # POSIX keeps a leading `//`, which an admin's unconfined path can carry
     # past a prefix comparison and the remote-path join then strips.
     scoped = "/" + scoped.lstrip("/")

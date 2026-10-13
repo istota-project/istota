@@ -167,6 +167,20 @@ def test_user_authority_is_not_the_operator_authority(install, fields, monkeypat
     assert not install[2].exists()
 
 
+def test_empty_admins_file_counts_the_stored_users(install, monkeypatch, tmp_path):
+    # The plan loads config with no DB overlay, so the stored users are what
+    # make an empty admins file mean "nobody" here as it does in the daemon (#745).
+    empty = tmp_path / "empty-admins"
+    empty.write_text("")
+    monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(empty))
+    job = [{"name": "daily", "cron": "0 9 * * *", "command": "echo hello"}]
+    preview(install, job)
+    user_profiles.provision_user(install[1].db_path, "bob", {})
+    with pytest.raises(engine.ExecutionError):
+        preview(install, job)
+    assert not install[2].exists()
+
+
 def test_prompt_file_snapshot_keeps_reference_and_explicit_defaults(install):
     from istota.settings_plan.files import snapshot_cron
     from istota.settings_plan.schema import JOB_FIELDS

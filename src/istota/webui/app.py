@@ -442,7 +442,7 @@ def _user_is_web_admin(username: str) -> bool:
     """Web dashboard admin check — fails closed.
 
     Distinct from ``Config.is_admin``, which treats an empty ``admin_users``
-    set as "all users are admin" for sandbox/skill/command back-compat. The
+    set as "the sole user is admin" on a single-user config. The
     web admin dashboard requires an explicit allowlist: a missing or empty
     ``/etc/istota/admins`` means no admin access via the web UI.
 

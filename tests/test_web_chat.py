@@ -3264,6 +3264,8 @@ class TestTheRoomPatchWritesTheBrain:
         from istota.config import BrainConfig
 
         config = _make_config(tmp_path)
+        # Two users, so an empty admin set would make nobody admin (#745).
+        config.admin_users = {"alice"}
         config.brain = BrainConfig(**brain_kwargs)
         app = _patch_app(config)
         transport = ASGITransport(app=app)
@@ -3476,6 +3478,7 @@ class TestBrainAndModelInOneBody:
         from istota.config import BrainConfig
 
         config = _make_config(tmp_path)
+        config.admin_users = {"alice"}
         config.brain = BrainConfig(
             kind="claude_code", room_selectable=["native", "tmux_claude"],
         )

@@ -2796,11 +2796,14 @@ class Config:
     def is_admin(self, user_id: str) -> bool:
         """Check if user has admin privileges.
 
-        Returns True if no admins file exists (empty set = all users are admin
-        for backward compatibility), or if user_id is in the admin set.
+        An empty admin set makes everyone admin only while at most one user is
+        configured, where that is the same as the one user being admin. With
+        more users it makes nobody admin (#745): a missing or emptied admins
+        file must not hand every user unsandboxed cron commands, subtasks and
+        the forge token. ``security.admins`` in doctor reports that state.
         """
         if not self.admin_users:
-            return True
+            return len(self.users) <= 1
         return self.is_named_admin(user_id)
 
     def is_named_admin(self, user_id: str) -> bool:
@@ -2812,7 +2815,7 @@ class Config:
 
         Deliberately asymmetric to :meth:`is_admin`: an empty admin allowlist
         authorizes NOBODY here (mirroring ``web_app._user_is_web_admin``),
-        rather than everyone. Content written to ``shared_kv`` flows into other
+        even on a single-user config where ``is_admin`` still says everyone. Content written to ``shared_kv`` flows into other
         users' briefing prompts (a prompt-injection surface), so a blank admins
         file must not silently make every user a shared-content writer.
         Returns True iff ``admin_users`` is non-empty and ``user_id`` is in it.
@@ -2860,13 +2863,43 @@ class Config:
         return self.is_named_admin(user_id)
 
 
+def stored_user_ids(conn) -> set[str]:
+    """Every user id the ``load_config`` DB overlays add to ``config.users``.
+
+    The same three tables ``_apply_user_profiles``, ``_apply_user_resources``
+    and ``_apply_user_briefings`` read, so a process that loaded config without
+    them counts users as the daemon does.
+    """
+    ids: set[str] = set()
+    for table in ("user_profiles", "user_resources", "briefing_configs"):
+        ids.update(row[0] for row in conn.execute(f"SELECT DISTINCT user_id FROM {table}"))
+    return ids
+
+
+def is_admin_with_stored_users(
+    config: "Config", user_id: str, stored_ids: set[str] | None,
+) -> bool:
+    """:meth:`Config.is_admin` for a config loaded without the DB overlays.
+
+    ``stored_ids`` is :func:`stored_user_ids`; ``None`` means it could not be
+    read, and then only a named admin is one, since the user count that
+    decides the empty-set fallback is unknown (#745).
+    """
+    if not config.admin_users and stored_ids is None:
+        return False
+    users = {uid: UserConfig() for uid in stored_ids or ()}
+    users.update(config.users)
+    return _dc_replace(config, users=users).is_admin(user_id)
+
+
 def load_admin_users(path: str | None = None) -> set[str]:
     """Load admin user IDs from a plain-text file.
 
     File format: one user ID per line, # comments, blank lines ignored.
     Returns empty set if file doesn't exist. Empty-set semantics are
-    asymmetric: Config.is_admin treats empty as "all users admin" for
-    legacy back-compat, while the web admin dashboard fails closed.
+    asymmetric: Config.is_admin treats empty as "all users admin" only on a
+    config with at most one user and as "nobody" otherwise, while the web
+    admin dashboard fails closed.
 
     Args:
         path: Override file path. If None, checks ISTOTA_ADMINS_FILE env var,

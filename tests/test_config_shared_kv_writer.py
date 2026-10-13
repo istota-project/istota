@@ -10,7 +10,7 @@ from istota.config import Config
 class TestSharedKvWriter:
     def test_empty_allowlist_authorizes_nobody(self):
         config = Config(admin_users=set())
-        # The fail-closed assertion, contrasted with is_admin's empty-means-all.
+        # The fail-closed assertion, contrasted with is_admin's single-user fallback.
         assert config.is_shared_kv_writer("alice") is False
         assert config.is_admin("alice") is True
 
