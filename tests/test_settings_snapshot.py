@@ -310,6 +310,17 @@ def test_invalid_stored_profile_is_not_exported_as_defaults(install, monkeypatch
     assert code == 1 and not stdout and "profile_store_invalid" in stderr
 
 
+@pytest.mark.parametrize("column", ["timezone_follow_location", "google_scopes"])
+def test_a_profile_table_missing_an_optional_column_is_refused(install, monkeypatch, capsys, column):
+    """A not-yet-migrated table reads as defaults elsewhere; a snapshot would export them as settings."""
+    path, config = install
+    with db.get_db(config.db_path) as conn:
+        conn.execute(f"ALTER TABLE user_profiles DROP COLUMN {column}")
+    code, stdout, stderr = invoke(monkeypatch, capsys, path, "snapshot")
+    assert code == 1 and not stdout and "profile_store_invalid" in stderr
+    assert "Traceback" not in stderr
+
+
 def test_scoped_snapshot_does_not_decode_another_users_profile(install, monkeypatch, capsys):
     path, config = install
     user_profiles.provision_user(config.db_path, "bob", {})
@@ -371,8 +382,10 @@ def test_snapshot_destination_requires_private_inline_replacement(install, tmp_p
     before = target.read_bytes(), database.read_bytes()
     code, stdout, stderr = invoke(monkeypatch, capsys, target, "apply", "-f", plan, "--dry-run", "--format", "json")
     assert code == 1
-    assert json.loads(stdout)["errors"] == [{"code": "validation_error",
-                                            "path": ["config", "brain", "native", "extra_headers", "x.tenant"]}]
+    [error] = json.loads(stdout)["errors"]
+    assert error["code"] == "validation_error"
+    assert error["path"] == ["config", "brain", "native", "extra_headers", "x.tenant"]
+    assert "--secrets-file" in error["message"] and "source-placeholder" not in stdout
     assert (target.read_bytes(), database.read_bytes()) == before
     sidecar = tmp_path / "private.json"
     sidecar.write_text(json.dumps({"config": [{"path": ["brain", "native", "extra_headers", "x.tenant"],

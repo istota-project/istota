@@ -412,6 +412,9 @@ def _connect(
 
 def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
     if strict:
+        # A missing column reads as its default below, which strict callers would export as a setting.
+        if not set(_PROFILE_COLUMNS) <= set(row.keys()):
+            raise ValueError("profile table is missing a column")
         for name in _LIST_COLUMNS | (_DICT_COLUMNS - {"google_scopes"}):
             value = json.loads(row[name])
             expected = list if name in _LIST_COLUMNS else dict

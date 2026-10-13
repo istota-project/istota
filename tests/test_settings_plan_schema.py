@@ -186,7 +186,9 @@ def test_execution_refuses_malformed_user_sections_before_writing(tmp_path):
                      stdin=io.StringIO('{"config": {}, "users": {"alice": {"resources": {}}}}'))
     assert code == 1 and not target.exists()
     report = json.loads(out[0])
-    assert report["errors"] == [{"code": "validation_error", "path": ["users", "alice", "resources"]}]
+    [error] = report["errors"]
+    assert error["code"] == "validation_error" and error["path"] == ["users", "alice", "resources"]
+    assert error["message"]
     assert not report["changed"]
 
 
