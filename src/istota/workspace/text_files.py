@@ -6,7 +6,7 @@ skill) take the same `memory_md_lock` anchor for a file, so neither side can
 drop the other's write. The anchor directory is the user's deferred dir,
 `{temp_dir}/{user_id}`, which the executor exports as `ISTOTA_DEFERRED_DIR`
 and binds into that user's sandbox at the same path; on the stack it is on the
-shared `istota_data` volume, so the `web` and `daemon` containers agree on it.
+shared state at `/data`, so the `web` and `daemon` containers agree on it.
 
 The revision is optimistic: the editor sends back the revision it loaded and
 `save` refuses a write when the file moved since. That covers what the lock

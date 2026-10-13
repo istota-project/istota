@@ -18,6 +18,7 @@
   import {
     Button,
     ConfirmDialog,
+    EmptyState,
     IconButton,
     KebabMenu,
     Modal,
@@ -498,7 +499,7 @@
         <Button variant="pill" size="sm" onclick={startAddCategory}>+ Add category</Button>
       {/snippet}
       {#if config.categories.length === 0}
-        <p class="empty">No categories yet. Categories group feeds in the sidebar.</p>
+        <EmptyState>No categories yet. Categories group feeds in the sidebar.</EmptyState>
       {:else}
         <div class="table-scroll">
           <table class="grid">
@@ -563,7 +564,7 @@
         <Button variant="pill" size="sm" onclick={startAdd}>+ Add subscription</Button>
       {/snippet}
       {#if config.feeds.length === 0}
-        <p class="empty">No subscriptions yet. Add one above, or import an OPML file.</p>
+        <EmptyState>No subscriptions yet. Add one above, or import an OPML file.</EmptyState>
       {:else}
         <div class="table-scroll">
           <table class="grid">

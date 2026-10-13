@@ -7,7 +7,7 @@
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { base } from '$app/paths';
-  import { StatTile } from '$lib/components/ui';
+  import { EmptyState, StatTile } from '$lib/components/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import { formatDecimal } from '$lib/format';
@@ -188,10 +188,9 @@
   {:else if error && !data}
     <div class="center-msg error">{error}</div>
   {:else if !data}
-    <div class="empty">
-      No tax configuration found. Set your filing status, year and state in
-      <a href="{base}/money/settings/taxes">money settings</a>.
-    </div>
+    <EmptyState actionLabel="Set up taxes" actionHref="{base}/money/settings/taxes">
+      No tax configuration found. Set your filing status, year and state to see estimates.
+    </EmptyState>
   {:else}
     {#if error}
       <div class="error-msg">{error}</div>
@@ -596,6 +595,11 @@
     flex: 1 0 auto;
   }
 
+  /* An empty state measures its own distance from the bar above it. */
+  .tax-content:has(> :global(.empty-state)) {
+    padding-top: 0;
+  }
+
   .tax-layout {
     display: grid;
     grid-template-columns: 280px 1fr;
@@ -850,7 +854,6 @@
   }
 
   .settings-link a,
-  .empty a,
   .state-notice a {
     color: var(--link);
   }

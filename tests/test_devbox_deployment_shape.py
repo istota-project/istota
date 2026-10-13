@@ -332,7 +332,7 @@ class TestTheShippedComposeFile:
         assert written["developer"]["container"]["exec_socket_dir"].startswith("/data/")
 
     def test_the_docs_describe_the_rendered_devboxes(self):
-        doc = (REPO / "docs" / "deployment" / "docker.md").read_text()
+        doc = (REPO / "docs" / "deployment" / "running-the-stack.md").read_text()
         assert "### Devboxes" in doc
         assert "#devboxes" in doc
         assert "istota devbox compose-file" in doc

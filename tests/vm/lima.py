@@ -379,13 +379,13 @@ IMAGE = "istota"
 UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
     # .env names the new ref and nothing starts it.
     "update-without-up": (
-        '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        stack_up\n',
+        '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        release_stack_up || up_rc=$?\n',
         '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        :\n',
     ),
     # The stack moves and the host's scripts and units stay at the old ref.
     "update-without-reprovision": (
-        '    log "now on ${tag} (previous: ${previous:-none})"\n    reprovision_if_changed\n',
-        '    log "now on ${tag} (previous: ${previous:-none})"\n',
+        '    reprovision_if_changed\n    [ "$up_rc" -eq 0 ] ||',
+        '    [ "$up_rc" -eq 0 ] ||',
     ),
     # The stack returns to the release and the host's scripts stay at the newer ref.
     "rollback-without-reprovision": (
@@ -411,6 +411,15 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
         '        secrets=()\n',
     ),
 }
+
+
+#: Applied with every `update-` control as well: an update hands its steps after
+#: the checkout to the release's own script, so a copy that kept the handoff
+#: would never run the step its control edits.
+UPDATE_HANDOFF_OFF: tuple[str, str] = (
+    '    hand_update_to_release "$tag" "$unsigned" "$before" "$(verified_git rev-parse HEAD)"\n',
+    '',
+)
 
 
 #: The Mac's `istota-stack` (row L4), run on this Mac against the tier's VM.
@@ -450,16 +459,20 @@ def stack_command(vm: Vm, name: str = "") -> str:
     """The installed `istota-stack`, or a copy with control `name` applied."""
     if not name:
         return STACK_COMMAND
-    old, new = UPDATE_CONTROLS[name]
+    edits = [UPDATE_CONTROLS[name]]
+    if name.startswith("update-"):
+        edits.append(UPDATE_HANDOFF_OFF)
     copy = f"{SCRATCH}/istota-stack.{name}"
     vm.run(f"""
 python3 - {STACK_COMMAND} {copy} <<'PY'
 import json, sys
-old, new = json.loads({json.dumps([old, new])!r})
+edits = json.loads({json.dumps(edits)!r})
 text = open(sys.argv[1]).read()
-if text.count(old) != 1:
-    sys.exit("the control does not apply to " + sys.argv[1])
-open(sys.argv[2], "w").write(text.replace(old, new))
+for old, new in edits:
+    if text.count(old) != 1:
+        sys.exit("the control does not apply to " + sys.argv[1])
+    text = text.replace(old, new)
+open(sys.argv[2], "w").write(text)
 PY
 chmod 0755 {copy}
 """)

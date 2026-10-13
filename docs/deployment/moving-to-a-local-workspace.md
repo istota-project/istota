@@ -1,14 +1,14 @@
 # Moving to a local workspace
 
-An install in full Nextcloud integration keeps its workspace in the bot's Nextcloud files, through the VM's rclone mount. A local workspace keeps it in `/data/workspace` on the state volume instead, with Talk and the `nextcloud` skill still connected to your Nextcloud. [Storage](docker.md#storage) describes the two choices, and [Where the workspace lives](../features/nextcloud.md#where-the-workspace-lives) what each means for the `nextcloud` skill.
+An install in full Nextcloud integration keeps its workspace in the bot's Nextcloud files, through the VM's rclone mount. A local workspace keeps it in `/data/workspace` in the state directory instead, with Talk and the `nextcloud` skill still connected to your Nextcloud. [Storage](running-the-stack.md#storage) describes the two choices, and [Where the workspace lives](../features/nextcloud.md#where-the-workspace-lives) what each means for the `nextcloud` skill.
 
-`istota-stack localize-workspace` moves an existing install from the mount to local storage, on the VM, with the stack stopped. It copies the files and leaves the Nextcloud copy in place, so going back is a config change.
+`istota-stack localize-workspace` moves an existing install from the mount to local storage, on the VM, with the stack stopped. It refuses unless `host.env` says `STORAGE=nextcloud`. It copies the files and leaves the Nextcloud copy in place, so going back is a config change.
 
 ## What the move does
 
 1. Checks that `config.toml` can be moved: it is in full integration, and `istota apply` did not write it (see [A VM the management role manages](#a-vm-the-management-role-manages)). Then checks that `/data/workspace` is empty, or that you passed `--resume`. A refusal here stops nothing.
 2. Stops `daemon`, `web` and `whatsapp-baileys`, the services that write the workspace. `nginx` and `signaling` keep running.
-3. Copies `Users/`, `Channels/`, `Groups/` and `PERSONA.md` from `/mnt/shared` to `/data/workspace`, in a one-shot container running as the daemon's user. Nothing else at the top of the bot's Nextcloud files belongs to the workspace: the bot's `Talk/` folder, folders users shared with the bot and `Backups/` stay where they are. Database snapshots are made again on the new volume.
+3. Copies `Users/`, `Channels/`, `Groups/` and `PERSONA.md` from `/mnt/shared` to `/data/workspace`, in a one-shot container running as the daemon's user. Nothing else at the top of the bot's Nextcloud files belongs to the workspace: the bot's `Talk/` folder, folders users shared with the bot and `Backups/` stay where they are. Database snapshots are made again, now in the state directory.
 4. Rewrites `config.toml`: `workspace_path = "/data/workspace"`, no `workspace_mount_path` (nor its old name, `nextcloud_mount_path`), and `auto_share_bot_dir = false`. `dav_prefix` stays, since the `nextcloud` skill still uses it for the bot's own Nextcloud files. The previous file is kept as `config/config.toml.pre-localize`.
 5. Writes `MOVED.md` into each user's bot folder in Nextcloud. It tells them their files now live in the web UI and that the folder is a frozen copy. This is the only change made to the Nextcloud files, and it happens only once the config no longer names the mount. A user who already has a `MOVED.md` there keeps theirs and gets no note; the verb names them. A failure here is a warning and the move goes on.
 6. Sets `STORAGE=local` in `host.env` and runs `provision.sh`, which stops and disables `mount-nextcloud.service`.
@@ -22,9 +22,9 @@ Run a dry run first. It stops nothing and writes nothing but the report, and lis
 istota-stack localize-workspace --dry-run
 ```
 
-The report is `/data/workspace-localize-report.json` on the state volume, and the same summary is printed. The copy skips anything that is not a regular file or a directory: a symlink, a FIFO, a socket or a device. It never follows a symlink, so a link a task left in a user's folder is not copied, and neither is what it points at.
+The report is `/data/workspace-localize-report.json` in the state directory, and the same summary is printed. The copy skips anything that is not a regular file or a directory: a symlink, a FIFO, a socket or a device. It never follows a symlink, so a link a task left in a user's folder is not copied, and neither is what it points at.
 
-Check that the state volume has room for the workspace. The dry run prints the bytes it would copy for each top-level folder, and `istota doctor`'s `runtime.workspace_disk` warns once the volume is low.
+Check that the VM's disk has room for the workspace in `/srv/app/istota/data`. The dry run prints the bytes it would copy for each top-level folder, and `istota doctor`'s `runtime.workspace_disk` warns once the disk is low.
 
 ## Running it
 
@@ -56,7 +56,7 @@ istota-stack compose run --rm --no-deps -T --entrypoint istota-drop daemon \
 
 ## A VM the management role manages
 
-When the Ansible management role manages the VM, `istota apply` writes `config.toml` from the role's plan, and the next play would undo an edit made on the VM. The verb refuses that config and names this route instead:
+This applies only when the optional Ansible management role manages the VM. Then `istota apply` writes `config.toml` from the role's plan, and the next play would undo an edit made on the VM. The verb refuses that config and names this route instead:
 
 1. On the VM, copy the files and leave the stack down:
 
@@ -77,7 +77,7 @@ When the Ansible management role manages the VM, `istota apply` writes `config.t
 
 Users reach their files in the web UI, under Workspace. Their bot folder in Nextcloud stays as it was on the day of the move, and the share that showed it to them is left in place. A change made there after the move does not reach Istota.
 
-Back up the `istota_data` volume, which now holds the workspace as well as the databases. See [Backing up a local install](docker.md#backing-up-a-local-install).
+Back up `/srv/app/istota/data`, which now holds the workspace as well as the databases. See [Backing up a local install](running-the-stack.md#backing-up-a-local-install).
 
 ## Going back
 
@@ -94,7 +94,7 @@ The Nextcloud copy is unchanged apart from `MOVED.md`, so returning to the mount
    ```
 
 5. `istota-stack up`.
-6. Remove the memory search entries that name the local copy, which stays on the volume and is not bound into a task on the mount:
+6. Remove the memory search entries that name the local copy, which stays in the state directory and is not bound into a task on the mount:
 
    ```bash
    istota-stack exec istota workspace reindex --forget-root /data/workspace

@@ -1497,9 +1497,9 @@
         onpointercancel={() => (tapStart = null)}
       >
         {#if !$loaded}
-          <div class="chat-empty">Loading…</div>
+          <div class="chat-placeholder">Loading…</div>
         {:else if $messages.length === 0}
-          <div class="chat-empty">
+          <div class="chat-placeholder">
             {#if $view === 'unread'}
               <CheckCheck size={28} />
               <p>All caught up</p>
@@ -1945,7 +1945,7 @@
     transform: translate(-50%, 0);
   }
 
-  .chat-empty {
+  .chat-placeholder {
     height: 100%;
     /* The composer is docked *over* the scrollport, so centring in the full
 		   height puts the notice half a composer below the middle of the space the
@@ -1971,12 +1971,12 @@
     font-size: var(--text-sm);
     text-align: center;
   }
-  .chat-empty p {
+  .chat-placeholder p {
     margin: 0.2rem 0 0;
     color: var(--text-muted);
     font-size: var(--text-base);
   }
-  .chat-empty .hint {
+  .chat-placeholder .hint {
     font-size: var(--text-sm);
   }
 

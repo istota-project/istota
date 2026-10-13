@@ -3,7 +3,6 @@
 import logging
 import os
 import re
-import shutil
 import stat
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -11,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from istota.lib.atomic_write import write_text_atomic
+from istota.lib.atomic_write import replace_at, write_text_atomic
 from istota.lib.filenames import MAX_NAME_BYTES, safe_filename
 from istota.sandbox.host_paths import owner_path_parts
 from istota.sandbox.user_scope import is_scopable_user_id
@@ -1172,7 +1171,7 @@ def read_user_config_file(
 
 
 def read_regular_file(
-    path: Path, *, max_bytes: int = USER_CONFIG_READ_CAP_BYTES
+    path: Path, *, max_bytes: int = USER_CONFIG_READ_CAP_BYTES, dir_fd: int | None = None,
 ) -> tuple[str | None, str | None]:
     """``read_user_config_file`` for a caller that already holds a safe path.
 
@@ -1191,12 +1190,14 @@ def read_regular_file(
     protect.
 
     Containment of the *ancestors* is the caller's, exactly as for
-    ``write_regular_file``. What this covers is the last component.
+    ``write_regular_file``. What this covers is the last component; with
+    ``dir_fd``, ``path`` is a name in that directory and the ancestors are the
+    descriptor's.
     """
     # noqa: PLC0415 - import cycle
     from .skills._loader import OVERLAY_NOT_UTF8, read_overlay_bytes
 
-    data, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes)
+    data, reason, _size = read_overlay_bytes(path, max_bytes=max_bytes, dir_fd=dir_fd)
     if reason is not None:
         return None, reason
     assert data is not None
@@ -1322,7 +1323,7 @@ def read_owner_text(
     return text.replace("\r\n", "\n").replace("\r", "\n"), None, False
 
 
-def create_file_if_absent(path: Path, text: str) -> bool:
+def create_file_if_absent(path: Path, text: str, *, dir_fd: int | None = None) -> bool:
     """Create ``path`` holding ``text``, or leave whatever is already there.
 
     The seeding counterpart to ``read_user_config_file``, and it replaces the
@@ -1345,11 +1346,17 @@ def create_file_if_absent(path: Path, text: str) -> bool:
     rather than abort a start-up, so ``ValueError`` is caught beside ``OSError``
     — a lone surrogate in ``text`` raises ``UnicodeEncodeError``, which is not
     an ``OSError`` and would otherwise escape the contract.
+
+    With ``dir_fd``, ``path`` is a name in a directory the caller opened
+    without following a link (ISSUE-723).
     """
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        fd = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+            dir_fd=dir_fd,
+        )
     except FileExistsError:
-        _warn_if_not_regular(path)
+        _warn_if_not_regular(path, dir_fd=dir_fd)
         return False
     except OSError as e:
         logger.warning("seed_file_refused path=%s errno=%s", path.name, e.errno)
@@ -1368,10 +1375,10 @@ def create_file_if_absent(path: Path, text: str) -> bool:
             os.close(fd)
 
 
-def _warn_if_not_regular(path: Path) -> None:
+def _warn_if_not_regular(path: Path, *, dir_fd: int | None = None) -> None:
     """Report a planted inode at a seeded name. Never raises."""
     try:
-        if not stat.S_ISREG(os.lstat(path).st_mode):
+        if not stat.S_ISREG(os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode):
             logger.warning(
                 "seed_file_refused path=%s reason=not_a_regular_file", path.name,
             )
@@ -1379,7 +1386,9 @@ def _warn_if_not_regular(path: Path) -> None:
         pass
 
 
-def write_regular_file(path: Path, text: str) -> bool:
+def write_regular_file(
+    path: Path, text: str | bytes, *, dir_fd: int | None = None,
+) -> bool:
     """Replace ``path``'s contents, refusing anything that is not a plain file.
 
     For the writers that legitimately overwrite — ``init_user_memory_v2``, the
@@ -1395,20 +1404,30 @@ def write_regular_file(path: Path, text: str) -> bool:
     bytes, and every caller reads False as "nothing was written". For the
     curator that is USER.md destroyed and reported as a no-op. So the target is
     opened only to *check* it, the content goes to a staging file in the same
-    directory, and ``os.replace`` publishes it atomically — which is what
-    ``atomic_write.write_text_atomic`` does. ``os.replace`` does not follow
+    directory, and ``os.replace`` publishes it atomically, through
+    ``atomic_write.replace_at``. ``os.replace`` does not follow
     a symlink at the destination, so the probe is what keeps a planted link from
     being quietly replaced with a real file rather than being the thing that
     stops the write landing elsewhere.
 
     False on refusal or failure, never an exception: the curator runs
     unattended and its caller treats False as "nothing was written tonight".
+
+    **With ``dir_fd``, ``path`` is a name in that directory**, which the caller
+    opened without following a link, and the probe, the staging file and the
+    replace all go through it (ISSUE-723). Checking a directory through a
+    descriptor and then writing by path leaves a window in which a task can
+    swap a component for a link; holding the descriptor closes it. Without
+    one, the parent is opened here, following links as the path always did,
+    and the caller owns ancestor containment as before.
     """
+    path = Path(path)
     try:
         fd = os.open(
             path,
             os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
             0o644,
+            dir_fd=dir_fd,
         )
     except OSError as e:
         logger.warning("write_refused path=%s errno=%s", path.name, e.errno)
@@ -1424,10 +1443,18 @@ def write_regular_file(path: Path, text: str) -> bool:
         os.close(fd)
 
     try:
-        # 0o644, the mode every workspace file has (and the one the user reads
-        # it with over Nextcloud, under the mount); `atomic_write` applies it to the descriptor rather than the name,
-        # which is what this directory being model-writable requires.
-        write_text_atomic(path, text, mode=0o644)
+        data = text.encode("utf-8") if isinstance(text, str) else text
+        target_fd = dir_fd
+        if dir_fd is None:
+            target_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            # 0o644, the mode every workspace file has (and the one the user
+            # reads it with over Nextcloud); `replace_at` applies it to the
+            # descriptor rather than the name.
+            replace_at(target_fd, path.name, data, mode=0o644)
+        finally:
+            if dir_fd is None:
+                os.close(target_fd)
         return True
     except (OSError, ValueError) as e:
         logger.warning("write_failed path=%s error=%s", path.name, type(e).__name__)
@@ -1779,6 +1806,83 @@ def _get_mount_path(config: "Config", path: str) -> Path:
     return config.workspace_path / path.lstrip("/")
 
 
+# The legacy migrations below run in the user's tree, which their tasks can
+# write, so nothing in them follows a link (ISSUE-723). Every directory is
+# reached through a descriptor opened without following one, a file is copied
+# only when it is a regular file, created only where nothing is at the name,
+# and a move is a rename between two such descriptors, never a copy.
+_MIGRATE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _open_plain_dir(root: Path, *parts: str) -> int | None:
+    """A descriptor on an existing directory below ``root``, or None."""
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+
+    if not parts:
+        try:
+            return os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            return None
+    return open_overlay_dir(root, *parts)
+
+
+def _lstat_at(dir_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return None
+
+
+def _copy_regular_at(src_fd: int, name: str, dst_fd: int, dst_name: str) -> bool:
+    """Copy one regular file between two pinned directories, never replacing."""
+    from .skills._loader import read_overlay_bytes  # noqa: PLC0415 - import cycle
+
+    st = _lstat_at(src_fd, name)
+    if st is None or not stat.S_ISREG(st.st_mode) or _lstat_at(dst_fd, dst_name) is not None:
+        return False
+    data, reason, _size = read_overlay_bytes(
+        Path(name), max_bytes=_MIGRATE_MAX_BYTES, dir_fd=src_fd,
+    )
+    if reason is not None or data is None:
+        logger.warning("migrate_copy_refused name=%s reason=%s", name, reason)
+        return False
+    try:
+        fd = os.open(
+            dst_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+            dir_fd=dst_fd,
+        )
+    except OSError as e:
+        logger.warning("migrate_copy_refused name=%s errno=%s", dst_name, e.errno)
+        return False
+    with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fh.fileno(), stat.S_IMODE(st.st_mode))
+        fh.write(data)
+    return True
+
+
+def _move_at(src_fd: int, name: str, dst_fd: int, dst_name: str) -> bool:
+    """Rename one entry between two pinned directories, never replacing.
+
+    A rename moves a link as a link, so the entry itself may be anything; what
+    must not be a link is either directory, and the descriptors settle that.
+    No copy fallback: the user's tree is one filesystem, and a copy would
+    follow what a rename does not.
+    """
+    if _lstat_at(src_fd, name) is None or _lstat_at(dst_fd, dst_name) is not None:
+        return False
+    try:
+        os.rename(name, dst_name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+    except OSError as e:
+        logger.warning("migrate_move_failed name=%s errno=%s", name, e.errno)
+        return False
+    return True
+
+
+def _is_plain_dir_at(dir_fd: int, name: str) -> bool:
+    st = _lstat_at(dir_fd, name)
+    return st is not None and stat.S_ISDIR(st.st_mode)
+
+
 def _migrate_old_layout(user_base: Path) -> None:
     """
     Migrate from old directory layout to new one.
@@ -1788,46 +1892,55 @@ def _migrate_old_layout(user_base: Path) -> None:
         context/YYYY-MM-DD.md → memories/YYYY-MM-DD.md
 
     Only runs if context/ exists and target files don't. Safe to call repeatedly.
+    Not shutil's copy here: its xattr step raises EIO on some FUSE workspace
+    mounts (#694), and it follows a link at either end.
     """
-    context_dir = user_base / "context"
-    if not context_dir.is_dir():
+    from .workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cycle
+
+    context_fd = _open_plain_dir(user_base, "context")
+    if context_fd is None:
         return
+    base_fd = memories_fd = None
+    try:
+        base_fd = _open_plain_dir(user_base)
+        if base_fd is None:
+            return
+        if _copy_regular_at(context_fd, "memory.md", base_fd, "USER.md"):
+            logger.info("Migrated %s → %s", user_base / "context" / "memory.md", user_base / "USER.md")
 
-    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
-
-    # Migrate memory.md → USER.md
-    old_memory = context_dir / "memory.md"
-    new_memory = user_base / "USER.md"
-    if old_memory.exists() and not new_memory.exists():
-        # Not copy2 here or below: its xattr step raises EIO on some FUSE
-        # workspace mounts (#694).
-        shutil.copyfile(old_memory, new_memory)
-        shutil.copymode(old_memory, new_memory)
-        logger.info("Migrated %s → %s", old_memory, new_memory)
-
-    # Migrate dated files → memories/
-    memories_dir = user_base / "memories"
-    memories_dir.mkdir(exist_ok=True)
-    for f in context_dir.iterdir():
-        if f.is_file() and date_pattern.match(f.name):
-            dest = memories_dir / f.name
-            if not dest.exists():
-                shutil.copyfile(f, dest)
-                shutil.copymode(f, dest)
-                logger.info("Migrated %s → %s", f, dest)
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+        names = [n for n in os.listdir(context_fd) if date_pattern.match(n)]
+        if not names:
+            return
+        try:
+            memories_fd = open_or_create_dirs(user_base, ["memories"])
+        except OSError as e:
+            logger.warning("migrate_dir_refused dir=memories errno=%s", e.errno)
+            return
+        for name in names:
+            if _copy_regular_at(context_fd, name, memories_fd, name):
+                logger.info("Migrated context/%s → memories/%s", name, name)
+    finally:
+        for fd in (context_fd, base_fd, memories_fd):
+            if fd is not None:
+                os.close(fd)
 
 
 def _migrate_notes_to_workspace(user_base: Path) -> None:
     """
     Migrate from notes/ to workspace/ directory.
 
-    Only runs if notes/ exists and workspace/ doesn't. Safe to call repeatedly.
+    Only runs if notes/ is a plain directory and workspace/ doesn't exist.
+    Safe to call repeatedly.
     """
-    notes_dir = user_base / "notes"
-    workspace_dir = user_base / "workspace"
-    if notes_dir.is_dir() and not workspace_dir.exists():
-        notes_dir.rename(workspace_dir)
-        logger.info("Migrated %s → %s", notes_dir, workspace_dir)
+    base_fd = _open_plain_dir(user_base)
+    if base_fd is None:
+        return
+    try:
+        if _is_plain_dir_at(base_fd, "notes") and _move_at(base_fd, "notes", base_fd, "workspace"):
+            logger.info("Migrated %s → %s", user_base / "notes", user_base / "workspace")
+    finally:
+        os.close(base_fd)
 
 
 def _migrate_workspace_files(user_base: Path) -> None:
@@ -1837,16 +1950,23 @@ def _migrate_workspace_files(user_base: Path) -> None:
     Only runs if workspace/ already exists (from a previous migration).
     Does not create workspace/ — the bot_dir layout supersedes it.
     """
-    workspace_dir = user_base / "workspace"
-    if not workspace_dir.is_dir():
+    workspace_fd = _open_plain_dir(user_base, "workspace")
+    if workspace_fd is None:
         return
-
-    for filename in ("USER.md", "TASKS.md"):
-        src = user_base / filename
-        dst = workspace_dir / filename
-        if src.exists() and not dst.exists():
-            shutil.move(str(src), str(dst))
-            logger.info("Migrated %s → %s", src, dst)
+    base_fd = _open_plain_dir(user_base)
+    try:
+        if base_fd is None:
+            return
+        for filename in ("USER.md", "TASKS.md"):
+            st = _lstat_at(base_fd, filename)
+            if st is None or not stat.S_ISREG(st.st_mode):
+                continue
+            if _move_at(base_fd, filename, workspace_fd, filename):
+                logger.info("Migrated %s → %s", user_base / filename, user_base / "workspace" / filename)
+    finally:
+        os.close(workspace_fd)
+        if base_fd is not None:
+            os.close(base_fd)
 
 
 # Config files that live in bot_name/config/
@@ -1860,29 +1980,69 @@ def _migrate_workspace_to_bot_dir(user_base: Path, bot_dir: str) -> None:
     """
     Migrate from workspace/ to bot directory layout.
 
-    1. If workspace/ exists and bot dir doesn't → rename workspace/ → bot_dir/
+    1. If workspace/ is a plain directory and bot dir doesn't exist → rename
+       workspace/ → bot_dir/
     2. Move config .md files from bot_dir/ root into bot_dir/config/
 
     Safe to call repeatedly.
     """
-    workspace_dir = user_base / "workspace"
-    bot_dir_path = user_base / bot_dir
+    from .workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cycle
 
-    # Step 1: rename workspace/ → bot_dir/
-    if workspace_dir.is_dir() and not bot_dir_path.exists():
-        workspace_dir.rename(bot_dir_path)
-        logger.info("Migrated %s → %s", workspace_dir, bot_dir_path)
+    base_fd = _open_plain_dir(user_base)
+    if base_fd is None:
+        return
+    try:
+        if _is_plain_dir_at(base_fd, "workspace") and _move_at(base_fd, "workspace", base_fd, bot_dir):
+            logger.info("Migrated %s → %s", user_base / "workspace", user_base / bot_dir)
+    finally:
+        os.close(base_fd)
 
-    # Step 2: move config files from bot_dir/ root into bot_dir/config/
-    if bot_dir_path.is_dir():
-        config_dir = bot_dir_path / "config"
-        config_dir.mkdir(exist_ok=True)
+    bot_fd = _open_plain_dir(user_base, bot_dir)
+    if bot_fd is None:
+        return
+    config_fd = None
+    try:
+        try:
+            config_fd = open_or_create_dirs(user_base, [bot_dir, "config"])
+        except OSError as e:
+            logger.warning("migrate_dir_refused dir=config errno=%s", e.errno)
+            return
         for filename in _CONFIG_FILES:
-            src = bot_dir_path / filename
-            dst = config_dir / filename
-            if src.is_file() and not dst.exists():
-                shutil.move(str(src), str(dst))
-                logger.info("Migrated %s → %s", src, dst)
+            st = _lstat_at(bot_fd, filename)
+            if st is None or not stat.S_ISREG(st.st_mode):
+                continue
+            if _move_at(bot_fd, filename, config_fd, filename):
+                logger.info("Migrated %s/%s → %s/config/%s", bot_dir, filename, bot_dir, filename)
+    finally:
+        os.close(bot_fd)
+        if config_fd is not None:
+            os.close(config_fd)
+
+
+def _migrate_dir_into_bot_dir(user_base: Path, name: str, bot_dir: str) -> None:
+    """Move every entry of ``{user_base}/{name}/`` into ``{bot_dir}/{name}/``."""
+    from .workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cycle
+
+    old_fd = _open_plain_dir(user_base, name)
+    if old_fd is None:
+        return
+    new_fd = None
+    try:
+        entries = os.listdir(old_fd)
+        if not entries:
+            return
+        try:
+            new_fd = open_or_create_dirs(user_base, [bot_dir, name])
+        except OSError as e:
+            logger.warning("migrate_dir_refused dir=%s errno=%s", name, e.errno)
+            return
+        for entry in entries:
+            if _move_at(old_fd, entry, new_fd, entry):
+                logger.info("Migrated %s/%s → %s/%s/%s", name, entry, bot_dir, name, entry)
+    finally:
+        os.close(old_fd)
+        if new_fd is not None:
+            os.close(new_fd)
 
 
 def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
@@ -1905,7 +2065,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         #
         # The ordering is the part that is easy to get wrong and was: the check
         # sat after the migrations, and `_migrate_workspace_to_bot_dir` derives
-        # `base / bot_dir / "config"` itself, `mkdir`s it and `shutil.move`s
+        # `base / bot_dir / "config"` itself, `mkdir`s it and moves
         # into it. So a redirected `{bot_dir}/` was still followed — the
         # refusal fired, returned False, and a `config/` directory had already
         # appeared outside the tree. Nothing may touch these paths before they
@@ -1945,26 +2105,9 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         config_dir.mkdir(exist_ok=True)
         for sub in BOT_SUBDIRS:
             (bot_dir_path / sub).mkdir(exist_ok=True)
-        exports_dir = bot_dir_path / "exports"
-        scripts_dir = bot_dir_path / "scripts"
-
-        # Migrate scripts/ from user root into bot dir
-        old_scripts = base / "scripts"
-        if old_scripts.is_dir() and any(old_scripts.iterdir()):
-            for item in old_scripts.iterdir():
-                dst = scripts_dir / item.name
-                if not dst.exists():
-                    shutil.move(str(item), str(dst))
-                    logger.info("Migrated %s → %s", item, dst)
-
-        # Migrate old exports/ to bot_dir/exports/
-        old_exports = base / "exports"
-        if old_exports.is_dir() and any(old_exports.iterdir()):
-            for item in old_exports.iterdir():
-                dst = exports_dir / item.name
-                if not dst.exists():
-                    shutil.move(str(item), str(dst))
-                    logger.info("Migrated %s → %s", item, dst)
+        # Migrate scripts/ and exports/ from the user root into the bot dir
+        _migrate_dir_into_bot_dir(base, "scripts", bot_dir)
+        _migrate_dir_into_bot_dir(base, "exports", bot_dir)
 
         # Every seed below goes through `create_file_if_absent` rather than
         # `if not exists(): write_text(...)`. `exists()` follows a link, so a
@@ -2520,32 +2663,30 @@ def write_channel_memory(
         from .workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cycle
 
         # A task in the room can plant a link at `Channels/<token>`: the
-        # directory is made without following one, and the write goes under
-        # the resolved, contained path.
+        # directory is opened without following one, and the write goes
+        # through that descriptor rather than by name again (ISSUE-723).
         validate_conversation_token(conversation_token)
         try:
-            os.close(open_or_create_dirs(
+            channel_fd = open_or_create_dirs(
                 _get_mount_path(config, CHANNEL_BASE), [conversation_token],
-            ))
+            )
         except OSError as e:
             logger.warning(
                 "channel memory write refused for %s: errno=%s", conversation_token, e.errno,
             )
             return False
-        channel_dir = _contained_channel_dir(config, conversation_token)
-        if channel_dir is None:
-            return False
-        memory_path = channel_dir / "CHANNEL.md"
         try:
             # 0o644: the file is about to become CHANNEL.md, which has the
-            # mode of every other file in the channel dir.
-            # `atomic_write` unlinks its staging file on any failure, so no
-            # stray dot-file is left sitting in the user's channel directory.
-            write_text_atomic(memory_path, content, mode=0o644)
+            # mode of every other file in the channel dir. `replace_at`
+            # unlinks its staging file on any failure, so no stray dot-file
+            # is left sitting in the user's channel directory.
+            replace_at(channel_fd, "CHANNEL.md", content.encode("utf-8"), mode=0o644)
             return True
-        except OSError as e:
+        except (OSError, ValueError) as e:
             logger.warning("channel memory write failed for %s: %s", conversation_token, e)
             return False
+        finally:
+            os.close(channel_fd)
     return False
 
 

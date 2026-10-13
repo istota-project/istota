@@ -38,9 +38,11 @@
 
 /* Bordered pills need daylight between their boxes; HeaderNav's own
    chip-gap is sized for the app bar's borderless text chips and reads as
-   touching here. */
-.money-section-nav .nav-links {
-  gap: var(--space-2);
+   touching here. Set through HeaderNav's property, because a
+   `.money-section-nav .nav-links` rule ties its scoped one on specificity and
+   lost in the dev server, where this sheet loads first. */
+.money-section-nav {
+  --header-nav-gap: var(--space-2);
 }
 
 /* In a body section header every link is a visible pill: deselected ones
@@ -319,13 +321,6 @@
    DocumentCard), and `align-self` would outrank that. */
 .money-table-row .ui-kebab-trigger {
   align-self: center;
-}
-
-.money-table-empty {
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  padding: var(--space-8) var(--space-4);
-  text-align: center;
 }
 
 @media (max-width: 640px) {

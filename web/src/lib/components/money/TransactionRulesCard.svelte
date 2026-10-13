@@ -1,7 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SettingsCard } from '$lib/components/settings';
-  import { Badge, Button, ConfirmDialog, Input, KebabMenu, Select } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    EmptyState,
+    Input,
+    KebabMenu,
+    Select,
+  } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
     createTransactionRule,
@@ -510,7 +518,7 @@
 
     {#if loaded && rules.length === 0}
       {#if !loadError}
-        <p class="empty">No rules in this scope yet.</p>
+        <EmptyState>No rules in this scope yet.</EmptyState>
       {/if}
     {:else}
       <ul class="rule-list">

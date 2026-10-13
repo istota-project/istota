@@ -24,6 +24,11 @@ describe('the table editor', () => {
     expect(mount(aliases).textarea.value).toBe('[aliases]\nfast = "haiku"\n');
   });
 
+  it('caps the textarea at the width of a text field, not the wide one', () => {
+    const { textarea } = mount(aliases);
+    expect(textarea.closest('.field')).not.toHaveClass('field-wide');
+  });
+
   it('starts empty for a table the file does not hold', () => {
     expect(mount(configField({ ...aliases, in_file: false, toml: '' })).textarea.value).toBe('');
   });

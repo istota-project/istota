@@ -188,6 +188,7 @@ export async function disconnectNextcloudToken(): Promise<{ ok: boolean; was_con
 
 export interface AdminStatsUserSource {
   count: number;
+  no_model?: number;
   failed: number;
   avg_duration_seconds: number | null;
 }
@@ -202,6 +203,9 @@ export interface AdminStatsUser {
   tasks_by_source_24h: Record<string, AdminStatsUserSource>;
   tasks_interactive_24h: number;
   tasks_automated_24h: number;
+  // Command and skill tasks (module pollers, CRON.md commands), apart from
+  // both buckets above. Optional while an older backend may answer.
+  tasks_no_model_24h?: number;
   tasks_failed_24h: number;
   last_active: string | null;
   // Usage sits on the same row as the task counts, so "how much is this user
@@ -365,6 +369,8 @@ export interface AdminStats {
     automated_24h: number;
     interactive_avg_per_day_30d: number;
     automated_avg_per_day_30d: number;
+    no_model_24h?: number;
+    no_model_avg_per_day_30d?: number;
   };
   storage: {
     db_size_bytes: number;
@@ -4477,6 +4483,15 @@ export interface FilePreview {
 
 export function previewChatFile(path: string, signal?: AbortSignal): Promise<FilePreview> {
   return apiFetch(`/chat/files/preview?path=${encodeURIComponent(path)}`, { signal });
+}
+
+/** Bytes of a file in the caller's own Nextcloud, read with their personal connection. */
+export function nextcloudFileUrl(path: string): string {
+  return `${base}/api/workspace/nextcloud/file?path=${encodeURIComponent(path)}`;
+}
+
+export function previewNextcloudFile(path: string, signal?: AbortSignal): Promise<FilePreview> {
+  return apiFetch(`/workspace/nextcloud/preview?path=${encodeURIComponent(path)}`, { signal });
 }
 
 /**

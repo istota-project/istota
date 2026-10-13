@@ -34,6 +34,7 @@ set -euo pipefail
 ISTOTA_UID=10001
 ISTOTA_GID=10001
 CGROUP_MOUNT=/sys/fs/cgroup
+DATA_ROOT=/data
 OWNERSHIP_MARKER=/data/.ownership-10001
 # The mount table the ownership walk reads; tests/test_container_root_phase.py
 # sets it after sourcing, to run the walk against a fabricated one.
@@ -178,14 +179,20 @@ writable_mounts_under() {
 # is repeated on the next boot rather than recorded as done.
 fix_ownership() {
     local mp
+    # Without DAC_READ_SEARCH a /data uid 10001 owns is crossed by its bits for
+    # others; with no search bit the stat below fails on the first mount in it.
+    if ! (cd "$DATA_ROOT") 2>/dev/null; then
+        log "REFUSE: ${DATA_ROOT} cannot be searched by this phase, which holds no DAC capability; give the host directory bound there search for others (chmod 0711 /srv/app/istota/data on the VM)."
+        return 76
+    fi
     while read -r mp; do
         [ "$(stat -c %u "$mp")" = "$ISTOTA_UID" ] || chown "$ISTOTA_UID:$ISTOTA_GID" "$mp"
-    done < <(writable_mounts_under /data)
+    done < <(writable_mounts_under "$DATA_ROOT")
     if [ -e "$OWNERSHIP_MARKER" ]; then
         return 0
     fi
-    log "one-time ownership fix: /data to ${ISTOTA_UID}"
-    chown_tree /data
+    log "one-time ownership fix: ${DATA_ROOT} to ${ISTOTA_UID}"
+    chown_tree "$DATA_ROOT"
     if ! istota-drop sh -c "mkdir -p /data/home && : > $OWNERSHIP_MARKER" 2>/dev/null; then
         log "could not record ${OWNERSHIP_MARKER} (no writable state volume); the walk repeats next boot"
     fi
@@ -253,7 +260,7 @@ main() {
     log "CapBnd $(capability_bounding_set "$SELF_STATUS") before the ownership walk"
     require_no_sys_admin "$SELF_STATUS" || exit $?
     check_drop || exit $?
-    fix_ownership
+    fix_ownership || exit $?
     probe_grant || exit $?
     exec istota-drop "$@"
 }

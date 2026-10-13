@@ -25,6 +25,7 @@
     Select,
     KebabMenu,
     ConfirmDialog,
+    EmptyState,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog } from '@lucide/svelte';
@@ -300,7 +301,7 @@
         {#if items.length === 0 && $briefingArchiveError}
           <p class="sidebar-error">{$briefingArchiveError}</p>
         {:else if items.length === 0}
-          <p class="sidebar-empty">No briefings yet.</p>
+          <EmptyState size="sm">No briefings yet.</EmptyState>
         {:else}
           {#each items as item (item.id)}
             <div class="list-row archive-row" class:active={item.id === $selectedBriefingId}>
@@ -392,12 +393,6 @@
   .load-more:hover:not(:disabled) {
     background: var(--surface-raised);
     color: var(--text-primary);
-  }
-
-  .sidebar-empty {
-    padding: var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--text-dim);
   }
 
   .sidebar-error {

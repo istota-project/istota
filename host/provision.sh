@@ -149,7 +149,7 @@ ensure_self_signed_cert() {
     fingerprint="$(openssl x509 -in "${dir}/fullchain.pem" -noout -fingerprint -sha256 | cut -d= -f2)"
     log "the reverse proxy pins ${dir}/fullchain.pem (SHA-256 ${fingerprint}): copy that file to it,"
     log "  forward to https://, and verify against it, e.g. in nginx: proxy_ssl_verify on;"
-    log "  proxy_ssl_trusted_certificate <the copy>; proxy_ssl_name ${domain}; (docs/deployment/docker.md)"
+    log "  proxy_ssl_trusted_certificate <the copy>; proxy_ssl_name ${domain}; (docs/deployment/running-the-stack.md)"
 }
 
 export DEBIAN_FRONTEND=noninteractive
@@ -347,6 +347,9 @@ install -d -m 0755 "$STACK" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/ac
 [ -n "$bare_metal_mount" ] || [ -n "$host_folder" ] || install -d -m 0755 "$MOUNT_DIR"
 install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/config"
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/secrets"
+# The state, bound at /data. Empty here on a VM from before it; istota-stack's
+# next `up` copies the old volume in. 0711 is istota-stack's DATA_MODE.
+install -d -m 0711 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/data"
 # The web config editor's trigger, bound into web at /data/requests; its
 # existence is what makes istota-stack add docker-compose.config-apply.yml.
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/requests"

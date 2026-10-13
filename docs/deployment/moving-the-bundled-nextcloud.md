@@ -1,13 +1,13 @@
 # Moving the bundled Nextcloud
 
-Earlier Docker releases ran a Nextcloud inside the istota stack: the `nextcloud`, `postgres`, `redis` and `init-shared` services in `docker/docker-compose.yml`, provisioned at first install by `provision-nc.sh`. The compose file no longer runs them. The stack ships no Nextcloud; istota either stores its workspace locally or connects to a Nextcloud you run yourself.
+Earlier releases ran a Nextcloud inside the istota stack: the `nextcloud`, `postgres`, `redis` and `init-shared` services in `docker/docker-compose.yml`, provisioned at first install by `provision-nc.sh`. The compose file no longer runs them. The stack ships no Nextcloud; istota either stores its workspace locally or connects to a Nextcloud you run yourself.
 
 An install whose `config.toml` still names `http://nextcloud` is refused at boot when no such host resolves. The log names the two ways forward:
 
 - **Keep the Nextcloud.** Move it, unchanged, into a compose project of its own, and run istota in full Nextcloud integration against it. Talk rooms, OAuth logins and every file stay where they are.
-- **Switch to local storage.** Copy the workspace onto the state volume and drop Nextcloud. Simpler, for an install that does not use Talk or Nextcloud's file access.
+- **Switch to local storage.** Copy the workspace into the state directory and drop Nextcloud. Simpler, for an install that does not use Talk or Nextcloud's file access.
 
-Both start with the stack stopped: `docker compose down` in the old `docker/` directory. Do not pass `--volumes`; the volumes are the data.
+Both start with the stack stopped: `istota-stack down` on the VM, or `docker compose down` in the old `docker/` directory for an install still started from there. Do not pass `--volumes` to it; the volumes are the data.
 
 ## Keep the Nextcloud in a project of its own
 
@@ -38,9 +38,24 @@ The old services used five named volumes, prefixed with the old compose project 
 
 2. Start it (`docker compose up -d` in `/srv/nextcloud`) and check you can log in.
 
-3. On the istota VM, mount the bot's `Shared Files` folder over WebDAV with rclone, as the VM's `mount-nextcloud.service` does: the remote is the bot user's WebDAV root with the app password istota already uses, and the mount is rooted at `Shared Files`, not at the bot's whole tree. Mounted at `/srv/mount/nextcloud/content`, compose binds it into the containers at `/mnt/shared`, which is where the workspace was before. No stored path changes, and nothing needs rebasing.
+3. On the istota VM, give `mount-nextcloud.service` its remote. Write `/srv/app/istota/rclone.conf` (mode 0600, owned by uid 10001) with a WebDAV remote at the bot user's files root, using the app password istota already uses, and an alias over it rooted at `Shared Files`, not at the bot's whole tree:
 
-4. Edit `/data/config/config.toml`:
+   ```ini
+   [nextcloud-root]
+   type = webdav
+   url = https://cloud.example.com/remote.php/dav/files/<bot user>/
+   vendor = nextcloud
+   user = <bot user>
+   pass = <the app password, as `rclone obscure` prints it>
+
+   [nextcloud]
+   type = alias
+   remote = nextcloud-root:Shared Files
+   ```
+
+   Set `STORAGE=nextcloud` and `RCLONE_REMOTE=nextcloud` in `/srv/app/istota/host.env` and run `/srv/app/istota/src/host/provision.sh`, which installs the unit and mounts the folder at `/srv/mount/nextcloud/content`. Compose binds it into the containers at `/mnt/shared`, which is where the workspace was before. No stored path changes, and nothing needs rebasing.
+
+4. Edit `/srv/app/istota/config/config.toml` (`/data/config/config.toml` inside the containers):
 
    ```toml
    workspace_mount_path = "/mnt/shared"
@@ -54,21 +69,21 @@ The old services used five named volumes, prefixed with the old compose project 
 
    `dav_prefix` and `auto_share_bot_dir` are the values the old compose file set; keep them. The OAuth2 client's endpoints under `[web]` (`oauth2_provider`, `oauth2_token_endpoint`, `oauth2_userinfo_endpoint`) named `http://nextcloud` and the old front end; point them at the moved Nextcloud too. The client itself, its redirect URI and every Talk room token are stored in Nextcloud's database and survive the move, since only the URL changed. If the redirect URI named the old stack's address and that address changes, update it in Nextcloud's OAuth2 admin settings.
 
-5. Start the istota stack. The entrypoint checks that `/mnt/shared` is the rclone mount before the daemon starts; if the mount is not up it refuses and compose retries.
+5. Start the istota stack with `istota-stack up`. The entrypoint checks that `/mnt/shared` is the rclone mount before the daemon starts; if the mount is not up it refuses and compose retries.
 
 ## Switch to local storage
 
-1. Copy the workspace into the state volume. With the old project name `istota`:
+1. Copy the workspace into the state directory, `/srv/app/istota/data`. With the old project name `istota`:
 
    ```bash
-   docker run --rm -v istota_shared_files:/from:ro -v istota_istota_data:/data alpine \
+   docker run --rm -v istota_shared_files:/from:ro -v /srv/app/istota/data:/data alpine \
        sh -c 'mkdir -p /data/workspace && cp -a /from/. /data/workspace/ && rm -f /data/.ownership-10001'
    ```
 
    Removing `/data/.ownership-10001` makes the next boot hand the copied files to the daemon's uid, which it does once.
 
-2. Edit `/data/config/config.toml`: remove the `[nextcloud]` table and any `workspace_mount_path` (or its old name, `nextcloud_mount_path`), set `workspace_path = "/data/workspace"`, set `[talk] enabled = false`, and if users logged in through Nextcloud, switch `[web] auth` to `["email"]` and give each user an email identity first (see [email login](../features/web-interface.md#email-login)).
+2. Edit `/srv/app/istota/config/config.toml` (`/data/config/config.toml` inside the containers): remove the `[nextcloud]` table and any `workspace_mount_path` (or its old name, `nextcloud_mount_path`), set `workspace_path = "/data/workspace"`, set `[talk] enabled = false`, and if users logged in through Nextcloud, switch `[web] auth` to `["email"]` and give each user an email identity first (see [email login](../features/web-interface.md#email-login)).
 
-3. Start the stack. The Nextcloud volumes are now unused; keep them until you are sure, then remove them by hand.
+3. Check that `STORAGE` in `/srv/app/istota/host.env` is `local`, then start the stack with `istota-stack up`. The Nextcloud volumes are now unused; keep them until you are sure, then remove them by hand.
 
 Talk rooms do not survive this path: there is no Talk without Nextcloud. Web chat rooms do.

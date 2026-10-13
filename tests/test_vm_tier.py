@@ -98,6 +98,16 @@ class TestTheUpdateControls:
             assert script.count(old) == 1, name
             assert old != new, name
 
+    def test_the_update_controls_finish_the_update_themselves(self):
+        """Otherwise the copy hands its update to the release's own script and
+        the step its control edits never runs: every control stays green."""
+        from tests.vm import lima
+
+        script = (REPO / "host" / "istota-stack").read_text()
+        old, new = lima.UPDATE_HANDOFF_OFF
+        assert script.count(old) == 1
+        assert "hand_update_to_release" not in script.replace(old, new).split("cmd_update() {", 1)[1].split("\n}\n", 1)[0]
+
 
 class TestTheRoleControls:
     def test_each_mutation_applies_once_to_the_roles_tasks(self):

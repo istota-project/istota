@@ -42,8 +42,9 @@ def _text_io_calls(tree: ast.AST) -> list[tuple[int, str]]:
     Keyed on the call shape rather than on a list of known files, because the
     thing being prevented is a *new* call site, which will be in a file no
     list written today names. Those three spellings are the whole of what this
-    sees: a `codecs.open` or an `os.fdopen` would pass it, and neither exists
-    in this package today.
+    sees: a `codecs.open` or an `os.fdopen` would pass it. `os.open` is skipped
+    by name, since it returns a descriptor and takes no encoding; the ledger
+    append wraps one in an `os.fdopen` that names its own.
     """
     hits = []
     for node in ast.walk(tree):
@@ -56,6 +57,12 @@ def _text_io_calls(tree: ast.AST) -> list[tuple[int, str]]:
         else:
             continue
         if name not in {"open", "read_text", "write_text"}:
+            continue
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+        ):
             continue
         if any(kw.arg == "encoding" for kw in node.keywords):
             continue

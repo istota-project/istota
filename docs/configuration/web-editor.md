@@ -8,12 +8,12 @@ The web container cannot write `config/` (it is bound read-only into every servi
 
 1. The admin edits fields (or the whole file as text, below), reviews the change and submits it. The page shows a redacted diff, any problems the configuration check reports, and which credentials change (by name, never by value).
 2. The web stores the request in the `config_change_requests` table and writes its id to `requests/config-apply` in the stack directory. Credential values are sealed with the master key until the host takes the request.
-3. A systemd path unit on the host runs `istota-stack config-apply`. Under the stack lock it takes the request, checks everything with a dry run before writing anything, writes credentials and admins through `put-files` and the config through `istota apply` (keeping the newest ten `config.toml.bak.<timestamp>` copies), records the outcome and restarts the stack. A timer runs the same unit every five minutes as a backstop.
+3. A systemd path unit on the host runs `istota-stack config-apply`. Under the stack lock it takes the request, checks everything with a dry run before writing anything, writes credentials and admins through `put-files` and the config through `istota apply` (keeping the newest ten `config.toml.bak.<timestamp>` copies), records the outcome and restarts the stack. A timer runs the same unit every five minutes as a backstop. It starts no container while the trigger file is unchanged since a run that found nothing pending, and asks the database again once that run is an hour old, so a request whose trigger the web failed to write is taken within the hour.
 4. The page follows the request through the restart and reloads once the web process is back.
 
 Every applied change restarts the stack. The review dialog shows how many tasks are running, so the admin can wait for them.
 
-The applier exists only on the dedicated VM, set up by `host/provision.sh`. Anywhere else (`istota serve` on macOS, a standalone install) the page is read-only and says so. On a VM provisioned before the applier was added, the page is read-only until `istota-stack update` re-runs provisioning and the stack restarts.
+The applier is part of the stack's VM, a server or the local VM on a Mac, set up by `host/provision.sh`. Anywhere else (`istota serve` on macOS, a standalone install) the page is read-only and says so. On a VM provisioned before the applier was added, the page is read-only until `istota-stack update` re-runs provisioning and the stack restarts.
 
 ## What it guards
 
@@ -42,7 +42,7 @@ These keys are shown read-only, each with the reason and where it is changed ins
 
 ## Managed resources
 
-If the Ansible management role (or a plan with `[meta] managed = true`) owns a resource, the editor shows it read-only, because the next play would revert a web change. Ownership is per resource (config, credentials, admins) and is recorded in `config/managed.json`. To hand a resource to the web, remove it from the role's variables (`istota_config`, `istota_secrets` or `istota_admins`), or run `istota-stack apply` once with `managed = false`. A `managed.json` that cannot be read makes every resource read-only until `istota-stack apply` rewrites it.
+If the optional [Ansible management role](../deployment/ansible.md) (or a plan with `[meta] managed = true`) owns a resource, the editor shows it read-only, because the next play would revert a web change. Ownership is per resource (config, credentials, admins) and is recorded in `config/managed.json`. To hand a resource to the web, remove it from the role's variables (`istota_config`, `istota_secrets` or `istota_admins`), or run `istota-stack apply` once with `managed = false`. A `managed.json` that cannot be read makes every resource read-only until `istota-stack apply` rewrites it.
 
 ## Tables, the whole file, and ignored keys
 

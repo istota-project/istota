@@ -28,7 +28,7 @@
 #   istota-stack retire-bare-metal --namespace NS [--dry-run]
 #                               remove what the old Ansible role installed, once the stack runs
 #   istota-stack localize-workspace [--copy-only] [--resume] [--dry-run] [--no-note] [--accept-skipped]
-#                               move a mounted workspace onto the state volume, offline
+#                               move a mounted workspace into the state directory, offline
 #   istota-stack put-files [--dry-run]
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
 #   istota-stack config-apply   apply what the web config editor requested (istota-config-apply.service)
@@ -99,6 +99,11 @@ ENV_FILE="${STACK}/.env"
 HOST_ENV="${STACK}/host.env"
 CONFIG_DIR="${STACK}/config"
 SECRETS_DIR="${STACK}/secrets"
+# The state bound at /data.
+DATA_DIR="${STACK}/data"
+# Search for others and nothing more: the container's root phase holds no DAC
+# capability and must pass through to the volumes mounted below /data.
+DATA_MODE=0711
 # Beside .env, not in config/: root passes it to `docker compose`, and config/
 # is uid 10001's to write.
 DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
@@ -252,7 +257,12 @@ compose() {
     fi
     # WITHOUT_DEVBOX=1: the release's own file alone, for the steps of an
     # update that run before compose.devbox.yml is rendered again.
-    if [ -z "${WITHOUT_DEVBOX:-}" ] && { [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; }; then
+    # Its running devbox containers then look like orphans to compose, which
+    # warns on every call; none of those steps removes orphans.
+    local ignore_orphans=""
+    if [ -n "${WITHOUT_DEVBOX:-}" ]; then
+        ignore_orphans=1
+    elif [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; then
         require_own_file "$DEVBOX_COMPOSE"
         if [ -s "$DEVBOX_COMPOSE" ]; then files+=(-f "$DEVBOX_COMPOSE"); fi
     fi
@@ -272,9 +282,19 @@ compose() {
         # Only a pin that is set: compose passes an empty variable as an empty
         # build arg, which overrides the Dockerfile's default and fails the build.
         if [ -n "$pin" ]; then export CLAUDE_CODE_VERSION="$pin"; else unset CLAUDE_CODE_VERSION; fi
+        # The image has no .git: the commit being built and its deployed name
+        # are how a running stack says which code it is. Every build caller
+        # sets ISTOTA_TAG and has the checkout at that commit.
+        if [ -n "${ISTOTA_TAG:-}" ] && revision="$(verified_git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)"; then
+            export ISTOTA_BUILD_REVISION="$revision" ISTOTA_BUILD_TAG="$ISTOTA_TAG"
+        else
+            unset ISTOTA_BUILD_REVISION ISTOTA_BUILD_TAG
+        fi
         if [ -n "$requests" ]; then export ISTOTA_REQUESTS_DIR="$requests"; fi
+        if [ -n "$ignore_orphans" ]; then export COMPOSE_IGNORE_ORPHANS=1; fi
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
         ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
+        ISTOTA_DATA_DIR="$DATA_DIR" \
         ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
         ISTOTA_WORKSPACE_FSTYPE="$fstype" \
         ISTOTA_WORKSPACE_MARKER_REQUIRED="$marker" \
@@ -304,7 +324,17 @@ main_service() {
 oneshot() {
     local tty=(-T)
     if [ -t 0 ] && [ -t 1 ]; then tty=(); fi
+    ensure_data_dir
     compose run --rm --no-deps "${tty[@]}" --entrypoint istota-drop "$@"
+}
+
+# The state directory: made on first use, and its mode reset on every start, so
+# a directory left 0700 is corrected before the root phase meets it.
+ensure_data_dir() {
+    local owner=()
+    if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
+    [ -d "$DATA_DIR" ] || install -d -m "$DATA_MODE" ${owner[@]+"${owner[@]}"} "$DATA_DIR"
+    chmod "$DATA_MODE" "$DATA_DIR"
 }
 
 # `docker compose exec` into the running daemon container, through `istota-drop`:
@@ -343,7 +373,7 @@ check_tag_name() {
 
 # Print the object id of a release tag that passes every check, or refuse.
 verify_release_tag() {
-    local tag="$1" object kind named
+    local tag="$1" object kind named body
     check_tag_name "$tag"
     if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
         refuse_tag "${tag} is not a tag in the checkout. Only a signed release tag is deployed, never a branch or a commit."
@@ -352,11 +382,14 @@ verify_release_tag() {
     if [ "$kind" != "tag" ]; then
         refuse_tag "${tag} is a lightweight tag; a release tag is annotated and signed."
     fi
-    named="$(verified_git cat-file tag "$object" | awk '/^tag / { print $2; exit } /^$/ { exit }')"
+    # Read once and tested as text: a `cat-file | grep -q` under pipefail
+    # reads a match as a failure when grep closes the pipe early.
+    body="$(verified_git cat-file tag "$object")"
+    named="$(awk '/^tag / { print $2; exit } /^$/ { exit }' <<<"$body")"
     if [ "$named" != "$tag" ]; then
         refuse_tag "the ref ${tag} points at a tag object named '${named}'."
     fi
-    if ! verified_git cat-file tag "$object" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+    if ! grep -qx -- '-----BEGIN SSH SIGNATURE-----' <<<"$body"; then
         refuse_tag "${tag} carries no SSH signature."
     fi
     if [ ! -s "$ALLOWED_SIGNERS" ]; then
@@ -420,16 +453,39 @@ PY
 # apply) are left alone.
 stack_up() {
     local active id service
-    compose up -d --remove-orphans
+    ensure_data_dir
+    # Rendered by the script that starts the stack, so it names this script's
+    # /data: one an older istota-stack rendered names a volume nothing mounts.
+    if [ -s "$DEVBOX_COMPOSE" ]; then
+        render_devbox_compose "$(env_get "$ENV_FILE" ISTOTA_TAG)" \
+            || die "the devbox compose file could not be rendered; the stack was not started."
+    fi
+    # Explicit: a caller on the left of `||` runs this with set -e off.
+    compose up -d --remove-orphans || return $?
     active="$(compose config --services)"
     docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
             --format '{{.ID}} {{.Label "com.docker.compose.service"}}' | while read -r id service; do
         [ -n "$id" ] || continue
-        if ! printf '%s\n' "$active" | grep -qxF -- "$service"; then
+        if ! grep -qxF -- "$service" <<<"$active"; then
             log "removing the ${service} container: no active profile names it"
             docker rm -f "$id" >/dev/null || log "WARNING: could not remove the ${service} container (${id})"
         fi
     done
+}
+
+# An update or a rollback runs the outgoing release's istota-stack, and
+# provision.sh runs the checkout's `up` after it. Where the two compose()
+# functions pass compose different variables, the containers were recreated
+# twice, so the checkout's own script brings the stack up, on the lock this
+# process holds. One without the marker below (an older release) would wait on
+# that lock instead.
+release_stack_up() {
+    local script="${SRC}/host/istota-stack"
+    if [ -x "$script" ] && grep -q 'ISTOTA_STACK_LOCK_INHERITED' "$script"; then
+        ISTOTA_STACK_LOCK_INHERITED=1 "$script" up
+    else
+        stack_up
+    fi
 }
 
 # The services this stack builds. web runs the daemon service's
@@ -532,7 +588,7 @@ render_devbox_compose() {
     local tag="$1" tmp
     [ -f "${CONFIG_DIR}/config.toml" ] || return 0
     tmp="$(mktemp)"
-    if ! WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" oneshot "$(main_service)" istota devbox compose-file > "$tmp"; then
+    if ! WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" oneshot "$(main_service)" istota devbox compose-file --state-dir "$DATA_DIR" > "$tmp"; then
         rm -f "$tmp"
         log "istota devbox compose-file failed"
         return 1
@@ -574,11 +630,9 @@ cmd_update() {
     local unsigned=""
     if [ "${1:-}" = "--unsigned" ]; then unsigned=1; shift; fi
     [ "$#" -eq 1 ] || { usage >&2; exit 64; }
-    local tag="$1" object current current_unsigned previous previous_unsigned before
+    local tag="$1" object before
     check_tag_name "$tag"
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
-    current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
-    current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
     verified_git fetch --quiet --tags origin \
         "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
         || die "git fetch failed; nothing was changed."
@@ -600,6 +654,46 @@ cmd_update() {
     # From here until .env is written, a failure puts the checkout back, so .env,
     # the checkout and the running stack all stay as they were.
     verified_git checkout --quiet --detach "${object}^{commit}"
+    hand_update_to_release "$tag" "$unsigned" "$before" "$(verified_git rev-parse HEAD)"
+    update_from_checkout "$tag" "$unsigned" "$before"
+}
+
+# The rest of an update belongs to the release being installed: its own
+# istota-stack builds, renders the devbox file, writes .env, starts the stack and
+# provisions the host. The script running this one is the previous release's,
+# and a change a release makes to those steps (the state directory, the devbox
+# render) otherwise reached a host only on the update after. The checkout was
+# verified above, as provision.sh is. A release without the handoff (an older
+# one) finishes here. The child holds the lock through descriptor 9.
+hand_update_to_release() {
+    local tag="$1" unsigned="$2" before="$3" commit="$4" script="${SRC}/host/istota-stack"
+    [ -z "${ISTOTA_STACK_UPDATE_HANDOFF:-}" ] || return 0
+    [ -x "$script" ] && grep -q 'ISTOTA_STACK_UPDATE_HANDOFF' "$script" || return 0
+    log "handing the update to ${tag}'s own istota-stack"
+    trap - EXIT
+    exec env ISTOTA_STACK_UPDATE_HANDOFF=1 ISTOTA_STACK_LOCK_INHERITED=1 \
+        "$BASH" "$script" update-from-checkout "$tag" "$unsigned" "$before" "$commit"
+}
+
+# Only ever exec'd by hand_update_to_release: it skips the fetch and the tag
+# check, so it refuses unless it holds the update's lock and the checkout is the
+# commit that check passed.
+cmd_update_from_checkout() {
+    [ "$#" -eq 4 ] || { usage >&2; exit 64; }
+    local tag="$1" unsigned="$2" before="$3" commit="$4"
+    [ -n "${ISTOTA_STACK_UPDATE_HANDOFF:-}" ] && flock -n 9 2>/dev/null \
+        || die "update-from-checkout is the second half of \`istota-stack update\`; run that instead."
+    check_tag_name "$tag"
+    [ "$(verified_git rev-parse HEAD)" = "$commit" ] \
+        || die "the checkout is not the commit the update verified; nothing was changed."
+    trap cleanup_update EXIT
+    update_from_checkout "$tag" "$unsigned" "$before"
+}
+
+update_from_checkout() {
+    local tag="$1" unsigned="$2" before="$3" current current_unsigned previous previous_unsigned up_rc=0
+    current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
     log "building ${tag}"
     if ! build_images "$tag" || ! render_devbox_compose "$tag" || ! build_devbox_images "$tag"; then
         verified_git checkout --quiet --detach "$before" || true
@@ -625,7 +719,7 @@ cmd_update() {
     env_set "ISTOTA_TAG=${tag}" "ISTOTA_TAG_UNSIGNED=${unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
-        stack_up
+        release_stack_up || up_rc=$?
     else
         log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
     fi
@@ -633,8 +727,15 @@ cmd_update() {
     cleanup_update
     # A successful update may exec provision.sh, which does not run EXIT traps.
     trap - EXIT
-    log "now on ${tag} (previous: ${previous:-none})"
+    if [ "$up_rc" -ne 0 ]; then
+        # Provisioned all the same: provision.sh installs this release's
+        # istota-stack, and a host left on the old one fails the next update too.
+        log "WARNING: the stack did not come up on ${tag} (exit ${up_rc}); .env names it, and the host is provisioned for it anyway."
+    else
+        log "now on ${tag} (previous: ${previous:-none})"
+    fi
     reprovision_if_changed
+    [ "$up_rc" -eq 0 ] || die "the stack did not come up on ${tag}; \`istota-stack compose ps\` and \`docker logs istota-daemon-1\` say why."
 }
 
 # provision.sh installs this script, the units and the host scripts, so a
@@ -661,6 +762,7 @@ provision_outdated() {
 }
 
 cmd_rollback() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
     local current current_unsigned previous previous_unsigned object rc=0
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
@@ -681,7 +783,6 @@ cmd_rollback() {
     else
         object="$(verify_release_tag "$previous")"
     fi
-
     # Ask the older image whether it can run this database before switching to
     # it: a newer release's migration may have been one-way.
     ISTOTA_TAG="$previous" oneshot "$(main_service)" istota init --check-schema || rc=$?
@@ -701,7 +802,7 @@ cmd_rollback() {
     fi
     env_set "ISTOTA_TAG=${previous}" "ISTOTA_TAG_UNSIGNED=${previous_unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}"
-    stack_up
+    release_stack_up
     log "rolled back to ${previous} (previous: ${current})"
     reprovision_if_changed
 }
@@ -728,23 +829,6 @@ ensure_secret_files() {
     request="${request%, }}}"
     printf '%s' "$request" | cmd_put_files >/dev/null || rc=$?
     [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]
-}
-
-# An install upgraded from the Docker shape keeps its config on the state
-# volume, which the host bind now hides. Copy it out once.
-copy_out_config() {
-    local tag volume="${PROJECT}_istota_data"
-    [ -e "${CONFIG_DIR}/config.toml" ] && return 0
-    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
-    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
-    [ -n "$tag" ] || return 0
-    local copied
-    copied="$(docker run --rm --network none --user "${ISTOTA_UID}:${ISTOTA_UID}" --entrypoint /bin/sh \
-        -v "${volume}:/old:ro" -v "${CONFIG_DIR}:/new" "${IMAGE}:${tag}" -c \
-        'for f in config.toml admins; do if [ -f "/old/config/$f" ]; then cp -p "/old/config/$f" /new/ && echo "$f"; fi; done')"
-    if [ -n "$copied" ]; then
-        log "copied $(echo "$copied" | tr '\n' ' ')out of the ${volume} volume into ${CONFIG_DIR}, once"
-    fi
 }
 
 # Copy a file the wizard wrote in staging into place, 0644 unless a third
@@ -788,8 +872,8 @@ install_setup_staging() {
     fi
 }
 
-# What either setup needs before the wizard runs: the directories, every secret
-# file compose declares, and an upgraded Docker install's config copied out.
+# What either setup needs before the wizard runs: the directories and every
+# secret file compose declares.
 prepare_setup() {
     local owner=()
     # Root on the VM; the tests run as themselves.
@@ -801,7 +885,6 @@ prepare_setup() {
     [ "$(env_get "$HOST_ENV" STORAGE)" != "host-folder" ] || host_folder=1
     [ -n "$host_folder" ] || install -d -m 0755 "$MOUNT_DIR"
     ensure_secret_files
-    copy_out_config
 }
 
 # The wizard runs as uid 10001 and writes .env, host.env and secrets/ in its
@@ -1489,7 +1572,7 @@ LOCALIZE_WRITERS="daemon web whatsapp-baileys"
 # --copy-only run here. MOVED.md goes onto the mount only once the config no
 # longer names it, and never under --copy-only.
 cmd_localize_workspace() {
-    local copy_only="" dry_run="" accept="" note=1 rc=0 pass=() resume=() service stop=() answer=""
+    local copy_only="" dry_run="" accept="" note=1 rc=0 pass=() resume=() service services stop=() answer=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --copy-only) copy_only=1 ;;
@@ -1512,8 +1595,12 @@ cmd_localize_workspace() {
         oneshot "$(main_service)" istota workspace localize --check \
             --from "$CONTAINER_MOUNT" --to "$LOCAL_WORKSPACE" "${resume[@]}" \
             || die "the copy cannot start (above); nothing was stopped."
+        # Captured, not piped into `grep -q`: under pipefail an early match
+        # closed the pipe and read as "no daemon" (ISSUE-736).
+        services="$(compose config --services)" \
+            || die "compose could not list the stack's services (above); nothing was stopped."
         for service in $LOCALIZE_WRITERS; do
-            if compose config --services | grep -qxF "$service"; then stop+=("$service"); fi
+            if grep -qxF -- "$service" <<<"$services"; then stop+=("$service"); fi
         done
         if [ "${#stop[@]}" -gt 0 ]; then
             log "stopping ${stop[*]}"
@@ -1795,6 +1882,37 @@ CONFIG_APPLY_RUN="${ISTOTA_CONFIG_APPLY_RUN_DIR:-/run}"
 CONFIG_APPLY_BACKUPS=10
 # config_apply_one's exit code when nothing was pending.
 CONFIG_APPLY_NOTHING=10
+# What the last run that found nothing pending saw: `seen` carries the trigger
+# file's mtime at its final take (absent when there was no trigger file), and
+# `idle`'s own mtime is when that run ended.
+CONFIG_APPLY_SEEN="${STACK}/.config-apply-seen"
+CONFIG_APPLY_IDLE="${STACK}/.config-apply-idle"
+CONFIG_APPLY_TRIGGER="${STACK}/requests/config-apply"
+# How long an idle run stands in for asking the database again. The web
+# commits a request before it writes the trigger, so only a trigger it failed
+# to write waits this long.
+CONFIG_APPLY_RECHECK_MINUTES=60
+
+# Whether nothing can be pending since the last run that found nothing, so the
+# timer's run need not start a container to ask.
+config_apply_idle() {
+    [ -f "$CONFIG_APPLY_IDLE" ] || return 1
+    [ -n "$(find "$CONFIG_APPLY_IDLE" -maxdepth 0 -mmin "-${CONFIG_APPLY_RECHECK_MINUTES}" 2>/dev/null)" ] || return 1
+    if [ -e "$CONFIG_APPLY_TRIGGER" ]; then
+        [ -f "$CONFIG_APPLY_SEEN" ] && ! [ "$CONFIG_APPLY_TRIGGER" -nt "$CONFIG_APPLY_SEEN" ]
+    else
+        [ ! -e "$CONFIG_APPLY_SEEN" ]
+    fi
+}
+
+# Taken before each take, so a trigger written while it runs is newer than
+# what an empty take records.
+config_apply_snapshot() {
+    rm -f "${CONFIG_APPLY_SEEN}.next"
+    if [ -e "$CONFIG_APPLY_TRIGGER" ]; then
+        touch -r "$CONFIG_APPLY_TRIGGER" "${CONFIG_APPLY_SEEN}.next"
+    fi
+}
 
 # The web stores a request and touches requests/config-apply; the path unit,
 # or the five-minute timer, runs this. Each request: take it in a one-shot,
@@ -1808,17 +1926,27 @@ cmd_config_apply() {
     [ "$#" -eq 0 ] || { usage >&2; exit 64; }
     # The timer runs from first boot, before setup has written anything.
     [ -f "${CONFIG_DIR}/config.toml" ] || return 0
+    config_apply_idle && return 0
     if ! take_stack_lock config-apply --try; then
         log "config-apply: \`istota-stack $(lock_holder)\` holds the stack lock; the next trigger or the timer retries"
         return 0
     fi
     local rc
+    rm -f "$CONFIG_APPLY_IDLE"
     while :; do
         rc=0
+        config_apply_snapshot
         config_apply_one || rc=$?
         if [ "$rc" -eq "$CONFIG_APPLY_NOTHING" ]; then
+            if [ -e "${CONFIG_APPLY_SEEN}.next" ]; then
+                mv -f "${CONFIG_APPLY_SEEN}.next" "$CONFIG_APPLY_SEEN"
+            else
+                rm -f "$CONFIG_APPLY_SEEN"
+            fi
+            touch "$CONFIG_APPLY_IDLE"
             return 0
         elif [ "$rc" -ne 0 ]; then
+            rm -f "${CONFIG_APPLY_SEEN}.next"
             log "config-apply: stopped (exit ${rc}); a request left taken is failed by the next run"
             return 1
         fi
@@ -2102,7 +2230,16 @@ main() {
                 *" --web "*) take_stack_lock "setup --web" --try || refuse_busy_setup_web ;;
                 *) take_stack_lock setup ;;
             esac ;;
-        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|up|down)
+        # `up` run by release_stack_up already holds the lock: descriptor 9 is
+        # inherited, and flock on it succeeds at once. The variable alone,
+        # with no lock behind it, takes the lock as usual.
+        up)
+            if [ -z "${ISTOTA_STACK_LOCK_INHERITED:-}" ] || ! flock -n 9 2>/dev/null; then
+                take_stack_lock up
+            fi ;;
+        # Holds the update's lock through descriptor 9 or refuses; never waits.
+        update-from-checkout) ;;
+        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down)
             take_stack_lock "$command" ;;
         # Setting a key writes host.env, which setup and restore write too;
         # reading one is a read. stage and unstage take none: each makes or
@@ -2115,6 +2252,7 @@ main() {
     esac
     case "$command" in
         update) cmd_update "$@" ;;
+        update-from-checkout) cmd_update_from_checkout "$@" ;;
         rollback) cmd_rollback "$@" ;;
         setup) cmd_setup "$@" ;;
         setup-code) cmd_setup_code "$@" ;;

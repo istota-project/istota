@@ -20,6 +20,7 @@ from istota.money.core.transactions import (
     lookup_mapping,
     uncategorized_account,
     append_to_ledger,
+    write_import_file,
 )
 
 from .base import NormalizedTransaction
@@ -247,12 +248,7 @@ def import_transactions(
         return result
 
     # Write staging file
-    ledger_dir = ledger_path.parent
-    imports_dir = ledger_dir / "imports"
-    imports_dir.mkdir(exist_ok=True)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    staging_file = imports_dir / f"{source_name}_import_{timestamp}.beancount"
 
     header = f"; Imported via {source_name} on {datetime.now().isoformat()}\n"
     if source_file:
@@ -262,7 +258,10 @@ def import_transactions(
         header += f"; Skipped (already in ledger): {content_skipped_count}\n"
     header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
 
-    staging_file.write_text(header + "\n\n".join(entries) + "\n", encoding="utf-8")
+    staging_file = write_import_file(
+        ledger_path, f"{source_name}_import_{timestamp}.beancount",
+        header + "\n\n".join(entries) + "\n",
+    )
 
     append_to_ledger(ledger_path, entries)
 

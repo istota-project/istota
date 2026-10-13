@@ -40,6 +40,7 @@
     Button,
     Chip,
     ConfirmDialog,
+    EmptyState,
     Field,
     KebabMenu,
     Modal,
@@ -399,12 +400,12 @@
 {:else if loadError}
   <div class="center-msg error">{loadError}</div>
 {:else if documents.length === 0}
-  <div class="empty">
+  <EmptyState>
     Nothing uploaded yet. Documents attach to a visit, a condition or a vaccination from those
     pages, and every one of them shows up here.
-  </div>
+  </EmptyState>
 {:else if rows.length === 0}
-  <div class="empty">Every document is attached to a record.</div>
+  <EmptyState>Every document is attached to a record.</EmptyState>
 {:else}
   <div class="table-scroll" class:refreshing bind:this={documentList}>
     <table class="grid">

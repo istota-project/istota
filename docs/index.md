@@ -56,7 +56,7 @@ Every task is confined by bubblewrap, credential isolation, scoped files, an out
 
 Nextcloud is a first-class integration, not the foundation of the system. When connected, it provides files, calendars, contacts, OAuth login, notifications, and Talk while Istota acts as an ordinary Nextcloud user over standard protocols.
 
-Without Nextcloud, the workspace is an ordinary local directory on the stack's state volume, web chat handles conversations, and CalDAV and IMAP can point at other providers. `istota setup` asks which you want. Read the [Nextcloud guide](features/nextcloud.md) for the integration itself.
+Without Nextcloud, the workspace is an ordinary local directory in the stack's state, web chat handles conversations, and CalDAV and IMAP can point at other providers. `istota setup` asks which you want. Read the [Nextcloud guide](features/nextcloud.md) for the integration itself.
 
 ## Principles
 
@@ -66,7 +66,7 @@ This view shares the humanist premise of [Common Task](https://commontask.org/):
 
 ## Installation
 
-Istota has one deployment: the Docker stack on a Debian 13 machine of its own, built from a signed release, with bubblewrap and per-task cgroups. The machine can be a VPS, a VM on your own hardware, or a Lima VM on a Mac. Nextcloud is optional. The [quickstart](getting-started/quickstart-server.md) covers a server, and the [local install](getting-started/local-install.md) a Mac.
+Istota has one deployment: a stack of containers on a Debian 13 machine of its own, built from a signed release, with bubblewrap and per-task cgroups, and managed with one command, `istota-stack`. The machine can be a VPS, a VM on your own hardware, or a Lima VM on a Mac, and the stack is the same on each. Nextcloud is optional. The [quickstart](getting-started/quickstart-server.md) covers a server, and the [local install](getting-started/local-install.md) a Mac.
 
 The older [standalone install](getting-started/standalone-install.md), an unsandboxed single-user process, is deprecated. Existing installs keep working, and `istota-stack import-standalone` moves one into the local VM. Don't start a new one that way.
 

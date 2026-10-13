@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -1849,23 +1850,31 @@ class TestDatedFileCollision:
         assert "Written tonight" in text
 
 
+def _append_in(directory, name, text):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        return _append_dated_memory(fd, name, text)
+    finally:
+        os.close(fd)
+
+
 class TestAppendDatedMemory:
     def test_creates_the_file_when_absent(self, tmp_path):
         path = tmp_path / "2026-09-06.md"
-        assert _append_dated_memory(path, "- One\n") == "- One\n"
+        assert _append_in(tmp_path, path.name, "- One\n") == "- One\n"
         assert path.read_text() == "- One\n"
 
     def test_appends_with_one_blank_line_between(self, tmp_path):
         path = tmp_path / "2026-09-06.md"
-        _append_dated_memory(path, "- One\n")
-        result = _append_dated_memory(path, "- Two\n")
+        _append_in(tmp_path, path.name, "- One\n")
+        result = _append_in(tmp_path, path.name, "- Two\n")
         assert result == "- One\n\n- Two\n"
         assert path.read_text() == result
 
     def test_an_empty_existing_file_is_not_treated_as_content(self, tmp_path):
         path = tmp_path / "2026-09-06.md"
         path.write_text("\n\n")
-        assert _append_dated_memory(path, "- One\n") == "- One\n"
+        assert _append_in(tmp_path, path.name, "- One\n") == "- One\n"
 
 
 class TestNoWriteLockAcrossTheBrainCall:
@@ -1979,7 +1988,7 @@ class TestDatedMemoryWritesRefuseLinks:
         path = tmp_path / "2026-09-06.md"
         path.symlink_to(victim)
 
-        assert _append_dated_memory(path, "- One\n") is None
+        assert _append_in(tmp_path, path.name, "- One\n") is None
         assert victim.read_text() == "keep"
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")

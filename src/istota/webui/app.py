@@ -8,7 +8,6 @@ SvelteKit frontend served as static files, Python handles auth and API.
 from istota.credentials import kdbx_import as credential_read
 
 import asyncio
-import codecs
 import base64
 import hashlib
 import hmac
@@ -73,8 +72,7 @@ from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from istota.config import load_config, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
-from istota.lib.audio_sniff import AUDIO_EXTENSIONS, sniff_audio
-from istota.lib.video_sniff import sniff_video
+from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
 from istota.storage import NOTES_MAX_BYTES
 from istota.workspace import text_files
 from istota.nextcloud.ocs import OcsError, ocs_data
@@ -3151,13 +3149,13 @@ _AUTOMATED_SOURCES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"}
 def _classify_source(source_type: str | None) -> str:
     """Classify a ``source_type`` as ``interactive``/``automated``.
 
-    Used to keep the headline numbers honest when module pollers
-    (``_module.feeds.run_scheduled`` etc., source_type=``scheduled``) dwarf
-    real user-driven traffic. Unknown / NULL source_types fall into
+    Applied to model tasks only: command and skill tasks (the module pollers
+    among them) are counted as ``no_model`` whatever their source, by
+    ``db.NO_MODEL_TASK_SQL``. Unknown / NULL source_types fall into
     ``automated`` so the headline split never silently undercounts —
-    ``interactive_24h + automated_24h`` always equals ``last_24h``. The
-    risk of misclassifying a future interactive type is preferred to
-    silent drift.
+    ``interactive_24h + automated_24h + no_model_24h`` always equals
+    ``last_24h``. The risk of misclassifying a future interactive type is
+    preferred to silent drift.
     """
     if source_type in _INTERACTIVE_SOURCES:
         return "interactive"
@@ -3212,16 +3210,17 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
     by_user = {r["user_id"]: r for r in rows}
 
     breakdown_rows = conn.execute(
-        """
+        f"""
         SELECT user_id, source_type,
                COUNT(*) AS n,
+               SUM(CASE WHEN {_db.NO_MODEL_TASK_SQL} THEN 1 ELSE 0 END) AS no_model,
                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
                AVG(CASE WHEN status = 'completed'
                          AND started_at IS NOT NULL
                          AND completed_at IS NOT NULL
                         THEN (julianday(completed_at) - julianday(started_at)) * 86400
                    END) AS avg_sec
-        FROM tasks
+        FROM tasks t
         WHERE created_at >= ?
         GROUP BY user_id, source_type
         """,
@@ -3233,6 +3232,7 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
         entry = breakdown.setdefault(r["user_id"], {})
         entry[src] = {
             "count": int(r["n"]),
+            "no_model": int(r["no_model"] or 0),
             "failed": int(r["failed"] or 0),
             "avg_duration_seconds": (
                 round(float(r["avg_sec"]), 2) if r["avg_sec"] is not None else None
@@ -3270,11 +3270,14 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
         avg_per_day = round(last_30d / 30.0, 2) if last_30d else 0.0
         per_source = breakdown.get(user_id, {})
         interactive_24h = sum(
-            v["count"] for s, v in per_source.items() if _classify_source(s) == "interactive"
+            v["count"] - v["no_model"] for s, v in per_source.items()
+            if _classify_source(s) == "interactive"
         )
         automated_24h = sum(
-            v["count"] for s, v in per_source.items() if _classify_source(s) == "automated"
+            v["count"] - v["no_model"] for s, v in per_source.items()
+            if _classify_source(s) == "automated"
         )
+        no_model_24h = sum(v["no_model"] for v in per_source.values())
         failed_24h = sum(v["failed"] for v in per_source.values())
         out.append({
             "username": user_id,
@@ -3286,6 +3289,7 @@ def _admin_users_section(conn: sqlite3.Connection, now: datetime) -> list[dict]:
             "tasks_by_source_24h": per_source,
             "tasks_interactive_24h": interactive_24h,
             "tasks_automated_24h": automated_24h,
+            "tasks_no_model_24h": no_model_24h,
             "tasks_failed_24h": failed_24h,
             "last_active": _iso_utc(row["last_active"]) if row else None,
             # Usage joins the same row rather than a separate pane, so "how much
@@ -3626,41 +3630,51 @@ def _admin_tasks_section(conn: sqlite3.Connection, now: datetime) -> dict:
     total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
 
     by_source_rows = conn.execute(
-        """
+        f"""
         SELECT source_type,
                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS n_24h,
                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS n_30d,
-               SUM(CASE WHEN created_at >= ? AND status = 'failed' THEN 1 ELSE 0 END) AS failed_24h
-        FROM tasks
+               SUM(CASE WHEN created_at >= ? AND status = 'failed' THEN 1 ELSE 0 END) AS failed_24h,
+               SUM(CASE WHEN created_at >= ? AND {_db.NO_MODEL_TASK_SQL}
+                        THEN 1 ELSE 0 END) AS no_model_24h,
+               SUM(CASE WHEN {_db.NO_MODEL_TASK_SQL} THEN 1 ELSE 0 END) AS no_model_30d
+        FROM tasks t
         WHERE created_at >= ?
         GROUP BY source_type
         """,
-        (cutoff_24h, cutoff_30d, cutoff_24h, cutoff_30d),
+        (cutoff_24h, cutoff_30d, cutoff_24h, cutoff_24h, cutoff_30d),
     ).fetchall()
     by_source: dict[str, int] = {}
     failed_by_source: dict[str, int] = {}
     last_24h = 0
     last_30d = 0
-    interactive_24h = automated_24h = 0
-    interactive_30d = automated_30d = 0
+    interactive_24h = automated_24h = no_model_24h = 0
+    interactive_30d = automated_30d = no_model_30d = 0
     for r in by_source_rows:
         src = r["source_type"] or "unknown"
         n24 = int(r["n_24h"] or 0)
         n30 = int(r["n_30d"] or 0)
         f24 = int(r["failed_24h"] or 0)
+        nm24 = int(r["no_model_24h"] or 0)
+        nm30 = int(r["no_model_30d"] or 0)
         last_24h += n24
         last_30d += n30
         if n24:
             by_source[src] = n24
         if f24:
             failed_by_source[src] = f24
+        # Command and skill tasks are counted apart from both buckets: the
+        # feed poller alone is hundreds a day per user, and inside "automated"
+        # it hid the scheduled prompts and briefings that figure is for.
+        no_model_24h += nm24
+        no_model_30d += nm30
         bucket = _classify_source(src)
         if bucket == "interactive":
-            interactive_24h += n24
-            interactive_30d += n30
+            interactive_24h += n24 - nm24
+            interactive_30d += n30 - nm30
         elif bucket == "automated":
-            automated_24h += n24
-            automated_30d += n30
+            automated_24h += n24 - nm24
+            automated_30d += n30 - nm30
 
     duration_row = conn.execute(
         """
@@ -3705,6 +3719,8 @@ def _admin_tasks_section(conn: sqlite3.Connection, now: datetime) -> dict:
         "automated_24h": automated_24h,
         "interactive_avg_per_day_30d": round(interactive_30d / 30.0, 2) if interactive_30d else 0.0,
         "automated_avg_per_day_30d": round(automated_30d / 30.0, 2) if automated_30d else 0.0,
+        "no_model_24h": no_model_24h,
+        "no_model_avg_per_day_30d": round(no_model_30d / 30.0, 2) if no_model_30d else 0.0,
     }
 
 
@@ -12380,53 +12396,13 @@ def _resolve_chat_file_for_download(
     return target, sniff_raster(head)
 
 
-PREVIEW_MAX_BYTES = 1_048_576
-
-
 def _preview_chat_file(username: str, path: str) -> dict:
     """Read and classify in the same worker hop as the confinement checks."""
     target, head, info = _read_chat_file_head(username, path, PREVIEW_MAX_BYTES)
-    result = {
-        "name": target.name,
-        "size": info.st_size,
-        "modified": _iso_z(datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)),
-        "kind": "binary",
-        "truncated": False,
-    }
-    media_type = sniff_raster(head)
-    kind = "image"
-    if media_type is None and head.startswith(b"%PDF-"):
-        kind, media_type = "pdf", "application/pdf"
-    if media_type is None:
-        audio_type = sniff_audio(head)
-        video_type = sniff_video(head)
-        extension = target.suffix.lower().lstrip(".")
-        # A container signature does not prove its track types. The name
-        # chooses a player only after the existing sniffers confirm media.
-        if audio_type == "audio/mp4" or video_type == "video/mp4":
-            kind = "audio" if extension in {"m4a", "m4b"} else "video"
-            media_type = f"{kind}/mp4"
-        elif audio_type == "audio/webm":
-            audio_names = (AUDIO_EXTENSIONS - {"webm", "mp4"}) | {"weba", "m4b"}
-            kind = "audio" if extension in audio_names else "video"
-            media_type = f"{kind}/webm"
-        elif audio_type == "audio/ogg" and extension == "ogv":
-            kind, media_type = "video", "video/ogg"
-        elif audio_type is not None:
-            kind, media_type = "audio", audio_type
-    if media_type is not None:
-        result.update(kind=kind, media_type=media_type)
-        return result
-    if b"\x00" in head:
-        return result
-    truncated = info.st_size > PREVIEW_MAX_BYTES
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
-    try:
-        text = decoder.decode(head.removeprefix(codecs.BOM_UTF8), final=not truncated)
-    except UnicodeDecodeError:
-        return result
-    result.update(kind="text", text=text, truncated=truncated)
-    return result
+    modified = _iso_z(datetime.fromtimestamp(info.st_mtime, tz=timezone.utc))
+    return classify_preview(
+        target.name, info.st_size, modified, head, truncated=info.st_size > PREVIEW_MAX_BYTES,
+    )
 
 
 @api_router.get("/chat/files/preview")

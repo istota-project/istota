@@ -6,7 +6,7 @@
 
 {#if viewer.state.mode === 'file'}
   {#key viewer.state}
-    <FileViewer path={viewer.state.path} onClose={viewer.close} />
+    <FileViewer path={viewer.state.path} fileSource={viewer.state.source} onClose={viewer.close} />
   {/key}
 {/if}
 <Lightbox

@@ -106,13 +106,13 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Deployment',
       items: [
-        'deployment/docker',
+        'deployment/running-the-stack',
         'deployment/security',
-        'deployment/ansible',
         'deployment/migrating-from-bare-metal',
         'deployment/moving-the-bundled-nextcloud',
         'deployment/moving-to-a-local-workspace',
         'getting-started/standalone-install',
+        'deployment/ansible',
       ],
     },
     {

@@ -1349,6 +1349,48 @@ class TestAdminStats:
             assert tasks["interactive_24h"] == 1
             assert tasks["automated_24h"] == 2  # scheduled + unrecognized
 
+    async def test_admin_stats_no_model_tasks_counted_apart(self, tmp_path):
+        """Command and skill tasks leave the automated figure for their own.
+
+        The feed poller is a `skill` task every five minutes per user; counted
+        as automated it buried the scheduled prompts and briefings."""
+        from istota import db
+        config = self._config_with_admin(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.create_task(conn, "talk", "alice", source_type="talk")
+            db.create_task(conn, "digest", "alice", source_type="scheduled")
+            db.create_task(conn, "brief", "alice", source_type="briefing")
+            for _ in range(5):
+                db.create_task(
+                    conn, "", "alice", source_type="scheduled",
+                    skill="feeds", skill_args='["run-scheduled"]',
+                )
+            db.create_task(
+                conn, "", "alice", source_type="scheduled", command="echo hi",
+            )
+
+        app = _patch_app(config)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.com") as client:
+            cookies = await self._login(client, "alice")
+            resp = await client.get("/istota/api/admin/stats", cookies=cookies)
+            data = resp.json()
+            tasks = data["tasks"]
+            assert tasks["automated_24h"] == 2
+            assert tasks["no_model_24h"] == 6
+            assert tasks["interactive_24h"] == 1
+            assert (
+                tasks["interactive_24h"] + tasks["automated_24h"]
+                + tasks["no_model_24h"] == tasks["last_24h"]
+            )
+            assert tasks["by_source"]["scheduled"] == 7
+
+            alice = next(u for u in data["users"] if u["username"] == "alice")
+            assert alice["tasks_automated_24h"] == 2
+            assert alice["tasks_no_model_24h"] == 6
+            assert alice["tasks_interactive_24h"] == 1
+            assert alice["tasks_by_source_24h"]["scheduled"]["count"] == 7
+
     async def test_admin_stats_failed_count_and_per_source(self, tmp_path):
         """Tasks card must surface both failed_24h and per-source failures."""
         from istota import db

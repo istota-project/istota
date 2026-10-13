@@ -242,7 +242,7 @@ tar_member() {
     [ -d "$path" ] || return 0
     base="$(basename "$path")"
     if [ "$base" != "$name" ]; then
-        if tar --version 2>/dev/null | grep -q GNU; then
+        if grep -q GNU <<<"$(tar --version 2>/dev/null)"; then
             renames+=(--transform "s,^${base},${name},")
         else
             renames+=(-s ",^${base},${name},")

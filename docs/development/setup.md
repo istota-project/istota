@@ -71,18 +71,19 @@ To run what operators run, sandbox included, use the Lima VM from the [quickstar
 
 ## A full deployment on a Mac
 
-The [local VM](../getting-started/local-install.md) has the same shape as a server: the Docker stack on a Debian VM, set up by `provision.sh`, sandbox included. A throwaway VM built from a checkout is therefore the way to try a whole deployment by hand, first-run setup included, before a release. Give it its own instance name so it never touches an install you already run. The name also keys its state file under `~/.config/istota-stack/` and its Keychain entry.
+The [local VM](../getting-started/local-install.md) has the same shape as a server: the istota stack on a Debian 13 VM, set up by `provision.sh` and managed by `istota-stack`, sandbox included. A throwaway VM built from a checkout is therefore the way to try a whole deployment by hand, first-run setup included, before a release. Give it its own instance name so it never touches an install you already run. The name also keys its state file under `~/.config/istota-stack/` and its Keychain entry.
 
 ```bash
 export ISTOTA_LIMA_INSTANCE=istota-try
+export ISTOTA_MAC_BIN_DIR="$(mktemp -d)"   # keeps an installed istota-stack from being replaced
 host/mac/istota-stack create --repo "$PWD" --workspace ~/IstotaTry --no-setup
 host/mac/istota-stack setup --web --local     # or `setup` for the terminal wizard
-host/mac/istota-stack create                  # finishes: Keychain copy of the key, Mac scripts
+host/mac/istota-stack create                  # finishes: Keychain copy of the key
 ```
 
-`--repo` installs from the checkout rather than a signed release ([developing on a checkout](../getting-started/local-install.md#developing-on-a-checkout)). The first `create` builds the images and takes several minutes. The web setup listens on the Mac's port 8080, so another install must not hold that port; an existing local install on a different `--port` is fine. Each VM takes 4 GiB of memory unless you pass `--memory`.
+`create` copies the VM's `istota-stack`, `istota` and Lima template over an install it finds in `~/.local/bin`, even when run from a checkout; the empty `ISTOTA_MAC_BIN_DIR` keeps it away from an install you already run. `--repo` installs from the checkout rather than a signed release ([developing on a checkout](../getting-started/local-install.md#developing-on-a-checkout)). The first `create` builds the images and takes several minutes. The web setup listens on the Mac's port 8080, so another install must not hold that port; an existing local install on a different `--port` is fine. Each VM takes 4 GiB of memory unless you pass `--memory`.
 
-Remove it with `host/mac/istota-stack destroy`, which asks you to type the instance name. It leaves the workspace folder, the Keychain item (service `istota.local`, account `secret-key-istota-try`) and the state file `~/.config/istota-stack/istota-try.env`; delete those by hand. `--force` only skips the check that the Keychain holds the VM's key, which matters when the last `create` never ran.
+Remove it with `host/mac/istota-stack destroy --purge`, which asks you to type the instance name and deletes the VM, the workspace folder, the Keychain item (service `istota.local`, account `secret-key-istota-try`) and the state file `~/.config/istota-stack/istota-try.env`. A plain `destroy` leaves the last three.
 
 This is a manual run. The `vm` test tier (`scripts/test-vm.sh`, instance `istota-vm-1`) is the automated one and does not go through the browser.
 
@@ -152,6 +153,8 @@ testbed/             # Staging environment for the deployment tiers -- compose
                      #   beside src/ rather than inside tests/ because it is not
                      #   part of the shipped application
 web/                 # SvelteKit frontend
+docs/                # Documentation markdown
+docs-site/           # Docusaurus site that renders docs/
 docker/              # Docker Compose stack and images
 host/                # Provisioning and istota-stack for the dedicated VM
 ansible/             # Optional management role for an estate-managed VM
@@ -160,7 +163,7 @@ schema.sql           # Database schema
 pyproject.toml       # Project metadata and dependencies
 ```
 
-Which tests to run, and when, is [testing](testing.md). The short version: `scripts/qt` while iterating (only the tests your change affects), `scripts/qtest uv run pytest` once before the commit.
+Which tests to run, and when, is [testing](testing.md). The short version: `scripts/qt` while iterating (only the tests your change affects), then the named test files that cover the change plus `ruff` before the commit. The full suite (`scripts/qtest uv run pytest`) runs only when someone asks for it.
 
 ## External tooling
 

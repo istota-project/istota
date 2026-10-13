@@ -13268,8 +13268,11 @@ def _usage_summary_by_model(
 # `started_at`, and `confirmed_at` keeps an approved one, whose parked run did.
 # Not covered: `release_task_for_restart` clears `started_at` without bumping
 # `attempt_count`, so a restart-killed attempt that never re-runs is dropped.
-_UNMEASURED_TASK_WHERE = """
-    t.command IS NULL AND t.skill IS NULL
+NO_MODEL_TASK_SQL = "(t.command IS NOT NULL OR t.skill IS NOT NULL)"
+"""A task that runs no model: a command job or a skill task. Alias `tasks` as `t`."""
+
+_UNMEASURED_TASK_WHERE = f"""
+    NOT {NO_MODEL_TASK_SQL}
     AND NOT (t.attempt_count = 0 AND t.confirmed_at IS NULL AND (
         t.status IN ('pending', 'locked', 'running')
         OR (t.status IN ('cancelled', 'failed') AND t.started_at IS NULL)

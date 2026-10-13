@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Button, IconButton, Input } from '$lib/components/ui';
+  import { Button, EmptyState, IconButton, Input } from '$lib/components/ui';
   import { Plus, X } from '@lucide/svelte';
 
   // A repeating threshold/rate row list. A flat state is one row, so it needs
@@ -173,9 +173,9 @@
   {/each}
 
   {#if !rows.length}
-    <p class="empty small">
+    <EmptyState size="sm">
       No brackets. Add one to start, or save with this empty to go back to the shipped rates.
-    </p>
+    </EmptyState>
   {/if}
 
   {#if problem}

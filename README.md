@@ -164,7 +164,7 @@ Istota does not hand the model a pile of unrelated integrations. A task receives
 
 Every user has a workspace for notes, configuration, inbox files, memories, scripts, and generated exports. That workspace can be an ordinary local directory or a Nextcloud-backed file tree.
 
-Nextcloud is a first-class integration, not a requirement. When connected, Istota can use Nextcloud for files, calendars, contacts, OAuth login, notifications, and Talk while acting as an ordinary user over standard protocols. Without it, the workspace is a local directory on the stack's state volume and people sign in with email.
+Nextcloud is a first-class integration, not a requirement. When connected, Istota can use Nextcloud for files, calendars, contacts, OAuth login, notifications, and Talk while acting as an ordinary user over standard protocols. Without it, the workspace is a local directory in the stack's state and people sign in with email.
 
 Data stays in formats that can be inspected and moved without Istota: SQLite, Markdown, TOML, JSON, CSV, and Beancount. Module data is stored per user. Online database backups, restore tooling, migration checks, and `istota doctor` cover the operational side of keeping that data on your own server.
 
@@ -230,7 +230,7 @@ WhatsApp and SMS carry the answer rather than the conversation: the exchange sta
 
 ## Install
 
-Istota has one deployment: the Docker stack of the scheduler, web app and nginx, on a Debian 13 machine dedicated to it, with every task in a bubblewrap sandbox with its own cgroup. Nextcloud is optional; without it, storage is local.
+Istota has one deployment, the same on a server and on a Mac: a stack of containers (the scheduler, the web app and nginx) on a Debian 13 machine dedicated to it, with every task in a bubblewrap sandbox with its own cgroup. `istota-stack` is the one command that installs updates, changes settings and controls it. Nextcloud is optional; without it, storage is local.
 
 Run the installer as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It verifies the release tag against the signing key, provisions the machine, builds the images there and starts the setup in your browser, which starts the stack when it finishes (`--terminal-setup` runs the setup wizard in the terminal instead). `istota-stack` manages it afterwards.
 
@@ -239,7 +239,7 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
   | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 ```
 
-On an Apple silicon Mac, `install.sh --local` runs the same stack in a Lima VM, with a folder in your home as the workspace; see the [local install](https://istota.cynium.com/docs/getting-started/local-install/). Read an installer before piping it into a shell. For prerequisites, setup choices and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
+On an Apple silicon Mac, `install.sh --local` runs the same stack in a Lima VM, with a folder in your home as the workspace, and the Mac's `istota-stack` forwards every command into it; see the [local install](https://istota.cynium.com/docs/getting-started/local-install/). An optional Ansible role exists for machines managed from an estate inventory; nothing in an install needs it. Read an installer before piping it into a shell. For prerequisites, setup choices and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
 
 The older standalone single-user install is deprecated. Existing installs keep working, and `istota-stack import-standalone` moves one into the local VM; see the [standalone page](https://istota.cynium.com/docs/getting-started/standalone-install/).
 
@@ -263,7 +263,7 @@ See the [configuration overview](https://istota.cynium.com/docs/configuration/ov
 
 ## Development
 
-Istota's backend and task runtime are Python. The web app is SvelteKit. The repository also contains the Docker stack, the host provisioning scripts, an optional Ansible management role, the browser service, deployment tests, and a full local testbed.
+Istota's backend and task runtime are Python. The web app is SvelteKit. The repository also contains the stack's compose file and images, the host provisioning scripts, an optional Ansible management role, the browser service, deployment tests, and a full local testbed.
 
 ```bash
 uv sync --extra test

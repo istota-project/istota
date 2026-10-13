@@ -92,6 +92,11 @@
     padding: var(--space-4) var(--space-3);
   }
 
+  /* An empty state measures its own distance from the bar above it. */
+  .report-frame:has(> :global(.empty-state)) {
+    padding-top: 0;
+  }
+
   /* The three report pages each declared these — .section-toggle three times
      byte-for-byte as a :global() rule, which leaks app-wide, so whichever
      stylesheet loaded last was the one in effect. Defined once here, where the

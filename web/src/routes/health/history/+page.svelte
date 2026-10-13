@@ -10,7 +10,14 @@
     type Diagnosis,
     type Encounter,
   } from '$lib/api';
-  import { Button, DateRangeFilter, Field, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Button,
+    DateRangeFilter,
+    EmptyState,
+    Field,
+    Select,
+    type SelectOption,
+  } from '$lib/components/ui';
   import {
     conditionOptionLabel,
     linkableConditionOptions,
@@ -319,9 +326,9 @@
   <div class="layout">
     <section class="timeline">
       {#if encounters.length === 0}
-        <div class="empty">
+        <EmptyState>
           No encounters yet. Use <strong>+ Add encounter</strong> above to record one.
-        </div>
+        </EmptyState>
       {:else}
         <ul>
           {#each encounters as e (e.id)}
@@ -356,7 +363,7 @@
     <aside class="sidebar">
       <h2 class="micro-label">Active conditions</h2>
       {#if active.length === 0 && chronic.length === 0}
-        <div class="empty small">No active conditions on file.</div>
+        <EmptyState size="sm">No active conditions on file.</EmptyState>
       {:else}
         {#if active.length > 0}
           <ul class="conditions">

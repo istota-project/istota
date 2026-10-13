@@ -349,7 +349,7 @@ Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_c
 
 ## Deployment
 
-One shape: the Docker stack (`docker/`) on a machine dedicated to it, set up by `host/provision.sh` and updated with `istota-stack update`; the optional `ansible/` role manages such a machine from an estate. On an Apple silicon Mac that machine is a Lima VM (`install.sh --local`): `host/mac/istota-stack` creates and controls it and forwards every other verb into it, `~/Istota` is the workspace (`STORAGE=host-folder`), the master key is copied into the login Keychain, and `restore` rebuilds a lost VM from the two. A bare-metal install moves over with `istota-stack import-bare-metal`, a standalone one with the Mac's `istota-stack import-standalone`. See `.claude/rules/deployment.md`.
+One shape, the same on a server and a Mac: the stack (compose file and images in `docker/`) on a machine dedicated to it, set up by `host/provision.sh` and updated with `istota-stack update`; the optional `ansible/` role can manage such a machine from an estate inventory, and nothing in an install uses it. On an Apple silicon Mac that machine is a Lima VM (`install.sh --local`): `host/mac/istota-stack` creates and controls it and forwards every other verb into it, `~/Istota` is the workspace (`STORAGE=host-folder`), the master key is copied into the login Keychain, and `restore` rebuilds a lost VM from the two. A bare-metal install moves over with `istota-stack import-bare-metal`, a standalone one with the Mac's `istota-stack import-standalone`. See `.claude/rules/deployment.md`.
 
 ## Task Status
 

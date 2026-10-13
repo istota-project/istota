@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SettingsCard } from '$lib/components/settings';
-  import { Badge, Select } from '$lib/components/ui';
+  import { Badge, EmptyState, Select } from '$lib/components/ui';
   import { getTransactionRuleCoverage, type RuleCoverageValue } from '$lib/money/api';
 
   // What recent imports actually carried, and where each value went. The list
@@ -90,7 +90,7 @@
     </p>
 
     {#if loaded && ordered.length === 0}
-      <p class="empty">No imports yet.</p>
+      <EmptyState>No imports yet.</EmptyState>
     {:else}
       <ul class="cov-list">
         {#each ordered as row (row.value)}

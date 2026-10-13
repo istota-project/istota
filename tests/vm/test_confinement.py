@@ -134,10 +134,11 @@ class TestTheDaemonCannotSeeTheMachine:
         cid = lima.container(stack, "daemon")
         mounts = json.loads(stack.out(f"docker inspect -f '{{{{json .Mounts}}}}' {cid}"))
         binds = sorted(m["Source"] for m in mounts if m["Type"] == "bind")
-        allowed = (f"{lima.STACK}/config", lima.MOUNT, f"{lima.STACK}/secrets/")
-        strays = [b for b in binds if not (b in allowed[:2] or b.startswith(allowed[2]))]
+        allowed = (f"{lima.STACK}/config", f"{lima.STACK}/data", lima.MOUNT, f"{lima.STACK}/secrets/")
+        strays = [b for b in binds if not (b in allowed[:3] or b.startswith(allowed[3]))]
         assert strays == [], f"row 7: the daemon container binds {strays}"
         assert f"{lima.STACK}/config" in binds, binds
+        assert f"{lima.STACK}/data" in binds, "the state is the host directory, not a volume"
 
     def test_the_daemon_sees_none_of_the_vm(self, stack):
         paths = _vm_paths(stack)
