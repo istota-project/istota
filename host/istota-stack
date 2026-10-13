@@ -502,7 +502,14 @@ PY
 stack_up() {
     local active id service
     adopt_data_dir
-    compose up -d --remove-orphans
+    # Rendered by the script that starts the stack, so it names this script's
+    # /data: one an older istota-stack rendered names a volume nothing mounts.
+    if [ -s "$DEVBOX_COMPOSE" ]; then
+        render_devbox_compose "$(env_get "$ENV_FILE" ISTOTA_TAG)" \
+            || die "the devbox compose file could not be rendered; the stack was not started."
+    fi
+    # Explicit: a caller on the left of `||` runs this with set -e off.
+    compose up -d --remove-orphans || return $?
     active="$(compose config --services)"
     docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
             --format '{{.ID}} {{.Label "com.docker.compose.service"}}' | while read -r id service; do
@@ -671,11 +678,9 @@ cmd_update() {
     local unsigned=""
     if [ "${1:-}" = "--unsigned" ]; then unsigned=1; shift; fi
     [ "$#" -eq 1 ] || { usage >&2; exit 64; }
-    local tag="$1" object current current_unsigned previous previous_unsigned before
+    local tag="$1" object before
     check_tag_name "$tag"
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
-    current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
-    current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
     verified_git fetch --quiet --tags origin \
         "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
         || die "git fetch failed; nothing was changed."
@@ -697,6 +702,46 @@ cmd_update() {
     # From here until .env is written, a failure puts the checkout back, so .env,
     # the checkout and the running stack all stay as they were.
     verified_git checkout --quiet --detach "${object}^{commit}"
+    hand_update_to_release "$tag" "$unsigned" "$before" "$(verified_git rev-parse HEAD)"
+    update_from_checkout "$tag" "$unsigned" "$before"
+}
+
+# The rest of an update belongs to the release being installed: its own
+# istota-stack builds, renders the devbox file, writes .env, starts the stack and
+# provisions the host. The script running this one is the previous release's,
+# and a change a release makes to those steps (the state directory, the devbox
+# render) otherwise reached a host only on the update after. The checkout was
+# verified above, as provision.sh is. A release without the handoff (an older
+# one) finishes here. The child holds the lock through descriptor 9.
+hand_update_to_release() {
+    local tag="$1" unsigned="$2" before="$3" commit="$4" script="${SRC}/host/istota-stack"
+    [ -z "${ISTOTA_STACK_UPDATE_HANDOFF:-}" ] || return 0
+    [ -x "$script" ] && grep -q 'ISTOTA_STACK_UPDATE_HANDOFF' "$script" || return 0
+    log "handing the update to ${tag}'s own istota-stack"
+    trap - EXIT
+    exec env ISTOTA_STACK_UPDATE_HANDOFF=1 ISTOTA_STACK_LOCK_INHERITED=1 \
+        "$BASH" "$script" update-from-checkout "$tag" "$unsigned" "$before" "$commit"
+}
+
+# Only ever exec'd by hand_update_to_release: it skips the fetch and the tag
+# check, so it refuses unless it holds the update's lock and the checkout is the
+# commit that check passed.
+cmd_update_from_checkout() {
+    [ "$#" -eq 4 ] || { usage >&2; exit 64; }
+    local tag="$1" unsigned="$2" before="$3" commit="$4"
+    [ -n "${ISTOTA_STACK_UPDATE_HANDOFF:-}" ] && flock -n 9 2>/dev/null \
+        || die "update-from-checkout is the second half of \`istota-stack update\`; run that instead."
+    check_tag_name "$tag"
+    [ "$(verified_git rev-parse HEAD)" = "$commit" ] \
+        || die "the checkout is not the commit the update verified; nothing was changed."
+    trap cleanup_update EXIT
+    update_from_checkout "$tag" "$unsigned" "$before"
+}
+
+update_from_checkout() {
+    local tag="$1" unsigned="$2" before="$3" current current_unsigned previous previous_unsigned up_rc=0
+    current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
     log "building ${tag}"
     if ! build_images "$tag" || ! render_devbox_compose "$tag" || ! build_devbox_images "$tag"; then
         verified_git checkout --quiet --detach "$before" || true
@@ -722,7 +767,7 @@ cmd_update() {
     env_set "ISTOTA_TAG=${tag}" "ISTOTA_TAG_UNSIGNED=${unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
-        release_stack_up
+        release_stack_up || up_rc=$?
     else
         log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
     fi
@@ -730,8 +775,15 @@ cmd_update() {
     cleanup_update
     # A successful update may exec provision.sh, which does not run EXIT traps.
     trap - EXIT
-    log "now on ${tag} (previous: ${previous:-none})"
+    if [ "$up_rc" -ne 0 ]; then
+        # Provisioned all the same: provision.sh installs this release's
+        # istota-stack, and a host left on the old one fails the next update too.
+        log "WARNING: the stack did not come up on ${tag} (exit ${up_rc}); .env names it, and the host is provisioned for it anyway."
+    else
+        log "now on ${tag} (previous: ${previous:-none})"
+    fi
     reprovision_if_changed
+    [ "$up_rc" -eq 0 ] || die "the stack did not come up on ${tag}; \`istota-stack compose ps\` and \`docker logs istota-daemon-1\` say why."
 }
 
 # provision.sh installs this script, the units and the host scripts, so a
@@ -2147,6 +2199,8 @@ main() {
             if [ -z "${ISTOTA_STACK_LOCK_INHERITED:-}" ] || ! flock -n 9 2>/dev/null; then
                 take_stack_lock up
             fi ;;
+        # Holds the update's lock through descriptor 9 or refuses; never waits.
+        update-from-checkout) ;;
         update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down)
             take_stack_lock "$command" ;;
         # Setting a key writes host.env, which setup and restore write too;
@@ -2160,6 +2214,7 @@ main() {
     esac
     case "$command" in
         update) cmd_update "$@" ;;
+        update-from-checkout) cmd_update_from_checkout "$@" ;;
         rollback) cmd_rollback "$@" ;;
         setup) cmd_setup "$@" ;;
         setup-code) cmd_setup_code "$@" ;;

@@ -603,6 +603,23 @@ class TestAnUpdateReprovisionsTheHost:
         assert "ISTOTA_TAG=v1\n" in fx.env_text()
         assert "provision.sh" in result.stdout + result.stderr
 
+    def test_a_stack_that_fails_to_start_still_provisions_the_host(self, with_provision):
+        """Provision installs the new istota-stack. An update whose `up` failed
+        used to stop before it, so the host kept the old script, and the next
+        update ran that script again and failed the same way."""
+        fx = with_provision
+        result = fx.run("update", "v1", STUB_UP_RC="1")
+        assert "provision ran" in fx.docker_calls()
+        assert "did not come up" in result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+
+    def test_a_stack_that_fails_to_start_fails_an_update_with_nothing_to_provision(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", STUB_UP_RC="1")
+        assert result.returncode == 1
+        assert "did not come up" in result.stdout + result.stderr
+
     def test_a_release_without_provision_sh_updates_as_before(self, fx):
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
@@ -613,6 +630,21 @@ class TestAnUpdateReprovisionsTheHost:
 RELEASE_STACK_STUB = """#!/bin/bash
 # ISTOTA_STACK_LOCK_INHERITED
 echo "release istota-stack: $* inherited=$(printenv | grep -c '^ISTOTA_STACK_LOCK_INH')" >> "$STUB_CALLS"
+"""
+
+
+HANDOFF_STUB = """#!/bin/bash
+# ISTOTA_STACK_LOCK_INHERITED ISTOTA_STACK_UPDATE_HANDOFF
+lock="$(python3 -c '
+import fcntl, sys
+with open(sys.argv[1], "a") as f:
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        print("free")
+    except BlockingIOError:
+        print("held")
+' "$ISTOTA_STACK_DIR/.stack.lock")"
+echo "release istota-stack: $* lock=${lock}" >> "$STUB_CALLS"
 """
 
 
@@ -652,7 +684,57 @@ class TestTheReleasesOwnScriptBringsTheStackUp:
         self._release_with(fx, SCRIPT.read_text())
         result = fx.run("update", "v1", ISTOTA_STACK_LOCK_WAIT="2")
         assert result.returncode == 0, result.stdout + result.stderr
-        assert any(c.endswith("up -d --remove-orphans") for c in fx.docker_calls())
+        assert any(c.endswith("up -d --remove-orphans") for c in fx.docker_calls()), result.stdout + result.stderr
+
+    def test_the_releases_script_runs_the_rest_of_the_update_holding_the_lock(self, fx):
+        """The running istota-stack is the previous release's. It fetches and
+        verifies, then the release's own script builds, renders, starts and
+        provisions: on zorg the old script's devbox render named a volume the
+        new compose file no longer mounted."""
+        self._release_with(fx, HANDOFF_STUB)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        handed = [c for c in calls if c.startswith("release istota-stack: update-from-checkout v1 ")]
+        assert handed, calls
+        commit = _git(fx.origin, "rev-parse", "v1^{commit}", env=fx.env)
+        assert handed[0].endswith(f" {commit} lock=held"), handed
+        assert not any(" build " in f" {c} " for c in calls), "the old script built the release itself"
+        assert "ISTOTA_TAG=v0\n" in fx.env_text(), "the old script wrote .env itself"
+
+    def test_a_release_without_the_handoff_is_finished_by_the_running_script(self, fx):
+        self._release_with(fx, RELEASE_STACK_STUB)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert any(" build " in f" {c} " for c in calls)
+        assert not any("update-from-checkout" in c for c in calls)
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+
+    @pytest.mark.parametrize("env", [{}, {"ISTOTA_STACK_UPDATE_HANDOFF": "1"}])
+    def test_the_second_half_alone_is_refused(self, fx, env):
+        """It skips the fetch and the tag check, so it runs only under the
+        update that did them, holding that update's lock."""
+        head = fx.head()
+        result = fx.run("update-from-checkout", "v0", "", head, head, **env)
+        assert result.returncode == 1
+        assert "istota-stack update" in result.stderr
+        assert fx.docker_calls() == []
+
+    def test_the_second_half_refuses_a_checkout_that_moved(self, fx, tmp_path):
+        """Holding the lock, as the handoff does, with a commit that is not
+        the checkout's."""
+        runner = tmp_path / "runner.sh"
+        runner.write_text(
+            f'exec 9>>"{fx.stack}/.stack.lock"; flock -n 9 || exit 99\n'
+            f'ISTOTA_STACK_UPDATE_HANDOFF=1 bash "{SCRIPT}" update-from-checkout v0 "" '
+            f'{fx.head()} 0000000000000000000000000000000000000000\n'
+        )
+        result = subprocess.run(["bash", str(runner)], capture_output=True, text=True,
+                                env=fx.env, timeout=60)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "not the commit the update verified" in result.stderr
+        assert fx.docker_calls() == []
 
     def test_the_variable_alone_does_not_skip_a_held_lock(self, fx):
         held = HeldLock(fx.stack / ".stack.lock", "update")
@@ -1036,6 +1118,27 @@ class TestTheStateDirectory:
         assert f"docker volume rm {self.VOLUME}" in result.stdout
         assert (legacy.stack / ".data-copied").read_text().strip() == self.VOLUME
         assert not (legacy.stack / "data.partial").exists()
+
+    def test_up_renders_the_devbox_file_itself(self, fx):
+        """The file an older istota-stack rendered names the state volume. The
+        script that starts the stack renders it again, against its own /data,
+        or compose creates an empty volume for the devbox's repos."""
+        devbox = fx.stack / "compose.devbox.yml"
+        devbox.write_text('{"services": {"devbox-alice": {"volumes": [{"source": "data"}]}}}\n')
+        devbox.chmod(0o644)
+        result = fx.run("up", STUB_DEVBOX_COMPOSE='{"services": {"devbox-alice": {"image": "x"}}}')
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        render = self._index(calls, lambda c: "devbox compose-file" in c)
+        assert render is not None, calls
+        assert calls[render].endswith(f"--state-dir {fx.stack / 'data'}")
+        assert render < self._up(calls)
+        assert '"image": "x"' in devbox.read_text()
+
+    def test_up_without_a_devbox_renders_nothing(self, fx):
+        result = fx.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any("devbox compose-file" in c for c in fx.docker_calls())
 
     def test_an_existing_directory_is_set_to_the_mode_the_root_phase_needs(self, fx):
         """The first release made it 0700, which the container's root phase,
