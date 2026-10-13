@@ -117,8 +117,8 @@ def parent_env_probe(name: str) -> str:
     both.
     """
     return (
-        f'if tr "\\0" "\\n" < /proc/$PPID/environ 2>/dev/null '
-        f'| grep -q "^{name}="; then echo "PARENT_ENV=PRESENT"; '
+        f'if grep -q "^{name}=" <<<"$(tr "\\0" "\\n" < /proc/$PPID/environ 2>/dev/null)"; '
+        f'then echo "PARENT_ENV=PRESENT"; '
         f'else echo "PARENT_ENV=ABSENT"; fi; '
         f'echo "PARENT_CMD=[$(tr "\\0" " " < /proc/$PPID/cmdline 2>/dev/null)]"'
     )

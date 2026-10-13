@@ -779,7 +779,7 @@ cmd_status() {
         holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u || true)"
         if [ -z "$holders" ]; then
             echo "Port:       nothing listens on ${port}: Lima's forward is not up"
-        elif printf '%s\n' "$holders" | grep -qvxE 'limactl|ssh'; then
+        elif grep -qvxE 'limactl|ssh' <<<"$holders"; then
             echo "Port:       ${port} is held by $(printf '%s' "$holders" | tr '\n' ' ')and not by Lima"
         fi
     fi

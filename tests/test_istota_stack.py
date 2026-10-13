@@ -1141,10 +1141,15 @@ class TestTheStateDirectory:
         assert "ISTOTA_TAG=v0\n" in legacy.env_text()
         assert "WARNING" in result.stdout and self.VOLUME in result.stdout
 
-    def test_a_rollback_between_releases_with_the_directory_is_not_refused(self, fx):
+    # The long file is ISSUE-736: `git show | grep -q` matched on line 4, git
+    # still had more than a pipe buffer to write, and pipefail read the
+    # SIGPIPE as "this release has no state directory".
+    @pytest.mark.parametrize("padding", [0, 20000], ids=["short", "longer-than-a-pipe-buffer"])
+    def test_a_rollback_between_releases_with_the_directory_is_not_refused(self, fx, padding):
         (fx.origin / "docker").mkdir()
         (fx.origin / "docker" / "docker-compose.yml").write_text(
-            "services:\n  daemon:\n    volumes:\n      - ${ISTOTA_DATA_DIR:-data}:/data\n")
+            "services:\n  daemon:\n    volumes:\n      - ${ISTOTA_DATA_DIR:-data}:/data\n"
+            + "".join(f"# padding line {i:06d}\n" for i in range(padding)))
         _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
         for tag in ("v1", "v2"):
             fx.commit(tag)
@@ -2714,6 +2719,16 @@ class TestLocalizeWorkspace:
         assert "STORAGE=local\n" in host_env
         assert "RCLONE_REMOTE=nextcloud\n" in host_env and "INGRESS=local\n" in host_env
         assert "config.toml.pre-localize" in result.stdout
+
+    def test_the_daemon_is_stopped_when_the_service_list_outruns_the_pipe(self, mounted):
+        """ISSUE-736: a `grep -q` on `compose config --services` exits at
+        `daemon`, the writer still has more than a pipe buffer to print and
+        takes SIGPIPE, and under pipefail the match read as "no daemon"."""
+        fx = mounted
+        filler = "".join(f"filler-{i:06d}\\n" for i in range(20000))
+        result = fx.run("localize-workspace", STUB_SERVICES=f"daemon\\n{filler}web\\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(call.endswith(" stop daemon web") for call in fx.docker_calls()), fx.docker_calls()
 
     def test_the_lock_is_released_while_provision_runs_and_taken_back(self, mounted):
         """provision.sh can start istota-stack.service, whose `up` takes the

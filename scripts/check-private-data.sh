@@ -83,7 +83,7 @@ derive_identity_patterns() {
   home_path="${HOME:-}"
   if [ -n "$home_path" ] && [ "$home_path" != "/" ]; then
     local base="${home_path##*/}"
-    if [ "${#base}" -ge 3 ] && ! printf '%s' "$base" | grep -qiE "$GENERIC_TERMS"; then
+    if [ "${#base}" -ge 3 ] && ! grep -qiE "$GENERIC_TERMS" <<<"$base"; then
       add_pattern "$(regex_escape "$home_path")" "local home directory path"
     fi
   fi
