@@ -977,36 +977,50 @@ cmd_restore() {
     log "open http://localhost:$(port_or_default)/istota"
 }
 
+# What this run staged in the VM, and the VM user's directory a stage is
+# copying through, both removed by the EXIT trap whatever the outcome: success,
+# a failure, or an interrupt. Global, since the trap runs after the function's
+# locals are gone; the apply path therefore calls stage_in_vm outside a
+# command substitution, whose assignments never reach this shell.
+STAGED_IN_VM=()
+VM_SCRATCH=""
+STAGED_PATH=""
+
+remove_vm_scratch() {
+    [ -n "$VM_SCRATCH" ] || return 0
+    limactl shell --workdir / "$INSTANCE" rm -rf "$VM_SCRATCH" </dev/null >&2 || true
+    VM_SCRATCH=""
+}
+
 # A Mac path copied into a directory of the VM user's and moved by the VM's
 # `istota-stack stage` into a fresh root-only one under
-# /srv/app/istota/staging; prints the path in the VM. --daemon stages it for
-# uid 10001, which is what a one-shot container reads it as.
+# /srv/app/istota/staging; prints the path in the VM and sets STAGED_PATH.
+# --daemon stages it for uid 10001, which is what a one-shot container reads
+# it as.
 stage_in_vm() {
-    local path="$1" copy=() stage=(stage) tmp staged
+    local path="$1" copy=() stage=(stage) staged
     [ "${2:-}" != --daemon ] || stage+=(--daemon)
     [ ! -d "$path" ] || copy=(-r)
-    tmp="$(limactl shell --workdir / "$INSTANCE" mktemp -d </dev/null)" || fail 1 "could not make a directory in the VM."
+    VM_SCRATCH="$(limactl shell --workdir / "$INSTANCE" mktemp -d </dev/null)" || fail 1 "could not make a directory in the VM."
     # The copy may hold credentials: it leaves the VM user's directory on
     # every path, staged or not.
-    if ! limactl copy ${copy[@]+"${copy[@]}"} "$path" "${INSTANCE}:${tmp}/" >&2; then
-        limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null >&2 || true
+    if ! limactl copy ${copy[@]+"${copy[@]}"} "$path" "${INSTANCE}:${VM_SCRATCH}/" >&2; then
+        remove_vm_scratch
         fail 1 "could not copy ${path} into the VM."
     fi
-    if ! staged="$(vm_stack "${stage[@]}" "${tmp}/$(basename "$path")" </dev/null)"; then
-        limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null >&2 || true
+    if ! staged="$(vm_stack "${stage[@]}" "${VM_SCRATCH}/$(basename "$path")" </dev/null)"; then
+        remove_vm_scratch
         fail 1 "could not stage ${path} in the VM."
     fi
-    limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null >&2 || true
+    STAGED_IN_VM+=("$staged")
+    remove_vm_scratch
+    STAGED_PATH="$staged"
     printf '%s\n' "$staged"
 }
 
-# What this run staged in the VM, unstaged by the EXIT trap whatever the
-# outcome: success, a failure, or an interrupt. Global, since the trap runs
-# after the function's locals are gone.
-STAGED_IN_VM=()
-
 unstage_all() {
     local staged
+    remove_vm_scratch
     for staged in ${STAGED_IN_VM[@]+"${STAGED_IN_VM[@]}"}; do
         vm_stack unstage "$staged" </dev/null >&2 || log "WARNING: ${staged} was left in the VM" >&2
     done
@@ -1061,12 +1075,12 @@ cmd_with_path() {
     trap unstage_all EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    staged="$(stage_in_vm "$path" ${daemon:+"$daemon"})" || exit $?
-    STAGED_IN_VM+=("$staged")
+    stage_in_vm "$path" ${daemon:+"$daemon"} >/dev/null
+    staged="$STAGED_PATH"
     if [ -n "$sidecar" ]; then
         local staged_sidecar
-        staged_sidecar="$(stage_in_vm "$sidecar")" || exit $?
-        STAGED_IN_VM+=("$staged_sidecar")
+        stage_in_vm "$sidecar" >/dev/null
+        staged_sidecar="$STAGED_PATH"
         local i
         for i in "${!args[@]}"; do
             if [ "${args[$i]}" = "@SIDECAR@" ]; then args[$i]="$staged_sidecar"; fi

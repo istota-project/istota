@@ -23,7 +23,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import subprocess
+import time
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,6 +147,7 @@ if verb == "copy":
     else:
         state.setdefault("copied", []).append(source)
         save()
+        time.sleep(state.get("copy_sleep", 0))
         if state.get("vm_root") and os.path.isdir(source):
             import shutil
             shutil.copytree(source, os.path.join(state["vm_root"], os.path.basename(source.rstrip("/"))))
@@ -473,6 +476,35 @@ class TestFileArguments:
         # The VM user's copy of the sidecar is removed too.
         removed = [c for c in mac.calls("limactl") if c[:1] == ["shell"] and "rm" in c]
         assert len(removed) == 2, removed
+
+    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+    def test_an_interrupt_mid_stage_removes_the_vm_users_copy(self, mac, tmp_path, sig):
+        """The copy in the VM user's directory may hold credentials, and the
+        EXIT trap is all that runs after an interrupt."""
+        mac.set(instance={"name": "istota", "status": "Running"}, copy_sleep=30)
+        plan = tmp_path / "role.json"
+        plan.write_text("{}")
+        plan.chmod(0o600)
+        process = subprocess.Popen(
+            [BASH, str(MAC_CLI), "apply", str(plan), "--input-format", "role-vars"], env=mac.env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while not any(c[:1] == ["copy"] for c in mac.calls("limactl")):
+                assert time.monotonic() < deadline and process.poll() is None, "the copy never started"
+                time.sleep(0.05)
+            os.killpg(process.pid, sig)
+            process.communicate(timeout=60)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+        assert process.returncode != 0
+        copy = next(i for i, c in enumerate(mac.calls("limactl")) if c[:1] == ["copy"])
+        after = mac.calls("limactl")[copy + 1:]
+        assert any(c[:1] == ["shell"] and c[-3:] == ["rm", "-rf", "/tmp/tmp.stub"] for c in after), after
+        assert not any(c[:1] == ["apply"] for c in mac.stack_calls())
 
     def test_a_missing_path_reaches_nothing(self, mac, tmp_path):
         mac.set(instance={"name": "istota", "status": "Running"})
