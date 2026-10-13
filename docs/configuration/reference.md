@@ -13,13 +13,13 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `advisor_model` | `""` | Advisor model — Anthropic-namespace brains only (`claude_code` / `tmux_claude`); resolves through the same alias table as `model` but carries no effort. Must resolve to a model capable of *being* an advisor (a weak/cheap tier fails every task it runs on). Dropped for any task carrying its own model pin (`!model`, `!room model`, a `[[jobs]] model`). |
 | `custom_system_prompt` | `false` | Use config/system-prompt.md instead of Claude Code default. That file — and nothing else in the config directory — is bind-mounted read-only into the sandbox, since the CLI opens it there |
 | `db_path` | `"data/istota.db"` | SQLite database path |
-| `module_data_dir` | derived | Root for per-user module DBs; defaults to `{db_path.parent}/modules` |
+| `module_data_dir` | derived | Root for per-user module DBs (feeds, health, location, money); defaults to `{db_path.parent}/modules`. It must be local disk, not the Nextcloud mount: SQLite's WAL keeps an mmap'd `-shm` file that raises SIGBUS on the rclone FUSE mount, which would leave the databases on the slower DELETE journal mode. A path under `workspace_mount_path` is refused at runtime. The user-facing files (health uploads, money ledgers, feed exports) stay in the workspace; only the `.db` files live here |
 | `workspace_path` | `workspace_mount_path` | On-disk root of the bot's file tree. Required when `[nextcloud] url` is set |
-| `workspace_mount_path` | not set | The mountpoint the workspace lives on, when it is one (the rclone mount of Nextcloud, or a host folder shared into a VM); doctor and the backup guard check it is mounted. `nextcloud_mount_path` is read as its old name; both set to different paths is a load error |
+| `workspace_mount_path` | not set | The mountpoint the workspace lives on, when it is one (the rclone mount of Nextcloud, or a host folder shared into a VM); doctor and the backup guard check it is mounted. With a `[nextcloud] url`, set means the workspace is the bot's Nextcloud files and the bot describes them that way; unset means a plain local workspace, and Talk and the `nextcloud` skill still work. `nextcloud_mount_path` is read as its old name; both set to different paths is a load error |
 | `skills_dir` | `"config/skills"` | Operator skill overrides directory |
 | `disabled_skills` | `[]` | Instance-wide skills to exclude |
 | `temp_dir` | `"/tmp/istota"` | Temporary directory for task execution |
-| `max_memory_chars` | `0` | Cap total memory in prompts (0 = unlimited) |
+| `max_memory_chars` | `0` | Cap total memory in prompts (0 = unlimited). A deployment-wide budget applied after retrieval has picked what is most relevant, so lowering it drops the weakest matches rather than switching recall off. A per-user `[users.X] max_chars` of 0 means "share this budget" |
 | `max_knowledge_facts` | `50` | Cap knowledge graph facts per prompt (0 = unlimited) |
 
 ## `[nextcloud]`
@@ -39,6 +39,8 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 |---|---|---|
 | `enabled` | `true` | Enable Talk polling |
 | `bot_username` | `"istota"` | Bot's username (to filter own messages) |
+| `attachment_max_mb` | `50` | When the workspace is not the Nextcloud mount, a file posted in Talk is fetched over WebDAV into `Channels/<room>/media/<message id>/`, once per message. Files larger than this are skipped and the task runs without them |
+| `attachment_retention_days` | `30` | Days a fetched attachment is kept before the cleanup pass removes it; `0` keeps them. Not used when the workspace is the mount |
 
 ## `[talk.signaling]`
 
@@ -48,15 +50,15 @@ There is no credential here, and that is deliberate: istota connects to the sign
 
 Two prerequisites, and each is a refusal to boot rather than a fallback to the poller: the HPB has to be registered with Talk already (`occ talk:signaling:list`), and the `websockets` library has to be installed (the `signaling` extra, included in `all` and `test` but not in `local`). A daemon quietly polling while an operator believes push is live is worse than one that did not start.
 
-While watching, istota holds an active Talk session in every room it watches, so it shows as present to everyone else in those rooms. It is not in a call and never joins one.
+While watching, istota holds an active Talk session in every room it watches, so it shows as present to everyone else in those rooms. It is not in a call and never joins one. A second daemon pointed at the same Nextcloud opens its own sessions and receives every event; duplicate work is prevented by the read cursor rather than by the transport.
 
 | Setting | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Take Talk messages over the signaling server instead of the poll loop |
 | `url` | `""` | HPB base URL. Empty means "use whatever Talk advertises" — set it only where the daemon reaches the server by a different route than browsers do |
-| `room_sync_interval` | `300` | Seconds between room reconciliations. Also the safety net: each pass compares every room's latest message id against the stored cursor and fetches only the rooms that are behind, so it bounds how long a gap lasts when the event stream is down |
+| `room_sync_interval` | `300` | Seconds between room reconciliations. Also the safety net: each pass compares every room's latest message id against the stored cursor and fetches only the rooms that are behind, so it bounds how long a gap lasts when the event stream is down. It is also the worst case for the first message in a brand-new room |
 | `reconnect_backoff_max` | `60` | Reconnect backoff ceiling, seconds. The proxy in front of the signaling server drops every connection hourly whatever the traffic, so reconnect is an ordinary event |
-| `payload_direct` | `false` | Ingest the relayed message directly instead of refetching the room. Talk sends a message with the event only from about Talk 21; below that every event is a bare notification and this changes nothing |
+| `payload_direct` | `false` | Ingest the relayed message directly instead of refetching the room. Talk sends a message with the event only from about Talk 21; below that every event is a bare notification and this changes nothing. The relayed message was measured field for field identical to the fetched one on Talk 24.0.4; it stays off by default because it is the only part of the design that can be wrong about message content rather than timing |
 
 ## `[email]`
 
@@ -76,12 +78,12 @@ While watching, istota holds an active Talk session in every room it watches, so
 | `bot_email` | `""` | Bot's email address |
 | `signup_task_window_minutes` | `30` | The first message to a [signup address](../features/email.md) within this many minutes of the tag opening mints one follow-up task. Later messages are filed and raise a notification. `0` files every message and mints no task |
 | `signup_body_retention_days` | `14` | Filed signup message bodies are cleared after this many days. The message rows stay |
-| `outbound_approval_floor` | `"untrusted"` | Minimum outbound email approval policy for every user: `off` (never hold) \| `untrusted` (hold unless every recipient is trusted) \| `all` (hold unless every recipient is one of the user's own addresses). A user may tighten past the floor but never loosen below it. An invalid value fails the config load rather than falling back — see [the outbound approval gate](../features/email.md#the-outbound-approval-gate) |
+| `outbound_approval_floor` | `"untrusted"` | Minimum outbound email approval policy for every user: `off` (never hold) \| `untrusted` (hold unless every recipient is trusted) \| `all` (hold unless every recipient is one of the user's own addresses). A user may tighten past the floor but never loosen below it, and a user who has never set their own policy follows the floor, so raising it reaches everyone. An invalid value fails the config load rather than falling back — see [the outbound approval gate](../features/email.md#the-outbound-approval-gate) |
 | `confirm_sender_match` | `"off"` | What an own-address claim buys: `off` (the header is proof — assumes the MTA enforces DMARC) \| `verify` (proof only when the MTA's own stamp says so; needs `authserv_id`, and the daemon refuses to load without it) \| `gate` (never proof; every self-sent message is held). Legacy `false`/`true` still load as `off`/`gate` — see [`confirm_sender_match`](../features/email.md#confirm_sender_match) |
 | `dmarc_canary` | `true` | Warns when mail routed on a user's own address arrives without a `dmarc=pass` from the receiving MTA. Monitoring for the assumption above; never blocks mail — see [the DMARC canary](../features/email.md#the-dmarc-canary) |
-| `dmarc_canary_warn_on_missing` | `false` | Also warn when your MTA's stamp carries no DMARC verdict at all. Off by default because a path that stamps nothing would warn on every message |
+| `dmarc_canary_warn_on_missing` | `false` | Also warn when your MTA's stamp carries no DMARC verdict at all. Off by default because a path that stamps nothing would warn on every message. Turn it on once you know your MTA stamps: it is the only way a mailbox moving to a provider that does not evaluate DMARC ever surfaces |
 | `thread_disclosure_footer` | `false` | Ends every plain-text mail the bot sends into a multi-person thread with one line naming the bot, the host and the `!<name> off` switch. Off by default, since mail from the bot's address is already from the bot |
-| `authserv_id` | `""` | Your receiving MTA's authserv-id — the first field of the `Authentication-Results` header it stamps. Set it and headers from any other authserv-id are discarded rather than read; blank keeps the older topmost-header-only read, which a sender can forge once the MTA stops stamping. Setting it also makes mail arriving without your stamp warn on its own — see [the DMARC canary](../features/email.md#the-dmarc-canary) |
+| `authserv_id` | `""` | Your receiving MTA's authserv-id — the first field of the `Authentication-Results` header it stamps. Set it and headers from any other authserv-id are discarded rather than read; blank keeps the older topmost-header-only read, which a sender can forge once the MTA stops stamping. Write the single token before the semicolon, without any version number that follows it. Setting it also makes mail arriving without your stamp warn on its own — see [the DMARC canary](../features/email.md#the-dmarc-canary) |
 
 ## `[sms]`
 
@@ -127,6 +129,7 @@ Three settings are at this level; each adapter's own are its nested block.
 | `enabled` | `false` | Accept inbound WhatsApp work and send |
 | `provider` | `"baileys"` | Which adapter sends and receives: `baileys` (a paired WhatsApp Web session, free and unmetered, no Meta account) or `whatsapp_cloud` (Meta's hosted Cloud API) |
 | `business_phone_number` | `""` | Exact E.164 number this deployment sends from, whichever adapter holds it |
+| `group_bare_file_hold_seconds` | `30` | In a group, a member's photo or GIF with no caption waits this long for the same member's next message, which is then read as its caption so the two get one answer. `0` answers the file at once |
 
 A configuration written before the adapters existed put every `[whatsapp.cloud]` setting below directly under `[whatsapp]`. It still loads: those keys are read as the nested block, and one carrying a `waba_id`, a `phone_number_id` or one of the three credentials selects `whatsapp_cloud` when no `provider` is set, so an existing Cloud deployment keeps its adapter and its webhook. The flat spelling is deprecated and will be removed.
 
@@ -153,11 +156,11 @@ Meta's Cloud API, used directly rather than through a Business Solution Provider
 |---|---|---|
 | `session_dir` | `""` | Where the paired session is stored. Empty derives it beside the database. The session is a full-account credential |
 | `library_version` | `""` | Pin the sidecar's Baileys version. Empty follows what the shipped sidecar pins |
-| `sidecar_command` | `""` | The command that runs the Node sidecar. Empty means the daemon listens and spawns nothing, which is what a deployment running the sidecar as its own unit or compose service wants |
+| `sidecar_command` | `""` | The command that runs the Node sidecar, split by shell rules and not run through a shell. Empty means the daemon listens and spawns nothing, which is what a deployment running the sidecar as its own unit or compose service wants, and is better there, since systemd restarts a unit a permanent fatal stopped. `istota whatsapp pair` finds the program in a checkout on its own |
 | `pairing_enabled` | `true` | Whether a session can be re-paired from Admin, Connections. `false` makes the pairing routes answer 404; `istota whatsapp pair` is unaffected |
-| `pairing_window_seconds` | `300` | How long a pairing window stays open for a code to be scanned |
-| `pairing_relay_path` | `""` | Where a pairing code is relayed between the process holding the sidecar and the web process. Empty derives it beside the database, 0600 |
-| `restart_interval_seconds` | `0` | Roughly how long this deployment's supervisor waits before restarting the sidecar. It gates nothing — it sizes how long a pairing window waits before reporting the sidecar missing. `0` means undeclared |
+| `pairing_window_seconds` | `300` | How long a pairing window stays open for a code to be scanned. For that span a pairing code, a full-account WhatsApp credential, can be relayed to the admin UI, so shorten this to narrow the exposure |
+| `pairing_relay_path` | `""` | Where a pairing code is relayed between the process holding the sidecar and the web process. Empty derives it beside the database, 0600, where the task sandbox binds nothing; a path inside a sandbox-bound root is refused at the route |
+| `restart_interval_seconds` | `0` | Roughly how long this deployment's supervisor waits before restarting the sidecar. It gates nothing — it sizes how long a pairing window waits before reporting the sidecar missing. `0` means undeclared, which is right wherever the supervisor backs off rather than waiting a fixed period (Docker). Under systemd, set it to the unit's `RestartSec` |
 
 ### `[whatsapp.cloud.proactive_template]`
 
@@ -165,7 +168,7 @@ Meta's Cloud API, used directly rather than through a Business Solution Provider
 |---|---|---|
 | `enabled` | `false` | Send one approved utility template when the 24-hour service window has closed. Valid only with `billing_policy = "allow_paid"` |
 | `name` | `""` | The approved Meta template name (lowercase letters, digits, underscores) |
-| `language` | `"en_US"` | The exact approved language code. Istota never substitutes another |
+| `language` | `"en_US"` | The exact approved language code. Istota never creates, submits or substitutes a template |
 
 The three credentials never enter task environments, prompts, logs or the admin configuration page, and the business phone number is masked there. The attempt cap bounds Istota's own attempts only: a message sent from a coexistence client or another application consumes Meta's allowance without passing through the ledger, so `free_guard` is conservative rather than a guaranteed zero invoice.
 
@@ -194,7 +197,7 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 |---|---|---|
 | `mode` | `"classifier"` | `"mention"` answers only when addressed; `"classifier"` lets a cheap model decide and stays quiet when it fails; `"off"` answers every turn. An unknown value stays quiet |
 | `disposition` | `"friendly"` | With the classifier: `"reserved"` answers a turn addressed to the bot, asking it for something or answering its question; `"friendly"` also answers thanks and other reactions to its last answer, in one short line, and treats the classifier as a lenient filter: a turn it lets through may be declined by the bot, which then posts nothing. An unknown value is `"reserved"`. A room's host can override it for one room with `!room disposition` |
-| `ack_reaction` | `"👍"` | Under `"friendly"`, the reaction a turn that only acknowledges the bot (thanks, agreement, a joke, good news) gets on Talk and in WhatsApp groups instead of a reply, when `ack_reactions` has no list for its kind. One emoji; anything that is not one emoji is ignored with a warning. Empty turns reactions off everywhere, `ack_reactions` included, and every acknowledgement gets one short line |
+| `ack_reaction` | `"👍"` | Under `"friendly"`, the reaction a turn that only acknowledges the bot (thanks, agreement, a joke, good news) gets on Talk and in WhatsApp groups instead of a reply, when `ack_reactions` has no list for its kind. One emoji; anything that is not one emoji is ignored with a warning. Empty turns reactions off everywhere, `ack_reactions` included, and every acknowledgement gets one short line. A reaction that cannot be sent falls back to the short line, and web chat, SMS and email always get the line |
 | `ack_reactions` | `thanks = ["👍", "🐙"]`, `agreement = ["👌"]`, `funny = ["😄", "🐙"]`, `celebration = ["🎉"]` | A sub-table, `[speech_gate.ack_reactions]`: a list of emoji for each kind of ack the classifier names (`thanks`, `agreement`, `funny`, `celebration`) plus `default`. One is picked per message by its id, so a message always gets the same one. A kind that is missing, empty or holds no valid emoji uses `default`; with no `default`, `ack_reaction` is used, which is why the shipped table has none. The table wins over `ack_reaction`. A table in the config file replaces the shipped lists whole; an empty one leaves only `ack_reaction`. |
 | `model` | `"fast"` | Role alias for the classifier, resolved per brain namespace |
 | `window_messages` | `8` | Transcript turns the classifier sees |
@@ -227,7 +230,7 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 | `talk_poll_full_sweep_interval` | `300` | Seconds between polls of every room regardless of the `lastMessage` gate. Between sweeps only a room the room list says has a newer message is long-polled. `0` turns the gate off |
 | `email_poll_interval` | `60` | Seconds between email polls |
 | `email_poll_batch_size` | `50` | Messages one email poll walks. The remainder is left for the next tick and drains in arrival order, rather than falling off the end |
-| `email_rate_limit_messages` | `60` | Inbound email tasks one user's account will pay for per window. Over-budget mail is filed (`routing_method="throttled"`, left in the mailbox, one alert per window), never dropped. 0 disables |
+| `email_rate_limit_messages` | `60` | Inbound email tasks one user's account will pay for per window. The `bot+{user_id}@domain` address is public by construction (it is the From: on every mail the bot sends for that user), so anyone who has corresponded with the bot can turn one SMTP transaction into a paid model call. Over-budget mail is filed (`routing_method="throttled"`, left in the mailbox, one alert per window), never dropped, and can still be read on demand with `email from-senders`. 0 disables |
 | `email_sender_rate_limit_messages` | `20` | The same budget narrowed to one correspondent, so a single loud sender throttles alone rather than consuming the user's whole allowance. 0 disables |
 | `email_rate_limit_window_seconds` | `3600` | The sliding window both counts run over, and the window the throttle alert and the collapsed confirmation prompts are deduplicated on |
 | `email_task_queue` | `background` | Which worker queue inbound mail lands on. Background by default: email is the one surface an unauthenticated stranger can create work on, and the one whose turnaround nobody is watching. `foreground` restores the previous behaviour at the cost of a flood competing with live chat |
@@ -246,7 +249,7 @@ Whether the bot replies to a turn nobody addressed to it, in a room more than on
 | `avatar_import_interval` | `21600` | Seconds between Nextcloud profile-picture import ticks (6h; 0 disables). Also gated by `[web] avatar_import_from_nextcloud` and by the storage backend being Nextcloud. On a cadence rather than at login (which would put a Nextcloud timeout in front of authentication) or on render (a live proxy), so a user who has just signed in for the first time sees the initial chip until the next tick — which is why it is six hours rather than daily |
 | `skill_overlay_reindex_interval` | `21600` | Seconds between memory-search reindexes of every configured user's [per-skill overlays](per-user.md#per-skill-overlays) (ISSUE-343, 6h; 0 disables). An overlay is a user-written file with no CLI write path, so there is nothing to index from on write, and the per-write reindex never covered a text-editor edit over Nextcloud anyway — which is the authoring mode the file is for. One pass walks the directory, indexes only what actually binds, and reaps rows for files that no longer do, so an edit, a create and a delete are all covered. Deliberately a scheduler tick rather than part of the sleep cycle: that pass is gated on `[sleep_cycle] enabled` and on the primary brain's breaker, while `[memory_search] enabled` is an independent setting, and this makes no model call. Seeded to 0 so a fresh daemon indexes on its first tick — a restart is the one moment an overlay edited while the daemon was down is guaranteed to be unindexed. Skipped without a mount and without `[memory_search] auto_index_memory_files` |
 | `credential_backup_interval` | `86400` | Seconds between scheduled age credential backups; `0` disables them |
-| `scheduler_stats_interval` | `60` | Seconds between `scheduler_stats` health-line emits (threads / fds / rss / running-tasks / active-workers) — one `key=value` INFO line per interval on the `istota.scheduler.stats` logger, for catching resource leaks early. 0 disables |
+| `scheduler_stats_interval` | `60` | Seconds between `scheduler_stats` health-line emits (threads / fds / rss / running-tasks / active-workers) — one `key=value` INFO line per interval on the `istota.scheduler.stats` logger, for catching resource leaks early (grep it in the journal). 0 disables |
 | `loop_stall_alert_seconds` | `180` | Defense-in-depth: a watchdog thread logs an ERROR and fires one operator alert if the single-threaded main dispatch loop hasn't ticked in this long (a slow call that slipped onto the loop thread, a wedged check), then re-arms when the loop recovers. Suspended around known multi-minute in-loop work (sleep cycles, DB-health sweep) to avoid false pages. 0 disables |
 
 ### Progress & event streaming
@@ -259,9 +262,9 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `progress_show_tool_use` | `true` | Emit `tool_start` / `tool_end` events |
 | `progress_show_text` | `false` | Emit `progress_text` events (intermediate text; noisy) |
 | `event_log_enabled` | `true` | Write events to the `task_events` table (kill-switch for task-event-streaming) |
-| `stream_text_gate_chars` | `280` | Narration gate for streamed answer text on stream surfaces (web/REPL). A text run emits no `text_delta` until it crosses this many chars without an intervening tool call, so short lead-in narration ("Let me check…") is discarded at the tool boundary instead of leaking into the answer area. Never loses text — only animation. 0 disables |
+| `stream_text_gate_chars` | `280` | Narration gate for streamed answer text on stream surfaces (web/REPL). A text run emits no `text_delta` until it crosses this many chars without an intervening tool call, so short lead-in narration ("Let me check…") is discarded at the tool boundary instead of leaking into the answer area. A block that crossed it is kept, and web chat renders it as its own block rather than folding it into the activity chip. Higher folds more pre-tool text away but animates short answers less (they still arrive whole with the final result); lower shows more intermediate text live. Keep it equal to the web client's `SUBSTANTIAL_TEXT_CHARS`, and tune it from the `stream_gate:` log lines. Never loses text — only animation. 0 disables |
 | `push_notification_threshold_seconds` | `30` | Min task duration before an ntfy completion push fires |
-| `push_notification_sources` | `[]` | Source types that trigger a completion push; empty = ntfy opt-in only (never a default surface) |
+| `push_notification_sources` | `[]` | Source types that trigger a completion push; empty = ntfy opt-in only (never a default surface). ntfy still fires for explicit requests (scheduled jobs with `output_target = "ntfy"`, heartbeat alerts) |
 
 ### Worker pool
 
@@ -274,9 +277,9 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `long_task_threshold_minutes` | `10` | A *running* foreground task older than this stops counting against its user's interactive cap (0 = disabled) |
 | `user_max_long_workers` | `1` | Per-user allowance of discounted long tasks; additive, so the per-user fg thread ceiling becomes 3 |
 | `max_long_workers` | `2` | Instance-wide budget of discounts, partitioned inside `max_foreground_workers`, which stays the hard thread ceiling |
-| `worker_idle_timeout` | `10` | Seconds before idle worker exits |
-| `worker_idle_poll_interval` | `0.5` | Idle worker's queue re-check cadence |
-| `main_loop_read_timeout_ms` | `2000` | SQLite read timeout on the main loop |
+| `worker_idle_timeout` | `10` | Cumulative idle seconds a worker lingers before exiting. A follow-up task arriving inside this window is claimed within one `worker_idle_poll_interval` instead of waiting a full `poll_interval` |
+| `worker_idle_poll_interval` | `0.5` | Idle worker's queue re-check cadence, so a quick follow-up message is picked up in under a second. 0 or ≥ `worker_idle_timeout` restores the older single wait and single recheck |
+| `main_loop_read_timeout_ms` | `2000` | SQLite busy-timeout for the main dispatch loop's read-only scans. A database locked past it makes the loop skip the tick (it re-dispatches about 0.5s later) instead of blocking up to 30s and tripping the stall watchdog. 0 keeps SQLite's 30s default. Defense in depth on top of WAL; leave it at 2000 unless you have a reason |
 
 ### Robustness
 
@@ -287,11 +290,11 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `stale_pending_warn_minutes` | `30` | Warn for long-pending tasks |
 | `stale_pending_fail_hours` | `2` | Auto-fail ancient tasks |
 | `worker_heartbeat_seconds` | `60` | How often a running worker pings liveness (0 disables). Stuck-task reclaim uses the heartbeat to tell a slow-but-alive worker from a dead one. |
-| `worker_stuck_minutes` | `10` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. |
+| `worker_stuck_minutes` | `10` | Reclaim a heartbeating worker's task after this much heartbeat silence. Independent of `task_timeout_minutes`. Higher means fewer false reclaims of a slow but alive worker (which would re-run the task), at the cost of slower recovery after a real worker crash |
 | `task_retention_days` | `7` | Delete old completed tasks |
-| `usage_retention_days` | `180` | Prune token/cost records. Kept far longer than tasks so spend history survives task cleanup; `0` disables |
-| `email_retention_days` | `7` | Delete old IMAP emails (0 = disable) |
-| `processed_email_retention_days` | `90` | Prune the processed-email dedup ledger (0 = disable). Floored at `email_retention_days + 1`; disabled entirely when `email_retention_days` is 0 |
+| `usage_retention_days` | `180` | Prune token/cost records. Kept far longer than tasks so spend history survives task cleanup; `0` disables. 180 rather than a year because the backup job snapshots the whole framework database into several dated directories, so every row is duplicated on the backup target |
+| `email_retention_days` | `7` | Delete old IMAP emails (0 = disable). The sweep is an IMAP `BEFORE` search, so its cost follows what has expired rather than a fixed slice of the newest mail |
+| `processed_email_retention_days` | `90` | Prune the processed-email dedup ledger (0 = disable). One row is written per polled message, task or not, so the table grows without this. Floored at `email_retention_days + 1`, because the row is what stops a message still in the mailbox from being ingested again; disabled entirely when `email_retention_days` is 0. A row still referenced by the stored conversation transcript is always kept, since it carries the sender attribution for that turn |
 | `talk_cache_max_per_conversation` | `200` | Max cached Talk messages |
 | `scheduled_job_max_consecutive_failures` | `5` | Auto-disable threshold |
 | `cron_max_staleness_minutes` | `60` | Skip cron-driven catch-up fires older than this (jobs + briefings). After a long daemon outage, fires missed by more than N minutes are skipped and `last_run_at` is bumped so the schedule resumes from the next future fire. 0 = legacy unconditional catch-up. |
@@ -307,6 +310,8 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 | `max_subtasks_per_task` | `10` | Cap on subtasks one task may queue |
 | `max_subtask_depth` | `3` | Cap on subtask nesting depth |
 | `max_subtask_prompt_chars` | `8000` | Cap on a subtask's prompt length |
+
+Subtasks are created when an admin task writes a deferred JSON request, so these caps bound how much fan-out a single prompt-injected task can cause. With `max_subtask_depth = 3`, a chain such as talk → subtask → subtask → subtask is allowed and nothing deeper; 0 disables subtasks.
 
 ### Database backup
 
@@ -361,9 +366,15 @@ These need a cgroup subtree delegated to the daemon, which the stack's root phas
 | `vault_writes_per_task` | `3` | How many `vault_create` requests (`istota-credential new`) one task attempt may make, refusals included. A capability gate rather than a budget: `0` disables model-requested vault writes, and unlike `vault_fetch_limit_per_task` it never means unlimited. See [credential vault](credentials.md#import-and-export) |
 | `passthrough_env_vars` | `["LANG", "LC_ALL", "LC_CTYPE", "TZ"]` | Extra env vars for subprocess |
 | `sandbox_ro_paths` | `[]` | Extra RO bind-mounts in the sandbox, for co-located services. Keep entries narrow — a broad path sweeps in whatever lives under it. The DB directories are masked after this list either way |
-| `sandbox_cache_dir` | `""` | **The fallback** root for the package managers' caches, read only where the developer skill is not configured. With `[developer] enabled` and `repos_dir` set, each user's cache is *derived* at `{repos_dir}/{user_id}/.package-caches` and this key is not consulted at all — so setting it on a developer deployment names a path nothing uses while reading like the intended one. Where it is read, each user gets `{root}/{user_id}`, bound RW into their sandbox with `UV_CACHE_DIR`, `XDG_CACHE_HOME` and `npm_config_cache` pointed at it. Empty leaves those caches on bwrap's own root tmpfs — RAM the host cannot attribute, discarded at task exit, so every task downloads again. The derivation exists for the mount rather than for tidiness: uv populates a venv by hardlinking out of its cache and `link(2)` compares *mounts* rather than devices, so a cache outside the bound subtree returns `EXDEV` even on the same filesystem and every worktree pays for a full copy. On this fallback branch nothing binds an ancestor, so that copy is what a venv in the task workspace pays — the same cost as before ISSUE-305 addressed the RAM, not a new one. The root must already exist and be writable. Ignored with one warning when relative, missing, unwritable, under a database directory, or at or above a path the sandbox already mounts |
+| `sandbox_cache_dir` | `""` | **The fallback** root for the package managers' caches, read only where the developer skill is not configured. With `[developer] enabled` and `repos_dir` set, each user's cache is *derived* at `{repos_dir}/{user_id}/.package-caches` and this key is not consulted at all — so setting it on a developer deployment names a path nothing uses while reading like the intended one. Where it is read, each user gets `{root}/{user_id}`, bound RW into their sandbox with `UV_CACHE_DIR`, `XDG_CACHE_HOME` and `npm_config_cache` pointed at it. Empty leaves those caches on bwrap's own root tmpfs — RAM the host cannot attribute, discarded at task exit, so every task downloads again. The derivation exists for the mount rather than for tidiness: uv populates a venv by hardlinking out of its cache and `link(2)` compares *mounts* rather than devices, so a cache outside the bound subtree returns `EXDEV` even on the same filesystem and every worktree pays for a full copy. On this fallback branch nothing binds an ancestor, so that copy is what a venv in the task workspace pays — the same cost as before ISSUE-305 addressed the RAM, not a new one. The root must already exist and be writable. Ignored with one warning when relative, missing, unwritable, under a database directory, or at or above a path the sandbox already mounts, since a bind above an earlier mount would cover it: so not `temp_dir`, `~/.cache`, `~/.local` or `repos_dir` itself |
 | `sandbox_cache_sweep_enabled` | `true` | Bound what the per-user caches grow to (`src/istota/maintenance/sandbox_cache_sweeper.py`). Every sweep runs the package managers' own cheap reclaim (`uv cache prune`, `npm cache verify`); a per-user cache still over its ceiling afterwards is wiped with their `clean` verbs. The sweeper deletes no file itself — a tool that is missing, that fails or that times out is reported and the cache is left alone. A user with a task in flight is skipped entirely, and `--force` is never passed to uv, so its own in-use check still stands. On the derived layout the sweep is over the users the daemon knows about rather than the directory names it finds, so a cache belonging to nobody configured is reported and left rather than swept. Runs on `[scheduler] sandbox_cache_sweep_interval` |
 | `sandbox_cache_max_gb` | `10.0` | The ceiling, per user, over the whole of that user's cache directory. One `uv sync --all-extras` writes about 1.8 GB, so the ceiling has to clear one resolution; on a small disk shared with the worktrees, 4.0 is a reasonable setting. A size budget rather than an age window for the same reason — one command writes more than any sane window's worth of bytes at once. Clamped to a 1 GiB floor: below that the ceiling is under one dependency resolution's working set, so every sweep would wipe a cache that is doing its job. `XDG_CACHE_HOME` points at the user's cache directory, so a third tool's cache counts toward the budget while neither reclaim verb can touch it — that case is reported with the largest remaining subdirectory named, not deleted by hand |
+
+### `[security.skill_proxy_timeouts]`
+
+Per-skill overrides of `skill_proxy_timeout`, in seconds, applied instead of the global for the skills named (`browse = 90`). An entry narrows as readily as it widens. Every entry, and the global, is bounded by the wait the sandboxed client arms before it sends: `skill_client_wait_seconds` minus a 30s margin, so 570s at the default.
+
+`code_review` has a 540s ceiling of its own without an entry here. It is the only skill that drives model calls, and raising the global to suit it would hand the same minutes to every other skill. That value lives in the code rather than in this table's default because a table an operator writes *replaces* the default instead of merging with it, so shipping the entry here would mean that setting any other skill silently took the review's ceiling back to the global. Naming `code_review` here still overrides it.
 
 `sandbox_admin_db_write` was removed: the framework DB is no longer bound into the sandbox for anyone, so there is no bind left to widen. A stale key logs a warning and is ignored.
 
@@ -437,12 +448,42 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 |---|---|---|
 | `kind` | `"claude_code"` | Brain implementation. `"claude_code"` (default) wraps the headless `claude -p` CLI subprocess; `"native"` runs Istota's own in-process agent loop against any OpenAI-compatible model (configured under `[brain.native]`); `"tmux_claude"` drives the interactive `claude` TUI in a detached tmux session to keep traffic on subscription billing (configured under `[brain.tmux]`; set `fallback = "claude_code"` for failover). |
 | `source_type_overrides` | `{}` | Per-`source_type` brain override (e.g. route `scheduled` to `native` while interactive tasks stay on `claude_code`). |
-| `room_selectable` | `[]` | Brain kinds a chat room may pin for itself, with `!brain` or the web room settings, **and** kinds a scheduled job may pin with `brain` in CRON.md. The name is narrower than the setting: one list bounds every pin written outside your own config, and both are admin-only on top of it. Empty means none may, so the feature is inert until you name kinds. A name here that is not a brain kind is warned about at load and offered to nobody. Listing a kind also widens the `doctor` checks for it — `claude` on PATH, tmux, a native API key — whether or not anything has selected it. Neither a pinned room nor a pinned job fails over: it runs the brain it names or fails saying why. |
-| `fallback` | `""` | Brain to rerun a request on when the primary is unavailable |
+| `room_selectable` | `[]` | Brain kinds a chat room may pin for itself, with `!brain` or the web room settings, **and** kinds a scheduled job may pin with `brain` in CRON.md. The name is narrower than the setting: one list bounds every pin written outside your own config, and both are admin-only on top of it. CRON.md is writable by the model through the `schedules` skill, so a non-admin's `brain` is dropped at sync with a warning and the job runs the configured brain. It is a gate rather than a preference: brain kind decides which process holds the agent loop, which tools it registers and which sandbox profile is built. Empty means none may, so the feature is inert until you name kinds. A name here that is not a brain kind is warned about at load and offered to nobody. Listing a kind also widens the `doctor` checks for it — `claude` on PATH, tmux, a native API key — whether or not anything has selected it. Neither a pinned room nor a pinned job fails over: it runs the brain it names or fails saying why. |
+| `fallback` | `""` | Brain to rerun a request on when the primary is unavailable (a subscription usage limit, a missing binary, a tmux launch failure), with that brain's own settings. A portable role tier (`fast`/`general`/`smart`) carries across the provider boundary; a provider-specific model pin drops to the fallback brain's own default, logged and noted in the reply. Single level only. `""` means no fallback for every brain kind, so a `tmux_claude` primary needs `fallback = "claude_code"` spelled out. A value equal to the kind a task runs on is no fallback for that task, so naming `claude_code` here with a `source_type_overrides` entry routing to tmux gives the routed tasks failover and leaves the rest alone. After a persistent unavailability, later tasks skip the primary for `fallback_cooldown_seconds`; a successful primary probe ends that early |
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
 | `fallback_cooldown_seconds` | `900` | Skip an unavailable primary at most this long before retrying it; a usage limit against a Claude subscription instead ends at the quota's own reset (floor 60s). 0 disables |
 
 `[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `soft_deadline_percent`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file. Full annotations in the [native brain runbook](native-brain.md).
+
+`soft_deadline_percent` (default `90`) stops the loop at that share of `[scheduler] task_timeout_minutes`, on a stop that keeps the model's partial work. The hard clock discards that work and `max_turns` delivers it, and on a slow brain the clock is what arrives first; the remaining slack still covers a turn that hangs. `0` or `100` and above disables it.
+
+### `[brain.native.web_fetch]`
+
+The native brain's daemon-side `WebFetch` tool, documented in the [native brain runbook](native-brain.md). Every user gets it; it was admin-only until ISSUE-449, on the grounds that a fetch from the daemon's network namespace is egress the same user's `claude_code` task does not have. That is true, and the policy fields answer it: they bound where a fetch may go, the same way for everybody, where identity bounded nobody's destinations. `enabled = false` withdraws it from everyone, and `admin_only = true` puts the old gate back for a deployment with users whose turns should not reach the network from the daemon's namespace at all. Fields the runbook's table does not list:
+
+| Setting | Default | Description |
+|---|---|---|
+| `allowed_ports` | `[80, 443]` | A port not listed is refused before any connect |
+| `user_agent` | `"IstotaBot/1.0"` | User-Agent sent with each fetch |
+| `extra_blocked_cidrs` | `[]` | Operator additions to the private/reserved blocklist, such as a metadata endpoint or an internal range the shipped list does not know about |
+
+`allow_http` stays off for a reason: the fetch is unauthenticated but its content reaches the model, and cleartext is content anyone on the path can choose. `require_url_provenance` is for a deployment ingesting content it does not trust, since it stops the model composing a URL from data it read.
+
+### `[brain.native.session_log]`
+
+A per-attempt transcript of a native-brain run: one append-only JSONL file per task attempt holding the assembled prompt, every assistant turn with its thinking and tool calls, every tool result, every compaction and steer, and a terminal record. `tasks.execution_trace` keeps tool labels and no output, so this is the only record of what the model saw and did on a finished run. Native only; `claude_code` and `tmux_claude` get a transcript from the `claude` CLI.
+
+The files hold the assembled prompt, which holds `USER.md`, and raw tool output, which can hold whatever a Bash call printed. They are written 0600 behind a 0700 per-user directory, on local disk, bound into no sandbox, and nothing copies them off the host. An operator who cannot accept a credential a task printed living there for the retention window sets `enabled = false`. On the Docker stack, `istota setup` writes `db_path = "/data/db/istota.db"`, so the directory is `/data/db/logs` on the `istota_data` volume, beside the framework database and behind the same sandbox mask.
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `true` | `false` writes no new files; retention still sweeps existing ones |
+| `dir` | `""` | `""` resolves to `{db_path.parent}/logs`, beside `istota.db`, `modules/` and `backups/` and behind the sandbox's database mask. A value set here is used as given, with no `~` expansion and no resolving against a base, so write an absolute path: a relative one follows each process's working directory, and the daemon, the sweep and an `istota` command from a shell need not share it. Outside `db_path.parent` gets a WARN from `istota doctor`; `/` and other values naming no directory of their own are refused. Otherwise the value is trusted, as `[security] sandbox_cache_dir` is: the retention sweep treats every subdirectory as a user's and unlinks the `*.jsonl` files under it, so point it at a directory istota owns. Nothing the model writes reaches this setting. The walk bounds a mis-set value: only `*.jsonl`, only under a first-level subdirectory (never a file at this directory's own level) but at any depth within one, never through a symlink, and `rmdir` only on a directory the sweep itself emptied |
+| `retention_days` | `14` | Age rule, for privacy. Longer than `[scheduler] task_retention_days` on purpose: the log's value is that it outlives the task row. `0` keeps files for ever by age; the size ceiling still applies |
+| `max_total_gb` | `2.0` | Size ceiling for the disk, across every user summed, since the filesystem also holds `istota.db` and every module DB. Lean on purpose: on a busy deployment this, not `retention_days`, is what binds, and `istota doctor` warns when the last sweep evicted by size. Eviction is largest user first, then oldest within that user, so a noisy neighbour cannot clear a quiet user's history. Clamped to a 0.5 floor; `0` means no ceiling |
+| `max_content_chars` | `32768` | Per text or thinking block. Over the cap the block keeps its head and its tail (a build log's error is at the tail) and records the real length. `0` means no cap, unlike the two limits above where 0 switches the rule off |
+| `max_args_chars` | `8192` | Per tool-call arguments object. Over the cap it becomes a marker rather than a truncated JSON fragment. `0` means no cap |
+| `include_thinking` | `true` | Reasoning traces in the written log: the most useful record for debugging a wrong answer, and the bulkiest. Independent of `istota-skill tasks transcript`, where thinking stays off unless asked for |
 
 ### `[brain.claude_code]`
 
@@ -452,9 +493,9 @@ This brain's own default model and effort, plus the subscription usage poll. Eve
 
 | Setting | Default | Description |
 |---|---|---|
-| `model` | `""` | This brain's default model when the task pins none. Same values the top-level key took: a canonical id, a shortcut (`opus`), a role tier (`smart`), any of them plus a `:effort` modifier. Empty = the CLI's own default |
+| `model` | `""` | This brain's default model when the task pins none. Same values the top-level key took: a canonical id, a shortcut (`opus`), a role tier (`smart`), any of them plus a `:effort` modifier. Empty = the CLI's own default. A bare shortcut floats to the latest version each release; a canonical id is immutable, so pin a versioned id for stability |
 | `effort` | `""` | This brain's default effort: `low`, `medium`, `high`, `xhigh`, `max`. Empty = the model's own. A task that pins a *model* takes no effort from here, since an effort chosen for one model need not be valid on another |
-| `subscription_usage` | `true` | Poll `api.anthropic.com` for plan utilization at all. Off = the doctor check SKIPs and the admin card is absent rather than showing a reason |
+| `subscription_usage` | `true` | Poll `api.anthropic.com/api/oauth/usage` for plan utilization at all. Off = the doctor check SKIPs and the admin card is absent rather than showing a reason |
 | `subscription_usage_cache_ttl_seconds` | `1800` | One deployment-wide fetch per this window, and the **minimum** backoff after a failure. A server-stated `Retry-After` overrides it, capped at six hours. Floored at 1 — a 0 would fetch on every read. 30 minutes rather than 5 because the shortest window reported is five hours, so polling faster buys no accuracy for the requests it spends, and the endpoint rate-limits a deployment that tries |
 | `subscription_usage_timeout_seconds` | `10.0` | Matches `doctor.PROBE_TIMEOUT`. Floored at 1 |
 | `subscription_usage_warn_percent` | `80.0` | Doctor WARNs and the tile turns amber at or above this |
@@ -508,20 +549,21 @@ Module-level settings for the briefings module (per-user content store + archive
 |---|---|---|
 | `archive_retention_days` | `90` | Prune archived briefing results older than this, on insert (0 = keep forever) |
 | `default_lookback_hours` | `12` | Seeds the `email` / `rss` source window when a source omits it |
-| `newsletter_max_links_per_source` | `20` | Cap on links pulled from one newsletter source |
+| `newsletter_max_links_per_source` | `20` | Cap on inline `[anchor](url)` links kept per newsletter body. Newsletters are mostly links, so the converter first drops unsubscribe, social and web-version chrome, and this caps what survives; an over-cap anchor keeps its text and loses only the destination. 0 = unlimited |
 | `max_source_chars` | `5000` | Cap on a single source's gathered text. The `todos` source spends it item by item and never cuts one in half — a half-item would read as a todo the file does not contain — dropping from the end and saying in its provenance line how many were left out |
 | `max_browse_chars` | `20000` | The same cap for a `browse` source, which gathers markdown rather than flattened text. Bigger because the URLs the markdown keeps cost characters, and a frontpage spends its first couple of thousand on masthead chrome before the headline grid starts. A `browse` source's own `max_chars` wins over either cap — it is the only kind that reads one; `email`, `notes` and `todos` take the module cap directly. |
 | `shared_block_timezone` | `"UTC"` | Timezone module-owned shared blocks evaluate their cron in. Shared blocks are global (generated once, no per-user timezone), so this is one operator-chosen zone — typically the operator's own, so morning/evening regeneration lines up with their day. An invalid name falls back to UTC at run time. |
 
 ## `[[briefing_shared_blocks]]`
 
-Module-owned shared blocks generated once globally under the reserved `__system__` identity and read by any user's briefing through a `shared_block` source. Seeded once into the `shared_block_configs` table, after which the DB is authoritative and admins manage them from the web UI or `istota briefings shared`. Leave unset for the canonical defaults (`world-headlines`, `markets-summary`); an explicit empty list opts out. Only user-agnostic source kinds are allowed (`browse`, `markets`, `email`). See [briefings](../features/briefings.md#shared-curated-content).
+Module-owned shared blocks generated once globally under the reserved `__system__` identity and read by any user's briefing through a `shared_block` (or `kv`) source, so a frontpage fetch and synthesis many users share runs once in total. Seeded once into the `shared_block_configs` table, after which the DB is authoritative and admins manage them from the web UI or `istota briefings shared`. Leave unset for the canonical defaults (`world-headlines`, `markets-summary`); an explicit empty list opts out. Only user-agnostic source kinds are allowed (`browse`, `markets`, `email`). See [briefings](../features/briefings.md#shared-curated-content).
 
 ## `[[default_briefings]]`
 
 A canonical shared briefing set, seeded once into each opted-in user (per-user
 `default_briefings` flag, default on). Same `name`/`cron`/`output`/`blocks`
-shape as a per-user briefing; content is blocks-only. (Replaces the retired
+shape as a per-user briefing; content is blocks-only. A user's later edits in
+the web editor win, and re-runs never overwrite them. (Replaces the retired
 `[briefing_defaults]` boolean-component defaults.)
 
 ```toml
@@ -558,14 +600,14 @@ output = "talk"
 | `github_reviewer` | `""` | PR reviewer username |
 | `author_credit` | `""` | Name credited as author on commits the bot makes |
 | `forge_cli_extra_denied` | `[]` | Extra verbs the `gh` / `glab` wrapper refuses, written as typed (`"gh repo delete"`); no binary name applies to both |
-| `forge_cli_permit` | `[]` | Baseline deny entries to turn off — each one removes a guard |
+| `forge_cli_permit` | `[]` | Baseline deny entries to turn off — each one removes a guard. The baseline lives in code because it is a safety default rather than a preference. An entry that matches no baseline rule is warned about at startup, because a hatch that silently stopped matching reads like one still open |
 | `gh_bin_path` | `"/usr/local/bin/gh"` | Real `gh` the wrapper execs. `istota setup` writes the image's path, `/usr/local/lib/istota_forge/gh` (off PATH, so the wrapper stays the only `gh` a task can resolve), since the default matches no shipped install |
 | `glab_bin_path` | `"/usr/local/bin/glab"` | Real `glab` the wrapper execs, rendered the same way |
 | `devbox_proxy_enabled` | `true` | Keep tokens host-side behind the devbox proxy |
 | `devbox_proxy_socket_dir` | `"/var/run/istota"` | Where the per-user devbox proxy sockets live |
 | `devbox_proxy_audit_log` | `""` | Optional path for a devbox proxy audit log |
-| `worktree_reap_enabled` | `true` | Remove a task worktree under `repos_dir` once every commit on it is upstream, the checkout is clean and it has been idle for the retention window (ISSUE-288). The sweep runs on `[scheduler] worktree_reap_interval` |
-| `worktree_retention_hours` | `24.0` | Idle hours before a worktree is a reap candidate. This is what protects a task running right now, not just a stale checkout. Clamped to a one-hour floor — anything shorter reaps a worktree a task is still setting up |
+| `worktree_reap_enabled` | `true` | Remove a task worktree under `repos_dir` once every commit on it is upstream (squash- and rebase-merged branches included), the checkout is clean (untracked and gitignored files included), it is unlocked, and it has been idle for the retention window (ISSUE-288). Everything else is kept and counted. To keep one indefinitely, `git worktree lock` it rather than turning the sweep off. The sweep runs on `[scheduler] worktree_reap_interval` |
+| `worktree_retention_hours` | `24.0` | Idle hours before a worktree is a reap candidate. This is what protects a task running right now, not just a stale checkout: the sweep knows nothing about the worker pool, so recent activity is the only evidence a checkout is in use. Clamped to a one-hour floor — a worktree seconds old is clean and has nothing that is not upstream, so anything shorter reaps a worktree a task is still setting up |
 
 How the wrapper behind `gh_bin_path` / `glab_bin_path` actually works — where it takes its policy and trust anchors from, and why it refuses rather than falling back to a public host — is written out under [`[devbox]`](#devbox), since one file serves both the sandbox and the container.
 
@@ -633,7 +675,7 @@ Money is a **module** (on by default; opt out per user via `disabled_modules = [
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `autoclass_lookup` | `true` | Allow transaction auto-classification to look up unknown payees |
+| `autoclass_lookup` | `true` | Let the portfolio module look up ticker metadata from a third-party quote API when classifying a newly imported symbol. The request carries the symbol, which is private financial data, and runs in the unsandboxed web or daemon process, outside the CONNECT allowlist. Off falls back to offline description heuristics, which need no network |
  The bot auto-discovers `*.beancount` files at the top level of `{user_workspace}/ledgers/` — no per-resource path is required. Monarch credentials are a cookie pair in the encrypted `secrets` table — provision both keys (`session_id` and `csrftoken`) via the CLI or the web settings UI:
 
 ```bash
@@ -669,7 +711,7 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 | Setting | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable web interface |
-| `auth` | `["nextcloud"]` | Login methods: any of `"nextcloud"` (OAuth2 against Nextcloud) and `"email"` (an email identity with a password or an emailed sign-in code), or `["none"]` alone. A bare string is still accepted, and unknown names are dropped with a warning. `"none"` disables auth entirely; it is exclusive and only the loopback `istota serve` launcher accepts it (the stack and direct uvicorn refuse it). Email identities are managed with [`istota auth`](../reference/cli.md#web-login-identities). Env override: `ISTOTA_WEB_AUTH`, comma-separated. See [email login](../features/web-interface.md#email-login) |
+| `auth` | `["nextcloud"]` | Login methods: any of `"nextcloud"` (OAuth2 against Nextcloud) and `"email"` (an email identity with a password or an emailed sign-in code), or `["none"]` alone. A bare string is still accepted, and unknown names are dropped with a warning. `"none"` disables auth entirely; it is exclusive and only the loopback `istota serve` launcher accepts it (the stack and direct uvicorn refuse it). Email identities are managed with [`istota auth`](../reference/cli.md#web-login-identities). To move from Nextcloud to email login, set `["nextcloud", "email"]`, attach identities with `istota auth add`, then select `["email"]` once every user has one. Passwords are optional: emailed sign-in codes work without them when SMTP is configured. Never put a public proxy in front of the no-auth local launcher. Env override: `ISTOTA_WEB_AUTH`, comma-separated. See [email login](../features/web-interface.md#email-login) |
 | `auth_enrol_ttl_hours` | `168` | Lifetime of an enrolment link |
 | `auth_reset_ttl_hours` | `1` | Lifetime of a password-reset link |
 | `auth_step_up_ttl_minutes` | `10` | Lifetime of a sensitive-action confirmation (an emailed code, or the password where mail is not set up) |
@@ -680,7 +722,7 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 | `auth_throttle_max_ip` | `30` | Password attempts per client address per window. Inactive while `trusted_proxy_hops` is `0`, since no client address is read |
 | `auth_mail_link_max_email` | `3` | Self-service mails per address per hour, reset links and sign-in codes together |
 | `trusted_proxy_hops` | `0` | How many trusted proxies sit in front of the backend; selects the client address from `X-Forwarded-For` for the IP budget. Set it only when the backend cannot be reached around those proxies |
-| `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"encrypted"` retains them in `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY`. Any other value warns and falls back to ephemeral. **`istota setup` writes `"encrypted"` on the stack**, because its entrypoint mints `/data/.web_token_key` itself. The standalone wizard leaves it ephemeral, since there the key is the operator's to supply. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
+| `token_storage` | `"ephemeral"` | Where per-user Nextcloud tokens live. `"ephemeral"` keeps them in the session only; `"encrypted"` retains them in `web_user_tokens` and requires `ISTOTA_WEB_TOKEN_KEY` (at least 32 characters, delivered to the web process only, never the scheduler). Retaining them enables posting web messages to Talk as the user and web-to-Talk read-state sync; a Nextcloud OAuth token grants full account access, so this is a deliberate opt-in. Any other value warns and falls back to ephemeral. **`istota setup` writes `"encrypted"` on the stack**, because its entrypoint mints `/data/.web_token_key` itself. The standalone wizard leaves it ephemeral, since there the key is the operator's to supply. Env override: `ISTOTA_WEB_TOKEN_STORAGE` |
 | `port` | `8766` | Web app port |
 | `oauth2_provider` | `""` | Public Nextcloud URL (browser-facing), no trailing slash |
 | `oauth2_client_id` | `""` | NC OAuth 2.0 client ID |
@@ -694,7 +736,7 @@ The agent-writable static web root (`enabled` / `base_path`) was removed. A publ
 
 ### `[web.chat]`
 
-Knobs for the in-app web chat surface (the "Chat" tab). The surface is always enabled when the web UI is on; these tune limits and streaming cadence.
+Knobs for the in-app web chat surface (the "Chat" tab). The surface is always enabled when the web UI is on; these tune limits and streaming cadence. The `room_stream_*` settings tune the live room-event stream (`GET /chat/stream`): one user-scoped SSE connection per open tab carries every room the user belongs to, so a Talk turn, a routed alert or a message in a background room reaches the browser in about a second whatever surface produced it.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -724,7 +766,7 @@ Where the background tiles under the location maps come from (ISSUE-334). The tw
 | `light_style` | `""` | `custom` only |
 | `attribution` | `""` | `custom` only |
 
-`openfreemap` needs no key and is the default for that reason. Resolution never returns an unusable spec: an unknown provider, a `custom` with no URL or a non-`http(s)` one, **and a keyed provider with no key** all fall back to `openfreemap`. Returning the keyless CARTO templates with a "needs key" flag was the original bug wearing a label — nothing in a browser can act on a flag, so the user still got the watermark. The flag survives on the fallback as the *reason*, which is what lets `istota doctor --only web.basemap` say "carto, with no key" rather than the vaguer "did not resolve as written".
+`openfreemap` needs no key and is the default for that reason. It is free OSM vector tiles with dark and light themes, and still a third-party request, so it does not make map viewing private. `carto` needs a free API key, and CARTO is retiring its raster service, so it buys time rather than fixing anything. `osm` is a keyless raster last resort: light tiles only, so the dark theme looks wrong, and the OSMF tile usage policy discourages application use. `custom` takes your own MapLibre style URLs, such as a self-hosted tile server; one URL covers both themes. Resolution never returns an unusable spec: an unknown provider, a `custom` with no URL or a non-`http(s)` one, **and a keyed provider with no key** all fall back to `openfreemap`. Returning the keyless CARTO templates with a "needs key" flag was the original bug wearing a label — nothing in a browser can act on a flag, so the user still got the watermark. The flag survives on the fallback as the *reason*, which is what lets `istota doctor --only web.basemap` say "carto, with no key" rather than the vaguer "did not resolve as written".
 
 `api_key` **is not a secret.** MapLibre puts it in the tile URL, so it ships to every browser that loads a map and appears in every request they make; CARTO issues these free for exactly that. It is redacted in the admin config view because the name matches the redaction rule, which is harmless but is not a guarantee about the value.
 
@@ -756,6 +798,8 @@ Explicit CalDAV override. When any field is set it wins over the value derived f
 | `url` | `""` | CalDAV base URL |
 | `username` | `""` | CalDAV username |
 | `password` | `""` | CalDAV password |
+
+Set all three fields or none. Each falls back to `[nextcloud]` on its own rather than as a group, so a half-set block mixes the two: a URL with no password names a foreign host and hands it the Nextcloud app password, and a password with no URL authenticates to Nextcloud's own DAV endpoint with the wrong secret. `istota setup` refuses the first pairing outright. Where there is no Nextcloud, `istota setup` offers this block, writing the URL and username into the config and the password to the stack's `secrets/istota_caldav_password` (or the standalone install's `istota.env`), which reaches the daemon as `ISTOTA_CALDAV_PASSWORD`.
 
 ## `[browser]`
 
@@ -812,7 +856,7 @@ Procedural memory — see [memory](../features/memory.md#layer-6-learned-playboo
 
 | Setting | Default | Description |
 |---|---|---|
-| `features` | `[]` | Operator-enabled feature flags. See [experimental features](../EXPERIMENTAL.md) |
+| `features` | `[]` | Operator-enabled feature flags. `istota experimental list` shows what this build can gate; an unknown name logs a warning at startup. Not exposed in the web UI and not per-user. See [experimental features](../EXPERIMENTAL.md) |
 
 ## `[health]`
 

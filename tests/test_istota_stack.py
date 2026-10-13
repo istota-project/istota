@@ -499,6 +499,26 @@ class TestASignedTagIsDeployed:
         assert (secrets / "new_one").read_text() == ""
         assert list(elsewhere.iterdir()) == []
 
+    def test_a_release_build_is_told_its_tag(self, fx, tmp_path):
+        commit = fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        recorder = tmp_path / "build-env"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            '*" build "*) exit',
+            f'*" build "*) echo "$ISTOTA_BUILD_REVISION $ISTOTA_BUILD_TAG" > {recorder}; exit',
+        ))
+        assert fx.run("update", "v1").returncode == 0
+        assert recorder.read_text().split() == [commit, "v1"]
+
+    def test_the_compose_file_and_dockerfile_carry_the_revision(self):
+        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+        dockerfile = (REPO / "docker" / "istota" / "Dockerfile").read_text()
+        for name in ("ISTOTA_BUILD_REVISION", "ISTOTA_BUILD_TAG"):
+            assert f"    - {name}\n" in compose
+            assert f"ARG {name}=" in dockerfile
+        assert "ENV ISTOTA_BUILD_REVISION=${ISTOTA_BUILD_REVISION}" in dockerfile
+
     def test_native_only_builds_without_claude_code(self, fx, tmp_path):
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
@@ -772,6 +792,20 @@ class TestLatestFollowsMain:
         assert result.returncode == 0, result.stdout + result.stderr
         assert fx.head() == first
         assert f"ISTOTA_TAG={self._name(first)}\n" in fx.env_text()
+
+    def test_the_build_is_told_the_commit_and_its_name(self, fx, tmp_path):
+        """The image has no .git, so this is how a running stack on main can
+        say which commit it is rather than the last release's number."""
+        commit = fx.commit("next")
+        recorder = tmp_path / "build-env"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            '*" build "*) exit',
+            f'*" build "*) echo "$ISTOTA_BUILD_REVISION $ISTOTA_BUILD_TAG" > {recorder}; exit',
+        ))
+        result = fx.run("update", "--unsigned", "latest")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert recorder.read_text().split() == [commit, self._name(commit)]
 
     def test_latest_tag_names_the_tip_and_changes_nothing(self, fx):
         """What the management role compares with ISTOTA_TAG before it updates,
@@ -2225,7 +2259,10 @@ CONFIG_APPLY_ARMS = r"""  *" config-request take "*)
       prev="$a"
     done
     next="$(ls "$STUB_REQUESTS" 2>/dev/null | sort -n | head -n 1)"
-    [ -n "$next" ] || exit 0
+    if [ -z "$next" ]; then
+      [ -z "${STUB_TRIGGER_DURING_TAKE:-}" ] || echo 99 > "$STUB_TRIGGER_DURING_TAKE"
+      exit 0
+    fi
     ls -ld "$out" > "${STUB_CALLS}.staging-$next"
     for f in plan.json files.json claude-code; do cp "$STUB_REQUESTS/$next/$f" "$out/$f"; chmod 0400 "$out/$f"; done
     rm -rf "${STUB_REQUESTS:?}/$next"
@@ -2462,6 +2499,87 @@ class TestConfigApply:
         assert result.returncode == 1, result.stdout + result.stderr
         assert len([call for call in fx.docker_calls() if "config-request take" in call]) == 1
         assert list(fx.rundir.iterdir()) == []
+
+
+class TestAnIdleConfigApply:
+    """The timer runs config-apply every five minutes, and each run started a
+    one-shot container to ask the database whether anything was pending. A run
+    that found nothing records what the trigger file looked like; the next
+    starts no container while the trigger is unchanged and that run is under
+    an hour old. The hour stands in for a trigger the web failed to write."""
+
+    @pytest.fixture
+    def idle(self, fx, tmp_path):
+        queue = tmp_path / "queue"
+        queue.mkdir()
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace('case "$args" in\n', 'case "$args" in\n' + CONFIG_APPLY_ARMS, 1))
+        run = tmp_path / "run"
+        run.mkdir()
+        (fx.stack / "requests").mkdir()
+        fx.env.update(STUB_REQUESTS=str(queue), ISTOTA_CONFIG_APPLY_RUN_DIR=str(run))
+        fx.trigger = fx.stack / "requests" / "config-apply"
+        return fx
+
+    def _takes(self, fx) -> int:
+        return len([call for call in fx.docker_calls() if "config-request take" in call])
+
+    def _age(self, path: Path, seconds: int) -> None:
+        then = time.time() - seconds
+        os.utime(path, (then, then))
+
+    def test_an_unchanged_trigger_starts_no_container(self, idle):
+        fx = idle
+        fx.trigger.write_text("1\n")
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 1
+        result = fx.run("config-apply")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._takes(fx) == 1, fx.docker_calls()
+
+    def test_no_trigger_ever_written_is_idle_too(self, idle):
+        fx = idle
+        assert fx.run("config-apply").returncode == 0
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 1
+
+    def test_a_newer_trigger_is_taken(self, idle):
+        fx = idle
+        fx.trigger.write_text("1\n")
+        self._age(fx.trigger, 100)
+        assert fx.run("config-apply").returncode == 0
+        fx.trigger.write_text("2\n")
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 2
+
+    def test_a_trigger_written_during_the_empty_take_is_taken_next_time(self, idle):
+        fx = idle
+        fx.trigger.write_text("1\n")
+        self._age(fx.trigger, 100)
+        assert fx.run("config-apply", STUB_TRIGGER_DURING_TAKE=str(fx.trigger)).returncode == 0
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 2
+
+    def test_an_hour_old_idle_run_checks_again(self, idle):
+        fx = idle
+        assert fx.run("config-apply").returncode == 0
+        for marker in fx.stack.glob(".config-apply-*"):
+            self._age(marker, 3700)
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 2
+
+    def test_a_failed_run_is_not_idle(self, idle):
+        fx = idle
+        assert fx.run("config-apply").returncode == 0
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        original = stub.read_text()
+        fx.trigger.write_text("1\n")
+        stub.write_text(original.replace('  *" config-request take "*)\n',
+                                         '  *" config-request take "*)\n    exit 1\n', 1))
+        assert fx.run("config-apply").returncode == 1
+        stub.write_text(original)
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 3
 
 
 class TestTheConfigApplyComposeFile:

@@ -65,6 +65,10 @@ x-istota-build: &istota_build
     # defaults apply.
     - INSTALL_CLAUDE_CODE
     - CLAUDE_CODE_VERSION
+    # The commit and the name `istota-stack` builds, since the image carries
+    # no .git: what the running version label is read from.
+    - ISTOTA_BUILD_REVISION
+    - ISTOTA_BUILD_TAG
 
 # web has no root phase: it starts as uid 0 only to run
 # `istota-drop`, which needs SETUID, SETGID and SETPCAP (the last empties the
