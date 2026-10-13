@@ -17,8 +17,9 @@
 #   istota-stack allow-host-port N | deny-host-port N
 #                               let containers reach TCP port N on the Mac's loopback, or not
 #   istota-stack update [args]  the VM's `update`, then these scripts from its checkout
-#   istota-stack destroy [--force]
-#                               delete the VM; the folder and the Keychain key stay
+#   istota-stack destroy [--force] [--purge]
+#                               delete the VM; the folder and the Keychain key stay;
+#                               --purge deletes them too, with the saved settings
 #   istota-stack restore [--date YYYY-MM-DD] [--force] [create's options]
 #                               a new VM from the folder's backups and the Keychain's
 #                               key, the old VM deleted first; --force restores an
@@ -852,14 +853,21 @@ cmd_update() {
 }
 
 cmd_destroy() {
-    local force=""
-    case "${1:-}" in
-        "") ;;
-        --force) force=1 ;;
-        *) usage_error ;;
-    esac
+    local force="" purge=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --force) force=1 ;;
+            --purge) purge=1 ;;
+            *) usage_error ;;
+        esac
+        shift
+    done
     local status folder rc=0
     status="$(instance_status)"
+    if [ -n "$purge" ]; then
+        purge_instance "$status"
+        return 0
+    fi
     [ -n "$status" ] || fail 1 "there is no Lima instance ${INSTANCE}."
     folder="$(workspace_or_default)"
     if [ -z "$force" ]; then
@@ -886,6 +894,91 @@ delete_instance() {
     read -r answer || true
     [ "$answer" = "$INSTANCE" ] || fail 1 "not deleted."
     limactl delete --force "$INSTANCE"
+}
+
+# Why --purge keeps the folder, or `may-delete` when it may go; anything else,
+# empty included, keeps it. It is only ever the folder this instance's state
+# names, never workspace_or_default's ~/Istota, which may be another instance's.
+purge_folder_refusal() {
+    local folder="$1" resolved file other old_dir
+    case "$folder" in /*) ;; *) echo "it is not an absolute path"; return 0 ;; esac
+    if [ ! -d "$folder" ]; then echo "it is not a folder"; return 0; fi
+    # A trailing slash makes `[ -L ]` follow a link, and a link in a parent is
+    # no link at the leaf: only a path that is already its own resolution goes.
+    resolved="$(resolve_dir "$folder" 2>/dev/null)" || { echo "it could not be resolved"; return 0; }
+    if [ -L "$folder" ] || [ "$resolved" != "$folder" ]; then
+        echo "it is reached through a link (it is ${resolved})"
+        return 0
+    fi
+    if [ ! -f "${folder}/${MARKER}" ] || [ -L "${folder}/${MARKER}" ]; then
+        echo "it has no ${MARKER}, so it may not be a workspace"
+        return 0
+    fi
+    if ! ( refuse_location "$folder" ) >/dev/null 2>&1; then
+        echo "it is a place create refuses for a workspace"
+        return 0
+    fi
+    old_dir="$(dirname "$OLD_STATE_FILE")"
+    for file in "${STATE_DIR}"/*.env "${old_dir}"/*.env; do
+        [ "$file" != "$STATE_FILE" ] && [ "$file" != "$OLD_STATE_FILE" ] || continue
+        [ -e "$file" ] || continue
+        case "$file" in
+            "${STATE_DIR}"/*) [ -f "$file" ] && [ ! -L "$file" ] || continue ;;
+            # The old directory also holds the standalone install's istota.env.
+            *) is_state_file "$file" || continue ;;
+        esac
+        if [ ! -r "$file" ]; then echo "${file} cannot be read to check it"; return 0; fi
+        other="$(awk -F= '$1 == "WORKSPACE" { sub(/^[^=]*=/, ""); v = $0 } END { print v }' "$file")"
+        if [ -n "$other" ] && { within "$other" "$folder" || within "$folder" "$other"; }; then
+            echo "the instance $(basename "$file" .env) uses it too"
+            return 0
+        fi
+    done
+    echo may-delete
+}
+
+# destroy --purge: the VM if there is one, then what a plain destroy leaves.
+# The state file goes last, so a run that stops partway can be run again. A
+# folder kept keeps the Keychain key too: its snapshots cannot be read without it.
+purge_instance() {
+    local status="$1" folder refusal="" key="" state="" old="" answer=""
+    folder="$(state_get WORKSPACE)"
+    if [ -n "$folder" ] && { [ -e "$folder" ] || [ -L "$folder" ]; }; then
+        refusal="$(purge_folder_refusal "$folder")" || true
+        if [ "$refusal" = may-delete ]; then refusal=""; else refusal="${refusal:-it could not be checked}"; fi
+    else
+        folder=""
+    fi
+    if [ -z "$refusal" ] && keychain_has_item; then key=1; fi
+    if [ -f "$STATE_FILE" ]; then state=1; fi
+    if [ "$(state_source)" = "$OLD_STATE_FILE" ]; then old=1; fi
+    if [ -z "$status" ] && [ -z "$folder" ] && [ -z "$key" ] && [ -z "$state" ]; then
+        fail 1 "there is no Lima instance ${INSTANCE} and nothing of it to remove."
+    fi
+    {
+        echo "[istota-stack] this deletes, for good:"
+        [ -z "$status" ] || echo "  the VM ${INSTANCE}, its database and its config"
+        [ -z "$folder" ] || [ -n "$refusal" ] || echo "  the workspace ${folder}, with every file and backup in it"
+        [ -z "$key" ] || echo "  the master key in the login Keychain (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT})"
+        [ -z "$state" ] || echo "  ${STATE_FILE}"
+        [ -z "$refusal" ] || echo "It keeps ${folder}, and the Keychain key its backups need: ${refusal}."
+        [ -z "$old" ] || echo "It leaves ${OLD_STATE_FILE}, which an earlier version of this script wrote."
+        printf '[istota-stack] Type %s to go on: ' "$INSTANCE"
+    } >&2
+    read -r answer || true
+    [ "$answer" = "$INSTANCE" ] || fail 1 "not deleted."
+    [ -z "$status" ] || limactl delete --force "$INSTANCE"
+    if [ -n "$key" ]; then
+        security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" >/dev/null 2>&1 \
+            || fail 1 "could not delete the Keychain item (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}); remove it in Keychain Access and run this again."
+    fi
+    if [ -n "$folder" ] && [ -z "$refusal" ]; then
+        rm -rf -- "$folder" || fail 1 "could not delete all of ${folder}; run this again to finish."
+    fi
+    [ -z "$state" ] || rm -f -- "$STATE_FILE"
+    log "purged ${INSTANCE}."
+    [ -z "$refusal" ] || log "kept ${folder} and the Keychain key (${KEYCHAIN_SERVICE}, ${KEYCHAIN_ACCOUNT}): ${refusal}."
+    [ -z "$old" ] || log "left ${OLD_STATE_FILE}."
 }
 
 # What a restore reads from the folder, looked for before anything is deleted:
