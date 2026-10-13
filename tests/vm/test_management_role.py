@@ -21,9 +21,10 @@ against a stack the role converged. This file holds what is the role's own:
   stack, running (nextcloud);
 - settings -> snapshot -> inventory -> apply (proxied): the converged VM's
   own `istota snapshot`, set as `istota_plan` in place of the legacy
-  variables, is no drift under --check; a timezone changed in it is drift a
-  --check reports and does not write; a converge applies it and restarts the
-  daemon; and the next --check is clean.
+  variables, is no drift under --check; a timezone and a config value
+  changed in it are drift a --check reports and does not write; a converge
+  applies both and restarts the daemon once (ISSUE-741); and the next
+  --check is clean.
 
 Control (`scripts/test-vm-negative-control.sh`): `role-user-settings-unchecked`
 runs a copy of the role whose user settings are skipped under --check, as the
@@ -289,6 +290,7 @@ class RoundTrip:
     daemon_after_converge: str
     clean_check: lima.RoleRun
     daemon_before: str
+    daemon_starts_in_converge: int
 
 
 def _snapshot(vm: lima.Vm) -> dict:
@@ -298,6 +300,15 @@ def _snapshot(vm: lima.Vm) -> dict:
 def _daemon_started(vm: lima.Vm) -> str:
     cid = lima.container(vm, "daemon")
     return f"{cid} {vm.out(f'docker inspect -f {{{{.State.StartedAt}}}} {cid}')}" if cid else ""
+
+
+def _daemon_starts(vm: lima.Vm, since: str, until: str) -> int:
+    """How many times a daemon container started between two VM clock readings."""
+    listing = vm.out(
+        f"docker events --since {since} --until {until} --filter event=start "
+        f"--filter label=com.docker.compose.project=istota "
+        f"--filter label=com.docker.compose.service=daemon --format '{{{{.ID}}}}'")
+    return len(listing.split())
 
 
 class TestASnapshotIsTheRolesPlan:
@@ -320,14 +331,19 @@ class TestASnapshotIsTheRolesPlan:
         wanted = TIMEZONES[0] if before != TIMEZONES[0] else TIMEZONES[1]
         drifted = copy.deepcopy(canonical)
         drifted["istota_plan"]["users"][lima.USER]["profile"]["timezone"] = wanted
+        # A config change as well, so the converge changes both halves of the plan.
+        facts = snapshot["config"].get("max_knowledge_facts")
+        drifted["istota_plan"]["config"]["max_knowledge_facts"] = 48 if facts == 49 else 49
         try:
             unchanged = lima.converge_role(stack, canonical, check=True, timeout=1800)
             daemon_before = _daemon_started(stack)
             drift = lima.converge_role(stack, drifted, check=True, timeout=1800)
             after_check = _snapshot(stack)["users"][lima.USER]["profile"].get("timezone", "")
             daemon_after_check = _daemon_started(stack)
+            since = stack.out("date +%s")
             converge = lima.converge_role(stack, drifted)
             lima.wait_healthy(stack)
+            starts = _daemon_starts(stack, since, stack.out("date +%s"))
             after_converge = _snapshot(stack)["users"][lima.USER]["profile"].get("timezone", "")
             daemon_after_converge = _daemon_started(stack)
             clean = lima.converge_role(stack, drifted, check=True, timeout=1800)
@@ -337,7 +353,7 @@ class TestASnapshotIsTheRolesPlan:
             assert restore.returncode == 0, _describe(restore)
             lima.wait_healthy(stack)
         return RoundTrip(before, wanted, unchanged, drift, after_check, daemon_after_check, converge,
-                         after_converge, daemon_after_converge, clean, daemon_before)
+                         after_converge, daemon_after_converge, clean, daemon_before, starts)
 
     def test_the_snapshot_as_istota_plan_is_no_drift(self, round_trip):
         run = round_trip.unchanged_check
@@ -357,6 +373,11 @@ class TestASnapshotIsTheRolesPlan:
         assert _task_changed(run, "istota-stack apply (user settings)"), _describe(run)
         assert round_trip.timezone_after_converge == round_trip.timezone_wanted
         assert round_trip.daemon_after_converge != round_trip.daemon_before, "a profile change did not restart"
+
+    def test_a_converge_changing_both_halves_restarts_once(self, round_trip):
+        run = round_trip.converge
+        assert _task_changed(run, "istota-stack apply"), _describe(run)
+        assert round_trip.daemon_starts_in_converge == 1, _describe(run)
 
     def test_the_next_check_is_clean(self, round_trip):
         run = round_trip.clean_check

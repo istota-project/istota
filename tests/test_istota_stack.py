@@ -105,6 +105,7 @@ case "$args" in
     case "$args" in *compose.devbox.yml*) echo devbox-alice ;; esac ;;
   *" build "*) exit "${STUB_BUILD_RC:-0}" ;;
   *" up -d "*) exit "${STUB_UP_RC:-0}" ;;
+  *" restart ") exit "${STUB_RESTART_RC:-0}" ;;
   *" builder prune "*|*" image prune "*)
     echo 'Total reclaimed space: 1.5GB'
     exit "${STUB_PRUNE_RC:-0}" ;;
@@ -1305,6 +1306,121 @@ class TestApplyResult:
         result = fx.run("apply", str(plan), "--format", "text")
         assert result.returncode == 64
         assert not any(" istota apply " in f"{c} " for c in fx.docker_calls())
+
+
+class TestApplyNoRestart:
+    """`apply --no-restart` leaves the restart a committed change needs to the
+    next apply, so the management role's two applies (the config, then the
+    user settings) restart the stack once between them (ISSUE-741). What is
+    owed is a file in the stack directory, so a play that fails between the
+    two still has the restart taken by the next apply that runs."""
+
+    @pytest.fixture
+    def plan(self, tmp_path) -> Path:
+        plan = tmp_path / "plan.json"
+        plan.write_text('{"config": {}}')
+        return plan
+
+    def _restarts(self, fx) -> int:
+        return sum(call.endswith(" restart") for call in fx.docker_calls())
+
+    def _owed(self, fx) -> Path:
+        return fx.stack / ".restart-owed"
+
+    def _apply(self, fx, plan, *flags, rc="2", **document):
+        return fx.run("apply", str(plan), *flags, STUB_APPLY_RC=rc,
+                      STUB_APPLY_RESULT=json.dumps(_result(**document)))
+
+    def test_a_change_needing_a_restart_is_owed_not_restarted(self, fx, plan):
+        document = _result(changed=True, restart=True)
+        result = fx.run("apply", str(plan), "--no-restart", STUB_APPLY_RC="2", STUB_APPLY_RESULT=json.dumps(document))
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert json.loads(result.stdout) == document
+        assert self._restarts(fx) == 0
+        assert self._owed(fx).is_file()
+        assert "--no-restart" in result.stderr
+        # The flag is istota-stack's own: istota apply is never handed it.
+        assert not any("--no-restart" in call for call in fx.docker_calls())
+
+    def test_the_config_and_the_user_settings_restart_once(self, fx, plan):
+        """The role's play: a config change, then a profile change."""
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = self._apply(fx, plan, changed=True, restart=True)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert self._restarts(fx) == 1
+        assert not self._owed(fx).exists()
+
+    def test_an_unchanged_apply_takes_the_owed_restart(self, fx, plan):
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = self._apply(fx, plan, rc="0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._restarts(fx) == 1
+        assert "an earlier apply" in result.stderr
+        assert not self._owed(fx).exists()
+
+    def test_a_refused_apply_still_takes_the_owed_restart(self, fx, plan):
+        """A refusal wrote nothing, and what the earlier apply committed is
+        in place, so the stack is restarted onto it."""
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = self._apply(fx, plan, rc="1", errors=["validation_error"])
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert self._restarts(fx) == 1
+        assert not self._owed(fx).exists()
+
+    def test_a_partial_apply_leaves_the_owed_restart_owed(self, fx, plan):
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = self._apply(fx, plan, rc="1", changed=True, partial=True, errors=["state_changed"])
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert self._restarts(fx) == 0
+        assert self._owed(fx).is_file()
+        assert "an earlier apply" in result.stderr
+
+    def test_a_dry_run_leaves_the_owed_restart_owed(self, fx, plan):
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = self._apply(fx, plan, "--dry-run", dry_run=True, changed=True, restart=True)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert self._restarts(fx) == 0
+        assert self._owed(fx).is_file()
+
+    def test_a_second_no_restart_apply_keeps_it_owed(self, fx, plan):
+        """A play that failed before its user settings: the next play's
+        config apply, unchanged, still defers to the user settings after it."""
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = self._apply(fx, plan, "--no-restart", rc="0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._restarts(fx) == 0
+        assert self._owed(fx).is_file()
+
+    def test_a_change_read_without_a_restart_owes_nothing(self, fx, plan):
+        result = self._apply(fx, plan, "--no-restart", changed=True)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert not self._owed(fx).exists()
+
+    def test_a_stack_that_is_down_owes_nothing(self, fx, plan):
+        """The role's first converge: the stack starts on the new config, so
+        the user settings apply after it has nothing more to restart for."""
+        result = fx.run("apply", str(plan), "--no-restart", STUB_APPLY_RC="2", STUB_STACK_DOWN="1",
+                        STUB_APPLY_RESULT=json.dumps(_result(changed=True, restart=True)))
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert not self._owed(fx).exists()
+        assert self._apply(fx, plan, rc="0").returncode == 0
+        assert self._restarts(fx) == 0
+
+    def test_a_stack_that_is_down_clears_what_is_owed(self, fx, plan):
+        """Its next start reads the config as it is."""
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="0", STUB_STACK_DOWN="1",
+                        STUB_APPLY_RESULT=json.dumps(_result()))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._restarts(fx) == 0
+        assert not self._owed(fx).exists()
+
+    def test_check_neither_takes_nor_clears_it(self, fx, plan):
+        assert self._apply(fx, plan, "--no-restart", changed=True, restart=True).returncode == 2
+        result = fx.run("apply", str(plan), "--check", "--json", STUB_APPLY_RC="0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._restarts(fx) == 0
+        assert self._owed(fx).is_file()
 
 
 class TestApplySidecar:
@@ -2588,6 +2704,17 @@ class TestConfigApply:
         assert any("config-request finish --id 9 --status failed" in call for call in calls), calls
         assert any(call.endswith(" restart") for call in calls), calls
         assert (fx.secrets / "istota_email_imap_password").read_text() == "pw-9"
+
+    def test_a_failed_restart_is_logged_and_leaves_an_owed_restart(self, ca):
+        """restart_for_config runs on the left of `||` here, where set -e is
+        off: a failed restart must still fail it (ISSUE-741's review)."""
+        fx = ca
+        (fx.stack / ".restart-owed").touch()
+        self._queue(fx, 10)
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="2", STUB_RESTART_RC="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "request 10: the restart failed" in result.stdout + result.stderr
+        assert (fx.stack / ".restart-owed").is_file()
 
     def test_the_loop_takes_two_requests_in_one_run(self, ca):
         fx = ca

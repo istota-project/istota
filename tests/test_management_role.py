@@ -514,7 +514,8 @@ def _apply_argv(name: str, **context) -> list:
     full = _role_context({}) | {"istota_stack_command": STACK_COMMAND, "ansible_check_mode": False,
                                 "_istota_config_input": {"path": "/tmp/config.json"},
                                 "_istota_users_input": {"path": "/tmp/users.json"},
-                                "_istota_users_check_input": {"path": "/tmp/users-check.json"}} | context
+                                "_istota_users_check_input": {"path": "/tmp/users-check.json"},
+                                "_istota_users_checked": {"skipped": True}} | context
     return native_env.from_string(task["ansible.builtin.command"]["argv"]).render(full)
 
 
@@ -653,6 +654,38 @@ class TestTheApplyCalls:
         second time."""
         for name in self.NAMES:
             assert "notify" not in _tasks()[_index(name)], name
+
+    def test_the_config_apply_leaves_its_restart_to_the_user_settings(self):
+        """A play that changes both halves restarts the stack once (ISSUE-741):
+        the config apply defers its restart whenever the user settings apply
+        will run after it, and that apply takes it with its own. Whether it
+        will is read from the user settings check, which runs on the same
+        conditions, rather than from the settings themselves, which carry
+        credentials an argv template may not name."""
+        checked = {"rc": 0, "stdout": "{}"}
+        assert _apply_argv("istota-stack apply", _istota_users_checked=checked)[-1] == "--no-restart"
+        assert "--no-restart" not in _apply_argv("istota-stack apply")
+        for check in (False, True):
+            argv = _apply_argv("istota-stack apply (user settings)", _istota_users_checked=checked,
+                               ansible_check_mode=check)
+            assert "--no-restart" not in argv
+        check_block = next(t for t in _tasks() if t.get("name") == "Check the user settings")
+        apply_block = next(t for t in _tasks() if t.get("name") == "Apply the user settings")
+        assert set(check_block["when"]) == set(apply_block["when"]) - {
+            "not ansible_check_mode or _istota_config_present.stat.exists"}
+
+    def test_a_restart_the_user_settings_took_is_waited_for(self):
+        """The health wait before the user settings no longer follows the
+        config's restart, so a second one follows the apply that took it."""
+        wait = _tasks()[_index("Wait for the daemon service to be healthy after the user settings")]
+        first = _tasks()[_index("Wait for the daemon service to be healthy")]
+        assert wait["ansible.builtin.shell"] == first["ansible.builtin.shell"]
+        assert wait["retries"] == first["retries"] and wait["until"] == f"{wait['register']}.rc == 0"
+        assert _index("Wait for the daemon service to be healthy after the user settings") > _index(
+            "Report a refused user settings apply")
+        assert "not ansible_check_mode" in _when(wait)
+        assert "_istota_users_applied" in _when(wait)
+        assert "tags" not in wait
 
     def test_each_input_file_is_private_and_removed_afterwards(self):
         for block_name, write, remove in (
