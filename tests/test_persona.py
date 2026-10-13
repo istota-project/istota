@@ -235,25 +235,25 @@ class TestSync:
 
     def test_a_failed_write_leaves_no_empty_file_and_is_retried(self, setup, monkeypatch):
         config, root = setup
-        real = storage.write_text_atomic
-        monkeypatch.setattr(storage, "write_text_atomic", _full_disk)
+        real = storage.replace_at
+        monkeypatch.setattr(storage, "replace_at", _full_disk)
         assert sync_operator_persona(config).action == "refused"
         assert not (root / "PERSONA.md").exists()
         assert _state(config) is None
 
-        monkeypatch.setattr(storage, "write_text_atomic", real)
+        monkeypatch.setattr(storage, "replace_at", real)
         assert sync_operator_persona(config).action == "wrote"
         assert (root / "PERSONA.md").read_text() == SHIPPED
 
     def test_a_failed_shipped_write_beside_an_edit_is_retried(self, setup, monkeypatch):
         config, root = setup
         (root / "PERSONA.md").write_text("Edited.")
-        real = storage.write_text_atomic
-        monkeypatch.setattr(storage, "write_text_atomic", _full_disk)
+        real = storage.replace_at
+        monkeypatch.setattr(storage, "replace_at", _full_disk)
         assert sync_operator_persona(config).action == "refused"
         assert not (root / "PERSONA.md.shipped").exists()
 
-        monkeypatch.setattr(storage, "write_text_atomic", real)
+        monkeypatch.setattr(storage, "replace_at", real)
         assert sync_operator_persona(config).action == "wrote_shipped_beside"
         assert (root / "PERSONA.md.shipped").read_text() == SHIPPED
 

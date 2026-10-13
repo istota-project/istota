@@ -423,37 +423,52 @@ def _window_date_str(
     return midpoint.astimezone(tz).strftime("%Y-%m-%d")
 
 
-def _append_dated_memory(path: Path, new_text: str) -> str | None:
+def _append_dated_memory(dir_fd: int, name: str, new_text: str) -> str | None:
     """Add ``new_text`` to a dated memory file, keeping what is already there.
 
     Returns the file's full text after the write, which is what callers index —
     ``index_file`` replaces every chunk for a path, so indexing only the new
     part would drop the earlier run's bullets from recall while leaving them on
     disk. None when the file could not be read or written: a link, a FIFO or a
-    file that is not UTF-8 is refused rather than replaced. Containment of the
-    directory is the caller's.
+    file that is not UTF-8 is refused rather than replaced. The read and the
+    write both go through ``dir_fd``, which the caller opened without following
+    a link.
     """
-    existing, reason = read_regular_file(path)
+    existing, reason = read_regular_file(Path(name), dir_fd=dir_fd)
     if reason is not None:
-        logger.warning("dated_memory_read_refused path=%s reason=%s", path.name, reason)
+        logger.warning("dated_memory_read_refused path=%s reason=%s", name, reason)
         return None
     file_text = join_dated_memory(existing or "", new_text)
-    if not write_regular_file(path, file_text):
+    if not write_regular_file(Path(name), file_text, dir_fd=dir_fd):
         return None
     return file_text
 
 
-def _user_dir_for_write(config: Config, user_id: str, path: Path) -> Path | None:
-    """``path`` created and returned, or None when it leads out of the user's tree."""
-    if _contained_under_user_root(config, user_id, path) is None:
-        logger.warning("sleep_cycle_dir_refused user=%s dir=%s", user_id, path.name)
+def _open_dir_for_write(root: Path | None, path: Path, owner: str) -> int | None:
+    """A descriptor on ``path``, created below ``root`` with no link followed.
+
+    The caller writes through the descriptor and closes it. Checking the
+    directory and then writing by path left a window in which a task could
+    swap a component for a link (ISSUE-723).
+    """
+    from ..workspace.writes import open_or_create_dir_below  # noqa: PLC0415
+
+    if root is None:
+        logger.warning("sleep_cycle_dir_refused owner=%s dir=%s reason=no_root", owner, path.name)
         return None
     try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger.warning("sleep_cycle_dir_refused user=%s dir=%s errno=%s", user_id, path.name, e.errno)
+        return open_or_create_dir_below(root, path)
+    except (OSError, ValueError) as e:
+        logger.warning(
+            "sleep_cycle_dir_refused owner=%s dir=%s errno=%s",
+            owner, path.name, getattr(e, "errno", None),
+        )
         return None
-    return path
+
+
+def _user_dir_for_write(config: Config, user_id: str, path: Path) -> int | None:
+    """A descriptor on ``path`` under ``{mount}/Users/{user_id}``, or None."""
+    return _open_dir_for_write(config.workspace_root(user_id), path, user_id)
 
 
 def join_dated_memory(existing: str, new_text: str) -> str:
@@ -1109,10 +1124,9 @@ def process_user_sleep_cycle(
         _update_state(config, conn, user_id, last_task_id)
         return False
 
-    context_dir = _user_dir_for_write(
-        config, user_id, _get_mount_path(config, get_user_memories_path(user_id)),
-    )
-    if context_dir is None:
+    context_dir = _get_mount_path(config, get_user_memories_path(user_id))
+    context_fd = _user_dir_for_write(config, user_id, context_dir)
+    if context_fd is None:
         return False
 
     memory_file = context_dir / f"{date_str}.md"
@@ -1123,7 +1137,10 @@ def process_user_sleep_cycle(
     # run holds only the tasks the earlier one didn't. A truncating write
     # therefore loses a day of memories outright, and `index_file` replaces the
     # chunks for the path, so it would go from recall too (ISSUE-470).
-    file_text = _append_dated_memory(memory_file, memories_text)
+    try:
+        file_text = _append_dated_memory(context_fd, memory_file.name, memories_text)
+    finally:
+        os.close(context_fd)
     if file_text is None:
         return False
     logger.info("Wrote dated memory file for %s: %s (%d chars)", user_id, memory_file.name, len(file_text))
@@ -1992,6 +2009,11 @@ def _playbook_is_pinned(path: Path, *, on_read_error: bool = False) -> bool:
         text = path.read_text()
     except OSError:
         return on_read_error
+    return _playbook_text_is_pinned(text)
+
+
+def _playbook_text_is_pinned(text: str) -> bool:
+    """``_playbook_is_pinned`` for text the caller already read."""
     text = text.lstrip("﻿").lstrip()
     if not text.startswith("---"):
         return False
@@ -2044,13 +2066,26 @@ def _process_extracted_playbooks(
         logger.warning("Playbooks require mount mode, skipping writes for %s", user_id)
         return
 
-    pb_dir = _user_dir_for_write(
-        config, user_id,
-        _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name)),
-    )
-    if pb_dir is None:
+    pb_dir = _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name))
+    pb_fd = _user_dir_for_write(config, user_id, pb_dir)
+    if pb_fd is None:
         return
+    try:
+        _write_playbooks(conn, user_id, pb_fd, pb_dir, playbooks, date_str, config)
+    finally:
+        os.close(pb_fd)
 
+
+def _write_playbooks(
+    conn: "db.sqlite3.Connection",
+    user_id: str,
+    pb_fd: int,
+    pb_dir: Path,
+    playbooks: list[dict],
+    date_str: str,
+    config: Config,
+) -> None:
+    """The playbook loop, reading and writing through ``pb_fd`` only."""
     index_enabled = (
         config.memory_search.enabled and config.memory_search.auto_index_memory_files
     )
@@ -2060,8 +2095,9 @@ def _process_extracted_playbooks(
         slug = _playbook_slug(title)
         file_text, searchable = _render_playbook(pb, date_str)
         pb_path = pb_dir / f"{slug}.md"
-        existed = pb_path.exists()
-        if existed and _playbook_is_pinned(pb_path):
+        current, reason = read_regular_file(Path(pb_path.name), dir_fd=pb_fd)
+        existed = reason is not None or bool(current)
+        if reason is None and current and _playbook_text_is_pinned(current):
             # Keep the human-corrected file, but REFRESH the index from its
             # current content — recall serves memory_chunks, not the file, so a
             # correction that isn't re-indexed never reaches the model
@@ -2070,12 +2106,12 @@ def _process_extracted_playbooks(
             if index_enabled:
                 try:
                     from .search import index_file as _index_file
-                    body = _playbook_searchable_body(pb_path.read_text())
+                    body = _playbook_searchable_body(current)
                     _index_file(conn, user_id, str(pb_path), body, "playbook")
                 except Exception as e:
                     logger.debug("Pinned playbook reindex failed for %s: %s", pb_path.name, e)
             continue
-        if not write_regular_file(pb_path, file_text):
+        if not write_regular_file(Path(pb_path.name), file_text, dir_fd=pb_fd):
             continue
         logger.info(
             "playbook_written slug=%s ref=%s updated=%s user=%s",
@@ -2485,10 +2521,18 @@ def process_channel_sleep_cycle(
     if not ensure_channel_directories(config, conversation_token):
         return False
     memories_dir = _get_mount_path(config, get_channel_memories_path(conversation_token))
+    memories_fd = _open_dir_for_write(
+        _get_mount_path(config, "Channels"), memories_dir, conversation_token,
+    )
+    if memories_fd is None:
+        return False
 
     memory_file = memories_dir / f"{date_str}.md"
     # Append rather than replace, for the reason the user cycle documents.
-    file_text = _append_dated_memory(memory_file, output)
+    try:
+        file_text = _append_dated_memory(memories_fd, memory_file.name, output)
+    finally:
+        os.close(memories_fd)
     if file_text is None:
         return False
     logger.info(

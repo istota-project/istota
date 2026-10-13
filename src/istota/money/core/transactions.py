@@ -6,13 +6,17 @@ functions for backward compatibility with CLI, API, and tests.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
-import shutil
+import stat
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+
+from istota.lib.atomic_write import replace_at
 
 from .dedup import compute_transaction_hash, parse_ledger_transactions
 from .ids import new_txn_id
@@ -651,27 +655,69 @@ def format_category_change_entry(
 # =============================================================================
 
 
-def backup_ledger(ledger_path: Path, max_backups: int = 10) -> Path | None:
-    """Create a timestamped backup of the ledger file before modification."""
-    if not ledger_path.exists():
-        return None
+def _read_ledger_bytes(ledger_path: Path) -> bytes | None:
+    """The ledger's bytes, None when there is no file, refusing anything else.
 
-    backups_dir = ledger_path.parent / "backups"
-    backups_dir.mkdir(exist_ok=True)
+    The ledger tree is in the user's workspace, which their tasks write, so a
+    link at the ledger's name would otherwise be read into a backup inside the
+    tree (ISSUE-723).
+    """
+    try:
+        fd = os.open(ledger_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise OSError(errno.EINVAL, "ledger is not a regular file", str(ledger_path))
+        return fh.read()
+
+
+def write_import_file(ledger_path: Path, name: str, text: str) -> Path:
+    """Write ``imports/<name>`` beside the ledger with no link followed."""
+    from istota.workspace.writes import open_or_create_dirs  # noqa: PLC0415
+
+    fd = open_or_create_dirs(ledger_path.parent, ["imports"])
+    try:
+        replace_at(fd, name, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return ledger_path.parent / "imports" / name
+
+
+def backup_ledger(ledger_path: Path, max_backups: int = 10) -> Path | None:
+    """Create a timestamped backup of the ledger file before modification.
+
+    ``backups/`` is opened from the ledger's directory without following a
+    link, and the copy, the pruning and the publish all go through that
+    descriptor (ISSUE-723). Not shutil's copy: its xattr step raises EIO on
+    some FUSE workspace mounts (#694), and a failed backup blocks the ledger
+    write behind it.
+    """
+    data = _read_ledger_bytes(ledger_path)
+    if data is None:
+        return None
+    mode = stat.S_IMODE(os.stat(ledger_path, follow_symlinks=False).st_mode)
+    from istota.workspace.writes import open_or_create_dirs  # noqa: PLC0415
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = backups_dir / f"{ledger_path.name}.{timestamp}"
+    name = f"{ledger_path.name}.{timestamp}"
+    fd = open_or_create_dirs(ledger_path.parent, ["backups"])
+    try:
+        replace_at(fd, name, data, mode=mode)
+        prefix = f"{ledger_path.name}."
+        existing = sorted(
+            (n for n in os.listdir(fd) if n.startswith(prefix)), reverse=True,
+        )
+        for old_backup in existing[max_backups:]:
+            try:
+                if not stat.S_ISDIR(os.stat(old_backup, dir_fd=fd, follow_symlinks=False).st_mode):
+                    os.unlink(old_backup, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(fd)
 
-    # Not copy2: its xattr step raises EIO on some FUSE workspace mounts (#694),
-    # and a failed backup blocks the ledger write behind it.
-    shutil.copyfile(ledger_path, backup_path)
-    shutil.copymode(ledger_path, backup_path)
-
-    existing = sorted(backups_dir.glob(f"{ledger_path.name}.*"), reverse=True)
-    for old_backup in existing[max_backups:]:
-        old_backup.unlink()
-
-    return backup_path
+    return ledger_path.parent / "backups" / name
 
 
 def _append_entries_unlocked(ledger_path: Path, entries: list[str]) -> None:
@@ -685,7 +731,16 @@ def _append_entries_unlocked(ledger_path: Path, entries: list[str]) -> None:
     if not entries:
         return
     backup_ledger(ledger_path)
-    with open(ledger_path, "a", encoding="utf-8") as f:
+    # `O_NOFOLLOW` and `S_ISREG`: a link or a FIFO at the ledger's name is
+    # refused rather than appended through (ISSUE-723).
+    fd = os.open(
+        ledger_path,
+        os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o644,
+    )
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise OSError(errno.EINVAL, "ledger is not a regular file", str(ledger_path))
         for entry in entries:
             f.write(f"\n{entry}\n")
 
@@ -1242,9 +1297,6 @@ def sync_monarch(
                         })
 
     # Prepare result
-    ledger_dir = ledger_path.parent
-    imports_dir = ledger_dir / "imports"
-    imports_dir.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     result = {
@@ -1284,7 +1336,6 @@ def sync_monarch(
 
     # Write new transactions to staging file
     if entries:
-        staging_file = imports_dir / f"monarch_sync_{timestamp}.beancount"
         header = f"; Synced from Monarch Money API on {datetime.now().isoformat()}\n"
         header += f"; Lookback days: {config.sync.lookback_days}\n"
         header += f"; Transaction count: {len(entries)}\n"
@@ -1293,31 +1344,34 @@ def sync_monarch(
         if content_skipped_count > 0:
             header += f"; Skipped (already in ledger): {content_skipped_count}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
-        staging_file.write_text(header + "\n\n".join(entries) + "\n", encoding="utf-8")
+        staging_file = write_import_file(
+            ledger_path, f"monarch_sync_{timestamp}.beancount",
+            header + "\n\n".join(entries) + "\n",
+        )
         result["staging_file"] = str(staging_file)
 
     # Write recategorizations to separate staging file
     if recategorized_entries:
-        recat_file = imports_dir / f"monarch_recategorize_{timestamp}.beancount"
         header = f"; Recategorizations from Monarch Money on {datetime.now().isoformat()}\n"
         header += "; These transactions had their business tag removed in Monarch\n"
         header += f"; Recategorization count: {len(recategorized_entries)}\n"
         header += f"; Target account: {config.sync.recategorize_account}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
-        recat_file.write_text(
-            header + "\n\n".join(recategorized_entries) + "\n", encoding="utf-8"
+        recat_file = write_import_file(
+            ledger_path, f"monarch_recategorize_{timestamp}.beancount",
+            header + "\n\n".join(recategorized_entries) + "\n",
         )
         result["recategorize_file"] = str(recat_file)
 
     # Write category changes to separate staging file
     if category_change_entries:
-        cat_change_file = imports_dir / f"monarch_category_change_{timestamp}.beancount"
         header = f"; Category changes from Monarch Money on {datetime.now().isoformat()}\n"
         header += "; These transactions were recategorized in Monarch\n"
         header += f"; Category change count: {len(category_change_entries)}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
-        cat_change_file.write_text(
-            header + "\n\n".join(category_change_entries) + "\n", encoding="utf-8"
+        cat_change_file = write_import_file(
+            ledger_path, f"monarch_category_change_{timestamp}.beancount",
+            header + "\n\n".join(category_change_entries) + "\n",
         )
         result["category_change_file"] = str(cat_change_file)
 

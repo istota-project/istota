@@ -11,6 +11,7 @@ import base64
 import html
 import logging
 import mimetypes
+import os
 import re
 from datetime import date, timedelta
 from pathlib import Path
@@ -476,7 +477,7 @@ def generate_invoices_for_period(
                 html = generate_invoice_html(invoice, logo_path=logo_path)
                 pdf_filename = f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
                 pdf_path = output_dir / pdf_filename
-                generate_invoice_pdf(html, pdf_path)
+                generate_invoice_pdf(html, pdf_path, root=accounting_path)
                 summary["file"] = str(pdf_path)
 
                 # By uid, never by display index: the entries were resolved
@@ -579,7 +580,12 @@ def update_invoice_number(config_path: Path, new_number: int) -> None:
         f"\\g<1>{new_number}",
         text,
     )
-    config_path.write_text(updated, encoding="utf-8")
+    from istota.storage import write_regular_file  # noqa: PLC0415
+
+    # A link at the config's name is refused rather than written through
+    # (ISSUE-723); the counter is not advanced silently either.
+    if not write_regular_file(config_path, updated):
+        raise OSError(f"could not write {config_path.name}")
 
 
 # =============================================================================
@@ -728,11 +734,31 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
 </html>"""
 
 
-def generate_invoice_pdf(html: str, output_path: Path) -> None:
-    """Convert invoice HTML to PDF using WeasyPrint."""
+def generate_invoice_pdf(html: str, output_path: Path, *, root: Path | None = None) -> None:
+    """Convert invoice HTML to PDF using WeasyPrint.
+
+    With ``root`` (the accounting folder) and an ``output_path`` under it, the
+    folders are walked from ``root`` with no link followed and the PDF is
+    published through that descriptor (ISSUE-723). An output directory
+    configured elsewhere keeps the leaf guard alone.
+    """
     from weasyprint import HTML
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    HTML(string=html).write_pdf(str(output_path))
+
+    from istota.storage import write_regular_file  # noqa: PLC0415
+    from istota.workspace.writes import open_or_create_dir_below  # noqa: PLC0415
+
+    pdf = HTML(string=html).write_pdf()
+    if root is not None and output_path.parent.is_relative_to(root):
+        fd = open_or_create_dir_below(root, output_path.parent)
+        try:
+            written = write_regular_file(Path(output_path.name), pdf, dir_fd=fd)
+        finally:
+            os.close(fd)
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        written = write_regular_file(output_path, pdf)
+    if not written:
+        raise OSError(f"could not write {output_path.name}")
 
 
 # =============================================================================

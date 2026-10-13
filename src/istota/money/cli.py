@@ -1386,7 +1386,7 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     output_dir = invoice_output_dir / str(invoice_date.year)
     pdf_filename = f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
     pdf_path = output_dir / pdf_filename
-    generate_invoice_pdf(html, pdf_path)
+    generate_invoice_pdf(html, pdf_path, root=accounting_path)
 
     persist_next_invoice_number(
         invoice_number + 1, db_path=ctx.db_path,

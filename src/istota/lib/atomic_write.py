@@ -53,6 +53,7 @@ reach it without pulling in ``istota``.
 from __future__ import annotations
 
 import os
+import secrets
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -108,6 +109,42 @@ def atomic_writer(
     except BaseException:
         try:
             tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def replace_at(
+    dir_fd: int, name: str, data: bytes, *, mode: int = 0o644, fsync: bool = False
+) -> None:
+    """``write_bytes_atomic`` relative to a directory descriptor.
+
+    For a directory a task can write: the caller opened it without following a
+    link, and nothing here resolves a path again. The staging name is created
+    ``O_EXCL | O_NOFOLLOW`` and ``os.replace`` does not follow ``name``, so a
+    link planted at either is replaced or refused, never written through.
+    """
+    staging = f".{name}.{secrets.token_hex(8)}"
+    fd = os.open(
+        staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+        dir_fd=dir_fd,
+    )
+    try:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(data)
+            handle.flush()
+            if fsync:
+                os.fsync(handle.fileno())
+        os.replace(staging, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(staging, dir_fd=dir_fd)
         except OSError:
             pass
         raise

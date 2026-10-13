@@ -131,16 +131,34 @@ def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
         nc_path = path_fn(task.user_id, config.bot_dir_name)
         full_path = mount / nc_path.lstrip("/")
 
-        if not full_path.exists():
-            template_obj = getattr(storage, spec.template, None)
-            if template_obj is not None:
-                full_path.parent.mkdir(parents=True, exist_ok=True)
-                # Some templates accept format args
-                try:
-                    content = template_obj.format(user_id=task.user_id)
-                except (KeyError, IndexError):
-                    content = template_obj
-                full_path.write_text(content)
+        template_obj = getattr(storage, spec.template, None)
+        if template_obj is not None:
+            # Some templates accept format args
+            try:
+                content = template_obj.format(user_id=task.user_id)
+            except (KeyError, IndexError):
+                content = template_obj
+            # The path is in the user's tree, which their tasks write: the
+            # directories are walked from the user root with no link followed
+            # and the seed is created only where nothing is at the name, so a
+            # dangling link planted there is not written through (ISSUE-723).
+            from ..workspace.writes import open_or_create_dir_below
+
+            user_root = config.workspace_root(task.user_id)
+            try:
+                if user_root is None:
+                    raise ValueError("no user root")
+                dir_fd = open_or_create_dir_below(user_root, full_path.parent)
+            except (OSError, ValueError) as e:
+                logger.warning(
+                    "template_file_refused var=%s error=%s",
+                    spec.var, getattr(e, "errno", None) or type(e).__name__,
+                )
+                return None
+            try:
+                storage.create_file_if_absent(Path(full_path.name), content, dir_fd=dir_fd)
+            finally:
+                os.close(dir_fd)
 
         return str(full_path)
 
