@@ -303,7 +303,7 @@ To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `
 
 ## State and volumes
 
-Istota's `/data` is `/srv/app/istota/data` on the VM, a directory owned by uid 10001 and readable by it alone. It holds the databases (`/data/db`), the master key (`/data/.secret_key`, unless a secrets file supplies it), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a separate bind of `/srv/app/istota/config`. **This directory is the one to back up.** A stack started without `istota-stack`, such as a test tier or Docker Desktop, keeps the same state in the named volume `data` instead.
+Istota's `/data` is `/srv/app/istota/data` on the VM, a directory owned by uid 10001, mode 0711: the container's start-up step can pass through it to hand the volumes mounted below to uid 10001, and only uid 10001 can list it. It holds the databases (`/data/db`), the master key (`/data/.secret_key`, unless a secrets file supplies it), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a separate bind of `/srv/app/istota/config`. **This directory is the one to back up.** A stack started without `istota-stack`, such as a test tier or Docker Desktop, keeps the same state in the named volume `data` instead.
 
 | Volume | Purpose |
 |---|---|
