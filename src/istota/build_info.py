@@ -24,6 +24,7 @@ answer here rather than an error.
 
 from __future__ import annotations
 
+import os
 import zlib
 from pathlib import Path
 
@@ -133,6 +134,20 @@ def checkout_revision(package_file: str | None = None) -> tuple[str | None, str 
         return None, None
 
 
+def image_revision() -> tuple[str | None, str | None]:
+    """``(deployed name, full sha)`` an image was built from, or ``(None, None)``.
+
+    The image has no ``.git``, so ``istota-stack`` passes both in as build args
+    and the Dockerfile keeps them as ``ISTOTA_BUILD_TAG`` and
+    ``ISTOTA_BUILD_REVISION``. Fixed for the container's life, so reading them
+    at import holds the same rule the checkout read does.
+    """
+    sha = os.environ.get("ISTOTA_BUILD_REVISION", "").strip()
+    if not sha:
+        return None, None
+    return os.environ.get("ISTOTA_BUILD_TAG", "").strip() or None, sha
+
+
 def build_description(package_file: str | None = None) -> str:
     """One line naming the code this process is running.
 
@@ -141,6 +156,9 @@ def build_description(package_file: str | None = None) -> str:
     """
     branch, sha = checkout_revision(package_file)
     if not sha:
+        tag, sha = image_revision()
+        if sha:
+            return f"istota {__version__} (image {tag or 'untagged'} {sha[:12]})"
         return f"istota {__version__} (no checkout under the import path)"
     where = f"{branch} {sha[:12]}" if branch else f"detached {sha[:12]}"
     return f"istota {__version__} ({where})"
@@ -271,14 +289,18 @@ def version_label(package_file: str | None = None, *, version: str = __version__
     ``version`` is the pyproject version, bumped only when a release is cut, so
     on any commit between two tags it names the earlier release. Unless HEAD is
     exactly ``v<version>`` the short sha is appended in PEP 440's local-version
-    form: ``0.42.0+a1b2c3d``. With no checkout under the import path (a wheel,
-    the Docker image) the plain version is all there is to say.
+    form: ``0.42.0+a1b2c3d``. With no checkout under the import path the
+    image's own revision stands in (:func:`image_revision`), plain when it was
+    built from ``v<version>``; a wheel has neither and gets the plain version.
 
     Never raises, for the reason :func:`checkout_revision` gives.
     """
     _, sha = checkout_revision(package_file)
     if not sha:
-        return version
+        tag, sha = image_revision()
+        if not sha or tag == f"v{version}":
+            return version
+        return _with_sha(version, sha)
     try:
         source = Path(package_file or __file__).resolve().parent
         git_dir = _git_dir(source)
@@ -286,6 +308,10 @@ def version_label(package_file: str | None = None, *, version: str = __version__
             return version
     except Exception:  # pragma: no cover - defensive; see docstring
         pass
+    return _with_sha(version, sha)
+
+
+def _with_sha(version: str, sha: str) -> str:
     # PEP 440 allows one local segment, and the uninstalled fallback
     # (`0.0.0+unknown`) already has one.
     sep = "." if "+" in version else "+"
