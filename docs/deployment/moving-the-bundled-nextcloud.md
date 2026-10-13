@@ -82,8 +82,6 @@ The old services used five named volumes, prefixed with the old compose project 
 
    Removing `/data/.ownership-10001` makes the next boot hand the copied files to the daemon's uid, which it does once.
 
-   Do this only once the stack keeps its state in that directory. If `/srv/app/istota/.data-copied` does not exist and the old `istota_istota_data` volume does, run `istota-stack up` first: it copies the volume into `/srv/app/istota/data` (see [From the state volume to the state directory](running-the-stack.md#from-the-state-volume-to-the-state-directory)), and the daemon then refuses on the config as before. Run `istota-stack down`, then the copy above. Copied the other way round, the next start refuses, because both the volume and the directory hold state.
-
 2. Edit `/srv/app/istota/config/config.toml` (`/data/config/config.toml` inside the containers): remove the `[nextcloud]` table and any `workspace_mount_path` (or its old name, `nextcloud_mount_path`), set `workspace_path = "/data/workspace"`, set `[talk] enabled = false`, and if users logged in through Nextcloud, switch `[web] auth` to `["email"]` and give each user an email identity first (see [email login](../features/web-interface.md#email-login)).
 
 3. Check that `STORAGE` in `/srv/app/istota/host.env` is `local`, then start the stack with `istota-stack up`. The Nextcloud volumes are now unused; keep them until you are sure, then remove them by hand.

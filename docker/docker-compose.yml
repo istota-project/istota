@@ -37,12 +37,8 @@ x-workspace-mount: &workspace_mount
 # local workspace. On the VM `istota-stack` sets ISTOTA_DATA_DIR to
 # /srv/app/istota/data, a host directory; anywhere else it is the named volume
 # `data`. Short syntax, because only the short form lets one variable choose
-# between a bind and a volume. A stack started with ISTOTA_CONFIG_DIR but no
-# ISTOTA_DATA_DIR is an istota-stack from before the directory, which the first
-# update to this file runs: it keeps that stack on the volume it has always used,
-# `istota_data`, until the new script's `up` copies it across. Remove that arm
-# and the volume once no VM is left unmigrated.
-x-data-mount: &data_mount ${ISTOTA_DATA_DIR:-${ISTOTA_CONFIG_DIR:+istota_}data}:/data
+# between a bind and a volume.
+x-data-mount: &data_mount ${ISTOTA_DATA_DIR:-data}:/data
 
 x-config-mount: &config_mount
   type: bind
@@ -613,6 +609,4 @@ secrets:
 
 volumes:
   data:
-  # Only for a stack an older istota-stack starts; see x-data-mount.
-  istota_data:
   browser_profile:
