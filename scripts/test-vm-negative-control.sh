@@ -23,6 +23,7 @@
 #              update-without-up, update-without-reprovision (istota-stack update),
 #              rollback-without-reprovision (istota-stack rollback)
 #              config-apply-not-triggered (the web config editor's host applier)
+#              apply-restart-on-any-change, apply-sidecar-not-passed (istota-stack apply)
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
 #   nextcloud: no-storage-refusal (row 9), localize-without-config (istota-stack localize-workspace)
@@ -134,6 +135,14 @@ control no-host-bounds \
     "row 15: provision.sh without the journal cap and zram" \
     "$VM/test_host.py::TestTheHostIsBounded::test_the_journal_is_capped" \
     "$VM/test_host.py::TestTheHostIsBounded::test_zram_swap_is_on_at_the_roles_priority"
+
+S="$VM/test_settings_apply.py"
+control apply-restart-on-any-change \
+    "istota-stack apply: a content-only settings change restarts the stack" \
+    "$S::TestASidecarReachesTheContainer::test_a_content_only_change_restarts_nothing"
+control apply-sidecar-not-passed \
+    "istota-stack apply: the sidecar is staged and its path never reaches istota apply" \
+    "$S::TestASidecarReachesTheContainer::test_the_credential_changed_and_the_result_says_no_restart"
 
 L="$VM/test_localize.py::TestAMountedVmMovesToALocalWorkspace"
 control localize-without-config \

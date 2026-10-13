@@ -399,6 +399,17 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
         '--workspace "$LOCAL_WORKSPACE" \\\n',
         '    true \\\n',
     ),
+    # A content-only settings change restarts the stack as a config change
+    # does (`tests/vm/test_settings_apply.py`).
+    "apply-restart-on-any-change": (
+        '            2:"0 1 0 0") log "the changes are read without a restart; nothing was restarted." ;;\n',
+        '            2:"0 1 0 0") restart_for_config ;;\n',
+    ),
+    # The sidecar is staged and bound, and its path never reaches istota apply.
+    "apply-sidecar-not-passed": (
+        '        secrets=(--secrets-file "/secrets/$(basename "$2")")\n',
+        '        secrets=()\n',
+    ),
 }
 
 
