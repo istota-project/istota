@@ -120,6 +120,12 @@
       connections.push(
         { label: 'Email', value: `${draft.text('imap_user')} on ${draft.text('imap_host')}` },
         { label: 'Email password', value: secret('imap_password') },
+        {
+          label: 'Sender check',
+          value: draft.text('authserv_id')
+            ? `Verdict from ${draft.text('authserv_id')}`
+            : 'Trusts the From: line',
+        },
       );
     } else {
       connections.push({ label: 'Email', value: 'Not connected' });

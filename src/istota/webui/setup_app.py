@@ -95,7 +95,7 @@ SETUP_STEPS: dict[str, tuple[str, ...]] = {
     ),
     "connections": (
         "email_enabled", "imap_host", "imap_user", "imap_password", "smtp_host", "bot_email",
-        "caldav_url", "caldav_username", "caldav_password",
+        "authserv_id", "caldav_url", "caldav_username", "caldav_password",
     ),
     "features": (*_MODULE_FIELDS, "profiles"),
 }
@@ -372,6 +372,7 @@ _WEB_MESSAGES: dict[str, str] = {
     "brain_kind": "Choose an AI service.",
     "native_model": "Enter a model name.",
     "native_api_key": "Enter your API key.",
+    "authserv_id": "Enter only the name before the first semicolon, like mx.example.com.",
     "caldav_password": "Enter the calendar's password.",
     "profiles": "Choose from the features listed.",
 }

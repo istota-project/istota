@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Setup, in the terminal and on the web, asks for the receiving mail server's authserv-id when email is configured, with what it is and where to find it in a received message's raw source. A value writes `authserv_id` and `confirm_sender_match = "verify"`, so mail claiming your own address is checked against the server's DMARC verdict; `istota doctor` warns (`email.sender_match`) while the check still trusts the `From:` line.
+
 - `istota snapshot` exports deterministic application settings for preview and reapplication, with private file output and selected-user exports. It preserves ownership, omits credential values and runtime history, and refuses embedded briefing credentials or settings that change during export.
 
 - `istota apply` can reconcile provisionable user credentials from a private sidecar without changing access timestamps during previews. Ordinary pruning preserves credentials; explicit credential pruning is limited to named services and records each deletion.
@@ -164,6 +166,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A `## ` section of `USER.md` whose heading ends in `<!-- pinned -->` is kept from the nightly memory curator.** The curator may add to it but cannot remove, rewrite or drop anything in it, and cannot create one; you, or the bot when you ask, still can. A pin covers one `## ` section, so use `### ` for its subsections.
 
 ### Changed
+
+- `[email] dmarc_canary_warn_on_missing` now defaults to on when `authserv_id` is set. An install that already set `authserv_id` and left the flag unwritten starts getting a canary alert when its mail server's stamp on a self-addressed mail carries no DMARC verdict; write `dmarc_canary_warn_on_missing = false` to keep it quiet.
 
 - The credential broker and reveal enforcement are on by default on Linux with the sandbox and network proxy on; elsewhere they default off, and a value set in `config.toml` is kept. Tasks authenticate with `{{cred:NAME}}` placeholders and can no longer read a value with `istota-credential get`, `run` or `env` unless the entry is marked readable. The first task each user runs grants their existing bound credentials once, as Settings' "Allow all existing" does; see "Credential broker" in `docs/configuration/credentials.md`.
 

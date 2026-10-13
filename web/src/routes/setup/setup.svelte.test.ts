@@ -1047,6 +1047,21 @@ describe('the Email and calendar screen', () => {
     });
   });
 
+  it('explains the authserv-id, says where to find it, and saves it', async () => {
+    vi.mocked(checkSetupConnection).mockResolvedValue(EMAIL_OK);
+    await addEmail();
+
+    expect(screen.getByText(/before the first semicolon/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/open the raw source of a message this mailbox received/),
+    ).toBeInTheDocument();
+    await type(/^Mail server's authserv-id/, 'mx.example.com');
+    await next();
+
+    expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ email_enabled: true, authserv_id: 'mx.example.com' });
+  });
+
   it('stays on a failed test and offers to continue without it', async () => {
     vi.mocked(checkSetupConnection).mockResolvedValue(EMAIL_BAD);
     await addEmail();

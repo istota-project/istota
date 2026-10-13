@@ -9283,6 +9283,48 @@ def check_email_confirmation_answers(config: "Config", probe: bool) -> CheckResu
     )
 
 
+def check_email_sender_match(config: "Config", probe: bool) -> CheckResult:
+    """Whether mail from a user's own address is trusted on its `From:` alone.
+
+    `confirm_sender_match = "off"`, the default, treats a `From:` naming one of
+    the user's own addresses as proof the user sent it, which holds only where
+    the receiving MTA enforces DMARC. `verify` needs `authserv_id`, which only
+    the operator can know, so the default cannot be changed and this says so
+    instead (ISSUE-746). Reads config only.
+    """
+    name = "email.sender_match"
+    if not config.email.enabled:
+        return CheckResult(name, SKIP, "email is disabled", scope=DEPLOYMENT)
+    policy = config.email.confirm_sender_match
+    if policy == "verify":
+        return CheckResult(
+            name, OK,
+            "mail from a user's own address is checked against "
+            f"{config.email.authserv_id}'s DMARC verdict",
+            scope=DEPLOYMENT,
+        )
+    if policy == "gate":
+        return CheckResult(
+            name, OK, "every mail from a user's own address is held for confirmation",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, WARN,
+        'email.confirm_sender_match is "off": a From: line naming a user\'s own '
+        "address is taken as proof that user sent the mail, which holds only if "
+        "your mail server rejects forged mail (DMARC enforcement)",
+        remedy=(
+            "Set `[email] authserv_id` to your mail server's authserv-id and "
+            '`confirm_sender_match = "verify"`. The authserv-id is the name before '
+            "the first semicolon of the topmost Authentication-Results header in the "
+            "raw source of a message this mailbox received, such as `mx.google.com` "
+            "for Gmail. While it is blank, the daemon log names the value it saw on "
+            "the first message that passed."
+        ),
+        scope=DEPLOYMENT,
+    )
+
+
 def check_email_address_uniqueness(config: "Config", probe: bool) -> CheckResult:
     """Whether any email address is held by more than one user.
 
@@ -9640,6 +9682,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("config.operator_persona", check_operator_persona),
     ("users.email_address_uniqueness", check_email_address_uniqueness),
     ("email.confirmation_answers", check_email_confirmation_answers),
+    ("email.sender_match", check_email_sender_match),
     ("sandbox.masks", check_sandbox_masks),
 )
 
@@ -9802,6 +9845,7 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment: it reads the install's own user tables.
     "users.email_address_uniqueness": DEPLOYMENT,
     "email.confirmation_answers": DEPLOYMENT,
+    "email.sender_match": DEPLOYMENT,
     "sandbox.masks": DEPLOYMENT,
 }
 
