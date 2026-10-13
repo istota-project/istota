@@ -28,7 +28,7 @@
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
   import { base } from '$app/paths';
-  import { Badge, Button, ConfirmDialog, KebabMenu, Modal } from '$lib/components/ui';
+  import { Badge, Button, ConfirmDialog, EmptyState, KebabMenu, Modal } from '$lib/components/ui';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import { portfolioGroupBy, type PortfolioGroupBy } from '$lib/money/stores/portfolio';
 
@@ -328,12 +328,9 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if snapshots.length === 0}
-  <div class="portfolio-empty">
-    <p class="empty">No snapshots yet — import a positions CSV to start the history.</p>
-    <div>
-      <Button variant="primary" href="{base}/money/portfolio/import">Import a snapshot</Button>
-    </div>
-  </div>
+  <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
+    No snapshots yet. Import a positions CSV to start the history.
+  </EmptyState>
 {:else}
   <div class="money-toolbar">
     <div class="toolbar-left control-row">
@@ -423,7 +420,7 @@
 >
   {#if diff}
     {#if diffEmpty}
-      <p class="empty">No position changes between these snapshots.</p>
+      <EmptyState>No position changes between these snapshots.</EmptyState>
     {:else}
       {#each [{ key: 'opened', label: 'Opened', rows: diff.opened }, { key: 'closed', label: 'Closed', rows: diff.closed }] as section (section.key)}
         {#if section.rows.length > 0}
@@ -509,14 +506,6 @@
 </Modal>
 
 <style>
-  .portfolio-empty {
-    padding: var(--space-6) var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-    max-width: 640px;
-  }
-
   .toolbar-left {
     display: flex;
     align-items: center;

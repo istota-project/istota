@@ -173,8 +173,8 @@ body:has(.app-content-fill) {
   overscroll-behavior: none;
 }
 
-/* A route's whole-pane status message — the loading placeholder, and the empty
-   and error states that occupy the same slot. One rule so every module reads the
+/* A route's whole-pane status message — the loading placeholder, and the error
+   state that occupies the same slot. An empty state is `EmptyState`, top-aligned. One rule so every module reads the
    same: centered in the content area both ways, dim, small.
 
    `flex: 1` rather than `min-height: 100%` is what does the vertical centering:

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { CornerDownRight, MessageSquare, FileText } from '@lucide/svelte';
   import type { SearchResultsData, SearchResultItem } from '$lib/stores/segments';
+  import { EmptyState } from '$lib/components/ui';
 
   let {
     data,
@@ -54,7 +55,7 @@
 
 <div class="search-results">
   {#if data.results.length === 0}
-    <p class="empty small">No results for “{data.query}”.</p>
+    <EmptyState size="sm">No results for “{data.query}”.</EmptyState>
   {:else}
     <p class="head">
       {data.results.length} result{data.results.length === 1 ? '' : 's'} for “{data.query}”

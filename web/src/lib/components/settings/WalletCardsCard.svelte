@@ -1,6 +1,13 @@
 <script lang="ts">
   import { updateWalletCard, removeWalletCard, type WalletCard } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    EmptyState,
+    KebabMenu,
+    type KebabItem,
+  } from '$lib/components/ui';
   import SettingsCard from './SettingsCard.svelte';
   import CardFormModal from './CardFormModal.svelte';
   let {
@@ -76,7 +83,7 @@
         form = { card: null };
       }}>Add card</Button
     >{/snippet}
-  {#if cards.length === 0}<p class="empty">No cards yet.</p>{/if}
+  {#if cards.length === 0}<EmptyState>No cards yet.</EmptyState>{/if}
   <ul class="card-list">
     {#each cards as card (card.id)}
       <li class="card-row">

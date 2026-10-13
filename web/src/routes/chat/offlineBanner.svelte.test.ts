@@ -325,8 +325,8 @@ describe('an empty transcript with nothing cached', () => {
       resolve(dirname(fileURLToPath(import.meta.url)), '+page.svelte'),
       'utf8',
     );
-    const rule = source.match(/\n {2}\.chat-empty \{([\s\S]*?)\n {2}\}/);
-    expect(rule, '.chat-empty rule not found in +page.svelte').not.toBeNull();
+    const rule = source.match(/\n {2}\.chat-placeholder \{([\s\S]*?)\n {2}\}/);
+    expect(rule, '.chat-placeholder rule not found in +page.svelte').not.toBeNull();
     expect(rule![1]).toMatch(/padding-inline:\s*var\(--space-\d\)/);
   });
 });

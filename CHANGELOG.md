@@ -147,6 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Upgrade note:** once the stack runs as it should, remove the old volume with `docker volume rm istota_istota_data`. The copy refuses if `/srv/app/istota/data` already holds files, and `istota-stack rollback` to an earlier release needs `--force`, since that release would run on the volume as it was at the copy.
 
+- "Nothing here yet" messages look the same across the web UI. They used to come in several sizes, and some sat at the top of the page while others were centred in it. Now each one sits near the top, under the page's toolbar, at one text size. Where there is something to do about it, such as importing a portfolio snapshot or setting up taxes, a centred button sits below the message.
+
 - **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
 
 - Location History now opens on yesterday. Dates and ranges selected through links still take precedence.

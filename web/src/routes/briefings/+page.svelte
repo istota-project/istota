@@ -9,6 +9,7 @@
     briefingArchiveError,
   } from '$lib/stores/briefings';
   import { formatDateTime } from '$lib/dateFormat';
+  import { EmptyState } from '$lib/components/ui';
 
   let current = $state<BriefingArchiveItem | null>(null);
   let loading = $state(false);
@@ -80,13 +81,14 @@
          could not be fetched must not read as an archive with nothing in it. -->
     <p class="center-msg error">{$briefingArchiveError}</p>
   {:else}
-    <div class="empty-state">
-      <h1>No briefings yet</h1>
-      <p class="muted">
-        Once a scheduled briefing runs it will appear here. Set up the schedule and content blocks
-        in <a href="{base}/briefings/settings">settings</a>.
-      </p>
-    </div>
+    <EmptyState
+      title="No briefings yet"
+      actionLabel="Set up briefings"
+      actionHref="{base}/briefings/settings"
+    >
+      Once a scheduled briefing runs it will appear here. The schedule and content blocks are set up
+      in settings.
+    </EmptyState>
   {/if}
 </div>
 
@@ -176,19 +178,5 @@
     border: 1px solid var(--border-subtle);
     padding: var(--space-1) var(--space-2);
     text-align: left;
-  }
-
-  /* Sized from the type scale, like the briefing body next door: the h1 was
-	   1.1rem and the paragraph inherited the 1rem body default, so the state a
-	   user meets before their first briefing rendered a step larger than
-	   everything around it. Weight is what still marks the heading. */
-  .empty-state {
-    max-width: 32rem;
-    font-size: var(--text-base);
-  }
-
-  .empty-state h1 {
-    font-size: var(--text-base);
-    margin: 0 0 var(--space-2);
   }
 </style>

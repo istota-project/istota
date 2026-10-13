@@ -7,7 +7,7 @@
 
    In source order, which is also cascade order:
      - the box-sizing reset
-     - the named shared blocks: .micro-label, .caption, .muted, .empty,
+     - the named shared blocks: .micro-label, .caption, .muted,
        .spinner + @keyframes spin, .banner and its status variants
      - one global :focus-visible ring, and the text-field exception to it
      - the iOS date-input and 16px-zoom-floor fixes (see @media pointer:coarse)
@@ -64,25 +64,6 @@
 
 .muted {
   color: var(--text-muted);
-}
-
-/* "Nothing here yet" inside a card or a section — a list with no rows, a
-   panel with no data. Fourteen files carried this verbatim.
-
-   Distinct from .center-msg below, which is for a state that IS the whole
-   pane. `.small` is the tighter variant for a sub-list inside a card; the
-   three copies at 0.75rem win over the two at 0.5rem. */
-.empty {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  padding: 2rem 1rem;
-  text-align: center;
-}
-
-.empty.small {
-  padding: 0.75rem 0;
-  font-size: var(--text-sm);
 }
 
 /* An inline "working…" spinner, beside its label. Declared in three files,

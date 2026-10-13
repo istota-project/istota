@@ -43,6 +43,7 @@
     type NotificationFilter,
   } from '$lib/stores/notifications';
   import Chip from './Chip.svelte';
+  import EmptyState from './EmptyState.svelte';
   import NotificationDetail from './NotificationDetail.svelte';
   import NotificationItem from './NotificationItem.svelte';
 
@@ -168,11 +169,11 @@
             <NotificationItem {item} onOpen={openDetail} {onAction} />
           {/each}
         {:else if $notificationsLoading}
-          <p class="empty small">Loading…</p>
+          <p class="panel-loading">Loading…</p>
         {:else if filter === 'action'}
-          <p class="empty small">Nothing needs your attention.</p>
+          <EmptyState size="sm">Nothing needs your attention.</EmptyState>
         {:else}
-          <p class="empty small">Nothing waiting on you.</p>
+          <EmptyState size="sm">Nothing waiting on you.</EmptyState>
         {/if}
       </div>
 
@@ -278,6 +279,14 @@
 
   .panel-msg {
     margin: 0;
+  }
+
+  .panel-loading {
+    margin: 0;
+    padding: var(--space-3) 0;
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    text-align: center;
   }
 
   .panel-foot {
