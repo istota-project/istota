@@ -29,7 +29,7 @@ import json
 import logging
 import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -127,11 +127,13 @@ def _row_to_briefing(row: sqlite3.Row) -> UserBriefing:
     )
 
 
-def list_briefings(db_path: Path, user_id: str | None = None) -> list[UserBriefing]:
+def list_briefings(
+    db_path: Path, user_id: str | None = None, *, conn: sqlite3.Connection | None = None,
+) -> list[UserBriefing]:
     """Return briefing rows. When ``user_id`` is set, scope to that user."""
-    if not Path(db_path).exists():
+    if conn is None and not Path(db_path).exists():
         return []
-    with _connect(db_path) as conn:
+    with nullcontext(conn) if conn is not None else _connect(db_path) as conn:
         if user_id is not None:
             rows = conn.execute(
                 "SELECT * FROM briefing_configs WHERE user_id = ? ORDER BY name",
@@ -144,9 +146,11 @@ def list_briefings(db_path: Path, user_id: str | None = None) -> list[UserBriefi
     return [_row_to_briefing(r) for r in rows]
 
 
-def get_briefing(db_path: Path, user_id: str, name: str) -> UserBriefing | None:
+def get_briefing(
+    db_path: Path, user_id: str, name: str, *, conn: sqlite3.Connection | None = None,
+) -> UserBriefing | None:
     """Return a single briefing or None."""
-    with _connect(db_path) as conn:
+    with nullcontext(conn) if conn is not None else _connect(db_path) as conn:
         row = conn.execute(
             "SELECT * FROM briefing_configs WHERE user_id = ? AND name = ?",
             (user_id, name),
@@ -165,6 +169,7 @@ def ensure_briefing(
     output: str = "talk",
     components: dict[str, Any] | None = None,
     enabled: bool = True,
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[UserBriefing, str]:
     """Idempotent upsert. Returns ``(briefing, state)``.
 
@@ -188,7 +193,7 @@ def ensure_briefing(
     enabled_int = 1 if enabled else 0
     title = title or ""
 
-    existing = get_briefing(db_path, user_id, name)
+    existing = get_briefing(db_path, user_id, name, conn=conn)
     if existing is None:
         state = "created"
     else:
@@ -205,8 +210,8 @@ def ensure_briefing(
     if state == "noop":
         return existing, state  # type: ignore[return-value]
 
-    with _connect(db_path) as conn:
-        conn.execute(
+    with nullcontext(conn) if conn is not None else _connect(db_path) as writer:
+        writer.execute(
             """
             INSERT INTO briefing_configs
                 (user_id, name, cron_expression, title, conversation_token,
@@ -224,14 +229,16 @@ def ensure_briefing(
              components_json, output, enabled_int),
         )
 
-    fresh = get_briefing(db_path, user_id, name)
+    fresh = get_briefing(db_path, user_id, name, conn=conn)
     assert fresh is not None
     return fresh, state
 
 
-def delete_briefing(db_path: Path, user_id: str, name: str) -> bool:
+def delete_briefing(
+    db_path: Path, user_id: str, name: str, *, conn: sqlite3.Connection | None = None,
+) -> bool:
     """Remove a briefing by (user_id, name). Returns True if a row was removed."""
-    with _connect(db_path) as conn:
+    with nullcontext(conn) if conn is not None else _connect(db_path) as conn:
         cur = conn.execute(
             "DELETE FROM briefing_configs WHERE user_id = ? AND name = ?",
             (user_id, name),

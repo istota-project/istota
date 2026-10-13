@@ -1692,7 +1692,7 @@ class TestWhatsAppSecretRedaction:
         cfg = Config()
         cfg.whatsapp = WhatsAppConfig(
             enabled=True,
-            business_phone_number="+15551234567",
+            business_phone_number="+15559876543",
             cloud=WhatsAppCloudConfig(
                 waba_id="123456789012345",
                 phone_number_id="223456789012345",
@@ -1710,8 +1710,8 @@ class TestWhatsAppSecretRedaction:
             for field in section["fields"]
         }
 
-        assert "+15551234567" not in rendered
-        assert fields["whatsapp.business_phone_number"]["value"] == "+*******4567"
+        assert "+15559876543" not in rendered
+        assert fields["whatsapp.business_phone_number"]["value"] == "+*******6543"
         assert "wa-access-token" not in rendered
         assert "wa-app-secret" not in rendered
         assert "wa-verify-token" not in rendered

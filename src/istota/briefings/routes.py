@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
@@ -36,6 +35,7 @@ from istota.briefings.models import (
     ArchivedBriefing,
     BriefingBlock,
     BriefingsContext,
+    validate_shared_block_payload,
 )
 from istota.briefings.sources.browse import BROWSE_PRESETS
 from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
@@ -413,9 +413,6 @@ def get_feed_options(
 # Shared briefing blocks (admin-editable; admin-shared-briefing-blocks spec)
 # ---------------------------------------------------------------------------
 
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-
-
 def _shared_block_status(conn, name: str) -> dict:
     """Per-block runtime status: last generation, current shared_kv preview,
     and any Run now request with the daemon's last answer to one."""
@@ -488,45 +485,10 @@ def list_shared_blocks(
 
 
 def _validate_shared_block_payload(payload: dict) -> dict:
-    """Validate + normalise a shared-block create/update payload. Raises 400."""
-    from croniter import croniter
-
-    name = (payload.get("name") or "").strip()
-    if not name or not _SLUG_RE.match(name):
-        raise HTTPException(400, "name must be a slug: lowercase letters, digits, - and _")
-    cron = (payload.get("cron") or "").strip()
-    if not cron or not croniter.is_valid(cron):
-        raise HTTPException(400, f"invalid cron expression: {cron!r}")
-    render_mode = payload.get("render_mode") or "synthesis"
-    if render_mode not in RENDER_MODES:
-        raise HTTPException(400, f"render_mode must be one of {list(RENDER_MODES)}")
-    raw_sources = payload.get("sources")
-    if raw_sources is None:
-        raw_sources = []
-    if not isinstance(raw_sources, list):
-        raise HTTPException(400, "sources must be a list")
-    sources: list = []
-    for s in raw_sources:
-        if not isinstance(s, dict) or "kind" not in s:
-            raise HTTPException(400, "each source must be an object with a 'kind'")
-        kind = s["kind"]
-        if kind not in ALLOWED_SHARED_SOURCE_KINDS:
-            raise HTTPException(
-                400,
-                f"source kind {kind!r} not allowed for shared blocks "
-                f"(allowed: {sorted(ALLOWED_SHARED_SOURCE_KINDS)})",
-            )
-        sources.append({"kind": kind, "config": s.get("config") or {}})
-    return {
-        "name": name,
-        "cron": cron,
-        "title": (payload.get("title") or "").strip(),
-        "directive": payload.get("directive") or None,
-        "render_mode": render_mode,
-        "enabled": bool(payload.get("enabled", True)),
-        "trusted": bool(payload.get("trusted", False)),
-        "sources": sources,
-    }
+    try:
+        return validate_shared_block_payload(payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @router.put("/shared-blocks")

@@ -101,8 +101,9 @@ class CheckResult:
     """What loading a `[config]` document reported.
 
     `problems` are `{"kind", "path", "message"}` entries from
-    `config_mapper.collect_problems`, `path` a list of strings. `error` is a
-    refusal that stopped the load, or `None`.
+    `config_mapper.collect_problems` or the settings schema. Paths contain
+    string keys and integer indices. `error` is a refusal that stopped the
+    load, or `None`.
     """
 
     problems: list[dict] = field(default_factory=list)
@@ -128,6 +129,19 @@ class Meta:
     source: str = "plan"
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("duplicate JSON object key")
+        result[name] = value
+    return result
+
+
+def _refuse_constant(value: str):
+    raise ValueError("non-finite JSON number")
+
+
 def load_plan(path: Path | str, *, stdin=None) -> dict:
     """The plan document: JSON when the file ends in `.json`, TOML otherwise.
 
@@ -139,8 +153,8 @@ def load_plan(path: Path | str, *, stdin=None) -> dict:
         where = "on stdin"
         try:
             raw = (stdin if stdin is not None else sys.stdin).read()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise PlanError(f"cannot read the plan {where}: {exc}") from None
+        except (OSError, UnicodeDecodeError):
+            raise PlanError(f"cannot read the plan {where}") from None
         is_json = raw.lstrip().startswith("{")
     else:
         path = Path(path)
@@ -150,13 +164,28 @@ def load_plan(path: Path | str, *, stdin=None) -> dict:
         except OSError as exc:
             raise PlanError(f"cannot read the plan {where}: {exc.strerror or exc}") from None
         is_json = path.suffix.lower() == ".json"
+    return parse_document(raw, is_json=is_json, where=where)
+
+
+def parse_document(raw: bytes | str, *, is_json: bool, where: str) -> dict:
+    """Parse an already-read document without quoting submitted values in errors."""
     try:
         if is_json:
-            document = json.loads(raw)
+            document = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_refuse_constant)
         else:
             document = tomllib.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise PlanError(f"the plan {where} does not parse: {exc}") from None
+    except json.JSONDecodeError as exc:
+        raise PlanError(f"the plan {where} does not parse: invalid JSON at line {exc.lineno}, column {exc.colno}") from None
+    except tomllib.TOMLDecodeError as exc:
+        # Older Python versions expose TOML locations only in the message.
+        # The rest of that message can contain submitted keys and values.
+        location = re.search(r"\(at (?:line \d+, column \d+|end of document)\)$", str(exc))
+        suffix = " " + location.group() if location else ""
+        raise PlanError(f"the plan {where} does not parse: invalid TOML{suffix}") from None
+    except UnicodeDecodeError:
+        raise PlanError(f"the plan {where} does not parse: invalid UTF-8") from None
+    except ValueError:
+        raise PlanError(f"the plan {where} does not parse: duplicate object key or non-finite number") from None
     if not isinstance(document, dict):
         raise PlanError(f"the plan {where} is not a table of sections")
     return document
@@ -206,9 +235,8 @@ def _find_null(value: object, where: str) -> str | None:
 def collect(document: object) -> CheckResult:
     """Load `document` as `config.toml` and return what the loader reported.
 
-    The load runs against a scratch copy whose `db_path` names nothing, so the
-    database overlays `load_config` applies (and the clean-up it does on the
-    way) touch no real database while a plan is only being considered.
+    The scratch TOML retains the proposed paths. Database overlays, imports
+    and seeding are disabled while a plan is only being considered.
     """
     from istota.config import load_config
     from istota.config_mapper import collect_problems
@@ -219,20 +247,17 @@ def collect(document: object) -> CheckResult:
     if null:
         return CheckResult(error=f"{null} is null; TOML has no null. Leave the key out for its default.")
     with tempfile.TemporaryDirectory(prefix="istota-apply-") as scratch:
-        probe = dict(document)
-        if isinstance(probe.get("db_path"), str):
-            probe["db_path"] = str(Path(scratch) / "absent" / "istota.db")
         path = Path(scratch) / "config.toml"
         try:
-            path.write_text(toml_write.dumps(probe), encoding="utf-8")
+            path.write_text(toml_write.dumps(document), encoding="utf-8")
         except toml_write.TomlWriteError as exc:
             return CheckResult(error=f"[config]: {exc}")
         error = None
         with collect_problems() as problems:
             try:
-                load_config(path)
-            except Exception as exc:  # noqa: BLE001 - every loader refusal is a plan refusal
-                error = f"[config] does not load: {exc}"
+                load_config(path, apply_db_overlays=False)
+            except Exception:  # noqa: BLE001 - loader exceptions may contain credentials
+                error = "[config] does not load: invalid configuration"
     scratch_name = str(path)
     reported = [
         {
@@ -410,27 +435,57 @@ def _sections(plan: dict) -> tuple[Meta, object]:
                 "[config] only. Remove it, or apply the plan with the release it "
                 "was written for."
             )
-    return _check_meta(plan.get("meta", {})), plan.get("config")
+    from istota.settings_plan.schema import parse_plan
+
+    parsed = parse_plan(plan)
+    return parsed.meta, parsed.config
 
 
-def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None) -> int:
+def load_input(path, *, input_format="plan", stdin=None):
+    """Load the plan and any embedded private role sidecar through one parser."""
+    from istota.settings_plan.schema import Sidecar, parse_sidecar
+
+    if input_format == "plan":
+        return load_plan(path, stdin=stdin), Sidecar()
+    if input_format != "role-vars":
+        raise PlanError("unsupported input format")
+    from istota.settings_plan.role_input import convert_role_input
+    from istota.settings_plan.secrets import read_private_document
+
+    document = (load_plan(path, stdin=stdin) if str(path) == "-" else
+                read_private_document(path, field="role_vars", option="role-vars input"))
+    plan, sidecar = convert_role_input(document)
+    return plan, parse_sidecar(sidecar)
+
+
+def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None, patches=None, input_format="plan") -> int:
     """Validate a plan without reading or writing any config. 0 valid, 1 refused.
 
     With `as_json`, prints `{"problems": [...], "error": str | null}` and
     nothing else, whatever the outcome; a plan that does not parse is an
     `error` there.
     """
+    from istota.settings_plan.schema import SchemaError, parse_plan
+
     try:
-        _, document = _sections(load_plan(plan_path, stdin=stdin))
+        from istota.settings_plan.paths import patch_document
+
+        document, _ = load_input(plan_path, input_format=input_format, stdin=stdin)
+        document, patch_warnings = patch_document(document, patches)
+        plan = parse_plan(document)
+    except SchemaError as exc:
+        result = CheckResult(problems=[exc.problem])
     except PlanError as exc:
         result = CheckResult(error=str(exc))
     else:
-        result = collect(document) if document is not None else CheckResult()
+        result = collect(plan.config) if plan.config is not None else CheckResult()
+        for warning in patch_warnings:
+            err(f"istota apply: warning: {warning}")
     if as_json:
         out(json.dumps(result.as_json()))
         return EXIT_ERROR if result.refused else EXIT_UNCHANGED
     for problem in result.problems:
-        err(f"istota apply: {problem['kind']}: {problem['message']}")
+        err(f"istota apply: {problem['kind']}: {problem['path']}: {problem['message']}")
     if result.error is not None:
         err(f"istota apply: {result.error}")
     if result.refused:
@@ -442,57 +497,85 @@ def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None) -> int:
 
 def run(
     plan_path: Path | str, config_path: Path, *, dry_run: bool, out, err,
-    backup: int | None = None, stdin=None,
+    backup: int | None = None, stdin=None, output_format: str = "text",
+    users: list[str] | None = None, continue_on_error: bool = False,
+    prune: bool = False, prune_secrets: bool = False,
+    secrets_file: Path | str | None = None, patches: list[str] | None = None,
+    input_format: str = "plan",
 ) -> int:
     """Plan every section, print, and write unless `dry_run`. Returns the exit code."""
+    from istota.settings_plan import engine
+    from istota.settings_plan.report import render_text, result_document
+    from istota.settings_plan.schema import SchemaError, parse_plan
+
+    options = engine.Options(dry_run, continue_on_error, users, prune, prune_secrets)
+    context = engine.Context(config_path, options=options, backup=backup)
     try:
-        meta, document = _sections(load_plan(plan_path, stdin=stdin))
-        planned: list[SectionPlan] = []
-        if document is not None:
-            planned.append(plan_config(document, config_path, backup=backup))
-    except PlanError as exc:
-        err(f"istota apply: {exc}")
-        err("istota apply: nothing was written.")
-        return EXIT_ERROR
+        from istota.settings_plan.paths import patch_document
 
-    # Only a plan with a config to own claims it.
-    marker = document is not None and managed_differs(
-        config_path.parent, "config", meta.managed, meta.source,
-    )
+        document, context.sidecar = load_input(plan_path, input_format=input_format, stdin=stdin)
+        document, patch_warnings = patch_document(document, patches)
+        context.warnings.extend(patch_warnings)
+        plan = parse_plan(document)
+        if secrets_file is not None:
+            from istota.settings_plan.secrets import read_sidecar
 
-    for section in planned:
-        for warning in section.warnings:
-            err(f"istota apply: warning: {warning}")
-        for line in section.diff:
-            out(line)
-    changed = [section for section in planned if section.changed]
+            if context.sidecar.users or context.sidecar.config:
+                raise PlanError("use either embedded role credentials or --secrets-file, not both")
+            context.sidecar = read_sidecar(secrets_file)
+        with engine.apply_lock(config_path):
+            operations = engine.build_plan(plan, context, options)
+            if output_format == "text":
+                for line in render_text(engine.ApplyResult(operations, dry_run=True)):
+                    out(line)
+            result = engine.execute_plan(operations, context)
+    except (PlanError, engine.ExecutionError, OSError) as exc:
+        path = exc.problem["path"] if isinstance(exc, SchemaError) else []
+        code = "validation_error"
+        if isinstance(exc, engine.ExecutionError):
+            code, path = exc.code, exc.path
+        elif isinstance(exc, OSError):
+            code = "io_error"
+        error = {"code": code, "path": path}
+        if isinstance(exc, SchemaError):
+            # Authored and value-free by SchemaError's contract; str() of anything else may quote input.
+            error["message"] = exc.problem["message"]
+        result = engine.ApplyResult(dry_run=dry_run, errors=[error])
+        if output_format == "text":
+            message = str(exc) if isinstance(exc, PlanError) else code
+            where = f"[{path[0]}] " if path else ""
+            err(f"istota apply: {where}{message}")
+            err("istota apply: nothing was written.")
+        else:
+            out(json.dumps(result_document(result)))
+        return result.exit_code
+
+    if output_format == "json":
+        out(json.dumps(result_document(result)))
+        return result.exit_code
+    for warning in result.warnings:
+        err(f"istota apply: warning: {warning}")
+    changed = list(dict.fromkeys(op.section for op in result.operations if op.status in ("planned", "applied")))
+    if result.errors:
+        for error in result.errors:
+            err(f"istota apply: {error['code']}: {error['path']}")
+        for op in result.operations:
+            out(f"{op.status}: {op.section} {op.user or ''} {op.identity}".strip())
+        if result.partial:
+            err("istota apply: partially applied; completed changes remain. Rerun to complete the plan.")
+            if result.restart_required:
+                err("istota apply: committed changes require a restart after completion.")
+        return result.exit_code
     if dry_run:
         if changed:
-            out(f"Would change: {', '.join(section.name for section in changed)} (--dry-run, nothing written).")
-            return EXIT_CHANGED
-        out("Would update: management marker (--dry-run, nothing written)." if marker else "No changes.")
-        return EXIT_UNCHANGED
-    for section in changed:
-        try:
-            section.write()
-        except OSError as exc:
-            err(f"istota apply: writing [{section.name}] failed: {exc}")
-            return EXIT_ERROR
-    if marker:
-        try:
-            write_managed(config_path.parent, {"config": (meta.managed, meta.source)})
-        except OSError as exc:
-            # After a config write the change stands and must still restart.
-            err(f"istota apply: writing {MANAGED_FILE} failed: {exc}")
-            if not changed:
-                return EXIT_ERROR
-            marker = False
-    if changed:
-        out(f"Changed: {', '.join(section.name for section in changed)}.")
-    if marker:
+            out(f"Would change: {', '.join(changed)} (--dry-run, nothing written).")
+        else:
+            out("Would update: management marker (--dry-run, nothing written)." if context.marker_pending else "No changes.")
+        return result.exit_code
+    if result.changed:
+        out(f"Changed: {', '.join(changed)}.")
+    if context.marker_updated:
         out("Updated: management marker." if changed else "Updated: management marker; config.toml is unchanged.")
-    if not changed:
-        if not marker:
-            out("No changes.")
-        return EXIT_UNCHANGED
-    return EXIT_CHANGED
+    if not changed and not context.marker_updated:
+        out("No changes.")
+    return result.exit_code

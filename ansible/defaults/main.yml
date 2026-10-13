@@ -147,6 +147,7 @@ istota_rclone_conf: ""
 istota_admins: []
 # The whole of config.toml as a nested dict. Applied with `istota-stack apply`
 # as the plan's [config]; under --check, with --dry-run. Empty skips the step.
+# Not set together with istota_plan, whose `config` takes its place.
 # The reference below names every key it takes.
 istota_config: {}
 # --- istota_config reference: generated, do not edit by hand ---
@@ -1784,10 +1785,13 @@ istota_config: {}
 #   module_data_dir:
 # --- end istota_config reference ---
 
-# --- Users, through the VM's `istota` wrapper ---------------------------------
-# Each entry is the CLI's own flags without the dashes: a list repeats the
-# flag, true passes it bare, false or null leaves it out. Until the
-# declarative-apply spec lands these loops are how users reach the database.
+# --- Users, as the ensure commands' flags ---------------------------------------
+# The legacy form of the user settings, kept so an existing inventory works
+# unchanged. Each entry is the `istota user|resource|briefing ensure` flags
+# without the dashes: a list repeats the flag, true passes it bare, false or
+# null leaves it out. The role converts them, with istota_config, into one
+# `istota apply` plan (`--input-format role-vars`); an unknown flag, or a
+# one-shot one such as reset-whatsapp-identity, fails the play.
 #
 #   istota_users:
 #     alice: {display-name: Alice, email: [alice@example.com], managed: true}
@@ -1798,13 +1802,34 @@ istota_config: {}
 #   istota_user_secrets:
 #     alice: [{service: karakeep, key: api_key, value: "{{ vault_alice_karakeep }}"}]
 #
-# A secret's value reaches `istota secret ensure` on stdin, never on a command
-# line. An entry whose value is empty is skipped; `istota secret remove` is how
-# a stored secret is cleared.
+# Secret values travel in a private 0600 file, never on a command line. An
+# entry whose value is empty is skipped; `istota secret remove` is how a stored
+# secret is cleared.
 istota_users: {}
 istota_user_resources: {}
 istota_user_briefings: {}
 istota_user_secrets: {}
+
+# --- The settings plan --------------------------------------------------------
+# The canonical form: the `istota apply` plan as a mapping, with exactly the
+# CLI's field names, for instance an `istota snapshot --format json` read with
+#   istota_plan: "{{ lookup('file', 'settings.json') | from_json }}"
+# It replaces istota_config and the four variables above; setting it with any
+# of them nonempty fails the play before anything changes. The role marks its
+# config as managed by ansible; each user's profile_mode is left as written.
+istota_plan: {}
+# The plan's credentials, from the vault: the sidecar's `users` (user ->
+# service -> key -> value) and `config` ([{path: [...], value: ...}]). Needs
+# istota_plan. Written to a private 0600 file and removed after the apply.
+istota_plan_secrets: {}
+# Remove definitions the plan does not list from the collections it does
+# (folders, briefings, jobs, heartbeat checks). Never deletes users or
+# credentials. Needs istota_plan.
+istota_plan_prune: false
+# With istota_plan_prune: also remove the provisionable credential keys a
+# user's `secrets` entry for a service does not list. Only services the plan
+# names are touched.
+istota_plan_prune_secrets: false
 
 # --- Behaviour ---------------------------------------------------------------
 # provision.sh runs when what it acts on (host.env, rclone.conf, .env's
@@ -1812,5 +1837,5 @@ istota_user_secrets: {}
 # successful run recorded, and on a VM where istota-stack is missing. true runs
 # it on every play.
 istota_provision_always: false
-# Seconds to wait for the daemon service's healthcheck before the ensure loops.
+# Seconds to wait for the daemon service's healthcheck before the user settings.
 istota_health_timeout: 900
