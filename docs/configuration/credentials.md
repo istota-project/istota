@@ -38,7 +38,7 @@ The SMS and WhatsApp rows are the exception to the credential-proxy sentence int
 
 ### Provisioning global credentials
 
-**The stack**: `istota setup` writes each credential it asks for to a file under `/srv/app/istota/secrets/` (0400, owned by uid 10001), which compose mounts and the container exports as the matching `ISTOTA_*` variable, keeping it out of `config.toml`. Replace a file and restart to change it. The entrypoint generates the master key on first start and keeps it at `/data/.secret_key`.
+**The stack**: `istota setup` writes each credential it asks for to a file under `/srv/app/istota/secrets/` on the VM (0400, owned by uid 10001), which compose mounts and the container exports as the matching `ISTOTA_*` variable, keeping it out of `config.toml`. Every file exists, empty when unused, because compose will not start without one. Change a credential from the web config editor (Admin → Configuration), or write it on the VM with `istota-stack put-files` (JSON on stdin) and restart the stack with `systemctl restart istota-stack`. `istota setup` also writes the master key to `/data/.secret_key` (`/srv/app/istota/data/.secret_key` on the VM), and the entrypoint generates one there on first start if it is missing; neither ever replaces an existing key.
 
 **A Mac development checkout**: edit `config.toml` directly, or set the `ISTOTA_*` env vars in an `istota.env` file, which `istota serve` reads before it loads the config. It reads the file named with `--env-file`, else the one beside the config named with `-c`, else `~/.config/istota/istota.env`. A checkout's `config/config.toml` takes precedence over `~/.config/istota/config.toml`, so check which config is loading before you edit one. See [the edit-run loop on a Mac](../development/setup.md#the-edit-run-loop-on-a-mac).
 
@@ -139,7 +139,7 @@ The daemon attempts one final non-deleting import for each configured legacy fil
 
 `ISTOTA_SECRET_KEY` opens the encrypted database. Losing it loses every stored credential unless you have an independent export. Keep a copy outside the storage and backups that hold the database.
 
-The stack keeps it at `/data/.secret_key` unless a secret file supplies the key. A standalone installation uses `istota.env` beside its configuration. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
+The stack keeps it at `/data/.secret_key`, which is `/srv/app/istota/data/.secret_key` on the VM. The local VM also copies it into the Mac's login Keychain (service `istota.local`), which is what `istota-stack restore` reads. A standalone installation uses `istota.env` beside its configuration. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
 
 An age credential backup is an independent recovery path: decrypt it with the private age key you keep elsewhere, then open its KeePass file with the enclosed password. It needs no server secret key. `security.key_separation` checks file locations, and reports when scheduled credential backups are off.
 

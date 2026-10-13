@@ -371,7 +371,7 @@ services:
     # drive a perfectly healthy Chrome reads as unhealthy as well (ISSUE-384).
     # Nothing here acts on that verdict: `restart: unless-stopped` reacts to
     # process exit, and the debounced auto-heal actor is the VM's
-    # host/istota-browser-watchdog.sh. Documented in docs/deployment/docker.md,
+    # host/istota-browser-watchdog.sh. Documented in docs/deployment/running-the-stack.md,
     # alongside the sandbox posture this stack makes the same choice about.
     # A compose healthcheck overrides the image HEALTHCHECK, so this must match it.
     healthcheck:
@@ -566,7 +566,7 @@ services:
   # service each, plus this service's mounts of every user's devbox-exec-<user>
   # and devbox-cred-<user> volumes. Each devbox mounts only its own pair; that
   # is what identifies a credential-proxy client (src/istota/devbox/proxy.py).
-  # No Docker socket is mounted here or there. See docs/deployment/docker.md
+  # No Docker socket is mounted here or there. See docs/deployment/running-the-stack.md
   # and tests/test_devbox_compose_file.py.
 
 networks:

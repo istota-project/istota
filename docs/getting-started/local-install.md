@@ -2,7 +2,7 @@
 
 The local install runs Istota on your own Apple silicon Mac. It is the same stack a server runs: the same image, compose file, `provision.sh`, `istota-stack` and bubblewrap sandbox, inside a [Lima](https://lima-vm.io/) VM that is dedicated to it. The one thing a server does not have is a folder in your home, `~/Istota`, which is the bot's workspace. The VM mounts it, the bot writes its files there, and you open them with any Mac app. Time Machine backs it up, and the database snapshots land in it too.
 
-A command on the Mac, also called `istota-stack`, creates and controls the VM. It handles the VM's own life (create, start, stop, restore) and passes every other verb to the `istota-stack` inside the VM unchanged, so the [server documentation](../deployment/docker.md) applies as written.
+A command on the Mac, also called `istota-stack`, creates and controls the VM. It handles the VM's own life (create, start, stop, restore) and passes every other verb to the `istota-stack` inside the VM unchanged, so the [server documentation](../deployment/running-the-stack.md) applies as written.
 
 ```
 Mac                                          Lima VM "istota" (Debian 13)
@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 | `--workspace DIR` | `~/Istota` | the workspace folder ([rules below](#where-the-folder-may-be)) |
 | `--port N` | `8080` | the Mac port the web UI is on, 1024 or higher |
 | `--cpus N` | `4` | the VM's CPUs |
-| `--memory N` | `6` | the VM's memory, in whole GiB |
+| `--memory N` | `4` | the VM's memory, in whole GiB |
 | `--adopt` | off | use a folder that already holds files |
 | `--no-setup` | off | stop before the setup questions ([setting up in the browser](#setting-up-in-the-browser)) |
 
@@ -54,11 +54,11 @@ The scripts the installer downloads come from `main`, as with any `curl | bash` 
 7. Rebuilds when the config needs Claude Code (`check-image` exits 2), runs `provision.sh` again, and starts `istota-stack.service`.
 8. Refreshes the Mac scripts from the VM's checkout, copies the master key into your login Keychain, and prints a one-use link to set your password, opening it in the browser.
 
-If a step fails, `create` prints the step, the command it ran in the VM, its exit status and its last 20 lines, and exits with that status. It never retries a build or a provision on its own. Run `istota-stack create` again, with no arguments, and it continues from the first step whose effect is missing; it keeps what you gave it the first time in a file under `~/.config/istota-stack/`.
+If a step fails, `create` prints the step, the command it ran in the VM, its exit status and its last 20 lines, and exits with that status. It never retries a build or a provision on its own. Run `istota-stack create` again, with no arguments, and it continues from the first step whose effect is missing. It keeps what you gave it the first time, and the tag the VM last deployed, in `~/.config/istota-stack/istota.env` (under `$XDG_CONFIG_HOME` when that is set). On a VM that already has a tag deployed, a re-run keeps that tag unless you give `--tag` again; `istota-stack update` is the way to move it on.
 
 ### Setting up in the browser
 
-The [web setup](../deployment/docker.md#in-the-browser) works in the local VM too. It asks fewer questions than the terminal wizard, and can test an API key before saving it:
+The [web setup](../deployment/running-the-stack.md#in-the-browser) works in the local VM too. It asks fewer questions than the terminal wizard, and can test an API key before saving it:
 
 ```bash
 istota-stack create --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases' --no-setup
@@ -109,7 +109,7 @@ istota task "..." -u alice -x  # the istota CLI, in the daemon container as uid 
 
 `stop` stops the stack before the VM so SQLite closes its files cleanly. `autostart on` runs `limactl autostart enable`, which writes a LaunchAgent that starts the VM at your next login; it does not start or stop a running VM.
 
-Every other verb is the VM's own `istota-stack`, run as root in the VM with its arguments unchanged and its exit status passed back: `setup`, `rollback`, `exec`, `compose`, `up`, `down`, `check-image` and the rest. `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac: it is copied into a root-only directory in the VM for the call and removed afterwards.
+Every other verb is the VM's own `istota-stack`, run as root in the VM with its arguments unchanged and its exit status passed back: `setup`, `rollback`, `exec`, `compose`, `up`, `down`, `check-image` and the rest. `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac: it is copied into a directory of its own in the VM for the call and removed afterwards.
 
 The VM is the Lima instance `istota`, in Lima's default home, so `limactl list` shows it. If you already have an instance of that name, set `ISTOTA_LIMA_INSTANCE` to another name for every `istota-stack` call.
 
@@ -149,7 +149,7 @@ istota-stack restore --date 2026-10-01     # a given day
 
 `restore` checks the folder's marker, the backups, the Keychain item, `create`'s options and, while the old VM runs, that the Keychain's key is that VM's own, before it touches anything. Then it deletes the existing VM, after you type its name, creates a new one without the setup questions, and in it writes the key from the Keychain (on stdin), the config files, the `.env` and `host.env` copies in effect on the restored config's date, and the databases. Then it starts the stack. `--force` restores a snapshot that looks empty. It takes `create`'s options too (`--tag`, `--signing-key`, `--port`, ...), and without them uses the ones `create` recorded and installs the tag the VM last ran, which every `create` and `update` records.
 
-`secrets/` is never copied into the folder, so after a restore the stack's own credentials (the model key, mail and Nextcloud passwords) are empty. Write them again as files, one per credential (the names are in [Credentials](../deployment/docker.md#credentials)), with `put-files`, which takes JSON on stdin:
+`secrets/` is never copied into the folder, so after a restore the stack's own credentials (the model key, mail and Nextcloud passwords) are empty. Write them again as files, one per credential (the names are in [Credentials](../deployment/running-the-stack.md#credentials)), with `put-files`, which takes JSON on stdin:
 
 ```bash
 istota-stack put-files < credentials.json    # {"secrets": {"anthropic_api_key": "sk-..."}}
@@ -182,7 +182,7 @@ Stop `istota serve` first; the import refuses while it runs. `--from DIR` and `-
 
 `~/.istota` is not changed. Only after a clean `doctor` does the import tell you how to move it to the Trash, and it never does that itself. User ids that would collide on a case-insensitive folder (`alice` and `Alice`) are refused before anything is written. Your own files that name `~/.istota` paths, such as a `CRON.md` or a script, are not rewritten; the import prints the `istota migrate workspace-paths --map` command that does it.
 
-A refused import exits 1 with nothing written; a partial one exits 2, and running it again resumes.
+A refused import writes nothing: a refusal on the Mac (a running `istota serve`, a missing `istota.env`, a different key already in the Keychain) exits 78, and one from the import in the VM exits 1. A partial import exits 2, and running it again resumes.
 
 ## What the VM protects, and what it does not
 
@@ -195,7 +195,7 @@ The local VM's boundary protects your Mac from the VM, not the VM from your Mac.
 
 ## Developing on a checkout
 
-From a checkout of the repository, `host/mac/istota-stack create --repo "$PWD"` makes a VM that mounts the checkout read-only and provisions from it at every boot, and installs `update --unsigned latest` (or the `--tag` you give). Run from a checkout, the script does not refresh any installed copy. The `vm` test tier uses its own instance, `istota-vm-1`, so the two never meet; [testing](../development/testing.md) covers it. To try a whole deployment by hand next to an install you already run, see [a full deployment on a Mac](../development/setup.md#a-full-deployment-on-a-mac).
+From a checkout of the repository, `host/mac/istota-stack create --repo "$PWD"` makes a VM that mounts the checkout read-only and provisions from it at every boot, and installs `update --unsigned latest` (or the `--tag` you give). Run from a checkout, the script still refreshes `~/.local/bin/istota-stack` and `istota` when an install is there, with the copies from the VM's checkout; set `ISTOTA_MAC_BIN_DIR` to another directory to keep an installed copy as it is. The `vm` test tier uses its own instance, `istota-vm-1`, so the two never meet; [testing](../development/testing.md) covers it. To try a whole deployment by hand next to an install you already run, see [a full deployment on a Mac](../development/setup.md#a-full-deployment-on-a-mac).
 
 ## Removing it
 

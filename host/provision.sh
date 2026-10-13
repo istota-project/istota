@@ -149,7 +149,7 @@ ensure_self_signed_cert() {
     fingerprint="$(openssl x509 -in "${dir}/fullchain.pem" -noout -fingerprint -sha256 | cut -d= -f2)"
     log "the reverse proxy pins ${dir}/fullchain.pem (SHA-256 ${fingerprint}): copy that file to it,"
     log "  forward to https://, and verify against it, e.g. in nginx: proxy_ssl_verify on;"
-    log "  proxy_ssl_trusted_certificate <the copy>; proxy_ssl_name ${domain}; (docs/deployment/docker.md)"
+    log "  proxy_ssl_trusted_certificate <the copy>; proxy_ssl_name ${domain}; (docs/deployment/running-the-stack.md)"
 }
 
 export DEBIAN_FRONTEND=noninteractive

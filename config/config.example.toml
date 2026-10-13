@@ -1074,7 +1074,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # A persistent per-user Linux workbench, one container per user, provisioned by
 # Ansible (image, network, volume). Only the bare-metal role builds one — the
 # shipped Docker stack ships no devbox service and cannot run the skill; see
-# docs/deployment/docker.md.
+# docs/deployment/running-the-stack.md.
 #
 # `enabled` is ONE SWITCH DOING TWO JOBS, deliberately. It offers the devbox
 # skill, and it is also what the developer skill derives its execution target

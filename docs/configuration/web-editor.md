@@ -13,7 +13,7 @@ The web container cannot write `config/` (it is bound read-only into every servi
 
 Every applied change restarts the stack. The review dialog shows how many tasks are running, so the admin can wait for them.
 
-The applier exists only on the dedicated VM, set up by `host/provision.sh`. Anywhere else (`istota serve` on macOS, a standalone install) the page is read-only and says so. On a VM provisioned before the applier was added, the page is read-only until `istota-stack update` re-runs provisioning and the stack restarts.
+The applier is part of the stack's VM, a server or the local VM on a Mac, set up by `host/provision.sh`. Anywhere else (`istota serve` on macOS, a standalone install) the page is read-only and says so. On a VM provisioned before the applier was added, the page is read-only until `istota-stack update` re-runs provisioning and the stack restarts.
 
 ## What it guards
 
@@ -42,7 +42,7 @@ These keys are shown read-only, each with the reason and where it is changed ins
 
 ## Managed resources
 
-If the Ansible management role (or a plan with `[meta] managed = true`) owns a resource, the editor shows it read-only, because the next play would revert a web change. Ownership is per resource (config, credentials, admins) and is recorded in `config/managed.json`. To hand a resource to the web, remove it from the role's variables (`istota_config`, `istota_secrets` or `istota_admins`), or run `istota-stack apply` once with `managed = false`. A `managed.json` that cannot be read makes every resource read-only until `istota-stack apply` rewrites it.
+If the optional [Ansible management role](../deployment/ansible.md) (or a plan with `[meta] managed = true`) owns a resource, the editor shows it read-only, because the next play would revert a web change. Ownership is per resource (config, credentials, admins) and is recorded in `config/managed.json`. To hand a resource to the web, remove it from the role's variables (`istota_config`, `istota_secrets` or `istota_admins`), or run `istota-stack apply` once with `managed = false`. A `managed.json` that cannot be read makes every resource read-only until `istota-stack apply` rewrites it.
 
 ## Tables, the whole file, and ignored keys
 

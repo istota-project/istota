@@ -11,6 +11,8 @@
 
 Override with `-c PATH` on the CLI.
 
+On the stack the file is `/srv/app/istota/config/config.toml` on the VM, which the containers see as `/data/config/config.toml` through `ISTOTA_CONFIG_PATH`. `istota setup` writes it once, and the running services mount it read-only. Change it from the [web config editor](web-editor.md), with `istota-stack apply PLAN` (an `istota apply` plan), or by running `istota-stack setup --force` again; see the [CLI reference](../reference/cli.md#istota-stack-on-the-vm).
+
 ## Structure
 
 The config file is TOML with nested sections:
@@ -58,13 +60,13 @@ Per-user data lives in DB tables (`user_profiles`, `user_resources`, `briefing_c
 
 ## Credentials
 
-Istota has two credential tiers: **global** (bot identity, in TOML/env vars) and **per-user** (user accounts, in the encrypted `secrets` table). Instance-wide secrets can be provided as env var overrides (e.g., from systemd `EnvironmentFile=`) instead of storing them in TOML. Per-user credentials are provisioned via the web UI at `/istota/settings` or `istota secret ensure`.
+Istota has two credential tiers: **global** (bot identity, in TOML/env vars) and **per-user** (user accounts, in the encrypted `secrets` table). Instance-wide secrets can be provided as env var overrides instead of storing them in TOML; on the stack each is a file under `/srv/app/istota/secrets/` that the container exports under its override name. Per-user credentials are provisioned via the web UI at `/istota/settings` or `istota secret ensure`.
 
 See [credentials](credentials.md) for the full inventory, runtime flow, and the decision heuristic for new integrations.
 
 ## Admin users
 
-Admin user IDs are listed in the admins file (`/srv/app/istota/config/admins` on a server; `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset) (plain text, one per line, `#` comments allowed). Empty file or missing file = all users are admin (backward compatibility).
+Admin user IDs are listed in the admins file: plain text, one per line, `#` comments allowed. On the stack it is `/srv/app/istota/config/admins` on the VM, `/data/config/admins` in the containers, and `istota setup` creates it naming the first admin. Elsewhere it is `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset. An empty or missing file makes every user an admin for task permissions (backward compatibility), while the web admin pages treat it as no admins at all.
 
 Override path via `ISTOTA_ADMINS_FILE` env var.
 
