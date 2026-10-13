@@ -28,6 +28,7 @@ export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { default as KebabMenu } from './KebabMenu.svelte';
 export { default as NoticeBanner } from './NoticeBanner.svelte';
 export { default as HintPopover } from './HintPopover.svelte';
+export { default as EmptyState } from './EmptyState.svelte';
 // The notification inbox. All five are exported rather than kept as siblings:
 // `NoticeDrawer` is the one deliberate absence from this barrel, for a reason
 // specific to it (a second mount is two live regions for one notice), and that

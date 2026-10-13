@@ -11,7 +11,7 @@
     type AdminConnection,
     type AdminPairingState,
   } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, NoticeBanner } from '$lib/components/ui';
+  import { Badge, Button, ConfirmDialog, EmptyState, NoticeBanner } from '$lib/components/ui';
 
   /** The five small fields the stream carries. Never the pairing code. */
   interface PairingFrame {
@@ -799,7 +799,7 @@
     <!-- Reached when the payload carries no `whatsapp` entry, which is not the
          same as carrying no connections: the index returns exactly one member
          today, so the card reads it by id rather than iterating. -->
-    <div class="center-msg">No deployment-level connections are configured.</div>
+    <EmptyState>No deployment-level connections are configured.</EmptyState>
   {/if}
 </div>
 

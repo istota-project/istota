@@ -12,7 +12,7 @@
     type Biomarker,
     type Specimen,
   } from '$lib/api';
-  import { Button, Field, FileDropZone, Select } from '$lib/components/ui';
+  import { Button, EmptyState, Field, FileDropZone, Select } from '$lib/components/ui';
 
   const flagOptions = [
     { value: '', label: '—' },
@@ -232,7 +232,7 @@
         <h2>Extracted biomarkers</h2>
 
         {#if extracting}
-          <div class="empty extracting">
+          <div class="loading extracting">
             <span class="spinner" aria-hidden="true"></span>
             Extracting biomarkers and panel metadata from the source file…
           </div>
@@ -247,9 +247,9 @@
           {/if}
 
           {#if extracted.length === 0}
-            <div class="empty">
-              No biomarkers extracted yet. Add rows manually, or retry extraction.
-            </div>
+            <EmptyState
+              >No biomarkers extracted yet. Add rows manually, or retry extraction.</EmptyState
+            >
           {:else}
             <table class="grid grid--dense">
               <thead>
@@ -379,6 +379,7 @@
   .extracting {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: var(--space-2);
   }
   .split {

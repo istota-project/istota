@@ -133,7 +133,11 @@ it('opens files through the viewer and skips results with refused routes', async
   expect(screen.getAllByRole('option')[0]).toBeDisabled();
   await fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
   await waitFor(() =>
-    expect(viewer.state).toEqual({ mode: 'file', path: '/Users/alice/memories/note.md' }),
+    expect(viewer.state).toEqual({
+      mode: 'file',
+      path: '/Users/alice/memories/note.md',
+      source: { kind: 'workspace' },
+    }),
   );
   expect(navigation.goto).not.toHaveBeenCalled();
 });

@@ -504,7 +504,7 @@ class TestARestoreFromTheFolder:
             f"cp -p {lima.STACK}/.env {lima.STACK}/host.env {saved}/\n"
             # What a new VM's .env holds before setup: the tag lines alone.
             f"grep -E '^ISTOTA_(PREVIOUS_)?TAG(_UNSIGNED)?=' {saved}/.env > {lima.STACK}/.env\n"
-            "docker volume rm istota_istota_data\n",
+            f"rm -rf {lima.STACK}/data\n",
             timeout=600)
         try:
             restored = stack.run('printf "%s\\n" "$KEY" | istota-stack restore', env={"KEY": key},

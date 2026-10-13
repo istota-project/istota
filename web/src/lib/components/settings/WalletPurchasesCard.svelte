@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { cancelWalletPurchase, type WalletPurchase, type WalletSettings } from '$lib/api';
-  import { Badge, Button } from '$lib/components/ui';
+  import { Badge, Button, EmptyState } from '$lib/components/ui';
   import SettingsCard from './SettingsCard.svelte';
   let {
     purchases,
@@ -52,7 +52,7 @@
         variant="ghost"
         size="sm">Money transactions</Button
       >{/if}{/snippet}
-  {#if purchases.length === 0}<p class="empty">No purchases yet.</p>{/if}
+  {#if purchases.length === 0}<EmptyState>No purchases yet.</EmptyState>{/if}
   <ul class="purchase-list">
     {#each purchases as purchase (purchase.id)}
       <li class="purchase-row">

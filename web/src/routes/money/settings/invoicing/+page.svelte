@@ -19,6 +19,7 @@
   import {
     Button,
     ConfirmDialog,
+    EmptyState,
     KebabMenu,
     NoticeBanner,
     type KebabItem,
@@ -207,7 +208,7 @@
     {#if businessError}
       <div class="banner error">{businessError}</div>
     {:else if !defaults}
-      <p class="empty">No invoicing configuration found.</p>
+      <EmptyState>No invoicing configuration found.</EmptyState>
     {:else}
       <dl class="kv">
         <dt>Currency</dt>
@@ -245,7 +246,7 @@
       <NoticeBanner title={entityNotice} variant="warn" />
     {/if}
     {#if entities.length === 0}
-      <p class="empty">No entities yet — add the one that bills your clients.</p>
+      <EmptyState>No entities yet. Add the one that bills your clients.</EmptyState>
     {:else}
       <div class="entity-grid card-grid">
         {#each entities as entity (entity.key)}
@@ -301,7 +302,7 @@
       <NoticeBanner title={serviceNotice} variant="warn" />
     {/if}
     {#if services.length === 0}
-      <p class="empty">No services yet — add what you bill for.</p>
+      <EmptyState>No services yet. Add what you bill for.</EmptyState>
     {:else}
       <div class="table-scroll">
         <table class="grid">

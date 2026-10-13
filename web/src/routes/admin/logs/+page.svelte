@@ -10,7 +10,7 @@
     type AdminLogRecord,
     type AdminLogSource,
   } from '$lib/api';
-  import { Button, Chip, Input, Select } from '$lib/components/ui';
+  import { Button, Chip, EmptyState, Input, Select } from '$lib/components/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
   import { copyText } from '$lib/clipboard';
   import { notifyError } from '$lib/stores/notices';
@@ -426,11 +426,11 @@
     {#if loading && records.length === 0}
       <div class="center-msg">Loading…</div>
     {:else if records.length === 0 && !error}
-      <div class="center-msg">
+      <EmptyState>
         {applied.q || applied.level || applied.user_id
           ? 'No entries match these filters.'
           : 'No entries yet.'}
-      </div>
+      </EmptyState>
     {:else}
       {#if nextBefore}
         <div class="older-row">

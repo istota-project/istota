@@ -156,7 +156,7 @@
   </p>
 
   {#if !ready}
-    <p class="empty">Loading…</p>
+    <p class="loading">Loading…</p>
   {:else}
     <div class="test-form control-row">
       <div class="ctl">

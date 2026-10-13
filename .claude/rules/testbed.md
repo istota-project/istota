@@ -227,7 +227,7 @@ No variable names the checkout a stack builds from. `Shape` takes `compose_file`
 
 | Variable | Effect |
 |---|---|
-| `ISTOTA_TESTBED_KEEP` | persist the Nextcloud fixture's and postgres volumes plus generated credentials between sessions. Containers still come down; keeps `shared_files`, wipes `istota_data` and `redis_data`. `tests/full/` refuses to run under it, since its assertions are about first-install state |
+| `ISTOTA_TESTBED_KEEP` | persist the Nextcloud fixture's and postgres volumes plus generated credentials between sessions. Containers still come down; keeps `shared_files`, wipes `data` (the state volume, which the testbed uses in place of a host directory) and `redis_data`. `tests/full/` refuses to run under it, since its assertions are about first-install state |
 | `ISTOTA_TESTBED_MAIL_IMAGE` | override the pinned Maddy digest |
 | `ISTOTA_IMAGE_TAG` | use a prebuilt image instead of building; how the upgrade tier's negative control is fed |
 | `ISTOTA_UPDATE_GOLDEN` | rewrite the prompt goldens instead of comparing |

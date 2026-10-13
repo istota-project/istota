@@ -122,7 +122,7 @@ describe('it claims no class primitives.css already publishes', () => {
   /**
    * Svelte scoping stops this component's rules leaking out; it does nothing
    * about a *global* rule landing on a bare class name used here. The state
-   * class started life as `empty`, which primitives.css publishes as the
+   * class started life as `empty`, which primitives.css then published as the
    * shared empty-state block — so every field silently took its `2rem 1rem`,
    * and the filter grew 70px of vertical padding nothing in this file
    * mentioned. The same trap is waiting on `caption`, `muted`, `banner`.
@@ -132,7 +132,7 @@ describe('it claims no class primitives.css already publishes', () => {
   );
 
   it('parses the shared blocks it checks against', () => {
-    expect(shared.has('empty')).toBe(true);
+    expect(shared.has('caption')).toBe(true);
     expect(shared.size).toBeGreaterThan(5);
   });
 

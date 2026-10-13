@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SettingsCard } from '$lib/components/settings';
-  import { Input } from '$lib/components/ui';
+  import { EmptyState, Input } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import {
@@ -113,7 +113,7 @@
   {#if loadError}
     <div class="banner error">{loadError}</div>
   {:else if loaded && rows.length === 0}
-    <p class="empty">No portfolio accounts yet — they appear with the first positions import.</p>
+    <EmptyState>No portfolio accounts yet. They appear with the first positions import.</EmptyState>
   {:else}
     <p class="card-hint">
       Excluded accounts stay imported but are hidden from every chart and total. Group and type

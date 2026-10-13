@@ -8,7 +8,6 @@ SvelteKit frontend served as static files, Python handles auth and API.
 from istota.credentials import kdbx_import as credential_read
 
 import asyncio
-import codecs
 import base64
 import hashlib
 import hmac
@@ -73,8 +72,7 @@ from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from istota.config import load_config, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
-from istota.lib.audio_sniff import AUDIO_EXTENSIONS, sniff_audio
-from istota.lib.video_sniff import sniff_video
+from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
 from istota.storage import NOTES_MAX_BYTES
 from istota.workspace import text_files
 from istota.nextcloud.ocs import OcsError, ocs_data
@@ -12380,53 +12378,13 @@ def _resolve_chat_file_for_download(
     return target, sniff_raster(head)
 
 
-PREVIEW_MAX_BYTES = 1_048_576
-
-
 def _preview_chat_file(username: str, path: str) -> dict:
     """Read and classify in the same worker hop as the confinement checks."""
     target, head, info = _read_chat_file_head(username, path, PREVIEW_MAX_BYTES)
-    result = {
-        "name": target.name,
-        "size": info.st_size,
-        "modified": _iso_z(datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)),
-        "kind": "binary",
-        "truncated": False,
-    }
-    media_type = sniff_raster(head)
-    kind = "image"
-    if media_type is None and head.startswith(b"%PDF-"):
-        kind, media_type = "pdf", "application/pdf"
-    if media_type is None:
-        audio_type = sniff_audio(head)
-        video_type = sniff_video(head)
-        extension = target.suffix.lower().lstrip(".")
-        # A container signature does not prove its track types. The name
-        # chooses a player only after the existing sniffers confirm media.
-        if audio_type == "audio/mp4" or video_type == "video/mp4":
-            kind = "audio" if extension in {"m4a", "m4b"} else "video"
-            media_type = f"{kind}/mp4"
-        elif audio_type == "audio/webm":
-            audio_names = (AUDIO_EXTENSIONS - {"webm", "mp4"}) | {"weba", "m4b"}
-            kind = "audio" if extension in audio_names else "video"
-            media_type = f"{kind}/webm"
-        elif audio_type == "audio/ogg" and extension == "ogv":
-            kind, media_type = "video", "video/ogg"
-        elif audio_type is not None:
-            kind, media_type = "audio", audio_type
-    if media_type is not None:
-        result.update(kind=kind, media_type=media_type)
-        return result
-    if b"\x00" in head:
-        return result
-    truncated = info.st_size > PREVIEW_MAX_BYTES
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
-    try:
-        text = decoder.decode(head.removeprefix(codecs.BOM_UTF8), final=not truncated)
-    except UnicodeDecodeError:
-        return result
-    result.update(kind="text", text=text, truncated=truncated)
-    return result
+    modified = _iso_z(datetime.fromtimestamp(info.st_mtime, tz=timezone.utc))
+    return classify_preview(
+        target.name, info.st_size, modified, head, truncated=info.st_size > PREVIEW_MAX_BYTES,
+    )
 
 
 @api_router.get("/chat/files/preview")

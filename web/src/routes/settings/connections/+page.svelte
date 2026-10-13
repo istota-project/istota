@@ -7,7 +7,7 @@
     type ServiceCard as ServiceCardData,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { Button } from '$lib/components/ui';
+  import { Button, EmptyState } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import {
     ServiceCard,
@@ -122,7 +122,7 @@
         <div class="card-actions">
           <Button variant="primary" size="sm" onclick={reconnectNextcloud}>Connect</Button>
         </div>
-        <p class="empty">
+        <p class="caption">
           Connecting signs you in to Nextcloud again and brings you back here. Your session stays as
           it is.
         </p>
@@ -141,7 +141,7 @@
   {/each}
 
   {#if !ncToken && activeServices.length === 0}
-    <p class="empty">No connected services are available on this deployment.</p>
+    <EmptyState>No connected services are available on this deployment.</EmptyState>
   {/if}
 </SettingsLayout>
 

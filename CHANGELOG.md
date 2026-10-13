@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`istota-stack` verbs that write now take one lock**, `/srv/app/istota/.stack.lock`, so an update, setup, apply, put-files, import, workspace move or config change never runs alongside another. A second command waits up to ten minutes and then fails naming the command that holds the lock; `setup --web`, which can hold it for an hour, refuses at once instead of waiting.
 - Workspace puts My files directly below Pinned. My files starts expanded; Pinned and the other sections start collapsed. Filename rows use the same side margins as locations in the Location sidebar.
 
-- Browse your connected Nextcloud files under Workspace → Connections. Open folders in Workspace and files in Nextcloud; if the connection expires, Workspace links you back to Connections to sign in again. The access note explains that browsing uses your personal account while tasks use the bot’s account and their workspace permissions.
+- Browse your connected Nextcloud files under Workspace → Connections. Folders open in Workspace and files open in Workspace's file viewer, with Download and Open in Nextcloud beside them; if the connection expires, Workspace links you back to Connections to sign in again. The access note explains that browsing uses your personal account while tasks use the bot’s account and their workspace permissions.
 
 - `istota-stack localize-workspace` moves an install whose workspace is the Nextcloud mount onto the VM's own disk, with Talk and the `nextcloud` skill still connected. It stops the stack, copies the files, points the config at the local copy, turns the mount off and starts the stack again; the Nextcloud copy is left as it was, apart from a `MOVED.md` in each user's bot folder, so going back is a config change. Run it with `--dry-run` first to see what it would skip.
 
@@ -143,6 +143,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Istota's state now lives in `/srv/app/istota/data` on the VM rather than in a Docker volume.** The databases, the master key and a local workspace sit in a plain directory you can back up with the VM's own tools, and `docker compose down -v` can no longer delete them. The first `istota-stack update` copies the old `istota_istota_data` volume into the directory once, with the stack stopped, and keeps the volume.
+
+  **Upgrade note:** once the stack runs as it should, remove the old volume with `docker volume rm istota_istota_data`. The copy refuses if `/srv/app/istota/data` already holds files, and `istota-stack rollback` to an earlier release needs `--force`, since that release would run on the volume as it was at the copy.
+
+- "Nothing here yet" messages look the same across the web UI. They used to come in several sizes, and some sat at the top of the page while others were centred in it. Now each one sits near the top, under the page's toolbar, at one text size. Where there is something to do about it, such as importing a portfolio snapshot or setting up taxes, a centred button sits below the message.
+
 - **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
 
 - Location History now opens on yesterday. Dates and ranges selected through links still take precedence.
@@ -249,6 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- The admin Status page, `istota --version` and the startup log line name the commit a stack runs. A stack updated with `istota-stack update --unsigned latest` showed the last release's number, because the image carries no `.git`; `istota-stack` now builds the commit and its deployed name into the image, and a build from main shows the version with the short commit appended, such as `0.43.0+a1b2c3d`. Takes effect from the first update after this one.
 
 - `istota-stack update` no longer takes the web UI down twice. When a release changed how the stack is started, the containers were recreated once by the old release's script and again by the new one's; the new release now starts them itself. The update also stops warning that a running devbox is an orphan container. The update to this release still restarts twice, since the previous script runs it.
 - The web config editor's five-minute check on the dedicated VM no longer starts a container when no change was requested, which also stops it repeating config warnings in the journal every five minutes. A requested change is still picked up at once; if the web could not signal it, the check finds it within the hour.

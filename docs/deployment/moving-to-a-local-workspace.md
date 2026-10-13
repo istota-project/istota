@@ -1,6 +1,6 @@
 # Moving to a local workspace
 
-An install in full Nextcloud integration keeps its workspace in the bot's Nextcloud files, through the VM's rclone mount. A local workspace keeps it in `/data/workspace` on the state volume instead, with Talk and the `nextcloud` skill still connected to your Nextcloud. [Storage](docker.md#storage) describes the two choices, and [Where the workspace lives](../features/nextcloud.md#where-the-workspace-lives) what each means for the `nextcloud` skill.
+An install in full Nextcloud integration keeps its workspace in the bot's Nextcloud files, through the VM's rclone mount. A local workspace keeps it in `/data/workspace` in the state directory instead, with Talk and the `nextcloud` skill still connected to your Nextcloud. [Storage](docker.md#storage) describes the two choices, and [Where the workspace lives](../features/nextcloud.md#where-the-workspace-lives) what each means for the `nextcloud` skill.
 
 `istota-stack localize-workspace` moves an existing install from the mount to local storage, on the VM, with the stack stopped. It copies the files and leaves the Nextcloud copy in place, so going back is a config change.
 
@@ -22,9 +22,9 @@ Run a dry run first. It stops nothing and writes nothing but the report, and lis
 istota-stack localize-workspace --dry-run
 ```
 
-The report is `/data/workspace-localize-report.json` on the state volume, and the same summary is printed. The copy skips anything that is not a regular file or a directory: a symlink, a FIFO, a socket or a device. It never follows a symlink, so a link a task left in a user's folder is not copied, and neither is what it points at.
+The report is `/data/workspace-localize-report.json` in the state directory, and the same summary is printed. The copy skips anything that is not a regular file or a directory: a symlink, a FIFO, a socket or a device. It never follows a symlink, so a link a task left in a user's folder is not copied, and neither is what it points at.
 
-Check that the state volume has room for the workspace. The dry run prints the bytes it would copy for each top-level folder, and `istota doctor`'s `runtime.workspace_disk` warns once the volume is low.
+Check that the VM's disk has room for the workspace in `/srv/app/istota/data`. The dry run prints the bytes it would copy for each top-level folder, and `istota doctor`'s `runtime.workspace_disk` warns once the disk is low.
 
 ## Running it
 
@@ -77,7 +77,7 @@ When the Ansible management role manages the VM, `istota apply` writes `config.t
 
 Users reach their files in the web UI, under Workspace. Their bot folder in Nextcloud stays as it was on the day of the move, and the share that showed it to them is left in place. A change made there after the move does not reach Istota.
 
-Back up the `istota_data` volume, which now holds the workspace as well as the databases. See [Backing up a local install](docker.md#backing-up-a-local-install).
+Back up `/srv/app/istota/data`, which now holds the workspace as well as the databases. See [Backing up a local install](docker.md#backing-up-a-local-install).
 
 ## Going back
 

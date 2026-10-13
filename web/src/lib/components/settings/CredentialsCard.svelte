@@ -21,6 +21,7 @@
     Chip,
     ConfirmDialog,
     CountPill,
+    EmptyState,
     KebabMenu,
     Modal,
   } from '$lib/components/ui';
@@ -248,7 +249,7 @@
       </p>
     {/if}
     {#if data.credentials.length === 0}
-      <p class="empty">No credentials yet.</p>
+      <EmptyState>No credentials yet.</EmptyState>
     {:else}
       <ul class="cred-list">
         {#each data.credentials as credential (credential.name)}

@@ -154,12 +154,6 @@
   color: var(--text-dim);
 }
 
-.settings .empty {
-  font-size: var(--text-sm);
-  color: var(--text-dim);
-  margin: 0;
-}
-
 .settings .row {
   display: flex;
   flex-wrap: wrap;

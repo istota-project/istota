@@ -15,7 +15,7 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
-  import { KebabMenu } from '$lib/components/ui';
+  import { EmptyState, KebabMenu } from '$lib/components/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -242,7 +242,7 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if transactions.length === 0}
-    <div class="empty">No transactions found.</div>
+    <EmptyState>No transactions found.</EmptyState>
   {:else}
     <div class="txn-scroll" class:faded={loading}>
       {#each grouped as group (group.date)}

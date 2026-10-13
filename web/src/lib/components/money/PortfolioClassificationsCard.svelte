@@ -1,7 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SettingsCard } from '$lib/components/settings';
-  import { Badge, Button, ConfirmDialog, Input, KebabMenu, Select } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    EmptyState,
+    Input,
+    KebabMenu,
+    Select,
+  } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
     ApiError,
@@ -288,7 +296,7 @@
     </div>
 
     {#if loaded && classifications.length === 0}
-      <p class="empty">No classifications yet.</p>
+      <EmptyState>No classifications yet.</EmptyState>
     {:else}
       <ul class="cls-list">
         {#each classifications as cls (cls.symbol)}

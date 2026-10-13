@@ -294,6 +294,14 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
   return undefined;
 }
 
+/**
+ * `VITE_MOCK_EMPTY=money` serves every money read as a fresh install would see
+ * it, so each empty state can be looked at without editing the mock data:
+ * lists come back empty, the portfolio has no snapshot and taxes have no
+ * configuration. Ledgers stay, since without one no money page loads at all.
+ */
+const MOCK_EMPTY_MONEY = process.env.VITE_MOCK_EMPTY === 'money';
+
 interface MockReq {
   url: string;
   method: string;
@@ -10906,9 +10914,9 @@ const handlers: MockHandler[] = [
     const PATH = '/istota/api/money/tax/estimate';
     const CONFIG_PATH = '/istota/api/money/config/tax';
 
-    // Set to true to exercise the "no tax configuration found" empty state,
-    // which the real API signals with a 404 (`_load_tax_config` returning None).
-    const NO_TAX_CONFIG = false;
+    // The "no tax configuration found" empty state, which the real API signals
+    // with a 404 (`_load_tax_config` returning None).
+    const NO_TAX_CONFIG = MOCK_EMPTY_MONEY;
 
     type Bracket = [threshold: number, rate: number];
 
@@ -11691,6 +11699,25 @@ function readBody(req: any): Promise<any> {
   });
 }
 
+function emptyArrays(value: unknown): unknown {
+  if (Array.isArray(value)) return [];
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = emptyArrays(v);
+    return out;
+  }
+  return value;
+}
+
+function emptyMoneyRead(ctx: MockReq, body: unknown): unknown {
+  if (!MOCK_EMPTY_MONEY || ctx.method !== 'GET') return body;
+  const path = ctx.url.split('?')[0];
+  if (!path.startsWith('/istota/api/money/')) return body;
+  if (/^\/istota\/api\/money\/(ledgers|check|config\/tax)/.test(path)) return body;
+  if (path === '/istota/api/money/portfolio/summary') return { summary: null };
+  return emptyArrays(body);
+}
+
 export function mockApi(): Plugin {
   return {
     name: 'istota-mock-api',
@@ -11759,7 +11786,7 @@ export function mockApi(): Plugin {
           for (const h of handlers) {
             const body = h(ctx);
             if (body !== undefined) {
-              respond(body);
+              respond(emptyMoneyRead(ctx, body));
               return;
             }
           }

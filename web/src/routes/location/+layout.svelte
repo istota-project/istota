@@ -33,6 +33,7 @@
     HeaderNav,
     IconButton,
     Chip,
+    EmptyState,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog, Pencil, X } from '@lucide/svelte';
@@ -355,7 +356,7 @@
                   <span>Last: {formatDate(placeStats.last_visit)}</span>
                 </div>
               {:else}
-                <div class="stats-empty">No visits recorded</div>
+                <EmptyState size="sm">No visits recorded</EmptyState>
               {/if}
             </div>
           {/if}
@@ -502,11 +503,6 @@
   }
 
   .stats-loading,
-  .stats-empty {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .stats-notes {
     font-size: var(--text-xs);
     color: var(--text-muted);

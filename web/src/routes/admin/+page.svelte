@@ -12,7 +12,14 @@
     type AdminStatsUserSource,
     type AdminSubscriptionSpend,
   } from '$lib/api';
-  import { Avatar, AvatarPicker, Field, NoticeBanner, StatTile } from '$lib/components/ui';
+  import {
+    Avatar,
+    AvatarPicker,
+    EmptyState,
+    Field,
+    NoticeBanner,
+    StatTile,
+  } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -865,7 +872,7 @@
         >
       </header>
       {#if stats.scheduler.jobs.length === 0}
-        <p class="empty">No scheduled jobs.</p>
+        <EmptyState>No scheduled jobs.</EmptyState>
       {:else}
         {@const parts = partitionJobs(stats.scheduler.jobs)}
         <div class="table-scroll">
