@@ -280,6 +280,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `istota apply --format json` now says why it refused a plan that does not parse, a bad `[meta]` field, a config value the loader would discard, or a role-vars input problem, so `istota-stack apply` and the Ansible role show a reason rather than a bare `validation_error`. A discarded value is reported by its key, never its value.
+
 - Interrupting `istota-stack import-standalone` on the Mac while it copies the standalone install into the VM no longer leaves that copy in the VM user's temporary directory. It is removed on exit, including after Ctrl-C or a TERM signal, as `apply` already did.
 
 - Applying scheduled jobs now rechecks admin rights before writing, so revoked rights invalidate an earlier preview. Clearing briefing blocks refuses pending legacy or configuration seeds that would restore them on initialization.

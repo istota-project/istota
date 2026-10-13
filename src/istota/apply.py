@@ -82,7 +82,20 @@ _BACKUP_SUFFIX = re.compile(r"\.bak\.\d{8}T\d{6}\.\d{6}Z")
 
 
 class PlanError(Exception):
-    """A plan this version refuses. Nothing has been written."""
+    """A plan this version refuses. Nothing has been written.
+
+    `str()` is for the terminal and may quote input. `message` is what a JSON
+    result carries: authored text with no submitted value in it, or `None`
+    where the raise site cannot promise that. `authored()` sets both at once.
+    """
+
+    def __init__(self, text: str, *, message: str | None = None):
+        super().__init__(text)
+        self.message = message
+
+    @classmethod
+    def authored(cls, text: str) -> "PlanError":
+        return cls(text, message=text)
 
 
 @dataclass
@@ -154,7 +167,7 @@ def load_plan(path: Path | str, *, stdin=None) -> dict:
         try:
             raw = (stdin if stdin is not None else sys.stdin).read()
         except (OSError, UnicodeDecodeError):
-            raise PlanError(f"cannot read the plan {where}") from None
+            raise PlanError.authored(f"cannot read the plan {where}") from None
         is_json = raw.lstrip().startswith("{")
     else:
         path = Path(path)
@@ -162,7 +175,12 @@ def load_plan(path: Path | str, *, stdin=None) -> dict:
         try:
             raw = path.read_bytes()
         except OSError as exc:
-            raise PlanError(f"cannot read the plan {where}: {exc.strerror or exc}") from None
+            # strerror is the OS's own text; str(exc) is the fallback for the terminal only.
+            reason = f": {exc.strerror}" if exc.strerror else ""
+            raise PlanError(
+                f"cannot read the plan {where}: {exc.strerror or exc}",
+                message=f"cannot read the plan {where}{reason}",
+            ) from None
         is_json = path.suffix.lower() == ".json"
     return parse_document(raw, is_json=is_json, where=where)
 
@@ -175,44 +193,45 @@ def parse_document(raw: bytes | str, *, is_json: bool, where: str) -> dict:
         else:
             document = tomllib.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
     except json.JSONDecodeError as exc:
-        raise PlanError(f"the plan {where} does not parse: invalid JSON at line {exc.lineno}, column {exc.colno}") from None
+        raise PlanError.authored(f"the plan {where} does not parse: invalid JSON at line {exc.lineno}, column {exc.colno}") from None
     except tomllib.TOMLDecodeError as exc:
         # Older Python versions expose TOML locations only in the message.
         # The rest of that message can contain submitted keys and values.
         location = re.search(r"\(at (?:line \d+, column \d+|end of document)\)$", str(exc))
         suffix = " " + location.group() if location else ""
-        raise PlanError(f"the plan {where} does not parse: invalid TOML{suffix}") from None
+        raise PlanError.authored(f"the plan {where} does not parse: invalid TOML{suffix}") from None
     except UnicodeDecodeError:
-        raise PlanError(f"the plan {where} does not parse: invalid UTF-8") from None
+        raise PlanError.authored(f"the plan {where} does not parse: invalid UTF-8") from None
     except ValueError:
-        raise PlanError(f"the plan {where} does not parse: duplicate object key or non-finite number") from None
+        raise PlanError.authored(f"the plan {where} does not parse: duplicate object key or non-finite number") from None
     if not isinstance(document, dict):
-        raise PlanError(f"the plan {where} is not a table of sections")
+        raise PlanError.authored(f"the plan {where} is not a table of sections")
     return document
 
 
 def _check_meta(meta: object) -> Meta:
     if not isinstance(meta, dict):
-        raise PlanError("[meta] must be a table")
+        raise PlanError.authored("[meta] must be a table")
     version = meta.get("version", PLAN_VERSION)
     if isinstance(version, bool) or not isinstance(version, int):
-        raise PlanError("[meta] version must be an integer")
+        raise PlanError.authored("[meta] version must be an integer")
     if version > PLAN_VERSION:
+        advice = f"this istota reads version {PLAN_VERSION}. Apply it with the release it was written for."
         raise PlanError(
-            f"the plan is format version {version}; this istota reads version "
-            f"{PLAN_VERSION}. Apply it with the release it was written for."
+            f"the plan is format version {version}; {advice}",
+            message=f"the plan's format version is newer than this istota reads; {advice}",
         )
     managed = meta.get("managed", False)
     if not isinstance(managed, bool):
-        raise PlanError("[meta] managed must be true or false")
+        raise PlanError.authored("[meta] managed must be true or false")
     source = meta.get("source", "plan")
     if not isinstance(source, str) or len(source) > MAX_SOURCE_LENGTH:
-        raise PlanError(f"[meta] source must be a string of at most {MAX_SOURCE_LENGTH} characters")
+        raise PlanError.authored(f"[meta] source must be a string of at most {MAX_SOURCE_LENGTH} characters")
     # The config editor's request id, which the host records; apply only
     # checks its type.
     request = meta.get("request")
     if request is not None and (isinstance(request, bool) or not isinstance(request, int)):
-        raise PlanError("[meta] request must be an integer")
+        raise PlanError.authored("[meta] request must be an integer")
     return Meta(managed=managed, source=source)
 
 
@@ -280,11 +299,15 @@ def validate_config(document: dict) -> list[str]:
     """
     result = collect(document)
     if result.error is not None:
-        raise PlanError(result.error)
+        # collect() authors every error: key paths and type names, never a value.
+        raise PlanError.authored(result.error)
     if result.discarded:
+        # The loader's messages quote the value; the JSON message names the keys instead.
+        keys = ", ".join(".".join(str(part) for part in problem["path"]) for problem in result.discarded)
         raise PlanError(
             "[config] has values the loader would discard: "
-            + "; ".join(problem["message"] for problem in result.discarded)
+            + "; ".join(problem["message"] for problem in result.discarded),
+            message=f"[config] has values the loader would discard at {keys}",
         )
     return [problem["message"] for problem in result.problems]
 
@@ -410,7 +433,7 @@ def _write_config(config_path: Path, new_text: str, backup: int | None) -> None:
 
 def plan_config(document: object, config_path: Path, *, backup: int | None = None) -> SectionPlan:
     if not isinstance(document, dict):
-        raise PlanError("[config] must be a table holding config.toml")
+        raise PlanError.authored("[config] must be a table holding config.toml")
     warnings = validate_config(document)
     current = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     if _same_document(current, document):
@@ -426,21 +449,6 @@ def plan_config(document: object, config_path: Path, *, backup: int | None = Non
     )
 
 
-def _sections(plan: dict) -> tuple[Meta, object]:
-    """The plan's validated `[meta]`, and its `[config]` (`None` when absent)."""
-    for name in plan:
-        if name not in ("meta", "config"):
-            raise PlanError(
-                f"[{name}] is not a section this istota applies; it reconciles "
-                "[config] only. Remove it, or apply the plan with the release it "
-                "was written for."
-            )
-    from istota.settings_plan.schema import parse_plan
-
-    parsed = parse_plan(plan)
-    return parsed.meta, parsed.config
-
-
 def load_input(path, *, input_format="plan", stdin=None):
     """Load the plan and any embedded private role sidecar through one parser."""
     from istota.settings_plan.schema import Sidecar, parse_sidecar
@@ -448,7 +456,7 @@ def load_input(path, *, input_format="plan", stdin=None):
     if input_format == "plan":
         return load_plan(path, stdin=stdin), Sidecar()
     if input_format != "role-vars":
-        raise PlanError("unsupported input format")
+        raise PlanError.authored("unsupported input format")
     from istota.settings_plan.role_input import convert_role_input
     from istota.settings_plan.secrets import read_private_document
 
@@ -476,7 +484,10 @@ def check(plan_path: Path | str, *, as_json: bool, out, err, stdin=None, patches
     except SchemaError as exc:
         result = CheckResult(problems=[exc.problem])
     except PlanError as exc:
-        result = CheckResult(error=str(exc))
+        error = str(exc)
+        if as_json:
+            error = exc.message if exc.message is not None else "the plan is refused"
+        result = CheckResult(error=error)
     else:
         result = collect(plan.config) if plan.config is not None else CheckResult()
         for warning in patch_warnings:
@@ -521,7 +532,7 @@ def run(
             from istota.settings_plan.secrets import read_sidecar
 
             if context.sidecar.users or context.sidecar.config:
-                raise PlanError("use either embedded role credentials or --secrets-file, not both")
+                raise PlanError.authored("use either embedded role credentials or --secrets-file, not both")
             context.sidecar = read_sidecar(secrets_file)
         with engine.apply_lock(config_path):
             operations = engine.build_plan(plan, context, options)
@@ -537,9 +548,9 @@ def run(
         elif isinstance(exc, OSError):
             code = "io_error"
         error = {"code": code, "path": path}
-        if isinstance(exc, SchemaError):
-            # Authored and value-free by SchemaError's contract; str() of anything else may quote input.
-            error["message"] = exc.problem["message"]
+        if isinstance(exc, PlanError) and exc.message is not None:
+            # Authored and value-free by PlanError's contract; str() may quote input.
+            error["message"] = exc.message
         result = engine.ApplyResult(dry_run=dry_run, errors=[error])
         if output_format == "text":
             message = str(exc) if isinstance(exc, PlanError) else code

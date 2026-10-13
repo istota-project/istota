@@ -259,3 +259,76 @@ def test_json_refusals_never_carry_a_sidecar_value(tmp_path):
         [error] = json.loads(out[0])["errors"]
         assert error["message"]
         assert "private-sidecar-value" not in "".join(out + err)
+
+
+class _UnreadableStdin:
+    def read(self):
+        raise OSError("private-sidecar-value")
+
+
+def test_json_plan_errors_carry_a_message_and_never_a_value(tmp_path):
+    """Every plain PlanError path reaches JSON with an authored message (ISSUE-740)."""
+    secret = "private-sidecar-value"
+    sidecar = tmp_path / "secrets.json"
+    sidecar.write_text(json.dumps({"config": [{"path": ["nextcloud", "app_password"], "value": secret}]}))
+    sidecar.chmod(0o600)
+    role = tmp_path / "role.json"
+    role.write_text(json.dumps({
+        "istota_plan": {"config": {}},
+        "istota_plan_secrets": {"users": {"alice": {"karakeep": {"api_key": secret}}}},
+    }))
+    role.chmod(0o600)
+    plans = {
+        "unterminated.toml": f'token = "{secret}\n'.encode(),
+        "bad-utf8.toml": f'token = "{secret}'.encode() + b'\xff"\n',
+        "bad.json": f'{{"config": {{"token": "{secret}"'.encode(),
+        "duplicate.json": f'{{"config": {{"a": "{secret}", "a": "{secret}"}}}}'.encode(),
+        "list.json": json.dumps([secret]).encode(),
+        "meta-version.json": json.dumps({"meta": {"version": secret}}).encode(),
+        "meta-newer.json": json.dumps({"meta": {"version": 99}}).encode(),
+        "meta-managed.json": json.dumps({"meta": {"managed": secret}}).encode(),
+        "meta-source.json": json.dumps({"meta": {"source": secret * 40}}).encode(),
+        "meta-request.json": json.dumps({"meta": {"request": secret}}).encode(),
+        "null.json": json.dumps({"config": {"token": None}}).encode(),
+        "discarded.json": json.dumps({"config": {"scheduler": {"poll_interval": secret},
+                                                 "nextcloud": {"url": [secret]}}}).encode(),
+    }
+    calls = []
+    for name, raw in plans.items():
+        path = tmp_path / name
+        path.write_bytes(raw)
+        calls.append((name, path, {}))
+    calls += [
+        ("missing", tmp_path / "absent.json", {}),
+        ("stdin", "-", {"stdin": _UnreadableStdin()}),
+        ("format", role, {"input_format": "unknown"}),
+        ("both sidecars", role, {"input_format": "role-vars", "secrets_file": sidecar}),
+    ]
+    for name, plan_path, kwargs in calls:
+        out, err = [], []
+        assert apply.run(plan_path, tmp_path / "config.toml", dry_run=True, output_format="json",
+                         out=out.append, err=err.append, **kwargs) == 1, name
+        [error] = json.loads(out[0])["errors"]
+        assert error["code"] == "validation_error", name
+        assert error.get("message"), name
+        assert secret not in "".join(out + err), name
+        if name == "meta-newer.json":
+            assert "99" not in error["message"]
+        # check --json reports a discarded value as a problem, which is the editor's own surface.
+        if name in plans and name != "discarded.json":
+            out = []
+            assert apply.check(plan_path, as_json=True, out=out.append, err=err.append) == 1, name
+            result = json.loads(out[0])
+            assert result["error"] or result["problems"], name
+            assert secret not in out[0], name
+
+
+def test_json_discarded_config_names_the_paths_not_the_values(tmp_path):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"config": {"scheduler": {"poll_interval": "private-sidecar-value"}}}))
+    out, err = [], []
+    assert apply.run(plan, tmp_path / "config.toml", dry_run=True, output_format="json",
+                     out=out.append, err=err.append) == 1
+    [error] = json.loads(out[0])["errors"]
+    assert "scheduler.poll_interval" in error["message"]
+    assert "private-sidecar-value" not in error["message"]

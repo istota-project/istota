@@ -69,7 +69,7 @@ class SchemaError(PlanError):
 
     def __init__(self, path: list[str | int], message: str):
         self.problem = {"kind": "discarded", "path": list(path), "message": message}
-        super().__init__(message)
+        super().__init__(message, message=message)
 
 
 @dataclass
