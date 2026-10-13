@@ -2,8 +2,8 @@
 
 After the [quickstart](quickstart-server.md), complete these steps on the machine, as root. `istota` there runs the CLI inside the daemon container. On the [local VM](local-install.md), run them on the Mac as yourself: the Mac's `istota-stack` and `istota` forward each command into the VM.
 
-:::tip[Phase 6 — DB-backed user profiles]
-Profile fields (display_name, timezone, email addresses, log/alerts channels, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed them with the CLI (the [Ansible management role](../deployment/ansible.md) runs the same command):
+:::tip[User profiles]
+Profile fields (display_name, timezone, email addresses, log/alerts channels, worker overrides, trusted email senders, disabled skills) live in the `user_profiles` SQLite table. They're auto-seeded the first time a user logs into the web UI, or you can pre-seed them with the CLI (the optional [Ansible management role](../deployment/ansible.md), where an estate uses it, runs the same command):
 ```bash
 istota user ensure --name alice --display-name "Alice" \
   --tz "America/Los_Angeles" --email alice@example.com
@@ -13,7 +13,7 @@ The web UI at `/istota/settings` lets each user edit their own profile and add p
 
 ## Claude authentication
 
-`istota setup` collects a long-lived Claude Code OAuth token (the "Claude Code OAuth token" prompt, which writes it to `secrets/claude_code_oauth_token`), and the entrypoint provisions the credentials file for you. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
+The first-run setup, in the browser or the terminal, collects a long-lived Claude Code OAuth token (the Claude subscription choice, which writes it to `/srv/app/istota/secrets/claude_code_oauth_token`), and the daemon writes Claude Code's credentials file from it at every start. Generate the token with `claude setup-token`. If you supplied it during install, Claude auth is already done — skip this section.
 
 Only if you skipped the token at install time (and aren't using `ANTHROPIC_API_KEY` or a native-brain provider key), authenticate manually:
 
@@ -23,7 +23,7 @@ istota-stack exec claude login
 
 ## Open the web app
 
-Open the hostname you gave the wizard (`http://localhost:8080` in a Lima VM) and sign in. Web chat works with or without Nextcloud.
+Open the hostname you gave the setup (`http://localhost:8080` on the local VM, unless you chose another port) and sign in. Web chat works with or without Nextcloud.
 
 ## Invite the bot to Talk
 
@@ -45,7 +45,7 @@ istota-stack compose logs -f daemon
 
 ## User workspace
 
-After the bot runs for the first time for a user, it creates a directory structure in the workspace: the Nextcloud mount with Nextcloud integration, `/data/workspace` in the state directory with local storage.
+After the bot runs for the first time for a user, it creates a directory structure in the workspace. Where the workspace is depends on the [storage mode](../deployment/running-the-stack.md#storage): `/srv/app/istota/data/workspace` on the machine with local storage, the bot's Nextcloud files with full Nextcloud integration, and the workspace folder (`~/Istota` by default) on the local VM.
 
 ```
 /Users/alice/

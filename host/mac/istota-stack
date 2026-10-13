@@ -422,7 +422,7 @@ refresh_one() {
 }
 
 # The scripts on PATH and the template, from the checkout the VM verified.
-# Only an install is refreshed: run from a checkout, this script leaves both.
+# Only an existing install is refreshed, wherever this script runs from.
 refresh_scripts() {
     if [ ! -e "${BIN_DIR}/istota-stack" ]; then
         log "no install in ${BIN_DIR}; the Mac scripts were not refreshed."

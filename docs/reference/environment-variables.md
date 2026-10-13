@@ -1,6 +1,6 @@
 # Environment variables
 
-Environment variables set for Claude Code subprocess invocations and skill CLI commands.
+Environment variables set for Claude Code subprocess invocations and skill CLI commands, the secret overrides the config loader reads, and, at the end, the variables and host files the [stack](#the-stack) uses.
 
 ## Core variables
 
@@ -190,3 +190,53 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 The three WhatsApp names kept their un-nested spelling when the block moved under `cloud`, so an existing environment file keeps working across that upgrade. Each variable is listed in full rather than as a shared prefix and a list of suffixes: this is the page you reach by searching for a variable already sitting in your environment, and a suffix matches nothing.
 
 See [credentials](../configuration/credentials.md) for what each override covers and the full env var → config mapping.
+
+## The stack
+
+These belong to the stack on its VM rather than to a task. `istota-stack` passes the first group to every `docker compose` call it makes, and they outrank the stack's `.env`. Run `docker compose` through `istota-stack compose` so it gets them.
+
+| Variable | Value on the VM |
+|---|---|
+| `ISTOTA_CONFIG_DIR` | `/srv/app/istota/config`, bound at `/data/config` |
+| `ISTOTA_DATA_DIR` | `/srv/app/istota/data`, bound at `/data`. Unset (Docker Desktop, the test tiers), `/data` is the named volume `data` |
+| `ISTOTA_SECRETS_DIR` | `/srv/app/istota/secrets`, one file per credential |
+| `ISTOTA_MOUNT_DIR` | The workspace mount's directory, bound at `/mnt/shared`: `/srv/mount/host-folder` when `host.env` says `STORAGE=host-folder`, else `/srv/mount/nextcloud/content` |
+| `ISTOTA_HOST_ENV` | `/srv/app/istota/host.env`, which `daemon` and `nginx` read |
+| `ISTOTA_WORKSPACE_FSTYPE` | The filesystem the workspace must be on, from `STORAGE`: `fuse.rclone` for `nextcloud`, `virtiofs` for `host-folder`, empty for `local`. The entrypoint refuses to start when `workspace_mount_path` is set and `/mnt/shared` is not that type |
+| `ISTOTA_WORKSPACE_MARKER_REQUIRED` | `1` for `host-folder`: the entrypoint, doctor and the database backup require `.istota-workspace` at the folder's root, since a folder that went away still looks like a mount |
+| `ISTOTA_LOG_DRIVER` | `journald`, so container output reaches the VM's journal. The compose default is `json-file` |
+| `ISTOTA_BUILD_REVISION`, `ISTOTA_BUILD_TAG` | The commit and tag being built, set when a build names a tag. The image keeps both, so the running version reads `<version>+<short commit>` for anything but a release tag |
+| `ISTOTA_REQUESTS_DIR` | `/srv/app/istota/requests`, the [web config editor's](../configuration/web-editor.md) trigger directory, bound into `web` alone. Set only where `provision.sh` made it |
+| `CERTS_DIR`, `ACME_WEBROOT` | nginx's certificates (`letsencrypt/` with `TLS_CERT_SOURCE=acme`, else `certs/`) and the ACME webroot |
+
+Two more are set for one command at a time:
+
+| Variable | Effect |
+|---|---|
+| `ISTOTA_CONFIG_READ_ONLY` | Whether `/data/config` is read-only in the container, `true` by default. `istota-stack` sets `false` for the one-shot containers of `setup`, `apply`, the imports, `restore` and `localize-workspace`, and for nothing that keeps running |
+| `ISTOTA_SETUP_PUBLISH` | Where `istota-stack setup --web` publishes its page: `0.0.0.0:443` by default (`[::]:443` on a machine with only IPv6), `127.0.0.1:8080` with `--local`. Set it to a free address and port when that one is taken |
+
+Inside the `daemon` and `web` containers, compose sets `ISTOTA_CONFIG_PATH=/data/config/config.toml` and `ISTOTA_ADMINS_FILE=/data/config/admins`, and each credential file becomes its uppercase name (`istota_nextcloud_app_password` becomes `ISTOTA_NEXTCLOUD_APP_PASSWORD`, one of the [secret overrides](#secret-overrides) above). Where the VM has the editor's trigger directory, `web` also gets `ISTOTA_CONFIG_APPLIER=host`, which says the host applies config changes and turns the web editor on. `ISTOTA_WEB_INSECURE_COOKIES=1` drops the `Secure` flag from the session cookie; setup writes `0` for every ingress.
+
+On the Mac, `ISTOTA_LIMA_INSTANCE` names the Lima instance `istota-stack` and `istota` act on (default `istota`).
+
+### host.env and .env
+
+The VM keeps two settings files beside the checkout. `istota setup` writes the keys it owns in each and keeps every other line; `istota-stack host-env` reads and sets `host.env` keys by hand.
+
+`/srv/app/istota/host.env` is read by `provision.sh`, the host units, and the `daemon` and `nginx` containers:
+
+| Key | Meaning |
+|---|---|
+| `STORAGE` | Where the workspace is: `local` (`/data/workspace`, no mount), `nextcloud` (the rclone mount of the bot's Nextcloud files) or `host-folder` (a folder the Mac shares into the local VM). `nextcloud` means the mount, not Nextcloud itself: Talk and the `nextcloud` skill work with `local` too |
+| `INGRESS` | How the stack is reached: `local`, `proxied` or `direct` |
+| `DOMAIN` | The public hostname. In `direct` and `proxied` ingress the daemon refuses to start when `[site] hostname` differs |
+| `TLS_CERT_SOURCE`, `UPSTREAM_PROXY`, `LISTEN_ADDR`, `LISTEN_PORT` | The ingress mode's details |
+| `ACME_EMAIL`, `ACME_SERVER` | Optional, for certbot in `direct` ingress |
+| `RCLONE_REMOTE` | The remote in `/srv/app/istota/rclone.conf` the mount uses (`nextcloud` when setup wrote the file) |
+| `RELEASE_SIGNING_KEY` | The release key, one line of an SSH public key, written to `allowed_signers` |
+| `CLAUDE_CODE_VERSION` | The Claude Code version a build pins, when it pins one |
+| `ZRAM_ENABLED` | `0` leaves swap alone |
+| `HOST_LOOPBACK_BLOCK`, `HOST_GATEWAY_ADDR`, `HOST_LOOPBACK_ALLOW` | The local VM's block on container traffic to the Mac's loopback (`HOST_GATEWAY_ADDR`), except DNS and the TCP ports in `HOST_LOOPBACK_ALLOW`, which `allow-host-port` and `deny-host-port` edit |
+
+`/srv/app/istota/.env` is compose's: `COMPOSE_PROFILES`, `DOMAIN`, `ISTOTA_SECRETS_DIR`, `NGINX_PUBLISH`, `NGINX_PUBLISH_TLS` and `ISTOTA_WEB_INSECURE_COOKIES` from setup, and `ISTOTA_TAG`, `ISTOTA_PREVIOUS_TAG`, `ISTOTA_TAG_UNSIGNED` and `ISTOTA_PREVIOUS_TAG_UNSIGNED` from `update` and `rollback`. istota's own settings are never here; they are in `config.toml`.
