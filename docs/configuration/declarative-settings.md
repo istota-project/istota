@@ -91,3 +91,22 @@ Preflight failure writes no settings. Execution uses separate database transacti
 On the VM, `istota-stack apply settings.json --secrets-file private-settings.json` runs the same apply in a one-shot container. The plan and the sidecar are copied into a private staging directory, bound read-only, and passed to the container by path; the staging is removed afterwards whatever the outcome. The sidecar, and a `--input-format role-vars` input, must be private regular files (mode 0600). On a Mac, the local VM's `istota-stack apply` takes both paths on the Mac and copies them in the same way.
 
 `istota-stack apply` prints the JSON result document on stdout and its own messages on stderr, and exits as `istota apply` does. It restarts the stack once when the result says committed changes need a restart. Credential values, briefing content, CRON.md and HEARTBEAT.md changes are reported as changed without a restart, and an unchanged or marker-only apply restarts nothing. A partial apply restarts nothing: the committed changes stay, and the message says to fix the error, apply the plan again and then restart the stack. An image older than the host script returns no result document, which is a failure, never a change; update the stack first.
+
+## With Ansible
+
+The [management role](../deployment/ansible.md) takes the same plan as `istota_plan`. Export it from the running install and read it in the estate's playbook:
+
+```bash
+istota-stack exec istota snapshot --format json > settings.json
+```
+
+```yaml
+istota_plan: "{{ lookup('file', 'settings.json') | from_json }}"
+istota_plan_secrets:
+  users:
+    alice: {karakeep: {api_key: "{{ vault_alice_karakeep }}"}}
+```
+
+Credentials stay in the vault and reach the plan through `istota_plan_secrets`, the sidecar in variable form. Host settings, deployment secrets and the admins list keep their own role variables; a snapshot does not contain them, so it is not a complete inventory. The role marks the config as managed by ansible. `istota_plan_prune` and `istota_plan_prune_secrets` pass `--prune` and `--prune-secrets`. Under `ansible-playbook --check` the role runs the same dry run and reports per-user drift without writing anything or restarting the stack. The older variables (`istota_config`, `istota_users` and the rest) still work, but not together with `istota_plan`.
+
+A settings plan applied by the role is a settings import, not a recovery. To move a whole install, use the backup, restore and migration tools.

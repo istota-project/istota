@@ -6,11 +6,10 @@ The role is thin. It writes the inputs `host/provision.sh` and `istota-stack` re
 
 - `host.env`, the stack's `.env` keys that `istota setup` owns, and `rclone.conf` for full Nextcloud integration
 - one file per deployment secret, and the admins file, written as uid 10001
-- `istota_config`, the whole of `config.toml` as a nested dict, applied as an `istota apply` plan
 - `istota-stack update <tag>`, only when `istota_release` differs from the deployed tag
-- the `istota user|resource|briefing|secret ensure` loops, through the machine's `istota` wrapper
+- the application settings through `istota-stack apply`: the config first, then, once the stack is healthy, the users' profiles, folders, briefings, jobs, heartbeats and credentials
 
-It renders no unit, nginx config or cron entry, and runs no build or migration. `ansible-playbook --check` reports drift without changing anything.
+The settings come either as `istota_plan`, an `istota apply` plan such as the output of `istota snapshot --format json`, or as the older `istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings` and `istota_user_secrets`, never both. It renders no unit, nginx config or cron entry, and runs no build or migration. `ansible-playbook --check` reports drift, per-user settings included, without changing anything. See [Declarative settings](../configuration/declarative-settings.md) for the plan itself.
 
 The machine must already be bootstrapped from a verified release (`host/cloud-init.yaml`, or `install.sh --server`); the role refuses one with no checkout. Both bootstraps start the browser setup (`istota-setup.service`), which listens on port 443 for up to an hour without a request. A machine the role will configure does not need it: stop it with `systemctl stop istota-setup` before the first play, or run the installer with `--terminal-setup` and no terminal, which stops after the build.
 

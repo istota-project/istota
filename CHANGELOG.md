@@ -163,6 +163,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Ansible management role applies user settings with `istota apply`, and `--check` now reports their drift.** The ensure loops are gone: profiles, folders, briefings and user secrets go through `istota-stack apply` with a private input file, and a new `istota_plan` variable takes a whole settings plan, such as `istota snapshot` output, with `istota_plan_secrets`, `istota_plan_prune` and `istota_plan_prune_secrets` beside it. A settings change restarts the stack at most once. **Upgrade note:** existing `istota_users` and related variables keep working, but setting them together with `istota_plan` fails the play, and an unknown or one-shot ensure flag (such as `reset-whatsapp-identity`) now fails it instead of being passed through.
+
+- **`istota-stack apply` prints `istota apply`'s JSON result instead of the text diff, and restarts only when that result says a committed change needs it.** It takes `--secrets-file` for a private credential sidecar and `--input-format role-vars`. **Upgrade note:** a script that read the text diff or treated every exit 2 as a restart should read the JSON document instead (`changed`, `restart_required`, `partial`, `errors`); `--format text` is refused, and an image older than the host script now fails with nothing written, so update the stack first.
+
 - **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
 
 - Location History now opens on yesterday. Dates and ranges selected through links still take precedence.

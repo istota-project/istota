@@ -8,9 +8,11 @@ The role is thin. It writes the inputs `host/provision.sh` and `istota-stack` re
 2. `provision.sh`, when what it acts on (`host.env`, `rclone.conf`, `.env`'s `COMPOSE_PROFILES`, the checkout's commit) differs from the digest its last successful run recorded, or where `istota-stack` is missing. A play that dies between writing an input and `provision.sh` finishing therefore still provisions on the next play.
 3. One file per deployment secret under `secrets/` (0400, uid 10001) from vault variables, and `config/admins` when `istota_admins` is set, through `istota-stack put-files`. Both directories are uid 10001's, so the files are written as 10001 with the values on stdin, and root never opens a file there.
 4. `istota-stack update <tag>`, only when `istota_release` differs from `ISTOTA_TAG` in `.env`. An update is a deliberate change to that variable.
-5. `istota_config`, the whole of `config.toml` as a nested dict, written as an `istota apply` plan and applied with `istota-stack apply`. Exit 2 is reported as changed, and `istota-stack` restarts a running stack on it.
+5. The config, from `istota_config` or the `config` of `istota_plan`, applied with `istota-stack apply --input-format role-vars`. Exit 2 is reported as changed. `istota-stack` restarts a running stack once, only when the result says a committed change needs it.
 6. `istota-stack check-image`, after the apply: a build decides from `config.toml` whether Claude Code goes in, so when the image lacks what the config needs (or has another version than `istota_claude_code_version`), the deployed tag is rebuilt.
-7. The `istota user|resource|briefing|secret ensure` loops, through the VM's `istota` wrapper. A secret's value goes on stdin (`--value-stdin`), and an empty one is skipped. The declarative-apply work will replace these loops.
+7. The user settings, once the stack is healthy: profiles, folder resources, briefings, scheduled jobs, heartbeats, provisionable credentials and shared briefing definitions, from `istota_plan` or from the legacy `istota_users`, `istota_user_resources`, `istota_user_briefings` and `istota_user_secrets`. They go through the same `istota-stack apply`, because they need the database the daemon initializes on its first start. The role adds no restart of its own.
+
+Both applies read the role's variables from a private 0600 file that is removed afterwards, whatever the outcome; credential values are never on a command line. The command prints `istota apply`'s JSON result, and a refused or partial apply fails the play with the error codes and field paths from that result.
 
 It renders no unit, nginx config or cron entry, and runs no build or migration. `provision.sh` and `istota-stack` own those.
 
@@ -43,6 +45,31 @@ istota_config:
 istota_users:
   alice: {display-name: Alice, email: [alice@example.com]}
 ```
+
+### Application settings: `istota_plan` or the legacy variables
+
+The application settings come in one of two forms, never both. A play that sets `istota_plan` together with any nonempty `istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings` or `istota_user_secrets` fails before it changes anything. Deployment variables (`istota_secrets`, `istota_admins`, the `host.env` variables, `istota_rclone_conf`) go with either.
+
+`istota_plan` is an `istota apply` plan as a mapping, with the CLI's own field names ([Declarative settings](../docs/configuration/declarative-settings.md)). A snapshot of a running install is one:
+
+```sh
+ssh vm sudo istota-stack exec istota snapshot --format json > settings.json
+```
+
+```yaml
+istota_plan: "{{ lookup('file', 'settings.json') | from_json }}"
+istota_plan_secrets:
+  users:
+    alice: {karakeep: {api_key: "{{ vault_alice_karakeep }}"}}
+```
+
+`istota_plan_secrets` is the plan's private sidecar: `users` maps user, service and key to a value, and `config` replaces inline config credentials by path. The role marks the config it applies as managed by ansible, so the web config editor shows it read-only; each user's `profile_mode` stays as the plan says. A snapshot says `update`, which neither adds nor releases a field lock; set `managed` on the profiles the inventory should own.
+
+`istota_plan_prune: true` removes the folders, briefings, jobs and heartbeat checks a user's plan does not list, from the collections it does list. It never removes users or credentials. `istota_plan_prune_secrets: true`, which needs `istota_plan_prune`, also removes the provisionable keys of a service a user's `secrets` entry names but does not list. Both need `istota_plan`, so the legacy variables never delete anything.
+
+The legacy variables keep working unchanged: an `istota_users` entry is still the `istota user ensure` flags without their dashes. The role converts them in Python with the CLI's own argument definitions, so an unknown flag fails the play rather than being dropped, and the one-shot `reset-whatsapp-identity` is refused; run `istota user ensure --reset-whatsapp-identity` for it. An `istota_user_secrets` entry with an empty value is skipped, as before.
+
+An image older than this role's `istota-stack` cannot read the role's input and returns no result document. The play then fails with nothing written. Update the release first (`--tags istota_update`), then run the whole play.
 
 ### Release or latest
 
@@ -93,7 +120,7 @@ ansible-vault encrypt new.yml
 shred -u old.yml config.toml rclone.conf
 ```
 
-`--old-vars` repeats, later files winning, for a host_vars file on top of group_vars. The output is 0600 and only names are printed. It maps the old secret variables to `istota_secrets`, the users to the ensure flags, and keeps the master key and web token key as `vault_istota_secret_key` and `vault_istota_web_token_key` (no task reads them; the vault is their only copy off the VM). The config comes from the VM's config.toml, not from the old variables, because the import rewrote its paths. A Twilio or WhatsApp Cloud credential has no secrets file, so the converter refuses and writes nothing; every old variable it does not carry is listed.
+`--old-vars` repeats, later files winning, for a host_vars file on top of group_vars. The output is 0600 and only names are printed. Its output uses the legacy variables, which the role still reads, so an estate need not move to `istota_plan` in the same change. It maps the old secret variables to `istota_secrets`, the users to the ensure flags, and keeps the master key and web token key as `vault_istota_secret_key` and `vault_istota_web_token_key` (no task reads them; the vault is their only copy off the VM). The config comes from the VM's config.toml, not from the old variables, because the import rewrote its paths. A Twilio or WhatsApp Cloud credential has no secrets file, so the converter refuses and writes nothing; every old variable it does not carry is listed.
 
 A secret named in `istota_secrets` is written exactly, an empty string included. A secret left out is created empty if its file is missing and otherwise left alone, so a file the wizard or the import wrote survives a play that does not manage it.
 
@@ -108,8 +135,8 @@ A secret named in `istota_secrets` is written exactly, an empty string included.
 
 ## Check mode
 
-`ansible-playbook --check` reports drift. The config step runs `istota-stack apply --dry-run` against the plan the play would apply, the secrets step runs `istota-stack put-files --dry-run`, an update, a provision or a rebuild that would run is reported as changed, and the other file writes are checked as usual. The ensure loops have no dry run and are skipped under `--check`.
+`ansible-playbook --check` reports drift. Both settings steps run `istota-stack apply --dry-run` against the settings the play would apply, so a changed profile, resource, briefing, job, heartbeat or credential shows as changed, and nothing is written or restarted. The secrets step runs `istota-stack put-files --dry-run`, an update, a provision or a rebuild that would run is reported as changed, and the other file writes are checked as usual. On a VM with no deployed release or no config yet, the user settings cannot be dry-run and are reported as a change.
 
 ## Tests
 
-`tests/test_management_role.py`, in the default suite, holds the role's names to the code: the secret names to `setup_wizard.SECRET_NAMES`, the `host.env` keys to what `provision.sh` documents and reads and what `istota-stack` reads, the `.env` keys and their derived values to the wizard's, and the `istota-stack` verbs the role calls to the script's own. It also requires that no task writes below `config/` or `secrets/`, that every task whose arguments carry a secret has `no_log`, that no secret value is on an ensure call's argv, and that an exit 2 counts as a change only when the command ran. The vm tier applies its proxied and nextcloud modes with this role and checks that a `--check` right after a converge changes nothing, that a link planted in `secrets/` is not written through, that a provision a dead play left undone runs on the next, and that a claude_code brain gets an image with Claude Code (`tests/vm/test_management_role.py`).
+`tests/test_management_role.py`, in the default suite, holds the role's names to the code: the secret names to `setup_wizard.SECRET_NAMES`, the `host.env` keys to what `provision.sh` documents and reads and what `istota-stack` reads, the `.env` keys and their derived values to the wizard's, and the `istota-stack` verbs the role calls to the script's own. It also requires that no task writes below `config/` or `secrets/`, that every task whose arguments carry a secret has `no_log`, that no secret value is on an argv, and that an exit 2 counts as a change only when the command ran. It renders the role's settings envelopes and passes each through `istota apply`'s own converter, and checks the mixed-input refusal, the `--dry-run` and prune flags, and the failure message read from a result document. The vm tier applies its proxied and nextcloud modes with this role and checks that a `--check` right after a converge changes nothing, that a link planted in `secrets/` is not written through, that a provision a dead play left undone runs on the next, that a claude_code brain gets an image with Claude Code, and that the VM's own snapshot used as `istota_plan` is no drift while a profile changed in it is drift under `--check` and is applied by a converge (`tests/vm/test_management_role.py`).
