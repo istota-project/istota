@@ -50,9 +50,11 @@
 </div>
 
 <style>
+  /* A placement can widen the gap through the property; a rule targeting
+     `.nav-links` from outside ties this one and wins or loses on load order. */
   .nav-links {
     display: flex;
-    gap: var(--chip-gap);
+    gap: var(--header-nav-gap, var(--chip-gap));
     align-items: center;
     flex-wrap: wrap;
     min-width: 0;
