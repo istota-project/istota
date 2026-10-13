@@ -37,7 +37,7 @@ def read_private_document(path, *, field, option):
     try:
         return apply.parse_document(raw, is_json=path.suffix.lower() == ".json", where=f"in {option}")
     except apply.PlanError as exc:
-        raise SchemaError([field], str(exc)) from None
+        raise SchemaError([field], exc.message or f"{option} does not parse") from None
 
 
 def select_sidecar(plan: Plan, sidecar: Sidecar, users: list[str] | None) -> Sidecar:
