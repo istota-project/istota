@@ -253,4 +253,13 @@ RUN chmod 0755 /entrypoint.sh /config-diff.py \
         /usr/local/sbin/istota-root-phase /usr/local/bin/istota-drop \
         /usr/local/bin/istota-secrets
 
+# Last, so a new commit invalidates no earlier layer. Read by build_info's
+# version label, and by `docker image inspect` as the OCI labels.
+ARG ISTOTA_BUILD_REVISION=
+ARG ISTOTA_BUILD_TAG=
+ENV ISTOTA_BUILD_REVISION=${ISTOTA_BUILD_REVISION} \
+    ISTOTA_BUILD_TAG=${ISTOTA_BUILD_TAG}
+LABEL org.opencontainers.image.revision=${ISTOTA_BUILD_REVISION} \
+      org.opencontainers.image.version=${ISTOTA_BUILD_TAG}
+
 ENTRYPOINT ["/usr/local/sbin/istota-root-phase", "/entrypoint.sh"]

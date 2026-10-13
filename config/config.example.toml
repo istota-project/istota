@@ -28,30 +28,8 @@ bot_name = "Istota"
 # (no need to also set `effort =`); the modifier's effort wins.
 # =============================================================================
 
-# DEPRECATED (ISSUE-418): top-level `model` / `effort`.
-#
-# These were the claude_code brain's own defaults living at the root. Because
-# they sat here they read as deployment-wide, and the executor treated them as
-# one -- filling every request with them whatever brain was about to run, which
-# shadowed that brain's own configured default. A room pinned to `native` with
-# `[brain.native] model` set still ran the Claude model, against the native
-# endpoint, billed per token.
-#
-# They still load, and are migrated onto `[brain.claude_code]` and
-# `[brain.tmux]` with a warning -- both, because those two share the anthropic
-# namespace and the same `claude` binary, so the value is valid in either.
-# Never onto `[brain.native]`: an Anthropic model id cannot carry to an
-# openai_compat endpoint, which is the defect itself.
-#
-# Set the per-brain keys instead. Each brain's block takes the same values this
-# one did:
-#   - canonical IDs    "claude-opus-5-5", "claude-opus-4-7", "claude-sonnet-5"
-#   - shortcuts        "opus", "sonnet", "haiku"
-#   - role tiers       "smart", "general", "fast", or any custom alias from
-#                      [models.aliases] below
-#   - any of the above + an optional :effort modifier ("opus:high")
-# Bare shortcuts ("opus", "sonnet") float to the current latest version each
-# release; canonical IDs are immutable. Pin to a versioned ID for stability.
+# Deprecated (ISSUE-418). Set `model` and `effort` under [brain.claude_code] and
+# [brain.tmux] instead; these still load and are moved there with a warning.
 # model = "claude-opus-5-5"
 # effort = "high"
 
@@ -61,20 +39,15 @@ bot_name = "Istota"
 # advisor_model = ""
 
 # Use config/system-prompt.md instead of Claude Code's default system prompt.
-# The custom prompt is minimal, focused on tool usage and working practices.
-# The CLI opens that file from inside the sandbox, so it is bind-mounted there
-# read-only — the only file in this directory that is (config.toml is not).
+# That one file is bind-mounted read-only into the sandbox.
 # custom_system_prompt = true
 
 # Database path (relative to working directory or absolute)
 db_path = "data/istota.db"
 
-# Local-disk root for per-user module SQLite DBs (feeds/health/location/money).
-# These MUST live on local disk, NOT the Nextcloud mount: WAL's mmap'd -shm file
-# SIGBUSes the process on the rclone FUSE mount, so they'd be stuck on the
-# slower DELETE journal mode (no reader/writer concurrency). User-facing files
-# (health uploads, money ledgers, feeds exports) stay on the mount; only the
-# .db relocates here. A path under workspace_mount_path is refused at runtime.
+# Local-disk root for the per-user module databases (feeds, health, location,
+# money). It must not be on the Nextcloud mount; a path under
+# workspace_mount_path is refused.
 module_data_dir = "data/modules"
 
 # =============================================================================
@@ -84,12 +57,9 @@ module_data_dir = "data/modules"
 # Required when [nextcloud] url is set, whether or not it is the mount.
 workspace_path = "/srv/mount/nextcloud/content"
 
-# The mountpoint the workspace lives on, when it is one: the rclone mount of the
-# bot's Nextcloud files (mount-nextcloud.service), or a host folder shared into
-# a VM. Doctor and the backup guard check it is still mounted. With a Nextcloud
-# URL, set means the workspace is the mount; unset means it is local, and Talk
-# and the nextcloud skill still work. Read under its old name,
-# nextcloud_mount_path; both names with different paths is an error.
+# The mountpoint the workspace lives on, if any: the rclone mount of the bot's
+# Nextcloud files, or a host folder shared into a VM. Doctor and the backup
+# guard check it is mounted. Old name: nextcloud_mount_path.
 # workspace_mount_path = "/srv/mount/nextcloud/content"
 
 # Path to skills directory (individual skill files loaded selectively)
@@ -101,80 +71,36 @@ skills_dir = "config/skills"
 # Temporary directory for task execution
 temp_dir = "/tmp/istota"
 
-# How much recalled memory a task prompt may carry. Both are deployment-wide
-# budgets applied after retrieval has already picked what is most relevant, so
-# lowering them drops the weakest matches rather than switching recall off.
-# `max_memory_chars` caps the total characters of memory text; 0 is unlimited.
-# A per-user `[users.X] max_chars` of 0 means "share this budget".
+# Cap on the characters of recalled memory in one task prompt; 0 is unlimited.
+# Lowering it drops the weakest matches first.
 # max_memory_chars = 0
 # `max_knowledge_facts` caps how many knowledge-graph facts a single prompt
 # carries; 0 is unlimited.
 # max_knowledge_facts = 50
 
-# Experimental feature flags — operator opt-in for rough features that ship
-# in the tree but are off by default. See docs/EXPERIMENTAL.md for the
-# registry and graduation policy. Run `uv run istota experimental list` to
-# see what's gateable on this build. Unknown names log a warning at
-# startup. Not exposed in the web UI, not per-user.
+# Operator opt-in flags for rough features that ship off by default.
+# `istota experimental list` shows what this build can gate.
 [experimental]
 # features = ["money_tax", "money_wash_sales"]
 features = []
 
-# Brain — selects the model-invocation backend. Three kinds coexist behind the
-# same protocol (src/istota/brain/), so swapping backends doesn't touch executor
-# orchestration (memory, skills, sandbox, etc.):
-#   "claude_code" (default) — wraps the headless `claude -p` CLI subprocess.
-#   "native"                — istota's own in-process agent loop against an
-#                             OpenAI-compatible (or Claude-CLI) provider.
-#   "tmux_claude"           — drives the interactive `claude` TUI in a detached
-#                             tmux session (keeps traffic on subscription
-#                             billing). Full instance switch, with its own
-#                             launch circuit breaker. Set fallback below to
-#                             reroute an unavailable tmux primary.
+# Which backend runs tasks: "claude_code" (the headless `claude -p` CLI, the
+# default), "native" (istota's own agent loop against an OpenAI-compatible
+# endpoint) or "tmux_claude" (the interactive `claude` TUI in tmux).
 # [brain]
 # kind = "claude_code"
 #
-# Availability failover: when the primary brain is unavailable (subscription
-# usage limit / missing binary / tmux launch failure), run the task on the
-# fallback brain with that brain's own [brain.native] / [brain.tmux] settings.
-# Motivating case: a claude_code subscription hitting its usage limit, failing
-# over to a metered native endpoint. A portable role tier (fast/general/smart)
-# carries across the provider boundary; a provider-specific model pin drops to
-# the fallback brain's own default (logged + a visible note in the reply).
-# Single level only. "" = no fallback, for every brain kind — a tmux_claude
-# primary needs fallback = "claude_code" spelled out here to get one. A value
-# equal to the kind a task runs on is no fallback for that task, so naming
-# claude_code here with a source_type_overrides entry routing to tmux gives the
-# routed tasks failover and leaves the rest alone. Once the
-# primary reports a persistent unavailability, subsequent tasks skip it for
-# fallback_cooldown_seconds; a successful primary probe closes the cooldown early.
-# On a usage limit against a Claude subscription the window ends at the quota's
-# own reset instead, so fallback_cooldown_seconds is the ceiling rather than the
-# duration (floor 60s).
+# Availability failover: rerun a task on this brain when the primary is
+# unavailable (usage limit, missing binary, tmux launch failure). "" is no
+# fallback. A pinned room or job never fails over.
 # fallback = ""                       # "" | "claude_code" | "native" | "tmux_claude"
 # fallback_on_transient = true        # also reroute a persistent transient_api_error
 #                                     # (429 / 5xx / 529 / network) after the primary's
 #                                     # own retries are exhausted. Set false to opt out.
 # fallback_cooldown_seconds = 900     # skip an unavailable primary this long; 0 disables stickiness
 #
-# Which brain kinds a room may pin for itself, and which a scheduled job may
-# pin with `brain` in CRON.md. The name is narrower than the setting: one list
-# bounds every pin written outside this file. Empty (the default) means none
-# may, so the feature is inert until you name kinds here. A gate rather than a
-# preference: brain kind decides which process holds the agent loop, what tool
-# set it registers and which sandbox profile is built, so it is not something an
-# upgrade should switch on. Both deployment shapes rewrite this file from
-# scratch, so set it through the deployment rather than by editing the rendered
-# copy: `istota_brain_room_selectable` on Ansible,
-# `ISTOTA_BRAIN_ROOM_SELECTABLE` (comma-separated) on Docker. Writing a room's
-# brain, or a job's, is admin-only on top of this — CRON.md is model-writable
-# through the `schedules` skill, so a non-admin's `brain` is dropped at sync
-# with a warning and the job runs the configured answer. Whatever pins a brain
-# runs that brain or fails saying why — the fallback above does not apply to
-# it, which is what makes the pin mean what it says. A name here that is not a
-# buildable kind is dropped with a warning and never offered. Listing a kind
-# also widens the doctor checks for it (`claude` on PATH, tmux, a native API
-# key), whether or not anything has selected it.
+# Brain kinds a room or a CRON.md job may pin. Empty (the default) means none
+# may; setting a pin is admin-only.
 # room_selectable = []                # e.g. ["claude_code", "native"]
 #
 # Native-brain settings (only used when kind = "native", or via a routing
@@ -228,11 +154,8 @@ features = []
 #                                            #   room for and uses whichever budget is scarcer, so
 #                                            #   the notices stay reachable on a slow brain.
 # soft_deadline_percent = 90                 # stop the loop at this % of scheduler.task_timeout_
-#                                            #   minutes, on a stop that keeps the model's partial
-#                                            #   work. The hard clock discards it; max_turns
-#                                            #   delivers it, and on a slow brain the clock is what
-#                                            #   arrives first. The remaining slack still covers a
-#                                            #   turn that hangs. 0 or >= 100 disables.
+#                                            #   minutes, keeping the model's partial work.
+#                                            #   0 or >= 100 disables.
 # prompt_caching = true                      # cache_control breakpoints. Omit to use the
 #                                            #   default: ON for api.anthropic.com,
 #                                            #   OFF for any other endpoint. Set explicitly
@@ -244,43 +167,20 @@ features = []
 #                                            #   dropping the tail.
 # api_key = ""                               # prefer the ISTOTA_BRAIN_NATIVE_API_KEY override
 #
-# Daemon-side WebFetch tool for the native harness. It is the one tool that
-# runs OUTSIDE the sandbox's network namespace, in the daemon's own, so the
-# CONNECT allowlist under [security.network] does not gate it. What stands in
-# for that: it carries no credentials and no cookies (`trust_env = False`),
-# every resolved IP is checked against the private/reserved blocklist on the
-# first request and on every redirect hop, the connection is pinned to the IP
-# that was validated (so a second DNS answer cannot redirect it), it is GET and
-# text only, and what comes back is wrapped in an untrusted-content delimiter.
-#
-# Every user gets it. It was admin-only until ISSUE-449, on the grounds that a
-# fetch from the daemon's network namespace is egress the same user's
-# claude_code task does not have. That is true, and the settings below are what
-# answer it: allow_hosts, block_hosts, extra_blocked_cidrs, allowed_ports,
-# allow_http and require_url_provenance bound where a fetch may go, and they
-# bound it the same way for everybody. Identity bounded nobody's destinations —
-# an admin reached whatever the policy allowed, and a non-admin asking for a web
-# page got a tool that was not there and no reason why.
-# `enabled = false` withdraws it from everyone; `admin_only = true` puts the old
-# gate back.
+# The native brain's WebFetch tool, available to every user. It runs in the
+# daemon's network namespace, outside the sandbox allowlist, so the fields
+# below are its egress policy: credential-free, SSRF-checked, GET and text only.
 # [brain.native.web_fetch]
 # enabled = true
-# admin_only = false              # true withholds the tool from non-admins, as
-#                                 #   before ISSUE-449. It is not a fetch policy:
-#                                 #   it decides whether the tool is registered,
-#                                 #   so it never reaches the fetch itself. Set it
-#                                 #   where the deployment has users whose turns
-#                                 #   you do not want reaching the network from
-#                                 #   the daemon's namespace at all; narrow *where*
-#                                 #   anyone may reach with the fields below.
+# admin_only = false              # true withholds the tool from non-admins. It
+#                                 #   decides whether the tool exists, not where
+#                                 #   a fetch may go.
 # timeout_seconds = 20.0          # total wall clock per fetch
 # max_bytes = 5000000             # response body cap, enforced while streaming
 # max_content_chars = 100000      # extracted text handed to the model
 # max_redirects = 5               # hops before giving up; each one is re-validated
-# allow_http = false              # true permits cleartext http://. Leave off:
-#                                 #   the fetch is unauthenticated but the *content*
-#                                 #   reaches the model, and cleartext is content
-#                                 #   anyone on the path can choose.
+# allow_http = false              # true permits cleartext http://, whose content
+#                                 #   anyone on the path can change
 # allowed_ports = [80, 443]       # a port not listed is refused before any connect
 # user_agent = "IstotaBot/1.0"
 # allow_hosts = []                # non-empty makes this an allowlist (suffix match):
@@ -294,86 +194,29 @@ features = []
 #                                 #   data it read. For a deployment ingesting content
 #                                 #   it does not trust.
 #
-# Per-attempt transcript of a native-brain run: one append-only JSONL file per
-# task attempt holding the assembled prompt, every assistant turn with its
-# thinking and tool calls, every tool result, every compaction and steer, and a
-# terminal record. `tasks.execution_trace` keeps tool *labels* and no output at
-# all, so this is the only artifact that answers "what did the model actually
-# see and do" for a run that already finished. Native-only — claude_code and
-# tmux_claude already get a transcript from the `claude` CLI.
-#
-# The files hold the assembled prompt, which holds USER.md, and raw tool
-# output, which can hold whatever a Bash call printed. They are written 0600
-# behind a 0700 per-user directory, on local disk, bound into no sandbox, and
-# nothing copies them off the host. An operator who cannot accept a credential
-# a task `cat`ed living there for the retention window sets `enabled = false`.
-#
-# DOCKER: the container's config.toml is the operator's own (written once by
-# `istota setup`), so these keys are set there like any other. `istota setup`
-# writes db_path = "/data/db/istota.db", so the directory resolves to
-# /data/db/logs on the istota_data volume, beside the framework database and
-# behind the same sandbox mask.
+# DOCKER: with the db_path `istota setup` writes, transcripts land in
+# /data/db/logs on the istota_data volume.
+
+# Per-attempt JSONL transcript of a native-brain run: the prompt, every turn,
+# tool call and result. Written 0600 on local disk and bound into no sandbox.
 # [brain.native.session_log]
 # enabled = true                  # false = no new files; retention still sweeps existing ones
-# dir = ""                        # "" resolves to {db_path.parent}/logs — local disk,
-#                                 #   beside istota.db / modules/ / backups/, and behind
-#                                 #   the sandbox's database mask where that mask applies.
-#                                 #   A value set here is used AS GIVEN (no ~ expansion,
-#                                 #   no resolving against a base), so WRITE AN ABSOLUTE
-#                                 #   PATH: a relative one follows each process's own
-#                                 #   working directory, and the daemon, the sweep and an
-#                                 #   `istota` command run from a shell need not share it.
-#                                 #   Pointing it outside db_path.parent gets a WARN from
-#                                 #   `istota doctor`. "/" and other values naming no
-#                                 #   directory of their own are refused (the sweep deletes
-#                                 #   under whatever this resolves to).
-#                                 #   OTHERWISE THIS VALUE IS TRUSTED, the way
-#                                 #   [security] sandbox_cache_dir is: there is no
-#                                 #   containment rule bounding it against an ancestor, so
-#                                 #   the retention sweep below treats every subdirectory of
-#                                 #   whatever you write here as a user's and unlinks the
-#                                 #   *.jsonl files under it. Point it at a directory istota
-#                                 #   owns. Nothing the model writes can reach this setting;
-#                                 #   what bounds the damage of a mis-set one is the shape of
-#                                 #   the walk: only *.jsonl, only under a first-level
-#                                 #   subdirectory (never a file at this directory's own
-#                                 #   level) but at ANY depth within one, never through a
-#                                 #   symlink, and rmdir only on a directory the sweep
-#                                 #   itself emptied.
-# retention_days = 14             # age rule, for privacy. Deliberately longer than
-#                                 #   [scheduler] task_retention_days — the log's value is
-#                                 #   that it outlives the task row. 0 = keep for ever by
-#                                 #   age; the size ceiling below still applies.
-# max_total_gb = 2.0              # size ceiling, for the disk, across EVERY user summed —
-#                                 #   the thing being protected is a filesystem, and this
-#                                 #   one also holds istota.db and every module DB. Lean on
-#                                 #   purpose: on a busy deployment the ceiling, not
-#                                 #   retention_days, is what binds, and `istota doctor`
-#                                 #   warns when the last sweep evicted by size. Eviction is
-#                                 #   largest-user-first, then oldest within that user, so a
-#                                 #   noisy neighbour cannot clear a quiet user's history.
-#                                 #   Clamped to a 0.5 floor. 0 = no ceiling; the age rule
-#                                 #   still applies.
-# max_content_chars = 32768       # per text/thinking block; over the cap the block keeps its
-#                                 #   head and its tail (a build log's tail is where the
-#                                 #   error is) and records the real length. NOTE 0 here
-#                                 #   means NO CAP, not "off" as it does on the two limits
-#                                 #   above — an uncapped block is one raw tool result of
-#                                 #   whatever size, which is what the caps exist to bound.
-# max_args_chars = 8192           # per tool-call arguments object; over the cap it becomes an
-#                                 #   honest marker rather than a truncated JSON fragment.
-#                                 #   0 = no cap, as above.
-# include_thinking = true         # reasoning traces in the written log. The most useful
-#                                 #   record for debugging a wrong answer, and the bulkiest.
-#                                 #   Independent of `istota-skill tasks transcript`, where
-#                                 #   thinking stays off unless asked for.
+# dir = ""                        # "" is {db_path.parent}/logs. Write an absolute path;
+#                                 #   the retention sweep deletes *.jsonl files under it.
+# retention_days = 14             # age rule. 0 = keep for ever by age; the size ceiling
+#                                 #   below still applies.
+# max_total_gb = 2.0              # size ceiling across every user summed; the largest
+#                                 #   user's oldest files go first. Clamped to a 0.5 floor.
+#                                 #   0 = no ceiling.
+# max_content_chars = 32768       # per text/thinking block; over the cap it keeps head and
+#                                 #   tail. 0 means no cap.
+# max_args_chars = 8192           # per tool-call arguments object; over the cap it becomes a
+#                                 #   marker. 0 = no cap.
+# include_thinking = true         # reasoning traces in the written log; the bulkiest part.
 #
-# Tmux-driven interactive-TUI brain (only used when kind = "tmux_claude", or via
-# a routing override below). All fields default in code to the prototype's pinned
-# values, so an empty/absent block is behavioral parity. The marker lists are
-# pane-text heuristics pinned to a claude CLI version — a CLI reword that breaks
-# readiness detection is a config hotfix (override the relevant marker), not a
-# code release.
+# The tmux_claude brain. Every field defaults in code. The marker lists are
+# pane-text heuristics pinned to a claude CLI version; override one if a CLI
+# reword breaks readiness detection.
 # [brain.tmux]
 # model = "claude-opus-5-5"         # this brain's own default model (ISSUE-418);
 # effort = "high"                   #   same values as [brain.claude_code] above,
@@ -395,30 +238,22 @@ features = []
 #                                   # pane substrings → stop_reason=usage_limit → the
 #                                   # configured [brain] fallback, if any
 #
-# Headless `claude -p` brain settings. The brain's model selection still comes
-# from [brain] and [models]; this block is the subscription usage poll only, and
-# it is read whatever `kind` is set to — a native primary with a claude_code
-# fallback burns the same plan. All fields default in code, so an absent block
-# is the shipping behaviour.
+# The headless `claude -p` brain: its default model and effort, and the
+# subscription usage poll. Read whatever `kind` is set to, since a fallback or
+# a routing override can reach it.
 # [brain.claude_code]
-# This brain's own default model and effort, used when nothing pins one for the
-# task (ISSUE-418). Read whatever `kind` is set to -- a native primary with a
-# claude_code fallback, or a source_type_overrides entry, routes here.
-# Empty or omitted = the CLI's own default.
+# This brain's default model and effort when the task pins none. A canonical
+# id, a shortcut ("opus"), a role tier ("smart"), optionally with ":high".
+# Empty = the CLI's own default.
 # model = "claude-opus-5-5"
 # effort = "high"
 #
-# Poll https://api.anthropic.com/api/oauth/usage for plan utilization and show it
-# on /admin and in `istota doctor`. Read-only: the credential is never written or
-# refreshed. Off = the doctor check SKIPs and the admin card is absent; there is
-# no reading to draw, and a permanent "unavailable" note names nothing to do.
+# Poll the Claude plan's utilization for /admin and `istota doctor`. The
+# credential is only read. Off = no admin card and the doctor check skips.
 # subscription_usage = true
 # subscription_usage_cache_ttl_seconds = 1800    # one deployment-wide fetch per this window,
-#                                                #   and the floor on the retry after a failure.
-#                                                #   The shortest window reported is five hours,
-#                                                #   so polling faster buys no accuracy and the
-#                                                #   endpoint rate-limits a deployment that does.
-#                                                #   Floored at 1 (0 would fetch on every read).
+#                                                #   and the minimum wait after a failure.
+#                                                #   Floored at 1.
 # subscription_usage_timeout_seconds = 10        # matches doctor.PROBE_TIMEOUT; floored at 1
 # subscription_usage_warn_percent = 80.0         # doctor WARNs, the tile turns amber
 # subscription_usage_high_percent = 95.0         # the tile turns red; still a WARN, never a FAIL
@@ -428,10 +263,9 @@ features = []
 # subscription_usage_stale_after_seconds = 3600  # a stale-cache reading older than this is
 #                                                #   reported SKIP, not as a current number
 #
-# Per-source-type brain routing (gradual rollout): map a task's source_type to
-# a brain kind, overriding `kind` for matching tasks. Lets cron/heartbeat run on
-# the native brain while interactive talk/email stays on claude_code. Unknown
-# kinds are ignored (logged), never wedging a task.
+# Route tasks by source_type to a brain kind, overriding `kind` for them (say,
+# cron on native while chat stays on claude_code). Unknown kinds are logged and
+# ignored.
 # [brain.source_type_overrides]
 # scheduled = "native"
 # heartbeat = "native"
@@ -457,33 +291,18 @@ features = []
 # wallet_authorization_minutes = 30 # clamped to 5..240 minutes
 # sandbox_enabled = true           # bwrap filesystem isolation per user (Linux only)
 # skill_proxy_enabled = true       # proxy skill CLI calls via Unix socket (credential isolation).
-#                                  # Required wherever sandbox_enabled is true, for two reasons.
-#                                  # Off, every configured service credential stays in the task
-#                                  # environment where the model can read it from inside the
-#                                  # sandbox, instead of being injected per call. And the databases
-#                                  # are masked out of the sandbox, so a skill CLI that can't reach
-#                                  # the proxy has nothing to read and refuses rather than guessing.
+#                                  # Required wherever sandbox_enabled is true: off, credentials
+#                                  # sit in the task environment and skill CLIs refuse to run.
 # skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds).
 #                                  # Capped at skill_client_wait_seconds minus 30;
 #                                  # see [security.skill_proxy_timeouts] below to give
 #                                  # one skill a different budget.
 # skill_client_wait_seconds = 600  # how long the sandboxed istota-skill client waits
-#                                  # on the proxy socket. The bound every skill budget
-#                                  # sits under: the global above and every per-skill
-#                                  # entry are capped at this minus a 30s margin, so a
-#                                  # skill wanting more than 570s needs this raised
-#                                  # too. Exported to the client as
-#                                  # ISTOTA_SKILL_CLIENT_WAIT; the proxy reads this
-#                                  # field, never the export.
-# vault_fetch_limit_per_task = 10  # how many shared credentials one task attempt may
-#                                  # fetch from the vault namespace over the proxy
-#                                  # socket. 0 is unlimited, and is the only spelling
-#                                  # of it — leaving the key out gives you the 10, not
-#                                  # "off". Counted per request whether or not the name
-#                                  # exists, so probing for absent names is not free;
-#                                  # listing the names costs nothing. A legitimate loop
-#                                  # over several credentials is the first thing to
-#                                  # trip it, which is why it is a setting at all.
+#                                  # on the proxy socket. Every skill timeout is capped
+#                                  # at this minus 30s.
+# vault_fetch_limit_per_task = 10  # shared-credential fetches one task attempt may
+#                                  # make. 0 is unlimited. A fetch of a name that does
+#                                  # not exist still counts; listing names does not.
 # On deployments with several configured users, vaults require a working sandbox.
 # Accept same-uid cross-task credential exposure only as an operator decision.
 # allow_unsandboxed_multi_user_vaults = false
@@ -493,53 +312,18 @@ features = []
 #                                  # unlike the fetch limit, 0 is not unlimited.
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 # sandbox_ro_paths = []            # extra RO bind-mounts in sandbox, for co-located services the
-#                                  # agent needs to read. Keep entries narrow — a broad path sweeps
-#                                  # in whatever lives under it. (The DB directories are masked
-#                                  # after this list is applied, so they stay unreachable either way.)
-# sandbox_cache_dir = ""           # root of a disk-backed directory for the package managers'
-#                                  # caches. Each user gets {root}/{user_id}, bound RW into
-#                                  # their sandbox, with UV_CACHE_DIR, XDG_CACHE_HOME and
-#                                  # npm_config_cache pointed at it. Empty (the default) leaves
-#                                  # them on bwrap's own root tmpfs — RAM the host cannot
-#                                  # attribute, discarded at task exit, so every task downloads
-#                                  # again. Put it under developer.repos_dir when that is set:
-#                                  # uv hardlinks out of its cache and link(2) fails across a
-#                                  # mount boundary, so a cache elsewhere costs every worktree a
-#                                  # full copy. It is ignored, with a warning, when it is
-#                                  # relative, missing, unwritable, under a database directory,
-#                                  # or at or ABOVE anything the sandbox already mounts — a bind
-#                                  # above an earlier mount would cover it, so do not point this
-#                                  # at temp_dir, ~/.cache, ~/.local, or repos_dir itself.
-# sandbox_cache_sweep_enabled = true  # bound what that directory grows to. Moving the caches
-#                                  # onto disk is what makes them persist, and nothing else
-#                                  # prunes them. Every sweep runs the package managers' own
-#                                  # cheap reclaim (uv cache prune, npm cache verify); a
-#                                  # per-user cache still over the ceiling afterwards is wiped
-#                                  # with their clean verbs. A user with a task in flight is
-#                                  # skipped rather than raced. Cadence is
-#                                  # [scheduler] sandbox_cache_sweep_interval; inert while
-#                                  # neither this nor a developer repos_dir is set.
-# sandbox_cache_max_gb = 10.0      # the ceiling, per user. Bytes rather than an age window
-#                                  # because one `uv sync --all-extras` writes about 1.8 GB in
-#                                  # a single command, which blows any sane window at once.
-#                                  # Clamped to a 1 GiB floor: below that the ceiling is under
-#                                  # one dependency resolution's working set, so every sweep
-#                                  # would wipe a cache that is doing its job.
+#                                  # agent needs to read. Keep entries narrow.
+# sandbox_cache_dir = ""           # disk root for the package managers' caches, one
+#                                  # {root}/{user_id} each, used only without the developer
+#                                  # skill. Empty keeps them in RAM for one task. Must be an
+#                                  # existing, writable absolute path.
+# sandbox_cache_sweep_enabled = true  # prune the per-user package caches to the ceiling
+#                                  # below, on [scheduler] sandbox_cache_sweep_interval.
+# sandbox_cache_max_gb = 10.0      # the cache ceiling per user. Clamped to a 1 GiB floor.
 
-# Per-skill overrides of skill_proxy_timeout, applied instead of the global for
-# the skills named. An entry narrows as readily as it widens. Everything here is
-# bounded by the wait the sandboxed client arms before it sends —
-# skill_client_wait_seconds above, minus a 30s margin, so 570s at the default —
-# and that bound applies to skill_proxy_timeout above as well.
-#
-# code_review already has a 540s ceiling of its own without an entry here: it is
-# the only skill that drives model calls, and raising the global to suit it
-# would hand the same minutes to every other skill. That value is in the code
-# rather than in this table's default, because a table an operator writes
-# *replaces* the default rather than merging with it — so shipping the entry
-# here would mean setting some other skill silently took the review's ceiling
-# back to the global. Naming code_review here still overrides it.
-#
+# Per-skill overrides of skill_proxy_timeout, in seconds, each capped at
+# skill_client_wait_seconds minus 30. code_review has its own 540s ceiling
+# unless named here.
 # [security.skill_proxy_timeouts]
 # browse = 90
 
@@ -568,10 +352,8 @@ features = []
 # install. See docs/deployment/security.md for what is deliberately uncovered.
 
 [nextcloud]
-# Nextcloud server URL: Talk, the nextcloud skill, OCS and DAV. A URL needs
-# workspace_path. Whether the workspace is the bot's Nextcloud files is
-# workspace_mount_path's question, not this one: with the mount path set the
-# bot describes files as Nextcloud, without it as a plain local workspace.
+# Nextcloud server URL, for Talk, the nextcloud skill, OCS and DAV. Setting it
+# requires workspace_path.
 url = "https://nextcloud.example.com"
 # Bot's Nextcloud username
 username = "istota"
@@ -582,47 +364,19 @@ app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 # Default expiry applied by `nextcloud share link`. A handed-out link that never
 # expires is the thing worth avoiding; 0 opts out of a default entirely.
 share_default_expire_days = 14
-# Where the bot's storage root sits inside its own Nextcloud file tree. Leave
-# empty for the rclone-mount deploy, where they are the same directory. Set it
-# to the mount point when the storage root reaches Nextcloud as an external
-# storage mount (the Docker stack sets "Shared Files"): every DAV and OCS path
-# the bot sends is prefixed with it, while paths on disk are unaffected.
+# Where the bot's storage root sits inside its own Nextcloud files, prefixed
+# onto every DAV and OCS path. Empty when they are the same directory.
 dav_prefix = ""
-# Share the bot workspace back to the user over OCS on every boot. Leave true
-# unless something else already puts that directory in the user's file tree —
-# the Docker stack mounts it there at provisioning and sets this false, so the
-# user is not handed the same directory twice.
+# Share the bot workspace back to the user over OCS at boot. Set false where
+# something else already puts it in the user's files.
 auto_share_bot_dir = true
 
 # ============================================================================
 # CalDAV (only when the calendar is not the Nextcloud above)
 # ============================================================================
-# Calendar normally derives from [nextcloud]: the URL becomes
-# {url}/remote.php/dav and the username and app password are reused. This block
-# overrides that derivation field by field, and it exists for the shape with no
-# Nextcloud at all — a local single-user install pointing calendar at Radicale,
-# Fastmail or Google. On a Nextcloud deployment you want it only when the
-# calendar genuinely lives elsewhere.
-#
-# SET ALL OF IT OR NONE OF IT. The three `Config.caldav_*` properties fall back
-# to [nextcloud] one field at a time, not as a group, so a half-set block does
-# not read as "override off" — it mixes. A url with no password names a foreign
-# host and then hands that host the Nextcloud app password. A password with no
-# url authenticates to Nextcloud's own DAV endpoint with the wrong secret.
-# `istota setup` refuses the first pairing outright and the Ansible template
-# renders nothing unless it has both; this file is the one place you can write
-# the broken shape by hand.
-#
-# DOCKER: the container's `istota setup` offers this when there is no
-# Nextcloud, writing the url and username here and the password to the
-# stack's secrets/istota_caldav_password, which reaches the daemon as
-# ISTOTA_CALDAV_PASSWORD.
-#
-# `istota setup` offers this and writes the url and username here, with the
-# password in the sibling istota.env. The password has an
-# ISTOTA_CALDAV_PASSWORD environment override, so on any shape that already has
-# an env file it need not be in this file at all — and where the file is
-# generated, it is not.
+# A calendar server other than the Nextcloud above (Radicale, Fastmail,
+# Google). Set all three fields or none: each blank one falls back to the
+# [nextcloud] value on its own.
 # [caldav]
 # url = "https://dav.example.com"
 # username = "you@example.com"
@@ -633,60 +387,28 @@ auto_share_bot_dir = true
 enabled = true
 # Bot's Nextcloud username (to filter its own messages)
 bot_username = "istota"
-# When the workspace is not the Nextcloud mount, a file posted in Talk is
-# fetched over WebDAV into the room's folder, Channels/<room>/media/<message id>/,
-# once per message. Files larger than this many megabytes are skipped, and the
-# task runs without them.
+# Largest Talk attachment, in MB, fetched into the room's folder when the
+# workspace is not the Nextcloud mount. Larger files are skipped.
 attachment_max_mb = 50
 # Days a fetched attachment is kept before the cleanup pass removes it. 0 keeps
 # them. Not used when the workspace is the mount.
 attachment_retention_days = 30
 
 [talk.signaling]
-# Receive Talk messages over Nextcloud's standalone signaling server (the
-# high-performance backend) instead of polling for them. Off by default.
-#
-# What it needs, and what happens without it: the HPB has to be registered with
-# Talk already, which you can check with `occ talk:signaling:list`. If it is
-# not, istota **refuses to boot** rather than quietly polling — an operator who
-# believes push is live and is actually being polled for is worse off than one
-# whose daemon did not start. The same refusal covers the `websockets` library
-# being absent; install it with the `signaling` extra.
-#
-# There is no secret here, and that is the design. istota connects as its own
-# Nextcloud user, so the server URL, the hello token and the per-room session
-# id are all minted on demand by Talk from calls the bot account can already
-# make. The alternative the protocol offers is an internal client holding the
-# signaling server's shared secret, which can join any room on the instance;
-# that is why it is not used.
-#
-# Two consequences worth knowing before switching it on. istota holds an active
-# Talk session in every room it watches, around the clock, so it shows as
-# present to everyone else in those rooms — it is not in a call, and it never
-# joins one. And a second daemon pointed at the same Nextcloud opens its own
-# sessions and receives every event; duplicate work is prevented by the read
-# cursor rather than by the transport.
+# Receive Talk messages over Nextcloud's signaling server (the HPB) instead of
+# polling. The HPB must be registered with Talk and the `signaling` extra
+# installed, or the daemon refuses to start.
 enabled = false
-# HPB base URL. Empty is the normal case and means "use whatever Talk
-# advertises". Set it only where the daemon has to reach the server by a
-# different route than the one browsers are given.
+# HPB base URL. Empty uses whatever Talk advertises; set it only where the
+# daemon reaches the server by a different route than browsers.
 url = ""
-# Seconds between room reconciliations. This pass is also the safety net: it
-# compares every room's latest message id against the stored cursor and fetches
-# only the rooms that are behind. So it bounds how long a gap lasts when the
-# event stream is down, and it is the worst case for the first message in a
-# brand-new room.
+# Seconds between room reconciliations, which fetch any room that is behind.
+# This bounds how long a gap lasts when the event stream is down.
 room_sync_interval = 300
-# Reconnect backoff ceiling, seconds. The proxy in front of the signaling
-# server drops every connection hourly whatever the traffic, so reconnect is an
-# ordinary event rather than a fault.
+# Reconnect backoff ceiling, seconds.
 reconnect_backoff_max = 60
-# Ingest the relayed message directly instead of refetching the room. The
-# relayed message was measured field-for-field identical to the fetched one on
-# Talk 24.0.4, but this stays off by default: it is the only part of the design
-# that can be wrong about message content rather than about timing. Talk sends
-# a message with the event only from about Talk 21 — below that every event is
-# a bare notification and switching this on changes nothing.
+# Ingest the relayed message directly instead of refetching the room. Has no
+# effect before about Talk 21, which sends no message with the event.
 payload_direct = false
 
 [email]
@@ -708,88 +430,29 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # signup_task_window_minutes = 30  # first signup message may mint one follow-up task; 0 only files mail
 # signup_body_retention_days = 14  # blank old filed bodies, retain message rows
 # imap_timeout_seconds = 30  # socket timeout for IMAP connections (fail fast on a dead host)
-# A declaration about your inbound mail path, not a safety switch to flip on.
-# SMTP From: is unauthenticated, so a From: naming a user's own address is a
-# claim until something checks it. Three answers to "who checked it":
-#
-#   "off"     (default) something upstream already did — normally DMARC
-#             enforcement at the receiving MTA, which rejects a forgery before
-#             it ever reaches poll_folder. Nothing is ever held.
-#   "verify"  your mail server did, and we read its verdict: a stamp from
-#             authserv_id carrying an aligned dmarc=pass goes straight through,
-#             anything else is held. Requires authserv_id — without one the
-#             verdict comes off whichever header arrived on top, which the
-#             sender writes, so the daemon refuses to start.
-#   "gate"    nothing upstream does, so ask me. Holds every message a user
-#             sends the bot for a yes/no.
-#
-# The legacy booleans still load: false is "off", true is "gate".
-#
-# "verify" is the one worth reaching for. "gate" has to ask about every
-# self-sent message because nothing in a plain SMTP message separates the user
-# from someone claiming to be them; the mail server's verdict is what finally
-# tells them apart, so you are asked only when authentication actually failed.
-# Prefer fixing things upstream regardless: it is silent and costs nothing per
-# message. Leaving this "off" makes the mail path load-bearing — see the
-# checklist in docs/features/email.md.
+# Who checks that mail from a user's own address really is theirs: "off" (the
+# receiving MTA enforces DMARC), "verify" (trust a dmarc=pass stamped by
+# authserv_id, hold the rest) or "gate" (hold every such message).
 # confirm_sender_match = "off"
-# The canary for the assumption above. Reads the DMARC verdict the receiving MTA
-# stamped in Authentication-Results and warns when mail routed on a user's own
-# address arrives without a pass — so the protection going away is noticed
-# instead of being silent. On by default; it is monitoring, never a gate, and it
-# changes nothing about how mail is handled. It detects misconfiguration and
-# drift, not attack: a forged top header silences it, and the MTA is the boundary
-# regardless.
+# Warn when mail routed on a user's own address arrives without a DMARC pass.
+# Monitoring only; it never holds mail.
 # dmarc_canary = true
-# Whether a *missing* DMARC verdict also warns. Off by default, because a mail
-# path that stamps nothing would warn on every message. Turn it on once you know
-# your MTA stamps — it is the only way "the mailbox moved to a provider that does
-# not evaluate DMARC" ever surfaces.
+# Also warn when the MTA's stamp has no DMARC verdict at all. Turn on once you
+# know your MTA stamps.
 # dmarc_canary_warn_on_missing = false
 # A disclosure line on every mail the bot sends into a multi-person thread:
 # "Written by <bot>, an AI assistant, for <host>", plus how to stop it replying
 # there. Off by default, since mail from the bot's address is already from the
 # bot.
 # thread_disclosure_footer = false
-# Your receiving MTA's own authserv-id — the first field of the
-# Authentication-Results header it stamps, before the semicolon. It is what tells
-# your MTA's stamp from one the sender wrote. Blank (the default) reads the
-# topmost header and trusts that "topmost" means "ours", which holds while the
-# MTA stamps and inverts the moment it stops: with no stamp of your own, the
-# sender's header is the top one and a forged dmarc=pass reads as a healthy path.
-# Set this and a header from any other authserv-id is discarded rather than read;
-# it must be the single token before the semicolon, without any version number
-# that follows it.
-# Setting it also says your MTA stamps, so mail arriving without your stamp warns
-# on its own — dmarc_canary_warn_on_missing stays about a stamp of yours that
-# carries no DMARC verdict. Find the value in a received message's own
-# Authentication-Results header.
+# Your receiving MTA's authserv-id: the first token of the Authentication-Results
+# header it stamps, before the semicolon. Set, headers from any other
+# authserv-id are ignored. Required by confirm_sender_match = "verify".
 # authserv_id = "mx.example.com"
 #
-# The weakest outbound approval policy any user on this instance may run. The
-# bot holds an outgoing email as an editable draft, rather than sending it, when
-# its recipients are not explicitly authorized; the user approves or discards it
-# from web chat or with `!drafts`. Three values:
-#
-#   off        no holds — every send goes out immediately
-#   untrusted  hold unless EVERY recipient (To, Cc, Bcc) is trusted: one of the
-#              user's own addresses, a `trusted_email_senders` pattern, or an
-#              address they trusted at runtime via `!trust` / "yes trust"
-#   all        hold unless every recipient is one of the user's own addresses
-#
-# This is a floor, not a default: a user may tighten past it (`all` over a
-# `untrusted` floor) but never loosen below it. A user who has never touched
-# their own setting follows this value, so raising it reaches everyone.
-#
-# Any single untrusted recipient holds the whole message — there are no partial
-# sends. An invalid value here FAILS THE CONFIG LOAD rather than falling back:
-# `off` would disable a gate you asked for and `untrusted` would override an
-# `off` you meant, so there is no safe value to guess.
-#
-# Note that `trusted_email_senders` now means both "their mail skips the inbound
-# gate" and "I may mail them without approving each message". A catch-all
-# pattern there (`*`, `*@*`) turns the `untrusted` policy off entirely; it is
-# logged when it happens, but narrow the pattern rather than relying on that.
+# The weakest outbound approval policy any user may run: "off" (never hold),
+# "untrusted" (hold mail unless every recipient is trusted) or "all" (hold
+# unless every recipient is the user's own). An invalid value fails the load.
 # outbound_approval_floor = "untrusted"
 
 # SMS uses one active provider. A complete inactive provider block remains
@@ -814,116 +477,60 @@ api_key = ""
 public_key = ""
 messaging_profile_id = ""
 
-# One WhatsApp business phone number, text only, and never part of a Talk or
-# web room. `provider` names the adapter that sends and receives: `baileys` is a
-# WhatsApp Web session paired by QR scan, and `whatsapp_cloud` is Meta's hosted
-# Cloud API used directly rather than through a Business Solution Provider.
-# Each adapter's own settings are its block below.
-#
-# For the Cloud adapter `access_token`, `app_secret` and `verify_token` are
-# credentials: leave them empty here and deliver them through
-# ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN. The Baileys
-# adapter has no credential in this file at all — the paired session on disk is
-# its credential.
-#
-# The rest of this note is the Cloud adapter's.
-#
-# `billing_policy` decides whether a send can ever cost money.
-#   free_guard — no templates at all, and at most
-#     `monthly_service_attempt_limit` service-message attempts per business
-#     phone number and calendar month (1..1000). This is conservative, not a
-#     guarantee: istota cannot see a message sent from a coexistence client or
-#     another application against the same Meta allowance.
-#   allow_paid — an explicit operator choice. 0 means no local cap.
-# `graph_api_version = ""` follows the version the installed PyWa release pins;
-# set `v23.0`-style only for a controlled migration.
+# One WhatsApp business phone number. The Cloud adapter's three credentials
+# belong in ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN, not here.
 [whatsapp]
 enabled = false
-# Which adapter sends and receives. "baileys" is the default and needs no Meta
-# account: it pairs with a phone by QR scan, sends are free and unmetered, and
-# there is no 24-hour window and no template. "whatsapp_cloud" is Meta's hosted
-# Cloud API — sanctioned, metered, and configured in [whatsapp.cloud] below.
+# Which adapter sends and receives: "baileys" (a WhatsApp Web session paired by
+# QR scan, no Meta account, free) or "whatsapp_cloud" (Meta's metered Cloud
+# API, configured in [whatsapp.cloud]).
 provider = "baileys"
-business_phone_number = ""      # exact E.164, e.g. "+15551234567"
+business_phone_number = ""      # exact E.164, with the leading +
 # In a group, a member's photo or GIF with no caption waits this long for the
 # same member's next message, which is then read as its caption so the two get
 # one answer. 0 answers the file at once.
 group_bare_file_hold_seconds = 30
 
-# The Meta Cloud API adapter. Read only under provider = "whatsapp_cloud", and
-# every value here is refused at load only under that provider — a Baileys
-# deployment need not carry a WABA id.
-#
-# DEPRECATED: these keys used to sit flat on [whatsapp] itself. A config still
-# writing them there keeps working — they are read as this block, and a block
-# carrying a waba_id, a phone_number_id or one of the three credentials also
-# selects provider = "whatsapp_cloud" when no provider key is present, so an
-# existing Cloud deployment is unchanged by the default above. That holds
-# whichever spelling the values are in, so moving them under [whatsapp.cloud]
-# is safe on its own — writing provider = "whatsapp_cloud" as well is clearer
-# and is what a config written today should say. The flat spelling will be
-# removed.
+# Meta's Cloud API adapter, read only under provider = "whatsapp_cloud". The
+# same keys written flat under [whatsapp] are DEPRECATED but still load.
 [whatsapp.cloud]
 waba_id = ""                    # decimal WhatsApp Business Account id
 phone_number_id = ""            # decimal business phone number id, not the number
 access_token = ""
 app_secret = ""
 verify_token = ""
-graph_api_version = ""
+graph_api_version = ""          # "" follows the version PyWa pins
 business_timezone = "UTC"       # IANA zone the monthly quota month is computed in
 request_timeout_seconds = 10
+# "free_guard" sends no templates and caps attempts at the limit below (1-1000);
+# "allow_paid" may cost money, and a limit of 0 there means no local cap.
 billing_policy = "free_guard"   # free_guard | allow_paid
 monthly_service_attempt_limit = 900
 
-# One approved Meta utility template, for delivering a result after the 24-hour
-# customer service window has closed. Paid, reviewed and language-specific:
-# valid only with billing_policy = "allow_paid", and istota never creates,
-# submits or substitutes one.
+# One approved Meta utility template, sent when the 24-hour service window has
+# closed. Paid; valid only with billing_policy = "allow_paid".
 [whatsapp.cloud.proactive_template]
 enabled = false
 name = ""
 language = "en_US"
 
-# The Baileys adapter's own settings. The first two resolve themselves when
-# left empty: the session directory to {db_path parent}/whatsapp-baileys-session
-# and the library version to whatever the shipped sidecar pins. The paired
-# session on disk is this adapter's credential; there is none in this file.
-#
-# sidecar_command is the command the daemon spawns to run the Node sidecar,
-# split by shell rules and not run through a shell. Left empty the daemon
-# spawns nothing and only listens on its socket, which is what a deployment
-# running the sidecar as its own systemd unit or compose service wants — and
-# is better there, since systemd restarts a unit a permanent fatal stopped.
-# `istota whatsapp pair` finds the program in a checkout on its own, so this
-# is only needed where the daemon itself has to run one.
-# The four pairing keys configure re-pairing the session from the admin web UI
-# (Admin, Connections) rather than over SSH. pairing_enabled is the off switch
-# and gates those routes and nothing else — `istota whatsapp pair` writes the
-# same request row and is unaffected, which is deliberate: the operator who
-# turns the web flow off is the one who will be on a terminal.
-#
-# pairing_window_seconds is how long a pairing window stays armed. For that
-# span a pairing code — a full-account WhatsApp credential — is relayable to
-# the admin UI, so this is the number to shorten to narrow the exposure.
-#
-# pairing_relay_path is where the code is relayed between the scheduler and the
-# web process. Empty resolves to a 0600 file beside db_path, which is where the
-# session directory already sits and which the task sandbox binds at no path; a
-# path inside a sandbox-bound root is refused at the route rather than used.
-#
-# restart_interval_seconds is this deployment's declaration that its supervisor
-# restarts the sidecar on a fixed interval of about this length. It gates
-# nothing — it only sizes how long a re-pair waits for the sidecar to come back
-# before reporting it missing. 0 means undeclared, which is right wherever the
-# supervisor backs off rather than waiting a fixed period (Docker). Under
-# systemd set it to the unit's own RestartSec.
+# The Baileys adapter. The paired session on disk is its credential.
 [whatsapp.baileys]
-session_dir = ""
-library_version = ""
+session_dir = ""                # "" = beside the database
+library_version = ""            # "" = what the shipped sidecar pins
+# Command the daemon runs for the Node sidecar. Empty spawns nothing, for a
+# sidecar run as its own unit or compose service.
 sidecar_command = ""
+# Allow re-pairing from Admin, Connections. `istota whatsapp pair` works either way.
 pairing_enabled = true
+# How long a pairing window stays open. The code is a full-account credential,
+# so shorter is safer.
 pairing_window_seconds = 300
+# Where the pairing code passes to the web process. Empty is a 0600 file beside
+# the database.
 pairing_relay_path = ""
+# Roughly how long the supervisor waits before restarting the sidecar; it only
+# sizes how long a re-pair waits. 0 = undeclared (Docker); under systemd use RestartSec.
 restart_interval_seconds = 0
 
 [conversation]
@@ -957,24 +564,17 @@ previous_tasks_count = 3
 talk_context_limit = 100
 
 [speech_gate]
-# Whether the bot replies to a turn nobody addressed to it, in a room with more
-# than one human. A direct conversation is never gated, and an explicit mention
-# always gets a reply. "mention" replies only when mentioned (Talk's rule);
-# "classifier" lets a cheap model decide and does not reply if it fails;
-# "off" replies to every turn. Every turn is recorded whichever mode is set.
+# Whether the bot replies to an unaddressed turn in a room with more than one
+# human: "mention" (only when mentioned), "classifier" (a cheap model decides)
+# or "off" (reply to every turn).
 mode = "classifier"
-# How wide the classifier reads "for the bot". "reserved" answers a turn
-# addressed to it, asking it for something, or answering its question.
-# "friendly" also answers thanks and other reactions to its last answer, in
-# one short line, and lets the bot decline a turn the classifier passed, in
-# which case nothing is posted. An unknown value is "reserved".
+# How wide the classifier reads "for the bot". "reserved" answers requests and
+# answers to its questions; "friendly" also answers thanks and reactions to
+# its last answer, in one short line.
 disposition = "friendly"
-# Under "friendly", a turn the classifier reads as only an acknowledgement
-# (thanks, agreement, a joke, good news) is answered on
-# Talk and in WhatsApp groups with this reaction instead of a message, and
-# falls back to the one short line if the reaction cannot be sent. Empty
-# turns reactions off everywhere, the table below included. Web, SMS and
-# email always get the short line.
+# Under "friendly", the reaction a mere acknowledgement gets on Talk and in
+# WhatsApp groups instead of a reply, when the table below has none for it.
+# Empty turns reactions off everywhere.
 ack_reaction = "👍"
 # Classifier model. A role alias ("fast"), resolved per brain namespace.
 model = "fast"
@@ -987,12 +587,9 @@ timeout_seconds = 20.0
 # Days to keep the speech_gate_decisions audit rows (0 keeps them forever)
 decision_retention_days = 30
 
-# A list of reactions per kind of ack. The classifier names the kind
-# (thanks, agreement, funny, celebration, else default), never the emoji; one
-# is picked from the list by the message id, so a message always gets the same
-# one. A kind that is missing or empty uses default, and with no default,
-# ack_reaction. These are the shipped lists: a table here replaces them whole,
-# and an empty table leaves only ack_reaction.
+# Reactions per kind of acknowledgement (thanks, agreement, funny, celebration,
+# default). A missing kind falls back to default, then ack_reaction. A table
+# here replaces the shipped lists whole.
 [speech_gate.ack_reactions]
 thanks = ["👍", "🐙"]
 agreement = ["👌"]
@@ -1000,11 +597,8 @@ funny = ["😄", "🐙"]
 celebration = ["🎉"]
 
 [money]
-# Whether the portfolio module may look up ticker metadata from a third-party
-# quote API when classifying a newly imported symbol. The request carries the
-# symbol — private financial data — and runs in the unsandboxed web/daemon
-# process, outside the CONNECT allowlist. Off falls back to offline
-# description heuristics, which need no network.
+# Let the portfolio module look up a new ticker's metadata from a third-party
+# quote API, which sees the symbol. Off uses offline heuristics.
 # autoclass_lookup = true
 
 [logging]
@@ -1022,12 +616,8 @@ output = "console"
 credential_backup_interval = 86400 # 0 disables scheduled credential backups
 # Seconds between checking for new tasks in the queue
 poll_interval = 5
-# Seconds between pending-task dispatch scans within a single poll tick. The
-# periodic checks (briefings, email, heartbeat, …) stay on poll_interval; only
-# the cheap pending-task scan runs at this finer cadence, so a freshly-enqueued
-# task (e.g. a web chat message) is claimed within dispatch_interval instead of
-# waiting up to a full poll_interval. Set to 0 or >= poll_interval for the
-# legacy "one dispatch per poll tick" behaviour.
+# Seconds between pending-task scans within one poll tick, so a new task is
+# picked up quickly. 0 or >= poll_interval scans once per tick.
 dispatch_interval = 0.5
 # Seconds between polling Talk conversations
 talk_poll_interval = 10
@@ -1037,32 +627,20 @@ talk_poll_timeout = 30
 # Rooms that respond faster (with new messages) are processed immediately;
 # quiet rooms still long-polling are cancelled and re-polled next cycle
 talk_poll_wait = 2.0
-# How often every room is long-polled regardless of the lastMessage gate.
-# Between sweeps only a room the room list already says has a newer message is
-# polled, so a quiet cycle costs one short request instead of one held
-# connection per room. The sweep is the safety net: it bounds what a gate that
-# read wrongly can cost to this interval. 0 turns the gate off entirely and
-# polls every room every cycle.
+# Seconds between long-polls of every room. In between, only rooms the room
+# list says have a newer message are polled. 0 polls every room every cycle.
 talk_poll_full_sweep_interval = 300
 # Seconds between polling for new emails
 email_poll_interval = 60
 # Messages one email poll walks. The rest wait for the next tick and drain in order.
 email_poll_batch_size = 50
-# Inbound email volume budget. `bot+{user_id}@domain` is public by construction
-# — it is the From: on every mail the bot sends on a user's behalf — so anyone
-# who has ever corresponded with the bot can turn one SMTP transaction into a
-# paid model invocation on that user's account. These cap how many. Over-budget
-# mail is *filed*, not dropped: it stays in the mailbox, gets a `throttled`
-# ledger row, and the user is told once per window, so nothing is lost and it
-# can still be read on demand with `email from-senders`. 0 on either count
-# disables that half.
+# Inbound email tasks per user per window. Over-budget mail is filed, not
+# dropped, and the user is told once per window. 0 disables.
 email_rate_limit_messages = 60          # email tasks per user per window
 email_sender_rate_limit_messages = 20   # …and per sender, so one loud correspondent throttles alone
 email_rate_limit_window_seconds = 3600
-# Untrusted-sender confirmation prompts per (user, sender) per window before
-# they collapse into one summary notice. The held mail is still held and still
-# individually approvable with `!confirm <task-id>`; only the interruption is
-# collapsed. 0 = never collapse (one prompt per message, as before).
+# Untrusted-sender confirmation prompts per user and sender per window before
+# they collapse into one summary notice. 0 = never collapse.
 email_confirmation_prompts_per_window = 3
 # Which worker queue inbound mail lands on. "background" keeps a flood from
 # taking the slots a live Talk or web-chat turn needs, at the cost of slower
@@ -1072,44 +650,28 @@ email_task_queue = "background"
 # amplification. Truncated with a marker past this; the full mail stays in the
 # mailbox.
 email_max_body_chars = 32000
-# Attachment bytes written to disk and pushed to Nextcloud, per message and
-# across one whole poll. This does NOT bound the IMAP transfer: the client
-# fetches and decodes the whole message before any part can be inspected, so
-# the bytes on the wire are the sender's choice regardless. Whole attachments
-# only — one that would cross the budget is skipped rather than truncated, and
-# the prompt says which. 0 = unlimited, as with the counts above.
+# Attachment bytes saved per message, and per poll below. An attachment that
+# would cross the budget is skipped whole. 0 = unlimited.
 email_max_attachment_bytes = 26214400
 email_max_attachment_bytes_per_poll = 104857600
 # Seconds between checking for briefings to run
 briefing_check_interval = 60
 # Seconds between polling TASKS.md files for new tasks
 tasks_file_poll_interval = 30
-# Seconds between scheduler_stats health-line emits (threads / fds / rss /
-# running-tasks / active-workers). One key=value INFO line per interval on the
-# istota.scheduler.stats logger — grep it in journalctl to catch resource leaks
-# early. 0 disables the emit.
+# Seconds between scheduler_stats log lines (threads, fds, rss, running tasks),
+# for catching resource leaks. 0 disables.
 scheduler_stats_interval = 60
 
-# Seconds between Nextcloud profile-picture import ticks (0 disables). Six
-# hours. The import runs on a cadence rather than at login — a Nextcloud
-# timeout in front of authentication — or on render, so the cost is that a user
-# who has just signed in for the first time sees the initial chip until the
-# next tick; daily would make that a whole day. Also gated by
-# [web] avatar_import_from_nextcloud and by the storage backend being Nextcloud.
+# Seconds between Nextcloud profile-picture imports (0 disables). Also gated by
+# [web] avatar_import_from_nextcloud.
 avatar_import_interval = 21600
 
-# Seconds between full reindexes of the per-skill user overlays (0 disables).
-# Six hours, matching the sweeps above. An overlay is edited over the mount as
-# often as it is edited through a skill, so a directory pass is the only seam
-# that sees every route. Deliberately not behind the sleep cycle's gates: a
-# reindex makes no brain call, and putting it there stopped it running whenever
-# the sleep cycle was off or the primary brain's breaker was open.
+# Seconds between memory-search reindexes of the per-skill user overlays
+# (0 disables).
 skill_overlay_reindex_interval = 21600
 
-# Defense-in-depth: alert an operator if the single-threaded main dispatch loop
-# stops ticking for this many seconds (a slow call that slipped onto the loop
-# thread, a wedged check). A separate watchdog thread logs an ERROR and fires
-# one alert, then re-arms when the loop recovers. 0 disables it.
+# Alert an operator once if the main dispatch loop stops ticking for this many
+# seconds. 0 disables it.
 loop_stall_alert_seconds = 180
 
 # Progress / event streaming.
@@ -1124,24 +686,14 @@ progress_show_text = false
 # Write events to the task_events table. Operational kill-switch — when false,
 # in-process consumers (Talk/log/push) still work but SSE/admin have nothing to read.
 event_log_enabled = true
-# Narration gate / substance bar for streamed answer text on stream surfaces
-# (web chat / REPL). A text run streams nothing until it crosses this many
-# characters without an intervening tool call. At a tool boundary a short
-# lead-in ("Let me check…") that stayed under it is dropped; a substantial block
-# that crossed it is kept (the web chat renders it as its own block rather than
-# folding it into the activity chip). Higher = more pre-tool text folds away but
-# short answers animate less (they still arrive whole via the final result);
-# lower = more intermediate text is shown live. Keep equal to the web client's
-# SUBSTANTIAL_TEXT_CHARS. 0 disables the gate. Watch the `stream_gate:` logs to
-# tune.
+# Streamed answer text on web chat and the REPL waits until a run passes this
+# many characters, so a short lead-in before a tool call is dropped. 0 disables.
 stream_text_gate_chars = 280
 # A push notification fires only when a task ran longer than this (short tasks
 # don't need a ping — the user is likely still watching).
 push_notification_threshold_seconds = 30
-# Which task source_types trigger a push notification on completion. Empty by
-# default: ntfy is opt-in, never a default surface. ntfy still fires for
-# explicit requests (scheduled jobs with output_target=ntfy, heartbeat alerts).
-# Add source_types here (e.g. ["talk"]) to opt back into completion pushes.
+# Task source_types that send a push notification on completion, e.g.
+# ["talk"]. Empty by default.
 push_notification_sources = []
 
 # Kill task execution after N minutes (default: 30)
@@ -1158,39 +710,24 @@ stale_pending_fail_hours = 24
 # How often a running worker pings liveness, in seconds (default: 60; 0 disables).
 # Reclaim uses this heartbeat to tell a slow-but-alive worker from a dead one.
 worker_heartbeat_seconds = 60
-# Reclaim a heartbeating worker's task after this many minutes of heartbeat
-# silence (default: 10). Independent of task_timeout_minutes. Higher = fewer
-# false-dead reclaims of a slow-but-alive worker (which would re-run the task),
-# at the cost of slower recovery after a genuine worker crash.
+# Reclaim a worker's task after this many minutes of heartbeat silence
+# (default: 10). Independent of task_timeout_minutes.
 worker_stuck_minutes = 10
 # Delete completed/failed/cancelled tasks older than N days (default: 7)
 task_retention_days = 7
-# Prune token/cost rows after N days (default: 180, 0 to disable). Far above
-# task_retention_days on purpose — spend records live in their own table so they
-# outlive the tasks they came from. 180 rather than a year because the backup
-# job snapshots the whole framework database into dated directories and keeps
-# several of them, so every row here is duplicated on the backup target.
+# Prune token/cost rows after N days (default: 180, 0 to disable). They
+# outlive the tasks they came from.
 usage_retention_days = 180
 # Delete emails older than N days from IMAP inbox (default: 7, 0 to disable).
-# The sweep is an IMAP BEFORE search, so it is proportional to what has
-# actually expired rather than to a fixed slice of the newest mail.
 email_retention_days = 7
-# Prune the processed_emails dedup ledger after N days (default: 90, 0 to
-# disable). One row is written per polled message, including the ones that
-# produce no task, so the table grows forever without this. Never applied
-# below email_retention_days + 1: the row is what stops a message still
-# sitting in the mailbox from being re-ingested as a brand-new task. With
-# email_retention_days = 0 (mail never deleted from IMAP) the prune is
-# disabled outright, since the message's lifetime is then unbounded too.
-# A row still referenced by the stored conversation transcript is always
-# kept — it also carries the sender attribution for that turn.
+# Prune the processed-email dedup ledger after N days (default: 90, 0 to
+# disable). Never below email_retention_days + 1, and off when that is 0.
 processed_email_retention_days = 90
 # Max cached talk messages per conversation (default: 200)
 talk_cache_max_per_conversation = 200
 
 # Deferred subtask creation limits (defense against prompt-injection-driven fan-out).
-# Subtasks are created when an admin task writes a deferred JSON request; these caps
-# bound how much damage a single injected task can do.
+
 # Max subtasks created per parent task (default: 10)
 max_subtasks_per_task = 10
 # Max chain depth — a task at depth N cannot spawn further subtasks when N >= max
@@ -1208,42 +745,27 @@ max_background_workers = 3
 # Global per-user worker defaults (individual users can override in their config)
 # user_max_foreground_workers = 2
 # user_max_background_workers = 1
-# Cumulative-idle seconds a worker lingers (re-checking for new work on a fine
-# cadence) before exiting. A follow-up task arriving inside this window is
-# claimed within one worker_idle_poll_interval instead of waiting a full
-# poll_interval.
+# Seconds an idle worker lingers, re-checking for new work, before exiting.
 worker_idle_timeout = 10
-# Idle re-check cadence (seconds). While a worker lingers it polls for a new
-# pending task every worker_idle_poll_interval, so a quick follow-up message is
-# picked up sub-second. Set to 0 or >= worker_idle_timeout to restore the legacy
-# single coarse wait + single recheck.
+# How often a lingering worker re-checks for a new task, in seconds. 0 or
+# >= worker_idle_timeout waits once and re-checks once.
 worker_idle_poll_interval = 0.5
-# Busy-timeout (ms) for the main dispatch loop's read-only scans. A DB locked
-# past this budget makes the loop skip the tick (it re-dispatches ~0.5s later)
-# instead of blocking up to 30s and tripping the stall watchdog. 0 keeps the
-# 30s default. Defense-in-depth on top of WAL — leave at 2000 unless you have a
-# reason to change it.
+# Busy-timeout (ms) for the main loop's read-only scans; a longer lock skips
+# the tick. 0 uses SQLite's 30s default.
 main_loop_read_timeout_ms = 2000
 # Snapshot local DBs (framework + per-user modules) for off-host durability.
 # Uses SQLite's online backup API (consistent live copy).
 db_backup_enabled = true
 db_backup_interval = 86400          # seconds between snapshots (daily)
 # db_backup_dir = ""                # empty = {workspace_path}/Backups/db/snapshots
-# A destination at or under workspace_mount_path is skipped while that mount is
-# down, however it is spelled. A stale mountpoint would take the copies to local
-# disk and lose them when the mount returns. A destination outside the mount is
-# trusted as-is; nothing here can check it.
+# A destination under workspace_mount_path is skipped while the mount is down.
 
 # Runtime self-check re-run. The auto-update cron changes what is installed
 # under a config the daemon already loaded, so a boot-only check is blind to it.
 # doctor_check_interval = 3600      # seconds between `istota doctor` re-runs (0 = disabled)
 
-# Host memory: the breadcrumb series, the admission gate, and the snapshots.
-# The breadcrumb is one host_pressure line per interval carrying MemAvailable /
-# Shmem / SwapFree / PSI / per-tmpfs usage / shmem_unaccounted, written whether
-# or not anything is wrong. The gate reads a faster sample and refuses to *start*
-# work below the floor — pending rows wait, nothing running is stopped, and every
-# uncertain case (no sample, unreadable sample, sampling off) fails open.
+# Host memory sampling: a periodic log line, an admission gate that starts no
+# new work below the floor, and snapshots.
 # host_pressure_enabled = true                 # master switch for all three
 # host_pressure_breadcrumb_interval_seconds = 300  # breadcrumb cadence (0 = disabled)
 # host_pressure_sample_interval_seconds = 30   # gate/snapshot sample cadence (0 = disabled)
@@ -1253,11 +775,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # host_pressure_shmem_unaccounted_alert_mb = 1024  # third snapshot trigger; NOT wired into the gate (0 = disabled)
 # host_pressure_docker_socket = "/var/run/docker.sock"  # read-only, resolves a container's pid for a snapshot; "" disables
 
-# Per-task cgroups. Each task's process tree gets its own cgroup v2 group, so a
-# runaway build or test suite is OOM-killed inside its own group instead of
-# taking the host down. Needs `Delegate=` and `DelegateSubgroup=supervisor` on
-# the scheduler unit; without them containment never engages and the daemon says
-# so once at startup rather than looking protected.
+# Per-task cgroups, so a runaway task is killed inside its own limits. Needs a
+# delegated cgroup subtree; without one the daemon logs that it is unprotected.
 # task_cgroup_enabled = true        # place each task's tree in its own cgroup
 # task_memory_max_mb = 2048         # memory.max per task (0 = unbounded)
 # task_pids_max = 512               # pids.max per task — bounds a fork storm
@@ -1285,10 +804,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # Default briefings (shared canonical set)
 # ============================================================================
-# A canonical briefing set seeded once into each opted-in user (per-user
-# `default_briefings = true`, the default). Same name/cron/output/blocks shape
-# as a per-user briefing; content is blocks-only. Seed-once: a user's later web
-# edits win and re-runs never clobber them. Omit the section for no defaults.
+# Briefings seeded once into each user with `default_briefings` on (the
+# default), shaped like a per-user briefing. Later edits by the user win.
 #
 # [[default_briefings]]
 # name = "Daily"
@@ -1306,14 +823,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # Shared briefing blocks (module-owned curated content)
 # ============================================================================
-# Generated ONCE globally by the scheduler (no user, UTC cron) and written into
-# the shared_kv store; per-user briefings read them via a `shared_block` (or
-# `kv`) source, so the N-way frontpage fetch + synthesis collapses to one
-# generation total. Only user-agnostic source kinds are allowed: browse /
-# markets / email (the shared/unowned pool).
-#
-# Omit the section entirely to seed the batteries-included defaults
-# (world-headlines, markets-summary). An explicit empty list opts out.
+# Blocks generated once for everyone and read by user briefings through a
+# `shared_block` source. Sources may be browse, markets or email. Omit for the
+# shipped defaults; an empty list opts out.
 #
 # [[briefing_shared_blocks]]
 # name = "world-headlines"          # → shared_kv key in namespace "briefing_shared_blocks"
@@ -1381,29 +893,22 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # Model alias registry [models.aliases] (operator override) — optional
 # ============================================================================
-# One operator-visible table overlaying the code-shipped defaults
-# (brain.claude_code.DEFAULT_ALIASES). It holds BOTH the portable tiers and the
-# provider shortcuts, base names only — effort is the orthogonal :effort modifier.
 # Shipped defaults:
 #   fast    → claude-haiku-5-5    (used by: context triage, skill classification)
 #   general → claude-sonnet-5-5   (used by: sleep cycle extraction + USER.md curation)
 #   smart   → claude-opus-5-5     (exists for `!model smart` from Talk + any code
 #                                  path that wants "the best model")
 #   opus / sonnet / haiku         (shortcuts → the current latest of each)
-#
-# Rebind any alias to a canonical ID, a shortcut, or a custom name accessible via
-# `!model <name>` from Talk. Effort composes with the :effort modifier
-# (`smart = "opus:high"`), never a separate alias. Two forms:
-#
-# 1. Flat (namespace-agnostic) — resolved by whichever brain runs the task:
+# docs/configuration/reference.md describes both forms below in full.
+
+# Rebind a model alias, or add one for `!model <name>`. A target may carry
+# effort as a modifier ("opus:high"). The flat form applies to every brain.
 #      [models.aliases]
 #      smart = "claude-opus-4-7:high"   # rebind "smart" to Opus 4.7, effort high
 #      deep  = "opus:max"               # a custom alias for deep-thinking tasks
 #
-# 2. Per-namespace (define ONCE, correct on every brain family) — an operator
-#    running a claude_code primary + native fallback, or [brain.source_type_overrides]
-#    routing some source types to native, gives each namespace its own value so
-#    one alias never leaks a foreign-namespace string onto the wire:
+# Per-namespace form: one value for the CLI brains (anthropic) and one for the
+# native endpoint (openai_compat), so a fallback across them stays correct.
 #      [models.aliases.smart]
 #      anthropic     = "opus:high"                                   # CLI brains (claude_code / tmux_claude)
 #      openai_compat = { model = "anthropic/claude-opus-4.8", effort = "high" }  # native
@@ -1415,23 +920,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #      openai_compat = "anthropic/claude-opus-4.8"
 #      portable      = true                                          # a cross-brain custom tier
 #
-# Alias targets CARRY EFFORT: a :effort modifier on the target (`opus:high` → high)
-# or an explicit `effort =` on a per-namespace table reaches the wire (explicit
-# wins). `anthropic` covers both CLI brains; `openai_compat` is the native endpoint
-# slug (sent verbatim, never translated from the Anthropic namespace). A custom
-# alias is a non-portable pin unless flagged `portable = true` (then a canonical
-# tier that re-resolves across the cross-brain fallback boundary).
-#
-# TOML note: an alias uses ONE form — a flat `smart = "..."` and a
-# `[models.aliases.smart]` table are mutually exclusive (a key can't be both a
-# string and a table). A per-namespace table missing the active brain's key falls
-# to that brain's own code default (Haiku/Sonnet/Opus for CLI; the configured
-# native.model for native).
-#
-# The old [models.roles] key is a HARD RENAME to [models.aliases] — the old key is
-# no longer read; a stale one logs a one-time migration warning. The old
-# effort-in-name forms (`opus-high`, `opus-46`) no longer resolve — use `opus:high`
-# or the canonical id + modifier (`claude-opus-4-6:high`).
+# An alias uses one form, not both. The old [models.roles] key is no longer read.
 
 # ============================================================================
 # Sleep Cycle (nightly memory extraction)
@@ -1533,12 +1022,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # github_default_owner = "myorg"                     # default org/user for short repo names
 # github_reviewer = "reviewer-user"                  # GitHub username to request as PR reviewer
 #
-# # Forge CLI policy. The baseline deny list lives in code, not here — it is a
-# # safety default rather than a preference. These two knobs extend and
-# # puncture it. Write an entry as you would type it; one with no binary name
-# # applies to both CLIs. A `forge_cli_permit` entry that matches no baseline
-# # rule is warned about at startup, because a hatch that silently stopped
-# # matching reads exactly like one that is still open.
+# # Extend or puncture the forge CLI deny list, which lives in code. Write an
+# # entry as you would type it; one with no binary name applies to both CLIs.
 # forge_cli_extra_denied = ["gh pr merge"]           # refuse these too
 # forge_cli_permit = ["gh repo delete"]              # turn a baseline guard off
 #
@@ -1551,68 +1036,18 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # # only trailer the `commit` skill permits; nothing else is ever appended.
 # author_credit = "Co-Authored-By: Bot <bot@example.invalid>"
 #
-# # Worktree reaping. Nothing used to remove a task's worktree, so `repos_dir`
-# # grew gigabyte checkouts with no owner. A scheduler job (see
-# # `[scheduler] worktree_reap_interval`) removes only a worktree that is clean
-# # (untracked and gitignored files included), unlocked, idle for the window
-# # below, and carrying no commit that is not already upstream — squash- and
-# # rebase-merged branches included. Everything else is kept and counted.
-# #
-# # The window is what protects a task running *right now*: the sweep is
-# # periodic and knows nothing about the worker pool, so recent activity is the
-# # only evidence available that a checkout is in use. It is clamped to a
-# # one-hour floor, because a worktree seconds old is clean and carries nothing
-# # that is not upstream — the reapable state — so a shorter window would take
-# # the checkout of a task still setting it up. To pin one indefinitely, use
-# # `git worktree lock` rather than turning the sweep off.
+# # Remove a task worktree once it is clean, unlocked, idle for the retention
+# # window and has nothing that is not upstream. `git worktree lock` keeps one.
 # worktree_reap_enabled = true
 # worktree_retention_hours = 24.0
 
 # ----------------------------------------------------------------------------
 # Where project code builds and runs
 # ----------------------------------------------------------------------------
-# **There is no key for this.** It is derived from `[devbox] enabled` together
-# with `[developer] enabled` and a non-empty `repos_dir`. A deploy-time choice,
-# not a runtime one: within a deployment there is exactly one place a build
-# happens, which is what keeps the property a per-command fallback would cost —
-# nothing on the host ever consumes an environment the container built, so no
-# parity rule has to hold.
-#
-# Without a devbox, npm, uv, cargo and the rest run on the host inside the
-# task's bwrap sandbox, where they cannot reach a registry that is not on the
-# CONNECT allowlist and cannot install a system package. With one, they run in
-# that user's devbox over a Unix-socket exec transport.
-#
-# A `backend` key used to sit in the block below and say which. It is retired,
-# and a file still carrying it gets a warning at load and a WARN from `doctor`.
-# Retiring it removed two states rather than a knob: the devbox on with the
-# backend off offered the model a devbox skill whose every verb but `reset`
-# refused, and the backend on with the devbox off asked the developer skill to
-# reach a container nothing had built. If you set it to "none" to keep builds on
-# the host, turn `[devbox] enabled` off instead — that is now the one switch.
-#
-# The devbox image has to be built with the daemon's own uid; the Ansible role
-# does that from a `getent` lookup. A mismatched uid is the one failure with no
-# error message anywhere that names it: the container cannot write into a
-# worktree the daemon made, and once that is worked around the daemon cannot
-# unlink a tree the container made, so every worktree that ever ran a build
-# becomes permanently unreapable.
-#
-# Check it with `istota doctor --only developer.container`, which answers four
-# questions that each fail silently: does this file derive what the running
-# daemon believes, does the transport answer, do the two sides agree on uid and
-# repos root, and is the uv cache mounted.
-#
-# Note `repos_dir` above is a *per-user root* **on every backend, including
-# "none"**: the daemon derives `{repos_dir}/{user_id}` and hands that to the
-# sandbox bind, `DEVELOPER_REPOS_DIR` and the credential scrub. That is what
-# closes cross-user worktree access, and it has nothing to do with containers —
-# so an upgraded host must move its existing clones down a level before the
-# developer skill can see them again. The Ansible role does it; with more than
-# one configured user it needs `istota_developer_repos_migrate_to` and fails the
-# play until it gets one, because a green play there is followed by a daemon
-# restart into a state where the bind names an empty directory.
-#
+# There is no key for this. Builds run in the user's devbox when [devbox]
+# enabled, [developer] enabled and repos_dir are all set, and otherwise on the
+# host inside the task's sandbox. docs/configuration/reference.md has the rest.
+
 # The devbox credential proxy: one socket per user under this directory, which
 # lets the forge CLIs and pushes in a devbox authenticate without holding a token.
 # devbox_proxy_enabled = true
@@ -1624,14 +1059,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # connect_timeout_seconds = 5.0        # the client's connect budget
 # idle_timeout_seconds = 3600          # server-side backstop reap for an idle connection
 #
-# # The commands fronted by a shim. Two absences are deliberate and one of them
-# # is not negotiable. `python3` is refused whatever you write here: the sandbox
-# # starts its own network bridge with it, so a shim would route that into the
-# # container and break egress for every developer-enabled task. `make` is
-# # merely omitted — shimming a *driver* inverts routing for everything beneath
-# # it, so a Makefile calling git, gh or python3 would get the container's
-# # copies. Add it if you know your Makefiles; the cost of leaving it out is a
-# # Makefile that calls ./node_modules/.bin/foo by path.
+# # Commands routed into the devbox. `python3` is refused whatever you write;
+# # `make` is left out on purpose.
 # shim_commands = [
 #     "npm", "npx", "pnpm", "yarn", "node",
 #     "uv", "uvx", "pip", "pip3",
@@ -1662,10 +1091,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # container_prefix = "devbox-"         # container name = f"{prefix}{user_id}"
 # max_output_bytes = 102400            # stdout/stderr cap per stream in the JSON envelope
 #
-# The rest is read by `istota devbox compose-file`, which renders one compose
-# service per user (the stack's compose.devbox.yml), and by the daemon, which
-# runs one credential-proxy listener per user. The bare-metal role renders its
-# own containers and leaves `users` empty.
+# The rest sizes the per-user devbox services `istota devbox compose-file`
+# renders for the stack.
 # users = []                           # e.g. ["sam"]; one devbox each
 # mem_limit = "4g"
 # cpus = 2.0
@@ -1732,12 +1159,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #                                     # reads files, and 240 was measured too short on
 #                                     # real diffs. --timeout on `run` overrides it for
 #                                     # one run
-# max_calls_per_task = 8              # review runs per task that reached the model. A
-#                                     # run charges 1: the review, plus one text-only
-#                                     # reformat call if the first answer was unusable.
-#                                     # 0 or less permits none — use enabled = false to
-#                                     # switch the feature off. At the cap the review
-#                                     # degrades to skipped rather than erroring
+# max_calls_per_task = 8              # review runs per task that reached the model.
+#                                     # 0 or less permits none. At the cap the review
+#                                     # is skipped rather than failing
 
 # ============================================================================
 # Browser container (the `browse` skill)
@@ -1814,14 +1238,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # enabled = false
 # port = 8766
 #
-# Login methods: nextcloud, email, or both. Bare strings remain accepted.
-# Migrate with ["nextcloud", "email"], attach identities with istota auth add,
-# then select ["email"] after every user has an identity. Passwords are optional;
-# emailed sign-in codes work without them when SMTP is configured.
-# ["none"] is exclusive and only supported by istota serve on loopback.
-# Direct uvicorn, Docker and Ansible refuse none, even on a loopback backend.
-# Never put a public proxy in front of the local no-auth launcher.
-# ISTOTA_WEB_AUTH accepts comma-separated method names and overrides this value.
+# Login methods: "nextcloud", "email", or both. ["none"] turns login off and
+# works only with `istota serve` on loopback.
 # auth = ["nextcloud"]
 # auth_enrol_ttl_hours = 168
 # auth_reset_ttl_hours = 1
@@ -1843,53 +1261,22 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # oauth2_userinfo_endpoint = ""                    # server-to-server identity URL
 # oauth2_redirect_uri = ""                         # explicit override; otherwise derived from request
 #
-# User-scoped OAuth token retention. "ephemeral" (default) discards the OAuth
-# pair after login. "encrypted" retains it in the web_user_tokens table,
-# encrypted with the web-only ISTOTA_WEB_TOKEN_KEY env var (>=32 chars,
-# delivered to the web unit ONLY — never the scheduler/webhooks). Enables
-# post-as-user Talk mirroring of web messages and web<->Talk read-state sync.
-# NC OAuth2 tokens grant full account access, so this is a deliberate opt-in.
+# "ephemeral" discards each user's Nextcloud OAuth token after login;
+# "encrypted" keeps it, under ISTOTA_WEB_TOKEN_KEY, for posting to Talk as the
+# user and read-state sync.
 # token_storage = "ephemeral"                      # "ephemeral" | "encrypted"
 #
-# Byte cap on a profile-picture upload, in KB. Checked on the declared
-# Content-Length before the body is read and again on the running total, so an
-# oversized upload is refused rather than buffered. Distinct from nginx's
-# client_max_body_size, which is sized for chat attachments. 0 switches
-# uploads off (the endpoint answers 503); a stored picture is still served.
+# Largest profile-picture upload, in KB. 0 switches uploads off; a stored
+# picture is still served.
 # max_avatar_kb = 4096
 #
-# Whether the scheduler imports users' Nextcloud profile pictures. Only a
-# *custom* avatar is ever imported: Nextcloud generates a coloured letter for a
-# user who has set none, and importing that would swap the app's own initial
-# chip for Nextcloud's version of the same idea, with nothing downstream able to
-# tell them apart. Inert on a local storage backend. The cadence is
-# [scheduler] avatar_import_interval.
+# Import users' custom Nextcloud profile pictures, on [scheduler]
+# avatar_import_interval.
 # avatar_import_from_nextcloud = true
 
-# Background tiles for the map surfaces (location today; anything geospatial
-# later). The default needs no key and no setup, so this block is only for an
-# operator who wants a different provider.
-#
-#   openfreemap  free OSM vector tiles, no key, no account, dark + light.
-#                Still a third-party request, so it does not make map viewing
-#                private — it just needs no credential.
-#   carto        the previous default. Requires a free API key since 2026;
-#                without one every tile comes back stamped "API KEY REQUIRED"
-#                with a 200 status, so nothing but a human notices. Get one at
-#                https://carto.com/basemaps/apikey/ — and note CARTO is
-#                retiring its raster service, so this buys time, not a fix.
-#                Set without a key, this falls back to openfreemap rather than
-#                serving watermarked tiles, and `istota doctor` says so.
-#   osm          keyless raster last resort. Light tiles only, so the dark
-#                theme looks wrong, and the OSMF tile usage policy discourages
-#                application use.
-#   custom       your own MapLibre style URLs, e.g. a self-hosted tile server.
-#                One URL is enough; it then covers both themes.
-#
-# api_key travels inside the tile URL to every browser that loads a map, so it
-# is public by construction — treat it as disclosed, whatever it is called.
-# Each user can also set their own CARTO key on the location settings page,
-# which selects CARTO for them and overrides whatever is set here.
+# Background tiles for the maps. The default, openfreemap, needs no key;
+# carto needs a free API key, osm is light-only, and custom takes your own
+# MapLibre style URLs.
 # [web.map]
 # provider = "openfreemap"                         # openfreemap | carto | osm | custom
 # api_key = ""                                     # carto only; public
@@ -1911,10 +1298,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # sse_poll_interval_ms = 200                        # server-side SSE generator cadence
 # client_poll_interval_ms = 1500                    # client polling fallback cadence
 #
-# Live room-event stream (GET /chat/stream). One user-scoped SSE connection per
-# open tab carries every room the user is a member of, so a Talk turn, a routed
-# alert, or a message in a background room reaches the browser in about a second
-# whatever surface produced it.
+# Live room-event stream: one connection per open tab carries every room.
 # room_stream_poll_interval_ms = 1000               # server-side tail cadence
 # room_stream_keepalive_seconds = 20                # SSE comment frame, keeps proxies from dropping an idle stream
 # room_stream_max_batch = 500                       # rows before a `gap` frame tells the client to reload
@@ -1952,11 +1336,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_browse_chars = 20000        # same cap for a browse source, which gathers markdown
                                   # rather than flattened text (the URLs it keeps cost
                                   # characters, and a frontpage opens with masthead chrome)
-# newsletter_max_links_per_source = 20  # inline [anchor](url) links kept per newsletter body.
-                                  # Newsletters are link soup, so the converter drops
-                                  # unsubscribe / social / web-version chrome and this caps
-                                  # what survives; an over-cap anchor keeps its text and
-                                  # loses only the destination. 0 = unlimited
+# newsletter_max_links_per_source = 20  # inline links kept per newsletter body, after
+                                  # unsubscribe and social links are dropped. 0 = unlimited
 # shared_block_timezone = "UTC"   # timezone shared (global) blocks evaluate their cron in;
                                   # typically the operator's own zone so the morning/evening
                                   # regeneration windows line up with their day
@@ -2005,23 +1386,16 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # trusted_email_senders = ["*@company.com"]  # trusted in both directions: their mail
                                # skips the inbound confirmation gate, and mail to them
                                # is sent without waiting for approval
-# outbound_approval = "all"    # this user's own outbound approval policy:
-                               # off | untrusted | all. Omit (or "") to follow
-                               # `[email] outbound_approval_floor`, which is a
-                               # minimum — a value weaker than it has no effect.
-                               # Read only when the user has no profile row yet;
-                               # for an existing user the DB row wins, so set it
-                               # with `istota user ensure --outbound-approval`.
+# outbound_approval = "all"    # this user's outbound approval policy: off |
+                               # untrusted | all. Omit to follow the [email] floor.
+                               # Read only before the user has a profile row.
 # external_turn_display = "full"  # how much of a turn that arrived from outside the
                                # room (an external contact's email) shows inline in
                                # web chat: full | collapsed (default) | hidden. The
                                # turn itself is always shown. Editable by the user
                                # on the web settings page.
-# briefing_email_html = false  # briefing email as plain text only. Default (true) sends
-                               # multipart/alternative — HTML with clickable article links
-                               # plus a plain-text fallback part. Also settable per user via
-                               # `istota user ensure --no-briefing-email-html` or the web UI
-                               # (Briefings → settings → Email delivery).
+# briefing_email_html = false  # briefing email as plain text only. The default (true)
+                               # sends HTML with a plain-text part.
 # Alice's resources — only `folder` (an out-of-workspace sandbox mount)
 # is declarable after the Resources sunset. todo/reminders/notes are
 # briefing-source properties (set the source `path`), and calendars are
@@ -2032,14 +1406,8 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # name = "Projects"
 # permissions = "write"
 
-# Alice's briefings. Content is config-authored blocks (the sole content model);
-# schedule + delivery come from name/cron/conversation_token/output. When a
-# briefing declares `blocks`, they are seeded ONCE into the user's briefings
-# module DB as an editable baseline. After the first materialisation the briefing
-# is an ordinary editable per-user briefing; the user reorders/edits it in the
-# web editor and operator re-runs never re-clobber it (seed-once). `blocks` are
-# never stored in the framework DB — they live only in this config and are
-# consumed by the module-DB seeder. See the per-kind config reference below.
+# Alice's briefings: a schedule, a delivery target and content blocks. The
+# blocks are seeded once; after that the user's own edits win.
 [[users.alice.briefings]]
 name = "morning"
 cron = "0 6 * * *"  # 6am in user's timezone

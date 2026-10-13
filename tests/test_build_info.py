@@ -232,6 +232,49 @@ def test_no_checkout_is_the_plain_version(tmp_path):
     assert _label(package) == "0.42.0"
 
 
+class TestTheImagesRevision:
+    """The Docker image has no `.git`, so the commit `istota-stack` built it
+    from rides in as ISTOTA_BUILD_REVISION, and the name it deployed as in
+    ISTOTA_BUILD_TAG. Without them a stack following main labelled itself
+    with the last release's number."""
+
+    @pytest.fixture
+    def package(self, tmp_path):
+        package = tmp_path / "site-packages" / "istota"
+        package.mkdir(parents=True)
+        return package
+
+    def test_a_build_off_main_carries_the_commit(self, package, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BUILD_REVISION", SHA)
+        monkeypatch.setenv("ISTOTA_BUILD_TAG", f"main-{SHA[:12]}")
+        assert _label(package) == f"0.42.0+{SHA[:7]}"
+
+    def test_a_release_build_is_the_plain_version(self, package, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BUILD_REVISION", SHA)
+        monkeypatch.setenv("ISTOTA_BUILD_TAG", "v0.42.0")
+        assert _label(package) == "0.42.0"
+
+    def test_a_revision_with_no_tag_still_carries_the_commit(self, package, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BUILD_REVISION", SHA)
+        monkeypatch.delenv("ISTOTA_BUILD_TAG", raising=False)
+        assert _label(package) == f"0.42.0+{SHA[:7]}"
+
+    def test_an_empty_revision_is_none(self, package, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BUILD_REVISION", "")
+        assert _label(package) == "0.42.0"
+
+    def test_a_checkout_outranks_the_variable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BUILD_REVISION", OTHER_SHA)
+        package = _checkout(tmp_path, head=SHA + "\n")
+        assert _label(package) == f"0.42.0+{SHA[:7]}"
+
+    def test_the_startup_line_names_the_images_commit(self, package, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BUILD_REVISION", SHA)
+        monkeypatch.setenv("ISTOTA_BUILD_TAG", f"main-{SHA[:12]}")
+        line = build_description(str(package / "build_info.py"))
+        assert f"image main-{SHA[:12]} {SHA[:12]}" in line
+
+
 def _pack_one_object(root: Path, sha: str, kind: int, body: bytes) -> None:
     """A v2 `.idx` / `.pack` pair holding one non-delta object, built by hand."""
     size = len(body)
