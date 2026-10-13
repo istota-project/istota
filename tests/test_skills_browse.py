@@ -35,6 +35,7 @@ from istota.skills.browse import (
     get_api_url,
     main,
 )
+from tests.support.broker import broker_off
 
 #: A body that `image_sniff.sniff_raster` admits. `screenshot` refuses to write
 #: anything else now, so a `b"fake image data"` stand-in is no longer a
@@ -3892,7 +3893,7 @@ class TestFillOtp:
         from istota.lib import totp
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-        config = Config(db_path=tmp_path / "otp.db")
+        config = broker_off(Config(db_path=tmp_path / "otp.db"))
         db.init_db(config.db_path)
         params = totp.parse_user_input(base64.b32encode(b"01234567890123456789").decode())
         uri = totp.to_uri(params)
@@ -3981,7 +3982,7 @@ class TestSaveRecovery:
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
         monkeypatch.setattr("istota.notifications.store.deliver_pending", lambda *_: None)
-        config = Config(db_path=tmp_path / "recovery.db")
+        config = broker_off(Config(db_path=tmp_path / "recovery.db"))
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             generated.create(conn, "alice", name="generated_acme", username="alice@example.com",

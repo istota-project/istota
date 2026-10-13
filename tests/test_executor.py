@@ -47,7 +47,7 @@ from istota.sandbox.host_paths import path_under_roots, workspace_roots
 import json
 from pathlib import Path
 
-from istota.config import Config, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, SecurityConfig, SiteConfig, UserConfig
+from istota.config import Config, CredentialBrokerConfig, DeveloperConfig, EmailConfig as AppEmailConfig, NextcloudConfig, SecurityConfig, SiteConfig, UserConfig
 from istota import db
 
 
@@ -586,7 +586,11 @@ class TestDeveloperEnvVars:
             tmp_path,
             bundled_skills_dir=None,
             developer=DeveloperConfig(**kw),
-            security=SecurityConfig(skill_proxy_enabled=skill_proxy_enabled),
+            # The legacy token path; the broker's own cases turn it on.
+            security=SecurityConfig(
+                skill_proxy_enabled=skill_proxy_enabled,
+                credential_broker=CredentialBrokerConfig(enabled=False, enforce_reveal=False),
+            ),
         )
 
     def _hook_env(self, config, tmp_path):

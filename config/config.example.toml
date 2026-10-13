@@ -328,14 +328,16 @@ features = []
 # browse = 90
 
 # [security.credential_broker]
-# enabled = false                 # opt-in header substitution for snapshotted bound hosts
-# enforce_reveal = false          # audit public value reads; true refuses non-revealable values (needs enabled)
+# enabled = true                  # placeholder substitution for granted, bound hosts. Unset, it
+#                                 # follows the sandbox: on for Linux with sandbox_enabled and
+#                                 # [security.network] enabled, off otherwise
+# enforce_reveal = true           # refuse task reads of values not marked readable; false allows
+#                                 # them and logs each as would_refuse. Unset, it follows enabled
 # scan_max_bytes = 1048576         # request scan and response scrub limit
 # leaf_validity_hours = 24         # positive lifetime for per-host TLS certificates
-# Enable enforcement after a week with no would_refuse credential_reveal events.
 # Manifest env reads (including forge tokens) are refused too; skills still get their env.
 # The CA stays in daemon state. Only sandbox commands receive its trust bundle.
-# Network proxy and effective sandboxing are required for credential containment.
+# See docs/configuration/credentials.md, "Credential broker".
 
 # [security.network]
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)

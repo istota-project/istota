@@ -7346,7 +7346,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # the value — which is the one outcome `run` exists to avoid. One line here
     # costs less than that.
     shared_credentials_line = ""
-    if config.security.credential_broker.enabled:
+    if shared_credentials and config.security.credential_broker.enabled:
         shared_credentials_line = (
             "\n- Credential broker: `istota-credential list` shows names and bound hosts. "
             "`istota-credential placeholder NAME` prints `{{cred:NAME}}`. Put that literal "

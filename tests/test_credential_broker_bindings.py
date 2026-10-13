@@ -5,6 +5,7 @@ import pytest
 from istota import db
 from istota.credentials import store as secrets_store
 from tests.test_kdbx_import_read import _new_db, _read
+from tests.support.broker import broker_off
 
 
 @pytest.mark.parametrize("url,host", [
@@ -122,7 +123,7 @@ def test_proxy_resolves_live_value_and_hosts_together(tmp_path, monkeypatch):
     with tempfile.TemporaryDirectory(prefix="binding_", dir="/tmp") as directory:
         socket = Path(directory) / "s"
         monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(socket))
-        with SkillProxy(socket, {}, {}, config=Config(db_path=database), user_id="alice",
+        with SkillProxy(socket, {}, {}, config=broker_off(Config(db_path=database)), user_id="alice",
                         vault_credentials={"portal": "stale-password"}):
             secrets_store.upsert_secret(database, "alice", "vault_entries", "portal",
                                         "current-password", binding=binding)
@@ -162,12 +163,12 @@ def test_vault_list_names_whole_entries_in_the_snapshot(tmp_path, monkeypatch):
     with tempfile.TemporaryDirectory(prefix="entries_", dir="/tmp") as directory:
         socket = Path(directory) / "s"
         monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(socket))
-        with SkillProxy(socket, {}, {}, config=Config(db_path=database), user_id="alice",
+        with SkillProxy(socket, {}, {}, config=broker_off(Config(db_path=database)), user_id="alice",
                         vault_credentials=snapshot):
             # Grouped by the parser's record, not by suffix; an entry with no
             # password is still an entry; one outside the snapshot is not listed.
             assert list_entries() == ["wordpress_blog", "wordpress_nopw"]
-        with SkillProxy(socket, {}, {}, config=Config(db_path=database), user_id="alice",
+        with SkillProxy(socket, {}, {}, config=broker_off(Config(db_path=database)), user_id="alice",
                         vault_credentials={}):
             assert list_entries() == []
         # A proxy that cannot group says nothing, and the shim refuses rather

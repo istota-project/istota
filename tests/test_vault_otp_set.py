@@ -16,6 +16,7 @@ from istota.sandbox.skill_proxy import SkillProxy
 from tests.support.kdbx import create_database
 from tests import test_skill_proxy_vault_create as _vault_create
 from tests.test_skill_proxy_vault_create import _request
+from tests.support.broker import broker_off
 
 # Bound by assignment, not import: ruff reads a test parameter named after an
 # imported fixture as a redefinition (F811), and pytest finds either.
@@ -32,7 +33,7 @@ def configured(tmp_path, monkeypatch):
     group = kp.add_group(kp.root_group, "generated")
     kp.add_entry(group, "acme", "alice", "test-value", url="https://acme.example")
     kp.save()
-    config = Config(db_path=tmp_path / "test.db", users={"alice": UserConfig(vault_path=str(path))})
+    config = broker_off(Config(db_path=tmp_path / "test.db", users={"alice": UserConfig(vault_path=str(path))}))
     db.init_db(config.db_path)
     store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
     preview = credential_read.preview(config.db_path, "alice", path.read_bytes(), "test-passphrase")

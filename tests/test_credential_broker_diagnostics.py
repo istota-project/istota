@@ -8,6 +8,7 @@ from istota.credentials.broker.bindings import parse_binding
 
 def test_disabled_does_not_create_state(tmp_path):
     config = Config(db_path=tmp_path / "db" / "data.db")
+    config.security.credential_broker.enabled = False
     results = doctor.check_credential_broker(config, False)
     assert results[0].status == doctor.SKIP
     assert not config.db_path.parent.exists()

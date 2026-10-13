@@ -1445,11 +1445,14 @@ istota_config: {}
 #     credential_backup_retention: 30
 #
 #     credential_broker:
-#       # opt-in header substitution for snapshotted bound hosts
-#       enabled: false
+#       # placeholder substitution for granted, bound hosts. Unset, it
+#       # follows the sandbox: on for Linux with sandbox_enabled and
+#       # [security.network] enabled, off otherwise
+#       enabled: true
 #
-#       # audit public value reads; true refuses non-revealable values (needs enabled)
-#       enforce_reveal: false
+#       # refuse task reads of values not marked readable; false allows
+#       # them and logs each as would_refuse. Unset, it follows enabled
+#       enforce_reveal: true
 #
 #       # request scan and response scrub limit
 #       scan_max_bytes: 1048576

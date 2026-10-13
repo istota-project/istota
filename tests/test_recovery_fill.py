@@ -9,6 +9,7 @@ from istota.credentials import generated
 from istota.sandbox.skill_proxy import SkillProxy
 from tests.test_skill_proxy_otp import ask
 from tests import test_skill_proxy_vault_create as _vault_create
+from tests.support.broker import broker_off
 
 sock = _vault_create.sock
 
@@ -19,7 +20,7 @@ CODES = ["sentinel-rc-1111", "sentinel-rc-2222", "sentinel-rc-3333"]
 @pytest.fixture
 def recovery_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-    config = Config(db_path=tmp_path / "data.db", users={"alice": UserConfig()})
+    config = broker_off(Config(db_path=tmp_path / "data.db", users={"alice": UserConfig()}))
     db.init_db(config.db_path)
     with db.get_db(config.db_path) as conn:
         task = db.create_task(conn, user_id="alice", prompt="Sign in", source_type="web")

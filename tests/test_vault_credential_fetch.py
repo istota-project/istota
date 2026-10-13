@@ -41,6 +41,7 @@ from istota.sandbox import credential_shim
 from istota.sandbox import task_env
 from istota.config import Config, DevboxConfig, SecurityConfig
 from istota.sandbox.skill_proxy import SkillProxy
+from tests.support.broker import broker_off
 
 #: Distinct enough that a sweep over two whole environment dicts means
 #: something. Every one of these is a *value*; the names beside them are
@@ -140,7 +141,7 @@ class TestVaultCredential:
             secrets_store.upsert_secret(
                 db_path, "alice", "vault", "passphrase", "the-passphrase",
             )
-            config = Config(db_path=db_path)
+            config = broker_off(Config(db_path=db_path))
             resolved = task_env._vault_credentials(config, "alice")
 
         assert resolved == {}
@@ -798,13 +799,13 @@ def _config(tmp_path, **security):
     sec = {"sandbox_enabled": True, "skill_proxy_enabled": True}
     sec.update(security)
     (tmp_path / "db").mkdir(exist_ok=True)
-    return Config(
+    return broker_off(Config(
         db_path=tmp_path / "db" / "test.db",
         temp_dir=tmp_path / "temp",
         workspace_path=tmp_path / "mount",
         security=SecurityConfig(**sec),
         devbox=DevboxConfig(enabled=False),
-    )
+    ))
 
 
 @pytest.fixture
@@ -1117,12 +1118,12 @@ class TestThePromptStatesTheFetchBudget:
     re-resolving the same names, and finds out at the refusal."""
 
     def _system(self, tmp_path, limit: int) -> str:
-        config = Config(
+        config = broker_off(Config(
             db_path=tmp_path / "t.db",
             skills_dir=tmp_path / "skills",
             bundled_skills_dir=tmp_path / "_empty",
             temp_dir=tmp_path / "temp",
-        )
+        ))
         config.skills_dir.mkdir(parents=True, exist_ok=True)
         from istota import db as framework_db
         framework_db.init_db(config.db_path)

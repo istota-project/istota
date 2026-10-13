@@ -56,6 +56,7 @@ from tests.test_skill_host_paths_coverage import (
     _module_for,
     _skill_dirs,
 )
+from tests.support.broker import broker_off
 
 #: Values distinct enough that a sweep over a whole rendered blob means
 #: something; the names beside them are deliberately ordinary.
@@ -673,7 +674,7 @@ class TestOtpPair:
 
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
         monkeypatch.setattr(skill_proxy, "time", lambda: 60.0)
-        config = Config(db_path=tmp_path / "data.db")
+        config = broker_off(Config(db_path=tmp_path / "data.db"))
         db.init_db(config.db_path)
         params = totp.parse_user_input(base64.b32encode(b"01234567890123456789").decode())
         uri = totp.to_uri(params)

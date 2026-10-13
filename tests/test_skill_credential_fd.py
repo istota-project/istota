@@ -15,6 +15,7 @@ from istota.sandbox.skill_proxy import SkillProxy
 from istota.skills._credref import _resolve_name
 from tests import test_vault_credential_fetch as _vault_fetch
 from tests.test_vault_credential_fetch import VAULT, request
+from tests.support.broker import broker_off
 
 # Shared fixture, bound by assignment so the parameters using it are not
 # read as redefinitions of an unused import.
@@ -133,7 +134,7 @@ def test_private_channel_preserves_live_binding_and_value(tmp_path, sock_path, m
     from istota.credentials.broker.bindings import parse_binding
 
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-    config = Config(db_path=tmp_path / "data.db")
+    config = broker_off(Config(db_path=tmp_path / "data.db"))
     db.init_db(config.db_path)
     with start_proxy(sock_path, config=config, user_id="alice") as proxy:
         with proxy._credential_channel(2) as fd:

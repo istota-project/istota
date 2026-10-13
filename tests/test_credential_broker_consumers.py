@@ -50,6 +50,7 @@ def test_broker_wrapper_still_checks_deny_policy(tmp_path, monkeypatch):
 
 def test_disabled_broker_policy_keeps_legacy_mode(tmp_path):
     config = _make_config(tmp_path, devbox=False)
+    config.security.credential_broker.enabled = False
     config.developer.gitlab_token = "fixture-forge-password"
     _, temp = _run_hook(config, tmp_path)
     policy = json.loads((temp / ".developer/forge-policy.json").read_text())

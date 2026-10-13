@@ -17,6 +17,7 @@ from istota.credentials.broker import bindings, intercept
 from istota.sandbox import credential_shim
 from istota.sandbox.skill_proxy import SkillProxy
 from tests import test_vault_credential_fetch as vault_fetch
+from tests.support.broker import broker_off
 
 sock_path = vault_fetch.sock_path
 SEED = "fixture-otp-seed-value"
@@ -26,7 +27,7 @@ VALUES = {"acme": "fixture-password", "acme_factor": SEED, "acme_totp": "ordinar
 @pytest.fixture
 def config(tmp_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-    config = Config(db_path=tmp_path / "data.db")
+    config = broker_off(Config(db_path=tmp_path / "data.db"))
     db.init_db(config.db_path)
     for name, value in VALUES.items():
         binding = bindings.parse_binding("https://acme.example", {}, ["istota:reveal"])

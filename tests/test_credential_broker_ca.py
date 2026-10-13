@@ -106,7 +106,7 @@ def test_server_context_negotiates_only_http11_and_upstream_distrusts_ca(tmp_pat
 
 
 def test_broker_config_defaults_mapping_and_validation(tmp_path):
-    assert not Config().security.credential_broker.enabled
+    assert Config().security.credential_broker.enabled
     path = tmp_path / "config.toml"
     path.write_text("[security.credential_broker]\nenabled = true\nscan_max_bytes = 2048\nleaf_validity_hours = 12\n")
     broker = load_config(path).security.credential_broker

@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field, replace as _dc_replace
@@ -1547,9 +1548,15 @@ class NetworkConfig:
 
 @dataclass
 class CredentialBrokerConfig:
-    """Opt-in credential interception and its bounded scans."""
-    enabled: bool = False
-    enforce_reveal: bool = False
+    """Credential interception, reveal enforcement and their bounded scans.
+
+    Both switches are on by default. A config that names neither follows the
+    boundary they need: off Linux, or with the sandbox or the network proxy
+    off, the loader turns the broker off (`_default_broker_to_boundary`), and
+    `enforce_reveal` left unnamed follows `enabled`.
+    """
+    enabled: bool = True
+    enforce_reveal: bool = True
     scan_max_bytes: int = 1048576
     leaf_validity_hours: int = 24
 
@@ -4521,7 +4528,32 @@ def _map_document(data: dict, config: Config) -> list[str]:
     # block: `_validate_alias_overrides` in `load_config` resolves names
     # through the brain.
     _apply_legacy_brain_defaults(data, config)
+    _default_broker_to_boundary(data, config)
     return unknown
+
+
+def _default_broker_to_boundary(data: dict, config: Config) -> None:
+    """Resolve the broker switches a document leaves unnamed.
+
+    Without the sandbox and the network proxy a placeholder has nowhere to be
+    substituted, and broker mode never falls back to a raw value, so a default
+    of on would break git, the forge CLIs and every vault read on the
+    standalone install. bwrap exists only on Linux, and a Linux daemon whose
+    sandbox cannot be built refuses to start, so the platform is the probe
+    this path may not spawn. A value the operator wrote is kept as written.
+    """
+    security = data.get("security")
+    broker = security.get("credential_broker") if isinstance(security, dict) else None
+    named = broker if isinstance(broker, dict) else {}
+    settings = config.security.credential_broker
+    if "enabled" not in named:
+        settings.enabled = bool(
+            sys.platform.startswith("linux")
+            and config.security.sandbox_enabled
+            and config.security.network.enabled
+        )
+    if "enforce_reveal" not in named:
+        settings.enforce_reveal = settings.enabled
 
 
 def config_from_document(data: dict) -> Config:

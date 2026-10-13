@@ -22,6 +22,7 @@ from tests import test_vault_credential_fetch as _vault_fetch
 from tests.test_credential_broker_reveal import granted_task
 from tests.test_skill_credential_fd import start_proxy
 from tests.test_vault_credential_fetch import proxy, request
+from tests.support.broker import broker_off
 
 skill_program = _credential_fd.skill_program
 sock_path = _vault_fetch.sock_path
@@ -46,7 +47,7 @@ def _store(config, name, value, *, owner, url="https://acme.example", tags=()):
 @pytest.fixture
 def config(tmp_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-    config = Config(db_path=tmp_path / "data.db")
+    config = broker_off(Config(db_path=tmp_path / "data.db"))
     db.init_db(config.db_path)
     for name, value in ACME.items():
         _store(config, name, value, owner="acme")

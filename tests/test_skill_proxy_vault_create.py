@@ -16,6 +16,7 @@ from istota.credentials import names as secrets_vault
 from istota.sandbox import credential_shim
 from istota.config import Config, UserConfig
 from istota.sandbox.skill_proxy import SkillProxy
+from tests.support.broker import broker_off
 
 
 @pytest.fixture
@@ -45,11 +46,11 @@ def test_create_is_available_in_the_same_task_and_never_returns_password(tmp_pat
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    config = Config(
+    config = broker_off(Config(
         db_path=tmp_path / "daemon" / "test.db",
         workspace_path=tmp_path / "workspace",
         users={"alice": UserConfig(vault_path=str(path), email_addresses=["alice@example.com"])},
-    )
+    ))
     config.email.enabled = True
     config.email.bot_email = "bot@example.com"
     config.db_path.parent.mkdir()
@@ -92,14 +93,14 @@ def test_signup_address_must_not_name_another_user(tmp_path, monkeypatch, sock):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    config = Config(
+    config = broker_off(Config(
         db_path=tmp_path / "daemon" / "test.db",
         workspace_path=tmp_path / "workspace",
         users={
             "alice": UserConfig(vault_path=str(path)),
             "alice+team": UserConfig(),
         },
-    )
+    ))
     config.security.allow_unsandboxed_multi_user_vaults = True
     config.email.enabled = True
     config.email.bot_email = "bot@example.com"
@@ -123,11 +124,11 @@ def test_stale_pending_signup_tag_recovers_from_the_store(
     from istota.credentials import generated
 
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
-    config = Config(
+    config = broker_off(Config(
         db_path=tmp_path / "daemon" / "test.db",
         workspace_path=tmp_path / "workspace",
         users={"alice": UserConfig()},
-    )
+    ))
     config.email.enabled = True
     config.email.bot_email = "bot@example.com"
     config.db_path.parent.mkdir()
@@ -156,11 +157,11 @@ def test_recent_pending_signup_tag_remains_busy(tmp_path, monkeypatch, sock):
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    config = Config(
+    config = broker_off(Config(
         db_path=tmp_path / "daemon" / "test.db",
         workspace_path=tmp_path / "workspace",
         users={"alice": UserConfig(vault_path=str(path))},
-    )
+    ))
     config.email.enabled = True
     config.email.bot_email = "bot@example.com"
     config.db_path.parent.mkdir()
@@ -224,11 +225,11 @@ def test_generated_count_comes_from_the_group_not_a_flat_name(tmp_path, monkeypa
     kp.save()
     read = credential_read.parse_vault(path.read_bytes(), "test-passphrase")
     assert read.generated_count == 0
-    config = Config(
+    config = broker_off(Config(
         db_path=tmp_path / "daemon" / "test.db",
         workspace_path=tmp_path / "workspace",
         users={"alice": UserConfig(vault_path=str(path))},
-    )
+    ))
     config.db_path.parent.mkdir()
     db.init_db(config.db_path)
     secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
@@ -261,11 +262,11 @@ def test_a_name_held_by_any_stored_row_is_refused(tmp_path, monkeypatch, sock, t
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
     before = path.read_bytes()
-    config = Config(
+    config = broker_off(Config(
         db_path=tmp_path / "daemon" / "test.db",
         workspace_path=tmp_path / "workspace",
         users={"alice": UserConfig(vault_path=str(path), email_addresses=["alice@example.com"])},
-    )
+    ))
     config.db_path.parent.mkdir()
     db.init_db(config.db_path)
     secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")

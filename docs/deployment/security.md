@@ -1,6 +1,6 @@
 # Security
 
-Istota isolates Claude Code invocations through layered security: clean environment, filesystem sandbox, credential proxy, and network isolation.
+Istota isolates Claude Code invocations through layered security: clean environment, filesystem sandbox, credential proxy, network isolation, and the credential broker.
 
 ## Supported deployment
 
@@ -211,7 +211,13 @@ Additional hosts added automatically:
 
 The forge wrapper sets `GH_TELEMETRY=0` and `DO_NOT_TRACK=1`, so no telemetry host needs allowlisting and no command spends a rejected CONNECT on one. GitHub Enterprise Server needs no extra entry: its API is a path on the same host (`<host>/api/v3`), already added as the git remote.
 
-TLS is end-to-end by default. With the optional [HTTP credential broker](../configuration/credentials.md#http-credential-broker), only hosts bound to a credential in the task snapshot are intercepted for header substitution. Other connections remain raw TLS.
+TLS is end-to-end except for hosts bound to a credential in the task's grant snapshot, which the credential broker intercepts (below). Every other connection is a raw tunnel.
+
+## Credential broker
+
+On by default on the stack, together with reveal enforcement. A task never holds the value of a stored credential: it writes a placeholder such as `{{cred:portal_token}}` in an authentication header, and the network proxy substitutes the value on a connection to a host the credential is bound to, when a grant covers the task. The proxy terminates TLS for those hosts only, with certificates from a CA kept in daemon state outside every sandbox bind; each task trusts it through a bundle in its read-only control directory. Reveal enforcement refuses `istota-credential get`, `run` and `env` for any entry not marked readable, so the only way a value leaves the daemon is to its own site, or through a host-side skill. The forge token reaches `git`, `gh` and `glab` the same way.
+
+Off by default where there is no sandbox and network proxy for it to rely on (`sandbox_enabled = false`, `[security.network] enabled = false`, or any platform other than Linux). Setup, use, the request path and the limits are in [Credential broker](../configuration/credentials.md#credential-broker).
 
 ## The local VM
 
@@ -274,6 +280,10 @@ sandbox_ro_paths = []        # extra RO binds for co-located services; keep narr
 enabled = true
 allow_pypi = true
 extra_hosts = []
+
+[security.credential_broker]
+enabled = true               # unset, follows the sandbox and the network proxy
+enforce_reveal = true        # unset, follows enabled
 ```
 
 The startup warning is read once at install. `istota doctor --only security.sandbox_credentials` reports the same pairing on demand, and the admin Health pane shows it as a standing `WARN` — with the bwrap probe's answer attached, so it says whether the sandbox you asked for is actually in force. Both switches off together is the single-user install's deliberate trust decision and is reported as a `SKIP`, not a warning.

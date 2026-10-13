@@ -224,31 +224,75 @@ For the full skill development workflow including env var mapping, see [adding s
 **Browser** — `BROWSER_API_URL` and `BROWSER_VNC_URL` are deployment-level config, not credentials. They point to the headless browser container.
 
 
-## HTTP credential broker
+## Credential broker
 
-The broker is off by default. Set `[security.credential_broker] enabled = true` with the network proxy enabled to use literal placeholders in authentication headers. `istota-credential list` shows names and bindings; `istota-credential placeholder NAME` prints the placeholder on stdout and its bound hosts on stderr without fetching a value.
+The credential broker lets a task use a stored credential without ever holding its value. The task writes a placeholder such as `{{cred:portal_token}}` where the secret would go, and the network proxy puts the real value in on the way out, only on a connection to that credential's own site. The value never enters the sandbox, so a task that has been steered by a prompt injection has nothing to copy out.
+
+The broker and reveal enforcement are both on by default on the stack. On a shape without a sandbox and a network proxy, such as the deprecated standalone install or `istota serve` on a Mac, they are off by default, because a placeholder needs the proxy to be substituted and a value is only contained by the sandbox.
+
+### What it changes
+
+With both switches on:
+
+- A task cannot read the value of a credential. `istota-credential get`, `istota-credential run` and `istota-credential env` are refused with `credential_brokered`. The one exception is an entry the user marked readable (below).
+- A task authenticates an HTTP request by putting a placeholder in an authentication header. The proxy substitutes it only for a host the credential is bound to, and only if a grant covers the task.
+- `git`, `gh` and `glab` use placeholders for the deployment's forge token without any change to how a task calls them. The token is not in the task's environment.
+- `browse interact --fill-credential` and `--fill-otp` work as before, but need a grant that covered the task when it started.
+- Skills that run host-side (email, calendar, the WordPress skill and the rest) still receive the credentials their manifests declare. They run outside the sandbox and read through a private channel the model cannot reach.
+
+### Setting up a credential
+
+A credential needs a site and a grant before a task can use it.
+
+1. **A site.** In Settings → Credentials, the Site field and "Also used on" list the hosts the credential may be sent to. In a KeePass file, the entry's URL field and an `istota_hosts` custom field do the same. Hosts are matched exactly, including the port. HTTPS is required unless the grant allows HTTP.
+2. **Headers.** By default a placeholder is accepted in `Authorization`, `Private-Token`, `X-API-Key` and `X-Auth-Token`. The Headers field (or an `istota_headers` custom field) adds others.
+3. **A grant.** "Edit access" on the credential sets who may use it: all rooms or chosen rooms, and whether scheduled tasks may. A grant for a scoped KeePass import is made on first import unless the entry is tagged `istota:nogrant`. A credential a task creates with `istota-credential new` is granted to that task's room.
+4. **Readable, if it must be.** A credential used outside an HTTP header, for a non-HTTP protocol or to sign something, cannot be substituted. Tick "Tasks may read the secret" (the `istota:reveal` tag in KeePass) and tasks may read its value as before. Prefer a host-side skill where one exists.
+
+### Using it in a task
 
 ```sh
+istota-credential list                     # names, bound hosts and grant state; never values
+istota-credential placeholder portal_token # prints {{cred:portal_token}}; hosts go to stderr
 curl -H 'Authorization: Bearer {{cred:portal_token}}' https://portal.example/api
 ```
 
-Bind a credential with a site (a KeePassXC entry's URL field or `istota_hosts`, or the Site and "Also used on" fields of one added in Istota), and grant access in Settings (a scoped import can grant a new entry; see above). Grants limit rooms and scheduled use, for the proxy's substitution and for host-side skills alike. With the broker enabled, `browse interact --fill-credential` needs a bound entry whose grant covered the task when it started, so it is refused with `credential_not_granted` for an ungranted entry, in a room the grant does not cover, and in a scheduled task without scheduled use. The one exception is an entry the same task created with `istota-credential new`, which it may fill; later tasks need a grant for it like any other entry. Public value reads (`get`, `run`) are governed by reveal enforcement, not by grants. With the broker disabled, grants are not consulted. Every HTTP method is allowed on a bound host, including DELETE and WebDAV methods; saved method restrictions from older versions no longer apply. Each task keeps its original grant snapshot across retries; revoking or changing a grant refuses its next use. The broker decodes Basic authentication before substituting a placeholder password, so clients can build the Basic header themselves.
+Quote the placeholder in single quotes so the shell passes it through unchanged. A client can build a Basic header itself: the proxy decodes it and substitutes a placeholder in the password half. When the proxy refuses a request it answers with a `X-Istota-Refused` header naming the reason, for example `credential_not_granted`, `credential_not_bound`, `credential_header_not_allowed` or `credential_https_required`. The fix for each is in Settings, not in the task.
 
-Only a host bound to a credential in the task snapshot is intercepted. Every other connection keeps its original TLS session and carries placeholders as literal text. On an intercepted connection, SNI and Host must match the CONNECT host. IP-literal destinations may omit SNI, as standard TLS clients do. A placeholder in a disallowed header or URL is refused. A placeholder in the first `scan_max_bytes` of a request body is refused before forwarding; later body bytes stream unchanged and are never substituted. The default cap is 1 MiB.
+### How it works
 
-Response headers and bodies no larger than that cap are scrubbed for the exact substituted bytes. A response field name containing a substituted value is refused, since a placeholder cannot be a valid field name. Larger bodies stream without body scrubbing; audit records state both scan limits. This is not protection against an upstream service deliberately encoding or transforming a credential in its response. Compressed request bodies, compressed responses to authenticated requests, trailers and upgrades are unsupported. Both TLS legs use HTTP/1.1, so pinned-certificate clients and clients that require HTTP/2 need a host-side skill or a revealable credential.
+1. **At task start** the daemon syncs the deployment forge token's binding, then freezes the task's grant snapshot: every grant whose room scope covers the task's room, and for a scheduled task, only grants that allow scheduled use. A guest's turn, and a task nobody asked in a shared room, get no credentials. A task with no room gets none either. Revoking or changing a grant refuses its next use, even in a running task.
+2. **A certificate authority** lives in daemon state under the database directory (`credential-broker/`, mode 0700), outside every sandbox bind. Each task gets a trust bundle, the system roots plus this CA's public certificate, in its read-only control directory. `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` and `NODE_EXTRA_CA_CERTS` point at it inside the sandbox only.
+3. **A connection to a bound host** in the snapshot is intercepted: the proxy ends the task's TLS with a certificate for that host (valid for 24 hours), checks that SNI and `Host` match the CONNECT target, and opens its own TLS connection upstream, verified against the daemon's trust store. Both legs use HTTP/1.1. A connection to any other host is tunnelled unchanged, so a placeholder sent there arrives as inert text.
+4. **On each request** the proxy re-reads the grant and the binding, then replaces a placeholder only in an allowed authentication header. A placeholder in the URL, or in the first `scan_max_bytes` of the body, refuses the request. Responses up to the same size are scrubbed of the substituted value before the task sees them.
+5. **Reveal enforcement** is in the skill proxy, which serves `istota-credential`. It refuses a public read of any entry not marked readable, and refuses manifest `env` reads, which have no readable marker. Host-side skills read through their private channel and are unaffected.
 
-`istota doctor --only security.credential_broker` reports the CA, task trust bundles, proxy and peer-check readiness, effective sandboxing, and counts of unbound or ungranted entries. The CA stays in daemon state; only public trust bundles enter tasks. The daemon verifies upstream TLS using its own trust store. Without effective sandboxing, credentials are not contained. With the broker enabled, developer git helpers and gh/glab use placeholders. Public value reads remain available until reveal enforcement is enabled.
+Audit records name the task, the credential and the outcome. They never hold a value.
 
+### Limits
 
-### Reveal enforcement rollout
+- Clients that need HTTP/2 or pin certificates cannot use an intercepted host. Use a host-side skill or a readable entry.
+- Compressed request bodies, compressed responses to authenticated requests, trailers and protocol upgrades are refused on intercepted hosts.
+- Body bytes past `scan_max_bytes` (1 MiB by default) stream unscanned: a placeholder there is not substituted, and a value echoed there is not scrubbed.
+- The scrub matches the exact substituted bytes. A service that encodes or transforms the credential in its response is not caught.
+- The devbox has its own credential proxy and is outside the broker. Forge tokens reach a build in the devbox as they did before.
 
-`[security.credential_broker] enforce_reveal = false` is the default. Each public value read of a brokered credential logs a WARNING with `credential_reveal`, `action=would_refuse`, the task, request type, credential name and claimed mode. Values are never logged. This includes callers claiming `mode=skill`: only the private inherited channel given to a host-side skill is trusted. Audit logging does not contain credentials; callers still receive values in this mode.
+### Upgrading an install that ran without it
 
-Enable the broker and migrate scripts to placeholders or host-side skills. Watch the `credential_reveal` records for a week of normal use. Resolve every `would_refuse` use, then observe a full week without one before setting `enforce_reveal = true`. This is an operator rollout step, with no automatic timer or activation. `enforce_reveal` has no effect while `enabled = false`, since without placeholders it would only break git, the forge CLIs and `run`; the daemon logs a warning at startup in that combination. Restart the daemon after changing the setting. Setting it back to false restores public reads and their audit records.
+Grants were never consulted while the broker was off, so an existing install has none. The first task each user runs after the upgrade grants every credential that has a site, once: all rooms, scheduled use on. An entry the user declined (tagged `istota:nogrant`, or created by a task) stays ungranted. This is the same action as the "Allow all existing" button in Settings, which disappears once it has run. Narrow the grants afterwards if you want them narrower.
 
-Under enforcement, `get`, `run` and `run --stdin` return `credential_brokered` for an entry without the `istota:reveal` tag. The daemon checks live metadata on each read, so removing the tag and importing the entry revokes the exception for running tasks too. A missing binding grants no exception. Revealable reads keep the existing fetch cap and read WARNING. `list`, `placeholder` and `new` remain available; a new entry is brokered by default.
+A credential with no site cannot be used through the broker at all. Give it a site, or mark it readable. A forge token configured after that first task needs its grant set in Settings.
 
-`env` reads manifest variables, which have no reveal marker, so enforcement refuses all of them, including forge tokens. A hand-written socket client receives the same refusal. Use the forge placeholders or a host-side skill instead; skills still receive their declared environment credentials and resolve vault names through their private channel. A forge wrapper still on its legacy token path will fail until the broker is enabled. The devbox has a separate proxy and is outside this rollout.
+Scripts that read values with `get`, `run` or `env` stop working. Move them to placeholders or a host-side skill, or mark the entries they need readable.
 
-Enforcement is independent of the interception switch. Turning it on before migrating consumers can break their authentication. It cannot contain values on an unsandboxed deployment.
+### Turning it down
+
+```toml
+[security.credential_broker]
+enforce_reveal = false   # values readable again; each read of a brokered entry logs credential_reveal action=would_refuse
+enabled = false          # no interception and no grants; enforce_reveal follows unless set
+```
+
+With `enforce_reveal = false` the broker still substitutes placeholders, and every public read of a brokered entry is allowed and logged at WARNING with `credential_reveal`, `action=would_refuse`, the task, the request type and the credential name. That log is how to find the scripts that still read values before turning enforcement back on. `enforce_reveal = true` with `enabled = false` has no effect and warns at startup. Restart the daemon after changing either setting.
+
+`istota doctor --only security.credential_broker` reports the CA, the task trust bundles, the network proxy, the peer check, whether sandboxing is in effect, and per user how many credentials have no site or no grant.

@@ -3757,24 +3757,32 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
         prefix + ".containment", OK if effective else WARN,
         "broker enabled with effective sandboxing" if effective else
         "broker enabled; effective sandboxing is absent or unverified, so values are not contained",
+        remedy="" if effective else
+        "run the stack, where bwrap runs every task; or set [security.credential_broker] enabled = false",
     ), CheckResult(
         prefix + ".proxy", OK if config.security.network.enabled else FAIL,
         "network proxy enabled" if config.security.network.enabled else
         "network proxy disabled; placeholders cannot authenticate",
+        remedy="" if config.security.network.enabled else
+        "set [security.network] enabled = true, or [security.credential_broker] enabled = false",
     ), CheckResult(
         prefix + ".peer_check", OK if peer_process.supported() else FAIL,
         "network proxy authenticates task process ancestry" if peer_process.supported() else
         "kernel peer identity unavailable; network proxy refuses connections",
+        remedy="" if peer_process.supported() else
+        "run on Linux, where the proxy reads the peer with SO_PEERCRED",
     )]
     certificate = None
     try:
         state = ca.state_directory(config)
         certificate = ca.read_ca(state).certificate
     except FileNotFoundError:
-        results.append(CheckResult(prefix + ".ca", WARN, "CA not created yet; it is generated at task setup"))
+        results.append(CheckResult(prefix + ".ca", WARN, "CA not created yet; it is generated at task setup",
+                                   remedy="none needed before the first task; run any task to create it"))
     except Exception:
         certificate = None
-        results.append(CheckResult(prefix + ".ca", FAIL, "CA is unreadable, invalid, or has unsafe ownership or permissions"))
+        results.append(CheckResult(prefix + ".ca", FAIL, "CA is unreadable, invalid, or has unsafe ownership or permissions",
+                                   remedy="delete ca-key.pem under {db dir}/credential-broker and restart the daemon to issue a new CA"))
     else:
         results.append(CheckResult(prefix + ".ca", OK, "CA is valid and private to the daemon account"))
     bundle_found = False
@@ -3791,6 +3799,7 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
         prefix + ".bundle", OK if bundle_found else WARN,
         "task trust bundle includes the current broker CA" if bundle_found else
         "no current task trust bundle found; bundles are written at task setup",
+        remedy="" if bundle_found else "none needed before the first task; run any task to write one",
     ))
     try:
         conn = sqlite_util.connect_read_only(config.db_path)
@@ -3819,9 +3828,12 @@ def check_credential_broker(config: "Config", probe: bool) -> list[CheckResult]:
         finally:
             conn.close()
         results.append(CheckResult(prefix + ".bindings", WARN if gaps else OK,
-                                   "; ".join(gaps) if gaps else "every bound credential is granted"))
+                                   "; ".join(gaps) if gaps else "every bound credential is granted",
+                                   remedy="give each credential a site, and grant it under Settings > Credentials"
+                                   if gaps else ""))
     except (OSError, sqlite3.Error, ValueError):
-        results.append(CheckResult(prefix + ".bindings", WARN, "binding counts unavailable; database not ready"))
+        results.append(CheckResult(prefix + ".bindings", WARN, "binding counts unavailable; database not ready",
+                                   remedy="run `istota init`, then check again"))
     return results
 
 

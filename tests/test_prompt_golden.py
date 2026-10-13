@@ -110,6 +110,7 @@ from istota.config import (
     BrainConfig,
     Config,
     ConversationConfig,
+    CredentialBrokerConfig,
     NextcloudConfig,
     SecurityConfig,
     SleepCycleConfig,
@@ -417,6 +418,9 @@ class Case:
     #: `base_nextcloud` is the empty-namespace half of the pair, so the diff
     #: between the two goldens is exactly the two lines this buys.
     shared_credentials: bool = False
+    #: `[security.credential_broker]`, on by default as shipped. Off only for
+    #: `shared_credentials_no_broker`, which keeps the `run` line covered.
+    broker: bool = True
     #: Registers `conversation_token` in the room registry, which is what the
     #: header's `Room:` line is gated on (ISSUE-509). Off everywhere else, and
     #: that absence is itself the control: `source_web` carries a `web-room`
@@ -554,6 +558,7 @@ CASES: tuple[Case, ...] = (
     # that it exists, and the quoting the injection form needs. Names and
     # values are in neither golden, because they are in neither prompt.
     Case("shared_credentials", shared_credentials=True),
+    Case("shared_credentials_no_broker", shared_credentials=True, broker=False),
     # The room card (multiplayer Stage 12), against `room_web`, which differs
     # from it in nothing but the second member: the diff is the card and the
     # ambient memory a shared room leaves out (ISSUE-576).
@@ -664,7 +669,10 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         # seeded `memories/YYYY-MM-DD.md` away from a wall-clock filename in a
         # golden. See the module docstring.
         sleep_cycle=SleepCycleConfig(auto_load_dated_days=0),
-        security=SecurityConfig(sandbox_enabled=case.sandboxed),
+        security=SecurityConfig(
+            sandbox_enabled=case.sandboxed,
+            credential_broker=CredentialBrokerConfig(enabled=case.broker, enforce_reveal=case.broker),
+        ),
         disabled_skills=list(case.disabled_skills),
         # `kind` stays the shipped default: the point of the routed case is
         # that a room reaches a brain the deployment does not run by default.

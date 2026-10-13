@@ -592,7 +592,7 @@ def build_task_runtime(
     if config.db_path and Path(config.db_path).is_file():
         from istota import db
         from istota.credentials.broker.bindings import sync_forge_bindings
-        from istota.credentials.broker.grants import ensure_credential_grants
+        from istota.credentials.broker.grants import ensure_credential_grants, grant_what_exists
         # A caller holding a write transaction (execute_task_interactive) would
         # deadlock a second connection's BEGIN IMMEDIATE, so join it instead.
         with db.get_db_if_present(config.db_path, conn) as c:
@@ -605,6 +605,12 @@ def build_task_runtime(
             # not by deleting the rows a concurrent task of this user reads.
             available = None if config.is_admin(task.user_id) and config.developer.enabled else set()
             sync_forge_bindings(c, task.user_id, config.developer, available_names=available)
+            # Grants were never consulted with the broker off, so an install
+            # turning it on has none. Granting what exists once, as the
+            # settings action does, keeps every bound entry usable on its
+            # hosts; a declined entry stays ungranted.
+            if config.security.credential_broker.enabled:
+                grant_what_exists(c, task.user_id)
             ensure_credential_grants(
                 c, task.id, task.user_id, withheld_scopes=withheld_scopes,
             )

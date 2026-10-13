@@ -380,12 +380,12 @@ Per-skill overrides of `skill_proxy_timeout`, in seconds, applied instead of the
 
 ### `[security.credential_broker]`
 
-Opt-in substitution of credential placeholders in authentication headers, for hosts a credential is bound to. Needs the network proxy and effective sandboxing. See [HTTP credential broker](credentials.md#http-credential-broker).
+Substitutes credential placeholders in authentication headers, for hosts a credential is bound to, so a task uses a credential without holding its value. Needs the network proxy and effective sandboxing. See [Credential broker](credentials.md#credential-broker).
 
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Turn the broker on |
-| `enforce_reveal` | `false` | `false` logs each public value read of a brokered credential (`credential_reveal`, `action=would_refuse`) and still returns it; `true` refuses reads of entries without the `istota:reveal` tag. No effect while `enabled = false`. Enable it only after a week with no `would_refuse` records |
+| `enabled` | `true` on Linux with `sandbox_enabled` and `[security.network] enabled`, otherwise `false` | Turn the broker on. When the key is absent the default follows the sandbox and the network proxy; a value you write is kept |
+| `enforce_reveal` | same as `enabled` | `true` refuses public value reads (`istota-credential get`, `run`, `env`) of entries without the `istota:reveal` tag. `false` returns them and logs each one (`credential_reveal`, `action=would_refuse`). No effect while `enabled = false` |
 | `scan_max_bytes` | `1048576` | Request scan and response scrub limit |
 | `leaf_validity_hours` | `24` | Lifetime of the per-host TLS certificates the broker issues |
 

@@ -15,7 +15,7 @@ from istota import executor
 from istota.sandbox import network_proxy
 from istota.sandbox import skill_proxy
 from istota.sandbox import task_env
-from istota.config import Config, DevboxConfig, NetworkConfig, SecurityConfig
+from istota.config import Config, CredentialBrokerConfig, DevboxConfig, NetworkConfig, SecurityConfig
 from istota.skills._types import EnvSpec, SkillMeta
 
 
@@ -41,7 +41,9 @@ def runtime_inputs(tmp_path, make_task):
 
 
 def _config(tmp_path, **security):
-    sec = {"sandbox_enabled": True, "skill_proxy_enabled": True}
+    # The broker is on by default; the cases that are about it say so.
+    sec = {"sandbox_enabled": True, "skill_proxy_enabled": True,
+           "credential_broker": CredentialBrokerConfig(enabled=False, enforce_reveal=False)}
     sec.update(security)
     # The database directory is a subdirectory rather than `tmp_path` itself:
     # `resolve_sandbox_cache_dir` refuses a cache root under it, and the cache
@@ -932,6 +934,41 @@ class TestBrokerTrustSplit:
                 assert f"{key}={value}" in shlex.split(shell)
             assert "ca-key.pem" not in " ".join(argv)
         assert merge_proxy_env({}, runtime.sandbox_env) == runtime.sandbox_env
+
+    def test_the_first_task_grants_what_exists_once(self, tmp_path, runtime_inputs, monkeypatch, make_task):
+        """Grants were never consulted with the broker off, so an install that
+        turns it on has none; the first task grants each bound entry once, and
+        an entry the user declined stays ungranted."""
+        import certifi
+        from istota import db
+        from istota.credentials.broker import bindings, grants
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
+        config = _config(tmp_path, credential_broker=CredentialBrokerConfig())
+        db.init_db(config.db_path)
+        binding = bindings.parse_binding("https://portal.example", {}, [])
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(conn, "x", "testuser", source_type="talk",
+                                     conversation_token="room1")
+            for name in ("portal", "declined"):
+                bindings.put_binding(conn, "testuser", name, binding)
+            conn.execute("INSERT INTO istota_kv (user_id, namespace, key, value) VALUES (?, ?, ?, ?)",
+                         ("testuser", grants.NAMESPACE, grants.AUTO_GRANT_PREFIX + "declined",
+                          grants.AUTO_GRANT_DECLINED))
+            conn.commit()
+        runtime_inputs["task"] = make_task(id=task_id, user_id="testuser", source_type="talk",
+                                           conversation_token="room1")
+        task_env.build_task_runtime(config, **runtime_inputs)
+        with db.get_db(config.db_path) as conn:
+            assert grants.get_grant(conn, "testuser", "portal") is not None
+            assert grants.get_grant(conn, "testuser", "declined") is None
+            # Once: a grant the user deletes afterwards is not restored.
+            grants.delete_grant(conn, "testuser", "portal")
+            conn.commit()
+        task_env.build_task_runtime(config, **runtime_inputs)
+        with db.get_db(config.db_path) as conn:
+            assert grants.get_grant(conn, "testuser", "portal") is None
 
     def test_disabled_has_no_ca_or_bundle(self, tmp_path, runtime_inputs):
         config = _config(tmp_path)

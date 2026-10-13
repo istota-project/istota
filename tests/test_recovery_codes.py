@@ -16,9 +16,15 @@ from istota.sandbox import credential_shim
 from istota.sandbox.skill_proxy import SkillProxy
 from tests import test_skill_proxy_vault_create as _vault_create
 from tests import test_vault_credential_fetch as vault_fetch
-from tests.test_generated_credentials import _config
+from tests.test_generated_credentials import _config as _generated_config
 from tests.test_skill_proxy_otp import ask
 from tests.test_skill_proxy_vault_create import _request
+from tests.support.broker import broker_off
+
+
+def _config(*args, **kwargs):
+    config, rest = _generated_config(*args, **kwargs)
+    return broker_off(config), rest
 
 sock = _vault_create.sock
 sock_path = vault_fetch.sock_path
@@ -31,7 +37,7 @@ VALUES = {"acme": "fixture-password", "acme_recovery": CODES}
 def seeded(tmp_path, monkeypatch):
     """An entry with a password and a recovery member, both marked revealable."""
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
-    config = Config(db_path=tmp_path / "data.db")
+    config = broker_off(Config(db_path=tmp_path / "data.db"))
     db.init_db(config.db_path)
     for name, value in VALUES.items():
         binding = bindings.parse_binding("https://acme.example", {}, ["istota:reveal"])
