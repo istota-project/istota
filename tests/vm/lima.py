@@ -399,6 +399,27 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
         '--workspace "$LOCAL_WORKSPACE" \\\n',
         '    true \\\n',
     ),
+    # A content-only settings change restarts the stack as a config change
+    # does (`tests/vm/test_settings_apply.py`).
+    "apply-restart-on-any-change": (
+        '            2:"0 1 0 0") log "the changes are read without a restart; nothing was restarted." ;;\n',
+        '            2:"0 1 0 0") restart_for_config ;;\n',
+    ),
+    # The sidecar is staged and bound, and its path never reaches istota apply.
+    "apply-sidecar-not-passed": (
+        '        secrets=(--secrets-file "/secrets/$(basename "$2")")\n',
+        '        secrets=()\n',
+    ),
+    # MOVED.md is written through the mount and the mount stopped at once,
+    # inside rclone's upload delay, so the note never reaches Nextcloud (#739).
+    # The mount alone: a plain stop takes istota-stack.service down first, whose
+    # `down` waits on the stack lock this verb still holds.
+    "localize-stops-mount-at-once": (
+        '            || log "WARNING: not every user got MOVED.md in their Nextcloud bot folder (above); '
+        'the move goes on."\n',
+        '            || log "WARNING: not every user got MOVED.md in their Nextcloud bot folder (above); '
+        'the move goes on."\n        systemctl stop --job-mode=ignore-dependencies mount-nextcloud.service\n',
+    ),
 }
 
 
@@ -874,6 +895,35 @@ def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
     }
 
 
+#: Negative controls on the role itself: `converge_role` runs a copy of
+#: `ansible/` with one fragment of `tasks/main.yml` replaced while one is applied.
+ROLE_CONTROLS: dict[str, tuple[str, str]] = {
+    # The user settings skipped under --check, as the ensure loops were.
+    "role-user-settings-unchecked": (
+        "    - not ansible_check_mode or _istota_config_present.stat.exists\n",
+        "    - not ansible_check_mode\n",
+    ),
+}
+
+
+def role_dir() -> Path:
+    """`ansible/`, or a copy with the applied role control's fragment replaced."""
+    name = control()
+    if name not in ROLE_CONTROLS:
+        return REPO / "ansible"
+    old, new = ROLE_CONTROLS[name]
+    target = _workdir() / f"ansible-{name}"
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(REPO / "ansible", target)
+    tasks = target / "tasks" / "main.yml"
+    text = tasks.read_text()
+    if text.count(old) != 1:
+        raise VmError(f"the control {name} does not apply to ansible/tasks/main.yml")
+    tasks.write_text(text.replace(old, new))
+    return target
+
+
 def converge_role(vm: Vm, variables: dict, *, check: bool = False, timeout: int = BUILD_TIMEOUT) -> RoleRun:
     """Run `ansible/` against the VM over Lima's ssh config, as root."""
     entry = vm.info() or {}
@@ -890,7 +940,7 @@ def converge_role(vm: Vm, variables: dict, *, check: bool = False, timeout: int 
         "- hosts: istota\n"
         "  become: true\n"
         "  roles:\n"
-        f"    - role: {REPO / 'ansible'}\n"
+        f"    - role: {role_dir()}\n"
     )
     vars_file = workdir / "vars.json"
     vars_file.write_text(json.dumps(variables))

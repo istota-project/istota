@@ -94,6 +94,7 @@ const sidebars: SidebarsConfig = {
         'configuration/overview',
         'configuration/reference',
         'configuration/web-editor',
+        'configuration/declarative-settings',
         'configuration/per-user',
         'configuration/credentials',
         'configuration/persona',

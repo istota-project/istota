@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `istota snapshot` exports deterministic application settings for preview and reapplication, with private file output and selected-user exports. It preserves ownership, omits credential values and runtime history, and refuses embedded briefing credentials or settings that change during export.
+
+- `istota apply` can reconcile provisionable user credentials from a private sidecar without changing access timestamps during previews. Ordinary pruning preserves credentials; explicit credential pruning is limited to named services and records each deletion.
+
+- `istota apply --patch` rewrites declared file paths when moving settings between installs. Repeated patches use the longest matching prefix, preserve literal placeholders and warn when a patch matches no selected paths.
+
+- `istota apply` preserves hidden configuration credentials and accepts replacements from a private sidecar. Missing values and attempts to replace deployment credentials inline are refused before writing; previews and errors omit credential values.
+
+- `istota apply` can update heartbeat settings and checks, reset inherited overrides and remove file-watch age limits. Previews validate definitions without running checks; writes refuse concurrent file edits and preserve heartbeat history.
+
+- `istota apply` can reconcile shared briefing definitions and refuses pruning while retained user or configuration definitions still reference them. Shared deletions wait for successful user updates; generated content and run history are preserved.
+
+- `istota apply` can reconcile briefing schedules with partial updates and explicit pruning. Pruning removes schedule and content definitions while keeping archives, items and runtime history; conflicting configuration seeds are refused before any settings change.
+
+- `istota apply` can now reconcile user profiles and WhatsApp enrollment, with read-only previews, identity and destination checks, and explicit update, managed and seed modes. Reapplying unchanged settings reports no change; profile or enrollment changes report that a restart is needed.
+
+- `istota apply --format json` reports planned and completed changes, failures, and restart requirements. Direct apply commands serialize writes to the same configuration and refuse an edit made after their preview; config-only text output and marker-only exit codes remain compatible.
+
+- `istota apply --check` accepts the version 1 structure for per-user settings and shared briefing definitions without reading live state. It reports malformed fields through the existing JSON check result.
+
 - **`istota-stack destroy --purge` removes a Mac VM completely.** A plain `destroy` keeps the workspace folder and the Keychain key so the VM can be restored; `--purge` deletes them too, with the saved settings, after listing them and asking for the name. It leaves a folder that is not marked as this VM's workspace, is reached through a link, or that another VM uses, and then keeps the key its backups need too.
 
 - **Istota can run in a Lima VM on an Apple silicon Mac.** `install.sh --local` installs a Mac-side `istota-stack` and `istota`, and `istota-stack create` makes a folder in your home (`~/Istota` by default) the workspace, creates the VM and sets up the same stack a server runs inside it. The Mac commands start, stop, update and open it, forward every server command into the VM, and copy the master key into your login Keychain. `istota-stack restore` rebuilds a lost or broken VM from the folder's backups and that key; the stack's own credentials (model key, mail passwords) are not backed up and are entered again afterwards. `istota-stack import-standalone` moves a standalone install (`~/.istota`) into a new VM with its databases, files, settings, credentials and master key, and leaves `~/.istota` untouched for you to remove once `istota doctor` is clean; an older install with no master key gets a new one, as long as nothing it stored was encrypted under one. Under local ingress a scheduled job missed while the Mac slept runs once on wake if it is under twelve hours late.
@@ -145,6 +165,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Ansible management role applies user settings with `istota apply`, and `--check` now reports their drift.** The ensure loops are gone: profiles, folders, briefings and user secrets go through `istota-stack apply` with a private input file, and a new `istota_plan` variable takes a whole settings plan, such as `istota snapshot` output, with `istota_plan_secrets`, `istota_plan_prune` and `istota_plan_prune_secrets` beside it. Each apply restarts the stack at most once, so a play that changes both the config and the user settings restarts it twice. The user settings are checked before the config is written, so a schema error in them fails the play with nothing changed. **Upgrade note:** existing `istota_users` and related variables keep working, but setting them together with `istota_plan` fails the play, and an unknown or one-shot ensure flag (such as `reset-whatsapp-identity`) now fails it instead of being passed through.
+
+- **`istota-stack apply` prints `istota apply`'s JSON result instead of the text diff, and restarts only when that result says a committed change needs it.** It takes `--secrets-file` for a private credential sidecar and `--input-format role-vars`. **Upgrade note:** a script that read the text diff or treated every exit 2 as a restart should read the JSON document instead (`changed`, `restart_required`, `partial`, `errors`); `--format text` is refused, and an image older than the host script now fails with nothing written, so update the stack first.
+
 - **Istota's state lives in `/srv/app/istota/data` on the VM rather than in a Docker volume.** The databases, the master key and a local workspace sit in a plain directory you can back up with the VM's own tools, and `docker compose down -v` can no longer delete them. A stack started without `istota-stack` keeps the same state in the volume `data`.
 
 - "Nothing here yet" messages look the same across the web UI. They used to come in several sizes, and some sat at the top of the page while others were centred in it. Now each one sits near the top, under the page's toolbar, at one text size. Where there is something to do about it, such as importing a portfolio snapshot or setting up taxes, a centred button sits below the message.
@@ -255,6 +279,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`room post` and guest proposals no longer send mail.** Mail sent on your behalf that waits for your approval is always a draft now. A post into an email thread room is refused, and the bot sends the text with `email reply-all` instead, which holds it as a draft when a recipient is not trusted. A post or guest proposal already waiting for an email thread is closed rather than sent.
 
 ### Fixed
+
+- Applying scheduled jobs now rechecks admin rights before writing, so revoked rights invalidate an earlier preview. Clearing briefing blocks refuses pending legacy or configuration seeds that would restore them on initialization.
+
+- Checking or previewing a configuration plan no longer imports credentials or removes obsolete resources when the plan uses the default database location. Validation leaves existing database state untouched.
+
+- **`istota-stack localize-workspace` now gets `MOVED.md` into Nextcloud.** rclone uploads a file a few seconds after it is closed, and the move stopped the mount before then, so the note stayed in the VM's cache and users never saw it. `provision.sh` now waits up to two minutes for rclone to finish uploading before it stops the mount, and names any file still waiting. This applies to every switch away from the Nextcloud mount.
 
 - **Admin → Status no longer counts feed polls as automated tasks.** Module pollers and CRON.md command jobs call no model, but they were counted in "Automated 24h" and in each user's automated figure, where the feed poller alone added hundreds a day per user. They now have their own "Job runs 24h" tile and a "jobs" figure on each user's row, so the automated count shows only scheduled prompts, briefings and other model-driven tasks.
 

@@ -4,6 +4,21 @@ Istota provides three console scripts: `istota` (main CLI), `istota-scheduler` (
 
 ## istota
 
+### Settings plans and snapshots
+
+```bash
+istota -c CONFIG snapshot [-o FILE] [--format toml|json] [--user USER] [--no-meta]
+istota -c CONFIG snapshot --patch 'SOURCE=DEST' -o settings.toml
+istota -c CONFIG apply -f PLAN --dry-run [--format json]
+istota -c CONFIG apply -f PLAN [--user USER] [--prune] [--secrets-file PRIVATE_FILE]
+istota -c CONFIG apply -f PLAN --prune --prune-secrets
+istota apply -f PLAN --check --json
+```
+
+`--user` and `--patch` are repeatable on both commands. Snapshot defaults to TOML on stdout; file output is atomic and private. It exports settings without credential values or runtime history and refuses stored briefing definitions with embedded credentials. Diagnostics go to stderr. `--no-meta` removes the ownership-preserving snapshot metadata.
+
+Apply exits 0 unchanged, 2 changed or would change, and 1 refused or failed. `--check` uses its own 0 valid / 1 invalid contract and `--json` envelope. `--continue-on-error` permits later independent users after a runtime failure. `--backup N` retains configuration backups. See [declarative settings](../configuration/declarative-settings.md) for defaults, pruning, credentials, path patches and partial failure behavior.
+
 ### Task execution
 
 ```bash

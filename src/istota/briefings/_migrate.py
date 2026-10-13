@@ -324,6 +324,14 @@ def _briefing_sentinel(name: str) -> str:
     return f"{_MIGRATION_SENTINEL}:{name}"
 
 
+def block_specs(briefing) -> list[dict]:
+    """The definitions a pending content migration would seed."""
+    raw_blocks = getattr(briefing, "blocks", None)
+    if isinstance(raw_blocks, list) and raw_blocks:
+        return normalize_block_specs(raw_blocks, briefing_name=briefing.name)
+    return blocks_from_components(briefing.components or {})
+
+
 def _migrate_components(ctx: BriefingsContext, app_config) -> None:
     """One-time seed of each briefing's content blocks, tracked **per briefing**.
 
@@ -362,14 +370,7 @@ def _migrate_components(ctx: BriefingsContext, app_config) -> None:
             if briefings_db.meta_get(conn, sentinel) == "1":
                 continue
             try:
-                raw_blocks = getattr(briefing, "blocks", None)
-                if isinstance(raw_blocks, list) and raw_blocks:
-                    # Config-authored rich blocks win over legacy components.
-                    specs = normalize_block_specs(
-                        raw_blocks, briefing_name=briefing.name,
-                    )
-                else:
-                    specs = blocks_from_components(briefing.components or {})
+                specs = block_specs(briefing)
                 if specs:
                     _seed_blocks(conn, briefing.name, specs)
                 briefings_db.meta_set(conn, sentinel, "1")

@@ -100,7 +100,7 @@ Edit `/srv/app/istota/config/config.toml` and restart:
 istota-stack down && istota-stack up
 ```
 
-`istota-stack apply plan.toml` is the other way in: it writes `config.toml` from a plan's `[config]` and restarts the stack only when something changed.
+`istota-stack apply plan.toml` is the other way in: it writes `config.toml` from a plan's `[config]`, prints `istota apply`'s JSON result, and restarts the stack only when a committed change needs it ([Declarative settings](../configuration/declarative-settings.md)).
 
 An admin can also change settings in the web UI's [configuration editor](../configuration/web-editor.md). The web writes a request, and `istota-config-apply.path` runs `istota-stack config-apply` on the machine, which checks the change, writes it and restarts the stack. `istota-config-apply.timer` runs it every five minutes as a backstop; while nothing can be pending, that run exits without starting a container. It never waits for another `istota-stack` command: when one holds the lock, the next trigger or the timer picks the request up.
 

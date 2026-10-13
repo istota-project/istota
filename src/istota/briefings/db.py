@@ -252,6 +252,12 @@ def delete_block(conn: sqlite3.Connection, block_id: int) -> None:
     conn.execute("DELETE FROM briefing_blocks WHERE id = ?", (block_id,))
 
 
+def delete_briefing_definitions(conn: sqlite3.Connection, briefing_name: str) -> None:
+    """Remove blocks and sources only; archives, items and migration state survive."""
+    for block in list_blocks(conn, briefing_name, with_sources=False):
+        delete_block(conn, block.id)
+
+
 def get_block(
     conn: sqlite3.Connection, block_id: int, *, with_sources: bool = True,
 ) -> BriefingBlock | None:
