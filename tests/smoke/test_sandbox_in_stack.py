@@ -60,7 +60,7 @@ CONTAINER_DB_DIR = "/data/db"
 # the first version of this probe would have passed on the third.
 #
 # `stat -f -c %T` is the positive half. Unmasked, `/data/db` is on the
-# `istota_data` named volume and reports `ext2/ext3`; masked it reports
+# `data` named volume and reports `ext2/ext3`; masked it reports
 # `tmpfs`, because the mask *is* a tmpfs. So the probe fails loudly if the path
 # vanished (stat prints an error, and `fstype=` carries it into the assertion)
 # rather than reading an absence as a boundary.

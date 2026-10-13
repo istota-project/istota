@@ -45,7 +45,7 @@ istota-stack compose logs -f daemon
 
 ## User workspace
 
-After the bot runs for the first time for a user, it creates a directory structure in the workspace: the Nextcloud mount with Nextcloud integration, `/data/workspace` on the state volume with local storage.
+After the bot runs for the first time for a user, it creates a directory structure in the workspace: the Nextcloud mount with Nextcloud integration, `/data/workspace` in the state directory with local storage.
 
 ```
 /Users/alice/

@@ -25,6 +25,8 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 COMPOSE = REPO / "docker" / "docker-compose.yml"
 SIDECAR = REPO / "docker" / "whatsapp-baileys" / "index.js"
+#: The shipped file's state mount at /data, a host directory or a volume.
+DATA_MOUNT = "${ISTOTA_DATA_DIR:-${ISTOTA_CONFIG_DIR:+istota_}data}:/data"
 
 
 def derive_media_dir(session_dir: str) -> str:
@@ -173,7 +175,7 @@ class TestTheBaileysSidecarService:
         """The staging directory's second reason, asserted rather than assumed.
 
         A photo is written by this container and read by the daemon in the
-        other one, so the two must see the same inodes. `istota_data:/data` is
+        other one, so the two must see the same inodes. The state at `/data` is
         already mounted for the socket and the session directory; this asserts
         that the media directory falls inside it rather than needing a volume
         of its own, which is the property that let the directory be added with
@@ -186,18 +188,18 @@ class TestTheBaileysSidecarService:
 
         istota = yaml.safe_load(COMPOSE.read_text())["services"]["daemon"]
 
-        assert "istota_data:/data" in service["volumes"]
+        assert DATA_MOUNT in service["volumes"]
         # **Both sides, because the property is that they see one inode set.**
         # This container writes the file and the daemon in the istota
         # container reads it back and copies it out, so asserting the
         # sidecar's mount alone names a two-sided property and checks one.
-        assert "istota_data:/data" in istota["volumes"]
+        assert DATA_MOUNT in istota["volumes"]
         assert str(default_media_dir(config)).startswith("/data/")
 
     def test_it_shares_the_data_volume_and_publishes_nothing(self):
         service = self._service()
 
-        assert "istota_data:/data" in service["volumes"]
+        assert DATA_MOUNT in service["volumes"]
         # Nothing ever dials it: it speaks to the daemon over the volume's
         # socket and to WhatsApp outbound.
         assert "ports" not in service

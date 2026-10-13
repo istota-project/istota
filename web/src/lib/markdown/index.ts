@@ -375,6 +375,13 @@ export const renderMarkdown = createRenderer({ breaks: true, imageAffordance: tr
 /** Render a document without chat's hard line breaks or image controls. */
 export const renderDocument = createRenderer({ breaks: false, imageAffordance: false });
 
+/** A document somebody else may have written, such as a file shared in Nextcloud. */
+export const renderUntrustedDocument = createRenderer({
+  breaks: false,
+  imageAffordance: false,
+  untrusted: true,
+});
+
 const renderUntrusted = createRenderer({ breaks: true, imageAffordance: false, untrusted: true });
 
 /** Render text somebody outside the room wrote, such as a mail body. No

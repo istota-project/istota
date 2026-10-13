@@ -379,7 +379,7 @@ IMAGE = "istota"
 UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
     # .env names the new ref and nothing starts it.
     "update-without-up": (
-        '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        stack_up\n',
+        '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        release_stack_up\n',
         '    if [ -f "${CONFIG_DIR}/config.toml" ]; then\n        :\n',
     ),
     # The stack moves and the host's scripts and units stay at the old ref.
