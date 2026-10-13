@@ -2,7 +2,7 @@
   import { fileLinks } from '$lib/fileViewer/links';
   import hljs from 'highlight.js/lib/common';
   import { Button, TextArea } from '$lib/components/ui';
-  import { renderDocument } from '$lib/markdown';
+  import { renderDocument, renderUntrustedDocument } from '$lib/markdown';
   import {
     presentationFor,
     splitFrontmatter,
@@ -14,11 +14,13 @@
     text,
     source = $bindable(false),
     fill = false,
+    untrusted = false,
   }: {
     name: string;
     text: string;
     source?: boolean;
     fill?: boolean;
+    untrusted?: boolean;
   } = $props();
   let presentation = $derived(presentationFor(name));
   let split = $derived(splitFrontmatter(text));
@@ -48,7 +50,7 @@
             <summary>Frontmatter</summary>
             <pre>{split.frontmatter}</pre>
           </details>{/if}
-        {@html renderDocument(split.body)}
+        {@html (untrusted ? renderUntrustedDocument : renderDocument)(split.body)}
       </div>
     {:else if highlighted !== null}
       <div class="markdown"><pre><code class="hljs">{@html highlighted}</code></pre></div>

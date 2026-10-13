@@ -1,6 +1,13 @@
+/**
+ * Where a viewed file's bytes come from. A workspace path goes through
+ * `/chat/files`; a Nextcloud path is relative to the caller's own account and
+ * is read with their personal connection.
+ */
+export type FileSource = { kind: 'workspace' } | { kind: 'nextcloud'; webUrl: string | null };
+
 type ViewerState =
   | { mode: 'closed' }
-  | { mode: 'file'; path: string }
+  | { mode: 'file'; path: string; source: FileSource }
   | { mode: 'images'; images: string[]; index: number };
 
 let state = $state<ViewerState>({ mode: 'closed' });
@@ -16,9 +23,9 @@ export const viewer = {
   get state() {
     return state;
   },
-  openFile(path: string) {
+  openFile(path: string, source: FileSource = { kind: 'workspace' }) {
     rememberFocus();
-    state = { mode: 'file', path };
+    state = { mode: 'file', path, source };
   },
   openImages(images: string[], index: number) {
     if (!images.length) return;

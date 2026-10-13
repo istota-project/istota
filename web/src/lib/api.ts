@@ -4479,6 +4479,15 @@ export function previewChatFile(path: string, signal?: AbortSignal): Promise<Fil
   return apiFetch(`/chat/files/preview?path=${encodeURIComponent(path)}`, { signal });
 }
 
+/** Bytes of a file in the caller's own Nextcloud, read with their personal connection. */
+export function nextcloudFileUrl(path: string): string {
+  return `${base}/api/workspace/nextcloud/file?path=${encodeURIComponent(path)}`;
+}
+
+export function previewNextcloudFile(path: string, signal?: AbortSignal): Promise<FilePreview> {
+  return apiFetch(`/workspace/nextcloud/preview?path=${encodeURIComponent(path)}`, { signal });
+}
+
 /**
  * What the file picker offers for a profile picture.
  *
