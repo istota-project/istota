@@ -440,7 +440,7 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # Monitoring only; it never holds mail.
 # dmarc_canary = true
 # Also warn when the MTA's stamp has no DMARC verdict at all. Turn on once you
-# know your MTA stamps.
+# know your MTA stamps. Left out, it is on exactly when authserv_id is set.
 # dmarc_canary_warn_on_missing = false
 # A disclosure line on every mail the bot sends into a multi-person thread:
 # "Written by <bot>, an AI assistant, for <host>", plus how to stop it replying
@@ -448,8 +448,10 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # bot.
 # thread_disclosure_footer = false
 # Your receiving MTA's authserv-id: the first token of the Authentication-Results
-# header it stamps, before the semicolon. Set, headers from any other
-# authserv-id are ignored. Required by confirm_sender_match = "verify".
+# header it stamps, before the semicolon. Find it in the raw source ("Show
+# original") of a message this mailbox received, on the topmost
+# Authentication-Results line; for Gmail it is mx.google.com. Set, headers from
+# any other authserv-id are ignored. Required by confirm_sender_match = "verify".
 # authserv_id = "mx.example.com"
 #
 # The weakest outbound approval policy any user may run: "off" (never hold),

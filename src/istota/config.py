@@ -197,7 +197,8 @@ class EmailConfig:
     # Whether *absence* of a DMARC verdict warns. Off by default because a mail
     # path that stamps nothing would otherwise warn on every message. Turn it on
     # when the MTA is known to stamp — that is the only way the "mailbox moved to
-    # a provider that does not evaluate DMARC" drift case is visible.
+    # a provider that does not evaluate DMARC" drift case is visible. Left out of
+    # the TOML, the loader turns it on whenever `authserv_id` is set.
     dmarc_canary_warn_on_missing: bool = False
     # A plain disclosure line on every mail the bot sends into an email thread
     # room (ISSUE-605): who wrote it, for whom, and the `!<bot> off` switch.
@@ -3580,6 +3581,16 @@ def _validate_confirm_sender_match(raw: object, authserv_id: str) -> str:
     return value
 
 
+def authserv_id_is_one_token(value: str) -> bool:
+    """Whether ``value`` can be an authserv-id: no whitespace, no delimiter.
+
+    The one rule for the loader's warning and setup's refusal (ISSUE-746). An
+    authserv-id is the single token before the semicolon, and the plausible
+    mistake is pasting what follows it, an RFC 8601 version number included.
+    """
+    return not any(ch.isspace() or ch in ';"(' for ch in value)
+
+
 def _validate_authserv_id(raw: object) -> str:
     """Validate ``[email] authserv_id``, warning rather than raising.
 
@@ -3598,7 +3609,7 @@ def _validate_authserv_id(raw: object) -> str:
     """
     value = raw if isinstance(raw, str) else ""
     value = value.strip()
-    if value and any(ch.isspace() or ch in ';"(' for ch in value):
+    if value and not authserv_id_is_one_token(value):
         report_problem(
             "warning", ("email", "authserv_id"),
             "[email] authserv_id = %r contains whitespace or a delimiter. It must "
@@ -4562,7 +4573,21 @@ def _map_document(data: dict, config: Config) -> list[str]:
     # through the brain.
     _apply_legacy_brain_defaults(data, config)
     _default_broker_to_boundary(data, config)
+    _default_warn_on_missing_to_authserv_id(data, config)
     return unknown
+
+
+def _default_warn_on_missing_to_authserv_id(data: dict, config: Config) -> None:
+    """Setting `authserv_id` says the MTA stamps, which is when a stamp with no
+    DMARC verdict should warn (ISSUE-746). A value the operator wrote is kept."""
+    email = data.get("email")
+    named = email if isinstance(email, dict) else {}
+    # The walk skips `authserv_id` (`_PARSED_BY_HAND`), so read the document.
+    authserv_id = named.get("authserv_id")
+    if "dmarc_canary_warn_on_missing" not in named:
+        config.email.dmarc_canary_warn_on_missing = (
+            isinstance(authserv_id, str) and bool(authserv_id.strip())
+        )
 
 
 def _default_broker_to_boundary(data: dict, config: Config) -> None:

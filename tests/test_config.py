@@ -1327,6 +1327,29 @@ dmarc_canary_warn_on_missing = true
         assert cfg.email.dmarc_canary is False
         assert cfg.email.dmarc_canary_warn_on_missing is True
 
+    def test_warn_on_missing_follows_a_set_authserv_id(self, tmp_path):
+        """Setting authserv_id says the MTA stamps, which is when absence of a
+        verdict should warn (ISSUE-746)."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+authserv_id = "mx.example.com"
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.dmarc_canary_warn_on_missing is True
+
+    def test_warn_on_missing_written_off_stays_off_beside_an_authserv_id(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[email]
+enabled = true
+authserv_id = "mx.example.com"
+dmarc_canary_warn_on_missing = false
+""")
+        cfg = load_config(config_file)
+        assert cfg.email.dmarc_canary_warn_on_missing is False
+
     def test_authserv_id_defaults_blank(self):
         """ISSUE-249 — blank keeps the pre-existing topmost-only read, so an
         existing deployment sees no change until the operator names their MTA."""

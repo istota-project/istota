@@ -155,6 +155,38 @@
       >
     </div>
     <SetupCheckResultLine result={results.email} />
+    <div class="sender-check">
+      <p class="micro-label">Sender check (optional)</p>
+      <p class="muted">
+        Mail from your own address is trusted on its From: line alone, unless {botName} can read your
+        mail server's own verdict on it. For that it needs the server's <em>authserv-id</em>: the
+        name your mail server writes at the start of the Authentication-Results header it adds to
+        every message it receives, before the first semicolon.
+      </p>
+      <p class="muted">
+        To find it, open the raw source of a message this mailbox received ("Show original" or "View
+        source" in most mail apps) and read the topmost Authentication-Results line. In
+        <code>Authentication-Results: mx.example.com; dkim=pass …</code> it is
+        <code>mx.example.com</code>. For Gmail and Google Workspace it is
+        <code>mx.google.com</code>.
+      </p>
+      <p class="muted">
+        With it, mail claiming your address that your server did not verify is held for you to
+        confirm. Leave it blank to trust the From: line; {botName} then logs the value it sees on the
+        first message that passes, and you can add it later.
+      </p>
+      <Field label="Mail server's authserv-id" error={shown.authserv_id}>
+        <Input
+          value={draft.text('authserv_id')}
+          placeholder="mx.example.com"
+          monospace
+          autocapitalize="none"
+          spellcheck={false}
+          invalid={!!shown.authserv_id}
+          oninput={(e: Event) => draft.set('authserv_id', input(e))}
+        />
+      </Field>
+    </div>
     <SetupMore open={!!(shown.smtp_host || shown.bot_email)}>
       <Field
         label="Outgoing mail server"
@@ -258,5 +290,11 @@
 
   .test-row {
     display: flex;
+  }
+
+  .sender-check {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 </style>
