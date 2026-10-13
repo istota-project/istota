@@ -195,7 +195,7 @@ features = []
 #                                 #   it does not trust.
 #
 # DOCKER: with the db_path `istota setup` writes, transcripts land in
-# /data/db/logs on the istota_data volume.
+# /data/db/logs in the state directory.
 
 # Per-attempt JSONL transcript of a native-brain run: the prompt, every turn,
 # tool call and result. Written 0600 on local disk and bound into no sandbox.

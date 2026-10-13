@@ -143,6 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Istota's state now lives in `/srv/app/istota/data` on the VM rather than in a Docker volume.** The databases, the master key and a local workspace sit in a plain directory you can back up with the VM's own tools, and `docker compose down -v` can no longer delete them. The first `istota-stack update` copies the old `istota_istota_data` volume into the directory once, with the stack stopped, and keeps the volume.
+
+  **Upgrade note:** once the stack runs as it should, remove the old volume with `docker volume rm istota_istota_data`. The copy refuses if `/srv/app/istota/data` already holds files, and `istota-stack rollback` to an earlier release needs `--force`, since that release would run on the volume as it was at the copy.
+
 - **`nextcloud_mount_path` is now `workspace_mount_path`.** The setting names the mount the workspace lives on, which will not always be Nextcloud, and `istota setup` writes the new name. A config with the old name keeps working and logs a warning asking you to rename it; a config setting both names to different paths refuses to load.
 
 - Location History now opens on yesterday. Dates and ranges selected through links still take precedence.
