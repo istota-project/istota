@@ -121,8 +121,8 @@ class TestTheMountsAreTheBoundary:
     def test_the_volume_is_the_one_the_shipped_file_falls_back_to(self):
         shipped = yaml.safe_load(SHIPPED_COMPOSE.read_text())
         assert compose_file.STATE_VOLUME in shipped["volumes"]
-        assert shipped["services"]["daemon"]["volumes"][0].endswith(
-            "}" + compose_file.STATE_VOLUME + "}:/data")
+        assert shipped["services"]["daemon"]["volumes"][0] == (
+            "${ISTOTA_DATA_DIR:-" + compose_file.STATE_VOLUME + "}:/data")
 
     def test_with_a_state_directory_the_repos_are_a_bind_below_it(self):
         """The daemon's /data is that directory on the VM, so the devbox has to
