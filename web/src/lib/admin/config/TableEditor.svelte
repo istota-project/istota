@@ -47,7 +47,7 @@
   different edits. The server parses it; a snippet that does not parse comes
   back from the review as a refusal with the parser's message.
 -->
-<Field label={field.name} {hint} {badge} inline error={emptyError || problem} wide>
+<Field label={field.name} {hint} {badge} inline error={emptyError || problem}>
   <TextArea
     monospace
     rows={Math.min(Math.max(text.split('\n').length + 1, 4), 16)}
@@ -74,8 +74,10 @@
 {/if}
 
 <style>
+  /* The settings hint's measure, so a note does not run the page's width. */
   .table-note {
     margin: var(--space-1) 0 0;
+    max-width: 60ch;
   }
 
   /* Under the control, in its column, as FieldControl's notes are. */
