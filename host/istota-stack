@@ -275,6 +275,14 @@ compose() {
         # Only a pin that is set: compose passes an empty variable as an empty
         # build arg, which overrides the Dockerfile's default and fails the build.
         if [ -n "$pin" ]; then export CLAUDE_CODE_VERSION="$pin"; else unset CLAUDE_CODE_VERSION; fi
+        # The image has no .git: the commit being built and its deployed name
+        # are how a running stack says which code it is. Every build caller
+        # sets ISTOTA_TAG and has the checkout at that commit.
+        if [ -n "${ISTOTA_TAG:-}" ] && revision="$(verified_git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)"; then
+            export ISTOTA_BUILD_REVISION="$revision" ISTOTA_BUILD_TAG="$ISTOTA_TAG"
+        else
+            unset ISTOTA_BUILD_REVISION ISTOTA_BUILD_TAG
+        fi
         if [ -n "$requests" ]; then export ISTOTA_REQUESTS_DIR="$requests"; fi
         if [ -n "$ignore_orphans" ]; then export COMPOSE_IGNORE_ORPHANS=1; fi
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \

@@ -482,6 +482,26 @@ class TestASignedTagIsDeployed:
         assert (secrets / "new_one").read_text() == ""
         assert list(elsewhere.iterdir()) == []
 
+    def test_a_release_build_is_told_its_tag(self, fx, tmp_path):
+        commit = fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        recorder = tmp_path / "build-env"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            '*" build "*) exit',
+            f'*" build "*) echo "$ISTOTA_BUILD_REVISION $ISTOTA_BUILD_TAG" > {recorder}; exit',
+        ))
+        assert fx.run("update", "v1").returncode == 0
+        assert recorder.read_text().split() == [commit, "v1"]
+
+    def test_the_compose_file_and_dockerfile_carry_the_revision(self):
+        compose = (REPO / "docker" / "docker-compose.yml").read_text()
+        dockerfile = (REPO / "docker" / "istota" / "Dockerfile").read_text()
+        for name in ("ISTOTA_BUILD_REVISION", "ISTOTA_BUILD_TAG"):
+            assert f"    - {name}\n" in compose
+            assert f"ARG {name}=" in dockerfile
+        assert "ENV ISTOTA_BUILD_REVISION=${ISTOTA_BUILD_REVISION}" in dockerfile
+
     def test_native_only_builds_without_claude_code(self, fx, tmp_path):
         fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
@@ -755,6 +775,20 @@ class TestLatestFollowsMain:
         assert result.returncode == 0, result.stdout + result.stderr
         assert fx.head() == first
         assert f"ISTOTA_TAG={self._name(first)}\n" in fx.env_text()
+
+    def test_the_build_is_told_the_commit_and_its_name(self, fx, tmp_path):
+        """The image has no .git, so this is how a running stack on main can
+        say which commit it is rather than the last release's number."""
+        commit = fx.commit("next")
+        recorder = tmp_path / "build-env"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            '*" build "*) exit',
+            f'*" build "*) echo "$ISTOTA_BUILD_REVISION $ISTOTA_BUILD_TAG" > {recorder}; exit',
+        ))
+        result = fx.run("update", "--unsigned", "latest")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert recorder.read_text().split() == [commit, self._name(commit)]
 
     def test_latest_tag_names_the_tip_and_changes_nothing(self, fx):
         """What the management role compares with ISTOTA_TAG before it updates,
