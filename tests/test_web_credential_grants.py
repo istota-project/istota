@@ -15,6 +15,7 @@ async def signed_client(client, monkeypatch, config):  # noqa: F811 -- imported 
     # The shared fixture is multi-user and unsandboxed; the delete route is
     # behind the store's isolation gate, which needs the operator's opt-in here.
     config.security.allow_unsandboxed_multi_user_vaults = True
+    config.admin_users = {"alice"}
     mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
     await client.get("/istota/callback", follow_redirects=False)
     secrets_store.upsert_secret(config.db_path, "alice", "vault_entries", "portal", "fixture-password",

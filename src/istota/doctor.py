@@ -2630,9 +2630,9 @@ def _probe_user(config: "Config") -> str:
     intersection is preferred over either list, and why "several admins" does
     not fall straight through to an arbitrary user: it takes an admin from
     among the configured ones first, so the probe runs in the sandbox shape the
-    operator asked about. An empty ``admin_users`` means *everyone* is admin
-    (:meth:`Config.is_admin`) and so names nobody in particular, which is why it
-    falls through rather than picking.
+    operator asked about. An empty ``admin_users`` names nobody in particular
+    (:meth:`Config.is_admin` reads it as everyone on one user and nobody on
+    several), which is why it falls through rather than picking.
 
     Deliberately not :attr:`Config.local_user_id`, which puts ``users`` ahead of
     ``admin_users`` because it answers a different question — the sole user of
@@ -3333,6 +3333,35 @@ def check_credential_backup(config: "Config", probe: bool) -> list[CheckResult]:
         return [CheckResult(name, WARN, f"{stale} credential backups failed or are overdue",
                             "Check Settings → Credentials and the scheduler backup log.")]
     return [CheckResult(name, OK, f"{len(states)} credential backups are current")]
+
+
+def check_admins(config: "Config", probe: bool) -> CheckResult:
+    """An empty admin set on a config with two or more users (#745).
+
+    ``Config.is_admin`` reads that state as "nobody is admin", so admin-only
+    work (``command`` cron jobs, subtasks, the developer repos and forge token)
+    stops for everyone with nothing else saying why. Reads config only.
+    """
+    name = "security.admins"
+    users = len(config.users)
+    admins = len(config.admin_users)
+    if admins:
+        return CheckResult(name, OK, f"{admins} admin(s) named for {users} user(s)",
+                           scope=DEPLOYMENT)
+    if users <= 1:
+        return CheckResult(
+            name, OK, f"{users} user(s) and no admins file: the sole user is admin",
+            scope=DEPLOYMENT,
+        )
+    path = os.environ.get("ISTOTA_ADMINS_FILE", "/etc/istota/admins")
+    return CheckResult(
+        name, FAIL,
+        f"{users} users configured and the admin set is empty: nobody is admin",
+        remedy=f"Name the administrator user ids, one per line, in the admins file "
+               f"({_named_path(path)}; set by ISTOTA_ADMINS_FILE, /data/config/admins "
+               f"on the stack), then restart the daemon.",
+        scope=DEPLOYMENT,
+    )
 
 
 def check_signup_tags(config: "Config", probe: bool) -> CheckResult:
@@ -5112,8 +5141,8 @@ def check_web_auth(config: "Config", probe: bool = True) -> list[CheckResult]:
         unsafe_admins = len(identities) > 1 and not config.admin_users
         results.append(CheckResult(
             "web.auth.admins", FAIL if unsafe_admins else OK,
-            "Multiple identities and an empty admin allowlist grant every user task-admin privileges"
-            if unsafe_admins else "Admin allowlist does not grant multiple email identities implicit task-admin access",
+            "Multiple identities and an empty admin allowlist: no user is an admin"
+            if unsafe_admins else "Admin allowlist names the administrators of multiple email identities",
             "Populate the admins file with explicit administrator user ids." if unsafe_admins else "",
         ))
     # A public hostname is evidence of the shipped proxy deployment, not proof
@@ -9641,6 +9670,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.credential_broker", check_credential_broker),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
+    ("security.admins", check_admins),
     ("security.key_separation", check_secret_key_separation),
     ("security.credential_library", check_credential_library),
     ("security.credential_isolation", check_credential_isolation),
@@ -9769,6 +9799,7 @@ CHECK_SCOPES: dict[str, str] = {
     # thing it unlocks is that install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.
     "security.secret_key": DEPLOYMENT,
+    "security.admins": DEPLOYMENT,
     "security.key_separation": DEPLOYMENT,
     "security.credential_library": IMAGE,
     # Deployment, not image: every question it asks is about an install — which

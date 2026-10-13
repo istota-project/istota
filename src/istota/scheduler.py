@@ -6179,7 +6179,8 @@ def _doctor_alert_recipients(config: Config) -> list[str]:
 
     Deliberately not :func:`_operator_alert_user`, which falls back to the first
     configured user, and deliberately not ``Config.is_admin``, which reads an
-    empty allowlist as "everyone is an admin". A doctor ``FAIL`` names install
+    empty allowlist as "everyone is an admin" on a single-user config. A
+    doctor ``FAIL`` names install
     paths, binary locations and remedies; broadcasting that to every user on a
     multi-user deployment leaks the operator's layout to non-admins.
 

@@ -970,7 +970,8 @@ def _ensure_admins_file(path: Path, user_id: str, out=print) -> None:
     """Create ``path`` naming ``user_id``, and never modify one that exists.
 
     An empty allowlist is read as "everyone is admin" by ``Config.is_admin``
-    and as "nobody" by ``is_shared_kv_writer`` and the web admin gate, so a
+    on a single-user config and as "nobody" by ``is_shared_kv_writer`` and
+    the web admin gate, so a
     standalone install with no file at all could not write a shared briefing
     block. This gives it a real, editable authorization artifact instead of
     leaning on the exemption in ``is_shared_kv_writer``.

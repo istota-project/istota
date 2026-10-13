@@ -15,11 +15,15 @@ from istota.skills.nextcloud import build_parser, main
 
 
 @pytest.fixture(autouse=True)
-def _nc_env(monkeypatch):
+def _nc_env(monkeypatch, tmp_path):
     monkeypatch.setenv("NC_URL", "https://cloud.example.com")
     monkeypatch.setenv("NC_USER", "istota")
     monkeypatch.setenv("NC_PASS", "secret")
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    # The share tests pass unconfined paths, which only an admin may reach.
+    admins = tmp_path / "fixture-admins"
+    admins.write_text("alice\n")
+    monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(admins))
 
 
 def _run(capsys, argv):
@@ -471,3 +475,39 @@ class TestLiveCoverage:
             + ", ".join(sorted(unexercised))
             + " — add one, or list it in NOT_EXERCISED_LIVE with a reason."
         )
+
+
+class TestAdminScopingWithEmptyAdminsFile:
+    """The CLI's config has no users, so the stored users decide the fallback (#745)."""
+
+    def _setup(self, monkeypatch, tmp_path, *users):
+        from istota import db, user_profiles
+        empty = tmp_path / "admins"
+        empty.write_text("")
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(empty))
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        for user in users:
+            user_profiles.provision_user(path, user, {})
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+
+    def test_another_users_files_are_refused_on_a_multi_user_install(self, monkeypatch, tmp_path):
+        from istota.nextcloud import PathScopeError
+        from istota.skills.nextcloud import _config_from_env, _scoped
+        self._setup(monkeypatch, tmp_path, "alice", "bob")
+        with pytest.raises(PathScopeError):
+            _scoped(_config_from_env(), "/Users/alice/notes")
+
+    def test_the_sole_user_keeps_unconfined_reach(self, monkeypatch, tmp_path):
+        from istota.skills.nextcloud import _config_from_env, _scoped
+        self._setup(monkeypatch, tmp_path, "bob")
+        assert _scoped(_config_from_env(), "/Users/alice/notes") == "/Users/alice/notes"
+
+    def test_an_unreadable_database_refuses(self, monkeypatch, tmp_path):
+        from istota.nextcloud import PathScopeError
+        from istota.skills.nextcloud import _config_from_env, _scoped
+        self._setup(monkeypatch, tmp_path, "bob")
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "missing.db"))
+        with pytest.raises(PathScopeError):
+            _scoped(_config_from_env(), "/Users/alice/notes")

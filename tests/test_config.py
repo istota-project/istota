@@ -2057,6 +2057,73 @@ class TestAdminUsersLoadConfig:
         assert cfg.admin_users == set()
 
 
+class TestIsAdminEmptyAdminSet:
+    """An empty admin set fails closed once more than one user is configured (#745)."""
+
+    def test_multi_user_empty_admin_set_makes_nobody_admin(self):
+        cfg = Config(users={"alice": UserConfig(), "bob": UserConfig()}, admin_users=set())
+        assert cfg.is_admin("alice") is False
+        assert cfg.is_admin("bob") is False
+
+    def test_single_user_empty_admin_set_keeps_the_fallback(self):
+        cfg = Config(users={"alice": UserConfig()}, admin_users=set())
+        assert cfg.is_admin("alice") is True
+
+    def test_no_users_empty_admin_set_keeps_the_fallback(self):
+        assert Config(admin_users=set()).is_admin("alice") is True
+
+    def test_named_admins_decide_on_a_multi_user_config(self):
+        cfg = Config(users={"alice": UserConfig(), "bob": UserConfig()}, admin_users={"Alice"})
+        assert cfg.is_admin("alice") is True
+        assert cfg.is_admin("bob") is False
+
+    def test_loaded_multi_user_config_with_missing_admins_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "nonexistent"))
+        config_file = tmp_path / "config.toml"
+        config_file.write_text('[users.alice]\n[users.bob]\n')
+        cfg = load_config(config_file, apply_db_overlays=False)
+        assert set(cfg.users) == {"alice", "bob"}
+        assert cfg.is_admin("alice") is False
+
+
+class TestAdminWithStoredUsers:
+    """The overlay-free reading of `is_admin`, for processes with no `config.users` (#745)."""
+
+    def _db(self, tmp_path):
+        from istota import db
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        return path
+
+    def test_stored_user_ids_reads_every_overlay_table(self, tmp_path):
+        import sqlite3
+        from istota import user_profiles
+        from istota.config import stored_user_ids
+        path = self._db(tmp_path)
+        user_profiles.provision_user(path, "alice", {})
+        with sqlite3.connect(path) as conn:
+            conn.execute("INSERT INTO user_resources (user_id, resource_type, resource_path) "
+                         "VALUES ('bob', 'folder', '/x')")
+            conn.execute("INSERT INTO briefing_configs (user_id, name, cron_expression, "
+                         "conversation_token, components) VALUES ('carol', 'm', '0 7 * * *', 't', '{}')")
+            assert stored_user_ids(conn) == {"alice", "bob", "carol"}
+
+    def test_two_stored_users_and_no_admins_is_nobody(self):
+        from istota.config import is_admin_with_stored_users
+        assert is_admin_with_stored_users(Config(), "alice", {"alice", "bob"}) is False
+
+    def test_one_stored_user_keeps_the_fallback(self):
+        from istota.config import is_admin_with_stored_users
+        assert is_admin_with_stored_users(Config(), "alice", {"alice"}) is True
+
+    def test_unknown_count_leaves_only_named_admins(self):
+        from istota.config import is_admin_with_stored_users
+        assert is_admin_with_stored_users(Config(), "alice", None) is False
+        named = Config(admin_users={"alice"})
+        assert is_admin_with_stored_users(named, "alice", None) is True
+        assert is_admin_with_stored_users(named, "bob", None) is False
+
+
 class TestWorkerConcurrencyConfig:
     def test_scheduler_new_worker_fields_from_toml(self, tmp_path, monkeypatch):
         """Explicit max_foreground_workers/max_background_workers parsed from TOML."""

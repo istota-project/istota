@@ -1511,8 +1511,9 @@ def _write_billing_alerts(conn, user_id: str, task_id) -> tuple[object, ...]:
     with `push_off_surface` stripping the failing surface, a user with no other
     route means the notice reaches nobody at all.
 
-    An empty admin file means "everyone is admin" to `Config.is_admin`, and
-    writing a row per user there would be a fan-out rather than an escalation
+    An empty admin file means "everyone is admin" to `Config.is_admin` on a
+    single-user config, and writing a row per user would be a fan-out rather
+    than an escalation
     — on that shape the recipient's own row is the notice, which on the
     single-user install it describes is the operator's inbox anyway.
 

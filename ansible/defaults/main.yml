@@ -143,7 +143,7 @@ istota_rclone_conf: ""
 
 # --- Admins and config -------------------------------------------------------
 # User ids, one per line of /srv/app/istota/config/admins. Empty leaves the
-# file alone: an empty allowlist means everyone is an admin.
+# file alone: an empty allowlist makes nobody an admin once there are two users.
 istota_admins: []
 # The whole of config.toml as a nested dict. Applied with `istota-stack apply`
 # as the plan's [config]; under --check, with --dry-run. Empty skips the step.

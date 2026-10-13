@@ -242,7 +242,7 @@ Overlay text is indexed for memory search under the `skill_overlay` source type,
 
 ## Admin vs non-admin
 
-Admin users are listed in the admins file (`/srv/app/istota/config/admins` on a server; `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset). Empty file = all users are admin.
+Admin users are listed in the admins file (`/srv/app/istota/config/admins` on a server; `ISTOTA_ADMINS_FILE`, or `/etc/istota/admins` when that is unset). An empty file makes the sole user admin on a single-user install and nobody admin once there are two or more users.
 
 Non-admin restrictions:
 

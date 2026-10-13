@@ -134,8 +134,8 @@ def fj_brain_or_none(job: "CronJob", is_admin: bool) -> str | None:
     unlisted kind is stored here and falls through there.
 
     And the claim above is bounded by the deployment: `Config.is_admin` reads
-    an empty admins file as "everyone is an admin", which is the standalone
-    install's shape, so there this drops nothing and the model writes CRON.md
+    an empty admins file as "everyone is an admin" on a single-user config,
+    which is the standalone install's shape, so there this drops nothing and the model writes CRON.md
     too. That is the `fj_is_disallowed_command` precedent rather than something
     new — an arbitrary shell command is already admin-gated the same way — but
     it means the enforcement here is the multi-user deployment's, not a

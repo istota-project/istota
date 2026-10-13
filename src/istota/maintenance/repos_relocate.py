@@ -22,7 +22,8 @@ YAML run once, during a real migration, on the only copy of the data.
 clone — a forge namespace is not a user id, and the two can legitimately share
 a name. So the destination is inferred from exactly one configured admin and
 from nothing else. Zero admins (a missing or empty admins file, which
-``Config.is_admin`` reads as "everyone is an admin") or more than one is a
+``Config.is_admin`` reads as everyone on one user and nobody on several) or
+more than one is a
 **refusal**: the namespaces found and the destination that cannot be inferred
 are printed and the exit code is non-zero. Guessing wrong hands one admin's
 clones to another, which is the exact exposure the per-user layout exists to
