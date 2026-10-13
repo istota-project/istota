@@ -249,7 +249,7 @@
     {:else if kind === 'table' && !pendingUnset}
       <TableEditor {field} {op} {hint} {badge} {problem} {onOp} />
     {:else if kind === 'table'}
-      <Field label={field.name} {hint} {badge} inline error={problem} labelled={false} wide>
+      <Field label={field.name} {hint} {badge} inline error={problem} labelled={false}>
         <span class="config-value dim">Removed from config.toml.</span>
       </Field>
     {:else}
@@ -345,6 +345,7 @@
 
   .field-note {
     margin: var(--space-1) 0 0;
+    max-width: 60ch;
   }
 
   /* Every control-column item that is not itself a control takes the
