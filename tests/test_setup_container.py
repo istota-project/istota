@@ -255,7 +255,7 @@ def _args(tmp_path: Path, **kw):
         workspace=None,
         oauth_client_id=None, no_email_login=False, brain="native",
         native_base_url=None, native_model="model-x", email=False,
-        imap_host=None, imap_user=None, smtp_host=None, bot_email=None,
+        imap_host=None, imap_user=None, smtp_host=None, bot_email=None, authserv_id=None,
         caldav_url=None, caldav_username=None, location=False, developer=False,
         profile=None, no_money=False, no_health=False, no_feeds=False,
         no_briefings=False, storage=None,
@@ -819,6 +819,14 @@ _REFUSALS = [
     ),
     ("native-without-model", {"native_model": None}, {"native_model": ""}, "native_model", "needs a model"),
     ("native-without-key", {}, {"native_api_key": ""}, "native_api_key", "needs a model"),
+    (
+        "authserv-id-with-a-version",
+        {"email": True, "imap_host": "imap.example.test", "imap_user": "zed@example.test",
+         "authserv_id": "mx.example.com 1"},
+        {"email_enabled": True, "imap_host": "imap.example.test", "imap_user": "zed@example.test",
+         "authserv_id": "mx.example.com 1"},
+        "authserv_id", "single name",
+    ),
 ]
 
 
@@ -1228,3 +1236,85 @@ class TestTheBrowserPrompt:
             _args(tmp_path), input_fn=input, out=lambda *_: None, getpass_fn=None,
         )
         assert a.profiles == ()
+
+
+class TestTheSenderCheck:
+    """ISSUE-746: setup asks for the mail server's authserv-id, and a value
+    turns the sender check from trusting `From:` to reading the server's
+    verdict."""
+
+    _EMAIL = {"email": True, "imap_host": "imap.example.test", "imap_user": "zed@example.test"}
+
+    def _written(self, tmp_path, monkeypatch, a: ContainerAnswers):
+        return _load(tmp_path, render_container_config(a, inline_credentials=True), monkeypatch)
+
+    def test_an_authserv_id_turns_on_verify(self, tmp_path, monkeypatch, _no_credentials_in_env):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        a = setup_wizard.collect_container_answers(
+            _args(tmp_path, **self._EMAIL, authserv_id=" mx.example.test "),
+            input_fn=input, out=lambda *_: None, getpass_fn=None,
+        )
+
+        config = self._written(tmp_path, monkeypatch, a)
+
+        assert config.email.authserv_id == "mx.example.test"
+        assert config.email.confirm_sender_match == "verify"
+        assert config.email.dmarc_canary_warn_on_missing is True
+
+    def test_no_authserv_id_keeps_the_from_line_trusted(self, tmp_path, monkeypatch, _no_credentials_in_env):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        a = setup_wizard.collect_container_answers(
+            _args(tmp_path, **self._EMAIL), input_fn=input, out=lambda *_: None, getpass_fn=None,
+        )
+
+        written = tomllib.loads(render_container_config(a, inline_credentials=True))["email"]
+        config = self._written(tmp_path, monkeypatch, a)
+
+        assert "authserv_id" not in written and "confirm_sender_match" not in written
+        assert config.email.confirm_sender_match == "off"
+        assert config.email.dmarc_canary_warn_on_missing is False
+
+    def test_it_is_not_written_without_email(self, tmp_path, monkeypatch, _no_credentials_in_env):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+        a = setup_wizard.collect_container_answers(
+            _args(tmp_path, authserv_id="mx.example.test"),
+            input_fn=input, out=lambda *_: None, getpass_fn=None,
+        )
+        assert a.authserv_id == ""
+        assert tomllib.loads(render_container_config(a, inline_credentials=True))["email"] == {"enabled": False}
+
+    def test_the_question_says_what_it_is_and_where_to_find_it(self, tmp_path, _no_credentials_in_env):
+        prompts: list[str] = []
+        said: list[str] = []
+
+        def answer(prompt: str) -> str:
+            prompts.append(prompt)
+            if "user id" in prompt:
+                return "carol"
+            if "Enable email" in prompt:
+                return "y"
+            if "authserv-id" in prompt:
+                return "mx.example.test"
+            return ""
+
+        a = setup_wizard.collect_container_answers(
+            _args(tmp_path, yes=False, user=None, brain=None, native_model=None),
+            input_fn=answer, out=said.append, getpass_fn=lambda _prompt: "",
+        )
+
+        assert a.authserv_id == "mx.example.test"
+        explanation = "\n".join(said)
+        assert "Authentication-Results" in explanation
+        assert "before the first semicolon" in explanation
+        assert "raw" in explanation and "source" in explanation
+        assert "From:" in explanation
+
+    def test_the_web_payload_carries_it_with_email_only(self, _no_credentials_in_env):
+        on = setup_wizard.answers_from_payload({
+            **_WEB_BASE, "email_enabled": True, "imap_host": "imap.example.test",
+            "authserv_id": " mx.example.test ",
+        })
+        off = setup_wizard.answers_from_payload({**_WEB_BASE, "authserv_id": "mx.example.test"})
+
+        assert on.authserv_id == "mx.example.test"
+        assert off.authserv_id == ""

@@ -1402,6 +1402,9 @@ class ContainerAnswers:
     smtp_host: str = ""
     smtp_port: int = 587
     bot_email: str = ""
+    #: The receiving mail server's authserv-id. Set, the sender check reads
+    #: that server's DMARC verdict instead of trusting `From:` (ISSUE-746).
+    authserv_id: str = ""
     # Calendar without Nextcloud.
     caldav_url: str = ""
     caldav_username: str = ""
@@ -1572,6 +1575,9 @@ def container_config_document(a: ContainerAnswers, *, inline_credentials: bool) 
         })
         if credential("istota_email_imap_password"):
             email["imap_password"] = secret["istota_email_imap_password"]
+        if a.authserv_id:
+            email["authserv_id"] = a.authserv_id
+            email["confirm_sender_match"] = "verify"
     doc["email"] = email
 
     doc["location"] = {"enabled": a.location_enabled}
@@ -1799,6 +1805,25 @@ def _env_credential(name: str) -> str:
     return os.environ.get(name.upper(), "").strip()
 
 
+#: What the terminal says before asking for the authserv-id. The web setup
+#: says the same in its own words, in `StepConnections.svelte`.
+AUTHSERV_ID_EXPLANATION = (
+    "  Sender check. Mail from your own address is trusted on its From: line",
+    "  alone, unless the bot can read your mail server's own verdict on it.",
+    "  For that it needs the server's authserv-id: the name your mail server",
+    "  writes at the start of the Authentication-Results header it adds to",
+    "  every message it receives, before the first semicolon.",
+    "  To find it, open the raw source of a message this mailbox received",
+    "  (\"Show original\" or \"View source\" in most mail apps) and read the",
+    "  topmost Authentication-Results line:",
+    "      Authentication-Results: mx.example.com; dkim=pass ...; dmarc=pass ...",
+    "  Here it is mx.example.com. For Gmail and Google Workspace it is mx.google.com.",
+    "  Given one, mail claiming your address that your server did not verify",
+    "  is held for you to confirm. Leave it blank to trust From: as before; the",
+    "  bot then logs the value it sees on the first message that passes.",
+)
+
+
 def _ask_secret_optional(getpass_fn, label: str) -> str:
     """A credential the operator may skip: one no-echo read, Enter skips."""
     _flush_terminal_input()
@@ -1898,6 +1923,15 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
             refuse("native_model", needs)
         if not a.native_api_key:
             refuse("native_api_key", needs)
+    from .config import authserv_id_is_one_token  # noqa: PLC0415 - keep the import graph lean
+
+    if a.email_enabled and a.authserv_id and not authserv_id_is_one_token(a.authserv_id):
+        refuse(
+            "authserv_id",
+            "The authserv-id is the single name before the first semicolon of the "
+            "Authentication-Results header, without the version number or anything "
+            "after it (--authserv-id).",
+        )
     # The terminal leaves [caldav] out rather than ask again; the web asks.
     if a.caldav_url and not a.uses_nextcloud and not a.caldav_password:
         refuse("caldav_password", "A calendar needs its password.")
@@ -1955,6 +1989,7 @@ WEB_SETUP_FIELDS: dict[str, type] = {
     "imap_password": str,
     "smtp_host": str,
     "bot_email": str,
+    "authserv_id": str,
     "caldav_url": str,
     "caldav_username": str,
     "caldav_password": str,
@@ -2052,6 +2087,7 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
         a.smtp_host = text("smtp_host") or a.imap_host
         a.bot_email = text("bot_email") or a.imap_user
         a.imap_password = text("imap_password")
+        a.authserv_id = text("authserv_id")
 
     if not a.uses_nextcloud:
         a.caldav_url = text("caldav_url")
@@ -2268,6 +2304,11 @@ def collect_container_answers(
         a.smtp_host = text("smtp_host", "SMTP host", a.imap_host)
         a.bot_email = text("bot_email", "The bot's email address", a.imap_user)
         a.imap_password = secret("istota_email_imap_password", "IMAP password")
+        if interactive and flag("authserv_id") is None:
+            for line in AUTHSERV_ID_EXPLANATION:
+                out(line)
+        a.authserv_id = text("authserv_id", "Mail server's authserv-id (Enter to skip)", "")
+        _refuse_on(a, "authserv_id")
 
     # Calendar, where there is no Nextcloud to derive it from.
     if not a.uses_nextcloud:

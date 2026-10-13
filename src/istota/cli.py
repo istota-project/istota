@@ -5202,6 +5202,11 @@ def main():
     setup_parser.add_argument("--imap-user", help="IMAP user (with --email)")
     setup_parser.add_argument("--smtp-host", help="SMTP host (with --email)")
     setup_parser.add_argument("--bot-email", help="The bot's email address (with --email)")
+    setup_parser.add_argument(
+        "--authserv-id",
+        help="Your receiving mail server's authserv-id, the first field of the "
+             "Authentication-Results header it adds (with --email); turns on the sender check",
+    )
     setup_parser.add_argument("--caldav-url", help="CalDAV server, without Nextcloud (container)")
     setup_parser.add_argument("--caldav-username", help="CalDAV username (with --caldav-url)")
     setup_parser.add_argument("--developer", action="store_true", help="Enable the developer skill")
