@@ -342,6 +342,12 @@
 # --dry-run), 1 refused or partly applied. It restarts a running stack once
 # when the result says a committed change needs it, so nothing here notifies
 # the restart handler. A refusal is reported from the document's error codes.
+# When user settings follow, the config apply passes --no-restart and the user
+# settings apply takes the restart it leaves owed, so a play changing both
+# restarts the stack once. Nothing before that needs the restart: check-image
+# and a rebuild read config.toml from disk, and the user settings run in a
+# one-shot container that reads it too. So a config the daemon refuses to
+# start on is found by the health wait after the user settings, not the first.
 
 - name: The settings step needs a release
   ansible.builtin.assert:
@@ -433,7 +439,7 @@
     # exit 2 is the drift answer.
     - name: istota-stack apply
       ansible.builtin.command:
-        argv: "{{ [istota_stack_command, 'apply', _istota_config_input.path, '--input-format', 'role-vars'] + (['--dry-run'] if ansible_check_mode else []) }}"
+        argv: "{{ [istota_stack_command, 'apply', _istota_config_input.path, '--input-format', 'role-vars'] + (['--dry-run'] if ansible_check_mode else []) + (['--no-restart'] if _istota_users_checked.rc is defined else []) }}"
       register: _istota_applied
       changed_when: _istota_applied.rc == 2
       failed_when: _istota_applied.delta is not defined or _istota_applied.rc not in [0, 1, 2]
@@ -516,7 +522,7 @@
 # A release from before the rename runs the daemon as the service `istota`.
 - name: Wait for the daemon service to be healthy
   tags: [istota_update]
-  ansible.builtin.shell: |
+  ansible.builtin.shell: &istota_health_check |
     set -euo pipefail
     cid=""
     for service in daemon istota; do
@@ -527,7 +533,7 @@
     executable: /bin/bash
   register: _istota_health
   until: _istota_health.rc == 0
-  retries: "{{ (istota_health_timeout | int) // 5 }}"
+  retries: &istota_health_retries "{{ (istota_health_timeout | int) // 5 }}"
   delay: 5
   changed_when: false
   when:
@@ -604,3 +610,17 @@
       changed_when: false
       check_mode: false
       when: _istota_users_input.path is defined
+
+# That apply took the config's restart along with its own.
+- name: Wait for the daemon service to be healthy after the user settings
+  ansible.builtin.shell: *istota_health_check
+  args:
+    executable: /bin/bash
+  register: _istota_health_after
+  until: _istota_health_after.rc == 0
+  retries: *istota_health_retries
+  delay: 5
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - _istota_users_applied.rc is defined

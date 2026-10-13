@@ -14,9 +14,10 @@
 #                               the first setup in a browser: prints an address and a
 #                               one-use code, then installs, builds and starts the stack
 #   istota-stack setup-code     print the address and code of a setup --web in progress
-#   istota-stack apply <plan> [--secrets-file FILE] [istota apply's options]
+#   istota-stack apply <plan> [--secrets-file FILE] [--no-restart] [istota apply's options]
 #                               `istota apply` a plan; prints its JSON result, and restarts
-#                               the stack once when a committed change needs it
+#                               the stack once when a committed change needs it, this
+#                               apply's or one an earlier `--no-restart` apply left owed
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
 #   istota-stack restore [--date YYYY-MM-DD] [--force]
@@ -107,6 +108,8 @@ DATA_MODE=0711
 # Beside .env, not in config/: root passes it to `docker compose`, and config/
 # is uid 10001's to write.
 DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
+# A restart `apply --no-restart` left to the next apply; root's, beside .env.
+RESTART_OWED="${STACK}/.restart-owed"
 # `setup --web`'s own files: the code, the certificate and the instructions,
 # root's alone, so everything it prints comes from a file uid 10001 cannot write.
 SETUP_DIR="${STACK}/.setup"
@@ -1258,9 +1261,16 @@ print(" ".join("1" if document[flag] else "0" for flag in flags))
 # result document and nothing else (the management role reads it); this
 # script's own messages go to stderr. A partial apply restarts nothing: what
 # was committed stays, and the operator completes it and restarts.
+#
+# --no-restart records a needed restart in RESTART_OWED instead of taking it,
+# and the next apply without the flag takes it along with its own, once. The
+# management role passes it to its config apply when a user settings apply
+# follows (ISSUE-741). A file, so a play that fails between the two leaves the
+# restart to the next apply rather than losing it.
 cmd_apply() {
     [ "$#" -ge 1 ] || { usage >&2; exit 64; }
     local plan="$1" name rc=0 sidecar="" check="" role="" args=() secrets=() decision="" document=""
+    local defer="" restarted=""
     shift
     [ -f "$plan" ] || die "no plan at ${plan}"
     while [ "$#" -gt 0 ]; do
@@ -1282,6 +1292,7 @@ cmd_apply() {
                 args+=("$1" "$2"); shift 2; continue ;;
             --input-format=role-vars) role=1; args+=("$1") ;;
             --check) check=1; args+=("$1") ;;
+            --no-restart) defer=1 ;;
             *) args+=("$1") ;;
         esac
         shift
@@ -1338,12 +1349,33 @@ cmd_apply() {
                 fi ;;
             1:*) log "the plan was refused or failed before any change was applied; nothing was restarted." ;;
             2:"1 1 0 "?) log "dry run: nothing was written." ;;
-            2:"0 1 0 1") restart_for_config ;;
+            2:"0 1 0 1")
+                if [ -n "$defer" ] && [ -z "$(compose ps -q "$(main_service)" 2>/dev/null)" ]; then
+                    # A stopped stack reads the config when it starts: nothing is owed.
+                    restart_for_config
+                elif [ -n "$defer" ]; then
+                    touch "$RESTART_OWED"
+                    log "the changes need a restart; with --no-restart it is left to the next \`istota-stack apply\`."
+                else
+                    restart_for_config
+                    restarted=1
+                fi ;;
             2:"0 1 0 0") log "the changes are read without a restart; nothing was restarted." ;;
             0:?" 0 0 "?) ;;
             *) log "istota apply's exit ${rc} does not match its result (${decision}); nothing was restarted."
-               rc=1 ;;
+               rc=1
+               decision="" ;;
         esac
+        # What an earlier --no-restart apply committed and left owed. Not on a
+        # dry run, a partial apply or a result that contradicts its exit.
+        if [ -z "$defer" ] && [ -z "$restarted" ] && [ -e "$RESTART_OWED" ]; then
+            case "${rc}:${decision}" in
+                1:*" 1 "?) log "an earlier apply's changes also need a restart, which is still owed." ;;
+                ?:"0 "*)
+                    log "an earlier apply's changes need a restart."
+                    restart_for_config ;;
+            esac
+        fi
     } >&2
     return "$rc"
 }
@@ -1548,11 +1580,15 @@ restart_for_config() {
         || log "the devbox services were not re-rendered; run \`istota-stack update <tag>\`"
     if [ -z "$(compose ps -q "$(main_service)" 2>/dev/null)" ]; then
         log "the config changed; the stack is not running, so nothing was restarted"
+        rm -f "$RESTART_OWED"
         return 0
     fi
     log "the config changed; restarting the stack"
-    stack_up
-    compose restart
+    # Explicit returns: config-apply calls this on the left of `||`, where
+    # set -e is off, and a failed restart must leave the owed one recorded.
+    stack_up || return $?
+    compose restart || return $?
+    rm -f "$RESTART_OWED"
 }
 
 # --- moving the workspace off the mount ------------------------------------------
