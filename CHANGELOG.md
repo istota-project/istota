@@ -280,6 +280,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Interrupting `istota-stack import-standalone` on the Mac while it copies the standalone install into the VM no longer leaves that copy in the VM user's temporary directory. It is removed on exit, including after Ctrl-C or a TERM signal, as `apply` already did.
+
 - Applying scheduled jobs now rechecks admin rights before writing, so revoked rights invalidate an earlier preview. Clearing briefing blocks refuses pending legacy or configuration seeds that would restore them on initialization.
 
 - Checking or previewing a configuration plan no longer imports credentials or removes obsolete resources when the plan uses the default database location. Validation leaves existing database state untouched.

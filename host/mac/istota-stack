@@ -1073,8 +1073,8 @@ cmd_restore() {
 # What this run staged in the VM, and the VM user's directory a stage is
 # copying through, both removed by the EXIT trap whatever the outcome: success,
 # a failure, or an interrupt. Global, since the trap runs after the function's
-# locals are gone; the apply path therefore calls stage_in_vm outside a
-# command substitution, whose assignments never reach this shell.
+# locals are gone; apply and import-standalone therefore call stage_in_vm
+# outside a command substitution, whose assignments never reach this shell.
 STAGED_IN_VM=()
 VM_SCRATCH=""
 STAGED_PATH=""
@@ -1343,7 +1343,9 @@ cmd_import_standalone() {
 
     local staging staged port rc=0
     IMPORT_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/istota-standalone.XXXXXX")"
-    trap 'rm -rf "${IMPORT_SCRATCH:-}"' EXIT
+    trap 'rm -rf "${IMPORT_SCRATCH:-}"; unstage_all' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     staging="${IMPORT_SCRATCH}/standalone"
     mkdir -m 0700 "$staging"
     stage_standalone "$from" "$config" "$staging"
@@ -1356,7 +1358,11 @@ cmd_import_standalone() {
         fi
     fi
     port="$(port_or_default)"
-    staged="$(stage_in_vm "$staging" --daemon)" || exit $?
+    stage_in_vm "$staging" --daemon >/dev/null
+    staged="$STAGED_PATH"
+    # The VM's import reads the staged copy throughout and may outlive an
+    # interrupt here, so only an import that has returned unstages it.
+    STAGED_IN_VM=()
     local import=(import-standalone "$staged" --hostname "localhost:${port}")
     [ -z "$dry" ] || import+=(--dry-run)
     # istota.env on stdin: the master key and the credentials, on no command line.
