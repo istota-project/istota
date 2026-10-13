@@ -250,6 +250,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `istota-stack update` no longer takes the web UI down twice. When a release changed how the stack is started, the containers were recreated once by the old release's script and again by the new one's; the new release now starts them itself. The update also stops warning that a running devbox is an orphan container. The update to this release still restarts twice, since the previous script runs it.
+- The web config editor's five-minute check on the dedicated VM no longer starts a container when no change was requested, which also stops it repeating config warnings in the journal every five minutes. A requested change is still picked up at once; if the web could not signal it, the check finds it within the hour.
 - Confirming a sensitive action in the web UI (a credential export, recovery codes, history restore or purge, the backup recipient, or an admin configuration change) works on an install with no mail. Where mail is not set up, the confirmation asks for your account password, bound to your session, with wrong passwords counted by the sign-in throttle; before, the page said a code had been sent when none had, so the action could never be confirmed. An account with no password and no mail is told what the operator can do about it.
 - `istota doctor` no longer reports `security.skill_model_credential.value` as failed on the native brain. Code review runs on the configured brain, so there it uses the native brain's own key and needs no Anthropic credential.
 

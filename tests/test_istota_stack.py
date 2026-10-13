@@ -48,6 +48,7 @@ pytestmark = pytest.mark.skipif(
 
 DOCKER_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
+[ -z "${COMPOSE_IGNORE_ORPHANS:-}" ] || printf '%s\n' "$*" >> "$STUB_CALLS.ignore-orphans"
 args=" $* "
 for ref in ${STUB_MISSING_IMAGES:-}; do
   case "$args" in *" image inspect $ref "*) exit 1 ;; esac
@@ -570,6 +571,74 @@ class TestAnUpdateReprovisionsTheHost:
         fx.tag("v1", key=fx.release_key)
         result = fx.run("update", "v1")
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+RELEASE_STACK_STUB = """#!/bin/bash
+# ISTOTA_STACK_LOCK_INHERITED
+echo "release istota-stack: $* inherited=$(printenv | grep -c '^ISTOTA_STACK_LOCK_INH')" >> "$STUB_CALLS"
+"""
+
+
+class TestTheReleasesOwnScriptBringsTheStackUp:
+    """The istota-stack running an update is the previous release's. When its
+    `up` and the new one's (run by provision.sh) pass compose different
+    variables, the containers were recreated twice. The checkout's own script
+    brings the stack up instead, on the lock the update holds."""
+
+    def _release_with(self, fx, script: str) -> None:
+        path = fx.origin / "host" / "istota-stack"
+        path.parent.mkdir(parents=True)
+        path.write_text(script)
+        path.chmod(0o755)
+        _git(fx.origin, "add", "host/istota-stack", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+
+    def test_the_checkouts_script_runs_up_under_the_held_lock(self, fx):
+        self._release_with(fx, RELEASE_STACK_STUB)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert "release istota-stack: up inherited=1" in calls
+        assert not any(" up -d " in f"{c} " for c in calls), calls
+
+    def test_a_script_that_cannot_inherit_the_lock_is_not_asked_to(self, fx):
+        """A rollback checks out an older script, which would wait on the lock."""
+        self._release_with(fx, RELEASE_STACK_STUB.replace("# ISTOTA_STACK_LOCK_INHERITED\n", ""))
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert not any(c.startswith("release istota-stack") for c in calls)
+        assert any(c.endswith("up -d --remove-orphans") for c in calls)
+
+    def test_the_real_script_comes_up_without_waiting_on_its_parent(self, fx):
+        self._release_with(fx, SCRIPT.read_text())
+        result = fx.run("update", "v1", ISTOTA_STACK_LOCK_WAIT="2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(c.endswith("up -d --remove-orphans") for c in fx.docker_calls())
+
+    def test_the_variable_alone_does_not_skip_a_held_lock(self, fx):
+        held = HeldLock(fx.stack / ".stack.lock", "update")
+        try:
+            result = fx.run("up", ISTOTA_STACK_LOCK_WAIT="0", ISTOTA_STACK_LOCK_INHERITED="1")
+        finally:
+            held.release()
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "istota-stack update" in result.stderr
+        assert fx.docker_calls() == []
+
+
+def test_the_steps_without_the_devbox_file_ignore_its_running_containers(fx):
+    """Without compose.devbox.yml, compose sees the devbox's containers as
+    orphans and warns on every `run`; nothing in those steps removes orphans."""
+    (fx.stack / "compose.devbox.yml").write_text('{"services": {"devbox-alice": {"image": "x"}}}\n')
+    fx.commit("v1")
+    fx.tag("v1", key=fx.release_key)
+    result = fx.run("update", "v1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    ignoring = Path(f"{fx.calls}.ignore-orphans").read_text().splitlines()
+    assert any("devbox compose-file" in c for c in ignoring), ignoring
+    assert not any("--remove-orphans" in c for c in ignoring), ignoring
 
 
 class TestARollbackReprovisionsTheHost:
@@ -1946,7 +2015,10 @@ CONFIG_APPLY_ARMS = r"""  *" config-request take "*)
       prev="$a"
     done
     next="$(ls "$STUB_REQUESTS" 2>/dev/null | sort -n | head -n 1)"
-    [ -n "$next" ] || exit 0
+    if [ -z "$next" ]; then
+      [ -z "${STUB_TRIGGER_DURING_TAKE:-}" ] || echo 99 > "$STUB_TRIGGER_DURING_TAKE"
+      exit 0
+    fi
     ls -ld "$out" > "${STUB_CALLS}.staging-$next"
     for f in plan.json files.json claude-code; do cp "$STUB_REQUESTS/$next/$f" "$out/$f"; chmod 0400 "$out/$f"; done
     rm -rf "${STUB_REQUESTS:?}/$next"
@@ -2183,6 +2255,87 @@ class TestConfigApply:
         assert result.returncode == 1, result.stdout + result.stderr
         assert len([call for call in fx.docker_calls() if "config-request take" in call]) == 1
         assert list(fx.rundir.iterdir()) == []
+
+
+class TestAnIdleConfigApply:
+    """The timer runs config-apply every five minutes, and each run started a
+    one-shot container to ask the database whether anything was pending. A run
+    that found nothing records what the trigger file looked like; the next
+    starts no container while the trigger is unchanged and that run is under
+    an hour old. The hour stands in for a trigger the web failed to write."""
+
+    @pytest.fixture
+    def idle(self, fx, tmp_path):
+        queue = tmp_path / "queue"
+        queue.mkdir()
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace('case "$args" in\n', 'case "$args" in\n' + CONFIG_APPLY_ARMS, 1))
+        run = tmp_path / "run"
+        run.mkdir()
+        (fx.stack / "requests").mkdir()
+        fx.env.update(STUB_REQUESTS=str(queue), ISTOTA_CONFIG_APPLY_RUN_DIR=str(run))
+        fx.trigger = fx.stack / "requests" / "config-apply"
+        return fx
+
+    def _takes(self, fx) -> int:
+        return len([call for call in fx.docker_calls() if "config-request take" in call])
+
+    def _age(self, path: Path, seconds: int) -> None:
+        then = time.time() - seconds
+        os.utime(path, (then, then))
+
+    def test_an_unchanged_trigger_starts_no_container(self, idle):
+        fx = idle
+        fx.trigger.write_text("1\n")
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 1
+        result = fx.run("config-apply")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._takes(fx) == 1, fx.docker_calls()
+
+    def test_no_trigger_ever_written_is_idle_too(self, idle):
+        fx = idle
+        assert fx.run("config-apply").returncode == 0
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 1
+
+    def test_a_newer_trigger_is_taken(self, idle):
+        fx = idle
+        fx.trigger.write_text("1\n")
+        self._age(fx.trigger, 100)
+        assert fx.run("config-apply").returncode == 0
+        fx.trigger.write_text("2\n")
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 2
+
+    def test_a_trigger_written_during_the_empty_take_is_taken_next_time(self, idle):
+        fx = idle
+        fx.trigger.write_text("1\n")
+        self._age(fx.trigger, 100)
+        assert fx.run("config-apply", STUB_TRIGGER_DURING_TAKE=str(fx.trigger)).returncode == 0
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 2
+
+    def test_an_hour_old_idle_run_checks_again(self, idle):
+        fx = idle
+        assert fx.run("config-apply").returncode == 0
+        for marker in fx.stack.glob(".config-apply-*"):
+            self._age(marker, 3700)
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 2
+
+    def test_a_failed_run_is_not_idle(self, idle):
+        fx = idle
+        assert fx.run("config-apply").returncode == 0
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        original = stub.read_text()
+        fx.trigger.write_text("1\n")
+        stub.write_text(original.replace('  *" config-request take "*)\n',
+                                         '  *" config-request take "*)\n    exit 1\n', 1))
+        assert fx.run("config-apply").returncode == 1
+        stub.write_text(original)
+        assert fx.run("config-apply").returncode == 0
+        assert self._takes(fx) == 3
 
 
 class TestTheConfigApplyComposeFile:

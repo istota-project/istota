@@ -250,7 +250,12 @@ compose() {
     fi
     # WITHOUT_DEVBOX=1: the release's own file alone, for the steps of an
     # update that run before compose.devbox.yml is rendered again.
-    if [ -z "${WITHOUT_DEVBOX:-}" ] && { [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; }; then
+    # Its running devbox containers then look like orphans to compose, which
+    # warns on every call; none of those steps removes orphans.
+    local ignore_orphans=""
+    if [ -n "${WITHOUT_DEVBOX:-}" ]; then
+        ignore_orphans=1
+    elif [ -e "$DEVBOX_COMPOSE" ] || [ -L "$DEVBOX_COMPOSE" ]; then
         require_own_file "$DEVBOX_COMPOSE"
         if [ -s "$DEVBOX_COMPOSE" ]; then files+=(-f "$DEVBOX_COMPOSE"); fi
     fi
@@ -271,6 +276,7 @@ compose() {
         # build arg, which overrides the Dockerfile's default and fails the build.
         if [ -n "$pin" ]; then export CLAUDE_CODE_VERSION="$pin"; else unset CLAUDE_CODE_VERSION; fi
         if [ -n "$requests" ]; then export ISTOTA_REQUESTS_DIR="$requests"; fi
+        if [ -n "$ignore_orphans" ]; then export COMPOSE_IGNORE_ORPHANS=1; fi
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
         ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
         ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
@@ -428,6 +434,21 @@ stack_up() {
             docker rm -f "$id" >/dev/null || log "WARNING: could not remove the ${service} container (${id})"
         fi
     done
+}
+
+# An update or a rollback runs the outgoing release's istota-stack, and
+# provision.sh runs the checkout's `up` after it. Where the two compose()
+# functions pass compose different variables, the containers were recreated
+# twice, so the checkout's own script brings the stack up, on the lock this
+# process holds. One without the marker below (an older release) would wait on
+# that lock instead.
+release_stack_up() {
+    local script="${SRC}/host/istota-stack"
+    if [ -x "$script" ] && grep -q 'ISTOTA_STACK_LOCK_INHERITED' "$script"; then
+        ISTOTA_STACK_LOCK_INHERITED=1 "$script" up
+    else
+        stack_up
+    fi
 }
 
 # The services this stack builds. web runs the daemon service's
@@ -623,7 +644,7 @@ cmd_update() {
     env_set "ISTOTA_TAG=${tag}" "ISTOTA_TAG_UNSIGNED=${unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
-        stack_up
+        release_stack_up
     else
         log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
     fi
@@ -699,7 +720,7 @@ cmd_rollback() {
     fi
     env_set "ISTOTA_TAG=${previous}" "ISTOTA_TAG_UNSIGNED=${previous_unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}"
-    stack_up
+    release_stack_up
     log "rolled back to ${previous} (previous: ${current})"
     reprovision_if_changed
 }
@@ -1680,6 +1701,37 @@ CONFIG_APPLY_RUN="${ISTOTA_CONFIG_APPLY_RUN_DIR:-/run}"
 CONFIG_APPLY_BACKUPS=10
 # config_apply_one's exit code when nothing was pending.
 CONFIG_APPLY_NOTHING=10
+# What the last run that found nothing pending saw: `seen` carries the trigger
+# file's mtime at its final take (absent when there was no trigger file), and
+# `idle`'s own mtime is when that run ended.
+CONFIG_APPLY_SEEN="${STACK}/.config-apply-seen"
+CONFIG_APPLY_IDLE="${STACK}/.config-apply-idle"
+CONFIG_APPLY_TRIGGER="${STACK}/requests/config-apply"
+# How long an idle run stands in for asking the database again. The web
+# commits a request before it writes the trigger, so only a trigger it failed
+# to write waits this long.
+CONFIG_APPLY_RECHECK_MINUTES=60
+
+# Whether nothing can be pending since the last run that found nothing, so the
+# timer's run need not start a container to ask.
+config_apply_idle() {
+    [ -f "$CONFIG_APPLY_IDLE" ] || return 1
+    [ -n "$(find "$CONFIG_APPLY_IDLE" -maxdepth 0 -mmin "-${CONFIG_APPLY_RECHECK_MINUTES}" 2>/dev/null)" ] || return 1
+    if [ -e "$CONFIG_APPLY_TRIGGER" ]; then
+        [ -f "$CONFIG_APPLY_SEEN" ] && ! [ "$CONFIG_APPLY_TRIGGER" -nt "$CONFIG_APPLY_SEEN" ]
+    else
+        [ ! -e "$CONFIG_APPLY_SEEN" ]
+    fi
+}
+
+# Taken before each take, so a trigger written while it runs is newer than
+# what an empty take records.
+config_apply_snapshot() {
+    rm -f "${CONFIG_APPLY_SEEN}.next"
+    if [ -e "$CONFIG_APPLY_TRIGGER" ]; then
+        touch -r "$CONFIG_APPLY_TRIGGER" "${CONFIG_APPLY_SEEN}.next"
+    fi
+}
 
 # The web stores a request and touches requests/config-apply; the path unit,
 # or the five-minute timer, runs this. Each request: take it in a one-shot,
@@ -1693,17 +1745,27 @@ cmd_config_apply() {
     [ "$#" -eq 0 ] || { usage >&2; exit 64; }
     # The timer runs from first boot, before setup has written anything.
     [ -f "${CONFIG_DIR}/config.toml" ] || return 0
+    config_apply_idle && return 0
     if ! take_stack_lock config-apply --try; then
         log "config-apply: \`istota-stack $(lock_holder)\` holds the stack lock; the next trigger or the timer retries"
         return 0
     fi
     local rc
+    rm -f "$CONFIG_APPLY_IDLE"
     while :; do
         rc=0
+        config_apply_snapshot
         config_apply_one || rc=$?
         if [ "$rc" -eq "$CONFIG_APPLY_NOTHING" ]; then
+            if [ -e "${CONFIG_APPLY_SEEN}.next" ]; then
+                mv -f "${CONFIG_APPLY_SEEN}.next" "$CONFIG_APPLY_SEEN"
+            else
+                rm -f "$CONFIG_APPLY_SEEN"
+            fi
+            touch "$CONFIG_APPLY_IDLE"
             return 0
         elif [ "$rc" -ne 0 ]; then
+            rm -f "${CONFIG_APPLY_SEEN}.next"
             log "config-apply: stopped (exit ${rc}); a request left taken is failed by the next run"
             return 1
         fi
@@ -1987,7 +2049,14 @@ main() {
                 *" --web "*) take_stack_lock "setup --web" --try || refuse_busy_setup_web ;;
                 *) take_stack_lock setup ;;
             esac ;;
-        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|up|down)
+        # `up` run by release_stack_up already holds the lock: descriptor 9 is
+        # inherited, and flock on it succeeds at once. The variable alone,
+        # with no lock behind it, takes the lock as usual.
+        up)
+            if [ -z "${ISTOTA_STACK_LOCK_INHERITED:-}" ] || ! flock -n 9 2>/dev/null; then
+                take_stack_lock up
+            fi ;;
+        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down)
             take_stack_lock "$command" ;;
         # Setting a key writes host.env, which setup and restore write too;
         # reading one is a read. stage and unstage take none: each makes or
