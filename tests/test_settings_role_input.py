@@ -222,3 +222,40 @@ def test_legacy_secret_write_and_empty_skip_use_the_real_store(tmp_path, monkeyp
     assert apply.run(payload, config, dry_run=False, input_format="role-vars", prune=True, prune_secrets=True,
                      out=lambda _: None, err=lambda _: None) == 0
     assert store.get_secret(database, "alice", "karakeep", "api_key") == "private-new-value"
+
+
+def test_json_refusal_names_the_unsupported_flag_and_its_fix(tmp_path):
+    source = tmp_path / "role.json"
+    source.write_text(json.dumps({"istota_users": {"alice": {"displayname": "A"}}}))
+    source.chmod(0o600)
+    out, err = [], []
+    target = tmp_path / "config.toml"
+    assert apply.run(source, target, input_format="role-vars", dry_run=False, output_format="json",
+                     out=out.append, err=err.append) == 1
+    assert not err and not target.exists()
+    [error] = json.loads(out[0])["errors"]
+    assert error["code"] == "validation_error"
+    assert error["path"] == ["istota_users", "alice", "displayname"]
+    assert "istota user ensure --help" in error["message"]
+
+
+def test_json_refusals_never_carry_a_sidecar_value(tmp_path):
+    envelopes = [
+        {"istota_plan": {"config": {}},
+         "istota_plan_secrets": {"users": {"alice": {"karakeep": {"api_key": "private-sidecar-value"}}}}},
+        {"istota_plan": {"config": {"brain": {"native": {"extra_headers": {"x.tenant": "<unchanged>"}}}}},
+         "istota_plan_secrets": {"config": [{"path": ["brain", "native", "extra_headers", "x.other"],
+                                            "value": "private-sidecar-value"}]}},
+        {"istota_user_secrets": {"alice": [{"service": "karakeep", "key": "api_key",
+                                            "value": "private-sidecar-value", "extra": "private-sidecar-value"}]}},
+    ]
+    for envelope in envelopes:
+        source = tmp_path / "role.json"
+        source.write_text(json.dumps(envelope))
+        source.chmod(0o600)
+        out, err = [], []
+        assert apply.run(source, tmp_path / "config.toml", input_format="role-vars", dry_run=False,
+                         output_format="json", out=out.append, err=err.append) == 1
+        [error] = json.loads(out[0])["errors"]
+        assert error["message"]
+        assert "private-sidecar-value" not in "".join(out + err)

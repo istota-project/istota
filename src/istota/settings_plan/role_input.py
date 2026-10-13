@@ -39,7 +39,7 @@ def _ensure_args(kind, entry, path):
         if key == identity:
             raise SchemaError([*path, key], "use the user mapping key for the identity")
         if not isinstance(key, str) or f"--{key}" not in parser._option_string_actions:
-            raise SchemaError(path, f"unsupported ensure flag; use `istota {kind} ensure --help`")
+            raise SchemaError([*path, key], f"unsupported ensure flag; use `istota {kind} ensure --help`")
         if value is False or value is None:
             continue
         if key == "reset-whatsapp-identity" and value:

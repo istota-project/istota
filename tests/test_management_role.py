@@ -692,6 +692,16 @@ class TestAFailedApplyIsReportedFromItsResult:
             assert "nothing was written" in message, message
             assert f"{register}.rc == 1" in _when(_tasks()[_index(name)]), name
 
+    def test_a_refusal_carries_its_message_when_the_document_has_one(self):
+        """The role's refusals name the flag and the fix; without the message
+        a JSON error says only where."""
+        errors = [{"code": "validation_error", "path": ["istota_users", "alice", "displayname"],
+                   "message": "unsupported ensure flag; use `istota user ensure --help`"}]
+        for name, register in self.NAMES:
+            message = _failure_message(name, {register: {"rc": 1, "stdout": self._doc(errors=errors), "stderr": ""}})
+            assert ("validation_error at istota_users.alice.displayname: unsupported ensure flag; "
+                    "use `istota user ensure --help`") in message, message
+
     def test_a_partial_apply_names_what_was_applied(self):
         operations = [
             {"section": "profile", "user": "alice", "identity": "alice", "action": "update",

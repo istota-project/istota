@@ -536,7 +536,11 @@ def run(
             code, path = exc.code, exc.path
         elif isinstance(exc, OSError):
             code = "io_error"
-        result = engine.ApplyResult(dry_run=dry_run, errors=[{"code": code, "path": path}])
+        error = {"code": code, "path": path}
+        if isinstance(exc, SchemaError):
+            # Authored and value-free by SchemaError's contract; str() of anything else may quote input.
+            error["message"] = exc.problem["message"]
+        result = engine.ApplyResult(dry_run=dry_run, errors=[error])
         if output_format == "text":
             message = str(exc) if isinstance(exc, PlanError) else code
             where = f"[{path[0]}] " if path else ""

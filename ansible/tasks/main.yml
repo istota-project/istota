@@ -393,7 +393,7 @@
           {%- set doc = (out | from_json) if out.startswith('{') else {} -%}
           {%- if doc.errors is defined -%}
           istota apply {{ 'partially applied the settings: the operations listed as applied are in place and the rest are not' if doc.partial else 'refused the settings, and nothing was written' }}.
-          Errors: {% for error in doc.errors %}{{ error.code }} at {{ (error.path | join('.')) or 'the plan' }}{{ '; ' if not loop.last }}{% endfor %}.
+          Errors: {% for error in doc.errors %}{{ error.code }} at {{ (error.path | join('.')) or 'the plan' }}{{ (': ' ~ error.message) if error.message is defined }}{{ '; ' if not loop.last }}{% endfor %}.
           {%- if doc.partial %} Applied: {% for op in doc.operations if op.status == 'applied' %}{{ op.section }} {{ op.user | default('') }} {{ op.identity }}{{ '; ' if not loop.last }}{% endfor %}.{% endif -%}
           {%- else -%}
           istota-stack apply exited {{ _istota_result.rc }} without a result document: {{ _istota_result.stderr | default('') }}
