@@ -569,6 +569,9 @@
                     <span class="sep">·</span>
                     <span class="muted">auto</span>
                     <strong>{formatNumber(u.tasks_automated_24h)}</strong>
+                    <span class="sep">·</span>
+                    <span class="muted">jobs</span>
+                    <strong>{formatNumber(u.tasks_no_model_24h ?? 0)}</strong>
                   </div>
                   {#if totalSeg > 0}
                     <div class="stack-bar" aria-label="24h source breakdown">
@@ -634,6 +637,15 @@
           valueColor="var(--text-muted)"
         >
           {formatNumber(stats.tasks.automated_24h)}
+        </StatTile>
+        <!-- Command and skill tasks call no model; the feed poller alone is
+             hundreds a day per user, so they are counted apart from Automated. -->
+        <StatTile
+          label="Job runs 24h"
+          sub="{formatNumber(stats.tasks.no_model_avg_per_day_30d ?? 0)}/day (30d) · no model"
+          valueColor="var(--text-muted)"
+        >
+          {formatNumber(stats.tasks.no_model_24h ?? 0)}
         </StatTile>
         <StatTile label="Avg duration">{stats.tasks.avg_duration_seconds}s</StatTile>
         <StatTile

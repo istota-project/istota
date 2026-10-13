@@ -192,3 +192,12 @@ describe('the admin users table shows a face beside the name', () => {
     expect(row(container, 'Bob').querySelector('img')?.getAttribute('alt')).toBe('');
   });
 });
+
+describe('the admin users table counts job runs apart', () => {
+  it('shows command and skill runs beside the interactive and automated counts', async () => {
+    const bob = { ...member('bob', 'Bob'), tasks_automated_24h: 2, tasks_no_model_24h: 288 };
+    const { container } = await show([bob]);
+    const summary = row(container, 'Bob').querySelector('.source-summary') as HTMLElement;
+    expect(summary.textContent?.replace(/\s+/g, ' ')).toContain('auto 2 · jobs 288');
+  });
+});
