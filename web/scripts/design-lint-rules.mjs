@@ -148,6 +148,15 @@ function offScaleSpacing(line) {
 const REDEFINED_PRIMITIVE =
   /^\s*(?::global\()?\.(?:btn|badge|icon-btn|field|chip)\b(?![\w-])[^{]*\{\s*$/;
 
+// An empty state is the `EmptyState` component and nothing else. Before it
+// there were seven spellings — a global `.empty`, `.money-table-empty`,
+// `.portfolio-empty`, briefings' `.empty-state`, a `.center-msg` that centred
+// in the pane — at three sizes and two alignments. Matches the markup and the
+// selector, since either one is the start of an eighth.
+// A frame dropping its own padding above one is placement, not a restyle.
+const EMPTY_STATE_PLACEMENT = /:has\(>\s*:global\(\.empty-state\)\)\s*\{\s*$/;
+const HAND_ROLLED_EMPTY = /\bclass="[^"]*\bempty\b|^[^{;]*\.[\w-]*\bempty\b[^{;]*\{\s*$/;
+
 // `exempt` is the file that legitimately owns a pattern — the shell definition
 // site, as opposed to EXEMPT_FILES which is global across every rule.
 // `strip` blanks a span before the rule is tested, so a line carrying both a
@@ -190,6 +199,13 @@ export const RULES = [
       'src/lib/components/ui/Chip.svelte',
     ],
     hint: 'this class belongs to a ui/ primitive — use the component instead',
+  },
+  {
+    id: 'hand-rolled-empty-state',
+    test: HAND_ROLLED_EMPTY,
+    unless: EMPTY_STATE_PLACEMENT,
+    exempt: ['src/lib/components/ui/EmptyState.svelte'],
+    hint: 'use EmptyState from $lib/components/ui',
   },
   {
     id: 'off-scale-space',

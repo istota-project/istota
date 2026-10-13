@@ -20,6 +20,7 @@
   import {
     Button,
     ConfirmDialog,
+    EmptyState,
     KebabMenu,
     NoticeBanner,
     Select,
@@ -364,7 +365,7 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if entries.length === 0}
-    <div class="money-table-empty">No work entries found.</div>
+    <EmptyState>No work entries found.</EmptyState>
   {:else}
     <div class="money-table">
       <div class="money-table-header">

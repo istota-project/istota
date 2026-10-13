@@ -13,6 +13,7 @@
   import {
     Button,
     ConfirmDialog,
+    EmptyState,
     Field,
     KebabMenu,
     Modal,
@@ -399,7 +400,7 @@
   <section>
     <h2 class="micro-label">Active <span class="count">{active.length}</span></h2>
     {#if active.length === 0}
-      <div class="empty small">No active conditions on file.</div>
+      <EmptyState size="sm">No active conditions on file.</EmptyState>
     {:else}
       <ul class="list">
         {#each active as d (d.id)}
@@ -412,7 +413,7 @@
   <section>
     <h2 class="micro-label">Chronic <span class="count">{chronic.length}</span></h2>
     {#if chronic.length === 0}
-      <div class="empty small">No chronic conditions on file.</div>
+      <EmptyState size="sm">No chronic conditions on file.</EmptyState>
     {:else}
       <ul class="list">
         {#each chronic as d (d.id)}
@@ -431,7 +432,7 @@
     </h2>
     {#if showResolved}
       {#if resolved.length === 0}
-        <div class="empty small">Nothing resolved yet.</div>
+        <EmptyState size="sm">Nothing resolved yet.</EmptyState>
       {:else}
         <ul class="list resolved">
           {#each resolved as d (d.id)}

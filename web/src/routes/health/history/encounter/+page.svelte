@@ -19,6 +19,7 @@
     Badge,
     Button,
     ConfirmDialog,
+    EmptyState,
     Field,
     KebabMenu,
     Select,
@@ -337,7 +338,7 @@
   <section class="related">
     <h2 class="micro-label">Linked diagnoses</h2>
     {#if diagnoses.length === 0}
-      <div class="empty small">None.</div>
+      <EmptyState size="sm">None.</EmptyState>
     {:else}
       <!-- Same card shape as the conditions list: name, then tags on their own
            line, then the date line. Unlike the panels grid below, the card is
@@ -387,7 +388,7 @@
   <section class="related">
     <h2 class="micro-label">Linked panels</h2>
     {#if panels.length === 0}
-      <div class="empty small">None.</div>
+      <EmptyState size="sm">None.</EmptyState>
     {:else}
       <ul class="card-grid">
         {#each panels as p (p.id)}

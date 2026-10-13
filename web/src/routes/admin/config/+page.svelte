@@ -12,7 +12,7 @@
     type ConfigRequest,
     type ConfigResource,
   } from '$lib/api';
-  import { Button, Input, NoticeBanner } from '$lib/components/ui';
+  import { Button, EmptyState, Input, NoticeBanner } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
@@ -421,7 +421,7 @@
     {/if}
 
     {#if sections.length === 0}
-      <div class="center-msg">No settings match “{filter}”.</div>
+      <EmptyState>No settings match “{filter}”.</EmptyState>
     {/if}
 
     {#each sections as section (section.key)}

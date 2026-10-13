@@ -96,8 +96,8 @@ describe('SearchResults', () => {
   });
 
   it('renders an empty state for no results', () => {
-    const { container } = render(SearchResults, { data: data([]), onJump: vi.fn() });
-    expect(container.querySelector('.empty')).not.toBeNull();
+    const { container, getByText } = render(SearchResults, { data: data([]), onJump: vi.fn() });
+    expect(getByText(/No results for/)).toBeTruthy();
     expect(container.querySelectorAll('.card').length).toBe(0);
   });
 });

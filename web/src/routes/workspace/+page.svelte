@@ -12,6 +12,7 @@
     Input,
     FileDropZone,
     HeaderNav,
+    EmptyState,
     type KebabItem,
   } from '$lib/components/ui';
   import {
@@ -483,9 +484,9 @@
       <Button variant="secondary" onclick={load}>Retry</Button>
     </div>
   {:else if !places.length}
-    <div class="center-msg">No workspace files or connections are available.</div>
+    <EmptyState>No workspace files or connections are available.</EmptyState>
   {:else if !place}
-    <div class="center-msg">This place is no longer available.</div>
+    <EmptyState>This place is no longer available.</EmptyState>
   {:else}
     <div class="folder-toolbar">
       <nav aria-label="Folder path">

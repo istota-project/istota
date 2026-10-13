@@ -10,7 +10,7 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { Button, NoticeBanner, StatTile } from '$lib/components/ui';
+  import { EmptyState, NoticeBanner, StatTile } from '$lib/components/ui';
   import { directionColor } from '$lib/money/direction';
   import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
@@ -159,14 +159,9 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if !summary}
-  <div class="portfolio-empty">
-    <p class="empty">
-      No portfolio snapshots yet. Import a Fidelity Portfolio Positions CSV to get started.
-    </p>
-    <div>
-      <Button variant="primary" href="{base}/money/portfolio/import">Import a snapshot</Button>
-    </div>
-  </div>
+  <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
+    No portfolio snapshots yet. Import a Fidelity Portfolio Positions CSV to get started.
+  </EmptyState>
 {:else}
   <div class="money-toolbar">
     <!-- Lone child of a space-between toolbar, so it needs the push right. -->
@@ -269,14 +264,6 @@
 <style>
   .as-of {
     margin-left: auto;
-  }
-
-  .portfolio-empty {
-    padding: var(--space-6) var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-    max-width: 640px;
   }
 
   .portfolio-body {

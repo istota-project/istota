@@ -13,7 +13,7 @@
     Tooltip,
     Legend,
   } from 'chart.js';
-  import { StatTile } from '$lib/components/ui';
+  import { EmptyState, StatTile } from '$lib/components/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
   import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';
@@ -315,7 +315,7 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if months.length === 0}
-  <div class="center-msg">No data for the selected period.</div>
+  <EmptyState>No data for the selected period.</EmptyState>
 {:else}
   <div class="cashflow-page">
     <div class="chart-container">

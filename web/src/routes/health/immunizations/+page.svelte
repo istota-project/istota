@@ -16,6 +16,7 @@
     Badge,
     Button,
     ConfirmDialog,
+    EmptyState,
     Field,
     KebabMenu,
     Select,
@@ -325,7 +326,7 @@
       />
     </div>
     {#if history.length === 0}
-      <div class="empty small">No immunizations recorded yet.</div>
+      <EmptyState size="sm">No immunizations recorded yet.</EmptyState>
     {:else}
       <div class="table-scroll">
         <table class="grid">

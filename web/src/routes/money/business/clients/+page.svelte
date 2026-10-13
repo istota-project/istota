@@ -17,6 +17,7 @@
   import {
     Button,
     ConfirmDialog,
+    EmptyState,
     KebabMenu,
     NoticeBanner,
     type KebabItem,
@@ -198,7 +199,7 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if clients.length === 0}
-    <div class="money-table-empty">No clients configured yet — add your first one.</div>
+    <EmptyState>No clients configured yet. Add your first one to start invoicing.</EmptyState>
   {:else}
     <div class="client-grid card-grid">
       {#each clients as client (client.key)}

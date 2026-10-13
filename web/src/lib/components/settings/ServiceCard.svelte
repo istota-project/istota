@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ConfirmDialog } from '$lib/components/ui';
+  import { ConfirmDialog, EmptyState } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SecretField from './SecretField.svelte';
@@ -136,7 +136,7 @@
     that used to live here served exactly one service, which outgrew it.
   -->
   {#if service.fields.length === 0}
-    <p class="empty">No settings for this service.</p>
+    <EmptyState>No settings for this service.</EmptyState>
   {:else}
     <!--
       There is no read-only branch here any more. A credential vault used to be
@@ -181,7 +181,7 @@
 
 <style>
   /* Inherit shared .settings .card / .section-header / .status-pill /
-	   .meta / .empty styling — this component is meant to be used inside
+	   .meta styling — this component is meant to be used inside
 	   <div class="settings"> wrappers that already pull in settings.css. */
   .used-by {
     margin: 0;

@@ -323,13 +323,6 @@
   align-self: center;
 }
 
-.money-table-empty {
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  padding: var(--space-8) var(--space-4);
-  text-align: center;
-}
-
 @media (max-width: 640px) {
   /* Too narrow for a status column — the pages fall back to a colored
      identifier in the first column. */

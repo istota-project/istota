@@ -8,7 +8,7 @@
     type GoogleStatus,
     type GoogleScopeLevel,
   } from '$lib/api';
-  import { Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, ConfirmDialog, EmptyState, Select, type SelectOption } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SettingsCard from './SettingsCard.svelte';
   import SettingsField from './SettingsField.svelte';
@@ -178,9 +178,9 @@
   {#if loading}
     <p class="muted">Loading…</p>
   {:else if !status}
-    <p class="empty">Google status is unavailable.</p>
+    <EmptyState>Google status is unavailable.</EmptyState>
   {:else if !status.enabled}
-    <p class="empty">Google Workspace OAuth is not configured on this Istota instance.</p>
+    <EmptyState>Google Workspace OAuth is not configured on this Istota instance.</EmptyState>
   {:else}
     {#if status.connected}
       {#if status.missing_scopes.length > 0}
