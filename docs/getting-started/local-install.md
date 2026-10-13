@@ -160,6 +160,8 @@ Credentials you stored through the web UI or `istota secret` are in the database
 
 `istota-stack destroy` deletes the VM after you type its name. It refuses when the Keychain has no copy of the master key, or, while the VM runs, when the copy is not the VM's own key, since the snapshots in your folder cannot be decrypted without it; `--force` deletes regardless. It leaves the folder and the Keychain item, and says so.
 
+`istota-stack destroy --purge` deletes those too, along with the settings `create` saved under `~/.config/istota-stack/`, so nothing is left to restore from. It lists what it will delete and asks for the name, `--force` or not. It deletes only the folder `create` recorded for this VM, and keeps it when `.istota-workspace` is missing from it, when it is reached through a link, or when another VM's settings name it. A folder it keeps keeps the Keychain key too, since the backups in it cannot be read without it. With the VM already gone, it removes what a plain `destroy` left.
+
 ## Moving from the standalone install
 
 `import-standalone` moves a [standalone install](standalone-install.md) (`~/.istota`) into a new local VM, with its history:
@@ -203,4 +205,4 @@ istota-stack destroy
 rm ~/.local/bin/istota-stack ~/.local/bin/istota ~/.local/share/istota/istota.yaml
 ```
 
-The folder and the Keychain item stay until you delete them yourself, the item in Keychain Access.
+The folder and the Keychain item stay until you delete them yourself, the item in Keychain Access. `istota-stack destroy --purge` in place of `destroy` deletes them as well, files and backups included.

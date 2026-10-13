@@ -513,7 +513,8 @@ istota-stack open [--files]                 # the web UI; --files the workspace 
 istota-stack autostart on|off               # limactl autostart enable|disable
 istota-stack allow-host-port N | deny-host-port N
 istota-stack update [args]                  # the VM's update, then the Mac scripts from its checkout
-istota-stack destroy [--force]              # refuses without the master key in the Keychain
+istota-stack destroy [--force] [--purge]    # refuses without the master key in the Keychain;
+                                            # --purge also deletes the folder, the key and the saved settings
 istota-stack restore [--date YYYY-MM-DD] [--force] [create's options]
 istota-stack import-standalone [--from DIR] [--config FILE] [--dry-run] [create's options]
 istota ...                                  # the istota CLI in the daemon container, as uid 10001

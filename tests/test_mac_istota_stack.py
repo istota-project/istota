@@ -31,7 +31,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-MAC_CLI = REPO / "host" / "mac" / "istota-stack"
+# A negative control hands a broken copy in here (scripts/test-stack-negative-control.sh).
+MAC_CLI = Path(os.environ.get("ISTOTA_MAC_STACK_SCRIPT") or REPO / "host" / "mac" / "istota-stack")
 MAC_SHIM = REPO / "host" / "mac" / "istota"
 TEMPLATE = REPO / "host" / "lima" / "istota.yaml"
 # The Mac's own bash is 3.2; run the scripts under it wherever there is one.
@@ -99,6 +100,13 @@ if name == "security":
                 sys.exit(45)
             keychain[item] = "" if state.get("short_read") else opts.get("-w", "")
             save()
+        sys.exit(0)
+    if argv[:1] == ["delete-generic-password"]:
+        item = f"{argv[argv.index('-s') + 1]}/{argv[argv.index('-a') + 1]}"
+        if item not in keychain:
+            sys.exit(44)
+        del keychain[item]
+        save()
         sys.exit(0)
     if argv[:1] == ["find-generic-password"]:
         item = f"{argv[argv.index('-s') + 1]}/{argv[argv.index('-a') + 1]}"
@@ -851,6 +859,160 @@ class TestDestroy:
         assert (made.home / "Istota" / ".istota-workspace").is_file()
         assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
         assert "Keychain" in result.stdout
+
+
+class TestDestroyPurge:
+    @pytest.fixture
+    def made(self, mac):
+        assert _create(mac).returncode == 0
+        mac.calls_path.unlink()
+        return mac
+
+    @staticmethod
+    def state_file(mac: Mac, instance: str = "istota") -> Path:
+        return mac.home / ".config" / "istota-stack" / f"{instance}.env"
+
+    def test_it_removes_the_vm_the_folder_the_key_and_the_state(self, made):
+        (made.home / "Istota" / "Users" / "alice").mkdir(parents=True)
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["delete", "--force", "istota"] in made.calls("limactl")
+        assert not (made.home / "Istota").exists()
+        assert made.state()["keychain"] == {}
+        assert not self.state_file(made).exists()
+        prompt = result.stderr
+        assert _resolved(made.home) + "/Istota" in prompt
+        assert "secret-key-istota" in prompt
+        assert str(self.state_file(made)) in prompt
+
+    def test_a_folder_without_the_marker_is_kept(self, made):
+        """The guard that holds the folder: the marker create wrote. Without
+        it the folder may be something else, so the rest goes and it stays."""
+        (made.home / "Istota" / ".istota-workspace").unlink()
+        (made.home / "Istota" / "notes.txt").write_text("mine")
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / "notes.txt").read_text() == "mine"
+        assert not self.state_file(made).exists()
+        assert "kept" in result.stdout + result.stderr
+
+    def test_a_kept_folder_keeps_the_key_its_backups_need(self, made):
+        (made.home / "Istota" / ".istota-workspace").unlink()
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert "Keychain" in result.stdout
+
+    def test_a_folder_an_old_location_state_file_records_is_kept(self, made):
+        """The first releases kept state in ~/.config/istota/, which
+        state_source still reads for an instance not yet moved."""
+        old = made.home / ".config" / "istota" / "other.env"
+        old.parent.mkdir(parents=True, exist_ok=True)
+        old.write_text(f"WORKSPACE={_resolved(made.home / 'Istota')}\nPORT=8181\n")
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert "other" in result.stdout + result.stderr
+
+    def test_an_old_location_state_file_is_named_and_left(self, made):
+        old = made.home / ".config" / "istota" / "istota.env"
+        old.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file(made).rename(old)
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert old.exists()
+        assert str(old) in result.stderr
+        assert not (made.home / "Istota").exists()
+
+    def test_the_name_has_to_be_typed_even_with_force(self, made):
+        result = made.run("destroy", "--force", "--purge", stdin="yes\n")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Type istota to go on" in result.stderr
+        assert not any(c[:1] == ["delete"] for c in made.calls("limactl"))
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert self.state_file(made).exists()
+
+    def test_after_a_plain_destroy_it_removes_the_leftovers(self, made):
+        assert made.run("destroy", stdin="istota\n").returncode == 0
+        made.calls_path.unlink()
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] == ["delete"] for c in made.calls("limactl"))
+        assert not (made.home / "Istota").exists()
+        assert made.state()["keychain"] == {}
+        assert not self.state_file(made).exists()
+
+    def test_with_nothing_left_it_says_so(self, mac):
+        result = mac.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 1
+        assert "nothing" in result.stderr
+
+    def test_an_instance_with_no_recorded_folder_deletes_no_folder(self, made):
+        """`~/Istota` is only the default: an instance whose state names no
+        folder must not take it. The state of the instance that made it is
+        gone too, as after a plain destroy and a hand cleanup, so nothing
+        else stands between the purge and that folder's backups."""
+        self.state_file(made).unlink()
+        keychain = made.state()["keychain"]
+        made.set(keychain={**keychain, "istota.local/secret-key-other": "cd" * 32})
+        result = made.run("destroy", "--purge", stdin="other\n", ISTOTA_LIMA_INSTANCE="other")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+
+    def test_a_folder_another_instance_records_is_kept(self, made):
+        other = self.state_file(made, "other")
+        other.write_text(f"WORKSPACE={_resolved(made.home / 'Istota')}\n")
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (made.home / "Istota" / ".istota-workspace").is_file()
+        assert "other" in result.stdout + result.stderr
+
+    def test_a_linked_folder_is_not_followed(self, made):
+        real = made.home / "Elsewhere"
+        real.mkdir()
+        (real / ".istota-workspace").touch()
+        (real / "notes.txt").write_text("mine")
+        link = made.home / "Linked"
+        link.symlink_to(real)
+        text = self.state_file(made).read_text()
+        workspace = _resolved(made.home / "Istota")
+        assert f"WORKSPACE={workspace}" in text
+        self.state_file(made).write_text(text.replace(f"WORKSPACE={workspace}", f"WORKSPACE={link}"))
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (real / "notes.txt").read_text() == "mine"
+        assert (real / ".istota-workspace").is_file()
+
+    @pytest.mark.parametrize("recorded", ["{link}/", "{link}/Inner"])
+    def test_a_path_through_a_link_is_not_followed(self, made, recorded):
+        """A trailing slash makes `[ -L ]` follow the link, and a link in a
+        parent is never a link at the leaf: only the resolved path counts."""
+        real = made.home / "Elsewhere"
+        (real / "Inner").mkdir(parents=True)
+        for folder in (real, real / "Inner"):
+            (folder / ".istota-workspace").touch()
+            (folder / "notes.txt").write_text("mine")
+        link = made.home / "Linked"
+        link.symlink_to(real)
+        text = self.state_file(made).read_text()
+        workspace = _resolved(made.home / "Istota")
+        self.state_file(made).write_text(
+            text.replace(f"WORKSPACE={workspace}", "WORKSPACE=" + recorded.format(link=link)))
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (real / "notes.txt").read_text() == "mine"
+        assert (real / "Inner" / "notes.txt").read_text() == "mine"
+
+    def test_a_keychain_key_that_is_not_this_vms_does_not_stop_it(self, made):
+        """The check exists to keep the key that decrypts the folder's
+        snapshots; --purge deletes the two together."""
+        made.set(keychain={"istota.local/secret-key-istota": "ab" * 32})
+        result = made.run("destroy", "--purge", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.state()["keychain"] == {}
+        assert not (made.home / "Istota").exists()
 
 
 BACKUP_DATE = "2026-10-10"

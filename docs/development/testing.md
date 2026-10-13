@@ -202,7 +202,14 @@ A clean run there is the failure.
 |---|---|---|
 | `setup-unmarked` | installs staging without checking the `setup-done` marker | the five `TestSetupWebUnfinished` tests and `TestSetupWebFinished::test_a_linked_marker_is_not_a_finished_setup` |
 | `setup-mint-in-staging` | mints the code, certificate and key into staging instead of root's own `.setup/`, then copies them back, so only the staged files' mode is wrong | `TestSetupWebMints::test_the_code_and_certificate_are_root_s_and_the_copies_read_only` |
-| `setup-no-lock` | skips the setup lock, so a second run is not refused | `TestSetupWebRefuses::test_a_second_run_is_refused_while_the_first_serves`, `TestSetupCode::test_during_a_setup_it_prints_the_instructions` |
+| `setup-no-lock` | skips the setup lock, so `setup-code` says no setup is running (a second run is still refused, by the stack lock) | `TestSetupCode::test_during_a_setup_it_prints_the_instructions` |
+
+`mac-purge` runs two controls for the Mac script's `destroy --purge` the same way, handing a broken copy of `host/mac/istota-stack` to `tests/test_mac_istota_stack.py` through `ISTOTA_MAC_STACK_SCRIPT`, each required to turn exactly its named `TestDestroyPurge` tests red:
+
+| Control | Breaks | Turns red |
+|---|---|---|
+| `mac-purge-unmarked` | deletes the recorded folder without checking for `.istota-workspace` | `test_a_folder_without_the_marker_is_kept`, `test_a_kept_folder_keeps_the_key_its_backups_need` |
+| `mac-purge-default-folder` | takes the folder from `workspace_or_default`, so an instance with no state of its own deletes `~/Istota` | `test_an_instance_with_no_recorded_folder_deletes_no_folder` |
 
 `no-drop` and `rollback` run against the image tier and need Docker.
 

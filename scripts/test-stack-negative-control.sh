@@ -13,6 +13,9 @@
 #   scripts/test-stack-negative-control.sh setup-unmarked
 #   scripts/test-stack-negative-control.sh setup-mint-in-staging
 #   scripts/test-stack-negative-control.sh setup-no-lock
+#   scripts/test-stack-negative-control.sh mac-purge  # the two destroy --purge folder guards
+#   scripts/test-stack-negative-control.sh mac-purge-unmarked
+#   scripts/test-stack-negative-control.sh mac-purge-default-folder
 #
 # Row 13 (release integrity) runs in the default suite against a fixture
 # repository: tests/test_istota_stack.py. The broken copy is handed over in
@@ -22,6 +25,10 @@
 # The setup --web controls run the same file's setup classes, and pass only when
 # the FAILED and ERROR lines are exactly the named node ids: each breaks one
 # property, and a neighbour turning red for the wrong reason fails the control.
+#
+# The mac-purge controls break host/mac/istota-stack instead, handed to
+# tests/test_mac_istota_stack.py in ISTOTA_MAC_STACK_SCRIPT, and pass on the
+# same exact-set rule over the purge class.
 #
 # no-drop runs the image tier's wrapper witness (tests/image/test_stack_wrapper.py)
 # against a copy whose exec path skips `istota-drop`, so it needs Docker and a
@@ -36,6 +43,8 @@ trap 'rm -rf "$work"' EXIT
 
 ROW13=tests/test_istota_stack.py::TestARefusedTagChangesNothing
 STACK_TESTS=tests/test_istota_stack.py
+MAC_SCRIPT=host/mac/istota-stack
+MAC_PURGE=tests/test_mac_istota_stack.py::TestDestroyPurge
 SETUP_WEB=(
     "${STACK_TESTS}::TestSetupWebRefuses"
     "${STACK_TESTS}::TestSetupWebMints"
@@ -46,8 +55,10 @@ SETUP_WEB=(
 )
 
 mutate() {
-    local expression="$2" copy="$work/istota-stack.$1"
-    python3 - "$SCRIPT" "$copy" "$expression" <<'PY'
+    local expression="$2" copy="$work/istota-stack.$1" source="${3:-$SCRIPT}"
+    # A command substitution does not inherit `set -e`: without the exit, a
+    # mutation that no longer applies ran the tests against a missing file.
+    python3 - "$source" "$copy" "$expression" <<'PY' || exit 1
 import re, sys
 source, dest, expression = sys.argv[1], sys.argv[2], sys.argv[3]
 old, new = expression.split("\n=>\n")
@@ -185,15 +196,57 @@ setup_mint_in_staging() {
 }
 
 setup_no_lock() {
-    # No lock taken: a second run goes ahead beside the first, and setup-code,
-    # which answers only while the lock is held, says no setup is running.
+    # No setup lock taken: setup-code, which answers only while it is held,
+    # says no setup is running. A second run is still refused, by the stack
+    # lock, so the second-run test is not this control's witness.
     local copy
-    copy="$(mutate setup-no-lock '    setup_lock take || die "a setup is already running: \`istota-stack setup-code\` prints its address."
+    copy="$(mutate setup-no-lock '    setup_lock take || die "could not take ${SETUP_DIR}/lock; nothing was done."
 =>
 ')"
     run_setup_web setup-no-lock "$copy" \
-        "${STACK_TESTS}::TestSetupWebRefuses::test_a_second_run_is_refused_while_the_first_serves" \
         "${STACK_TESTS}::TestSetupCode::test_during_a_setup_it_prints_the_instructions"
+}
+
+run_mac_purge() {
+    local label="$1" copy="$2"
+    local output="$work/${label}.out" dir="$work/${label}"
+    shift 2
+    # The script finds its Lima template at ../lima beside itself.
+    mkdir -p "${dir}/mac" "${dir}/lima"
+    cp host/lima/istota.yaml "${dir}/lima/istota.yaml"
+    mv "$copy" "${dir}/mac/istota-stack"
+    copy="${dir}/mac/istota-stack"
+    ISTOTA_MAC_STACK_SCRIPT="$copy" uv run pytest "$MAC_PURGE" -q --no-header -rfE -p no:randomly -n0 --color=no \
+        > "$output" 2>&1 || true
+    require_exactly_red "$label" "$output" "$@"
+}
+
+mac_purge_unmarked() {
+    # Any folder the state names is deleted, workspace or not.
+    local copy
+    copy="$(mutate mac-purge-unmarked '    if [ ! -f "${folder}/${MARKER}" ] || [ -L "${folder}/${MARKER}" ]; then
+        echo "it has no ${MARKER}, so it may not be a workspace"
+        return 0
+    fi
+=>
+' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-unmarked "$copy" \
+        "${MAC_PURGE}::test_a_folder_without_the_marker_is_kept" \
+        "${MAC_PURGE}::test_a_kept_folder_keeps_the_key_its_backups_need"
+}
+
+mac_purge_default_folder() {
+    # The folder comes from workspace_or_default, so an instance with no state
+    # of its own takes ~/Istota, which another instance may be using.
+    local copy
+    copy="$(mutate mac-purge-default-folder '    local status="$1" folder refusal="" key="" state="" old="" answer=""
+    folder="$(state_get WORKSPACE)"
+=>
+    local status="$1" folder refusal="" key="" state="" old="" answer=""
+    folder="$(workspace_or_default)"
+' "$MAC_SCRIPT")"
+    run_mac_purge mac-purge-default-folder "$copy" \
+        "${MAC_PURGE}::test_an_instance_with_no_recorded_folder_deletes_no_folder"
 }
 
 no_drop() {
@@ -236,5 +289,8 @@ case "$mode" in
     setup-unmarked) setup_unmarked ;;
     setup-mint-in-staging) setup_mint_in_staging ;;
     setup-no-lock) setup_no_lock ;;
+    mac-purge) mac_purge_unmarked; mac_purge_default_folder ;;
+    mac-purge-unmarked) mac_purge_unmarked ;;
+    mac-purge-default-folder) mac_purge_default_folder ;;
     *) echo "unknown control: $mode" >&2; exit 64 ;;
 esac
