@@ -424,7 +424,7 @@ check_tag_name() {
 
 # Print the object id of a release tag that passes every check, or refuse.
 verify_release_tag() {
-    local tag="$1" object kind named
+    local tag="$1" object kind named body
     check_tag_name "$tag"
     if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
         refuse_tag "${tag} is not a tag in the checkout. Only a signed release tag is deployed, never a branch or a commit."
@@ -433,11 +433,14 @@ verify_release_tag() {
     if [ "$kind" != "tag" ]; then
         refuse_tag "${tag} is a lightweight tag; a release tag is annotated and signed."
     fi
-    named="$(verified_git cat-file tag "$object" | awk '/^tag / { print $2; exit } /^$/ { exit }')"
+    # Read once and tested as text: a `cat-file | grep -q` under pipefail
+    # reads a match as a failure when grep closes the pipe early.
+    body="$(verified_git cat-file tag "$object")"
+    named="$(awk '/^tag / { print $2; exit } /^$/ { exit }' <<<"$body")"
     if [ "$named" != "$tag" ]; then
         refuse_tag "the ref ${tag} points at a tag object named '${named}'."
     fi
-    if ! verified_git cat-file tag "$object" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+    if ! grep -qx -- '-----BEGIN SSH SIGNATURE-----' <<<"$body"; then
         refuse_tag "${tag} carries no SSH signature."
     fi
     if [ ! -s "$ALLOWED_SIGNERS" ]; then
@@ -514,7 +517,7 @@ stack_up() {
     docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
             --format '{{.ID}} {{.Label "com.docker.compose.service"}}' | while read -r id service; do
         [ -n "$id" ] || continue
-        if ! printf '%s\n' "$active" | grep -qxF -- "$service"; then
+        if ! grep -qxF -- "$service" <<<"$active"; then
             log "removing the ${service} container: no active profile names it"
             docker rm -f "$id" >/dev/null || log "WARNING: could not remove the ${service} container (${id})"
         fi
@@ -835,8 +838,8 @@ cmd_rollback() {
     fi
     # A release from before the state directory runs on the volume this host
     # copied out of, as it stood at the copy.
-    if [ -e "$DATA_COPIED" ] && ! verified_git show "${object}^{commit}:docker/docker-compose.yml" 2>/dev/null \
-            | grep -q 'ISTOTA_DATA_DIR'; then
+    if [ -e "$DATA_COPIED" ] \
+            && ! grep -q 'ISTOTA_DATA_DIR' <<<"$(verified_git show "${object}^{commit}:docker/docker-compose.yml" 2>/dev/null)"; then
         if [ -z "$force" ]; then
             echo "[istota-stack] REFUSE: ${previous} keeps its state in the ${LEGACY_DATA_VOLUME} volume, not ${DATA_DIR}, and would run on the volume as it was when it was copied. \`istota-stack rollback --force\` does that anyway. ${ENV_FILE} still names ${current}." >&2
             exit 1
@@ -1538,7 +1541,7 @@ LOCALIZE_WRITERS="daemon web whatsapp-baileys"
 # --copy-only run here. MOVED.md goes onto the mount only once the config no
 # longer names it, and never under --copy-only.
 cmd_localize_workspace() {
-    local copy_only="" dry_run="" accept="" note=1 rc=0 pass=() resume=() service stop=() answer=""
+    local copy_only="" dry_run="" accept="" note=1 rc=0 pass=() resume=() service services stop=() answer=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --copy-only) copy_only=1 ;;
@@ -1561,8 +1564,12 @@ cmd_localize_workspace() {
         oneshot "$(main_service)" istota workspace localize --check \
             --from "$CONTAINER_MOUNT" --to "$LOCAL_WORKSPACE" "${resume[@]}" \
             || die "the copy cannot start (above); nothing was stopped."
+        # Captured, not piped into `grep -q`: under pipefail an early match
+        # closed the pipe and read as "no daemon" (ISSUE-736).
+        services="$(compose config --services)" \
+            || die "compose could not list the stack's services (above); nothing was stopped."
         for service in $LOCALIZE_WRITERS; do
-            if compose config --services | grep -qxF "$service"; then stop+=("$service"); fi
+            if grep -qxF -- "$service" <<<"$services"; then stop+=("$service"); fi
         done
         if [ "${#stop[@]}" -gt 0 ]; then
             log "stopping ${stop[*]}"

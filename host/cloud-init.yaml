@@ -65,7 +65,7 @@ write_files:
 
       # Print the object id of a release tag that passes every check, or refuse.
       verify_release_tag() {
-          local tag="$1" object kind named
+          local tag="$1" object kind named body
           check_tag_name "$tag"
           if ! object="$(verified_git rev-parse -q --verify "refs/tags/${tag}" 2>/dev/null)"; then
               refuse_tag "${tag} is not a tag in the checkout. Only a signed release tag is deployed, never a branch or a commit."
@@ -74,11 +74,14 @@ write_files:
           if [ "$kind" != "tag" ]; then
               refuse_tag "${tag} is a lightweight tag; a release tag is annotated and signed."
           fi
-          named="$(verified_git cat-file tag "$object" | awk '/^tag / { print $2; exit } /^$/ { exit }')"
+          # Read once and tested as text: a `cat-file | grep -q` under pipefail
+          # reads a match as a failure when grep closes the pipe early.
+          body="$(verified_git cat-file tag "$object")"
+          named="$(awk '/^tag / { print $2; exit } /^$/ { exit }' <<<"$body")"
           if [ "$named" != "$tag" ]; then
               refuse_tag "the ref ${tag} points at a tag object named '${named}'."
           fi
-          if ! verified_git cat-file tag "$object" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+          if ! grep -qx -- '-----BEGIN SSH SIGNATURE-----' <<<"$body"; then
               refuse_tag "${tag} carries no SSH signature."
           fi
           if [ ! -s "$ALLOWED_SIGNERS" ]; then
