@@ -318,7 +318,8 @@ class TestTheVerbs:
             assert "istota_cli_command" not in yaml.safe_dump(task), task.get("name")
             assert "docker compose exec" not in yaml.safe_dump(task), task.get("name")
         applies = [t for t in _tasks() if (argv := _command_argv(t)) and argv[:2] == [STACK_COMMAND, "apply"]]
-        assert [t["name"] for t in applies] == ["istota-stack apply", "istota-stack apply (user settings)"]
+        assert [t["name"] for t in applies] == ["istota-stack apply --check (user settings)", "istota-stack apply",
+                                                "istota-stack apply (user settings)"]
         for task in applies:
             assert _command_argv(task)[3:5] == ["--input-format", "role-vars"], task["name"]
 
@@ -512,7 +513,8 @@ def _apply_argv(name: str, **context) -> list:
     task = _tasks()[_index(name)]
     full = _role_context({}) | {"istota_stack_command": STACK_COMMAND, "ansible_check_mode": False,
                                 "_istota_config_input": {"path": "/tmp/config.json"},
-                                "_istota_users_input": {"path": "/tmp/users.json"}} | context
+                                "_istota_users_input": {"path": "/tmp/users.json"},
+                                "_istota_users_check_input": {"path": "/tmp/users-check.json"}} | context
     return native_env.from_string(task["ansible.builtin.command"]["argv"]).render(full)
 
 
@@ -612,7 +614,8 @@ class TestTheSettingsInput:
 
     def test_no_secret_value_is_on_an_argv(self):
         """argv is in root's docker CLI command line and dockerd's exec records."""
-        for name in ("istota-stack apply", "istota-stack apply (user settings)"):
+        for name in ("istota-stack apply", "istota-stack apply (user settings)",
+                     "istota-stack apply --check (user settings)"):
             for check in (False, True):
                 argv = _apply_argv(name, ansible_check_mode=check, **self._canonical())
                 assert all(isinstance(arg, str) for arg in argv), argv
@@ -775,6 +778,55 @@ class TestTheSettingsVariablesAreCheckedFirst:
     def test_the_inputs_must_be_mappings(self):
         assert self._fails(istota_plan="settings.json") != []
         assert self._fails(**self.PLAN, istota_plan_secrets=["x"]) != []
+
+
+class TestTheUserSettingsAreCheckedBeforeTheConfig:
+    """The user settings are applied after the health wait, but a schema
+    error or an unknown legacy flag in them must fail the play before the
+    config is written. `apply --check` reads no config and no database."""
+
+    CHECK = "istota-stack apply --check (user settings)"
+    REPORT = "Report refused user settings"
+
+    def test_the_check_runs_before_the_config_is_written(self):
+        assert _index("Split the application settings") < _index(self.CHECK) < _index("istota-stack apply")
+        assert _index(self.CHECK) < _index("Write the config input")
+
+    def test_the_check_is_schema_only_and_never_a_change(self):
+        for check in (False, True):
+            assert _apply_argv(self.CHECK, ansible_check_mode=check) == [
+                STACK_COMMAND, "apply", "/tmp/users-check.json", "--input-format", "role-vars", "--check", "--json"]
+        task = _tasks()[_index(self.CHECK)]
+        assert task.get("check_mode") is False and task.get("changed_when") is False
+        failed_when = str(task["failed_when"])
+        assert "_istota_users_checked.delta is not defined" in failed_when and "[0, 1]" in failed_when
+
+    def test_it_runs_wherever_the_user_settings_would(self):
+        block = next(t for t in _tasks() if t.get("name") == "Check the user settings")
+        assert "_istota_settings_users | length > 0" in _when(block)
+        assert self.CHECK in [t.get("name") for t in block["block"]]
+
+    def test_a_refusal_fails_the_play_with_its_messages(self):
+        stdout = json.dumps({"problems": [{"kind": "discarded", "path": ["istota_users", "alice", "displayname"],
+                                           "message": "unsupported ensure flag; use `istota user ensure --help`"}],
+                             "error": None})
+        message = _failure_message(self.REPORT, {"_istota_users_checked": {"rc": 1, "stdout": stdout, "stderr": ""}})
+        assert ("istota_users.alice.displayname: unsupported ensure flag; use `istota user ensure --help`"
+                in message), message
+        assert "nothing was written" in message, message
+        assert "_istota_users_checked.rc == 1" in _when(_tasks()[_index(self.REPORT)])
+        stdout = json.dumps({"problems": [], "error": "the plan in role-vars input does not parse: invalid JSON"})
+        message = _failure_message(self.REPORT, {"_istota_users_checked": {"rc": 1, "stdout": stdout, "stderr": ""}})
+        assert "does not parse: invalid JSON" in message, message
+        message = _failure_message(self.REPORT, {"_istota_users_checked": {"rc": 1, "stdout": "", "stderr": "boom"}})
+        assert "boom" in message, message
+
+    def test_the_check_input_is_private_and_removed_afterwards(self):
+        block = next(t for t in _tasks() if t.get("name") == "Check the user settings")
+        assert "Remove the user settings check file" in [t.get("name") for t in block.get("always", [])]
+        task = _tasks()[_index("Write the user settings check input")]
+        assert task.get("no_log") is True
+        assert task["ansible.builtin.copy"]["mode"] == "0600"
 
 
 class TestTheUserSettingsWaitForTheStack:

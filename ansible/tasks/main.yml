@@ -353,6 +353,59 @@
     quiet: true
   when: _istota_settings_config | length > 0 or _istota_settings_users | length > 0
 
+# The user settings are applied after the health wait, so their schema is
+# checked here, before the config is written. `apply --check` reads no config
+# and no database, so it runs under --check too and never counts as a change.
+- name: Check the user settings
+  when:
+    - _istota_settings_users | length > 0
+    - (_istota_deployed.stdout_lines | default([''], true) | first) | length > 0
+  block:
+    - name: Make the user settings check file
+      ansible.builtin.tempfile:
+        suffix: .json
+      register: _istota_users_check_input
+      changed_when: false
+      check_mode: false
+
+    - name: Write the user settings check input
+      ansible.builtin.copy:
+        dest: "{{ _istota_users_check_input.path }}"
+        content: "{{ _istota_settings_users | to_json }}"
+        mode: "0600"
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: istota-stack apply --check (user settings)
+      ansible.builtin.command:
+        argv: "{{ [istota_stack_command, 'apply', _istota_users_check_input.path, '--input-format', 'role-vars', '--check', '--json'] }}"
+      register: _istota_users_checked
+      changed_when: false
+      failed_when: _istota_users_checked.delta is not defined or _istota_users_checked.rc not in [0, 1]
+      check_mode: false
+
+    - name: Report refused user settings
+      ansible.builtin.fail:
+        msg: >-
+          {%- set out = _istota_users_checked.stdout | default('') -%}
+          {%- set doc = (out | from_json) if out.startswith('{') else {} -%}
+          {%- if doc.problems is defined -%}
+          istota apply refused the user settings, and nothing was written.
+          {% for problem in doc.problems %}{{ (problem.path | join('.')) or 'the plan' }}: {{ problem.message }}{{ '; ' if not loop.last }}{% endfor %}{{ ' ' ~ doc.error if doc.error }}
+          {%- else -%}
+          istota-stack apply --check exited {{ _istota_users_checked.rc }} without a result: {{ _istota_users_checked.stderr | default('') }}
+          {%- endif -%}
+      when: _istota_users_checked.rc == 1
+  always:
+    - name: Remove the user settings check file
+      ansible.builtin.file:
+        path: "{{ _istota_users_check_input.path }}"
+        state: absent
+      changed_when: false
+      check_mode: false
+      when: _istota_users_check_input.path is defined
+
 - name: Apply the config
   when: _istota_settings_config | length > 0
   block:
