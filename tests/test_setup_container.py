@@ -653,7 +653,7 @@ class TestTheAppLog:
 
         for name in ("daemon", "web"):
             mounts = [v for v in services[name]["volumes"] if isinstance(v, str)]
-            assert f"istota_data:{setup_wizard.CONTAINER_DATA_DIR}" in mounts, name
+            assert any(m.endswith(f":{setup_wizard.CONTAINER_DATA_DIR}") for m in mounts), name
         assert log.is_relative_to(setup_wizard.CONTAINER_DATA_DIR)
 
     def test_the_file_is_outside_every_directory_a_task_or_a_sweep_reaches(self):

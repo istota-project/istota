@@ -3918,14 +3918,14 @@ def cmd_devbox_compose_file(args) -> int:
     Stdout, not a path: the config directory is read-only to the daemon, so
     `istota-stack` writes the output on the host. Each user's repos directory is
     created first (as the daemon's uid, through the exec path), because the
-    devbox mounts it as a `subpath` of the state volume and Docker refuses a
-    subpath that does not exist.
+    devbox mounts it as a bind or a `subpath` of the state, and Docker refuses
+    either when it does not exist.
     """
     from istota.devbox import compose_file
 
     config = load_config(Path(args.config) if args.config else None)
     try:
-        text = compose_file.render_devbox_compose(config)
+        text = compose_file.render_devbox_compose(config, args.state_dir)
         repos = compose_file.repos_dirs_to_create(config)
     except compose_file.ComposeFileError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -5853,9 +5853,13 @@ def main():
     # devbox (with subparsers)
     devbox_parser = subparsers.add_parser("devbox", help="The per-user development containers")
     devbox_subparsers = devbox_parser.add_subparsers(dest="devbox_action", required=True)
-    devbox_subparsers.add_parser(
+    compose_file_parser = devbox_subparsers.add_parser(
         "compose-file",
         help="Print compose.devbox.yml: one devbox service per [devbox] users entry",
+    )
+    compose_file_parser.add_argument(
+        "--state-dir", metavar="PATH",
+        help="The host directory bound at /data; the repos mounts become binds below it",
     )
 
     # workspace (with subparsers)

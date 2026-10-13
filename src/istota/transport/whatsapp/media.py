@@ -300,7 +300,7 @@ def default_media_dir(config: "Config") -> Path:
     that write path doing the refusing rather than the unit's `PrivateTmp`,
     which the first version of this paragraph credited: the role renders
     `temp_dir` as `{istota_home}/tmp`, so a private `/tmp` never reaches it. The compose stack already
-    mounts `istota_data:/data` into both containers, so they see one inode set
+    mounts the same state at `/data` into both containers, so they see one inode set
     with no new volume. And `build_bwrap_cmd` masks `db_path.parent` with an
     empty read-only tmpfs after every other mount, so on both shapes this
     directory is bound into no sandbox at any path.

@@ -108,7 +108,7 @@ Stack builds use Docker's default builder explicitly. Its cache is shared with o
 
 ### The daemon service is called `daemon`
 
-The scheduler's compose service was called `istota` and is now `daemon`, so its container is `istota-daemon-1` rather than `istota-istota-1`, and the image built for it is `istota:<tag>` rather than `istota-istota:<tag>`. `istota-stack update` brings the stack up with `docker compose up -d --remove-orphans`, which removes the old `istota-istota-1` container. Nothing moves on disk: the state volume is keyed by its own name, `istota_data`, not by the service, so the new container mounts the same data.
+The scheduler's compose service was called `istota` and is now `daemon`, so its container is `istota-daemon-1` rather than `istota-istota-1`, and the image built for it is `istota:<tag>` rather than `istota-istota:<tag>`. `istota-stack update` brings the stack up with `docker compose up -d --remove-orphans`, which removes the old `istota-istota-1` container. Nothing moves on disk: the state is not keyed by the service, so the new container mounts the same data.
 
 ### Room identities: offline maintenance required
 
@@ -230,7 +230,7 @@ What each devbox gets, and nothing else:
 - `devbox-home-<user>` at `/home/dev`, its persistent home.
 - `devbox-exec-<user>` at `/run/istota-exec`: the exec transport's socket, which the server inside the box creates and the daemon container reaches at `[developer.container] exec_socket_dir`/`<user>`.
 - `devbox-cred-<user>` at `/run/istota-cred`: the credential proxy's socket, which istota creates at `[developer] devbox_proxy_socket_dir`/`<user>`. The proxy answers on that socket as that user, whoever connects, so it matters that no other container mounts it and no task sandbox binds any credential socket directory.
-- Its own subdirectory of the state volume, `/data/repos/<user>`, at the same path on both sides.
+- Its own subdirectory of the state directory, `/data/repos/<user>`, at the same path on both sides.
 
 `istota setup` writes both socket directories under `/data/devbox/` when the developer skill is on; the render refuses socket directories outside `/data`, because only mounts there are handed to uid 10001 when the daemon container starts.
 
@@ -246,8 +246,8 @@ Two questions decide the storage: whether istota uses a Nextcloud (`[nextcloud] 
 
 | Mode | `config.toml` | Workspace | `host.env` |
 |---|---|---|---|
-| Local (the default) | no `[nextcloud] url` | `/data/workspace` on the state volume | `STORAGE=local` |
-| Nextcloud, local workspace | `url` names your Nextcloud, no `workspace_mount_path` | `/data/workspace` on the state volume | `STORAGE=local` |
+| Local (the default) | no `[nextcloud] url` | `/data/workspace` in the state directory | `STORAGE=local` |
+| Nextcloud, local workspace | `url` names your Nextcloud, no `workspace_mount_path` | `/data/workspace` in the state directory | `STORAGE=local` |
 | Full Nextcloud integration | `url` names your Nextcloud, `workspace_mount_path = "/mnt/shared"` | the VM's rclone mount of the bot's files, bound at `/mnt/shared` | `STORAGE=nextcloud` |
 | Host folder (the [local VM](#local-vm)) | no `[nextcloud] url`; `workspace_mount_path = "/mnt/shared"` | a Mac folder Lima shares into the VM at `/srv/mount/host-folder`, bound at `/mnt/shared` | `STORAGE=host-folder` |
 
@@ -301,14 +301,27 @@ In `proxied` mode the reverse proxy terminates the public TLS and forwards to th
 
 To replace the certificate, delete both files in `/srv/app/istota/certs/`, run `provision.sh`, copy the new `fullchain.pem` to the proxy and reload it, then restart the stack. `TLS_CERT_SOURCE=files` is the same listener with a certificate you provide, for a proxy that verifies against an internal CA instead.
 
-## Volumes
+## State and volumes
+
+Istota's `/data` is `/srv/app/istota/data` on the VM, a directory owned by uid 10001 and readable by it alone. It holds the databases (`/data/db`), the master key (`/data/.secret_key`, unless a secrets file supplies it), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a separate bind of `/srv/app/istota/config`. **This directory is the one to back up.** A stack started without `istota-stack`, such as a test tier or Docker Desktop, keeps the same state in the named volume `data` instead.
 
 | Volume | Purpose |
 |---|---|
-| `istota_data` | Istota's `/data`: the databases (`/data/db`), and with a local workspace, with or without Nextcloud, the workspace (`/data/workspace`). `/data/config` is a bind of the VM's config directory, not part of the volume. **This is the one to back up.** |
 | `browser_profile` | Persistent Chrome profiles per user, including their logins; also the console TLS certificate and parked legacy profile |
 
-In full Nextcloud integration and on the local VM the workspace is not a volume: it is the VM's rclone mount or the Mac folder, bound at `/mnt/shared`.
+In full Nextcloud integration and on the local VM the workspace is not in `/data`: it is the VM's rclone mount or the Mac folder, bound at `/mnt/shared`.
+
+### From the state volume to the state directory
+
+Releases before this one kept `/data` in the named volume `istota_istota_data`. The first time the new `istota-stack` starts a container, during `update` or the `up` that `provision.sh` runs after it, it stops the stack, copies the volume into `/srv/app/istota/data` with owners and modes kept, checks that the framework database and the master key arrived intact, and starts the stack on the directory. It does this once, and records it in `/srv/app/istota/.data-copied`.
+
+The volume is kept. Once the stack runs as it should, remove it:
+
+```bash
+docker volume rm istota_istota_data
+```
+
+The copy refuses, and changes nothing, when `/srv/app/istota/data` already holds files: one of the two is out of date, and only you can say which. Move the directory aside to copy the volume again, or remove the volume to keep the directory. `istota-stack rollback` to a release from before the directory refuses without `--force`, since that release would run on the volume as it was when it was copied.
 
 ## Local VM
 
@@ -331,18 +344,17 @@ What differs from a server:
 
 ### Backing up a local install
 
-Istota backs up nothing but its databases. On a timer it snapshots them to `[scheduler] db_backup_dir`, by default `Backups/db/snapshots` under the workspace. In full Nextcloud integration that is on the mount, so the snapshots leave the VM. In local storage mode it is `/data/workspace/Backups/db/snapshots`, on the same `istota_data` volume as the databases themselves: a snapshot there gets you back from a corrupted database file, not from losing the volume. `istota doctor` reports this as a warning under `backups.off_volume`, and `runtime.workspace_disk` warns when the volume runs low on space.
+Istota backs up nothing but its databases. On a timer it snapshots them to `[scheduler] db_backup_dir`, by default `Backups/db/snapshots` under the workspace. In full Nextcloud integration that is on the mount, so the snapshots leave the VM. In local storage mode it is `/data/workspace/Backups/db/snapshots`, in the same `/srv/app/istota/data` as the databases themselves: a snapshot there gets you back from a corrupted database file, not from losing the VM's disk. `istota doctor` reports this as a warning under `backups.off_volume`, and `runtime.workspace_disk` warns when the disk runs low on space.
 
-The workspace and the volume as a whole are yours to back up. Either back up the volume with whatever backs up the VM's disk, or stop the stack and archive it:
+The workspace and the state directory as a whole are yours to back up. Either back up `/srv/app/istota/data` with whatever backs up the VM's disk, or stop the stack and archive it:
 
 ```bash
 istota-stack down
-docker run --rm -v istota_istota_data:/data:ro -v "$PWD":/backup alpine \
-  tar -czf /backup/istota-data.tar.gz -C /data .
+tar -czf /root/istota-data.tar.gz -C /srv/app/istota/data .
 istota-stack up
 ```
 
-Compose prefixes the volume with the project name, so on the VM it is `istota_istota_data`. Unless a secrets file supplies it, the archive holds `/data/.secret_key` beside the databases it decrypts, so keep it somewhere at least as private as the VM (see `docs/deployment/security.md`). To keep the database snapshots off the volume without archiving it, set `db_backup_dir` to a directory on another disk mounted into the stack.
+Unless a secrets file supplies it, the archive holds `/data/.secret_key` beside the databases it decrypts, so keep it somewhere at least as private as the VM (see `docs/deployment/security.md`). To keep the database snapshots off the VM's disk without archiving the directory, set `db_backup_dir` to a directory on another disk mounted into the stack.
 
 ## Container logs
 

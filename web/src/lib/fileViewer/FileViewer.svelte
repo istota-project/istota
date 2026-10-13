@@ -2,13 +2,28 @@
   import { Modal, Button } from '$lib/components/ui';
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
-  import { chatFileUrl, previewChatFile, type FilePreview } from '$lib/api';
+  import { base } from '$app/paths';
+  import {
+    chatFileUrl,
+    nextcloudFileUrl,
+    previewChatFile,
+    previewNextcloudFile,
+    type FilePreview,
+  } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { formatDateTime } from '$lib/dateFormat';
-  import { viewer } from './store.svelte';
+  import { viewer, type FileSource } from './store.svelte';
   import PdfPreview from './PdfPreview.svelte';
 
-  let { path, onClose }: { path: string; onClose: () => void } = $props();
+  let {
+    path,
+    fileSource = { kind: 'workspace' },
+    onClose,
+  }: { path: string; fileSource?: FileSource; onClose: () => void } = $props();
+  let nextcloud = $derived(fileSource.kind === 'nextcloud');
+  let fileUrl = $derived(nextcloud ? nextcloudFileUrl : chatFileUrl);
+  let webUrl = $derived(fileSource.kind === 'nextcloud' ? fileSource.webUrl : null);
+  let reconnect = $state(false);
   let preview = $state<FilePreview | null>(null);
   let error = $state('');
   let canDownload = $state(true);
@@ -22,16 +37,21 @@
     error = '';
     source = false;
     canDownload = true;
-    previewChatFile(requested, controller.signal)
+    reconnect = false;
+    const load = nextcloud ? previewNextcloudFile : previewChatFile;
+    const urlFor = fileUrl;
+    load(requested, controller.signal)
       .then((result) => {
         if (!active) return;
-        if (result.kind === 'image') viewer.openImages([chatFileUrl(requested)], 0);
+        if (result.kind === 'image') viewer.openImages([urlFor(requested)], 0);
         else preview = result;
       })
       .catch((e: unknown) => {
         if (!active) return;
         const status = e && typeof e === 'object' && 'status' in e ? Number(e.status) : null;
-        canDownload = ![400, 401, 403, 404].includes(status ?? 0);
+        canDownload = ![400, 401, 403, 404, 409].includes(status ?? 0);
+        // The personal connection is missing or revoked; only Settings can fix it.
+        reconnect = nextcloud && status === 409;
         error = status && e instanceof Error ? e.message : "Couldn't load a preview.";
       });
     return () => {
@@ -60,8 +80,17 @@
     {/if}
   {/snippet}
   {#snippet actions()}
-    {#if canDownload}<Button size="sm" href={chatFileUrl(path)} download={name}>Download</Button
+    {#if reconnect}<Button size="sm" variant="secondary" href={`${base}/settings/connections`}
+        >Reconnect</Button
       >{/if}
+    {#if webUrl}<Button
+        size="sm"
+        variant="secondary"
+        href={webUrl}
+        target="_blank"
+        rel="noopener noreferrer">Open in Nextcloud</Button
+      >{/if}
+    {#if canDownload}<Button size="sm" href={fileUrl(path)} download={name}>Download</Button>{/if}
   {/snippet}
   <div class="file-content">
     {#if error}
@@ -75,17 +104,17 @@
       {#if preview.kind === 'binary'}
         <p>No preview for this file type.</p>
       {:else if preview.kind === 'pdf'}
-        <PdfPreview url={chatFileUrl(path)} />
+        <PdfPreview url={fileUrl(path)} />
       {:else if preview.kind === 'audio' || preview.kind === 'video'}
         <div class="file-media">
           <MediaPreview
             kind={preview.kind}
-            url={chatFileUrl(path)}
+            url={fileUrl(path)}
             failureMessage="Your browser could not play this file. Download it to open in another app."
           />
         </div>
       {:else if preview.kind === 'text'}
-        <TextPreview {name} text={preview.text ?? ''} bind:source fill />
+        <TextPreview {name} text={preview.text ?? ''} bind:source fill untrusted={nextcloud} />
       {/if}
     {/if}
   </div>

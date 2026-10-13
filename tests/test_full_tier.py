@@ -657,7 +657,7 @@ class TestTheComposeInvocation:
 class TestKeepSemantics:
     """`ISTOTA_TESTBED_KEEP`, and the two corrections the boot path forces.
 
-    The spec's version wiped `shared_files` along with `istota_data`. That
+    The spec's version wiped `shared_files` along with the state volume. That
     removes `/mnt/shared/.istota-provisioned`, which `provision-nc.sh` never
     rewrites — it is a `post-installation` hook and the Nextcloud image runs
     those only when it performs the install — so the fixture's health check
@@ -667,7 +667,7 @@ class TestKeepSemantics:
 
     def test_only_the_daemons_own_volumes_are_wiped(self):
         assert set(compose_support.StackPool.KEEP_WIPES) == {
-            "istota_data",
+            "data",
             "redis_data",
         }
 

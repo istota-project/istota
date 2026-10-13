@@ -25,7 +25,7 @@
     KebabMenu,
     type KebabItem,
   } from '$lib/components/ui';
-  import { chatFileUrl } from '$lib/api';
+  import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
   import { formatBytes } from '$lib/format';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { fileIcon } from './filePresentation';
@@ -88,7 +88,7 @@
             mime_type: null,
             modified: new Date(entry.modified * 1000).toISOString(),
             path: [listing?.path, entry.name].filter(Boolean).join('/'),
-            web_url: place.kind === 'nextcloud' ? (entry.nextcloud_url ?? null) : null,
+            web_url: null,
           })),
   );
   type SortKey = 'name' | 'size' | 'modified';
@@ -186,7 +186,9 @@
           }),
       });
     }
-    if (place.kind !== 'drive' && entry.kind === 'file' && entry.ref) {
+    if (place.kind === 'nextcloud' && entry.kind === 'file') {
+      items.push({ label: 'Download', href: nextcloudFileUrl(entry.path), download: entry.name });
+    } else if (place.kind !== 'drive' && entry.kind === 'file' && entry.ref) {
       items.push({ label: 'Download', href: chatFileUrl(entry.ref), download: entry.name });
     }
     const providerUrl = entry.nextcloud_url || entry.web_url;
@@ -343,6 +345,15 @@
                   <a
                     href={href(place.id, entry.path)}
                     onclick={(event) => onNavigate(event, place.id, entry.path)}>{entry.name}</a
+                  >
+                {:else if entry.kind === 'file' && place.kind === 'nextcloud'}
+                  <button
+                    type="button"
+                    onclick={() =>
+                      viewer.openFile(entry.path, {
+                        kind: 'nextcloud',
+                        webUrl: entry.nextcloud_url ?? null,
+                      })}>{entry.name}</button
                   >
                 {:else if entry.kind === 'file' && entry.web_url}
                   <a href={entry.web_url} target="_blank" rel="noopener noreferrer">{entry.name}</a>

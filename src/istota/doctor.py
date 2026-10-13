@@ -1096,7 +1096,7 @@ def check_backups_off_volume(config: "Config", probe: bool) -> CheckResult:
 
     `db_backup._destination_is_durable` deliberately does not refuse a
     same-volume destination: on the Docker stack `/data/db` and
-    `/data/workspace` share `istota_data`, so refusing would stop every
+    `/data/workspace` share one state directory, so refusing would stop every
     backup on every local install. A snapshot there still protects against a
     corrupted database file; it does not protect against losing the volume,
     and this check is where that is said. Under a workspace mount (the
@@ -1132,7 +1132,7 @@ def check_backups_off_volume(config: "Config", probe: bool) -> CheckResult:
         f"backups go to {dest}, on the same volume as " + " and ".join(shared)
         + ": they survive a corrupted database file but not the loss of the volume",
         remedy=(
-            "Back up that volume itself (istota_data on the Docker stack), or set "
+            "Back up that disk itself (/srv/app/istota/data on the VM), or set "
             "[scheduler] db_backup_dir to a directory on another disk."
         ),
     )
@@ -1172,7 +1172,7 @@ def check_workspace_disk(config: "Config", probe: bool) -> CheckResult:
     )
     remedy = (
         "Free space on that volume or grow it. On the Docker stack it also holds "
-        "the databases and their snapshots (istota_data)."
+        "the databases and their snapshots (/srv/app/istota/data)."
     )
     if fraction < _DISK_FAIL_FRACTION:
         return CheckResult(name, FAIL, detail, remedy=remedy)
