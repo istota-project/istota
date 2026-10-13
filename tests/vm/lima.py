@@ -410,6 +410,16 @@ UPDATE_CONTROLS: dict[str, tuple[str, str]] = {
         '        secrets=(--secrets-file "/secrets/$(basename "$2")")\n',
         '        secrets=()\n',
     ),
+    # MOVED.md is written through the mount and the mount stopped at once,
+    # inside rclone's upload delay, so the note never reaches Nextcloud (#739).
+    # The mount alone: a plain stop takes istota-stack.service down first, whose
+    # `down` waits on the stack lock this verb still holds.
+    "localize-stops-mount-at-once": (
+        '            || log "WARNING: not every user got MOVED.md in their Nextcloud bot folder (above); '
+        'the move goes on."\n',
+        '            || log "WARNING: not every user got MOVED.md in their Nextcloud bot folder (above); '
+        'the move goes on."\n        systemctl stop --job-mode=ignore-dependencies mount-nextcloud.service\n',
+    ),
 }
 
 

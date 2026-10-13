@@ -22,6 +22,7 @@ import pytest
 import yaml
 
 from istota.config import DevboxConfig
+from istota.lib.rclone_conf import render_webdav_remote
 
 REPO = Path(__file__).resolve().parent.parent
 HOST = REPO / "host"
@@ -878,6 +879,122 @@ class TestABareMetalInstallOnTheSameHost:
         """The role made /srv/mount/nextcloud 0770 root:nextcloud-mount; uid 10001 is
         in no such group, and fusermount refuses a mountpoint its user cannot reach."""
         assert 'chmod o+x "$(dirname "$MOUNT_DIR")"' in self.TEXT
+
+
+class TestTheMountUploadsBeforeItStops:
+    """rclone uploads a closed file some seconds after its last close, and a
+    stop inside that window leaves it dirty in the VFS cache, where nothing
+    uploads it while the mount stays off. `localize-workspace` writes MOVED.md
+    through the mount and then runs provision.sh, which stopped the mount
+    within the window (#739)."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+    DIRTY = '{\n\t"Size": 172,\n\t"Dirty": true\n}\n'
+    CLEAN = '{\n\t"Size": 172,\n\t"Dirty": false\n}\n'
+
+    def _run(self, tmp_path, *, active=True, uploads_after=None, timeout="5", dav_prefix="Shared Files"):
+        """Against the rclone.conf the wizard writes for remote `nextcloud`:
+        with a dav_prefix that is an alias of `nextcloud-root:<prefix>`, and
+        rclone keeps the cache under the aliased remote's name."""
+        stack = tmp_path / "stack"
+        stack.mkdir()
+        (stack / "rclone.conf").write_text(render_webdav_remote(
+            "nextcloud", "https://cloud.example.com", "istota", "x", dav_prefix=dav_prefix))
+        cache = tmp_path / "cache"
+        if dav_prefix:
+            meta = cache / "vfsMeta" / "nextcloud-root" / dav_prefix / "Users" / "alice" / "istota"
+        else:
+            meta = cache / "vfsMeta" / "nextcloud" / "Users" / "alice" / "istota"
+        meta.mkdir(parents=True)
+        (meta / "MOVED.md").write_text(self.DIRTY)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        sleeps = tmp_path / "sleeps"
+        _stub(bindir, "systemctl", f'[ "$1" = is-active ] && exit {0 if active else 3}\nexit 0\n')
+        # Stands in for rclone: the upload lands while the caller sleeps.
+        _stub(bindir, "sleep", (
+            f'echo "$1" >> "{sleeps}"\n'
+            f'n=$(wc -l < "{sleeps}")\n'
+            f'[ "{uploads_after or 0}" -gt 0 ] && [ "$n" -ge "{uploads_after or 0}" ] '
+            f"&& printf '%s' '{self.CLEAN}' > \"{meta / 'MOVED.md'}\"\n"
+            "exit 0\n"
+        ))
+        cache_line = re.search(r"^RCLONE_CACHE=.*$", self.TEXT, re.M)
+        assert cache_line, "provision.sh names the rclone cache"
+        functions = [cache_line.group(0)]
+        for name in ("mount_cache_name", "mount_pending_uploads", "wait_for_mount_uploads"):
+            found = re.search(rf"^{name}\(\) \{{.*?^\}}", self.TEXT, re.M | re.S)
+            assert found, f"provision.sh defines {name}"
+            functions.append(found.group(0))
+        script = ('set -euo pipefail\nlog() { echo "$*"; }\n'
+                  'host_env() { [ "$1" = RCLONE_REMOTE ] && echo nextcloud; }\n'
+                  + "\n".join(functions) + "\nwait_for_mount_uploads\n")
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": f"{bindir}:{os.environ['PATH']}", "STACK": str(stack),
+                 "ISTOTA_RCLONE_CACHE_DIR": str(cache),
+                 "ISTOTA_RCLONE_UPLOAD_TIMEOUT": timeout},
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        slept = len(sleeps.read_text().splitlines()) if sleeps.exists() else 0
+        return result, slept, meta / "MOVED.md"
+
+    def test_a_dirty_note_is_uploaded_before_the_mount_stops(self, tmp_path):
+        result, slept, note = self._run(tmp_path, uploads_after=2)
+        assert slept == 2, result.stdout
+        assert note.read_text() == self.CLEAN
+
+    def test_without_a_dav_prefix_the_cache_is_the_remotes_own(self, tmp_path):
+        result, slept, note = self._run(tmp_path, uploads_after=2, dav_prefix="")
+        assert slept == 2, result.stdout
+        assert note.read_text() == self.CLEAN
+
+    def test_an_upload_that_never_lands_is_named_and_does_not_hold_provision(self, tmp_path):
+        result, slept, note = self._run(tmp_path, timeout="3")
+        assert slept == 3
+        assert "1 file(s)" in result.stdout and "not uploaded" in result.stdout, result.stdout
+        assert "nextcloud-root/Shared Files/Users/alice/istota/MOVED.md" in result.stdout, result.stdout
+        assert note.read_text() == self.DIRTY
+
+    def test_a_timeout_that_is_not_a_number_is_the_default(self, tmp_path):
+        """`[ -ge ]` on "2m" fails inside the `if`, where set -e does not
+        reach, and the loop never ended."""
+        _, slept, _ = self._run(tmp_path, uploads_after=1, timeout="2m")
+        assert slept == 1
+
+    def test_a_stopped_mount_has_nothing_to_wait_for(self, tmp_path):
+        _, slept, _ = self._run(tmp_path, active=False)
+        assert slept == 0
+
+    def test_another_remotes_leftovers_are_not_waited_on(self, tmp_path):
+        """A mount from an earlier mode used another remote; its cache is never
+        uploaded by this one, so waiting on it would always time out."""
+        stale = tmp_path / "cache" / "vfsMeta" / "ncroot" / "old.md"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(self.DIRTY)
+        _, slept, _ = self._run(tmp_path, uploads_after=1)
+        assert slept == 1
+
+    def test_the_wait_comes_before_the_stop(self):
+        local = self.TEXT.split('if [ "$(host_env STORAGE)" = "nextcloud" ]; then', 1)[1]
+        local = local.split("# --- Firewall", 1)[0].split("\nelse\n", 1)[1]
+        wait = '[ -n "$bare_metal_mount" ] || wait_for_mount_uploads'
+        stop = '[ -n "$bare_metal_mount" ] || systemctl disable --now mount-nextcloud.service'
+        assert wait in local and stop in local
+        assert local.index(wait) < local.index(stop)
+
+    def test_the_cache_is_the_units(self):
+        unit = (HOST / "mount-nextcloud.service").read_text()
+        cache = re.search(r"--cache-dir (\S+)", unit).group(1)
+        assert f'RCLONE_CACHE="${{ISTOTA_RCLONE_CACHE_DIR:-{cache}}}"' in self.TEXT
+
+    def test_dirty_reads_as_the_bare_metal_export_reads_it(self):
+        """export-bare-metal.sh runs alone on the old host and cannot source a
+        shared file; the two copies of the pattern are held equal here."""
+        pattern = "'\"Dirty\"[[:space:]]*:[[:space:]]*true'"
+        assert pattern in (HOST / "export-bare-metal.sh").read_text()
+        assert pattern in self.TEXT
 
 
 class TestTheSelfSignedCertificate:

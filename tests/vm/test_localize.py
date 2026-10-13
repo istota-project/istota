@@ -16,6 +16,11 @@ use it too.
 Control `localize-without-config`: `istota-stack` with the config edit removed,
 so the copy runs and the mount is turned off while `config.toml` still names
 it. The stack must not come up on the local workspace.
+
+Control `localize-stops-mount-at-once`: `istota-stack` stopping the mount
+straight after `moved-note`, inside rclone's upload delay, which is what
+`provision.sh` did before it waited for the upload (#739). `MOVED.md` must not
+reach Nextcloud.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ from . import lima
 
 pytestmark = pytest.mark.vm
 
-CONTROL = "localize-without-config"
+CONTROLS = ("localize-without-config", "localize-stops-mount-at-once")
 
 
 def _webdav_get(vm: lima.Vm, fixture: dict, name: str) -> tuple[str, str]:
@@ -61,11 +66,18 @@ def moved(vm, release, model) -> dict:
     name = f"vmtier-{uuid.uuid4().hex[:10]}.txt"
     lima.stack_exec(vm, f"mkdir -p /mnt/shared/Users/{lima.USER}/{bot}/notes && "
                         f"echo before-the-move > /mnt/shared/Users/{lima.USER}/{bot}/notes/{name}")
+    # A note an earlier session left would make the witness pass on its own,
+    # and moved-note skips a user who already has one. Through the mount, so a
+    # dirty copy in rclone's cache goes with it.
+    note = f"Users/{lima.USER}/{bot}/MOVED.md"
+    lima.stack_exec(vm, f"rm -f /mnt/shared/{note}")
+    _, status = _webdav_get(vm, fixture, note)
+    assert status == "404", f"a MOVED.md from before the move is still in Nextcloud: {status}"
     # As 10001: the daemon service drops CAP_DAC_OVERRIDE, so its root cannot
     # delete what a local-mode session left under 10001's directories.
     vm.run("istota-stack compose run --rm --no-deps -T --entrypoint istota-drop daemon "
            "sh -c 'mkdir -p /data/workspace && find /data/workspace -mindepth 1 -delete'", timeout=600)
-    command = lima.stack_command(vm, CONTROL if lima.control() == CONTROL else "")
+    command = lima.stack_command(vm, lima.control() if lima.control() in CONTROLS else "")
     try:
         result = vm.run(f"{command} localize-workspace", check=False, timeout=lima.BUILD_TIMEOUT)
     finally:
@@ -108,7 +120,7 @@ class TestAMountedVmMovesToALocalWorkspace:
 
     def test_moved_md_is_in_the_users_nextcloud_folder(self, vm, moved):
         body, status = _webdav_get(vm, moved["fixture"], f"Users/{lima.USER}/{moved['bot']}/MOVED.md")
-        assert status == "200", status
+        assert status == "200", (status, moved["result"].stdout[-3000:])
         assert "web UI" in body
 
     def test_the_nextcloud_connection_still_answers(self, vm, moved):

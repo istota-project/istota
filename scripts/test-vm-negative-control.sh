@@ -26,7 +26,8 @@
 #              apply-restart-on-any-change, apply-sidecar-not-passed (istota-stack apply)
 #   direct:    certbot-disabled (row 19)
 #   any:       no-host-bounds (row 15)
-#   nextcloud: no-storage-refusal (row 9), localize-without-config (istota-stack localize-workspace)
+#   nextcloud: no-storage-refusal (row 9), localize-without-config and
+#              localize-stops-mount-at-once (istota-stack localize-workspace)
 #   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
 #              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18),
@@ -150,6 +151,9 @@ control localize-without-config \
     "istota-stack localize-workspace: the copy and the mount change run and config.toml still names the mount" \
     "$L::test_the_config_names_the_local_workspace" \
     "$L::test_a_file_written_before_the_move_is_read_from_the_local_workspace"
+control localize-stops-mount-at-once \
+    "istota-stack localize-workspace: the mount stopped straight after MOVED.md is written, before rclone uploads it" \
+    "$L::test_moved_md_is_in_the_users_nextcloud_folder"
 
 control no-storage-refusal \
     "row 9: an entrypoint without the mount refusal" \
