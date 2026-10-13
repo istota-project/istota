@@ -856,7 +856,7 @@ it('cancels deletion without a request and clears selection on navigation', asyn
   expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
 });
 
-it('browses Nextcloud folders and opens files in the connected account', async () => {
+it('browses Nextcloud folders and previews files in the workspace viewer', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
     places: [{ ...home, id: 'nextcloud', kind: 'nextcloud', label: 'Nextcloud', view_root: null }],
     notes: [],
@@ -873,12 +873,18 @@ it('browses Nextcloud folders and opens files in the connected account', async (
   render(Workspace);
   await fireEvent.click(await screen.findByRole('link', { name: 'Notes & plans' }));
   expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('nextcloud', 'Notes & plans');
-  const file = await screen.findByRole('link', { name: 'report.pdf' });
-  expect(file).toHaveAttribute('href', 'https://cloud.example.com/index.php/f/11');
-  expect(file).toHaveAttribute('target', '_blank');
+  await fireEvent.click(await screen.findByRole('button', { name: 'report.pdf' }));
+  expect(openFile).toHaveBeenCalledWith('Notes & plans/report.pdf', {
+    kind: 'nextcloud',
+    webUrl: 'https://cloud.example.com/index.php/f/11',
+  });
+  expect(screen.queryByRole('link', { name: 'report.pdf' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
+  api.nextcloudFileUrl.mockReturnValue('/istota/api/workspace/nextcloud/file?path=x');
   await openActions('report.pdf');
   expect(await screen.findByRole('menuitem', { name: 'Open in Nextcloud' })).toBeTruthy();
+  expect(screen.getByRole('menuitem', { name: 'Download' })).toBeTruthy();
+  expect(api.nextcloudFileUrl).toHaveBeenCalledWith('Notes & plans/report.pdf');
 });
 
 it('links to Connections when Nextcloud needs reconnecting', async () => {

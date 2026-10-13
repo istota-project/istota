@@ -759,6 +759,161 @@ async def test_nextcloud_listing_filters_and_caps_entries(client, nextcloud_conn
     assert response.json()["truncated"]
 
 
+def nextcloud_file_xml(path="notes/plan%20%231.md", size=5):
+    return f"""<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+      <d:response><d:href>/nc/remote.php/dav/files/alice/{path}</d:href>
+        <d:propstat><d:prop><d:getcontentlength>{size}</d:getcontentlength><d:getlastmodified>Sat, 25 Jul 2026 10:00:00 GMT</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+    </d:multistatus>"""
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 64
+
+
+async def test_nextcloud_preview_reads_through_the_personal_token(client, config, nextcloud_connection, nextcloud_wire):
+    import httpx
+    calls, replies = nextcloud_wire
+    replies.extend([httpx.Response(207, text=nextcloud_file_xml()), httpx.Response(200, content=b"# Plan")])
+    response = await client.get("/workspace/nextcloud/preview", params={"path": "notes/plan #1.md"})
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["name"], body["kind"], body["text"], body["size"]) == ("plan #1.md", "text", "# Plan", 5)
+    assert body["modified"] == "2026-07-25T10:00:00.000Z"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert [c.method for c in calls] == ["PROPFIND", "GET"]
+    for call in calls:
+        assert call.url.host == "cloud.example.com"
+        assert call.url.path == "/nc/remote.php/dav/files/alice/notes/plan #1.md"
+        assert call.headers["authorization"] == "Bearer alice-access"
+    assert calls[0].headers["depth"] == "0"
+    assert "alice-access" not in response.text and "bot-password" not in response.text
+
+
+async def test_nextcloud_preview_bounds_and_classifies(client, nextcloud_connection, nextcloud_wire, monkeypatch):
+    import httpx
+    from istota.webui import nextcloud_files
+    monkeypatch.setattr(nextcloud_files, "PREVIEW_MAX_BYTES", 4)
+    replies = nextcloud_wire[1]
+    replies.extend([httpx.Response(207, text=nextcloud_file_xml(size=9)), httpx.Response(200, content=b"abcdefghi")])
+    body = (await client.get("/workspace/nextcloud/preview", params={"path": "notes/plan #1.md"})).json()
+    assert (body["text"], body["truncated"], body["size"]) == ("abcd", True, 9)
+    monkeypatch.setattr(nextcloud_files, "PREVIEW_MAX_BYTES", 1024)
+    replies.extend([httpx.Response(207, text=nextcloud_file_xml("photo.png")), httpx.Response(200, content=PNG)])
+    body = (await client.get("/workspace/nextcloud/preview", params={"path": "photo.png"})).json()
+    assert (body["kind"], body["media_type"]) == ("image", "image/png")
+    replies.extend([httpx.Response(207, text=nextcloud_file_xml("blob.bin")), httpx.Response(200, content=b"\x00\x01")])
+    body = (await client.get("/workspace/nextcloud/preview", params={"path": "blob.bin"})).json()
+    assert body["kind"] == "binary"
+
+
+async def test_nextcloud_preview_refuses_a_folder_and_a_missing_file(client, nextcloud_connection, nextcloud_wire):
+    import httpx
+    calls, replies = nextcloud_wire
+    replies.append(httpx.Response(207, text=nextcloud_xml().replace("/alice/", "/alice/Notes%20%26%20plans/", 1)))
+    response = await client.get("/workspace/nextcloud/preview", params={"path": "Notes & plans"})
+    assert response.status_code == 400
+    replies.append(httpx.Response(404, text="private upstream detail"))
+    response = await client.get("/workspace/nextcloud/preview", params={"path": "gone.md"})
+    assert (response.status_code, response.json()["error"]) == (404, "File not found.")
+    assert "private upstream detail" not in response.text
+    assert [c.method for c in calls] == ["PROPFIND", "PROPFIND"]
+    response = await client.get("/workspace/nextcloud/preview", params={"path": ""})
+    assert response.status_code == 404
+    assert len(calls) == 2
+
+
+async def test_nextcloud_file_streams_with_the_download_policy(client, nextcloud_connection, nextcloud_wire):
+    import httpx
+    calls, replies = nextcloud_wire
+    replies.append(httpx.Response(200, content=PNG, headers={"Content-Type": "text/html", "Content-Length": str(len(PNG))}))
+    response = await client.get("/workspace/nextcloud/file", params={"path": "photo.png"})
+    assert response.status_code == 200
+    assert response.content == PNG
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["content-disposition"] == "inline; filename*=utf-8''photo.png"
+    assert response.headers["content-security-policy"] == "default-src 'none'; sandbox"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert calls[0].headers["authorization"] == "Bearer alice-access"
+    # An HTML file is never inline, whatever Nextcloud calls it.
+    replies.append(httpx.Response(200, content=b"<script>x</script>", headers={"Content-Type": "image/png"}))
+    response = await client.get("/workspace/nextcloud/file", params={"path": "notes/page #1.html"})
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-disposition"] == "attachment; filename*=utf-8''page%20%231.html"
+    assert calls[1].url.path == "/nc/remote.php/dav/files/alice/notes/page #1.html"
+
+
+async def test_nextcloud_file_asks_for_the_stored_bytes(client, nextcloud_connection, nextcloud_wire):
+    import httpx
+    calls, replies = nextcloud_wire
+    body = b"hello world " * 1000
+    replies.append(httpx.Response(200, content=body, headers={"Content-Length": str(len(body))}))
+    response = await client.get("/workspace/nextcloud/file", params={"path": "notes.txt"})
+    # A compressed reply would be decoded behind a forwarded compressed length.
+    assert calls[0].headers["accept-encoding"] == "identity"
+    assert int(response.headers["content-length"]) == len(response.content) == len(body)
+
+
+async def test_nextcloud_file_forwards_one_byte_range(client, nextcloud_connection, nextcloud_wire):
+    import httpx
+    calls, replies = nextcloud_wire
+    replies.append(httpx.Response(206, content=b"abc", headers={"Content-Range": "bytes 0-2/10", "Accept-Ranges": "bytes"}))
+    response = await client.get("/workspace/nextcloud/file", params={"path": "clip.mp4"}, headers={"Range": "bytes=0-2"})
+    assert (response.status_code, response.content) == (206, b"abc")
+    assert response.headers["content-range"] == "bytes 0-2/10"
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert calls[0].headers["range"] == "bytes=0-2"
+    replies.append(httpx.Response(200, content=b"whole"))
+    await client.get("/workspace/nextcloud/file", params={"path": "clip.mp4"}, headers={"Range": "bytes=0-1, 4-5"})
+    assert "range" not in calls[1].headers
+
+
+async def test_nextcloud_files_never_use_another_account(client, config, app, nextcloud_connection, nextcloud_wire):
+    from istota.webui import tokens
+    tokens.delete_tokens(config.db_path, "alice")
+    for route in ("preview", "file"):
+        response = await client.get(f"/workspace/nextcloud/{route}", params={"path": "notes/plan.md"})
+        assert response.status_code == 409
+        assert "Reconnect in Settings." in response.json()["error"]
+    assert not nextcloud_wire[0]
+    import httpx
+    app.dependency_overrides[require_auth] = lambda: {"username": "bob"}
+    nextcloud_wire[1].append(httpx.Response(200, content=b"bob's"))
+    response = await client.get("/workspace/nextcloud/file", params={"path": "../alice/plan.md"})
+    assert response.status_code == 404
+    response = await client.get("/workspace/nextcloud/file", params={"path": "plan.md"})
+    assert response.status_code == 200
+    assert nextcloud_wire[0][0].url.path == "/nc/remote.php/dav/files/bob/plan.md"
+    assert nextcloud_wire[0][0].headers["authorization"] == "Bearer bob-access"
+
+
+@pytest.mark.parametrize("failure,expected", [("revoked", 409), ("network", 502), (403, 403), (404, 404), (500, 502)])
+async def test_nextcloud_file_failures_are_clear(client, nextcloud_connection, nextcloud_wire, monkeypatch, failure, expected):
+    import httpx
+    if failure == "network":
+        def fail(*args, **kwargs):
+            raise httpx.ReadTimeout("private upstream detail")
+        monkeypatch.setattr(httpx, "stream", fail)
+    elif failure == "revoked":
+        nextcloud_wire[1].append(httpx.Response(401))
+        monkeypatch.setattr(httpx, "post", lambda *a, **kw: httpx.Response(400))
+    else:
+        nextcloud_wire[1].append(httpx.Response(failure, text="private upstream detail"))
+    response = await client.get("/workspace/nextcloud/file", params={"path": "plan.md"})
+    assert response.status_code == expected
+    assert "private upstream detail" not in response.text
+    if failure == "revoked":
+        assert "Reconnect in Settings." in response.json()["error"]
+
+
+async def test_nextcloud_file_retries_once_on_a_refreshed_token(client, nextcloud_connection, nextcloud_wire, monkeypatch):
+    import httpx
+    nextcloud_wire[1].extend([httpx.Response(401), httpx.Response(200, content=b"text")])
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: httpx.Response(
+        200, json={"access_token": "renewed", "refresh_token": "rotated", "expires_in": 3600}))
+    response = await client.get("/workspace/nextcloud/file", params={"path": "plan.md"})
+    assert (response.status_code, response.content) == (200, b"text")
+    assert nextcloud_wire[0][1].headers["authorization"] == "Bearer renewed"
+
+
 async def test_config_file_paths_match_pins_with_a_custom_bot_name(client, config):
     config.bot_name = "Helper"
     _config_dir(config).mkdir(parents=True)
