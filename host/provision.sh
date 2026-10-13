@@ -211,6 +211,59 @@ mount_runs_stale_rclone() {
     [ "$exe" != "$RCLONE_BIN" ]
 }
 
+# rclone uploads a closed file 5 seconds after its last close, and a stop
+# before then leaves it dirty in the VFS cache, where nothing uploads it while
+# the mount stays off: localize-workspace's MOVED.md did that (#739). Only the
+# current remote's cache counts; another's is never uploaded by this mount.
+# export-bare-metal.sh carries the same Dirty pattern (held by a test).
+RCLONE_CACHE="${ISTOTA_RCLONE_CACHE_DIR:-/var/cache/istota-rclone}"
+
+# The name rclone keeps the mount's cache under. With a dav_prefix the wizard
+# writes RCLONE_REMOTE as an alias of `<webdav>:<prefix>`, and the cache is
+# keyed by the webdav remote, not the alias.
+mount_cache_name() {
+    local remote target
+    remote="$(host_env RCLONE_REMOTE)"
+    [ -n "$remote" ] || return 0
+    target="$(awk -v section="[${remote}]" '
+        $0 == section { inside = 1; next }
+        /^\[/ { inside = 0 }
+        inside && $1 == "type" { sub(/^[^=]*=[ \t]*/, ""); type = $0 }
+        inside && $1 == "remote" { sub(/^[^=]*=[ \t]*/, ""); target = $0 }
+        END { if (type == "alias") { sub(/:.*/, "", target); print target } }
+    ' "${STACK}/rclone.conf" 2>/dev/null || true)"
+    echo "${target:-$remote}"
+}
+
+# One line per entry not yet uploaded, relative to the cache's vfsMeta.
+mount_pending_uploads() {
+    local name meta
+    name="$(mount_cache_name)"
+    meta="${RCLONE_CACHE}/vfsMeta"
+    [ -n "$name" ] && [ -d "${meta}/${name}" ] || return 0
+    { grep -rlE '"Dirty"[[:space:]]*:[[:space:]]*true' "${meta}/${name}" 2>/dev/null || true; } \
+        | sed "s|^${meta}/||"
+}
+
+# Bounded, so a Nextcloud that stopped answering cannot hold provision: what is
+# left uploads when the mount next starts, since rclone queues dirty entries then.
+wait_for_mount_uploads() {
+    local timeout="${ISTOTA_RCLONE_UPLOAD_TIMEOUT:-120}" waited=0 pending
+    case "$timeout" in ''|*[!0-9]*) timeout=120 ;; esac
+    systemctl is-active --quiet mount-nextcloud.service || return 0
+    while :; do
+        pending="$(mount_pending_uploads)"
+        [ -z "$pending" ] && return 0
+        if [ "$waited" -ge "$timeout" ]; then
+            log "WARNING: $(printf '%s\n' "$pending" | wc -l | tr -d ' ') file(s) written through the Nextcloud mount not uploaded after ${timeout}s; the mount stops anyway, and they upload only if it is started again. Waiting in ${RCLONE_CACHE}/vfsMeta:"
+            printf '%s\n' "$pending" | head -20 | sed 's/^/[provision]   /' || true
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
 apt-get update -qq
 apt_install ca-certificates curl git python3 iptables apparmor apparmor-utils openssl
 
@@ -467,6 +520,7 @@ EOF
 else
     rm -f "${dropin}/mount.conf"
     systemctl daemon-reload
+    [ -n "$bare_metal_mount" ] || wait_for_mount_uploads
     [ -n "$bare_metal_mount" ] || systemctl disable --now mount-nextcloud.service >/dev/null 2>&1 || true
 fi
 
