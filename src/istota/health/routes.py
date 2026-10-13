@@ -878,13 +878,14 @@ async def api_panel_upload(
             )
             conn.commit()
         # The uploads tree is in the user's workspace, which their tasks can
-        # write, so the panel directory and the file follow no link and a name
-        # already there (a rolled-back panel's leftover) is numbered, not replaced.
+        # write, so every directory from the workspace root down and the file
+        # follow no link, and a name already there (a rolled-back panel's
+        # leftover) is numbered, not replaced.
+        root, walk = health_documents.uploads_walk(ctx, str(pid))
         try:
-            os.close(open_or_create_dirs(ctx.uploads_dir, [str(pid)]))
+            os.close(open_or_create_dirs(root, walk))
             name = write_new_file(
-                ctx.uploads_dir, [str(pid)], f"original{suffix}", [raw],
-                max_bytes=len(raw),
+                root, walk, f"original{suffix}", [raw], max_bytes=len(raw),
             )
         except (OSError, ValueError, ListingError) as e:
             logger.warning(

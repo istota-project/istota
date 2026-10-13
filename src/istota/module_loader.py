@@ -93,11 +93,19 @@ def resolve_module_workspace(
             f"{module} module for '{user_id}' has no nextcloud mount configured"
         )
 
-    from istota.storage import get_user_bot_path  # noqa: PLC0415 - import cycle
+    from istota.storage import (  # noqa: PLC0415 - import cycle
+        _contained_under_user_root, get_user_bot_path,
+    )
 
-    return Path(mount) / get_user_bot_path(
+    workspace = Path(mount) / get_user_bot_path(
         user_id, istota_config.bot_dir_name,
     ).lstrip("/")
+    # The module contexts resolve this path once and write under the result,
+    # so a bot directory a task has linked out of the user's tree would carry
+    # every module write with it (ISSUE-723).
+    if _contained_under_user_root(istota_config, user_id, workspace) is None:
+        raise error(f"{module} workspace for '{user_id}' leads outside the user's tree")
+    return workspace
 
 
 def get_module_user(istota_config, user_id: str, *, error: type[Exception]):

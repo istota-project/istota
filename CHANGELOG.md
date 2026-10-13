@@ -394,6 +394,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A link planted in your workspace no longer redirects Istota's own writes.** Lab and document uploads, dated memories, playbooks, room notes, `!export`, the money ledger and its backups and staging files, invoice files and the old-layout migrations now refuse a link at the file and at the folders they walk through, and write through a folder they already opened rather than by name. A module's folder linked out of your tree is refused when it is loaded. A folder you linked to another place inside your own tree is now refused by these writers too.
+
 - **A model provider's error message no longer carries your API key into the logs.** When a provider quoted the key back in an error, that text reached the log and the error shown to you; the key is now removed first.
 
 - **The container's AppArmor profile no longer lets a root shell in the container re-expose kernel settings by bind-mounting them.** It now refuses bind and move mounts out of `/proc` and `/sys` and any new `sysfs` mount, which the task sandbox never needs. Reload the profile on the host after updating (`istota-stack update` does it).

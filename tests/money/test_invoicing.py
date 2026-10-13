@@ -1152,7 +1152,7 @@ class TestInvoiceNumberStampingIsUidAddressed:
         config = parse_invoicing_config(config_file)
         add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
 
-        def fake_pdf(html, output_path):
+        def fake_pdf(html, output_path, **kwargs):
             # Simulates the web Work tab adding a backdated entry while the
             # PDF renders — every display index after it shifts by one.
             add_work_entry(tmp_path, "2026-03-01", "hooli", "dev", qty=1)
@@ -1186,7 +1186,7 @@ class TestInvoiceNumberStampingIsUidAddressed:
         add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
         uid = load_work_entries(tmp_path)[0].uid
 
-        def fake_pdf(html, output_path):
+        def fake_pdf(html, output_path, **kwargs):
             assign_invoice_number_by_uids(tmp_path, [uid], "INV-000999")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"%PDF-1.4")

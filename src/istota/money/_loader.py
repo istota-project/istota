@@ -112,6 +112,14 @@ def resolve_for_user(
         istota_config, user_id, MODULE,
     )
     ctx = synthesize_user_context(workspace, db_path=db_override)
+    # The ledger, staging and backup writers are guarded at the leaf and
+    # below the ledger directory; above it, a `money/` or `ledgers/` a task
+    # has linked out of the user's tree is refused here (ISSUE-723).
+    from istota.storage import _contained_under_user_root  # noqa: PLC0415
+
+    for path in (ctx.data_dir, ctx.data_dir / "ledgers"):
+        if _contained_under_user_root(istota_config, user_id, path) is None:
+            raise UserNotFoundError(f"money data for '{user_id}' leads outside the user's tree")
     # Operator gate on the portfolio module's third-party ticker lookup.
     money_cfg = getattr(istota_config, "money", None)
     ctx.autoclass_lookup = bool(getattr(money_cfg, "autoclass_lookup", True))

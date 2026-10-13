@@ -2805,6 +2805,35 @@ def _export_display_path(user_id: str, parts: list[str], export_path: Path) -> s
     return "/" + "/".join(["Users", user_id, *parts, export_path.name])
 
 
+def _write_export(user_root: Path, parts: list[str], name: str, content: str) -> bool:
+    from .storage import write_regular_file
+
+    try:
+        return _export_file_op(
+            user_root, parts,
+            lambda fd: write_regular_file(Path(name), content, dir_fd=fd),
+        )
+    except (OSError, ValueError) as e:
+        logger.warning("export_dir_refused error=%s", e)
+        return False
+
+
+def _export_file_op(user_root: Path, parts: list[str], op):
+    """Run ``op(dir_fd)`` on the export folder, opened afresh with no link followed.
+
+    Each read and write walks from the user root again rather than reusing a
+    path checked earlier, so a component swapped for a link in between fails
+    the walk instead of redirecting the write (ISSUE-723).
+    """
+    from .workspace.writes import open_or_create_dirs
+
+    fd = open_or_create_dirs(user_root, parts)
+    try:
+        return op(fd)
+    finally:
+        os.close(fd)
+
+
 @command("export", "Export conversation history to a file: `!export [markdown|text]`")
 async def cmd_export(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
@@ -2825,9 +2854,7 @@ async def cmd_export(ctx: CommandContext):
     # Build export path. The user's tree is bound read-write into their tasks,
     # so the directories are opened without following a link and the file is
     # read and replaced through the leaf-guarded helpers.
-    from .storage import (
-        read_regular_file, validate_conversation_token, write_regular_file,
-    )
+    from .storage import read_regular_file, validate_conversation_token
     from .workspace.writes import open_or_create_dirs
 
     validate_conversation_token(conversation_token)
@@ -2861,7 +2888,14 @@ async def cmd_export(ctx: CommandContext):
     render = _format_history_markdown if format_md else _format_history_text
 
     # Check for existing export
-    existing_content, refusal = read_regular_file(export_path)
+    try:
+        existing_content, refusal = _export_file_op(
+            user_root, export_parts,
+            lambda fd: read_regular_file(Path(export_path.name), dir_fd=fd),
+        )
+    except (OSError, ValueError) as e:
+        logger.warning("export_dir_refused user=%s error=%s", user_id, e)
+        return "Could not write the export file: its folder is not a plain folder."
     if refusal is not None:
         logger.warning("export_read_refused user=%s reason=%s", user_id, refusal)
         return "Could not read the existing export file; it was left unchanged."
@@ -2887,8 +2921,9 @@ async def cmd_export(ctx: CommandContext):
         new_meta = _build_export_metadata(
             conversation_token, last_id, fmt, last_msg_id,
         )
-        if not write_regular_file(
-            export_path, new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n",
+        if not _write_export(
+            user_root, export_parts, export_path.name,
+            new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n",
         ):
             return "Could not write the export file."
 
@@ -2919,7 +2954,7 @@ async def cmd_export(ctx: CommandContext):
 
     body = render(messages, bot_name, tz=tz)
     content = "\n".join(header_parts) + "\n" + body + "\n"
-    if not write_regular_file(export_path, content):
+    if not _write_export(user_root, export_parts, export_path.name, content):
         return "Could not write the export file."
 
     rel_path = _export_display_path(user_id, export_parts, export_path)
