@@ -1011,7 +1011,7 @@ class TestTheStateDirectory:
         assert result.returncode == 0, result.stdout + result.stderr
         data = fx.stack / "data"
         assert data.is_dir() and list(data.iterdir()) == []
-        assert stat.S_IMODE(data.stat().st_mode) == 0o700
+        assert stat.S_IMODE(data.stat().st_mode) == 0o711
         calls = fx.docker_calls()
         assert self._copy(calls) is None
         assert not any(call.endswith(" stop") for call in calls)
@@ -1024,7 +1024,7 @@ class TestTheStateDirectory:
         assert (data / "db" / "istota.db").read_bytes() == b"SQLite format 3\0framework"
         assert (data / ".secret_key").read_text() == self.KEY
         assert (data / "workspace" / "notes.md").read_text() == "notes\n"
-        assert stat.S_IMODE(data.stat().st_mode) == 0o700
+        assert stat.S_IMODE(data.stat().st_mode) == 0o711
         calls = legacy.docker_calls()
         stop = self._index(calls, lambda c: c.endswith(" stop"))
         copy, up = self._copy(calls), self._up(calls)
@@ -1036,6 +1036,30 @@ class TestTheStateDirectory:
         assert f"docker volume rm {self.VOLUME}" in result.stdout
         assert (legacy.stack / ".data-copied").read_text().strip() == self.VOLUME
         assert not (legacy.stack / "data.partial").exists()
+
+    def test_an_existing_directory_is_set_to_the_mode_the_root_phase_needs(self, fx):
+        """The first release made it 0700, which the container's root phase,
+        holding no DAC capability, cannot pass through to the mounts below
+        /data: the daemon then failed at every start."""
+        data = fx.stack / "data"
+        data.mkdir(mode=0o700)
+        result = fx.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert stat.S_IMODE(data.stat().st_mode) == 0o711
+
+    def test_the_mode_lets_a_process_without_dac_capabilities_through(self):
+        """The root phase runs as uid 0 with CHOWN and FOWNER but no
+        DAC_OVERRIDE or DAC_READ_SEARCH, and the directory is uid 10001's, so
+        what it gets is the bits for others: search, and nothing to list."""
+        mode = int(re.search(r'^DATA_MODE=(\d+)$', SCRIPT.read_text(), re.M).group(1), 8)
+        assert mode & stat.S_IXOTH
+        assert not mode & (stat.S_IROTH | stat.S_IWOTH)
+
+    def test_provision_makes_the_directory_with_the_same_mode(self):
+        mode = re.search(r'^DATA_MODE=(\d+)$', SCRIPT.read_text(), re.M).group(1)
+        provision = (REPO / "host" / "provision.sh").read_text()
+        made = re.findall(r'install -d -m (\d+) .*"\$\{STACK\}/data"', provision)
+        assert made == [mode], made
 
     def test_it_copies_once(self, legacy):
         assert legacy.run("up").returncode == 0

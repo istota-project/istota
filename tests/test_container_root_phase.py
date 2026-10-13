@@ -342,8 +342,10 @@ class TestTheOwnershipWalkStaysInData:
         (bindir / "istota-drop").chmod(0o755)
         mountinfo = tmp_path / "mountinfo"
         mountinfo.write_text(self.MOUNTS)
+        # The walk is asserted against the literal /data, which this host lacks;
+        # TestTheRootPhaseCanReachData holds the search check.
         script = (
-            f'export PATH="{bindir}:$PATH"; source "{ROOT_PHASE}"; '
+            f'export PATH="{bindir}:$PATH"; source "{ROOT_PHASE}"; cd() {{ return 0; }}; '
             f'MOUNTINFO="{mountinfo}"; OWNERSHIP_MARKER="{tmp_path / "absent-marker"}"; fix_ownership'
         )
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
@@ -363,3 +365,48 @@ class TestTheOwnershipWalkStaysInData:
     def test_the_script_never_names_the_workspace_mount(self):
         text = ROOT_PHASE.read_text()
         assert "/mnt/shared" not in text.split("set -euo pipefail", 1)[1]
+
+
+class TestTheRootPhaseCanReachData:
+    """The root phase holds no DAC capability, so a `/data` it cannot search
+    (the host directory made 0700 by its first release) left it unable to
+    stat the volumes mounted below it: `stat: Permission denied`, then a
+    restart loop with nothing saying why. It refuses by name instead, on
+    every start, mounts below or not."""
+
+    def _fix(self, tmp_path, data: Path) -> subprocess.CompletedProcess:
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        for name in ("find", "chown", "istota-drop"):
+            (bindir / name).write_text("#!/bin/sh\nexit 0\n")
+            (bindir / name).chmod(0o755)
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(f"40 30 254:1 / {data} rw,relatime - ext4 /dev/vda1 rw\n")
+        script = (
+            f'export PATH="{bindir}:$PATH"; source "{ROOT_PHASE}"; '
+            f'MOUNTINFO="{mountinfo}"; DATA_ROOT="{data}"; '
+            f'OWNERSHIP_MARKER="{data}/.ownership-10001"; fix_ownership'
+        )
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+
+    @pytest.mark.requires_dac
+    def test_a_data_directory_it_cannot_search_is_refused_by_name(self, tmp_path):
+        data = tmp_path / "data"
+        data.mkdir()
+        data.chmod(0o600)
+        try:
+            result = self._fix(tmp_path, data)
+        finally:
+            data.chmod(0o700)
+        assert result.returncode == 76, result.stdout + result.stderr
+        assert "REFUSE" in result.stdout and "0711" in result.stdout
+
+    def test_a_searchable_data_directory_passes(self, tmp_path):
+        data = tmp_path / "data"
+        data.mkdir(mode=0o711)
+        result = self._fix(tmp_path, data)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_main_stops_on_the_refusal(self):
+        main = ROOT_PHASE.read_text().split("main() {", 1)[1]
+        assert "fix_ownership || exit $?" in main

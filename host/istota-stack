@@ -102,6 +102,9 @@ SECRETS_DIR="${STACK}/secrets"
 # The state bound at /data. Releases before it kept the state in a named volume;
 # DATA_COPIED records that `adopt_data_dir` copied one across.
 DATA_DIR="${STACK}/data"
+# Search for others and nothing more: the container's root phase holds no DAC
+# capability and must pass through to the volumes mounted below /data.
+DATA_MODE=0711
 DATA_COPIED="${STACK}/.data-copied"
 # Beside .env, not in config/: root passes it to `docker compose`, and config/
 # is uid 10001's to write.
@@ -336,7 +339,8 @@ adopt_data_dir() {
     local owner=() tag partial found name
     if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
     if [ -e "$DATA_COPIED" ] || ! docker volume inspect "$LEGACY_DATA_VOLUME" >/dev/null 2>&1; then
-        [ -d "$DATA_DIR" ] || install -d -m 0700 ${owner[@]+"${owner[@]}"} "$DATA_DIR"
+        [ -d "$DATA_DIR" ] || install -d -m "$DATA_MODE" ${owner[@]+"${owner[@]}"} "$DATA_DIR"
+        chmod "$DATA_MODE" "$DATA_DIR"
         return 0
     fi
     if [ -n "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
@@ -372,7 +376,7 @@ adopt_data_dir() {
             die "${name} is missing from the copy of the ${LEGACY_DATA_VOLUME} volume. The volume is unchanged and the stack is stopped."
         fi
     done
-    chmod 0700 "$partial"
+    chmod "$DATA_MODE" "$partial"
     if [ "$(id -u)" -eq 0 ]; then chown "$ISTOTA_UID:$ISTOTA_UID" "$partial"; fi
     rmdir "$DATA_DIR" 2>/dev/null || true
     mv "$partial" "$DATA_DIR"

@@ -258,6 +258,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The daemon starts again after the update that moved the state to `/srv/app/istota/data`, on a VM with a devbox.** That update made the directory private to the daemon's user, so the container's start-up step could not reach the devbox volumes mounted inside it, and the daemon restarted in a loop. The directory is now searchable by that step, `istota-stack` corrects one that is not, and the step stops with the command to run rather than looping.
+
 - The admin Status page, `istota --version` and the startup log line name the commit a stack runs. A stack updated with `istota-stack update --unsigned latest` showed the last release's number, because the image carries no `.git`; `istota-stack` now builds the commit and its deployed name into the image, and a build from main shows the version with the short commit appended, such as `0.43.0+a1b2c3d`. Takes effect from the first update after this one.
 
 - `istota-stack update` no longer takes the web UI down twice. When a release changed how the stack is started, the containers were recreated once by the old release's script and again by the new one's; the new release now starts them itself. The update also stops warning that a running devbox is an orphan container. The update to this release still restarts twice, since the previous script runs it.
