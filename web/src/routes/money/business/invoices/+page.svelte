@@ -12,7 +12,7 @@
     type InvoiceDetailItem,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { Button, NoticeBanner, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { Button, EmptyState, NoticeBanner, KebabMenu, type KebabItem } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
 
@@ -228,7 +228,7 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if invoices.length === 0}
-    <div class="money-table-empty">No invoices found.</div>
+    <EmptyState>No invoices found.</EmptyState>
   {:else}
     <div class="money-table">
       <div class="money-table-header">

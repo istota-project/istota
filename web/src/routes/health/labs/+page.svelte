@@ -13,7 +13,7 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, Button, Select } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Select } from '$lib/components/ui';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let loading = $state(true);
@@ -212,12 +212,11 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if specimen && matrix && matrix.panels.length === 0 && drafts.length === 0}
-  <div class="empty">No confirmed {specimen} panels on file.</div>
+  <EmptyState>No confirmed {specimen} panels on file.</EmptyState>
 {:else if matrix && matrix.panels.length === 0 && drafts.length === 0}
-  <div class="empty">
+  <EmptyState actionLabel="Upload your first lab report" actionHref="{base}/health/labs/upload">
     No lab results on file yet.
-    <a href="{base}/health/labs/upload">Upload your first lab report.</a>
-  </div>
+  </EmptyState>
 {:else if matrix}
   {#if drafts.length > 0}
     <section class="drafts">
@@ -238,14 +237,12 @@
   {/if}
 
   {#if matrix.panels.length === 0}
-    <div class="empty">
+    <EmptyState actionLabel="Upload a lab report" actionHref="{base}/health/labs/upload">
       {specimen ? `No confirmed ${specimen} panels yet.` : 'No confirmed panels yet.'}
       {#if drafts.length > 0}
-        Review the draft above to add it to your history,
+        Review the draft above to add it to your history.
       {/if}
-      or
-      <a href="{base}/health/labs/upload">upload another lab report</a>.
-    </div>
+    </EmptyState>
   {:else}
     <section class="spreadsheet">
       <div class="scroll">

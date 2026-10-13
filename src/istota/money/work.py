@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from contextlib import contextmanager
 from collections.abc import Callable
@@ -95,9 +96,12 @@ class WorkMutationResult:
 
 
 def _work_dir(data_dir: Path) -> Path:
-    d = data_dir / "invoices" / "work"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from istota.workspace.writes import open_or_create_dirs  # noqa: PLC0415
+
+    # Created from the money data dir with no link followed at `invoices` or
+    # `work` (ISSUE-723): the year files are written under it.
+    os.close(open_or_create_dirs(data_dir, ["invoices", "work"]))
+    return data_dir / "invoices" / "work"
 
 
 def _year_file(work_dir: Path, year: int) -> Path:

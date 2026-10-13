@@ -23,6 +23,7 @@
     IconButton,
     ConfirmDialog,
     KebabMenu,
+    EmptyState,
     type KebabItem,
   } from '$lib/components/ui';
   import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
@@ -399,13 +400,13 @@
     </tbody>
   </table>
 {:else}
-  <div class="center-msg">
+  <EmptyState>
     {query
       ? 'No matching files.'
       : listing?.entries.length
         ? 'No visible files in this folder.'
         : 'This folder is empty.'}
-  </div>
+  </EmptyState>
 {/if}
 {#if listing && (listing.truncated || listing.skipped_names || listing.notes?.length)}
   <div class="listing-notes muted" role="status">

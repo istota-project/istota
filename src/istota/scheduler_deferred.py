@@ -1287,15 +1287,18 @@ def _process_deferred_health_ops(
                         draft=True,
                     )
                     # The uploads tree is in the user's workspace, which
-                    # their tasks write: the panel directory and the copy
-                    # follow no link, and a leftover name is numbered.
+                    # their tasks write: every directory from the workspace
+                    # root down and the copy follow no link, and a leftover
+                    # name is numbered.
+                    from .health.documents import uploads_walk
                     from .workspace.listing import ListingError
                     from .workspace.writes import open_or_create_dirs, write_new_file
+                    root, walk = uploads_walk(ctx, str(pid))
                     try:
-                        os.close(open_or_create_dirs(ctx.uploads_dir, [str(pid)]))
+                        os.close(open_or_create_dirs(root, walk))
                         with open(src, "rb") as fh:
                             name = write_new_file(
-                                ctx.uploads_dir, [str(pid)], f"original{src.suffix}",
+                                root, walk, f"original{src.suffix}",
                                 iter(lambda: fh.read(1024 * 1024), b""),
                                 max_bytes=os.fstat(fh.fileno()).st_size,
                             )

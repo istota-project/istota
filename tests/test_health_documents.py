@@ -756,18 +756,18 @@ class TestDeferredAttachOps:
 
         from istota.lib import atomic_write
 
-        real_write = atomic_write.write_bytes_atomic
+        real_write = atomic_write.replace_at
 
-        def flaky_write(path, data, **kwargs):
+        def flaky_write(dir_fd, name, data, **kwargs):
             # Fail only the first document's byte write, after its row exists.
             if data == PDF:
                 raise OSError("disk full")
-            return real_write(path, data, **kwargs)
+            return real_write(dir_fd, name, data, **kwargs)
 
         # Injected at `documents`' own binding rather than at `atomic_write`'s,
         # so this reaches `_write_bytes` and nothing else in the replay.
         monkeypatch.setattr(
-            "istota.health.documents.write_bytes_atomic", flaky_write,
+            "istota.health.documents.replace_at", flaky_write,
         )
 
         count = self._replay(ctx, deferred, [

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { DaySummaryStop } from '$lib/api';
+  import { EmptyState } from '$lib/components/ui';
 
   interface Props {
     stops: DaySummaryStop[];
@@ -45,7 +46,7 @@
     {/each}
   </div>
 {:else}
-  <div class="empty small">No stops today</div>
+  <EmptyState size="sm">No stops today</EmptyState>
 {/if}
 
 <style>

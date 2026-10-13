@@ -33,6 +33,7 @@
     AutocompleteInput,
     Button,
     ConfirmDialog,
+    EmptyState,
     IconButton,
     Input,
     KebabMenu,
@@ -985,7 +986,7 @@
       description="Cron-scheduled summaries posted to a Talk room or sent by email. Operator-managed entries (from config.toml) are read-only here."
     >
       {#if briefings.length === 0}
-        <p class="empty">No briefings scheduled yet.</p>
+        <EmptyState>No briefings scheduled yet.</EmptyState>
       {:else}
         <div class="table-scroll">
           <table class="grid sched-table">
@@ -1133,7 +1134,7 @@
 
         {#if selectedName}
           {#if currentBlocks.length === 0}
-            <p class="empty">No blocks yet. Add one below to start shaping this briefing.</p>
+            <EmptyState>No blocks yet. Add one below to start shaping this briefing.</EmptyState>
           {:else}
             <div class="table-scroll" bind:clientWidth={blocksWidth}>
               <table class="grid">
@@ -1260,7 +1261,7 @@
                               </div>
 
                               {#if block.sources.length === 0}
-                                <p class="empty small">No sources yet — add one above.</p>
+                                <EmptyState size="sm">No sources yet — add one above.</EmptyState>
                               {:else}
                                 <table class="grid sub">
                                   <tbody>
@@ -1412,7 +1413,7 @@
         {/if}
 
         {#if sharedBlocks.length === 0}
-          <p class="empty">No shared blocks yet.</p>
+          <EmptyState>No shared blocks yet.</EmptyState>
         {:else}
           <div class="table-scroll">
             <table class="grid sb-table">
@@ -1587,7 +1588,7 @@
 {/if}
 
 <style>
-  /* Shared .settings/.card/.field/.grid/.banner/.icon-btn/.empty/.muted
+  /* Shared .settings/.card/.field/.grid/.banner/.icon-btn/.muted
 	   primitives live in web/src/lib/styles/settings.css. Only page-specific
 	   layout stays here. */
 
@@ -1833,11 +1834,6 @@
     gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--text-muted);
-  }
-
-  .empty.small {
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-1);
   }
 
   .muted.small,

@@ -10,7 +10,6 @@ and the revision check that turns a concurrent agent write into a visible
 refusal instead of a silent clobber.
 """
 
-import pathlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -500,19 +499,26 @@ class TestChannelMemoryStorage:
         from istota.lib import atomic_write
         config = _make_config(tmp_path)
         seen: list[str] = []
-        real_mkstemp = atomic_write.tempfile.mkstemp
+        real_replace_at = atomic_write.replace_at
+        real_token = atomic_write.secrets.token_hex
 
-        def _record(*a, **kw):
-            fd, name = real_mkstemp(*a, **kw)
-            # Scoped to this room's directory: `tempfile` is a shared module,
-            # so anything else in the process staging a file during the window
-            # would otherwise be counted here.
-            if pathlib.Path(name).parent.name == "web-alice-abc":
-                seen.append(name)
-            return fd, name
+        def _record(dir_fd, name, data, **kw):
+            # The staging name is the target's plus a per-call token; record
+            # the tokens this write drew.
+            def _token(n):
+                token = real_token(n)
+                seen.append(f".{name}.{token}")
+                return token
 
-        # The staging name is minted in `atomic_write` now, not in `storage`.
-        monkeypatch.setattr(atomic_write.tempfile, "mkstemp", _record)
+            monkeypatch.setattr(atomic_write.secrets, "token_hex", _token)
+            try:
+                return real_replace_at(dir_fd, name, data, **kw)
+            finally:
+                monkeypatch.setattr(atomic_write.secrets, "token_hex", real_token)
+
+        # The staging name is minted in `atomic_write` (ISSUE-723: through the
+        # directory descriptor), not in `storage`.
+        monkeypatch.setattr(storage, "replace_at", _record)
         storage.write_channel_memory(config, "web-alice-abc", "one\n")
         storage.write_channel_memory(config, "web-alice-abc", "two\n")
         assert len(seen) == 2 and seen[0] != seen[1]

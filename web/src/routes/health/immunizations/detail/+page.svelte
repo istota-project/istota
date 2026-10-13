@@ -15,6 +15,7 @@
     Badge,
     Button,
     ConfirmDialog,
+    EmptyState,
     Field,
     Select,
     type SelectOption,
@@ -259,7 +260,7 @@
     </section>
   {/if}
 {:else}
-  <div class="empty">Immunization not found.</div>
+  <EmptyState>Immunization not found.</EmptyState>
 {/if}
 
 <ConfirmDialog

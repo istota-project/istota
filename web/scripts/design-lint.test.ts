@@ -406,6 +406,45 @@ describe('redefined-primitive', () => {
   });
 });
 
+describe('hand-rolled-empty-state', () => {
+  it.each([
+    '<p class="empty">Nothing yet.</p>',
+    '<div class="empty small">Nothing yet.</div>',
+    '<div class="money-table-empty">No invoices found.</div>',
+    '<div class="empty-state">',
+  ])('flags the markup %s', (line) => {
+    expect(rules(line)).toContain('hand-rolled-empty-state');
+  });
+
+  it.each(['.empty {', '  .stats-empty {', '  :global(.empty) {', '  .card .empty {'])(
+    'flags the selector %s',
+    (line) => {
+      expect(rules(`<style>\n${line}\n    color: red;\n  }\n</style>`)).toContain(
+        'hand-rolled-empty-state',
+      );
+    },
+  );
+
+  it('allows the component that owns it', () => {
+    expect(
+      rules('<div class="empty-state">', 'src/lib/components/ui/EmptyState.svelte'),
+    ).not.toContain('hand-rolled-empty-state');
+  });
+
+  it('allows a frame dropping its padding above one', () => {
+    expect(
+      rules('<style>\n  .frame:has(> :global(.empty-state)) {\n    padding-top: 0;\n  }\n</style>'),
+    ).not.toContain('hand-rolled-empty-state');
+  });
+
+  it('allows a word that merely contains it', () => {
+    expect(rules('<div class="emptyish">')).not.toContain('hand-rolled-empty-state');
+    expect(rules('<EmptyState>No accounts found.</EmptyState>')).not.toContain(
+      'hand-rolled-empty-state',
+    );
+  });
+});
+
 describe('stray-money-global', () => {
   it('flags a money shell class defined outside the money layout', () => {
     expect(rules(':global(.money-table-row) { padding: 0; }')).toContain('stray-money-global');

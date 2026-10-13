@@ -16,6 +16,7 @@
     Field,
     Badge,
     ConfirmDialog,
+    EmptyState,
     Modal,
     KebabMenu,
     NoticeBanner,
@@ -192,7 +193,7 @@
         >
       {/snippet}
       {#if view.users.length === 0}
-        <p class="empty">No users yet. Add a user to send their first invitation.</p>
+        <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
       {:else}
         <div class="table-scroll">
           <table class="grid users-grid" aria-label="Users">

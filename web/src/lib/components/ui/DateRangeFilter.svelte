@@ -119,8 +119,8 @@
      leading an inline wrapper would add under the field.
 
      Carries no state class of its own beyond `date-unset`. `empty` was the
-     obvious name and the wrong one: primitives.css publishes `.empty` as a
-     shared empty-state block, and a bare global class name lands on any
+     obvious name and the wrong one: primitives.css then published `.empty` as
+     a shared empty-state block, and a bare global class name lands on any
      element that happens to use it — the field silently took its `2rem 1rem`,
      which was the whole of the vertical gap this filter grew. */
   .date-field {

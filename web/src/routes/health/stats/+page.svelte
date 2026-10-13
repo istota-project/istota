@@ -31,7 +31,7 @@
     metricLabel,
     toCanonical,
   } from '$lib/health/units';
-  import { Button, Field, Input, Modal, Select } from '$lib/components/ui';
+  import { Button, EmptyState, Field, Input, Modal, Select } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
 
   Chart.register(
@@ -427,12 +427,9 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if metricsToShow().length === 0 && !hasBp()}
-  <div class="empty">
+  <EmptyState actionLabel="Log your first measurement" onaction={() => openEntry()}>
     No measurements yet.
-    <button class="link" onclick={() => openEntry()} type="button"
-      >Log your first measurement</button
-    >.
-  </div>
+  </EmptyState>
 {:else}
   <div class="grid card-grid" style="--card-min: 380px;">
     {#each metricsToShow() as metric (metric)}
@@ -566,15 +563,6 @@
   }
   .log-btn:hover {
     background: var(--surface-raised);
-  }
-  .link {
-    background: none;
-    border: none;
-    color: var(--text-primary);
-    font: inherit;
-    cursor: pointer;
-    text-decoration: underline;
-    padding: 0;
   }
   .card {
     font: inherit;

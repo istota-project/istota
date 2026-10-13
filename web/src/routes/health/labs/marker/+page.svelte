@@ -23,6 +23,7 @@
     type BiomarkerTrend,
   } from '$lib/api';
   import { formatDate } from '$lib/dateFormat';
+  import { EmptyState } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -351,7 +352,7 @@
 
   <section class="chart-card">
     {#if trend.points.length === 0}
-      <div class="empty">No measurements recorded for this biomarker yet.</div>
+      <EmptyState>No measurements recorded for this biomarker yet.</EmptyState>
     {:else}
       {#if trend.unit_mismatch}
         <div class="banner warn">

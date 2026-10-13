@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import shutil
 import sqlite3
+import stat
 import time
 from pathlib import Path
 
-from istota.lib.atomic_write import write_bytes_atomic
+from istota.lib.atomic_write import replace_at
 from istota.lib.filenames import safe_filename
 from istota.health import db as health_db
 from istota.health.models import Document, HealthContext
@@ -163,32 +165,69 @@ def _resolve_mime(mime: str | None, filename: str, raw: bytes = b"") -> str:
     return mime or "application/octet-stream"
 
 
-def _clear_document_dir(target_dir: Path) -> None:
+def uploads_walk(ctx: HealthContext, *parts: str) -> tuple[Path, list[str]]:
+    """Where a write under ``uploads_dir`` starts, and the components below it.
+
+    The uploads tree is in the user's workspace, which their tasks can write,
+    so a link planted at ``health`` or ``uploads`` would send a write
+    anywhere (ISSUE-723). The walk therefore starts at the parent of
+    ``workspace_root`` and every component from the bot directory down is
+    opened without following a link: the bot directory was checked when the
+    context was resolved, and a task can still swap it for a link afterwards.
+    An ``uploads_dir`` configured outside the workspace is its own root.
+    """
+    uploads = Path(ctx.uploads_dir)
+    workspace = Path(ctx.workspace_root)
+    try:
+        rel = uploads.relative_to(workspace)
+    except ValueError:
+        return uploads, list(parts)
+    return workspace.parent, [workspace.name, *rel.parts, *parts]
+
+
+def _clear_document_dir_at(dir_fd: int) -> None:
     """Empty a document's numbered directory without removing it."""
-    if not target_dir.is_dir():
-        return
-    for child in target_dir.iterdir():
-        if child.is_file() or child.is_symlink():
-            try:
-                child.unlink()
-            except OSError as e:
-                logger.warning(
-                    "health_document_dir_clear_failed path=%s error=%s",
-                    child, e,
-                )
+    for name in os.listdir(dir_fd):
+        try:
+            if stat.S_ISDIR(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+                continue
+            os.unlink(name, dir_fd=dir_fd)
+        except OSError as e:
+            logger.warning(
+                "health_document_dir_clear_failed name=%s error=%s", name, e,
+            )
 
 
-def _write_bytes(target: Path, raw: bytes) -> None:
-    """Write via a staging sibling + rename, so a torn write is never visible
-    under the final name.
+def _open_document_dir(ctx: HealthContext, rel_dir: Path, *, create: bool) -> int | None:
+    """A descriptor on ``uploads_dir/rel_dir``, reached with no link followed."""
+    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415
+    from istota.workspace.writes import open_or_create_dirs  # noqa: PLC0415
+
+    root, walk = uploads_walk(ctx, *rel_dir.parts)
+    if create:
+        return open_or_create_dirs(root, walk)
+    return open_overlay_dir(root, *walk, raise_mount_errors=True)
+
+
+def _write_bytes(ctx: HealthContext, rel: str, raw: bytes, *, clear: bool = False) -> None:
+    """Write ``uploads_dir/rel`` via a staging sibling + rename, so a torn
+    write is never visible under the final name.
 
     The staging name used to be a fixed ``.{name}.part`` shared by every
     writer, with nothing removing it on a failure: two uploads of one document
-    interleaved into one file and published a mixture. ``atomic_write`` mints
-    it per call and unlinks it on any failure.
+    interleaved into one file and published a mixture. ``replace_at`` mints it
+    per call and unlinks it on any failure. The directory is opened from the
+    workspace root with no link followed, and both the clear and the write go
+    through that one descriptor.
     """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    write_bytes_atomic(target, raw)
+    rel_path = Path(rel)
+    fd = _open_document_dir(ctx, rel_path.parent, create=True)
+    try:
+        if clear:
+            _clear_document_dir_at(fd)
+        replace_at(fd, rel_path.name, raw)
+    finally:
+        os.close(fd)
 
 
 def _heal_missing_bytes(ctx: HealthContext, doc: Document, raw: bytes) -> None:
@@ -206,8 +245,8 @@ def _heal_missing_bytes(ctx: HealthContext, doc: Document, raw: bytes) -> None:
     if path.is_file():
         return
     try:
-        _write_bytes(path, raw)
-    except OSError as e:
+        _write_bytes(ctx, doc.stored_path, raw)
+    except (OSError, ValueError) as e:
         logger.error(
             "health_document_heal_failed id=%d path=%s error=%s",
             doc.id, path, e,
@@ -291,13 +330,11 @@ def store_document(
         "UPDATE documents SET stored_path = ? WHERE id = ?", (rel, doc_id),
     )
 
-    target_dir = Path(ctx.uploads_dir) / _DOCUMENTS_SUBDIR / str(doc_id)
     # A rolled-back predecessor can leave a stale file under a reused id
     # (AUTOINCREMENT hands the number back). Clear the directory first, or
     # the leftover shares the dir with the live document and blocks the
     # rmdir in delete_document_fully.
-    _clear_document_dir(target_dir)
-    _write_bytes(target_dir / safe_name, raw)
+    _write_bytes(ctx, rel, raw, clear=True)
 
     doc = health_db.get_document(conn, doc_id)
     if doc is None:  # pragma: no cover — the insert just succeeded
@@ -357,18 +394,32 @@ def delete_document_fully(
         path = None
     health_db.delete_document(conn, document_id)
     if path is not None:
+        rel = Path(doc.stored_path)
         try:
-            path.unlink(missing_ok=True)
-            parent = path.parent
-            if parent.name == str(doc.id) and parent.parent.name == _DOCUMENTS_SUBDIR:
-                # Only ever the document's own numbered directory. Clear it
-                # first: a rolled-back predecessor under a reused id can have
-                # left a stale sibling, and rmdir would silently fail on it.
-                _clear_document_dir(parent)
+            fd = _open_document_dir(ctx, rel.parent, create=False)
+            if fd is not None:
                 try:
-                    parent.rmdir()
-                except OSError:
-                    pass
+                    try:
+                        os.unlink(rel.name, dir_fd=fd)
+                    except FileNotFoundError:
+                        pass
+                    if rel.parent.parts == (_DOCUMENTS_SUBDIR, str(doc.id)):
+                        # Only ever the document's own numbered directory.
+                        # Clear it first: a rolled-back predecessor under a
+                        # reused id can have left a stale sibling, and rmdir
+                        # would silently fail on it.
+                        _clear_document_dir_at(fd)
+                finally:
+                    os.close(fd)
+                if rel.parent.parts == (_DOCUMENTS_SUBDIR, str(doc.id)):
+                    parent_fd = _open_document_dir(ctx, Path(_DOCUMENTS_SUBDIR), create=False)
+                    if parent_fd is not None:
+                        try:
+                            os.rmdir(str(doc.id), dir_fd=parent_fd)
+                        except OSError:
+                            pass
+                        finally:
+                            os.close(parent_fd)
         except OSError as e:
             logger.error(
                 "health_document_unlink_failed id=%d path=%s error=%s",

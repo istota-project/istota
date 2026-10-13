@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { EmptyState } from '$lib/components/ui';
   import { getAccounts, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
@@ -80,7 +81,7 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if visibleNodes.length === 0}
-  <div class="empty">No accounts found.</div>
+  <EmptyState>No accounts found.</EmptyState>
 {:else}
   <div class="account-list">
     {#each visibleNodes as node (node.fullName)}

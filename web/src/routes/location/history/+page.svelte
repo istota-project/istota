@@ -29,7 +29,7 @@
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import { Chip, ConfirmDialog, DateRangeFilter, Select } from '$lib/components/ui';
+  import { Chip, ConfirmDialog, DateRangeFilter, EmptyState, Select } from '$lib/components/ui';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
   let pings: LocationPing[] = $state([]);
@@ -304,7 +304,7 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if pings.length === 0 && !showDiscover}
-    <div class="center-msg">No location data for this period</div>
+    <EmptyState>No location data for this period</EmptyState>
   {:else}
     <div class="map-area">
       <LocationMap

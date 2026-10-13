@@ -12,7 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, Button, KebabMenu } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, KebabMenu } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -85,9 +85,7 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if !ref}
-  <div class="empty">
-    Unknown vaccine "{name}". It may not be in the canonical reference list.
-  </div>
+  <EmptyState>Unknown vaccine "{name}". It may not be in the canonical reference list.</EmptyState>
 {:else}
   <section class="card coverage-card">
     {#if entry}
@@ -157,7 +155,7 @@
   <section class="history">
     <h2 class="micro-label">Dose history</h2>
     {#if history.length === 0}
-      <div class="empty small">No doses recorded yet.</div>
+      <EmptyState size="sm">No doses recorded yet.</EmptyState>
     {:else}
       <div class="table-scroll">
         <table class="grid">

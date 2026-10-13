@@ -47,6 +47,16 @@ def open_or_create_dirs(root: Path, parts: list[str] | tuple[str, ...]) -> int:
     return fd
 
 
+def open_or_create_dir_below(root: Path, path: Path) -> int:
+    """``open_or_create_dirs`` for a ``path`` the caller composed under ``root``.
+
+    The components are ``path``'s own, taken lexically, so nothing below
+    ``root`` is resolved: a link at any of them fails the open. ``ValueError``
+    when ``path`` is not under ``root`` as written.
+    """
+    return open_or_create_dirs(root, Path(path).relative_to(root).parts)
+
+
 # What `link` answers on a filesystem that has no hard links.
 _NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
 
