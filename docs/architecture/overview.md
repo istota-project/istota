@@ -2,7 +2,7 @@
 
 Istota is a self-hosted personal AI operating system. It combines a durable agent runtime with native applications for health, location, money, feeds, briefings, chat, and memory. Each module owns its schema and per-user storage, while a common skill interface lets an authorized task query more than one module without merging all personal data into one store.
 
-Each agent task runs through a pluggable **Brain**. Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model), and `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (subscription billing; it composes `ClaudeCodeBrain` for model resolution). Swapping brains does not change executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, WhatsApp, SMS, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI. Each surface sits behind a uniform [Transport](#input-channels) seam. Requests flow through a SQLite task queue, are claimed by per-user worker threads, and produce responses for the originating channel. Nextcloud can supply files, calendars, contacts, login, notifications, and Talk, but the standalone shape uses local storage and needs no Nextcloud server.
+Each agent task runs through a pluggable **Brain**. Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model), and `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (subscription billing; it composes `ClaudeCodeBrain` for model resolution). Swapping brains does not change executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, WhatsApp, SMS, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI. Each surface sits behind a uniform [Transport](#input-channels) seam. Requests flow through a SQLite task queue, are claimed by per-user worker threads, and produce responses for the originating channel. Nextcloud can supply files, calendars, contacts, login, notifications, and Talk, but the default storage is a local directory and needs no Nextcloud server. See [Deployment](#deployment) for how an install is put together.
 
 ```mermaid
 flowchart TB
@@ -133,7 +133,7 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 |---|---|
 | `db.py` | All SQLite operations: task CRUD, resources, conversation history, state tracking |
 | `config.py` | TOML config loading with nested dataclasses, per-user overrides, secret env vars |
-| `storage.py` | Nextcloud filesystem path management, user workspace creation, OCS sharing |
+| `storage.py` | Workspace path management, user workspace creation, OCS sharing when the workspace is on Nextcloud |
 
 ### Memory
 
@@ -184,7 +184,7 @@ See [Memory](../features/memory.md) for the layered design (USER.md, CHANNEL.md,
 
 ## Browser container
 
-The headless browser runs in a Docker container (`docker/browser/`) — Google Chrome driven over a Flask API (with VNC for observation):
+The headless browser runs in its own container (`docker/browser/`), the stack's optional `browser` service — Google Chrome driven over a Flask API (with VNC for observation):
 
 | Module | Purpose |
 |---|---|
@@ -197,17 +197,30 @@ The headless browser runs in a Docker container (`docker/browser/`) — Google C
 
 Anti-detection strategy: Chrome launches with the stealth extension natively. Patchright connects via CDP only for content extraction, then disconnects. Navigation uses xdotool keyboard input rather than CDP commands. Human simulation adds 5-10s delays between page actions with realistic mouse movement patterns.
 
+## Deployment
+
+Istota has one deployment: the istota stack on a Debian 13 machine dedicated to it. The machine is a server, a cloud VM or bare metal, or, on an Apple silicon Mac, a Lima VM. Both run the same stack, set up the same way.
+
+- **One stack.** Inside the machine the stack is a set of containers run by Docker Compose (`docker/docker-compose.yml`): `nginx`, the only published listener; `daemon`, the scheduler and every task, each in its own bubblewrap sandbox; and `web`, the web UI and webhook receiver. The optional `browser`, `whatsapp-baileys` and `signaling` services are Compose profiles the setup turns on from your answers, and a devbox per developer user is added from `config.toml`. The images are built on the machine from the checked-out release; nothing is pulled from a registry.
+- **One machine.** `install.sh` clones the repository, checks the release tag's signature, and runs `host/provision.sh`, which installs Docker Engine, the sandbox's seccomp and AppArmor profiles and the systemd units. The machine runs nothing else, because the daemon container holds what bubblewrap needs to build namespaces.
+- **One command.** `istota-stack` manages the machine afterwards: first-run setup (`setup --web` in a browser, or `setup` in the terminal), `update` to a signed release tag or, with `update --unsigned latest`, to the tip of `main`, `rollback`, `apply` for config changes, and `up` and `down`. On a Mac, `istota-stack` on the Mac creates the VM and forwards every other command into it.
+- **Three storage modes.** The workspace is a local directory in the state directory (the default), the bot's files on an existing Nextcloud mounted with rclone (full Nextcloud integration), or, on the Mac, a folder in your home shared into the VM (`~/Istota` by default). Nextcloud is never part of the stack; a Nextcloud you already run can supply Talk, files and login.
+- **Three ingress modes.** nginx listens on loopback only (`local`, the Mac's mode), on a private address behind your own reverse proxy (`proxied`), or on ports 80 and 443 with its own certificate (`direct`).
+- **State, config and credentials** are host directories under `/srv/app/istota`: `data/` (the databases, the master key and a local workspace) is bound at `/data`, `config/` is bound read-only into every service, and each credential is a file under `secrets/` mounted as a compose secret. The web config editor writes a request that `istota-stack` on the host applies, so no running service writes the config itself.
+
+[Running the stack](../deployment/running-the-stack.md) covers the server, and [Local install](../getting-started/local-install.md) the Mac. [Security](../deployment/security.md) describes the sandbox and the local VM's trust model.
+
 ## Design decisions
 
 **Pluggable execution — delegate, or run the loop in-house.** The default brain invokes the existing Claude Code CLI as the execution engine. The native brain instead runs Istota's own in-process agent loop (tool dispatch, context compaction, retries) against any OpenAI-compatible model. A third brain drives the interactive Claude TUI over tmux to keep traffic on subscription billing. Same executor, same skills — the brain is the swappable seam, so Istota isn't bound to one vendor.
 
 **Regular Nextcloud user, not bot API.** The bot runs as an ordinary user. File sharing, CalDAV, and Talk messaging work through standard protocols. No special server configuration.
 
-**File-as-config for user self-service.** Users configure briefings, cron jobs, heartbeats, and their own memory through markdown files in their Nextcloud workspace. The persona is the operator's, one file at the file root. No CLI access needed.
+**File-as-config for user self-service.** Users configure briefings, cron jobs, heartbeats, and their own memory through markdown files in their workspace. The persona is the operator's, one file at the file root. No CLI access needed.
 
 **Functional over object-oriented.** Most code is module-level functions. Classes exist only where shared state across calls is necessary (TalkClient, UserWorker, WorkerPool).
 
-**Graceful degradation everywhere.** Memory search falls back to BM25-only without sqlite-vec. Bubblewrap degrades to unsandboxed on macOS. Mount falls back to rclone CLI. Indexing failures never affect core processing.
+**Graceful degradation, except for the sandbox.** Memory search falls back to BM25-only without sqlite-vec, and indexing failures never affect core processing. The sandbox is the exception: on Linux a daemon whose bubblewrap sandbox cannot be built refuses to start rather than run tasks unconfined. Only a development checkout on macOS (`istota serve`) and the deprecated standalone install run without it.
 
 **Security by environment, not tool restriction.** Rather than limiting the model's tools, credentials are stripped from the execution environment and optionally routed through a credential proxy.
 

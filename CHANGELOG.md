@@ -256,6 +256,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Admin → Status no longer counts feed polls as automated tasks.** Module pollers and CRON.md command jobs call no model, but they were counted in "Automated 24h" and in each user's automated figure, where the feed poller alone added hundreds a day per user. They now have their own "Job runs 24h" tile and a "jobs" figure on each user's row, so the automated count shows only scheduled prompts, briefings and other model-driven tasks.
+
 - **`istota-stack update` runs the release's own `istota-stack` once its tag is verified**, so a release's changes to the update itself take effect on the update that installs it rather than the one after, and a stack that fails to start still gets the host's scripts provisioned. If the daemon's start-up step cannot reach `/srv/app/istota/data`, it now stops with the `chmod` to run rather than restarting in a loop.
 
 - `istota-stack localize-workspace` always stops the daemon before it copies the workspace. It sometimes stopped only `web` and copied with the scheduler running, because a `grep -q` on the service list could close the pipe early and, under `pipefail`, read the match as a miss. The same timing could refuse a signed release tag as unsigned, or refuse a rollback to a release that keeps its state in the state directory; the host scripts now test captured text instead.

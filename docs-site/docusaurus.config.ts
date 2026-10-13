@@ -47,6 +47,7 @@ const config: Config = {
       {
         redirects: [
           {from: '/getting-started/quickstart-docker', to: '/getting-started/quickstart-server'},
+          {from: '/deployment/docker', to: '/deployment/running-the-stack'},
         ],
       },
     ],
