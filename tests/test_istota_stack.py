@@ -23,6 +23,7 @@ node ids in the setup classes red.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -113,7 +114,35 @@ case "$args" in
   *" ps -q daemon"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
-  *" istota apply "*) exit "${STUB_APPLY_RC:-0}" ;;
+  *" istota apply "*)
+    # What each bind holds while apply runs: target, name, mode, contents.
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ]; then
+        python3 -I -c 'import os, sys, json
+src, dst = sys.argv[1].split(":")[:2]
+for name in sorted(os.listdir(src)):
+    path = os.path.join(src, name)
+    if os.path.isfile(path):
+        print(json.dumps([dst, name, oct(os.stat(path).st_mode & 0o777), open(path).read()]))' "$a" >> "$STUB_CALLS.seen"
+      fi
+      prev="$a"
+    done
+    rc="${STUB_APPLY_RC:-0}"
+    case "$args" in
+      *" --format json "*)
+        if [ -n "${STUB_APPLY_RESULT+set}" ]; then
+          printf '%s\n' "$STUB_APPLY_RESULT"
+        else
+          dry=false; changed=false; restart=false; errors="[]"
+          case "$args" in *" --dry-run "*) dry=true ;; esac
+          [ "$rc" != 2 ] || { changed=true; restart=true; }
+          [ "$rc" != 1 ] || errors='[{"code": "validation_error", "path": []}]'
+          printf '{"version": 1, "dry_run": %s, "changed": %s, "partial": false, "restart_required": %s, "counts": {}, "operations": [], "warnings": [], "errors": %s}\n' \
+            "$dry" "$changed" "$restart" "$errors"
+        fi ;;
+    esac
+    exit "$rc" ;;
   *" image ls "*) if [ -n "${STUB_IMAGES:-}" ]; then printf "%b" "$STUB_IMAGES"; exit 0; fi; printf 'istota:v0\nistota:v1\nistota:old\nistota-istota:v0\nistota-istota:older\nistota-browser:old\nnginx:alpine\n' ;;
   *" image tag "*) touch "${STUB_CALLS}.tagged" ;;
   *" image inspect istota:"*)
@@ -880,7 +909,7 @@ class TestApply:
         calls = fx.docker_calls()
         assert any(
             "--entrypoint istota-drop" in call and call.endswith(
-                f"daemon istota apply -f /plan/plan.toml{''.join(' ' + f for f in flags)}")
+                f"daemon istota apply -f /plan/plan.toml{''.join(' ' + f for f in flags)} --format json")
             for call in calls
         ), calls
         assert any(call.endswith(" restart") for call in calls) is restarted
@@ -907,6 +936,166 @@ class TestApply:
         assert result.returncode == 2, result.stdout + result.stderr
         calls = fx.docker_calls()
         assert not any(call.endswith(" restart") or " up " in f"{call} " for call in calls), calls
+
+
+def _result(*, dry_run=False, changed=False, partial=False, restart=False, errors=()) -> dict:
+    """`istota apply --format json`'s result document, as the stub prints it."""
+    return {
+        "version": 1, "dry_run": dry_run, "changed": changed, "partial": partial,
+        "restart_required": restart, "counts": {}, "operations": [], "warnings": [],
+        "errors": [{"code": code, "path": []} for code in errors],
+    }
+
+
+SIDECAR_VALUE = "sidecar-value-never-on-argv"
+
+
+class TestApplyResult:
+    """`istota-stack apply` reads the apply's structured result: stdout is
+    that document alone, and the stack restarts once, only for a committed
+    change the result says needs it (the declarative settings spec, Stage 17).
+    """
+
+    @pytest.fixture
+    def plan(self, tmp_path) -> Path:
+        plan = tmp_path / "plan.json"
+        plan.write_text('{"config": {}}')
+        return plan
+
+    def _restarts(self, fx) -> int:
+        return sum(call.endswith(" restart") for call in fx.docker_calls())
+
+    @pytest.mark.parametrize(("rc", "document", "restarts", "says"), [
+        ("2", _result(changed=True, restart=True), 1, ""),
+        ("2", _result(changed=True), 0, "read without a restart"),
+        ("0", _result(), 0, ""),
+        ("0", _result(dry_run=True), 0, ""),
+        ("2", _result(dry_run=True, changed=True, restart=True), 0, "dry run"),
+        ("1", _result(errors=["validation_error"]), 0, "before any change was applied"),
+    ], ids=["restart-required", "content-only", "unchanged-or-marker-only", "dry-run-unchanged",
+            "dry-run-changed", "refused"])
+    def test_one_restart_and_only_when_the_result_needs_it(self, fx, plan, rc, document, restarts, says):
+        flags = ["--dry-run"] if document["dry_run"] else []
+        result = fx.run("apply", str(plan), *flags, STUB_APPLY_RC=rc, STUB_APPLY_RESULT=json.dumps(document))
+        assert result.returncode == int(rc), result.stdout + result.stderr
+        assert json.loads(result.stdout) == document
+        assert self._restarts(fx) == restarts
+        assert says in result.stderr
+
+    def test_a_partial_apply_restarts_nothing_and_says_what_to_do(self, fx, plan):
+        document = _result(changed=True, partial=True, restart=True, errors=["state_changed"])
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="1", STUB_APPLY_RESULT=json.dumps(document))
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert json.loads(result.stdout) == document
+        assert self._restarts(fx) == 0
+        assert "partially applied" in result.stderr
+        assert "restart the stack" in result.stderr
+        assert "nothing was written" not in result.stdout + result.stderr
+
+    def test_a_restart_keeps_stdout_the_document_alone(self, fx, plan):
+        document = _result(changed=True, restart=True)
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_APPLY_RESULT=json.dumps(document))
+        assert result.returncode == 2, result.stderr
+        assert result.stdout.splitlines() == [json.dumps(document)]
+        assert "restarting the stack" in result.stderr
+
+    @pytest.mark.parametrize("output", ["", "usage: istota apply [-h]", '{"version": 2}'])
+    def test_no_result_document_is_a_failure_and_restarts_nothing(self, fx, plan, output):
+        """An image older than the script exits 2 on an unknown --format, which
+        must not read as a change."""
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="2", STUB_APPLY_RESULT=output)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert self._restarts(fx) == 0
+        assert "without a result document" in result.stderr
+
+    def test_an_exit_the_result_contradicts_restarts_nothing(self, fx, plan):
+        document = _result(changed=True, restart=True)
+        result = fx.run("apply", str(plan), STUB_APPLY_RC="0", STUB_APPLY_RESULT=json.dumps(document))
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert self._restarts(fx) == 0
+
+    def test_check_passes_through_without_a_result_or_a_restart(self, fx, plan):
+        result = fx.run("apply", str(plan), "--check", "--json", STUB_APPLY_RC="0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        call = next(c for c in fx.docker_calls() if " istota apply " in f"{c} ")
+        assert call.endswith("istota apply -f /plan/plan.json --check --json")
+        assert self._restarts(fx) == 0
+
+    def test_format_text_is_refused(self, fx, plan):
+        result = fx.run("apply", str(plan), "--format", "text")
+        assert result.returncode == 64
+        assert not any(" istota apply " in f"{c} " for c in fx.docker_calls())
+
+
+class TestApplySidecar:
+    """A credential sidecar reaches the one-shot as a read-only file of uid
+    10001's at /secrets, its path on argv and its value nowhere else; the
+    staging is gone afterwards, whatever the outcome."""
+
+    @pytest.fixture
+    def files(self, tmp_path):
+        plan = tmp_path / "plan.json"
+        plan.write_text('{"users": {"alice": {"secrets": [{"service": "karakeep", "keys": ["api_key"]}]}}}')
+        sidecar = tmp_path / "creds" / "plan.json"
+        sidecar.parent.mkdir()
+        sidecar.write_text(json.dumps({"users": {"alice": {"karakeep": {"api_key": SIDECAR_VALUE}}}}))
+        sidecar.chmod(0o600)
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        return plan, sidecar, scratch
+
+    def _seen(self, fx) -> list[list[str]]:
+        path = Path(f"{fx.calls}.seen")
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    @pytest.mark.parametrize("rc", ["2", "1"])
+    def test_the_sidecar_is_bound_read_only_and_its_value_stays_off_argv(self, fx, files, rc):
+        plan, sidecar, scratch = files
+        result = fx.run("apply", str(plan), "--secrets-file", str(sidecar), "--dry-run",
+                        STUB_APPLY_RC=rc, TMPDIR=str(scratch))
+        assert result.returncode == int(rc), result.stdout + result.stderr
+        call = next(c for c in fx.docker_calls() if " istota apply " in f"{c} ")
+        assert ":/secrets:ro " in call and ":/plan:ro " in call
+        assert call.endswith(
+            "istota apply -f /plan/plan.json --secrets-file /secrets/plan.json --dry-run --format json")
+        seen = {(target, name): (mode, text) for target, name, mode, text in self._seen(fx)}
+        # The same basename as the plan: each is kept in a directory of its own.
+        assert seen[("/secrets", "plan.json")] == ("0o400", sidecar.read_text())
+        assert seen[("/plan", "plan.json")] == ("0o400", plan.read_text())
+        assert SIDECAR_VALUE not in fx.calls.read_text()
+        assert SIDECAR_VALUE not in result.stdout + result.stderr
+        assert list(scratch.iterdir()) == [], "the staging directory was left behind"
+
+    def test_the_equals_form_is_the_same(self, fx, files):
+        plan, sidecar, _ = files
+        result = fx.run("apply", str(plan), f"--secrets-file={sidecar}", "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any("--secrets-file /secrets/plan.json" in c for c in fx.docker_calls())
+
+    @pytest.mark.parametrize("problem", ["group-readable", "link", "missing"])
+    def test_a_sidecar_that_is_not_a_private_file_reaches_nothing(self, fx, files, problem):
+        plan, sidecar, scratch = files
+        if problem == "group-readable":
+            sidecar.chmod(0o640)
+        elif problem == "link":
+            link = sidecar.with_name("link.json")
+            link.symlink_to(sidecar)
+            sidecar = link
+        else:
+            sidecar = sidecar.with_name("absent.json")
+        result = fx.run("apply", str(plan), "--secrets-file", str(sidecar), TMPDIR=str(scratch))
+        assert result.returncode == 1
+        assert "private regular file" in result.stderr
+        assert not any(" istota apply " in f"{c} " for c in fx.docker_calls())
+        assert list(scratch.iterdir()) == []
+
+    @pytest.mark.parametrize(("mode", "reached"), [(0o600, True), (0o644, False)])
+    def test_a_role_vars_input_meets_the_same_rule(self, fx, files, mode, reached):
+        plan, _, _ = files
+        plan.chmod(mode)
+        result = fx.run("apply", str(plan), "--input-format", "role-vars", "--dry-run")
+        assert any(" istota apply " in f"{c} " for c in fx.docker_calls()) is reached, result.stderr
+        assert (result.returncode == 0) is reached
 
 
 class TestAProfileTurnedOffStopsItsService:

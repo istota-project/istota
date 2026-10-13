@@ -31,7 +31,8 @@
 # its arguments unchanged and its exit status passed back (setup, apply,
 # rollback, exec, compose, up, down, ...). `apply <plan>` and
 # `import-bare-metal <dir>` take a path on the Mac, copied into the VM for the
-# call and removed afterwards. `istota` beside this script is the VM's `istota`.
+# call and removed afterwards, as is apply's `--secrets-file <file>`. `istota`
+# beside this script is the VM's `istota`.
 #
 # --- end usage ---
 #
@@ -985,30 +986,94 @@ stage_in_vm() {
     [ "${2:-}" != --daemon ] || stage+=(--daemon)
     [ ! -d "$path" ] || copy=(-r)
     tmp="$(limactl shell --workdir / "$INSTANCE" mktemp -d </dev/null)" || fail 1 "could not make a directory in the VM."
-    limactl copy ${copy[@]+"${copy[@]}"} "$path" "${INSTANCE}:${tmp}/" >&2 || fail 1 "could not copy ${path} into the VM."
-    staged="$(vm_stack "${stage[@]}" "${tmp}/$(basename "$path")" </dev/null)" || fail 1 "could not stage ${path} in the VM."
+    # The copy may hold credentials: it leaves the VM user's directory on
+    # every path, staged or not.
+    if ! limactl copy ${copy[@]+"${copy[@]}"} "$path" "${INSTANCE}:${tmp}/" >&2; then
+        limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null >&2 || true
+        fail 1 "could not copy ${path} into the VM."
+    fi
+    if ! staged="$(vm_stack "${stage[@]}" "${tmp}/$(basename "$path")" </dev/null)"; then
+        limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null >&2 || true
+        fail 1 "could not stage ${path} in the VM."
+    fi
     limactl shell --workdir / "$INSTANCE" rm -rf "$tmp" </dev/null >&2 || true
     printf '%s\n' "$staged"
 }
 
+# What this run staged in the VM, unstaged by the EXIT trap whatever the
+# outcome: success, a failure, or an interrupt. Global, since the trap runs
+# after the function's locals are gone.
+STAGED_IN_VM=()
+
+unstage_all() {
+    local staged
+    for staged in ${STAGED_IN_VM[@]+"${STAGED_IN_VM[@]}"}; do
+        vm_stack unstage "$staged" </dev/null >&2 || log "WARNING: ${staged} was left in the VM" >&2
+    done
+    STAGED_IN_VM=()
+}
+
+# The VM's rule for a credential-bearing file, held on the Mac before
+# anything is copied: a regular file, not a link, no group or other bits.
+require_private_mac_file() {
+    local path="$1" what="$2"
+    if [ -z "$(find -P "$path" -maxdepth 0 -type f ! -perm -0001 ! -perm -0002 ! -perm -0004 \
+            ! -perm -0010 ! -perm -0020 ! -perm -0040 2>/dev/null)" ]; then
+        fail 1 "${what} must be a private regular file (chmod 600), not a link: ${path}"
+    fi
+}
+
 # `apply <plan>` and `import-bare-metal <dir>`: the Mac path staged in the VM,
-# run, and removed.
+# run, and removed. apply's `--secrets-file FILE` is staged the same way, and
+# the VM is handed the staged path in its place; the file's name, and the
+# suffix that says JSON or TOML, are kept.
 cmd_with_path() {
     local verb="$1"
     shift
     [ "$#" -ge 1 ] || usage_error "${verb} takes a path on this Mac"
-    local path="$1" daemon="" staged rc=0
+    local path="$1" daemon="" staged rc=0 sidecar="" role="" args=() arg
     shift
     case "$verb" in
-        apply) [ -f "$path" ] || usage_error "no plan file at ${path}" ;;
+        apply)
+            [ -f "$path" ] || usage_error "no plan file at ${path}"
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --secrets-file)
+                        [ "$#" -ge 2 ] || usage_error "--secrets-file takes a file on this Mac"
+                        sidecar="$2"; args+=(--secrets-file "@SIDECAR@"); shift 2; continue ;;
+                    --secrets-file=*) sidecar="${1#*=}"; args+=(--secrets-file "@SIDECAR@") ;;
+                    --input-format=role-vars) role=1; args+=("$1") ;;
+                    --input-format)
+                        [ "$#" -lt 2 ] || [ "$2" != role-vars ] || role=1
+                        args+=("$1") ;;
+                    *) args+=("$1") ;;
+                esac
+                shift
+            done
+            if [ -n "$sidecar" ]; then require_private_mac_file "$sidecar" "--secrets-file"; fi
+            if [ -n "$role" ]; then require_private_mac_file "$path" "a role-vars input"; fi ;;
         import-bare-metal)
             [ -d "$path" ] || usage_error "no unpacked export at ${path}"
-            daemon=--daemon ;;
+            daemon=--daemon
+            args=("$@") ;;
     esac
     require_running
+    trap unstage_all EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     staged="$(stage_in_vm "$path" ${daemon:+"$daemon"})" || exit $?
-    vm_stack "$verb" "$staged" "$@" || rc=$?
-    vm_stack unstage "$staged" </dev/null || log "WARNING: ${staged} was left in the VM"
+    STAGED_IN_VM+=("$staged")
+    if [ -n "$sidecar" ]; then
+        local staged_sidecar
+        staged_sidecar="$(stage_in_vm "$sidecar")" || exit $?
+        STAGED_IN_VM+=("$staged_sidecar")
+        local i
+        for i in "${!args[@]}"; do
+            if [ "${args[$i]}" = "@SIDECAR@" ]; then args[$i]="$staged_sidecar"; fi
+        done
+    fi
+    vm_stack "$verb" "$staged" ${args[@]+"${args[@]}"} || rc=$?
+    unstage_all
     exit "$rc"
 }
 

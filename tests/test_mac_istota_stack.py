@@ -229,6 +229,8 @@ if verb == "shell":
         save()
         sys.exit(rc)
     if stack[:1] == ["stage"]:
+        if os.path.basename(stack[-1]) in state.get("stage_fail", []):
+            sys.exit(1)
         out(f"/srv/app/istota/staging/AbCd1234/{os.path.basename(stack[-1])}\n")
         sys.exit(0)
     if stack[:1] == ["down"] and state.get("down_sleep"):
@@ -401,6 +403,76 @@ class TestFileArguments:
             ["import-bare-metal", staged, "--ingress", "local"],
             ["unstage", staged],
         ]
+
+    @pytest.fixture
+    def sidecar(self, tmp_path) -> Path:
+        path = tmp_path / "creds.json"
+        path.write_text('{"users": {"alice": {"karakeep": {"api_key": "mac-sidecar-value"}}}}')
+        path.chmod(0o600)
+        return path
+
+    @pytest.mark.parametrize("spelling", ["separate", "equals"])
+    @pytest.mark.parametrize("forward_rc", [2, 1])
+    def test_a_sidecar_is_staged_beside_the_plan_and_both_removed(self, mac, tmp_path, sidecar, spelling, forward_rc):
+        """The declarative settings spec, Stage 17: the sidecar crosses as a
+        file, the VM is handed its staged path, and both are unstaged on any
+        outcome. No limactl argv carries a value."""
+        mac.set(instance={"name": "istota", "status": "Running"}, forward_rc=forward_rc)
+        plan = tmp_path / "plan.json"
+        plan.write_text('{"users": {"alice": {"secrets": [{"service": "karakeep", "keys": ["api_key"]}]}}}')
+        option = ["--secrets-file", str(sidecar)] if spelling == "separate" else [f"--secrets-file={sidecar}"]
+        result = mac.run("apply", str(plan), *option, "--dry-run")
+        assert result.returncode == forward_rc, result.stderr
+        copies = [c for c in mac.calls("limactl") if c[:1] == ["copy"]]
+        assert copies == [["copy", str(plan), "istota:/tmp/tmp.stub/"], ["copy", str(sidecar), "istota:/tmp/tmp.stub/"]]
+        staged_plan = "/srv/app/istota/staging/AbCd1234/plan.json"
+        staged_sidecar = "/srv/app/istota/staging/AbCd1234/creds.json"
+        assert mac.stack_calls() == [
+            ["stage", "/tmp/tmp.stub/plan.json"],
+            ["stage", "/tmp/tmp.stub/creds.json"],
+            ["apply", staged_plan, "--secrets-file", staged_sidecar, "--dry-run"],
+            ["unstage", staged_plan],
+            ["unstage", staged_sidecar],
+        ]
+        assert "mac-sidecar-value" not in mac.calls_path.read_text()
+
+    @pytest.mark.parametrize("problem", ["group-readable", "link"])
+    def test_a_sidecar_that_is_not_private_reaches_nothing(self, mac, tmp_path, sidecar, problem):
+        mac.set(instance={"name": "istota", "status": "Running"})
+        plan = tmp_path / "plan.json"
+        plan.write_text("{}")
+        if problem == "group-readable":
+            sidecar.chmod(0o644)
+        else:
+            link = tmp_path / "link.json"
+            link.symlink_to(sidecar)
+            sidecar = link
+        result = mac.run("apply", str(plan), "--secrets-file", str(sidecar))
+        assert result.returncode == 1
+        assert "private regular file" in result.stderr
+        assert mac.calls("limactl") == []
+
+    def test_a_role_vars_input_must_be_private(self, mac, tmp_path):
+        mac.set(instance={"name": "istota", "status": "Running"})
+        plan = tmp_path / "role.json"
+        plan.write_text("{}")
+        plan.chmod(0o644)
+        result = mac.run("apply", str(plan), "--input-format", "role-vars")
+        assert result.returncode == 1
+        assert mac.calls("limactl") == []
+
+    def test_a_sidecar_that_fails_to_stage_still_unstages_the_plan(self, mac, tmp_path, sidecar):
+        mac.set(instance={"name": "istota", "status": "Running"}, stage_fail=["creds.json"])
+        plan = tmp_path / "plan.json"
+        plan.write_text("{}")
+        result = mac.run("apply", str(plan), "--secrets-file", str(sidecar))
+        assert result.returncode == 1
+        calls = mac.stack_calls()
+        assert ["unstage", "/srv/app/istota/staging/AbCd1234/plan.json"] in calls
+        assert not any(c[:1] == ["apply"] for c in calls)
+        # The VM user's copy of the sidecar is removed too.
+        removed = [c for c in mac.calls("limactl") if c[:1] == ["shell"] and "rm" in c]
+        assert len(removed) == 2, removed
 
     def test_a_missing_path_reaches_nothing(self, mac, tmp_path):
         mac.set(instance={"name": "istota", "status": "Running"})

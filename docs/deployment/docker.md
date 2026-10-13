@@ -96,7 +96,7 @@ Edit `/srv/app/istota/config/config.toml` and restart:
 istota-stack down && istota-stack up
 ```
 
-`istota-stack apply plan.toml` is the other way in: it writes `config.toml` from a plan's `[config]` and restarts the stack only when something changed.
+`istota-stack apply plan.toml` is the other way in: it writes `config.toml` from a plan's `[config]`, prints `istota apply`'s JSON result, and restarts the stack only when a committed change needs it ([Declarative settings](../configuration/declarative-settings.md)).
 
 A credential is a file under `/srv/app/istota/secrets/` (0400, owned by uid 10001); replace the file and restart. An existing install keeps the `config.toml` its old entrypoint rendered, unchanged, as its own file; `docker/istota/config-diff.py` in the image compares two configs by key if you want to see what an old render would have changed.
 

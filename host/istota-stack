@@ -14,7 +14,9 @@
 #                               the first setup in a browser: prints an address and a
 #                               one-use code, then installs, builds and starts the stack
 #   istota-stack setup-code     print the address and code of a setup --web in progress
-#   istota-stack apply <plan>   `istota apply` a plan; restarts the stack when it changed
+#   istota-stack apply <plan> [--secrets-file FILE] [istota apply's options]
+#                               `istota apply` a plan; prints its JSON result, and restarts
+#                               the stack once when a committed change needs it
 #   istota-stack import-bare-metal <dir> [args]
 #                               import a bare-metal export, with the stack down
 #   istota-stack restore [--date YYYY-MM-DD] [--force]
@@ -1121,32 +1123,145 @@ cmd_setup_code() {
 # the plan's directory bound read-only at /plan, where uid 10001 must be able
 # to read it. The caller decides about a restart. Exit codes are istota
 # apply's: 0 nothing changed, 2 changed (or would, under --dry-run), 1 refused.
+#
+# `--secrets-file <file>` as the second and third arguments binds that file's
+# directory read-only at /secrets and passes its path in the container: a
+# credential sidecar travels as a file, never on argv or the plan's stdin.
 apply_plan_file() {
-    local plan="$1"
+    local plan="$1" binds=() secrets=()
     shift
-    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "$(dirname "$plan"):/plan:ro" \
-        "$(main_service)" istota apply -f "/plan/$(basename "$plan")" "$@"
+    binds=(-v "$(dirname "$plan"):/plan:ro")
+    if [ "${1:-}" = --secrets-file ]; then
+        binds+=(-v "$(dirname "$2"):/secrets:ro")
+        secrets=(--secrets-file "/secrets/$(basename "$2")")
+        shift 2
+    fi
+    ISTOTA_CONFIG_READ_ONLY=false oneshot "${binds[@]}" \
+        "$(main_service)" istota apply -f "/plan/$(basename "$plan")" ${secrets[@]+"${secrets[@]}"} "$@"
 }
 
+# Refuse a credential-bearing input unless it is a regular file, not a link,
+# with no group or other permission bits: the rule `istota apply` holds a
+# sidecar to, checked here because the staged copy is always 0400.
+require_private_file() {
+    local path="$1" what="$2"
+    if [ -z "$(find -P "$path" -maxdepth 0 -type f ! -perm -0001 ! -perm -0002 ! -perm -0004 \
+            ! -perm -0010 ! -perm -0020 ! -perm -0040 2>/dev/null)" ]; then
+        die "${what} must be a private regular file (mode 0600), not a link: ${path}"
+    fi
+}
+
+# Reads `istota apply --format json`'s result document (the last line of its
+# stdout) and prints it, then `dry_run changed partial restart_required` as
+# 0/1 words on the next line. Exit 1 when there is no well-formed document.
+APPLY_RESULT_PY='
+import json, sys
+try:
+    with open(sys.argv[1], "rb") as fh:
+        lines = [line for line in fh.read(1 << 24).decode().splitlines() if line.strip()]
+    document = json.loads(lines[-1])
+except (OSError, ValueError, IndexError):
+    sys.exit(1)
+flags = ("dry_run", "changed", "partial", "restart_required")
+if not isinstance(document, dict) or document.get("version") != 1 \
+        or any(type(document.get(flag)) is not bool for flag in flags):
+    sys.exit(1)
+print(lines[-1])
+print(" ".join("1" if document[flag] else "0" for flag in flags))
+'
+
+# `istota apply` a plan from this host, and restart the stack at most once,
+# when the result says a committed change needs it. stdout is the apply's JSON
+# result document and nothing else (the management role reads it); this
+# script's own messages go to stderr. A partial apply restarts nothing: what
+# was committed stays, and the operator completes it and restarts.
 cmd_apply() {
     [ "$#" -ge 1 ] || { usage >&2; exit 64; }
-    local plan="$1" name rc=0
+    local plan="$1" name rc=0 sidecar="" check="" role="" args=() secrets=() decision="" document=""
     shift
     [ -f "$plan" ] || die "no plan at ${plan}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --secrets-file)
+                [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                sidecar="$2"; shift 2; continue ;;
+            --secrets-file=*) sidecar="${1#*=}" ;;
+            --format|--format=*)
+                local format="${1#--format}"
+                if [ -z "$format" ]; then
+                    [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                    format="$2"; shift
+                fi
+                [ "${format#=}" = json ] || { echo "[istota-stack] apply prints istota apply's JSON result; --format ${format#=} is not available here" >&2; exit 64; } ;;
+            --input-format)
+                [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                [ "$2" != role-vars ] || role=1
+                args+=("$1" "$2"); shift 2; continue ;;
+            --input-format=role-vars) role=1; args+=("$1") ;;
+            --check) check=1; args+=("$1") ;;
+            *) args+=("$1") ;;
+        esac
+        shift
+    done
+    # Role variables carry credentials, so they meet the sidecar's file rule.
+    if [ -n "$role" ]; then require_private_file "$plan" "a role-vars input"; fi
+    if [ -n "$sidecar" ]; then require_private_file "$sidecar" "--secrets-file"; fi
     staging="$(mktemp -d)"
     trap 'rm -rf "${staging:-}"' EXIT
+    chmod 0700 "$staging"
     name="$(basename "$plan")"
-    # Readable by uid 10001 alone: a plan can hold credentials.
-    install -m 0400 "$plan" "${staging}/${name}"
-    if [ "$(id -u)" -eq 0 ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
-    apply_plan_file "${staging}/${name}" "$@" || rc=$?
-    copy_stack_env_out
-    if [ "$rc" -eq 2 ]; then
-        case " $* " in
-            *" --dry-run "*) ;;
-            *) restart_for_config ;;
-        esac
+    # Readable by uid 10001 alone: a plan can hold credentials. Each input has
+    # a directory of its own, so a plan and a sidecar of the same name both
+    # keep their names, and with them the suffix that says JSON or TOML.
+    install -d -m 0700 "${staging}/plan"
+    install -m 0400 "$plan" "${staging}/plan/${name}"
+    if [ -n "$sidecar" ]; then
+        install -d -m 0700 "${staging}/secrets"
+        install -m 0400 "$sidecar" "${staging}/secrets/$(basename "$sidecar")"
+        secrets=(--secrets-file "${staging}/secrets/$(basename "$sidecar")")
     fi
+    if [ "$(id -u)" -eq 0 ]; then
+        chown -R "$ISTOTA_UID:$ISTOTA_UID" "${staging}/plan"
+        if [ -n "$sidecar" ]; then chown -R "$ISTOTA_UID:$ISTOTA_UID" "${staging}/secrets"; fi
+    fi
+
+    if [ -n "$check" ]; then
+        # --check validates the plan alone: no result document, no restart.
+        apply_plan_file "${staging}/plan/${name}" ${secrets[@]+"${secrets[@]}"} ${args[@]+"${args[@]}"} || rc=$?
+        return "$rc"
+    fi
+    # The result goes to a root-only file beside the bound directories, never
+    # into one uid 10001 could change before root reads it.
+    apply_plan_file "${staging}/plan/${name}" ${secrets[@]+"${secrets[@]}"} ${args[@]+"${args[@]}"} \
+        --format json > "${staging}/result" || rc=$?
+    if ! decision="$(python3 -I -c "$APPLY_RESULT_PY" "${staging}/result")"; then
+        { copy_stack_env_out; } >&2
+        echo "[istota-stack] istota apply exited ${rc} without a result document; nothing was restarted. An image older than this istota-stack reports none: update the stack first." >&2
+        return 1
+    fi
+    document="${decision%$'\n'*}"
+    decision="${decision##*$'\n'}"
+    printf '%s\n' "$document"
+    {
+        copy_stack_env_out
+        # dry_run changed partial restart_required
+        case "${rc}:${decision}" in
+            1:*" 1 "?)
+                log "partially applied: the operations the result lists as applied are in place and the rest are not; nothing was restarted."
+                if [ "${decision##* }" = 1 ]; then
+                    log "the applied changes need a restart: fix the error and apply the plan again, then restart the stack (\`systemctl restart istota-stack\`)."
+                else
+                    log "fix the error and apply the plan again to complete it."
+                fi ;;
+            1:*) log "the plan was refused or failed before any change was applied; nothing was restarted." ;;
+            2:"1 1 0 "?) log "dry run: nothing was written." ;;
+            2:"0 1 0 1") restart_for_config ;;
+            2:"0 1 0 0") log "the changes are read without a restart; nothing was restarted." ;;
+            0:?" 0 0 "?) ;;
+            *) log "istota apply's exit ${rc} does not match its result (${decision}); nothing was restarted."
+               rc=1 ;;
+        esac
+    } >&2
     return "$rc"
 }
 
